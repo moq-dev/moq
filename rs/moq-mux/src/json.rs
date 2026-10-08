@@ -303,8 +303,10 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	/// Append one record to the log.
 	///
 	/// A record that cannot be written ends the track (see [`moq_json::stream::Producer::append`])
-	/// and retires the catalog entry with it. A catalog error publishing the measured bitrate is
-	/// returned after the record was written, so the track stays open and a retry would duplicate it.
+	/// and retires the catalog entry with it. A record refused with
+	/// [`moq_net::Error::GroupTooLarge`] leaves both intact, since nothing was written. A catalog
+	/// error publishing the measured bitrate is returned after the record was written, so the track
+	/// stays open and a retry would duplicate it.
 	pub fn append<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> crate::Result<()>
 	where
 		T: 'a,
@@ -316,6 +318,8 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 		};
 		let size = match self.inner.append(value) {
 			Ok(size) => size,
+			// Refused before anything was written, so the log and its entry carry on.
+			Err(err @ moq_json::Error::Net(moq_net::Error::GroupTooLarge)) => return Err(err.into()),
 			Err(err) => {
 				// The inner producer has already ended the track. Dropping the listing retires the
 				// catalog entry: waiting for the handle to drop would keep advertising a track that
@@ -546,7 +550,7 @@ mod test {
 			let mut stamps = Vec::new();
 			while let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) {
 				while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-					stamps.push(frame.timestamp.as_millis());
+					stamps.push(frame.timestamp.unwrap().as_millis());
 				}
 			}
 			assert_eq!(stamps.len(), 1);
@@ -808,6 +812,32 @@ mod test {
 
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(track.poll_recv_group(&waiter), Poll::Ready(Err(_))));
+	}
+
+	/// A record past the group budget is refused before anything is written, so the log stays
+	/// advertised and the next record still lands.
+	#[test]
+	fn an_oversized_record_keeps_the_track_and_the_entry() {
+		let (mut broadcast, catalog) = catalog();
+		let mut chat = catalog
+			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
+			.unwrap();
+		let track = chat.consume();
+
+		let oversized = Value::String("x".repeat(moq_net::group::MAX_CACHE_BYTES as usize));
+		assert!(matches!(
+			chat.append(&oversized),
+			Err(crate::Error::Json(moq_json::Error::Net(moq_net::Error::GroupTooLarge)))
+		));
+		assert!(catalog.snapshot().json.tracks.contains_key("chat"));
+
+		chat.append(&json!({ "n": 1 })).unwrap();
+		let entry = entry(&catalog, "chat");
+		chat.finish().unwrap();
+		assert_eq!(
+			drain(Consumer::from_track(track, &entry).unwrap()),
+			vec![json!({ "n": 1 })]
+		);
 	}
 
 	/// A consumer that can't tell a log from a latest-value document would silently drop records,

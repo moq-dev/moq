@@ -59,7 +59,7 @@ void main() {
 
     final producer = track.appendGroup();
     producer.writeFrame(
-      frame: MoqFrame(payload: utf8.encode('dart round trip')),
+      frame: MoqFrame(payload: utf8.encode('dart round trip'), timestampUs: 0),
     );
     producer.finish();
 

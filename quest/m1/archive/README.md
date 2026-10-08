@@ -61,9 +61,12 @@ timeline's `segments/<n>`. A failed object PUT drops that record. A DVR prunes
 each timeline's oldest objects no checkpoint recovery reads. On a prefix
 that already holds a recording, it replays each retained timeline through
 `timeline::Producer::resume`, deletes objects past each track's committed tail,
-resumes after the newest record's end (partway through a split group), and a
-DVR deletes unreferenced objects and unneeded timeline objects one grace period
-after recovery.
+resumes after the newest record's end (partway through a split group). Each
+track's `.info` keeps the source route's epoch, and a resume under another
+epoch fails to enroll (`Error::EpochMismatch`); the caller starts a new
+prefix. A new group whose first timestamp precedes the recorded end fails the
+recording instead of overlapping media time. A DVR deletes unreferenced objects and unneeded timeline
+objects one grace period after recovery.
 `moq_archive::Reader` (`rs/moq-archive/src/reader/mod.rs`) replays every timeline
 onto a supplied `broadcast::Producer` and serves FETCH through `track::Dynamic`
 with a byte-bounded object LRU, stitching a group split across records and
@@ -162,7 +165,6 @@ owned by that prerequisite, not duplicated in archive storage.
 - [History from the start](/quest/m1/archive/replay-history.md) - history mode lists a recording from its first segment by reading stored timeline groups, not only the restated tail
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq_archive::Reader` republishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay of `moq import archive`
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
-- [Backward timestamps](/quest/m1/archive/backward-timestamps.md) - a resumed recording refuses a restarted source instead of dropping its groups or overlapping media time
 - [HLS media sequence](/quest/m1/archive/hls-media-sequence.md) - `EXT-X-MEDIA-SEQUENCE` never decreases when the reference rendition switches
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 

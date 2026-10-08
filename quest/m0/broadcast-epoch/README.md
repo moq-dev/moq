@@ -5,10 +5,16 @@
 A path and the epoch on its route are the only content identity, and no
 first-party publisher reuses a pair for different content. Only routes with
 the same epoch resume a subscription from the first frame it lacks; a route
-without one keeps its subscriptions until a better route takes over. So epochs are what make
+without one keeps its subscriptions until it goes. So epochs are what make
 failover seamless, and a restart is a new epoch at the same path: the newest
-epoch wins and ends subscriptions to the old one, so viewers re-request
-rather than stall on a replaced broadcast.
+epoch wins new requests and announce consumers see a `Restart` (or an end
+and start on older versions), so viewers re-request rather than stall on a
+replaced broadcast. Subscriptions already on the old one stay until the
+application drops them or its route goes. Without an epoch, a restarted
+publisher on the same hop chain as its lingering old session wins at once
+(the newest announcement breaks the tie), but one on a different chain of
+the same length and cost that loses the routing hash is reached only once
+the old session closes and its route is withdrawn.
 
 The epoch rides moq-lite 07 announcements and requests as metadata, so the
 path never changes and every older version and moq-transport keeps working:
@@ -16,7 +22,7 @@ their routes carry no epoch, and see a restart as an end and start at the
 same path.
 
 Non-goals: pooling, which needs nothing here; a redundant pair shares an
-explicit epoch through [`--hop` removal](/quest/m0/broadcast-epoch/hop-removal.md).
+explicit epoch through `moq --epoch`.
 Also out of scope: trusting the publisher's clock (a far-future epoch wins
 until its route goes away).
 
@@ -33,14 +39,17 @@ Decided:
 - The route's epoch is taken as given: nothing mints one by default (decided
   2026-10-06). Each first-party publisher mints one per run and announces it;
   a replica announces a shared one. A route without one, such as a
-  transcoder's prefix claim, is never stitched to another worker's output: a
-  better route takes over with a hard switch and an announcement (decided
-  2026-10-07, replacing "stays on the worker that first served a
-  subscription", which let dead routes linger).
-- The newest epoch wins a prefix ahead of cost (decided 2026-10-06), and
-  replaces the old one with a hard switch: subscriptions in flight end with
-  `Unroutable`. When it goes and an older one is still live, the older one
-  wins again as a new broadcast.
+  transcoder's prefix claim, is never stitched to another worker's output.
+  A better route without an epoch wins new requests and is announced as a
+  `Restart`, replacing "stays on the worker that first served a
+  subscription", which let dead routes linger (decided 2026-10-07).
+- The newest epoch wins a prefix ahead of cost (decided 2026-10-06). The
+  hard switch that ended subscriptions in flight with `Unroutable` (decided
+  2026-10-06 for epochs, and 2026-10-07 in #5013 for routes without one) is
+  reversed (2026-10-07): subscriptions stay sticky on their route and an
+  explicit `Restart` announce event tells players to follow, through
+  [Restart](/quest/m0/broadcast-epoch/restart.md). When the newest goes and
+  an older one is still live, the older one wins again as a new broadcast.
 - A catalog `broadcast` reference by name follows the newest epoch, since a
   path cannot name one.
 - Every first-party publisher that can restart mints its own: the apps,
@@ -63,19 +72,18 @@ the IETF resume point and lite-05/06 `widen_frame_bounds` still serve any
 mid-group start: a public `Subscription::with_start` or a downstream Frame
 Start a relay forwards upstream.
 
-This README owns an end-to-end relay test: republish a name while the old
-publisher's session stays open. A lite-07 viewer and a lite-06 or IETF viewer
-both reach the new epoch within one RTT-scale bound rather than the idle
-timeout, and killing the newest epoch falls back to a still-live older one.
+This README owns an end-to-end relay test: republish a name under a new
+epoch while the old publisher's session stays open. A lite-07 viewer and a lite-06 or IETF viewer
+that follow the announce `Restart` (or END then START) both reach the new
+epoch within one RTT-scale bound rather than the idle timeout, and killing the
+newest epoch falls back to a still-live older one.
 
 ## Required
 
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
-- [Un-epoched takeover](/quest/m0/broadcast-epoch/unepoched-takeover.md) - a better route without an epoch takes over with a hard switch and an announcement, so a restarted lite-06 publisher reaches viewers
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - a replaced broadcast reaches announce consumers as an explicit Restart, subscriptions stay sticky, and new requests never join a replaced route's front
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
-- [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone
 - [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each group announcement under its own epoch, so neither a restarted node nor a returning idle group stalls its viewers
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)

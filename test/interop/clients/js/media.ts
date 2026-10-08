@@ -55,7 +55,7 @@ import {
 import * as Pattern from "./src/pattern";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
-const CASES = ["capture-denial", "pause", "rejoin", "detach", "republish", "late-join"] as const;
+const CASES = ["capture-denial", "pause", "disable", "rejoin", "detach", "republish", "late-join"] as const;
 type Case = (typeof CASES)[number];
 
 const { values } = parseArgs({
@@ -563,6 +563,44 @@ try {
 		});
 		console.error(`  resumed ${(resumed.frameId ?? 0) - paused} frames past the pause`);
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after resume");
+	}
+
+	// ── disable and re-enable the video rendition ────────────────────────────
+	// A disabled rendition stays in the catalog with `enabled: false`. The player deselects it and
+	// shows black instead of freezing on the last picture, then picks it up again once re-enabled.
+	if (wants("disable")) {
+		console.error("=== disable and enable video ===");
+		const before = await readPlayerState(player);
+		await command(publisher, "disableVideo");
+		await waitForFixture(publisher, publisherErrors, {
+			deadline: Date.now() + SETTLE_MS,
+			assertion: "disable keeps the rendition",
+			description: "the fixture to publish its video rendition with enabled: false and stop encoding",
+			predicate: (state) => !state.videoEnabled && !state.videoActive,
+		});
+		await waitForState(player, playerErrors, {
+			deadline: Date.now() + SETTLE_MS,
+			assertion: "disable blanks the picture",
+			description: `the canvas to go black instead of holding frame ${before.frameId}`,
+			predicate: (state) => !state.painted,
+		});
+		const blank = await collect(player, playerErrors, HELD_MS);
+		const lit = blank.filter((s) => s.painted);
+		check(
+			lit.length === 0,
+			"disable blanks the picture",
+			() => `the canvas showed a picture again while disabled: ${JSON.stringify(lit[0])}`,
+		);
+
+		await command(publisher, "enableVideo");
+		const resumed = await waitForState(player, playerErrors, {
+			deadline: Date.now() + timeoutMs,
+			assertion: "enable resumes playback",
+			description: `the presented frame to move past the ${before.frameId} showing before the disable`,
+			predicate: (state) => (state.frameId ?? 0) > (before.frameId ?? 0),
+		});
+		console.error(`  black while disabled, then resumed at frame ${resumed.frameId}`);
+		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after enable");
 	}
 
 	// ── unsubscribe and rejoin ───────────────────────────────────────────────

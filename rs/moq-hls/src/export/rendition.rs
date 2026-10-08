@@ -192,7 +192,7 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	config.jitter = None;
 	config.delay = None;
 	config.label = None;
-	config.stalled = None;
+	config.enabled = true;
 	// Publishers estimate it and republish once it settles. The rendition keeps the fMP4
 	// timescale it was built with, and the framerate is refreshed in place like the bitrate.
 	config.framerate = None;
@@ -206,6 +206,7 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 	config.jitter = None;
 	config.delay = None;
 	config.label = None;
+	config.enabled = true;
 	config
 }
 
@@ -1047,10 +1048,14 @@ fn is_cache_miss(err: &moq_net::Error) -> bool {
 	matches!(
 		err,
 		moq_net::Error::NotFound
+			| moq_net::Error::NotFetchable
 			| moq_net::Error::Old
 			| moq_net::Error::Evicted
 			| moq_net::Error::Stream(
-				moq_net::StreamError::NotFound | moq_net::StreamError::Old | moq_net::StreamError::Evicted
+				moq_net::StreamError::NotFound
+					| moq_net::StreamError::NotFetchable
+					| moq_net::StreamError::Old
+					| moq_net::StreamError::Evicted
 			)
 	)
 }
@@ -1100,7 +1105,12 @@ mod tests {
 
 	#[test]
 	fn a_cache_miss_that_crossed_a_session_is_still_a_cache_miss() {
-		for local in [moq_net::Error::NotFound, moq_net::Error::Old, moq_net::Error::Evicted] {
+		for local in [
+			moq_net::Error::NotFound,
+			moq_net::Error::NotFetchable,
+			moq_net::Error::Old,
+			moq_net::Error::Evicted,
+		] {
 			assert!(is_cache_miss(&local), "{local:?} locally");
 			let lite = over_lite(&local);
 			assert!(is_cache_miss(&lite), "{local:?} over lite ({lite:?})");
