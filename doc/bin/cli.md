@@ -98,7 +98,7 @@ codec configuration ends the export. Restart it to pick up the change.
 MPEG-TS export pads to the source's constant mux rate when the catalog
 recorded one, or to `--mux-rate`, on a constant-rate schedule an IRD or groomer
 can lock to. Each frame goes out as early as the receiver's buffers admit, up
-to `--delay` ahead of its decode time, so the output trails the source by twice
+to `--delay` ahead of its decode time on the output's clock, so the output trails the source by twice
 the delay; a frame that cannot arrive in time at the rate fails the export.
 
 ## Play

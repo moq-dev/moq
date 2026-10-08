@@ -194,9 +194,10 @@ Cluster peers are admitted the same way, so a mesh runs
 server granting its cluster CA everything with `peer: true`); see
 [Clustering](/bin/relay/cluster). `--mtls-peer` marks every certificate as
 another relay; leave it off when certificates identify clients.
-`--mtls-upstream` also marks them [upstream](/bin/relay/cluster#upstream-links).
-Changing either flag ends each live mTLS session at its next re-check, so the
-mesh redials once.
+`--mtls-upstream`, which needs `--mtls-peer`, also marks them
+[upstream](/bin/relay/cluster#upstream-links). Changing either flag ends each
+live mTLS session at its next re-check (the `--revalidate` cadence or a
+`moq auth revalidate` push), so the mesh redials once.
 
 ```toml
 [listen.tls]
