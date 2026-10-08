@@ -24,7 +24,10 @@ which can be pending under send-window pressure. Check credit at the QUIC
 level instead, likely a non-waiting open on the transport trait. Also note that
 `moq-tokio`'s `poll_open_bi` parks an abandoned open in the session's slot
 rather than dropping it, so the next request inherits it; the non-waiting open
-should avoid that.
+should avoid that. The async backends `moq-tokio` wraps (qmux, iroh, noq) have
+no credit query in `web-transport-trait`; prefer adding one upstream in
+moq-dev/web-transport over leaving them waiting, and say in the PR which
+backends fail fast.
 
 Propose the error variant's name in the PR. Public API: one new `Error`
 variant, and possibly a transport-trait method. Wire: none.

@@ -34,8 +34,13 @@ Decided 2026-10-07, re-planning the external
   opt out of it, and their setup timer (`SUBSCRIBE_SETUP_TIMEOUT_MS` in lite,
   `SUBSCRIBE_OK_TIMEOUT_MS` in IETF, PUBLISH_NAMESPACE's own) covers the
   create as well as the answer.
-- PUBLISH_NAMESPACE is in scope with no retry: drop the IETF publisher's loop
-  that re-offers a failed advertisement.
+- PUBLISH_NAMESPACE is in scope with no retry: the IETF publisher's loop
+  (`runPublishNamespaces`, `js/net/src/ietf/publisher.ts`) stops re-offering
+  after either failure above. It still re-offers when the peer's
+  REQUEST_ERROR names a retry interval, and keeps its backoff for a
+  draft-14/15 refusal, which can't carry one (decided 2026-10-07 from review:
+  the peer asked for those, and dropping them leaves a namespace
+  undiscoverable until reconnect).
 - The credit error is local, with no wire code. Propose its name in the PR;
   it is a new public `@moq/net` error.
 - `@moq/watch` keeps ending a track on either failure. Rejected: #4999's
