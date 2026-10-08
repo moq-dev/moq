@@ -10,7 +10,7 @@ OBS Studio install.
 
 - **Publish**: Settings > Stream, choose "MoQ", enter the relay URL (with `?jwt=` if needed) and broadcast path, Start Streaming.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
-- **Dock**: a **MoQ** dock with Go Live, its own encoding settings, and live stats (negotiated draft, RTT, bandwidth, loss).
+- **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (negotiated draft, RTT, bandwidth, loss).
 
 Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
 such as `https://cdn.moq.dev/anon/your-stream`. A URL with `?jwt=` fills the

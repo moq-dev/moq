@@ -92,9 +92,9 @@ The mark belongs to the link, whichever side dialed: a dialed peer is upstream
 when its `connect` entry says so, and a peer that dials in when its
 [grant](/bin/relay/auth#the-contract) sets `"upstream": true` beside
 `"peer": true`. `moq auth serve --mtls-peer --mtls-upstream` grants that to
-every certificate, so use it only where nothing but cores dial in: on a hub
-that leaves dial into, it marks every leaf upstream and the hub stops
-forwarding between them. A relay that predates the mark treats every link as
+every certificate, so use it only where cores are the only relays dialing in
+with mTLS: on a hub that leaf relays dial into, it marks every leaf upstream
+and the hub stops forwarding between them. A relay that predates the mark treats every link as
 transit, so a cluster migrates one region at a time. There are no roles and no
 topology check; whatever generates the peer list applies the layout's rules.
 
