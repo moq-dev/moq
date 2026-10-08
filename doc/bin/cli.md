@@ -96,8 +96,10 @@ be described, and the track set is then fixed: a new rendition or a changed
 codec configuration ends the export. Restart it to pick up the change.
 
 MPEG-TS export pads to the source's constant mux rate when the catalog
-recorded one, or to `--mux-rate`, so an IRD or groomer receives CBR. Media is
-never delayed or dropped to fit.
+recorded one, or to `--mux-rate`, on a constant-rate schedule an IRD or groomer
+can lock to. Each frame goes out as early as the receiver's buffers admit, up
+to `--delay` ahead of its decode time, so the output trails the source by twice
+the delay; a frame that cannot arrive in time at the rate fails the export.
 
 ## Play
 
@@ -285,8 +287,13 @@ See [Authentication](/bin/relay/auth).
 fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-delay`
 (default 500 ms) is how far a stalled group may fall behind the live edge
 before *this* consumer skips it. Raising the first never delays playback.
-`export ts` still spells its budget `--max-age`, and it also bounds how long
-the muxer holds a leading track to interleave a lagging one in media-time order.
+
+`export ts` takes `--delay` (default 500 ms) instead, like an SRT receiver's
+latency: each frame is muxed that long after its decode time, all tracks in
+decode order, so two exporters of one broadcast emit the same order. A frame
+arriving after its deadline is dropped, and video resumes at its next
+keyframe. The output's PCR follows the source's clock within what ISO/IEC
+13818-1 allows. `--delay 0` writes frames in arrival order and drops nothing.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for a restarted publisher instead, and marks the break in the stream

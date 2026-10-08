@@ -58,7 +58,8 @@ brew install moq-dev/tap/moq-relay moq-dev/tap/moq
 nix run github:moq-dev/moq/release#moq-relay -- relay.toml
 nix run github:moq-dev/moq/release#moq -- --help
 
-# Docker (linux/amd64 and linux/arm64)
+# Docker (linux/amd64 and linux/arm64). The image is scratch (the package
+# closure only) and has no shell.
 docker run -p 4443:4443/udp -p 4443:4443/tcp -v "$PWD/relay.toml:/app/relay.toml:ro" moqdev/moq-relay /app/relay.toml
 docker run -i moqdev/moq --help
 ```
