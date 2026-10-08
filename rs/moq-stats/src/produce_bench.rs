@@ -1,8 +1,6 @@
 //! One producer tick, without the publish interval. The benchmark drives this
 //! over a registry it filled itself. Not a public API.
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use moq_net::{PathOwned, origin, stats::Registry};
@@ -44,7 +42,6 @@ impl Driver {
 			depth: 0,
 			linger: Duration::from_secs(300),
 			interval: Duration::from_secs(1),
-			sequence: Arc::new(AtomicU64::new(0)),
 		};
 		Some(Self {
 			drain: Drain::new(task)?,

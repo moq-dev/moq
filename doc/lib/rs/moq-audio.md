@@ -31,7 +31,9 @@ refused; AAC decode is for broadcasts from the ingest gateways.
 Playback writes never block: samples that do not fit are dropped and
 reported, and retrying them would only add latency. Voice activity is read off the Opus
 stream, so a call UI needs no second detector. Echo cancellation pairs one
-playback engine with one live microphone.
+playback engine with one live microphone. A microphone buffer is stamped at
+the capture instant of its first sample, so it lines up with video acquired
+then.
 
 ```bash
 cargo add moq-audio --features playback

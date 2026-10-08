@@ -68,9 +68,9 @@ scoped like a relay session, but the relay token itself never crosses it: a
 `moq_auth` JWT is a bearer credential with no audience or proof of
 possession, so a peer that received one could replay it against the relay.
 Instead the relay issues each session a peer grant, a relay-signed statement
-of that session's path scopes bound to its hop id, its presenter public key,
+of that session's path scopes bound to its node id, its presenter public key,
 and short-lived, which the peer presents in band with a proof of possession;
-the other side verifies the relay's signature, the hop id and key against
+the other side verifies the relay's signature, the node id and key against
 the roster, and AUTH_POP, then serves only the granted paths. Issuance,
 asymmetric keys, JWKS, PoP, and refresh live in
 [Peer grants](/quest/m3/p2p/peer-grant.md): HMAC keys cannot be given to
@@ -81,4 +81,4 @@ there is no equal-scope shortcut.
 ## Required
 
 - [Data channel transport](/quest/m3/p2p/transport.md)
-- [Peer grants](/quest/m3/p2p/peer-grant.md) - the hop-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none
+- [Peer grants](/quest/m3/p2p/peer-grant.md) - the node-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none

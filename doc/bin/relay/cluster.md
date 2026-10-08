@@ -86,9 +86,12 @@ connect = [
 The mark belongs to the link, whichever side dialed: a dialed peer is upstream
 when its `connect` entry says so, and a peer that dials in when its
 [grant](/bin/relay/auth#the-contract) sets `"upstream": true` beside
-`"peer": true`. A relay that predates the mark treats every link as transit,
-so a cluster migrates one region at a time. There are no roles and no topology
-check; whatever generates the peer list applies the layout's rules.
+`"peer": true`. `moq auth serve --mtls-peer --mtls-upstream` grants that to
+every certificate, so use it only where nothing but cores dial in: on a hub
+that leaves dial into, it marks every leaf upstream and the hub stops
+forwarding between them. A relay that predates the mark treats every link as
+transit, so a cluster migrates one region at a time. There are no roles and no
+topology check; whatever generates the peer list applies the layout's rules.
 
 ## TLS links
 
@@ -217,11 +220,11 @@ Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
 URL, `token` on a peer object, or a shared `cluster.token` file for every
 listed peer). The accepting relay admits a peer like any client, so a mesh
 needs an auth server that grants the cluster CA, such as
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**'`. An accepted peer
-counts as a cluster peer only when its grant sets `peer: true`, which
-`moq auth serve` never does; otherwise what it announces counts as ingest
-here, like a client's. Dials retry forever with capped backoff, so a rejected
-peer is loud in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer`. An
+accepted peer counts as a cluster peer only when its grant sets `peer: true`,
+as `--mtls-peer` does; otherwise what it announces counts as ingest here, like
+a client's. Dials retry forever with capped backoff, so a rejected peer is loud
+in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.

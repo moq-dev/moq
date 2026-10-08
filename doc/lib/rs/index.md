@@ -56,7 +56,7 @@ let mut announced = consumer.announced();
 while let Some(event) = announced.next().await {
     // Skip updates and retractions.
     let moq_net::announce::Event::Start(update) = event else { continue };
-    let broadcast = consumer.request_broadcast(&update.prefix).await?;
+    let broadcast = consumer.request_broadcast(&update.prefix, update.route.epoch).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())

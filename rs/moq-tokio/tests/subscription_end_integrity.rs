@@ -80,7 +80,10 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 			.expect("client connect");
 
 		consumer.routed("test").await.expect("routed");
-		let remote = consumer.request_broadcast("test").await.expect("broadcast resolves");
+		let remote = consumer
+			.request_broadcast("test", None)
+			.await
+			.expect("broadcast resolves");
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut got = 0;

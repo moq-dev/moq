@@ -6,7 +6,7 @@ The newest `libmoq` on crates.io is the code-free stub that `main`'s
 `rs/libmoq` holds, whose README points at `moq-c`. Since #4738 publishing runs
 only from `release`, so the condition clears at the next `main`-to-`release`
 cut, which must take `main`'s stub for `rs/libmoq` at a version above
-0.6.12. `main`'s stub is at 0.6.11, which crates.io already holds as a full
+0.6.12. `main`'s stub is at 0.6.12, which crates.io already holds as a full
 crate, so the cut bumps it or the stub never publishes.
 
 This quest tracks a condition outside the repository. When it holds, delete

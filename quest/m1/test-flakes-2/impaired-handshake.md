@@ -25,3 +25,7 @@ that. Confirm with a qlog of a failing seed, then fix it at the cause, without
 raising a timeout or retrying the connect.
 
 Public API: none. Wire: none.
+
+## Related
+
+- [Switch](/quest/m1/quic/fork/switch.md) - moves the runtimes from noq to `moq-quic`, whose idle-timer arming a fix may land in instead

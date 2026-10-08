@@ -159,7 +159,10 @@ put one packet in each unless told otherwise.
 
 The `description` field carries out-of-band codec setup (an `avcC` box for
 H.264). When it is absent, the parameter sets ride inline before each keyframe,
-which is what `avc3`/`hev1` tracks do. Decoders should handle both.
+which is what `avc3`/`hev1` tracks do. Decoders should handle both. CMAF is the
+exception: its samples are always length-prefixed, so an `avc3`/`hev1` CMAF
+track keeps the configuration record as its `description` for the NAL length
+size, even when the parameter sets ride in the samples.
 
 ## Encryption
 

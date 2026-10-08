@@ -27,7 +27,7 @@ async fn release(version: Version) {
 
 	let consumer = relay.consume();
 	consumer.routed("a/b").await.expect("routed");
-	let remote = consumer.request_broadcast("a/b").await.expect("resolves");
+	let remote = consumer.request_broadcast("a/b", None).await.expect("resolves");
 	let sub = remote.track("t").unwrap().subscribe(None).await.expect("subscribes");
 	track.demand().used().await.unwrap();
 

@@ -91,10 +91,9 @@ Packets are steered by connection ID, so a client that migrates stays with its
 worker. `workers` needs the `noq` feature and real certificate files rather
 than `tls.generate`. `io_uring` additionally needs Linux 6.12+, the `io-uring`
 cargo feature, and exactly one certificate; it serves moq-lite only, and
-refuses `mtu_discovery` and the flow-control windows. A setting the build or
-host cannot deliver refuses to start rather than being ignored. If io\_uring
-workers fail to start naming `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under
-systemd).
+refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
+start rather than being ignored. If io\_uring workers fail to start naming
+`RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 
 ## \[web]
 
@@ -194,8 +193,10 @@ linger = "5m"                        # Keep an empty group's broadcast announced
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-[Stats](/concept/stats) describes the paths, tracks, and encodings; read them
-with the [`moq-stats`](https://docs.rs/moq-stats) crate.
+Each run, and each group returning after its linger, announces under a fresh
+[epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
+the same path. [Stats](/concept/stats) describes the paths, tracks, and
+encodings; read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
 

@@ -1885,3 +1885,67 @@ test("a peer naming another epoch is refused rather than served a different inst
 	local.close();
 	origin.close();
 });
+
+test("request pins its epoch while an unpinned sibling follows the newest publisher", () => {
+	const origin = new Producer();
+	const path = Path.from("room");
+	const first = origin.createBroadcast(path);
+	first.announce({ epoch: EPOCH });
+	const reader = origin.consume();
+	const pinned = reader.request(path, { epoch: EPOCH });
+	const unpinned = reader.request(path);
+	expect(pinned.active.peek()?.epoch).toBe(EPOCH);
+	expect(unpinned.active.peek()?.epoch).toBe(EPOCH);
+	const newerEpoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
+	const second = origin.createBroadcast(path);
+	second.announce({ epoch: newerEpoch });
+	expect(pinned.active.peek()).toBeUndefined();
+	expect(pinned.unroutable.peek()).toBe(true);
+	// The unpinned handle names the publisher it actually resolved.
+	expect(unpinned.active.peek()?.epoch).toBe(newerEpoch);
+	const stale = reader.request(path, { epoch: EPOCH });
+	expect(stale.active.peek()).toBeUndefined();
+	expect(stale.unroutable.peek()).toBe(true);
+	stale.close();
+	pinned.close();
+	unpinned.close();
+	origin.close();
+});
+
+test("request never accepts an old handler after its epoch changes asynchronously", async () => {
+	const origin = new Producer();
+	const prefix = Path.from("room");
+	const path = Path.from("room/cam");
+	const dynamic = origin.dynamic(prefix, { epoch: EPOCH });
+	const pending = origin.consume().request(path, { epoch: EPOCH });
+	const requests = dynamic.requested();
+	const old = (await requests.next()).value;
+	const epoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
+	dynamic.update({ ...dynamic.route, epoch });
+	const current = origin.consume().request(path, { epoch });
+	old?.accept(new BroadcastProducer().consume());
+	expect(pending.active.peek()).toBeUndefined();
+	expect(pending.unroutable.peek()).toBe(true);
+	expect(current.active.peek()).toBeUndefined();
+	const next = (await requests.next()).value;
+	next?.accept(new BroadcastProducer().consume());
+	expect(current.active.peek()?.epoch).toBe(epoch);
+	expect(pending.active.peek()).toBeUndefined();
+	await requests.return?.();
+	pending.close();
+	current.close();
+	dynamic.close();
+	origin.close();
+});
+
+test("a route without an epoch resolves a handle without one", () => {
+	const origin = new Producer();
+	const path = Path.from("room");
+	const broadcast = origin.createBroadcast(path);
+	broadcast.announce();
+	const request = origin.consume().request(path);
+	expect(request.active.peek()).toBeDefined();
+	expect(request.active.peek()?.epoch).toBeUndefined();
+	request.close();
+	origin.close();
+});

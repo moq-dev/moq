@@ -87,3 +87,4 @@ the fork plan the same day kept it there.
 ## Related
 
 - [noq#812](https://github.com/n0-computer/noq/issues/812) - the qmux proposal to n0
+- [tls:// peer certificates](/quest/m2/tls-listener-mtls.md) - needs a peer-certificate accessor on qmux's TLS session, upstream or in-tree

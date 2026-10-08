@@ -190,8 +190,13 @@ verifies client certificates, so a relay without `listen.bind` refuses
 `listen.tls.root` too.
 
 Cluster peers are admitted the same way, so a mesh runs
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server
-granting its cluster CA everything); see [Clustering](/bin/relay/cluster).
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` (or a
+server granting its cluster CA everything with `peer: true`); see
+[Clustering](/bin/relay/cluster). `--mtls-peer` marks every certificate as
+another relay; leave it off when certificates identify clients.
+`--mtls-upstream` also marks them [upstream](/bin/relay/cluster#upstream-links).
+Changing either flag ends each live mTLS session at its next re-check, so the
+mesh redials once.
 
 ```toml
 [listen.tls]
@@ -210,7 +215,7 @@ key = "/etc/moq/relay.key"
 moq auth serve --listen 127.0.0.1:4440 \
   --key-dir /etc/moq/keys \
   --public-subscribe 'anon/**' --public-publish 'anon/**' \
-  --mtls-publish '**' --mtls-subscribe '**' \
+  --mtls-publish '**' --mtls-subscribe '**' --mtls-peer \
   --tier edge --expires 1d --revalidate 1m --limit-remote 64
 ```
 
@@ -260,7 +265,7 @@ patterns: `--auth-public 'PREFIX/**'`.
 | `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe`, as patterns |
 | `--auth-public-api URL` | your own server answering the contract |
 | `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
-| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**'` |
+| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-peer` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
 | `--auth-domain` | your server reads `server_name` and decides |
 

@@ -16,6 +16,7 @@ moq-transport at setup and presents one API either way. Media is a layer above
 What you use it for, beyond what the concept page already describes:
 
 - **An origin outlives the session.** Broadcasts are created on the origin, and a reconnect announces them again. Closing the session does not delete them.
+- **Requests can pin an epoch.** `consumer.request_broadcast(path, Some(epoch))` resolves only through a route announcing that [publisher epoch](/concept/moq-lite#publisher-epochs); `None` takes whichever route wins. The resolved consumer names its epoch in `info().epoch`, pinned or not.
 - **Publish only while someone is watching.** `demand()` on a track, group, or broadcast says whether a subscriber is attached, which is how capture and transcode skip work nobody asked for. Holding a broadcast consumer is not demand. A shared fetch stays up until its last reader leaves.
 - **You drive the session, or `moq-tokio` does.** `connect` and `accept` return a session plus a driver that never reads the clock itself. `moq_net::time::run` polls it on tokio or in the browser. `moq-tokio` and `moq-wasm` hide that. A custom transport implements `moq_net::transport::poll`.
 - **A graceful close waits.** `session.close().await` withdraws announcements and gives finished tracks up to one second to deliver. `abort` ends immediately. IETF drafts 14 through 16 send withdrawals without waiting.

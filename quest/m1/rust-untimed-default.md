@@ -35,4 +35,6 @@ untimed). Wire: none.
 
 ## Related
 
-- [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - the same publishers stop filling in a timestamp
+- [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - the same publishers stop filling in a timestamp; this lands first, since a data track declaring milliseconds refuses an untimed write, so that quest covers only tracks declared untimed
+- [FFI shape](/quest/m1/ffi-shape/README.md) - #4519 moves the moq-ffi json and flate tracks this edits; whichever lands second rebases
+- [lite-07 untimed](/quest/m1/lite-untimed.md) - the same `rs/moq-net` lines; this lands first and it rebases

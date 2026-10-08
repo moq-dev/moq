@@ -53,14 +53,15 @@ arguments (3205), and the priority `set_track` wakes were dropped. Egress
 requeue folded into Run to quiescence; egress keep-alive and owned decode
 copies folded into Group cost. The benchmark noise estimate and the noq
 re-profile come first, since every quest here accepts "within noise". Lock
-wait and One enter per turn rank next: they produce the numbers that decide
+profile and One enter per turn rank next: they produce the numbers that decide
 the rest.
 
 ## Required
 
 - [Performance comparisons](/quest/m1/performance-comparisons.md) - the noise estimate every "within noise" verdict here depends on
 - [Performance profiles](/quest/m1/performance-profiles.md) - the reproducible noq profile the quests below re-measure on
-- [Lock wait](/quest/m1/perf/lock-wait.md) - each worker reports time blocked on cross-worker locks, deciding whether the shared model needs work
+- [Lock profile](/quest/m1/perf/lock-profile.md) - a bpftrace recipe reports each worker's time blocked on locks, by stack, with no code in kio
+- [kio channel contention](/quest/m1/perf/kio-channel-contention.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers)
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
 - [Group cost](/quest/m1/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
