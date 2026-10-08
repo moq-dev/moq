@@ -23,6 +23,13 @@ catalog can keep both, or a new [broadcast epoch](/quest/m0/broadcast-epoch/READ
 when the whole broadcast restarts. The catalog may still add and remove
 tracks; a removed name is never reused for different content.
 
+Only a track's defining fields are immutable: codec and its config bytes,
+resolution, audio layout, and anything else a decoder needs. Live state that
+describes the track's delivery changes freely under the same name: `enabled`,
+the jitter and delay figures, and `warmup`. Name the split in the catalog
+docs and the hang draft so a catalog update that changes only live state is
+never mistaken for a new identity (split in the 2026-10-08 audit).
+
 Cover codec changes, rendition switches, reconnects, and late joiners in Rust,
 JS, and HLS/watch tests.
 

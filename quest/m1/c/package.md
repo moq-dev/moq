@@ -31,3 +31,4 @@ under the same names.
 ## Required
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - moq-c 0.8.0 ships the reshaped moq-ffi, so C breaks once
+- [C++ package](/quest/m1/cpp/README.md) - the `cpp/moq` build, generator pin, and release workflow this mirrors (#4079)

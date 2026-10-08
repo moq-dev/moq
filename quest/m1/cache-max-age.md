@@ -2,9 +2,9 @@
 
 ## Goal
 
-`max_age` means the same thing in Rust and js/net, for both publisher
-retention (`track::Info::max_age`) and a subscriber's budget
-(`Subscription::max_age`). A group other than the newest is stale once either
+Publisher retention (`track::Info::max_age`) and a subscriber's budget
+(`Subscription::max_delay`, renamed from `max_age` in #4917) apply the same
+staleness rule in Rust and js/net. A group other than the newest is stale once either
 its wall-clock age since its successor arrived at this hop, or its media-time
 age (the live edge minus its reach), reaches the budget. The newest group is
 never stale. An untimed group has no media time, so the wall clock alone
@@ -13,7 +13,7 @@ judges it.
 That one rule also gives up a resumed group no route continues after a
 failover, on untimed tracks too, and lets an untimed track's start replay
 what isn't stale instead of jumping to the latest group. The pool's (Rust) or
-cache window's (JS) wall-clock idle bound stays separate from `max_age`.
+cache window's (JS) wall-clock idle bound stays separate from both.
 
 ## Plan
 
@@ -34,8 +34,8 @@ Decided (2026-10-06, maintainer):
   arrival once N+1 shows up. If the successor aborts, the clock falls to the
   next servable successor's arrival, or stops if there is none.
 - Accepted: during a total upstream stall, a reader still on a superseded
-  group is skipped forward after `max_age`, where media time alone would let
-  it wait. That reader is `max_age` of real time behind live, and the newest
+  group is skipped forward after its budget, where media time alone would let
+  it wait. That reader is its budget of real time behind live, and the newest
   group is never evicted.
 - Applies to both retention and subscriber budgets, which share `is_stale`
   in `rs/moq-net/src/model/track.rs` today.
@@ -55,7 +55,7 @@ Decided (2026-10-06, maintainer):
   no longer decides the semantics.
 - Ranked in the clock chain right after the untimed model, because that
   model ships the failover regression below until this lands.
-- Docs update inline: `track::Info::max_age` and `Subscription` docs,
+- Docs update inline: `track::Info::max_age` and `Subscription::max_delay` docs,
   js/net's `Info.maxAge` doc, `doc/concept`, the relay config docs, the
   Expiration section and Max Age field definitions in
   `drafts/draft-lcurley-moq-lite.md` (which today exclude wall-clock

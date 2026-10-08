@@ -2,17 +2,23 @@
 
 ## Goal
 
-A moq-transport group whose object IDs skip (legal per draft-22 section
-11.3.1, but not representable in the model) is refused the same way a
-non-zero subgroup is: the group aborts, a warning is logged, and the stream
-is stopped with the error, in Rust and JS. An object ID that overflows
+A moq-transport group whose object IDs skip after an object was delivered
+(legal per draft-22 section 11.3.1, but not representable in the model) is
+refused the same way a non-zero subgroup is: the group aborts, a warning is
+logged, and the stream is stopped with the error, in Rust and JS. A headless
+subgroup on drafts 14-17 (a non-zero first object ID, since those drafts have
+no FIRST_OBJECT bit) is not a gap: it stays a quiet drop that keeps the
+subscription, as #5019 made it in JS. An object ID that overflows
 closes the session with PROTOCOL_VIOLATION in Rust, as the draft requires.
 
 ## Plan
 
 Decided 2026-10-06, while declining object-level identity in #4926: the
 model is the product, so subgroups, gapped object IDs, and arbitrary object
-properties stay unsupported. Refusals must be loud and consistent.
+properties stay unsupported. Refusals must be loud and consistent, except
+the headless drop: a relay joining at the live edge sends one on every
+subscribe, so it is expected, not a fault. Rust's headless drop is planned
+separately in #5041.
 
 Facts from `main`:
 
@@ -26,8 +32,10 @@ Facts from `main`:
   `rs/moq-net/src/ietf/session.rs` only aborts the stream, even for a
   protocol violation. Closing the session on overflow needs a new route from
   the subgroup task to session teardown, like `run_subscribe_namespace`'s.
-- JS: `Frame.decode` in `js/net/src/ietf/object.ts` throws on a gap, and
-  `handleGroup` in `subscriber.ts` stops the stream without logging.
+- JS: `Frame.decode` in `js/net/src/ietf/object.ts` throws `ObjectIdGap` on
+  any non-zero delta. Since #5019, `handleGroup` in `subscriber.ts` drops a
+  headless group on drafts 14-17 at debug level; any other gap fails the
+  group (`open().close(e)`) and stops the stream, with no warning logged.
 
 Neither closes the session for a gap; that would punish a peer following
 the spec. JS refuses any non-zero delta before adding it, so it has no

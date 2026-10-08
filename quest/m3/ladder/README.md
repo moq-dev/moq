@@ -46,17 +46,17 @@ controller only consumes that tiebreak.
 
 ### Adaptive bands
 
-`moq_transcode::Rung::bitrate` (`rs/moq-transcode/src/ladder.rs:14-17`) stays
+`moq_transcode::Rung::bitrate` (`rs/moq-transcode/src/ladder.rs`) stays
 the configured maximum and never follows the instantaneous target. For a
 rendition with configured maximum `max` and the next lower rendition's
 `lower`:
 
 ```text
-stall = (max + 2 * lower) / 3
+disable = (max + 2 * lower) / 3
 ```
 
 The lowest rendition takes `lower = 0`, so its boundary is `max / 3`. An
-encoder may adapt within `[stall, max]`; below the boundary the rung is
+encoder may adapt within `[disable, max]`; below the boundary the rung is
 disabled (`enabled: false`) and stops encoding, and it is enabled again only
 once a target at or above the same boundary is successfully applied. Catalog state follows the last target the encoder
 *accepted*, not the one the controller requested, so a transient rate-control
