@@ -427,7 +427,61 @@ impl Config {
 		if self.tcp.tls == Some(true) && self.tcp.bind.is_none() {
 			return Err(crate::Error::NoBackend("--listen-tcp-tls requires --listen-tcp-bind"));
 		}
+		#[cfg(all(feature = "uds", unix))]
+		if !self.unix.allow.is_empty() && self.unix.bind.is_none() {
+			return Err(crate::Error::NoBackend(
+				"--listen-unix-allow-* requires --listen-unix-bind",
+			));
+		}
 		Ok(())
+	}
+
+	/// Refuse what only the QUIC listener reads, for a server that has none.
+	#[cfg(feature = "_transport")]
+	pub(crate) fn validate_stream_only(&self) -> crate::Result<()> {
+		#[cfg(feature = "tcp")]
+		let tcp_tls = self.tcp.tls == Some(true);
+		#[cfg(not(feature = "tcp"))]
+		let tcp_tls = false;
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		let identity = self.tls.identity.is_some();
+		#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+		let identity = false;
+
+		let refused = [
+			(
+				!tcp_tls && !self.tls.cert.is_empty(),
+				"--listen-tls-cert needs a TLS listener (--listen or --listen-tcp-tls)",
+			),
+			(
+				!tcp_tls && !self.tls.key.is_empty(),
+				"--listen-tls-key needs a TLS listener (--listen or --listen-tcp-tls)",
+			),
+			(
+				!tcp_tls && !self.tls.generate.is_empty(),
+				"--listen-tls-generate needs a TLS listener (--listen or --listen-tcp-tls)",
+			),
+			(
+				!tcp_tls && identity,
+				"tls.identity needs a TLS listener (--listen or --listen-tcp-tls)",
+			),
+			(
+				self.preferred_v4.is_some(),
+				"--listen-preferred-v4 needs a QUIC listener (--listen)",
+			),
+			(
+				self.preferred_v6.is_some(),
+				"--listen-preferred-v6 needs a QUIC listener (--listen)",
+			),
+			(
+				self.lb_id.is_some() || self.load_balancer.is_some(),
+				"--listen-quic-lb-id (load_balancer) needs a QUIC listener (--listen)",
+			),
+		];
+		match refused.into_iter().find(|(set, _)| *set) {
+			Some((_, reason)) => Err(crate::Error::NoBackend(reason)),
+			None => Ok(()),
+		}
 	}
 
 	/// How long an accepted connection has to finish its handshake, or `None` to wait
@@ -608,6 +662,68 @@ load_balancer = { id = "ab", nonce = 8 }
 
 		let server = config.init_streams().unwrap();
 		assert!(matches!(server.local_addr(), Err(crate::Error::NoBackend(_))));
+	}
+
+	/// A stream-only server refuses each setting only QUIC reads rather than
+	/// ignoring it, and accepts them once QUIC lives elsewhere.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn stream_only_refuses_quic_settings() {
+		let stream_only = || Config {
+			tcp: crate::tcp::Config {
+				bind: Some("127.0.0.1:0".parse().unwrap()),
+				..Default::default()
+			},
+			..Default::default()
+		};
+		type Set = fn(&mut Config);
+		let cases: [(&str, Set); 7] = [
+			("--listen-tls-cert", |c| c.tls.cert = vec!["cert.pem".into()]),
+			("--listen-tls-key", |c| c.tls.key = vec!["key.pem".into()]),
+			("--listen-tls-generate", |c| c.tls.generate = vec!["localhost".into()]),
+			("--listen-preferred-v4", |c| {
+				c.preferred_v4 = Some("192.0.2.1:443".parse().unwrap())
+			}),
+			("--listen-preferred-v6", |c| {
+				c.preferred_v6 = Some("[2001:db8::1]:443".parse().unwrap())
+			}),
+			("--listen-quic-lb-id", |c| c.lb_id = Some("ab".parse().unwrap())),
+			("--listen-quic-lb-id (load_balancer)", |c| {
+				c.load_balancer = Some(crate::quic::LoadBalancer {
+					id: "ab".parse().unwrap(),
+					nonce: 8,
+				})
+			}),
+		];
+		for (name, set) in cases {
+			let mut config = stream_only();
+			set(&mut config);
+			match config.clone().init(Default::default()) {
+				Err(crate::Error::NoBackend(reason)) => assert!(reason.starts_with(name), "{name}: {reason}"),
+				Err(err) => panic!("{name}: {err}"),
+				Ok(_) => panic!("{name} was ignored"),
+			}
+			config.init_streams().expect("streams beside worker-owned QUIC");
+		}
+
+		// `tls://` serves the certificate.
+		let mut config = stream_only();
+		config.tcp.tls = Some(true);
+		config.tls.generate = vec!["localhost".into()];
+		config.init(Default::default()).expect("a TLS stream listener");
+	}
+
+	/// A Unix allowlist without the Unix listener it gates is refused.
+	#[cfg(all(feature = "uds", unix))]
+	#[test]
+	fn unix_allow_requires_unix_bind() {
+		let mut config = Config::default();
+		config.unix.allow.uid = vec![0];
+		match config.init(Default::default()) {
+			Err(crate::Error::NoBackend(reason)) => assert!(reason.contains("--listen-unix-bind"), "{reason}"),
+			Err(err) => panic!("{err}"),
+			Ok(_) => panic!("the allowlist was ignored"),
+		}
 	}
 
 	/// The default constructor still binds QUIC when nothing else is configured,

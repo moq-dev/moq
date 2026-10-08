@@ -192,18 +192,12 @@ In addition to the WebCodecs fields, each rendition MAY carry the common renditi
 type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
-  "stalled": boolean | undefined,
 }
 ~~~
 
 `displayAspectWidth` and `displayAspectHeight` give the display aspect ratio of the media, stretching or shrinking the coded pixels.
 A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
-
-`stalled` indicates that the publisher recommends temporarily avoiding the rendition.
-The track remains available when `stalled` is true.
-A consumer SHOULD select an unstalled rendition when it supports one, but MAY select a stalled rendition when no unstalled rendition is suitable.
-If absent, `stalled` defaults to false.
 
 For example:
 
@@ -217,7 +211,7 @@ For example:
       "codedWidth": 1280,
       "codedHeight": 720,
       "bitrate": 6000000,
-      "stalled": true,
+      "enabled": false,
       "framerate": 30.0,
       "jitter": 34
     },
@@ -308,7 +302,7 @@ type TextConfig = {
   "format": "vtt" | "ttml" | "utf8" | string,
   "role": "subtitle" | "caption" | string | undefined,
   "lang": string | undefined,
-  // plus the common rendition fields
+  // plus the common rendition fields, except `enabled`
 }
 ~~~
 
@@ -489,6 +483,7 @@ type CommonExtensions = {
   "container": Container,
   "jitter": number | undefined,
   "delay": number | undefined,
+  "enabled": boolean | undefined,
 }
 ~~~
 
@@ -552,6 +547,14 @@ A consumer SHOULD hold at least the largest `delay` plus `jitter` among the rend
 A consumer MUST NOT subtract one rendition's `delay` from another's: each is a maximum over the life of the stream, so two values need not share an origin.
 
 For example, a video encoder that flushes 200 milliseconds after the audio encoder for the same media time advertises a video `delay` of 200 and no audio `delay`.
+
+### enabled {#field-enabled}
+The `enabled` field says whether a consumer may select an audio or video rendition; a text rendition does not carry it.
+When `enabled` is false, no frames are coming, and a consumer MUST NOT select the rendition.
+If absent, `enabled` defaults to true; a publisher SHOULD only write it when false.
+
+Earlier versions defined a video `stalled` field instead.
+A publisher MUST NOT write `stalled`, and a consumer MUST ignore it.
 
 # Container {#container}
 Audio, video, and text tracks use a container to encapsulate the media payload.
@@ -876,17 +879,19 @@ Each track has its own objects so a reader can fetch one rendition without downl
 }
 ~~~
 
-All three fields are required integers.
+`version`, `priority`, and `timescale` are required integers.
 `version` identifies this recording format and MUST be 2.
 `priority` and `timescale` have the meanings of moq-lite `TRACK_INFO` {{moql}}: `priority` is in the range 0 through 255, and `timescale` is in the range 1 through 9007199254740991, so JSON consumers can preserve it exactly.
 A reader MUST preserve integer values exactly.
+An optional `epoch` string is the Epoch of the route the source was read through {{moql}}, in its canonical UUID text, and is omitted when that route had none.
 `Publisher Max Age` is not stored; a reader supplies its own serving policy.
 
 The track object MUST be durable before its first segment object is stored, including for a timeline track.
 It is immutable for the lifetime of the recording.
 A reader MUST refuse an unknown version or invalid track properties.
-On an existing `.info`, a writer MUST validate and compare the parsed `version`, `priority`, and `timescale` values; JSON whitespace and member order do not affect equality.
+On an existing `.info`, a writer MUST validate and compare the parsed `version`, `priority`, `timescale`, and `epoch` values, an absent `epoch` matching only an absent one; JSON whitespace and member order do not affect equality.
 Different property values MUST fail enrollment, and the existing object MUST NOT be rewritten.
+A different `epoch` means the source restarted, so the writer starts a new recording rather than continuing this one.
 
 ## Segment Objects {#recording-segments}
 A segment object holds one record's frames:
@@ -1063,12 +1068,14 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
 - Replaced the broadcast's one aligned timeline with one timeline per track: the catalog `archive` entry's `track` became a `timelines` map from each indexed track, the catalog included, to its timeline track.
 - Replaced the segment record with a per-track record: `sequence`, `pts`, `duration`, and a `start`/`end` range of group and frame positions, dropping cross-track pacing and completeness.
 - One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.
 - Described deriving HLS and DASH at the edge from a reference rendition's records.
 - An edge keeps its derived-format video reference rendition while that rendition stays in the catalog; an audio reference yields once video has a timeline.
+- Added an optional `epoch` to `.info`: the source route's Epoch, compared on resume so a restarted source fails enrollment.
 
 ## moq-hang-03
 {:numbered="false"}
