@@ -821,10 +821,10 @@ The role is a hint that only ever narrows the session: a server MUST still enfor
 Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
 
 ### Cost Parameter {#cost-parameter}
-The Cost Parameter declares what subscribing from this endpoint costs: a receiver adds the value the sender declared to both Route Costs of every announcement that sender forwards (see [Routing](#routing)).
+The Cost Parameter declares what subscribing from this endpoint costs: a receiver adds the value the sender declared to the Route Cost of every announcement that sender forwards (see [Routing](#routing)).
 
-The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Costs.
-An absent parameter means the default cost of 1, under which the accumulated Route Costs equal the hop count and routing degenerates to shortest-path.
+The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Cost.
+An absent parameter means the default cost of 1, under which the accumulated Route Cost equals the hop count and routing degenerates to shortest-path.
 A value of 0 is meaningful and distinct from absent: it makes that direction free, e.g. between two relays in the same datacenter.
 
 Both endpoints send it and the two values need not match: the parameter prices the sender's own egress. A relay MUST NOT forward it.

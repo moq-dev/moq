@@ -465,9 +465,6 @@ impl Route {
 	}
 
 	/// Set the cost: lower wins among routes covering the same prefix and anonymity.
-	///
-	/// A bare `u64` prices the route undiscounted (both halves of [`Cost`] alike),
-	/// which is what a publisher seeding its production cost means.
 	pub fn with_cost(mut self, cost: impl Into<Cost>) -> Self {
 		self.cost = cost.into();
 		self
