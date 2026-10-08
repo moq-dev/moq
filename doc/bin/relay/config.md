@@ -44,6 +44,12 @@ with the MoQ timeout code once its transport is up. The `[web]` listeners apply 
 headers and, for the WebSocket fallback, to the SETUP after the upgrade. The
 `io_uring` workers do not apply it yet.
 
+A setting no configured listener reads stops startup rather than being ignored.
+A stream-only relay refuses `preferred_v4`, `preferred_v6`, and `lb_id` (or `load_balancer`), which
+only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
+`tcp.tls` serves it.
+`unix.allow` needs `unix.bind`.
+
 ## \[quic]
 
 Transport tuning, applied to accepted and dialed connections alike.
@@ -125,7 +131,7 @@ listen = "[::]:4443"                 # HTTP: fingerprint, announced, fetch, heal
 
 [web.https]
 listen = "[::]:443"                  # HTTPS plus the WebSocket fallback.
-cert = "cert.pem"
+cert = "cert.pem"                    # cert, key, and root need listen.
 key = "key.pem"
 
 [internal]

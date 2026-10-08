@@ -1081,10 +1081,12 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.timestamp_us, timestamp_us);
+	assert!(frame.timestamp_present, "a media frame is always timed");
 	assert!(frame.keyframe);
 	assert_eq!(
 		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
@@ -1428,6 +1430,63 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
+/// A raw frame read from an untimed track reports no timestamp. The C API only publishes
+/// timed tracks, so the track and its frame come from moq-net.
+#[test]
+fn an_untimed_raw_frame_reads_untimed() {
+	let origin = id(moq_origin_create());
+	let path = b"raw-untimed";
+	let broadcast = publish_broadcast(origin, path);
+
+	let track_name = b"data";
+	let track = State::lock()
+		.publish
+		.track(
+			Id::try_from(broadcast).unwrap(),
+			"data",
+			Some(moq_net::track::Info::default().with_timescale(None)),
+		)
+		.unwrap();
+
+	let consume = request_broadcast(origin, path);
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_track(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			std::ptr::null(),
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+
+	State::lock()
+		.publish
+		.track_producer(track)
+		.unwrap()
+		.write_frame(None, &b"untimed"[..])
+		.unwrap();
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 7,
+		timestamp_present: true,
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert!(!frame.timestamp_present, "an untimed frame reads untimed");
+	assert_eq!(frame.timestamp_us, 0);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "clean close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn raw_track_publish_consume() {
 	let origin = id(moq_origin_create());
@@ -1482,12 +1541,14 @@ fn raw_track_publish_consume() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: true, // should be overwritten with false
 	};
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload);
 	assert_eq!(frame.timestamp_us, timestamp_us);
+	assert!(frame.timestamp_present);
 	assert!(!frame.keyframe, "raw frames have no keyframe flag");
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
@@ -1508,6 +1569,7 @@ fn raw_track_publish_consume() {
 			payload: std::ptr::null(),
 			payload_size: 0,
 			timestamp_us: 0,
+			timestamp_present: false,
 			keyframe: false,
 		};
 		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
@@ -1571,6 +1633,7 @@ fn raw_track_datagram_publish_consume() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		sequence: 0,
 	};
 	assert_eq!(unsafe { moq_consume_datagram(dg_id, &mut datagram) }, 0);
@@ -1676,6 +1739,7 @@ fn raw_track_subscription_options_and_update() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
@@ -1695,6 +1759,7 @@ fn raw_track_subscription_options_and_update() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
@@ -2502,6 +2567,7 @@ fn dynamic_serves_track_requests() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
@@ -2834,6 +2900,7 @@ fn local_publish_consume() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
@@ -2995,6 +3062,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
@@ -3124,6 +3192,7 @@ fn video_publish_consume() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
@@ -3948,6 +4017,7 @@ fn multiple_frames_ordering() {
 			payload: std::ptr::null(),
 			payload_size: 0,
 			timestamp_us: 0,
+			timestamp_present: false,
 			keyframe: false,
 		};
 		assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
@@ -4873,6 +4943,7 @@ fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
 			payload: std::ptr::null(),
 			payload_size: 0,
 			timestamp_us: 0,
+			timestamp_present: false,
 			keyframe: false,
 		};
 		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);

@@ -154,7 +154,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		let payload = format!("frame@{us}").into_bytes();
 		let frame = moq_tokio::moq_net::frame::Info {
 			size: payload.len() as u64,
-			timestamp: Timestamp::new(us, Timescale::MICRO).unwrap(),
+			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -228,7 +228,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		let ts = frame_sub.timestamp;
+		let ts = frame_sub.timestamp.expect("timed frame");
 		assert_eq!(ts.scale(), Timescale::MICRO);
 		assert_eq!(ts.value(), expected_us);
 
@@ -277,7 +277,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		let payload = format!("frame@{us}").into_bytes();
 		let frame = moq_tokio::moq_net::frame::Info {
 			size: payload.len() as u64,
-			timestamp: Timestamp::new(us, Timescale::MICRO).unwrap(),
+			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
 		};
 		let mut writer = group.create_frame(frame).expect("failed to create frame");
 		writer
@@ -346,7 +346,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		let ts = frame_sub.timestamp;
+		let ts = frame_sub.timestamp.expect("timed frame");
 		assert_eq!(ts.scale(), Timescale::MICRO);
 		assert_eq!(ts.value(), expected_us);
 
@@ -524,7 +524,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	fn timestamped_frame(us: u64, payload: &str) -> moq_net::frame::Info {
 		moq_net::frame::Info {
 			size: payload.len() as u64,
-			timestamp: Timestamp::new(us, Timescale::MICRO).unwrap(),
+			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
 		}
 	}
 
@@ -730,7 +730,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 		.expect("next_frame failed")
 		.expect("group closed");
 
-	let ts = frame_sub.timestamp;
+	let ts = frame_sub.timestamp.expect("timed frame");
 	assert_eq!(ts.scale(), Timescale::MILLI, "default timescale is milliseconds");
 
 	drop(connection);

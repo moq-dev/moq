@@ -8,6 +8,7 @@ import { spreadHash } from "./internal.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { Timescale } from "./time.ts";
 import { wireOf } from "./wire.ts";
 
 function publish(origin: Producer, path: Path.Valid) {
@@ -191,7 +192,7 @@ test("a published broadcast resolves by path", async () => {
 	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	const broadcast = publish(origin, path);
-	broadcast.createTrack("video");
+	broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const handle = await routed(consumer, path);
 	expect(handle).toBeDefined();
@@ -423,11 +424,11 @@ test("a local publish shadows a remote entry", async () => {
 	const path = Path.from("room");
 
 	const upstream = new BroadcastProducer();
-	upstream.createTrack("remote-track");
+	upstream.createTrack("remote-track", { timescale: Timescale.MILLI });
 	const dispose = serve(origin, path, provider(upstream), { hops: [], cost: { warm: 9n, cold: 9n } });
 
 	const local = publish(origin, path);
-	local.createTrack("local-track");
+	local.createTrack("local-track", { timescale: Timescale.MILLI });
 
 	// Local wins: the handle reaches the local track, not the remote one.
 	const handle = await routed(consumer, path);
@@ -553,7 +554,7 @@ test("disposing the newest remote route promotes the fallback", async () => {
 	// Two sessions announced the same path; the older one is still alive when the newer
 	// one goes away, so the route must fail over rather than black-hole.
 	const older = new BroadcastProducer();
-	older.createTrack("chat");
+	older.createTrack("chat", { timescale: Timescale.MILLI });
 	const keepOlder = older.consume();
 	const disposeOlder = serve(origin, path, provider(older));
 
@@ -1161,7 +1162,7 @@ test("a handle serves a request under live", async () => {
 	expect(req?.path).toBe(Path.from("live/cam"));
 
 	const produced = new BroadcastProducer();
-	produced.createTrack("video");
+	produced.createTrack("video", { timescale: Timescale.MILLI });
 	req?.accept(produced);
 	await settle();
 
@@ -1198,7 +1199,7 @@ test("an accepted dynamic broadcast is retired when it closes", async () => {
 
 	const first = await it.next();
 	const produced = new BroadcastProducer();
-	produced.createTrack("video");
+	produced.createTrack("video", { timescale: Timescale.MILLI });
 	first.value?.accept(produced);
 	await settle();
 	expect(request.active.peek()?.track("video").subscribe()).toBeDefined();
@@ -1210,7 +1211,7 @@ test("an accepted dynamic broadcast is retired when it closes", async () => {
 	const second = await it.next();
 	expect(second.value?.path).toBe(path);
 	const replacement = new BroadcastProducer();
-	replacement.createTrack("video");
+	replacement.createTrack("video", { timescale: Timescale.MILLI });
 	second.value?.accept(replacement);
 	await settle();
 	expect(request.active.peek()?.track("video").subscribe()).toBeDefined();

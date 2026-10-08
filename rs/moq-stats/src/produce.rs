@@ -390,7 +390,39 @@ impl Drain {
 			group.finish();
 		}
 	}
+
+	/// Largest publisher-track payload across tiers: the snapshot still held,
+	/// and what this tick actually wrote. Idle paths stay in the snapshot, so
+	/// `held` is the plain frame that nears the cache cap.
+	#[cfg(feature = "bench")]
+	fn publisher_frame_bytes(&self) -> bench::FrameBytes {
+		let mut held = 0;
+		let mut plain = 0;
+		let mut compressed = 0;
+		for group in self.groups.values() {
+			for (name, pair) in &group.traffic.tracks {
+				if !name.ends_with("publisher.json") {
+					continue;
+				}
+				held = held.max(pair.held);
+				plain = plain.max(pair.wrote_plain);
+				compressed = compressed.max(pair.wrote_compressed);
+			}
+		}
+		bench::FrameBytes {
+			held,
+			plain,
+			compressed,
+		}
+	}
 }
+
+/// Drives one producer tick for the benchmark. Not a public API: compiled only
+/// with the `bench` feature, which nothing enables by default.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+#[path = "produce_bench.rs"]
+pub mod bench;
 
 /// One track's frame, rebuilt every drain in a buffer kept across drains.
 /// Serializes as a JSON object keyed by path, byte-identical to
@@ -439,11 +471,14 @@ impl<V: Serialize> Snapshot<V> {
 		self.track.demand()
 	}
 
-	fn update(&mut self, value: &Frame<V>) -> moq_json::Result<()> {
+	/// Write one frame. `Some(len)` is the payload written; `None` means the
+	/// value was unchanged and the encoder emitted nothing.
+	fn update(&mut self, value: &Frame<V>) -> moq_json::Result<Option<usize>> {
 		let Some(frame) = self.encoder.update(value)? else {
-			return Ok(());
+			return Ok(None);
 		};
-		if frame.payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+		let len = frame.payload.len();
+		if len as u64 > moq_net::group::MAX_CACHE_BYTES {
 			return Err(moq_net::Error::FrameTooLarge.into());
 		}
 		if frame.keyframe {
@@ -463,7 +498,7 @@ impl<V: Serialize> Snapshot<V> {
 			self.group.take().unwrap().finish()?;
 		}
 		frame.commit();
-		Ok(())
+		Ok(Some(len))
 	}
 
 	fn finish(&mut self) -> moq_json::Result<()> {
@@ -483,6 +518,16 @@ struct TrackPair<V> {
 	compressed: Snapshot<V>,
 	/// This drain's entries, published and cleared by [`Self::publish`].
 	frame: Frame<V>,
+	/// Last plain payload written, kept so a later unchanged tick can still
+	/// report the snapshot size. Bench builds only.
+	#[cfg(feature = "bench")]
+	held: usize,
+	/// Plain and compressed bytes this drain actually wrote. Zero when the
+	/// encoder skipped an unchanged value. Bench builds only.
+	#[cfg(feature = "bench")]
+	wrote_plain: usize,
+	#[cfg(feature = "bench")]
+	wrote_compressed: usize,
 }
 
 impl<V: Serialize> TrackPair<V> {
@@ -501,6 +546,12 @@ impl<V: Serialize> TrackPair<V> {
 			plain: Snapshot::new(plain_track, plain_config, sequence.clone()),
 			compressed: Snapshot::new(compressed_track, compressed_config, sequence),
 			frame: Frame::default(),
+			#[cfg(feature = "bench")]
+			held: 0,
+			#[cfg(feature = "bench")]
+			wrote_plain: 0,
+			#[cfg(feature = "bench")]
+			wrote_compressed: 0,
 		}
 	}
 
@@ -513,13 +564,36 @@ impl<V: Serialize> TrackPair<V> {
 	/// and clear them for the next drain; moq-json skips unchanged values.
 	fn publish(&mut self, name: &str) {
 		self.frame.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-		if let Err(err) = self.plain.update(&self.frame) {
-			tracing::debug!(?err, name, "stats: failed to write frame");
-		}
-		if let Err(err) = self.compressed.update(&self.frame) {
-			tracing::debug!(?err, name, "stats: failed to write compressed frame");
-		}
+		let plain = match self.plain.update(&self.frame) {
+			Ok(len) => len,
+			Err(err) => {
+				tracing::debug!(?err, name, "stats: failed to write frame");
+				None
+			}
+		};
+		let compressed = match self.compressed.update(&self.frame) {
+			Ok(len) => len,
+			Err(err) => {
+				tracing::debug!(?err, name, "stats: failed to write compressed frame");
+				None
+			}
+		};
+		self.record_bench(plain, compressed);
 		self.frame.entries.clear();
+	}
+
+	#[cfg(feature = "bench")]
+	fn record_bench(&mut self, plain: Option<usize>, compressed: Option<usize>) {
+		self.wrote_plain = plain.unwrap_or(0);
+		self.wrote_compressed = compressed.unwrap_or(0);
+		if let Some(len) = plain {
+			self.held = len;
+		}
+	}
+
+	#[cfg(not(feature = "bench"))]
+	fn record_bench(&mut self, plain: Option<usize>, compressed: Option<usize>) {
+		let _ = (plain, compressed);
 	}
 
 	/// Finish both flavors, so dropping the pair is a deliberate end instead of

@@ -306,3 +306,47 @@ describe("Source stalled rendition selection", () => {
 			source.close();
 		}));
 });
+
+describe("Source rendition rank", () => {
+	it("breaks an exact tie by name, not catalog order", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				e: config("avc1.640028", { codedWidth: 1280, codedHeight: 720, bitrate: 3_000_000 }),
+				d: config("avc1.64001e", { codedWidth: 1280, codedHeight: 720, bitrate: 3_000_000 }),
+			}),
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("d");
+		source.close();
+	});
+
+	it("ranks a known zero bitrate above an unknown one", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				unknown: config("avc1.640028", { codedWidth: 1280, codedHeight: 720 }),
+				zero: config("avc1.64001e", { codedWidth: 1280, codedHeight: 720, bitrate: 0 }),
+			}),
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("zero");
+		source.close();
+	});
+
+	it("prefers a known picture over a higher bitrate with no size", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				a: config("avc1.640028", { bitrate: 9_000_000 }),
+				b: config("avc1.64001e", { codedWidth: 640, codedHeight: 360, bitrate: 1_000_000 }),
+			}),
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("b");
+		source.close();
+	});
+});

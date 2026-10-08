@@ -18,7 +18,7 @@ export async function read<T = unknown>(
 	return schema.parse(next);
 }
 
-/** Validate a value against the schema, then write it as a JSON frame. */
+/** Validate a value against the schema, then write it as a JSON frame stamped now, so the track must be timed. */
 export function write<T = unknown>(source: track.Producer | group.Producer, value: T, schema: z.ZodMiniType<T>) {
 	const valid = schema.parse(value);
 	source.writeJson(valid);
