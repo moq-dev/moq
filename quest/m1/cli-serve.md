@@ -28,10 +28,6 @@ startup on any other invalid auth config.
 - Test: a listening import drains its viewers on SIGTERM within
   `drain_timeout`, and its sessions show up in stats.
 
-Decided in the 2026-09-30 audit: no longer waits on
-[`moq relay`](/quest/m3/moq-relay-subcommand.md).
-
 ## Related
 
-- [`moq relay`](/quest/m3/moq-relay-subcommand.md) - the CLI later hosts the whole relay
 - [Drain handshakes](/quest/m1/drain-handshakes.md) - moves where the drain count is taken

@@ -27,3 +27,7 @@ behind the `mediacodec` feature and the encode seam.
 ## Required
 
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - the round-trip regression decodes through it
+
+## Related
+
+- [AudioToolbox encode](/quest/m1/audio-encode-audiotoolbox.md) - the macOS and iOS backend, which may already add `flush` to `Encoder::encode`

@@ -23,14 +23,11 @@ once per tab by the origin rather than once per session. lite-07 drops the
 hop list, so no hop chain carries it.
 
 Roster: each peer publishes `<prefix><id>` with an `info.json` snapshot track:
-the moq ALPNs it accepts, `webrtc: true`, whether it can run qmux unordered,
-the presenter public key that
+the moq ALPNs it accepts, `webrtc: true`, the presenter public key that
 [peer grants](/quest/m3/p2p/peer-grant.md) bind, the application's `meta`,
 and for native peers an optional `webtransport: { url, fingerprint }` and
 `iroh` endpoint id. The schema is shared with
-[moq-cli](/quest/m3/p2p/cli.md). Unordered is advertised here so the dialer
-can set `RTCDataChannel.ordered` at create time; see
-[unordered qmux](/quest/m3/p2p/unordered.md).
+[moq-cli](/quest/m3/p2p/cli.md).
 
 Pairing is sparse: broadcasts exist only for pairs some `select` chose, so
 the cost is the dialed pairs, not the square of the roster. Whoever selects a
@@ -80,5 +77,6 @@ there is no equal-scope shortcut.
 
 ## Required
 
+- [Routes](/quest/m1/cluster-routing/routes.md) - the ROUTE_START node id the roster keys on
 - [Data channel transport](/quest/m3/p2p/transport.md)
 - [Peer grants](/quest/m3/p2p/peer-grant.md) - the node-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none

@@ -9,8 +9,9 @@ Windows, macOS, and Linux.
 
 ## Plan
 
-In m3 until a Conan consumer asks; vcpkg and the release tarball cover
-C++ consumers first.
+In m3 until a Conan consumer asks; the release tarball covers C++ consumers
+first. The vcpkg registry, which this reuses, is parked in m3 too (decided
+2026-10-08), so it lands before this does.
 
 - A `moq-cpp` recipe, named after the package, on a moq-dev remote
   (Artifactory or a GitHub-hosted `conan` index) that packages the prebuilt
@@ -25,4 +26,4 @@ C++ consumers first.
 
 ## Required
 
-- [vcpkg registry](/quest/m2/cpp-vcpkg.md) - the release manifest and bump automation this reuses
+- [vcpkg registry](/quest/m3/cpp-vcpkg.md) - the release manifest and bump automation this reuses

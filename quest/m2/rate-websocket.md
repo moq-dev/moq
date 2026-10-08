@@ -39,3 +39,7 @@ live session applies.
 ## Required
 
 - [Bitrate claim](/quest/m2/rate-claim.md) - the cap this enforces
+
+## Related
+
+- [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - boxes the accepted stream, so it must keep the socket handle these buffer sizes need

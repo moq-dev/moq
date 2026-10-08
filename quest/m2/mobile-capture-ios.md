@@ -25,5 +25,5 @@ same everywhere.
 
 ## Related
 
-- [Android capture and encode](/quest/m2/mobile-capture-android.md) - the other half of
+- [Android capture](/quest/m2/mobile-capture-android.md) - the other half of
   mobile, and a much larger one

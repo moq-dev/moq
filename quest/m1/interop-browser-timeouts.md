@@ -23,7 +23,3 @@ FFI publisher's 2 s audio max age parked hundreds of group serves.
 - Never raise the timeout or add a retry.
 
 Public API: none expected. Wire: none.
-
-## Related
-
-- [CI runner stalls](/quest/m1/ci-runner-stalls.md) - shorter freezes of both interop tracks on CI runners

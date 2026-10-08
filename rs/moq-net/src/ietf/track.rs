@@ -178,10 +178,10 @@ impl Message for TrackStatusOk {
 		// Read as SUBSCRIBE_OK's are: EXPIRES is ignored, and MAX_CACHE_DURATION is a
 		// parameter only on draft-15.
 		decode_params!(r, version,
-			0x04 => max_cache_duration: Option<u64>,
+			0x04 => max_cache_duration: Option<u64> where version == Version::Draft15,
 			0x08 => _expires: Option<u64>,
 			0x09 => largest: Option<Location>,
-			0x22 => group_order: Option<GroupOrder>,
+			0x22 => group_order: Option<GroupOrder> where version == Version::Draft15,
 		);
 		let mut properties = match Self::has_properties(version) {
 			true => Properties::decode(r, version)?,
@@ -231,6 +231,22 @@ mod tests {
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		buf.to_vec()
+	}
+
+	/// GROUP_ORDER and MAX_CACHE_DURATION are TRACK_STATUS_OK parameters only on draft-15,
+	/// as on SUBSCRIBE_OK. Draft-16 ignores a GROUP_ORDER it defines elsewhere, even with a
+	/// value no field could hold, and rejects 0x04, which it does not define at all. Draft-18
+	/// rejects a known parameter on a message that does not define it.
+	#[test]
+	fn track_status_ok_parameters_follow_the_draft() {
+		// Request 1, then GROUP_ORDER as the varint 256.
+		let ok = decode_message::<TrackStatusOk>(&[0x01, 0x01, 0x22, 0x41, 0x00], Version::Draft16)
+			.expect("draft-16 ignores GROUP_ORDER");
+		assert_eq!(ok.properties.group_order, None);
+		// Request 1, then MAX_CACHE_DURATION of 5.
+		assert!(decode_message::<TrackStatusOk>(&[0x01, 0x01, 0x04, 0x05], Version::Draft16).is_err());
+		// GROUP_ORDER = Ascending, then an empty properties block.
+		assert!(decode_message::<TrackStatusOk>(&[0x01, 0x22, 0x01], Version::Draft18).is_err());
 	}
 
 	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {

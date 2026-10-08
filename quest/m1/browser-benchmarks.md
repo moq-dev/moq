@@ -8,6 +8,8 @@ microbenchmarks do not exercise.
 
 ## Plan
 
+Decided 2026-10-08: m2, since nothing in m1 waits on browser measurements.
+
 The JS microbenchmarks already exist: the seven Bun sweeps in `js/net/bench`
 (`broadcasts`, `forward`, `frames`, `lite-varint`, `reader`, `track`,
 `varint`) run nightly and cover the origin map, forwarded route re-pricing,

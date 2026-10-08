@@ -9,8 +9,10 @@ its recorded catalog live, stamped with the recording's `store` and `version`,
 so an exporter in history mode treats its timeline as durable and lists past
 `--window`. A `--follow` replay grows like an event playlist.
 
-Choosing which catalog applies to which media group stays with
-[Catalog track identity](/quest/m2/catalog-tracks.md).
+A track's definition never changes for its name
+([Catalog track identity](/quest/m2/catalog-tracks.md)), so the newest
+recorded catalog describes every group of the tracks it lists; nothing here
+picks a catalog per group.
 
 ## Plan
 

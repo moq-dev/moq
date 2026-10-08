@@ -13,12 +13,11 @@ the KDE DMA-BUF capture and PipeWire camera validations fold in here, and the
 V4L2 `VIDIOC_EXPBUF` source is dropped with the export itself (see
 [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md)).
 
-- **VAAPI low-power entrypoint.** H.264 encode, DMA-BUF input, and VPP
-  resize ran on Intel Meteor Lake with iHD (moq-vaapi 0.1.0). Still unrun:
-  the low-power encode entrypoint, which that device does not expose. A
-  render node other than the first moved to
-  [VA-API external images](/quest/m2/vaapi-vulkan-import.md) (2026-10-06 audit),
-  whose two-node test host has one.
+Decided 2026-10-08: the VAAPI low-power entrypoint check is dropped. Neither
+Meteor Lake nor the Arrow Lake test host exposes `EncSliceLP`, so no machine
+on hand reaches that fallback. A render node other than the first is checked
+by [VA-API external images](/quest/m2/vaapi-vulkan-import.md).
+
 - **Windows Media Foundation capture**: on-demand open and close, so the
   camera LED is off when nobody is watching, and NV12 delivery from MJPEG and
   YUY2 cameras.
@@ -54,7 +53,7 @@ arrived, and whether the producer used one memory block or one per plane.
 No new capture API, and no libcamera source.
 
 A separate-plane producer belongs to
-[multi-plane cameras](/quest/m2/pipewire-camera-planes.md); if that is why a
+[multi-plane cameras](/quest/m3/pipewire-camera-planes.md); if that is why a
 Pi produces nothing, write it down and stop. `doc/lib/rs/moq-video.md` says
 both paths are reachable; correct that sentence if one cannot capture.
 
@@ -76,5 +75,5 @@ is not a bug any amount of review finds.
 ## Related
 
 - [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - the DMA-BUF import validation this capture feeds
-- [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - separate-plane I420 and NV12, when the Pi pass finds them
+- [Capture multi-plane PipeWire cameras](/quest/m3/pipewire-camera-planes.md) - separate-plane I420 and NV12, when the Pi pass finds them
 - [Embedded video path](/quest/m3/video-embedded.md) - presenting on a Pi, which is a different gap

@@ -10,8 +10,9 @@ cooperation.
 
 ## Plan
 
-This is the ingress mirror of the egress `lag` histogram (#4298, on the QoS
-line) and needs no acknowledgments: the relay is the receiver, and a frame is measured
+This is the ingress mirror of the egress `lag` histogram ([viewer lag
+histogram](/quest/m1/qos/lag-histogram.md), which lands first so this reuses
+its histogram type, decided 2026-10-08) and needs no acknowledgments: the relay is the receiver, and a frame is measured
 when its last byte arrives, because a partial frame is not useful.
 
 Frame timestamps are relative and jittered with no epoch, so measure each
@@ -38,12 +39,12 @@ regressions: B-frame reordering makes presentation timestamps non-monotonic
 inside a group, and that is not a broken timeline.
 
 Sample where the relay completes a frame: the moq-lite subscriber's
-`run_group` in `rs/moq-net/src/lite/subscriber.rs` (which already decodes the
-zigzag timestamp delta) and the IETF subscriber's object path. Leave untimed
-tracks out of the histogram rather than report a fiction: today pre-lite-05
-peers without a timescale are stamped with `Timestamp::now()` on arrival,
-which would read as perfectly on time, and after the untimed model
-([#4822](https://github.com/moq-dev/moq/pull/4822)) they arrive untimed. Update the stats section of `doc/bin/relay/config.md`.
+`FrameIngest` in `rs/moq-net/src/lite/subscriber.rs` (which already decodes
+the zigzag timestamp delta) and the IETF subscriber's object path. Leave
+untimed tracks out of the histogram: since the untimed model
+([#4822](https://github.com/moq-dev/moq/pull/4822)) pre-lite-05 frames arrive
+untimed rather than stamped on arrival. Update the stats section of
+`doc/bin/relay/config.md`.
 
 Tests: a paced publisher lands in the lowest bucket; publishers whose clocks
 run 100 ppm slow and 100 ppm fast both stay in the lowest bucket over a
@@ -54,6 +55,7 @@ excluded.
 
 ## Required
 
+- [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the egress histogram whose type and edges this reuses
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the totals and prefix tracks the drift histogram lands on
 
 ## Related

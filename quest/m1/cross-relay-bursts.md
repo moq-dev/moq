@@ -36,8 +36,10 @@ used and against `main`:
   (seed 11025055814286623932). Several
   30 s timers of that era have since been removed or shortened (#4606, #4741).
   That drill uses a lite peer link; over a `moq-transport-19` peer link, a
-  related refusal does reproduce: FETCHes answered `old` for groups the origin
-  still holds ([IETF peer FETCH refused old](/quest/m1/ietf-peer-fetch-old.md)).
+  related refusal reproduces every run: FETCHes answered `old` for groups the
+  origin still holds. Both, the lite seed included, belong to
+  [Cross-relay FETCH serves held groups](/quest/m1/ietf-peer-fetch-old.md),
+  widened to any peer link (decided 2026-10-08).
 - **Queueing.** FETCHes beyond a session's stream credit wait for it, one
   cross-relay round trip per slot, so with tight credit a gap's FETCH can
   outlast a 2 s deadline without being lost.
@@ -51,3 +53,4 @@ used and against `main`:
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - owns the stale and flapping announcements from the same report
+- [Cross-relay FETCH serves held groups](/quest/m1/ietf-peer-fetch-old.md) - owns the FETCH refused `old` over either peer link, with this quest's lite seed
