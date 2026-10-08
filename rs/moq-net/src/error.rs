@@ -32,6 +32,12 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
+	/// The peer went past what the session allows: a request ID at or past the
+	/// MAX_REQUEST_ID we advertised (moq-transport drafts 14 to 16), or more announcements
+	/// or subscriptions than its [`crate::session::Limits`].
+	#[error("too many requests")]
+	TooManyRequests,
+
 	/// The peer did not close within the GOAWAY drain deadline.
 	#[error("goaway timeout")]
 	GoawayTimeout,
@@ -62,6 +68,7 @@ impl SessionError {
 			Self::Unauthorized => 0x2,
 			Self::ProtocolViolation => 0x3,
 			Self::KeyValueFormatting => 0x6,
+			Self::TooManyRequests => 0x7,
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
 			Self::Version => 0x15,
@@ -82,6 +89,7 @@ impl SessionError {
 			0x2 => Self::Unauthorized,
 			0x3 => Self::ProtocolViolation,
 			0x6 => Self::KeyValueFormatting,
+			0x7 => Self::TooManyRequests,
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
 			0x15 => Self::Version,
@@ -376,6 +384,11 @@ pub enum Error {
 	#[error("too many parameters")]
 	TooManyParameters,
 
+	/// The peer already holds as many requests, announcements, or subscriptions as this
+	/// session allows (see [`crate::session::Limits`]).
+	#[error("too many requests")]
+	TooManyRequests,
+
 	/// The peer offered an ALPN this endpoint doesn't recognize, so no version could be
 	/// negotiated. A connect-time error.
 	#[error("unknown ALPN: {0}")]
@@ -538,6 +551,7 @@ impl From<&Error> for SessionError {
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::TooManyParameters => Self::KeyValueFormatting,
+			Error::TooManyRequests => Self::TooManyRequests,
 			Error::GoawayTimeout => Self::GoawayTimeout,
 			Error::Timeout => Self::Timeout,
 			Error::ProtocolViolation
@@ -634,6 +648,7 @@ mod tests {
 			SessionError::Unauthorized,
 			SessionError::ProtocolViolation,
 			SessionError::KeyValueFormatting,
+			SessionError::TooManyRequests,
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,
 			SessionError::Version,
@@ -650,6 +665,7 @@ mod tests {
 
 		// The moq-transport codes we reuse must keep moq-transport's values.
 		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
+		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
 

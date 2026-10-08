@@ -2317,6 +2317,50 @@ test("draft-20: PUBLISH_DONE waits for a queued group and counts every stream", 
 	}
 });
 
+/**
+ * A peer that did not send SOLICIT still gets NAMESPACE on its SUBSCRIBE_NAMESPACE
+ * stream on draft-16 and later: one for a match that already exists, one announced
+ * after, then NAMESPACE_DONE when that announcement ends.
+ */
+test.each([
+	["draft-16", Version.DRAFT_16],
+	["draft-18", Version.DRAFT_18],
+] as const)("a non-SOLICIT %s SUBSCRIBE_NAMESPACE carries NAMESPACE then NAMESPACE_DONE", async (_, version) => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, version, true);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: false, session });
+	const early = publish(origin, Path.from("early-cam"));
+
+	const subscription = await Stream.open(pair.client, { version });
+	const accepted = await Stream.accept(pair.server, version);
+	if (!accepted) throw new Error("missing subscription");
+	const run = pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 1n, namespace: Path.empty() }), accepted);
+
+	try {
+		expect(await subscription.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(subscription.reader, version);
+
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+		expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(
+			Path.from("early-cam"),
+		);
+
+		publish(origin, Path.from("late-cam"));
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+		expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(Path.from("late-cam"));
+
+		early.close();
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntryDone.id);
+		expect((await SubscribeNamespaceEntryDone.decode(subscription.reader, version)).suffix).toBe(
+			Path.from("early-cam"),
+		);
+	} finally {
+		subscription.close();
+		origin.close();
+		await run;
+	}
+});
+
 for (const version of [Version.DRAFT_15, Version.DRAFT_19] as const) {
 	for (const declared of [false, true]) {
 		for (const solicited of [false, true]) {

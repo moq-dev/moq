@@ -6687,9 +6687,10 @@ pub(super) mod test {
 		let mut exporter = super::super::Export::new(crate::source::announced(&consumer))
 			.await
 			.unwrap()
-			.with_max_age(Duration::from_secs(30));
+			.with_delay(Duration::from_secs(30))
+			.with_replay();
 		let mut ts = Vec::new();
-		while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+		while let Ok(res) = tokio::time::timeout(Duration::from_secs(100), exporter.next()).await {
 			let Some(frame) = res.expect("the exporter must take the open GOP after the break") else {
 				break;
 			};
@@ -7075,34 +7076,45 @@ pub(super) mod test {
 		}
 	}
 
-	/// Import `data`, re-export the broadcast to MPEG-TS, and count the exported packets
-	/// whose adaptation field sets `discontinuity_indicator`.
-	async fn export_discontinuities(data: &[u8]) -> usize {
+	/// Import `before`, re-export the broadcast to MPEG-TS until it has gone out, then import
+	/// `after` and count the exported packets whose adaptation field sets
+	/// `discontinuity_indicator`.
+	async fn export_discontinuities(before: &[u8], after: &[u8]) -> usize {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
-		import.decode(&bytes::BytesMut::from(data)).unwrap();
-		import.finish().unwrap();
+		import.decode(&bytes::BytesMut::from(before)).unwrap();
 
-		// `import` and `catalog` stay alive so the exporter can subscribe to the finished,
-		// retained tracks. A generous max age, since the default of zero would shed the
-		// earlier groups and the boundary with them.
+		// `import` and `catalog` stay alive so the exporter can subscribe to the retained
+		// tracks. A generous delay, since the default of zero would shed the earlier groups
+		// and the boundary with them. The paused clock runs out the delay and every gap in
+		// the media without a real wait.
+		let delay = std::time::Duration::from_secs(3600);
 		let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
 			.await
 			.unwrap()
-			.with_max_age(std::time::Duration::from_secs(3600));
-		let mut flagged = 0;
-		while let Ok(Ok(Some(frame))) =
-			tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await
-		{
-			flagged += frame
+			.with_delay(delay)
+			.with_replay();
+		let flags = |frame: crate::container::Frame| {
+			frame
 				.payload
 				.as_chunks::<188>()
 				.0
 				.iter()
 				.filter(|p| p[3] & 0x20 != 0 && p[4] > 0 && p[5] & 0x80 != 0)
-				.count();
+				.count()
+		};
+		// A discontinuity before anything went out moves no clock, so the media before the
+		// boundary goes out first, as it would live.
+		let mut flagged = 0;
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(2 * delay, exporter.next()).await {
+			flagged += flags(frame);
+		}
+		import.decode(&bytes::BytesMut::from(after)).unwrap();
+		import.finish().unwrap();
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(2 * delay, exporter.next()).await {
+			flagged += flags(frame);
 		}
 		flagged
 	}
@@ -7127,21 +7139,21 @@ pub(super) mod test {
 		};
 
 		let mut cc = 0;
-		let mut signalled = synth_pmt(&[(StreamType::Mpeg1Audio, PID)], false);
-		media(&mut signalled, &mut cc, 90_000);
-		let mut unsignalled = signalled.clone();
-		signalled.extend_from_slice(&clock_break_packet(PID));
+		let mut before = synth_pmt(&[(StreamType::Mpeg1Audio, PID)], false);
+		media(&mut before, &mut cc, 90_000);
+		let mut signalled = clock_break_packet(PID);
+		let mut unsignalled = Vec::new();
 		let mut peer_cc = cc;
 		media(&mut signalled, &mut cc, 31 * 90_000);
 		media(&mut unsignalled, &mut peer_cc, 31 * 90_000);
 
 		assert_eq!(
-			export_discontinuities(&signalled).await,
+			export_discontinuities(&before, &signalled).await,
 			1,
 			"the declared reset never reached the exported clock"
 		);
 		assert_eq!(
-			export_discontinuities(&unsignalled).await,
+			export_discontinuities(&before, &unsignalled).await,
 			0,
 			"a leap the source did not declare must not be flagged"
 		);
@@ -7168,10 +7180,14 @@ pub(super) mod test {
 
 		let mut cc = 0;
 		media(&mut stimulus, &mut cc, 90_000);
-		stimulus.extend_from_slice(&clock_break_packet(PCR_PID));
-		media(&mut stimulus, &mut cc, 31 * 90_000);
+		let mut after = clock_break_packet(PCR_PID);
+		media(&mut after, &mut cc, 31 * 90_000);
 
-		assert_eq!(export_discontinuities(&stimulus).await, 1, "one flag per program break");
+		assert_eq!(
+			export_discontinuities(&stimulus, &after).await,
+			1,
+			"one flag per program break"
+		);
 	}
 
 	fn opus_extension(body: &[u8]) -> Vec<super::catalog::Descriptor> {

@@ -38,8 +38,8 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
-	/// Set once the peer sends a GOAWAY; new request streams are then rejected
-	/// with [`Error::GoingAway`] (the peer told us to stop asking).
+	/// Set once the peer sends a GOAWAY; this session's routes then cost
+	/// [`crate::origin::Cost::DRAIN`], so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 }
 
@@ -83,6 +83,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	going_away: crate::goaway::GoingAway,
 	/// What this session may allocate up front for frames still arriving.
 	frames: frame::Budget,
+	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
+	pub(super) announces: crate::session::Slots,
 }
 
 #[derive(Clone)]
@@ -118,6 +120,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
 			frames: Default::default(),
+			announces: Default::default(),
 		}
 	}
 
@@ -133,15 +136,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// The recorded session end, or [`Error::Dropped`] when nothing recorded one.
 	fn end_reason(&self) -> Error {
 		self.ended.lock().clone().unwrap_or(Error::Dropped)
-	}
-
-	/// Reject a new request once the peer has sent a GOAWAY: it told us to stop
-	/// opening streams on this session (existing subscriptions keep flowing).
-	fn check_going_away(&self) -> Result<(), Error> {
-		if self.going_away.is_set() {
-			return Err(Error::GoingAway);
-		}
-		Ok(())
 	}
 
 	/// What pulling content across this session's link costs, added to the route cost
@@ -282,8 +276,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 
 		// The peer holds this prefix now. Everything below either accepts the announcement,
-		// replacing this, or declines it and leaves it exactly as reserved.
-		announced.reserve(path.clone(), epoch);
+		// replacing this, or declines it and leaves it exactly as reserved. Past the
+		// session's cap this refuses the announce stream instead.
+		announced.reserve(path.clone(), epoch)?;
 
 		if let Some(responder) = responder_origin {
 			// A chain already naming the sender came back through it: a reflection, and
@@ -1166,8 +1161,8 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 		loop {
 			match &mut self.state {
 				ProbeState::Open => {
-					// After a GOAWAY the peer must not see new streams. Probe is
-					// best-effort; skip it rather than erroring.
+					// Probe is best-effort telemetry; a session that is going away
+					// has no use for a new estimate, so skip it rather than erroring.
 					if self.subscriber.going_away.is_set() {
 						return Poll::Ready(Ok(()));
 					}
@@ -1247,13 +1242,17 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 		}
 	}
 
+	/// Fails the session on any error, [`Error::TooManyRequests`] included: a peer
+	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.poll_run(waiter)
+	}
+
+	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				PrefixState::Open => {
-					// A peer that sent GOAWAY told us to stop opening streams on this session.
-					self.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(
 						&mut self.subscriber.session,
 						self.subscriber.version,
@@ -1318,7 +1317,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					let run = PrefixRun {
 						responder_origin,
 						link_cost,
-						announced: Announced::default(),
+						announced: Announced::new(self.subscriber.announces.clone()),
 						decoder: lite::AnnounceDecoder::default(),
 					};
 
@@ -3159,6 +3158,58 @@ mod tests {
 		cursor.assert_next_active("a");
 		cursor.assert_next_active("b");
 	}
+
+	/// An announce past the session's cap fails the session with TOO_MANY_REQUESTS, and
+	/// the stream gives its slots back once the session drops it.
+	#[moq_net_sim::test]
+	async fn announces_past_the_cap_close_the_session() {
+		const VERSION: Version = Version::Lite06;
+		let start = |suffix| lite::AnnounceBroadcast::Active {
+			epoch: None,
+			suffix: lite::PathRef::literal(Path::new(suffix)),
+			hops: lite::HopsRef::literal(crate::Hops::new()),
+			cost: crate::origin::Cost::default(),
+		};
+		let mut script = Vec::new();
+		lite::AnnounceOk {
+			origin: crate::Hop::new(9).unwrap(),
+			active: 3,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+		.unwrap();
+		for suffix in ["a", "b", "c"] {
+			start(suffix)
+				.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+				.unwrap();
+		}
+
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::sim(),
+			session,
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: Some(1),
+			peer_hop: None,
+			going_away: Default::default(),
+		});
+		let slots = crate::session::Slots::new(2);
+		subscriber.announces = slots.clone();
+		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
+
+		let err = kio::wait(|waiter| prefix.poll(waiter))
+			.await
+			.expect_err("an announce past the cap must fail the session");
+		assert_eq!(crate::SessionError::from(&err), crate::SessionError::TooManyRequests);
+
+		// The session's end drops the stream, which gives its slots back.
+		drop(prefix);
+		let _a = slots.acquire().expect("the failed stream kept a slot");
+		let _b = slots.acquire().expect("the failed stream kept a slot");
+	}
 }
 
 /// The four wire fields a subscription's half-open range encodes to.
@@ -3254,9 +3305,11 @@ enum Sub<S: crate::transport::poll::Session> {
 ///
 /// A declined advertisement remains present with no route because the peer still
 /// owns its path and announce id until it retracts or restarts it.
-#[derive(Default)]
 struct Announced {
 	routes: HashMap<PathOwned, Option<AnnouncedRoute>>,
+	/// The session's announce cap, and one slot taken from it per entry in `routes`.
+	slots: crate::session::Slots,
+	held: Vec<crate::session::Slot>,
 	/// The epoch each advertisement named, kept while it stands even when declined,
 	/// so a restart that attaches it later serves the same broadcast.
 	epochs: HashMap<PathOwned, crate::Epoch>,
@@ -3266,7 +3319,24 @@ struct Announced {
 	ready: kio::Queue<PathOwned>,
 }
 
+#[cfg(test)]
+impl Default for Announced {
+	fn default() -> Self {
+		Self::new(Default::default())
+	}
+}
+
 impl Announced {
+	fn new(slots: crate::session::Slots) -> Self {
+		Self {
+			routes: HashMap::new(),
+			slots,
+			held: Vec::new(),
+			epochs: HashMap::new(),
+			ready: Default::default(),
+		}
+	}
+
 	fn contains(&self, path: &PathOwned) -> bool {
 		self.routes.contains_key(path)
 	}
@@ -3297,12 +3367,16 @@ impl Announced {
 	/// the peer still holds.
 	/// Only valid on a prefix the peer does not already hold, which the caller establishes
 	/// with [`Self::contains`]. Overwriting an attached route is [`Self::declined`]'s job.
-	fn reserve(&mut self, path: PathOwned, epoch: Option<crate::Epoch>) {
+	///
+	/// Fails with [`Error::TooManyRequests`] once the session holds as many as it allows.
+	fn reserve(&mut self, path: PathOwned, epoch: Option<crate::Epoch>) -> Result<(), Error> {
 		debug_assert!(!self.routes.contains_key(&path), "reserved a prefix already advertised");
+		self.held.push(self.slots.acquire()?);
 		if let Some(epoch) = epoch {
 			self.epochs.insert(path.clone(), epoch);
 		}
 		self.routes.insert(path, None);
+		Ok(())
 	}
 
 	/// The epoch the advertisement at `path` named, if any.
@@ -3318,7 +3392,11 @@ impl Announced {
 	/// session from the same peer. Dropping its sources closes their requests.
 	fn withdraw(&mut self, path: &PathOwned) {
 		self.epochs.remove(path);
-		if let Some(Some(entry)) = self.routes.remove(path) {
+		let Some(entry) = self.routes.remove(path) else {
+			return;
+		};
+		self.held.pop();
+		if let Some(entry) = entry {
 			entry.dynamic.withdrawn();
 		}
 	}
@@ -3760,8 +3838,6 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 		loop {
 			match &mut self.state {
 				EstablishState::Open => {
-					// A peer that sent GOAWAY told us to stop opening streams.
-					self.serve.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,
@@ -4006,7 +4082,6 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 		loop {
 			match &mut self.state {
 				TrackInfoState::Open => {
-					serve.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(&mut self.session, serve.subscriber.version, &mut cx))?;
 					stream.writer.buffer(&lite::ControlType::Track)?;
 					stream.writer.buffer(&lite::Track {
@@ -4468,13 +4543,6 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 			match &mut self.state {
 				FetchRunState::Open { request } => {
-					// A peer that sent GOAWAY told us to stop opening streams on this session.
-					if self.serve.subscriber.going_away.is_set() {
-						request.take().expect("request pending").reject(Error::GoingAway);
-						self.state = FetchRunState::Done;
-						return Poll::Ready(());
-					}
-
 					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,

@@ -3,7 +3,7 @@ use std::{
 	collections::{BTreeSet, HashMap},
 	ops::{Bound, ControlFlow},
 	sync::{
-		Arc,
+		Arc, Mutex,
 		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll, ready},
@@ -39,6 +39,8 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
+	/// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
+	pub subscriptions: crate::session::Slots,
 }
 
 /// Context shared by every control-stream child.
@@ -64,6 +66,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
+	subscriptions: crate::session::Slots,
 	// The send time an untimed track's frames carry, since no lite version can mark them
 	// untimed yet (see `wire_timestamp`).
 	runtime: crate::time::Clock,
@@ -170,6 +173,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				version: config.version,
 				goaway: config.goaway,
 				owed: AtomicUsize::new(0),
+				subscriptions: config.subscriptions,
 				runtime: config.runtime.clone(),
 			}),
 			runtime: config.runtime,
@@ -194,6 +198,7 @@ where
 						shared: self.shared.clone(),
 						runtime: self.runtime.clone(),
 						state: ControlState::Start { stream },
+						_slot: None,
 					});
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -238,6 +243,8 @@ struct Control<S: crate::transport::poll::Session> {
 	// Handed to the children that arm timers (PROBE, announce linger).
 	runtime: crate::time::Clock,
 	state: ControlState<S>,
+	// A subscription's place under the session's cap, held until the stream ends.
+	_slot: Option<crate::session::Slot>,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -301,9 +308,20 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Announce => {
 							ControlState::Announce(AnnounceServe::new(self.shared.clone(), stream))
 						}
-						lite::ControlType::Subscribe => {
-							ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
-						}
+						lite::ControlType::Subscribe => match self.shared.subscriptions.acquire() {
+							Ok(slot) => {
+								self._slot = Some(slot);
+								ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
+							}
+							// A peer past its limits loses the session, not just this request.
+							Err(err) => {
+								self.shared
+									.session
+									.clone()
+									.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
+								return Poll::Ready(Err(err));
+							}
+						},
 						// The Track Stream and FETCH are lite-05+ only.
 						lite::ControlType::Fetch | lite::ControlType::Track
 							if !self.shared.version.has_track_stream() =>
@@ -2290,10 +2308,15 @@ struct Subscription<S: crate::transport::poll::Session> {
 ///
 /// A group is pending from the moment it is queued until its stream opens, or it gives
 /// up first (expired, or the open failed) and is never counted.
+///
+/// `unencodable` rides along because every group machine and the run loop already share
+/// this handle. A header that cannot be encoded writes nothing, so the group-stream
+/// reset is not a stream the subscriber can pin to this subscription.
 #[derive(Default)]
 struct Opens {
 	pending: AtomicU64,
 	opened: AtomicU64,
+	unencodable: Mutex<Option<Error>>,
 }
 
 impl<S: crate::transport::poll::Session> Subscription<S> {
@@ -2336,6 +2359,21 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	fn track_priority_current(&mut self) -> u8 {
 		self.track_priority_seen = *self.track_priority.read();
 		self.track_priority_seen
+	}
+
+	/// Remember an encode failure the group stream could not carry.
+	///
+	/// The first one wins. The run loop resets the subscribe stream with it.
+	fn note_unencodable(&self, err: &Error) {
+		let mut slot = self.opens.unencodable.lock().unwrap();
+		if slot.is_none() {
+			*slot = Some(err.clone());
+		}
+	}
+
+	/// Take the encode failure, if a group recorded one.
+	fn take_unencodable(&self) -> Option<Error> {
+		self.opens.unencodable.lock().unwrap().take()
 	}
 
 	/// Test shim: drive one group stream like the old `serve_group`, surfacing the
@@ -2478,6 +2516,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 		// Drive the in-flight group machines; completions just retire.
 		let _ = self.children.poll(waiter);
+		// A group whose header does not fit this peer's varint wrote nothing. The
+		// reset is on a stream the subscriber never tied to this subscription, so
+		// forward it here or the reader waits forever.
+		if let Some(err) = self.ctx.take_unencodable() {
+			return Poll::Ready(Err(err));
+		}
 
 		// The first group waits for the source to resolve where its feed starts; datagrams
 		// keep flowing meanwhile.
@@ -2757,6 +2801,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						frame_start: self.frame_start,
 					};
 					if let Err(err) = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg)) {
+						// The header wrote nothing, so the group-stream reset has nothing to pin
+						// it to this subscription. The run loop reads the slot and resets the
+						// subscribe stream instead.
+						self.ctx.note_unencodable(&err);
 						self.state = GroupState::Done;
 						writer.abort(&err);
 						return Poll::Ready(Err(err));
@@ -3746,6 +3794,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
+			subscriptions: Default::default(),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3911,6 +3960,7 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}
@@ -4083,6 +4133,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 
 		let mut script = Vec::new();
@@ -4206,6 +4257,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 
 		let mut script = Vec::new();
@@ -4259,5 +4311,41 @@ mod tests {
 			panic!("the subscription is not running");
 		};
 		assert_eq!(*run.track_priority_tx.read(), 7, "the update was lost");
+	}
+
+	/// A subscription past the session's cap closes the session with TOO_MANY_REQUESTS.
+	#[moq_net_sim::test]
+	async fn subscriptions_past_the_cap_close_the_session() {
+		use crate::coding::Encode as _;
+
+		const VERSION: Version = Version::Lite06;
+		let mut script = Vec::new();
+		lite::ControlType::Subscribe
+			.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+			.unwrap();
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
+		let log = session.log.clone();
+
+		let origin = Hop::random().produce();
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let mut publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::sim(),
+			session,
+			origin: origin.consume(),
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::default(),
+			goaway,
+			peer_hop: None,
+			subscriptions: crate::session::Slots::new(0),
+		});
+
+		let _ = publisher.poll(&kio::Waiter::noop());
+		assert_eq!(
+			log.closes(),
+			vec![(
+				crate::SessionError::TooManyRequests.to_code(),
+				"too many subscriptions".to_string()
+			)]
+		);
 	}
 }

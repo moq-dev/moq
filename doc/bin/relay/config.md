@@ -239,9 +239,11 @@ and auth root, split by a **tier** label chosen by the auth server's grant or
 `--cluster-tier`, which is what makes billing per customer or per region
 possible. Each run, and each group returning after its linger, announces under
 a fresh [epoch](/concept/moq-lite#publisher-epochs) on its route, so a restart
-is a new broadcast at the same path.
-[Stats](/concept/stats) describes the paths, tracks, and encodings;
-read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
+is a new broadcast at the same path. Each `sessions.json` row also carries
+`announces_peak` and `subscriptions_peak`: the most any one session under that
+root held against the per-session limits, past which a session is closed with
+`TOO_MANY_REQUESTS`. [Stats](/concept/stats) describes the paths, tracks, and
+encodings; read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
 
