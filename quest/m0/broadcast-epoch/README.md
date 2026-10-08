@@ -97,7 +97,6 @@ then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - a replaced broadcast reaches announce consumers as an explicit Restart, subscriptions stay sticky, and new requests never join a replaced route's front
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
-- [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) - moqsrc switches to the new broadcast on a `Restart`, keeping its pads by rendition name
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
