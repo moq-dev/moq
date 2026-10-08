@@ -237,7 +237,10 @@ Each node publishes `publisher.json`, `subscriber.json`, and `sessions.json`
 tracks (plus compressed `.json.z` twins) of cumulative counters per broadcast
 and auth root, split by a **tier** label chosen by the auth server's grant or
 `--cluster-tier`, which is what makes billing per customer or per region
-possible. [Stats](/concept/stats) describes the paths, tracks, and encodings;
+possible. Each run, and each group returning after its linger, announces under
+a fresh [epoch](/concept/moq-lite#publisher-epochs) on its route, so a restart
+is a new broadcast at the same path.
+[Stats](/concept/stats) describes the paths, tracks, and encodings;
 read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]

@@ -32,7 +32,7 @@ async fn after_abort(version: &str, hops: u32) {
 	let _pair2 = connect_mock(options).await;
 	let consumer = if hops == 2 { far.consume() } else { relay.consume() };
 	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut open = track.append_group().unwrap();
 	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
@@ -70,7 +70,7 @@ async fn recreate(finish: bool) {
 	let broadcast = origin.create_broadcast("bench").unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
-	let remote = origin.consume().request_broadcast("bench").await.unwrap();
+	let remote = origin.consume().request_broadcast("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut open = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
 	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();

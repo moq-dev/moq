@@ -3,8 +3,9 @@
 ## Goal
 
 A `js/net` track subscription survives its broadcast's route swapping to
-another provider, such as a relay migration after a GOAWAY, and resumes from
-the new provider at the first frame it has not delivered. A viewer at the live
+another provider with the same epoch, such as a relay migration after a
+GOAWAY, and resumes from the new provider at the first frame it has not
+delivered. A viewer at the live
 edge with no latency budget never loses a group across the swap, and never
 has to notice the swap to keep reading.
 
@@ -38,6 +39,9 @@ settle along the way:
   at its own live edge.
 - Failover compatibility: Rust refuses to resume onto a source whose track
   properties differ (timescale, retention, priority, order). Match it.
+- Resume only between routes with the same epoch. Any other swap is a new
+  broadcast that announce consumers see as a `Restart`, and players follow
+  it with a fresh subscription.
 - `js/watch` and `js/hang` consumers that re-subscribe on `active` changes.
   Check whether they still need to.
 - Giving up a resumed group no route continues. Mirror Rust's rule from
@@ -51,3 +55,7 @@ budget note in its README).
 
 Public API: likely a behavior change to `Origin.Requesting.active` and track
 subscriptions across a swap. Report it in the PR.
+
+## Related
+
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - the announce event a swap to another epoch produces instead of a handover

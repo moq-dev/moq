@@ -80,7 +80,7 @@ impl Chain {
 
 	async fn subscribe(&self, track: &str) -> track::Subscriber {
 		let consumer = self.nodes.last().unwrap().consume();
-		let broadcast = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("room"))
+		let broadcast = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");
@@ -180,7 +180,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 		}
 		moq_net_sim::sleep(Duration::from_secs(1)).await;
 
-		let consumer = chain.nodes[1].consume().request_broadcast("room").await.unwrap();
+		let consumer = chain.nodes[1].consume().request_broadcast("room", None).await.unwrap();
 		let subscription = track::Subscription::default()
 			.with_start(track::Position::group(2))
 			.with_max_delay(Duration::from_secs(30));
@@ -238,7 +238,7 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 		broadcast.announce(Default::default()).unwrap();
 		moq_net_sim::sleep(Duration::from_secs(1)).await;
 
-		let consumer = chain.nodes[1].consume().request_broadcast("room").await.unwrap();
+		let consumer = chain.nodes[1].consume().request_broadcast("room", None).await.unwrap();
 		let mut waiting = Box::pin(consumer.track("video").unwrap().fetch_group(0, None));
 		let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut waiting).await {
 			futures::future::Either::Left((request, _)) => request.expect("the track request reaches the publisher"),
