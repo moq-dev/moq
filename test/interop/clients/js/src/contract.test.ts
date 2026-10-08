@@ -22,7 +22,7 @@ test("unchanged counts are not a leak start", () => {
 
 test("late join uses the published GOP when painting is ahead of capture", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack("video");
+	const track = broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MILLI });
 	try {
 		const old = track.appendGroup();
 		old.writeFrame({ payload: new Uint8Array([1]), timestamp: Moq.Time.Timestamp.fromMillis(3000) });

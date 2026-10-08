@@ -3,12 +3,13 @@
 ## Goal
 
 The `release` branch and crates.io carry the neutral `Surface::Vulkan`, the
-Vulkan Video encoder, and VA-API import of an external Vulkan image, so a
-consumer pinned to `release` (moq.pro is) can drop its vendor code.
+Vulkan Video encoder, VA-API import of an external Vulkan image, and the
+vendor-neutral GPU capacity and health report, so a consumer pinned to
+`release` (moq.pro is) can drop its vendor code, its GPU admission included.
 
 ## Plan
 
-Release all three together: the VA-API and AMD proofs are what show the
+Release them together: the VA-API and AMD proofs are what show the
 surface is right, and shipping it before them risks a second breaking change.
 
 The surface is a breaking `moq-video` change on `main`, and releases are
@@ -25,3 +26,4 @@ maintainer at release time:
 - [One external GPU image for every encoder](/quest/m2/gpu-surface.md) - the neutral surface and auto-selection
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the AMD encoder
 - [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - the Intel proof
+- [GPU capacity and health](/quest/m2/gpu-health.md) - keyed by the same device identity; moq.pro's admission still needs vendor code without it

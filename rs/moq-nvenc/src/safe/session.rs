@@ -150,11 +150,9 @@ impl Session {
 	///
 	/// An encoder-busy result is returned as an error so the caller can retry.
 	/// A need-more-input result is instead represented by the returned
-	/// [`Submission`], which retains both buffers until completion. The facade
-	/// does not drive frames the driver holds back, so configure the session
-	/// without B-frames or lookahead (`frameIntervalP = 1` and low-latency
-	/// tuning, as `moq-video` does): the driver refuses to lock a held frame's
-	/// output, and [`Submission::finish`] fails.
+	/// [`Submission`], which retains both buffers until completion.
+	/// [`Encoder::start_session`] refuses lookahead and B-frames, which are what
+	/// make the driver hold a frame and then reject [`Submission::finish`].
 	///
 	/// Safe code cannot release the input while it is in flight because the
 	/// submission owns it:
@@ -484,8 +482,9 @@ mod tests {
 	use super::*;
 	use crate::{
 		sys::nvEncodeAPI::{
-			NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P7_GUID,
-			NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_HIGH_QUALITY,
+			NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12,
+			NV_ENC_CODEC_H264_GUID, NV_ENC_CONFIG, NV_ENC_PRESET_P1_GUID, NV_ENC_PRESET_P7_GUID,
+			NV_ENC_TUNING_INFO::{NV_ENC_TUNING_INFO_HIGH_QUALITY, NV_ENC_TUNING_INFO_LOW_LATENCY},
 		},
 		EncoderInitParams,
 	};
@@ -651,56 +650,118 @@ mod tests {
 		cuda && Encoder::load().is_ok()
 	}
 
-	/// Lookahead holds frames back, and the driver refuses to lock a held
-	/// frame's output. P7 with high-quality tuning turns lookahead on. The failed
-	/// submissions must not keep the session open: one still open at exit
-	/// deadlocks the driver's exit handler, so the process never exits.
-	#[test]
-	fn failed_submission_releases_the_session() {
+	/// Whether an NVENC device can encode here. Library presence is not enough:
+	/// the loader succeeds when no device is assigned.
+	fn try_encoder() -> Option<Encoder> {
 		if !driver_available() {
-			return;
+			return None;
 		}
-		// The libraries can load when no device is assigned. That is the same
-		// as a missing driver: only a session that can start proves the fix.
 		let Ok(cuda) = CudaContext::new(0) else {
-			return;
+			return None;
 		};
-		let Ok(encoder) = Encoder::initialize_with_cuda(cuda) else {
-			return;
-		};
+		Encoder::initialize_with_cuda(cuda).ok()
+	}
+
+	/// A session the driver will not hold frames for. `None` when NVENC cannot run.
+	fn low_latency_session() -> Option<Session> {
+		let encoder = try_encoder()?;
 		let (codec, preset, tuning) = (
 			NV_ENC_CODEC_H264_GUID,
-			NV_ENC_PRESET_P7_GUID,
-			NV_ENC_TUNING_INFO_HIGH_QUALITY,
+			NV_ENC_PRESET_P1_GUID,
+			NV_ENC_TUNING_INFO_LOW_LATENCY,
 		);
 		let mut config = encoder.get_preset_config(codec, preset, tuning).unwrap().presetCfg;
-		assert_eq!(
-			config.rcParams.enableLookahead(),
-			1,
-			"the preset no longer holds frames"
-		);
-		// No B-frames, so lookahead alone holds the frames.
 		config.frameIntervalP = 1;
-
+		config.rcParams.set_enableLookahead(0);
+		config.rcParams.set_enableExtLookahead(0);
 		let mut init = EncoderInitParams::new(codec, 320, 240);
 		init.preset_guid(preset)
 			.tuning_info(tuning)
 			.enable_picture_type_decision();
 		// SAFETY: the preset config holds no borrowed extension pointers.
 		unsafe { init.encode_config(config) };
-		let session = encoder.start_session(NV_ENC_BUFFER_FORMAT_NV12, init).unwrap();
+		Some(
+			encoder
+				.start_session(NV_ENC_BUFFER_FORMAT_NV12, init)
+				.expect("low-latency session was refused"),
+		)
+	}
+
+	/// P7 high-quality defaults, and an explicit lookahead or B-frame config, are
+	/// refused before the driver can accept a frame it will not give back.
+	/// A low-latency session still encodes.
+	#[test]
+	fn start_session_refuses_held_frames() {
+		let Some(encoder) = try_encoder() else {
+			return;
+		};
+		let codec = NV_ENC_CODEC_H264_GUID;
+		let preset = encoder
+			.get_preset_config(codec, NV_ENC_PRESET_P7_GUID, NV_ENC_TUNING_INFO_HIGH_QUALITY)
+			.unwrap()
+			.presetCfg;
+		assert!(
+			preset.rcParams.enableLookahead() != 0 || preset.frameIntervalP > 1,
+			"P7 high quality no longer holds frames"
+		);
+		let mut init = EncoderInitParams::new(codec, 320, 240);
+		init.preset_guid(NV_ENC_PRESET_P7_GUID)
+			.tuning_info(NV_ENC_TUNING_INFO_HIGH_QUALITY)
+			.enable_picture_type_decision();
+		let error = encoder
+			.start_session(NV_ENC_BUFFER_FORMAT_NV12, init)
+			.expect_err("preset lookahead or B-frames were accepted");
+		assert_eq!(error.kind(), ErrorKind::InvalidParam);
+
+		refuse_explicit(|config| config.rcParams.set_enableLookahead(1));
+		refuse_explicit(|config| config.rcParams.set_enableExtLookahead(1));
+		refuse_explicit(|config| config.frameIntervalP = 2);
+
+		let session = low_latency_session().expect("NVENC device disappeared");
+		let input = session.create_input_buffer().unwrap();
+		let output = session.create_output_bitstream().unwrap();
+		session
+			.encode_picture(input, output, EncodePictureParams::default())
+			.unwrap()
+			.finish()
+			.expect("an allowed session did not encode");
+	}
+
+	fn refuse_explicit(set: fn(&mut NV_ENC_CONFIG)) {
+		let encoder = try_encoder().expect("NVENC device disappeared");
+		let mut config = NV_ENC_CONFIG::default();
+		config.frameIntervalP = 1;
+		set(&mut config);
+		let mut init = EncoderInitParams::new(NV_ENC_CODEC_H264_GUID, 320, 240);
+		// SAFETY: this config holds no borrowed extension pointers.
+		unsafe { init.encode_config(config) };
+		let error = encoder
+			.start_session(NV_ENC_BUFFER_FORMAT_NV12, init)
+			.expect_err("held frames were accepted");
+		assert_eq!(error.kind(), ErrorKind::InvalidParam);
+	}
+
+	/// A failed lock must not keep the session open: one still open at exit
+	/// deadlocks the driver's exit handler, so the process never exits.
+	/// Lookahead used to force that error, and [`Encoder::start_session`] now
+	/// refuses it, so the output pointer is cleared instead. The driver rejects
+	/// a null output immediately rather than waiting on a frame it does not have.
+	#[test]
+	fn failed_submission_releases_the_session() {
+		let Some(session) = low_latency_session() else {
+			return;
+		};
 		let encoder = Arc::downgrade(&session.encoder);
 
-		let submit = || {
+		let reject = || {
 			let input = session.create_input_buffer().unwrap();
-			let output = session.create_output_bitstream().unwrap();
-			session
-				.encode_picture(input, output, EncodePictureParams::default())
-				.unwrap()
+			let mut output = session.create_output_bitstream().unwrap();
+			output.ptr = std::ptr::null_mut();
+			Submission::new(input, output)
 		};
 		// One submission fails to finish and one is dropped unfinished.
-		assert!(submit().finish().is_err(), "the driver locked a held frame's output");
-		drop(submit());
+		assert!(reject().finish().is_err(), "the driver locked a null output");
+		drop(reject());
 
 		drop(session);
 		assert!(encoder.upgrade().is_none(), "failed submissions kept the session open");

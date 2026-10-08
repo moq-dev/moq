@@ -15,7 +15,14 @@ switches to a republish within an RTT. Logs show the epoch.
   archive replay, WHEP import, and transcode output; moq-boy; `@moq/publish`,
   the clock, and moq-boy's viewer feedback. What remains is below.
 - Watch sides handle "the broadcast changed" as a fresh catalog and decoder
-  reset. Test a republish mid-playback in the browser and native players.
+  reset. Players (`moq play`, `@moq/watch`, demo/web) start on `Start`,
+  restart on `Restart`, and stop on `End`, so a re-price or a same-epoch
+  failover (an `Update`) never restarts playback. #4970, which drove them
+  from announcements, closed unmerged. Test a republish mid-playback in the
+  browser and native players.
 - Update `doc/bin/cli.md` and every example invocation that shows a published
   path.
 
+## Required
+
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - the `Restart` announce event the players follow

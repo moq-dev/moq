@@ -182,3 +182,17 @@ test("fill skips allowed parameters it ignores", () => {
 	const encoded = new Uint8Array([0x02, 0x20, 0x2a, 0x01, 0x01, 0x02]);
 	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: { kind: "relative", groups: 2n }, rangeFilters: false });
 });
+
+for (const version of [Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22]) {
+	test(`fill rejects invalid group order on ${version}`, () => {
+		for (const value of [0, 3, 255]) {
+			expect(() => Filter.decodeFill(new Uint8Array([1, 0x22, value]), version)).toThrow(/group order/);
+		}
+		for (const value of [1, 2]) {
+			expect(Filter.decodeFill(new Uint8Array([1, 0x22, value]), version)).toEqual({
+				filter: undefined,
+				rangeFilters: false,
+			});
+		}
+	});
+}

@@ -364,8 +364,8 @@ impl Message for FetchOk {
 					0x04 => max_cache_duration: Option<u64>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
-				// The timescale is read but not surfaced yet: a fetched object without an
-				// interpretable timestamp is stamped on arrival.
+				// The timescale is read but not surfaced yet: a fetched object without its
+				// own units arrives untimed.
 				let mut properties = super::Properties::decode(buf, version)?;
 				if version == Version::Draft15 {
 					properties.max_cache_duration = max_cache_duration.map(std::time::Duration::from_millis);
@@ -594,7 +594,7 @@ impl Encode<Version> for FetchObject {
 }
 
 impl Decode<Version> for FetchObject {
-	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let flags = buf.varint()?;
 
 		// Anything at or above 128 is a named value rather than a set of flags, and only
@@ -637,7 +637,11 @@ impl Decode<Version> for FetchObject {
 		};
 
 		let properties = match flags & flag::PROPERTIES != 0 {
-			true => Some(buf.bytes()?.to_vec()),
+			true => {
+				let super::group::ObjectExtensionsLength(size) =
+					super::group::ObjectExtensionsLength::decode(buf, version)?;
+				Some(buf.slice(size)?.to_vec())
+			}
 			false => None,
 		};
 
@@ -1025,6 +1029,22 @@ mod object_tests {
 		assert!(!bytes.has_remaining(), "the object header is fully consumed");
 
 		(buf.to_vec(), decoded)
+	}
+
+	/// A fetch stream is read until a whole object header has arrived, so a properties
+	/// length the peer declares is refused at its prefix rather than buffered.
+	#[test]
+	fn oversized_properties_are_refused_at_the_prefix() {
+		let mut wire = Vec::new();
+		Encoder::new(&mut wire, VERSION.into())
+			.varint(flag::PROPERTIES)
+			.unwrap();
+		Encoder::new(&mut wire, VERSION.into())
+			.varint((super::super::group::MAX_OBJECT_EXTENSIONS + 1) as u64)
+			.unwrap();
+
+		let err = FetchObject::decode_slice(&wire, VERSION).unwrap_err();
+		assert!(matches!(err, DecodeError::MessageTooLarge { .. }), "{err:?}");
 	}
 
 	/// The first Object carries absolute IDs and a priority, because "same as the prior

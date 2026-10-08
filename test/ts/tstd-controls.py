@@ -26,6 +26,8 @@ with each AU in its own PES, a PCR packet between AUs and nulls elsewhere.
     two AUs, one PES    an AU without its own timestamp               refused
     adaptation burst    four payload-less packets after an AU         TB overflow (they cost TB)
     duplicate packet    one AU's first packet sent twice (2.4.3.3)    must pass (TB only, not MB)
+    teletext burst      eight teletext packets back to back           TB overflow (EN 300 472's 480 B,
+                                                                      where 2.4.2.3's 512 B holds them)
     PCR PID mismatch    the PMT declares a PID that carries no PCR    pcr-presence fails
 
 and an MPEG audio stream whose frames end partway through a packet, each decoded
@@ -54,7 +56,7 @@ FIXTURE = os.path.join(DIR, "../../rs/moq-mux/src/container/ts/test_data/scte35/
 # The Kyrion SPS (High@4.0, NAL HRD 1.935 Mb/s CBR, 755 kbit CPB), so the synthetic
 # streams get the same declared buffers.
 SPS = bytes.fromhex("6764 0028 acd1 0078 044f de03 6a02 0202 8000 01f4 8000 7530 7500 0762 0002 e11f af7f 072a 1629 92")
-VIDEO_PID, PMT_PID = 0x100, 0x1000
+VIDEO_PID, TELETEXT_PID, PMT_PID = 0x100, 0x101, 0x1000
 RATE = 10_000_000
 SLOT_S = 188 * 8 / RATE
 
@@ -106,7 +108,12 @@ def synthetic(path: str, layout: str) -> None:
     """Write a compliant 2 s stream, bent into `layout` at one access unit."""
     pat = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big"))
     pcr_pid = 0x1FF if layout == "PCR PID mismatch" else VIDEO_PID
-    pmt = section(0x02, 1, (0xE000 | pcr_pid).to_bytes(2, "big") + bytes([0xF0, 0x00, 0x1B, 0xE1, 0x00, 0xF0, 0x00]))
+    streams = bytes([0x1B, 0xE1, 0x00, 0xF0, 0x00])
+    if layout == "teletext burst":
+        # Private data with a teletext_descriptor (EN 300 468 6.2.43): English, initial page 100.
+        teletext = bytes([0x56, 0x05]) + b"eng" + bytes([0x09, 0x00])
+        streams += bytes([0x06, 0xE1, 0x01, 0xF0, len(teletext)]) + teletext
+    pmt = section(0x02, 1, (0xE000 | pcr_pid).to_bytes(2, "big") + bytes([0xF0, 0x00]) + streams)
     cc: dict[int, int] = {}
     out: list[bytes] = []
 
@@ -144,6 +151,13 @@ def synthetic(path: str, layout: str) -> None:
         if layout == "adaptation burst" and k == 20:
             for _ in range(4):
                 emit(VIDEO_PID, adaptation=b"\x00")
+        if layout == "teletext burst" and k == 20:
+            # One PES of eight packets, sent back to back: at 10 Mb/s against a 6.75 Mb/s
+            # drain each adds 61 bytes to the transport buffer, 489 by the eighth.
+            ticks = round((1.0 + 0.5 + k * 0.04) * compliance.PTS_HZ)
+            data = bytes.fromhex("000001bd 05be 8480 05") + stamp(2, ticks) + b"\x10" + b"\xff" * (8 * 184 - 15)
+            for at in range(0, len(data), 184):
+                emit(TELETEXT_PID, data[at : at + 184], pusi=at == 0)
         slots = round(0.04 / SLOT_S)
         while len(out) - begin < slots:
             if len(out) - begin == slots // 2:
@@ -251,6 +265,7 @@ CASES = [
     ("two AUs, one PES", built("two AUs, one PES"), "several access units"),
     ("adaptation burst", built("adaptation burst"), {"TB overflow"}),
     ("duplicate packet", built("duplicate packet"), "pass"),
+    ("teletext burst", built("teletext burst"), {"TB overflow"}),
     ("PCR PID mismatch", built("PCR PID mismatch"), ("fails", "pcr-presence")),
     ("straddling audio", audio(4, STRADDLE_S), "pass"),
     ("mid-packet overflow", audio(7, MID_PACKET_S), {"B overflow"}),

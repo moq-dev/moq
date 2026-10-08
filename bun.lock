@@ -140,7 +140,6 @@
         "zod": "^4.6.5",
       },
       "devDependencies": {
-        "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.2",
         "@typescript/lib-dom": "npm:@types/web@^0.0.350",
         "fast-glob": "^3.3.3",

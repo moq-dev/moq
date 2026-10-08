@@ -17,9 +17,10 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
 - **Broadcasts** are created unannounced and invisible to everyone, then announced as an exact route, or served below a prefix with `dynamic`. A consumer of the same origin sees exactly what a peer sees. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
-- **Epochs** identify publisher instances with a canonical UUIDv7 carried on each route (`Route::epoch`): the newest wins a path, and only routes with the same epoch resume a subscription; see [publisher epochs](/concept/moq-lite#publisher-epochs).
+- **Resolution** uses `consumer.request_broadcast(path, epoch)` with an owned `Epoch` to pin a publisher instance, or `None` for unpinned lookup. A pinned request refuses a different or missing epoch at request time and asynchronous resolution.
+- **Epochs** identify publisher instances with a canonical UUIDv7 carried on each route (`Route::epoch`): the newest wins a path, and only routes with the same epoch resume a subscription. A resolved `broadcast::Consumer` names the epoch it came through in `info().epoch`, pinned or not; see [publisher epochs](/concept/moq-lite#publisher-epochs).
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
-- **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale. Subscribers set their own priority and max delay and can change them live.
+- **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale, or none for an untimed track whose frames carry no timestamp. Subscribers set their own priority and max delay and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
 - **Track ends**: `finish()` ends a track at its live edge, while `finish_at(n)` declares the exclusive end ahead of it and still accepts the groups below. A subscriber awaits it with `finished()`. A remote track ends only once every group below its end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max delay on moq-lite (one second without one), or after one second on IETF.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+ and moq-transport.
@@ -83,6 +84,25 @@ drive sessions for their callers. A deliberate local session close ends
 received tracks cleanly after their delivered groups. A peer close ends
 received tracks and open group readers with the session error, preserving its
 close code.
+
+### Session limits
+
+`Client::with_limits` and `Server::with_limits` take a `session::Limits`, which
+caps what the peer can make one session hold: `announces` (broadcasts, or
+moq-transport namespaces) and `subscriptions`. The defaults (100,000 and
+10,000) suit a relay mesh; lower them for untrusted peers. A peer that goes
+past either cap loses the session, closed with `TOO_MANY_REQUESTS`. Each
+auth root's stats `sessions` row reports `announces_peak` and
+`subscriptions_peak`, the most any one session held, so an operator sees how
+close sessions come. On moq-transport drafts 14 to 16 the limits also size the
+`MAX_REQUEST_ID` window advertised in SETUP, granted back as requests close.
+That window counts every request, FETCH and SUBSCRIBE\_UPDATE included, so very
+low limits can starve it. A request ID past it also closes the session with
+`TOO_MANY_REQUESTS`, as the draft requires.
+
+Every length a peer declares is capped before it is buffered: 65,535 bytes for
+a moq-lite control message (`ANNOUNCE_INIT` on lite 01 and 02 excepted) and
+64 KiB for an object's property block.
 
 `origin::Producer::new` returns a driver with the same `time::Driver`
 interface. It calls `cache::Pool::gc(now)` after each poll and folds the next

@@ -24,7 +24,7 @@ const PARAM_HOP = 0x5n;
 const MAX_PARAMS = 64;
 
 /** SETUP only carries negotiation parameters, so it gets a far smaller cap than other messages. */
-const MAX_SETUP_SIZE = 64 * 1024;
+const MAX_SETUP_SIZE = 0xffff;
 
 /**
  * The probe capability an endpoint advertises in SETUP.

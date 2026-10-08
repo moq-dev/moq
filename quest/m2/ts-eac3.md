@@ -27,7 +27,3 @@ with no buffer model, so a multi-frame PES can overflow B.
   an independent-plus-dependent fixture keeps both substreams on one
   interval (32 ms for six 48 kHz blocks, not 64); and a control in
   `tstd-controls.py` overflows B without the split.
-
-## Required
-
-- [Fixed-delay muxing](/quest/m1/tstd/delay.md) - the per-PID admission this joins, which #4645 lands; the rest of the T-STD line is not needed (2026-10-06 audit)

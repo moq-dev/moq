@@ -33,6 +33,3 @@ viewer session does not; the io_uring path applies the same values; a
 ## Required
 
 - [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
-- [io_uring flow control](/quest/m1/uring-flow-control-windows.md) - the
-  io_uring workers hardcode their windows today, so the peer values have
-  nothing to raise there until the static windows reach them

@@ -33,6 +33,7 @@ pub mod codec;
 pub mod container;
 mod error;
 pub mod import;
+mod jitter;
 pub mod json;
 mod pace;
 pub mod rate;

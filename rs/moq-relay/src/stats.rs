@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 /// Set `enabled = true` to attach a [`moq_stats::Producer`] to every session
 /// the relay accepts (and every cluster dial). The producer publishes a single
 /// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
-/// unset) on the cluster origin. Each broadcast carries plain `.json` tracks
+/// unset) on the cluster origin, under a fresh epoch each run. Each broadcast
+/// carries plain `.json` tracks
 /// (a JSON map of broadcast path to a cumulative counter snapshot per frame)
 /// plus compressed `.json.z` siblings; see `moq_stats` for the wire format and
 /// per-field semantics.
@@ -81,8 +82,9 @@ pub struct Config {
 	/// How long a group's stats broadcast stays announced after the group's
 	/// last session and traffic leave, e.g. "5m" or "30s". Defaults to 5
 	/// minutes. A group that returns within it keeps its broadcast, so viewer
-	/// churn doesn't unannounce and re-announce it across the mesh. Only applies
-	/// at `depth` 1 or more. See [`moq_stats::produce::Config::linger`].
+	/// churn doesn't unannounce and re-announce it across the mesh; one that
+	/// returns after it announces under a new epoch. Only applies at `depth` 1
+	/// or more. See [`moq_stats::produce::Config::linger`].
 	#[usage(skip)]
 	#[serde(with = "crate::duration::serde_option")]
 	pub linger: Option<Duration>,

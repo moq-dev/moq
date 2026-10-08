@@ -132,5 +132,4 @@ behaviour moves closer to the drafts.
 ## Related
 
 - [Request tokens](/quest/m1/auth/request-token.md) - owns request-token decode and AUTH_TOKEN_CACHE_OVERFLOW
-- [Request caps](/quest/m0/request-caps.md) - bounds peer lengths and counts; shares the decode paths
 - [moq-transport request codes](/quest/m2/ietf-request-codes.md) - the request-level half of the same validator report

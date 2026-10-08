@@ -153,4 +153,3 @@ Wire: none.
 ## Related
 
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - supplies the input-derived anchor through this quest's API
-- [Audio capture time](/quest/m2/audio-capture-time.md) - maps audio's capture timeline onto the broadcast clock once per open
