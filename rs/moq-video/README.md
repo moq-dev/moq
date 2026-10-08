@@ -231,7 +231,7 @@ decoded straight to system memory where the backend can and downloaded where it
 cannot. `decode::Config::scale_hint` asks a decoder with a hardware scaler
 (NVDEC) to emit that size; it is a hint, so check `Frame::size` and use
 `Frame::resize` for the exact size. `decode::Consumer` takes `decode::Options`,
-which pairs that config with the subscription's `start` and `max_age`.
+which pairs that config with the subscription's `start` and `max_delay`.
 
 Common feature sets:
 

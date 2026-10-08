@@ -35,7 +35,7 @@ check *args:
 # `check` with clippy replaced by the `test` build, whose clippy-driver reports
 # the same findings. `build.warnings` turns them into errors without entering
 # cargo's fingerprint, so a later plain `test` reuses the artifacts. A
-# selection can hold nothing testable (moq-wasm has no host tests).
+# selection can hold nothing testable.
 
 # Compile, lint, and test in one build, plus everything else `check` verifies.
 [positional-arguments]
@@ -347,3 +347,8 @@ bench-playback:
 [positional-arguments]
 bench-rtmp *args:
     cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"
+
+# One relay's stats tick, plus the decode table. `--test` runs each tick once; decode ignores it and prints its whole table.
+[positional-arguments]
+bench-stats *args:
+    cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode -- "$@"

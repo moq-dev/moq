@@ -754,10 +754,10 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
-	let stalled_video_name = "video-stalled";
-	let stalled_video = moq_video_config {
-		name: stalled_video_name.as_ptr() as *const c_char,
-		name_len: stalled_video_name.len(),
+	let disabled_video_name = "video-disabled";
+	let disabled_video = moq_video_config {
+		name: disabled_video_name.as_ptr() as *const c_char,
+		name_len: disabled_video_name.len(),
 		label: std::ptr::null(),
 		label_len: 0,
 		codec: video_codec.as_ptr() as *const c_char,
@@ -768,7 +768,7 @@ fn publish_catalog_roundtrip() {
 		coded_height: height,
 		container: moq_container::default(),
 	};
-	assert_eq!(unsafe { moq_publish_video_config(broadcast, &stalled_video) }, 0);
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &disabled_video) }, 0);
 	{
 		let mut state = State::lock();
 		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
@@ -777,9 +777,9 @@ fn publish_catalog_roundtrip() {
 			.unwrap()
 			.video
 			.renditions
-			.get_mut(stalled_video_name)
+			.get_mut(disabled_video_name)
 			.unwrap()
-			.stalled = Some(true);
+			.enabled = false;
 	}
 	let properties = moq_video_properties {
 		display_width: 1080,
@@ -845,30 +845,30 @@ fn publish_catalog_roundtrip() {
 	);
 	assert_eq!(video_cfg.coded_width, 1920);
 	assert_eq!(video_cfg.coded_height, 1080);
-	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
+	let mut enabled = std::mem::MaybeUninit::<bool>::uninit();
 	assert_eq!(
-		unsafe { moq_consume_video_stalled(catalog_id, 0, stalled.as_mut_ptr()) },
+		unsafe { moq_consume_video_enabled(catalog_id, 0, enabled.as_mut_ptr()) },
 		0
 	);
-	assert!(!unsafe { stalled.assume_init() });
+	assert!(unsafe { enabled.assume_init() });
 
-	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
+	let mut enabled = std::mem::MaybeUninit::<bool>::uninit();
 	assert_eq!(
-		unsafe { moq_consume_video_stalled(catalog_id, 1, stalled.as_mut_ptr()) },
+		unsafe { moq_consume_video_enabled(catalog_id, 1, enabled.as_mut_ptr()) },
 		0
 	);
-	assert!(unsafe { stalled.assume_init() });
+	assert!(!unsafe { enabled.assume_init() });
 	assert_eq!(
-		unsafe { moq_consume_video_stalled(catalog_id, 0, std::ptr::null_mut()) },
+		unsafe { moq_consume_video_enabled(catalog_id, 0, std::ptr::null_mut()) },
 		-6,
-		"null stalled pointer should return InvalidPointer (-6)"
+		"null enabled pointer should return InvalidPointer (-6)"
 	);
 	assert_eq!(
 		unsafe {
 			moq_publish_video_remove(
 				broadcast,
-				stalled_video_name.as_ptr() as *const c_char,
-				stalled_video_name.len(),
+				disabled_video_name.as_ptr() as *const c_char,
+				disabled_video_name.len(),
 			)
 		},
 		0
@@ -1081,10 +1081,12 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.timestamp_us, timestamp_us);
+	assert!(frame.timestamp_present, "a media frame is always timed");
 	assert!(frame.keyframe);
 	assert_eq!(
 		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
@@ -1402,7 +1404,7 @@ fn publish_track_invalid_broadcast() {
 
 	let subscription = moq_subscription {
 		priority: 1,
-		max_age_us: 0,
+		max_delay_us: 0,
 		group_start: 0,
 		group_start_present: false,
 		group_end: 0,
@@ -1426,6 +1428,63 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+/// A raw frame read from an untimed track reports no timestamp. The C API only publishes
+/// timed tracks, so the track and its frame come from moq-net.
+#[test]
+fn an_untimed_raw_frame_reads_untimed() {
+	let origin = id(moq_origin_create());
+	let path = b"raw-untimed";
+	let broadcast = publish_broadcast(origin, path);
+
+	let track_name = b"data";
+	let track = State::lock()
+		.publish
+		.track(
+			Id::try_from(broadcast).unwrap(),
+			"data",
+			Some(moq_net::track::Info::default().with_timescale(None)),
+		)
+		.unwrap();
+
+	let consume = request_broadcast(origin, path);
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_track(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			std::ptr::null(),
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+
+	State::lock()
+		.publish
+		.track_producer(track)
+		.unwrap()
+		.write_frame(None, &b"untimed"[..])
+		.unwrap();
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 7,
+		timestamp_present: true,
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert!(!frame.timestamp_present, "an untimed frame reads untimed");
+	assert_eq!(frame.timestamp_us, 0);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "clean close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
@@ -1452,7 +1511,7 @@ fn raw_track_publish_consume() {
 	// finish draining if the second becomes visible while the callback runs.
 	let subscription = moq_subscription {
 		priority: 0,
-		max_age_us: 1_000_000,
+		max_delay_us: 1_000_000,
 		group_start: 0,
 		group_start_present: false,
 		group_end: 0,
@@ -1482,12 +1541,14 @@ fn raw_track_publish_consume() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: true, // should be overwritten with false
 	};
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload);
 	assert_eq!(frame.timestamp_us, timestamp_us);
+	assert!(frame.timestamp_present);
 	assert!(!frame.keyframe, "raw frames have no keyframe flag");
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
@@ -1508,6 +1569,7 @@ fn raw_track_publish_consume() {
 			payload: std::ptr::null(),
 			payload_size: 0,
 			timestamp_us: 0,
+			timestamp_present: false,
 			keyframe: false,
 		};
 		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
@@ -1571,6 +1633,7 @@ fn raw_track_datagram_publish_consume() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		sequence: 0,
 	};
 	assert_eq!(unsafe { moq_consume_datagram(dg_id, &mut datagram) }, 0);
@@ -1654,7 +1717,7 @@ fn raw_track_subscription_options_and_update() {
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 5,
-		max_age_us: 25_000,
+		max_delay_us: 25_000,
 		group_start: 1,
 		group_start_present: true,
 		group_end: 2,
@@ -1676,6 +1739,7 @@ fn raw_track_subscription_options_and_update() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
@@ -1695,6 +1759,7 @@ fn raw_track_subscription_options_and_update() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
@@ -2502,6 +2567,7 @@ fn dynamic_serves_track_requests() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
@@ -2834,6 +2900,7 @@ fn local_publish_consume() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
@@ -2995,6 +3062,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
@@ -3124,6 +3192,7 @@ fn video_publish_consume() {
 		payload: std::ptr::null(),
 		payload_size: 0,
 		timestamp_us: 0,
+		timestamp_present: false,
 		keyframe: false,
 	};
 	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
@@ -3307,7 +3376,7 @@ fn video_raw_publish_consume() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let decoder = moq_video_decoder_output {
-		max_age_us: 10_000_000,
+		max_delay_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
@@ -3379,7 +3448,7 @@ fn video_raw_decode_output_rejected() {
 	use crate::ffi::ReturnCode;
 
 	let bad_format = moq_video_decoder_output {
-		max_age_us: 0,
+		max_delay_us: 0,
 		format: 999,
 		width: 0,
 		height: 0,
@@ -3391,7 +3460,7 @@ fn video_raw_decode_output_rejected() {
 
 	for (width, height) in [(320, 0), (0, 240), (321, 240), (320, 241), (u32::MAX - 1, u32::MAX - 1)] {
 		let bad_size = moq_video_decoder_output {
-			max_age_us: 0,
+			max_delay_us: 0,
 			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 			width,
 			height,
@@ -3409,7 +3478,7 @@ fn video_raw_decode_output_rejected() {
 	);
 
 	let valid = moq_video_decoder_output {
-		max_age_us: 0,
+		max_delay_us: 0,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 160,
 		height: 120,
@@ -3512,7 +3581,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 #[test]
 fn video_raw_decode_rgba() {
 	let output = moq_video_decoder_output {
-		max_age_us: 10_000_000,
+		max_delay_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 0,
 		height: 0,
@@ -3525,7 +3594,7 @@ fn video_raw_decode_rgba() {
 #[test]
 fn video_raw_decode_resize() {
 	let output = moq_video_decoder_output {
-		max_age_us: 10_000_000,
+		max_delay_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 160,
 		height: 120,
@@ -3853,7 +3922,7 @@ fn video_raw_decode() {
 
 	// Subscribe + decode before publishing frames so the keyframe group is delivered.
 	let output = moq_video_decoder_output {
-		max_age_us: 10_000_000,
+		max_delay_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
@@ -3948,6 +4017,7 @@ fn multiple_frames_ordering() {
 			payload: std::ptr::null(),
 			payload_size: 0,
 			timestamp_us: 0,
+			timestamp_present: false,
 			keyframe: false,
 		};
 		assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
@@ -4850,7 +4920,7 @@ fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 0,
-		max_age_us: 1_000_000,
+		max_delay_us: 1_000_000,
 		group_start: 0,
 		group_start_present: false,
 		group_end: 0,
@@ -4873,6 +4943,7 @@ fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
 			payload: std::ptr::null(),
 			payload_size: 0,
 			timestamp_us: 0,
+			timestamp_present: false,
 			keyframe: false,
 		};
 		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);

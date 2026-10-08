@@ -4425,7 +4425,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "web-transport-trait",
  "zeroize",
 ]
 
@@ -4451,6 +4450,7 @@ dependencies = [
  "uniffi",
  "url",
  "web-async",
+ "web-transport-trait",
  "web-transport-wasm",
 ]
 
@@ -4476,6 +4476,7 @@ dependencies = [
  "gst-plugin-version-helper",
  "gstreamer",
  "hang",
+ "moq-audio",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -4612,7 +4613,6 @@ dependencies = [
  "uuid",
  "wasm-bindgen-test",
  "web-async",
- "web-transport-trait",
 ]
 
 [[package]]
@@ -4905,6 +4905,7 @@ dependencies = [
 name = "moq-stats"
 version = "0.2.12"
 dependencies = [
+ "criterion",
  "futures",
  "moq-json",
  "moq-net",
@@ -5120,24 +5121,27 @@ dependencies = [
 name = "moq-wasm"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "console_error_panic_hook",
  "futures",
  "getrandom 0.4.3",
  "js-sys",
  "moq-net",
+ "thiserror 2.0.21",
  "tracing-wasm",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-async",
+ "web-transport-trait",
  "web-transport-wasm",
 ]
 
 [[package]]
 name = "mp4-atom"
-version = "0.16.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adf4a16eebb3eb223ad0f2d16f37ad276736cec3a74538954e5ce0aec2268467"
+checksum = "b6f6638ef4f165c7eb423d7ab9666fff423c8ab53f0dc67ec523aa49530729a7"
 dependencies = [
  "bytes",
  "derive_more 2.1.1",

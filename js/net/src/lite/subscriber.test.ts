@@ -1,15 +1,16 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
 import { error, fromTransport, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
-import { Writer } from "../stream.ts";
+import { type Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
+import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
-import { Subscriber } from "./subscriber.ts";
+import { SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
 
@@ -186,35 +187,24 @@ test("an unidentified responder keeps hop 0 on a nonempty chain", async () => {
 	subscriber.close();
 });
 
-test("a received hop list naming no publisher is stamped per connection", async () => {
-	const first = async () => {
-		const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-		const announced = subscriber.announced();
-		await settle();
+test("a received hop list naming no publisher stays anonymous", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
 
-		await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
-		await send((w) =>
-			encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
-		);
-		const update = await announced.next();
-		expect(update).toMatchObject({ prefix: Path.from("room"), kind: "start" });
-		const hops = update?.route.hops ?? [];
-		expect(hops).toHaveLength(2);
-		expect(hops[0]).not.toBe(UNKNOWN_HOP);
-		// The 0 after the stamp keeps the unnamed publisher ranked as anonymous.
-		expect(hops[1]).toBe(UNKNOWN_HOP);
-		expect(update && isAnonymous(update.route)).toBe(true);
+	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
+	);
+	const update = await announced.next();
+	expect(update).toMatchObject({ prefix: Path.from("room"), kind: "start", route: { hops: [UNKNOWN_HOP] } });
+	expect(update && isAnonymous(update.route)).toBe(true);
 
-		announced.close();
-		subscriber.close();
-		return hops[0];
-	};
-
-	// A reconnect is a new connection, so the same unnamed publisher reads as a new one.
-	expect(await first()).not.toBe(await first());
+	announced.close();
+	subscriber.close();
 });
 
-test("a received chain starting with hop 0 keeps it behind the stamp", async () => {
+test("a received chain starting with hop 0 is forwarded unchanged", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
 	await settle();
@@ -229,9 +219,7 @@ test("a received chain starting with hop 0 keeps it behind the stamp", async () 
 	);
 	const update = await announced.next();
 	expect(update).toMatchObject({ prefix: Path.from("room"), kind: "start" });
-	const [stamp, ...rest] = update?.route.hops ?? [];
-	expect(stamp).not.toBe(UNKNOWN_HOP);
-	expect(rest).toEqual([UNKNOWN_HOP, PUBLISHER_A, PEER]);
+	expect(update?.route.hops).toEqual([UNKNOWN_HOP, PUBLISHER_A, PEER]);
 
 	announced.close();
 	subscriber.close();
@@ -352,9 +340,8 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 });
 
 // A responder that withholds its Hop ID sends the reserved 0, and an empty chain means it
-// originated the path itself, so the advertisement names nobody and the connection stamps it.
-// A restart on the same connection keeps that stamp, so it is a reprice that updates in place
-// and keeps the shared broadcast, as does one that names a publisher.
+// originated the path itself, so the advertisement names nobody. A restart of it is a reprice
+// that updates in place and keeps the shared broadcast, as does one that names a publisher.
 test("a restart from an unidentified publisher updates in place", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
@@ -785,6 +772,8 @@ interface FakeStream {
 	// Resolves once the subscriber waits on a read the test has not answered.
 	reading: Promise<void>;
 	aborted: Promise<unknown>;
+	// Every chunk the subscriber wrote.
+	written: Uint8Array[];
 	// Hands the stream to the subscriber, for an open the session was told to park.
 	release: () => void;
 }
@@ -811,10 +800,14 @@ function fakeSession(park: number[] = []) {
 				},
 				{ highWaterMark: 0 },
 			);
-			const writable = new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) });
+			const written: Uint8Array[] = [];
+			const writable = new WritableStream<Uint8Array>({
+				write: (chunk) => void written.push(chunk),
+				abort: (reason) => void onAbort(reason),
+			});
 			const opened = new Promise((resolve) => (release = () => resolve({ readable, writable })));
 			if (!park.includes(streams.length)) release();
-			streams.push({ inbound, reading, aborted, release });
+			streams.push({ inbound, reading, aborted, written, release });
 			return opened;
 		},
 	} as unknown as WebTransport;
@@ -880,6 +873,86 @@ test.each([
 	const stuck = streams[stage === "track" ? 0 : 1];
 	stuck.release();
 	await stuck.aborted;
+});
+
+// A setup that outlived its deadline is over: its TRACK stream is reset, even one still waiting for a
+// slot, and the subscription is neither registered again nor sent as a SUBSCRIBE.
+test.each([
+	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05, false],
+	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06, false],
+	["lite-07 subscribe waiting on the TRACK_INFO", Version.DRAFT_07, false],
+	["lite-05 subscribe waiting on a stream slot for the TRACK", Version.DRAFT_05, true],
+] as const)("a %s that times out leaves nothing behind", async (_, version, parked) => {
+	jest.useFakeTimers();
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const { quic, streams } = fakeSession(parked ? [0] : []);
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	try {
+		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+		await drainUntil(() => streams.length === 1);
+		if (!parked) await streams[0].reading;
+
+		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS);
+		await drainUntil(() => track.closed.peek() !== undefined);
+
+		let aborted = false;
+		void streams[0].aborted.then(() => {
+			aborted = true;
+		});
+		if (parked) streams[0].release();
+		await drainUntil(() => aborted);
+		expect(aborted).toBe(true);
+		expect(streams.length).toBe(1);
+
+		// A GROUP for a forgotten id is ignored without touching its stream.
+		const touched: PropertyKey[] = [];
+		const reader = new Proxy({} as Reader, {
+			get: (_, key) => {
+				touched.push(key);
+				return () => {};
+			},
+		});
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), reader);
+		expect(touched).toEqual([]);
+	} finally {
+		subscriber.close();
+		warn.mockRestore();
+		jest.useRealTimers();
+	}
+});
+
+// The SUBSCRIBE stream can open after the deadline too; it is reset without carrying a SUBSCRIBE.
+test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE sends nothing on it", async () => {
+	jest.useFakeTimers();
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const { quic, streams } = fakeSession([1]);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	try {
+		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+		await drainUntil(() => streams.length === 1);
+		await streams[0].reading;
+		// TRACK_INFO lands halfway, so the SUBSCRIBE open's own deadline is still ahead when the
+		// setup deadline fires.
+		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS / 2);
+		await answerTrackInfo(streams[0]);
+		await drainUntil(() => streams.length === 2);
+
+		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS / 2);
+		await drainUntil(() => track.closed.peek() !== undefined);
+
+		let aborted = false;
+		void streams[1].aborted.then(() => {
+			aborted = true;
+		});
+		streams[1].release();
+		await drainUntil(() => aborted);
+		expect(aborted).toBe(true);
+		expect(streams[1].written).toEqual([]);
+	} finally {
+		subscriber.close();
+		warn.mockRestore();
+		jest.useRealTimers();
+	}
 });
 
 test("a fetch started after the subscriber closes rejects without opening a stream", async () => {

@@ -35,7 +35,7 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 
 	let consumer = nodes[relays as usize]
 		.consume()
-		.request_broadcast("room")
+		.request_broadcast("room", None)
 		.await
 		.unwrap();
 	let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));

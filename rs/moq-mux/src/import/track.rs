@@ -911,7 +911,7 @@ mod tests {
 			sample_rate: 44_100,
 			channel_count: 2,
 		};
-		let init = config.encode();
+		let init = config.encode().unwrap();
 		let request = broadcast.reserve_track("audio").unwrap();
 
 		let import = Track::audio(
@@ -1038,7 +1038,8 @@ mod tests {
 			.unwrap();
 		// Every group is written before anything reads, which the default
 		// REAL_TIME budget would collapse to the live edge.
-		let subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(30)));
+		let subscriber =
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(30)));
 		let config = crate::codec::opus::Config::new(48_000, 2);
 		let import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		(import, subscriber)

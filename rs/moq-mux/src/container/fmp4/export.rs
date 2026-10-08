@@ -19,7 +19,7 @@ use moq_net::Timestamp;
 /// The init segment declares every track, so it waits until each one can be described; a
 /// track that needs its bitstream for that (an Annex-B H.264 or H.265 source, or video
 /// whose catalog leaves out its dimensions) holds it until a keyframe arrives. The other
-/// tracks keep reading meanwhile, so they don't fall behind the subscription's max age,
+/// tracks keep reading meanwhile, so they don't fall behind the subscription's max delay,
 /// and their fragments are written right after the init. A source that never delivers a
 /// keyframe would otherwise queue forever.
 const INIT_QUEUE: Duration = Duration::from_secs(30);
@@ -55,7 +55,7 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	max_age: Duration,
+	max_delay: Duration,
 	fragment_duration: Option<Duration>,
 
 	/// Every track by rendition name. Before the init a rendition that leaves the catalog
@@ -152,10 +152,10 @@ enum Rendition {
 }
 
 impl Rendition {
-	fn subscribe(&self, source: &crate::Source, name: &str, max_age: Duration) -> Result<Option<ExportSource>> {
+	fn subscribe(&self, source: &crate::Source, name: &str, max_delay: Duration) -> Result<Option<ExportSource>> {
 		match self {
-			Rendition::Video(config) => ExportSource::for_video(source, name, config, max_age),
-			Rendition::Audio(config) => ExportSource::for_audio(source, name, config, max_age),
+			Rendition::Video(config) => ExportSource::for_video(source, name, config, max_delay),
+			Rendition::Audio(config) => ExportSource::for_audio(source, name, config, max_delay),
 		}
 	}
 
@@ -441,7 +441,7 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			max_age: Duration::ZERO,
+			max_delay: Duration::ZERO,
 			fragment_duration: None,
 			tracks: HashMap::new(),
 			queued: VecDeque::new(),
@@ -451,13 +451,13 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Set the max age for each per-track source.
+	/// Set the max delay for each per-track source.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
 	/// Defaults to
 	/// [`Duration::ZERO`] (skip aggressively).
-	pub fn with_max_age(mut self, max_age: Duration) -> Self {
-		self.max_age = max_age;
+	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
@@ -791,7 +791,7 @@ impl<S: Stream> Export<S> {
 			match self.tracks.get_mut(&name) {
 				Some(track) if track.source.is_some() => track.reconfigure(&name, config)?,
 				Some(track) => {
-					let Some(source) = config.subscribe(&self.source, &name, self.max_age)? else {
+					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
 						continue;
 					};
 					track.rejoin(&name, config, source)?;
@@ -799,7 +799,7 @@ impl<S: Stream> Export<S> {
 				None => {
 					// Subscribe via ExportSource, which applies any per-codec transform
 					// (Annex-B → length-prefixed) at pull time.
-					let Some(source) = config.subscribe(&self.source, &name, self.max_age)? else {
+					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
 						continue;
 					};
 					if self.init_emitted {

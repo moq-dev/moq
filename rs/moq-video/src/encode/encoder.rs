@@ -88,13 +88,15 @@ impl Gop {
 
 /// How an encoder trades latency for compression at the configured bitrate.
 ///
-/// Bitrate is set separately, via [`Config::bitrate`]. No preset reorders
-/// frames (no B-frames) or queues them without bound: they differ only in the
+/// Bitrate is set separately, via [`Config::bitrate`]. Presets differ in the
 /// codec effort spent per frame and the buffering the backend allows. Each
 /// backend maps a preset onto the controls it actually has, so two presets can
-/// apply the same controls on one backend; [`Encoder::applied`] reports what
-/// took effect. A preset describes the encoder alone, not keyframe join time,
-/// transport delay, or viewer playout.
+/// apply the same controls on one backend, and some backends cannot rule out
+/// frame reordering or queueing: V4L2 leaves both to the driver, and
+/// MediaCodec's no-B-frame setting is only a hint. [`Encoder::applied`] reports
+/// what took effect, and only a reported [`Applied::preset`] confirms it. A
+/// preset describes the encoder alone, not keyframe join time, transport delay,
+/// or viewer playout.
 ///
 /// `#[non_exhaustive]` so a later policy can be added without breaking a
 /// `match`.

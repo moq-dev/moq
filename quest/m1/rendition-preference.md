@@ -41,7 +41,7 @@ Decided in planning interviews on 2026-10-01:
 - Video only. Optional on the wire, omitted when 0 (as `enabled` is omitted at its default).
   Additive, so older players ignore it.
 - Selection order in `js/watch/src/video/source.ts`: drop disabled
-  renditions ([enabled flag](/quest/m1/catalog-enabled.md)), then decode
+  renditions (catalog `enabled: false`), then decode
   support, then keep the highest preference among supported renditions, then
   the existing target and bitrate pick within what is left. Preference is
   about decodability only.
@@ -49,8 +49,8 @@ Decided in planning interviews on 2026-10-01:
   picker keeps listing every tier.
 - `Video::ranked` sorts by preference (highest first), then by picture and
   bitrate as today. RTMP play, FLV export, and moq-transcode take the first
-  rendition they support, so they need no change. Update the
-  [JS rendition ranking](/quest/m1/js-ranked.md) Plan if it is still open.
+  rendition they support, so they need no change. `@moq/hang`'s `ranked`
+  must sort the same way, so update it in this change.
 - WHEP needs its own step: `Session::handle_media` (`rs/moq-rtc`) takes the
   peer's first negotiated payload type, then `pick_video` filters `ranked()`
   to that codec, so a peer offering the fallback's codec first would get the
@@ -71,11 +71,6 @@ Decided in planning interviews on 2026-10-01:
   the field. moq-transcode producing same-size codec fallbacks; the consumer
   publishes its own.
 
-## Required
-
-- [Enabled flag](/quest/m1/catalog-enabled.md) - the `enabled` field selection filters on first
-
 ## Related
 
-- [JS rendition ranking](/quest/m1/js-ranked.md) - mirrors `Video::ranked` in `@moq/hang`, which sorts by preference first once this quest lands
 - [Audio rendition pick](/quest/m1/audio-ranked.md) - audio ranking, where `preference` could join later

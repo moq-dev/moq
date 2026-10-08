@@ -22,7 +22,8 @@ replaces both: the rule is timestamp arithmetic on the group start.
 - Withhold rule, keyed on the same non-continuous signal in both consumers:
   `js/hang/src/container/consumer.ts` `next()` reports `continuous: false`
   after a subscribe, a declared discontinuity, or any skip (`#gap`). The Rust
-  `moq_mux::container::Consumer` gains the equivalent in the open-GOP quest
+  `moq_mux::container::Consumer` gains the equivalent in
+  [Rust non-continuous signal](/quest/m1/rust-continuous.md)
   (today `poll_read` returns a bare frame and only the `discontinuity()`
   counter moves); this quest reuses it, and
   `rs/moq-video/src/decode/consumer.rs` propagates it. For the first
@@ -38,16 +39,16 @@ replaces both: the rule is timestamp arithmetic on the group start.
   types). Rust has the NAL walkers in `rs/moq-mux/src/codec/{h264,h265}`;
   JS needs a small length-prefixed walker beside the codec description parsing
   in `js/hang`. Other codecs never set `warmup`, so no check is needed there.
-- Join earlier: the subscription's maximum age becomes the latency target plus
+- Join earlier: the subscription's maximum delay becomes the latency target plus
   `warmup`, so the group start lands `warmup` before the target and the first
-  presented frame is on time. JS sets the subscription's `maxAge` in `js/net`;
-  Rust adds it to the decode consumer's `Options::max_age`, which reaches the
-  subscription through `Subscription::with_max_age`
+  presented frame is on time. JS sets the subscription's `maxDelay` in `js/net`;
+  Rust adds it to the decode consumer's `Options::max_delay`, which reaches the
+  subscription through `Subscription::with_max_delay`
   (`rs/moq-video/src/decode/consumer.rs`), not `Subscription::start`, which
   is aggregated across subscribers and rewinds the track for everyone.
-- Max-age skipping must not shed the warmup span it deliberately joined:
-  `#checkMaxAge` in the JS container consumer and the max-age budget in Rust
-  (`Consumer::poll_read`, set by `set_max_age`) compare the buffered span
+- Max-delay skipping must not shed the warmup span it deliberately joined:
+  `#checkMaxDelay` in the JS container consumer and the max delay budget in Rust
+  (`Consumer::poll_read`, set by `set_max_delay`) compare the buffered span
   against the target, and frames still inside a
   withheld warmup count as decode-only, not buffered.
 - Tests in both languages: a synthetic three-group track with `warmup` where a
@@ -60,4 +61,8 @@ replaces both: the rule is timestamp arithmetic on the group start.
 ## Required
 
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - the field this reads
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - adds the Rust non-continuous signal this keys on, and trims frames stamped before the keyframe where this trims frames after the start
+- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust signal this keys on
+
+## Related
+
+- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims frames stamped before the keyframe where this trims frames after the start

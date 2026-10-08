@@ -17,18 +17,23 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
 - **Broadcasts** are created unannounced and invisible to everyone, then announced as an exact route, or served below a prefix with `dynamic`. A consumer of the same origin sees exactly what a peer sees. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
-- **Epochs** identify publisher instances with a canonical UUIDv7 carried on each route (`Route::epoch`): the newest wins a path, and only routes with the same epoch resume a subscription; see [publisher epochs](/concept/moq-lite#publisher-epochs).
+- **Resolution** uses `consumer.request_broadcast(path, epoch)` with an owned `Epoch` to pin a publisher instance, or `None` for unpinned lookup. A pinned request refuses a different or missing epoch at request time and asynchronous resolution.
+- **Epochs** identify publisher instances with a canonical UUIDv7 carried on each route (`Route::epoch`): the newest wins a path, and only routes with the same epoch resume a subscription. A resolved `broadcast::Consumer` names the epoch it came through in `info().epoch`, pinned or not; see [publisher epochs](/concept/moq-lite#publisher-epochs).
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
-- **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale. Subscribers set their own priority and max age and can change them live.
+- **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale, or none for an untimed track whose frames carry no timestamp. Subscribers set their own priority and max delay and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
-- **Track ends**: `finish()` ends a track at its live edge, while `finish_at(n)` declares the exclusive end ahead of it and still accepts the groups below. A subscriber awaits it with `finished()`. A remote track ends only once every group below its end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max age on moq-lite (one second without one), or after one second on IETF.
+- **Track ends**: `finish()` ends a track at its live edge, while `finish_at(n)` declares the exclusive end ahead of it and still accepts the groups below. A subscriber awaits it with `finished()`. A remote track ends only once every group below its end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max delay on moq-lite (one second without one), or after one second on IETF.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+ and moq-transport.
 - **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones. A handle marked `origin::Producer::upstream()` announces as a peer, and a consumer taken from it never sees a route another upstream handle announced, so a relay never transits between two upstream links.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
 
-It runs over anything implementing `web_transport_trait::poll::Session`: noq, the
-browser, iroh, or qmux over TCP, Unix sockets, and
-WebSockets. [`moq-tokio`](https://docs.rs/moq-tokio) wires those up.
+It runs over its own `moq_net::transport::poll::Session`, `SendStream`, and
+`RecvStream` traits. Implement these for a custom transport; session clones keep
+independent operation state, and errors expose session and stream codes separately.
+[`moq-tokio`](https://docs.rs/moq-tokio) adapts native backends, `moq-wasm` adapts
+browser WebTransport, and `moq-uring::transport::Session::new` wraps a poll backend
+without adding thread bounds. `moq-net` does not depend on `web-transport-trait`,
+so backend trait upgrades affect their adapters rather than this public API.
 
 ```bash
 cargo add moq-net moq-tokio
@@ -178,7 +183,7 @@ for hidden routes, so each local consumer decides.
 
 Use `Subscription::default().with_groups(2..=5)` to request only groups 2
 through 5. `2..5` excludes group 5, and `..` leaves both ends unbounded.
-The range limits the data eligible under the subscription's max-age budget;
+The range limits the data eligible under the subscription's max delay budget;
 it does not fetch historical data by itself.
 
 A reader's `set_groups(2..=5)` applies a local limit. It preserves read

@@ -1717,6 +1717,66 @@ mod tests {
 		}
 	}
 
+	#[moq_net_sim::test]
+	async fn an_invalid_group_order_closes_the_session() {
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			for (value, nested) in [
+				(0u8, false),
+				(3, false),
+				(255, false),
+				(0, true),
+				(3, true),
+				(255, true),
+			] {
+				// FILL_PARAMETERS starts in draft-20.
+				if nested && version == Version::Draft18 {
+					continue;
+				}
+				let mut body = vec![0, 1, 1, b'a', 1, b'b', 1];
+				if nested {
+					body.extend([0x23, 3, 1, 0x22, value]);
+				} else {
+					body.extend([0x22, value]);
+				}
+				let mut payload = Vec::new();
+				let mut w = crate::coding::Encoder::new(&mut payload, version.into());
+				w.varint(ietf::Subscribe::ID).unwrap();
+				w.u16(body.len() as u16);
+				w.slice(&body);
+				let session =
+					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
+				let log = session.log.clone();
+				let (driver, _goaway, _) = start(Config {
+					runtime: crate::time::Clock::sim(),
+					session,
+					setup: None,
+					request_id_max: None,
+					client: false,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					cost: None,
+					version,
+					path: None,
+					authority: None,
+					peer_setup_stream: None,
+					peer_declared: Some(peer::Peer::default()),
+					early_unis: Vec::new(),
+				})
+				.unwrap();
+				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+					.await
+					.expect("invalid GROUP_ORDER must close the session")
+					.expect_err("invalid GROUP_ORDER must fail");
+				assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation);
+				assert_eq!(
+					log.closes(),
+					vec![(SessionError::ProtocolViolation.to_code(), err.to_string())]
+				);
+			}
+		}
+	}
+
 	/// A peer's advertisement of `room/host`, then two namespace-keyed withdrawals of it.
 	/// The second has no advertisement left to name.
 	async fn publish_namespace_then_two_withdrawals(version: Version) -> Vec<u8> {

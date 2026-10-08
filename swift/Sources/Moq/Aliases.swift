@@ -15,8 +15,8 @@ public typealias MediaFrame = MoqFFI.MoqMediaFrame
 /// The JSON manifest describing a broadcast's tracks: video and audio
 /// renditions, display geometry, and untyped application sections.
 public typealias Catalog = MoqFFI.MoqCatalog
-/// A video rendition in the catalog: codec, dimensions, bitrate, temporary
-/// avoidance recommendation, framerate, and container.
+/// A video rendition in the catalog: codec, dimensions, bitrate, whether it is
+/// enabled, framerate, and container.
 public typealias Video = MoqFFI.MoqVideo
 /// Caller-provided catalog fields for a video track.
 public typealias VideoHint = MoqFFI.MoqVideoHint
@@ -30,7 +30,7 @@ public typealias ContainerFormat = MoqFFI.MoqContainerFormat
 /// that property from the next catalog snapshot.
 public typealias VideoProperties = MoqFFI.MoqVideoProperties
 /// An audio rendition in the catalog: codec, sample rate, channel count,
-/// bitrate, and container.
+/// bitrate, whether it is enabled, and container.
 public typealias Audio = MoqFFI.MoqAudio
 /// One raw-audio frame: PCM samples in the configured layout plus a
 /// presentation timestamp.
@@ -42,13 +42,13 @@ public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
 /// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
-/// What a `VideoConsumer` decodes to: an optional resize, a max age, and
+/// What a `VideoConsumer` decodes to: an optional resize, a max delay, and
 /// whether frames keep the decoder's native surface.
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
 /// One decoded video frame, owning the decoder's surface until released;
 /// `pixels(format:)` converts it to packed CPU pixels.
 public typealias VideoDecodedFrame = MoqVideoDecodedFrame
-/// The PCM layout an `AudioConsumer` decodes to, plus its max age.
+/// The PCM layout an `AudioConsumer` decodes to, plus its max delay.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 public typealias AudioSampleFormat = MoqFFI.MoqAudioSampleFormat

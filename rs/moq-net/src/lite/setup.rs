@@ -55,7 +55,7 @@ impl ProbeLevel {
 	/// transport whose figures exist by the time the session starts. QUIC and TCP
 	/// both qualify: their RTT comes from the handshake, which has already happened.
 	pub fn detect<S: crate::transport::poll::Session>(session: &S) -> Self {
-		use web_transport_trait::Stats as _;
+		use crate::transport::Stats as _;
 		let stats = session.stats();
 		match stats.estimated_send_rate().is_some() || stats.rtt().is_some() {
 			true => Self::Report,
@@ -176,10 +176,10 @@ pub struct Setup {
 	/// Directional: it prices the sender's own egress, so both ends declare their own
 	/// and the two need not match. `None` means the default cost of 1.
 	pub cost: Option<u64>,
-	/// This endpoint's Hop ID, the identity it stamps onto forwarded
-	/// announcements. The peer uses it to serve this endpoint's subscriptions from
-	/// a route that does not flow through it (the same split horizon the announce
-	/// filter applies). `None` when the endpoint has no meaningful identity (a
+	/// This endpoint's Hop ID, the identity forwarded announcements name it by.
+	/// The peer uses it to serve this endpoint's subscriptions from a route that
+	/// does not flow through it (the same split horizon the announce filter
+	/// applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
 }

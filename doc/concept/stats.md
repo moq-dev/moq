@@ -33,16 +33,27 @@ generate more stats.
   prefix, so a consumer skips any path without `node` where it expects one. A
   group segment literally named `node` is ambiguous; don't use one.
 
+Each announcement carries a fresh [publisher epoch](/concept/moq-lite#publisher-epochs)
+on its route, so a restarted node or a group returning from idle is a new
+broadcast at the same path: it replaces the old one, and no relay serves it
+groups cached under the old epoch. A reader treats each epoch as its own set of
+counters. The epoch rides moq-lite 07 announcements; over older versions and
+moq-transport a reader sees the same change as an end and a start at the path.
+An aggregating reader pins each node's subscription to its epoch, and when one
+publisher is reached through both kinds of link (with and without an epoch), it
+carries only that path's outgoing counters across the change.
+
 At depth 0 the broadcast stays announced for the producer's life. At depth
 1 or more, a group's broadcast is announced while that group has entries, and
 for a linger (five minutes by default) after its last one leaves. A group that
 returns within the linger keeps its broadcast, so viewer churn doesn't
 unannounce and re-announce it across the mesh; while it lingers empty, its
 tracks hold `{}`. Once the linger elapses with the group still empty, the
-broadcast is unannounced. Group numbers keep increasing across recreated
-tracks and group broadcasts for the producer's life; they may have gaps. A
-recreated compressed track starts a new group with a full snapshot, never a
-delta whose compression state belonged to its previous writer.
+broadcast is unannounced and its counters dropped; a group that returns later
+announces a new epoch counted from zero. Within one epoch, group numbers keep
+increasing across recreated tracks; they may have gaps. A recreated compressed
+track starts a new group with a full snapshot, never a delta whose compression
+state belonged to its previous writer.
 
 ## Tracks
 
@@ -132,9 +143,12 @@ Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
-A counter going **down** means the relay restarted or the entry was dropped
-and re-created. Treat it as the start of a fresh segment rather than a
-negative rate.
+A new epoch starts every counter from zero, so a reader summing a node over
+time adds each epoch's counters rather than diffing across them. Within one
+epoch, a counter going **down** means the entry was dropped and re-created.
+Treat it as the start of a fresh segment rather than a negative rate. On a
+route without an epoch (an older relay, or a session older than moq-lite 07),
+a counter going down also means the node restarted.
 
 A reader ignores unknown fields, so a newer relay can add counters, and
 defaults a missing field to zero, so it can read an older relay.

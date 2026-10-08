@@ -290,6 +290,11 @@ impl Server {
 		quic.validate()?;
 
 		let build_quic = parts.quic() && (config.bind.is_some() || !config.has_stream_listener());
+		// A stream-only server would silently ignore what only QUIC reads. A caller
+		// opening only the streams owns QUIC elsewhere, which reads them.
+		if parts.quic() && !build_quic {
+			config.validate_stream_only()?;
+		}
 		// Read before the member is taken out below, which consumes `parts`.
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let build_streams = parts.streams();
@@ -303,11 +308,12 @@ impl Server {
 
 		// Only the QUIC backend verifies client certificates; the qmux listeners
 		// (tcp/unix/websocket) never ask for one, even over `tls://`, so a
-		// stream-only server would ignore the CA. A caller opening only the streams owns QUIC elsewhere.
+		// stream-only server would ignore the CA or pinned peers. A caller opening
+		// only the streams owns QUIC elsewhere.
+		if parts.quic() && !build_quic && (!config.tls.root.is_empty() || config.tls.peers.is_some()) {
+			return Err(Error::MtlsUnsupported);
+		}
 		if parts.quic() && !config.tls.root.is_empty() {
-			if !build_quic {
-				return Err(Error::MtlsUnsupported);
-			}
 			#[cfg(not(feature = "noq"))]
 			return Err(Error::NoBackend("--listen-tls-root requires the noq feature"));
 		}
@@ -880,10 +886,8 @@ impl Setup {
 	where
 		S: web_transport_trait::Session,
 		crate::transport::Session<S>: moq_net::transport::poll::Boxable,
-		<crate::transport::Session<S> as web_transport_trait::poll::Session>::SendStream:
-			web_transport_trait::MaybeSync,
-		<crate::transport::Session<S> as web_transport_trait::poll::Session>::RecvStream:
-			web_transport_trait::MaybeSync,
+		<crate::transport::Session<S> as moq_net::transport::poll::Session>::SendStream: moq_net::transport::MaybeSync,
+		<crate::transport::Session<S> as moq_net::transport::poll::Session>::RecvStream: moq_net::transport::MaybeSync,
 	{
 		let session = crate::transport::Session::new(session);
 		let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
@@ -2256,7 +2260,7 @@ mod tests {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active);
-		let broadcast = consumer.request_broadcast("test").await.expect("resolve");
+		let broadcast = consumer.request_broadcast("test", None).await.expect("resolve");
 
 		let mut track = broadcast
 			.track("video")
@@ -2338,21 +2342,28 @@ mod tests {
 		drop((session, connection));
 	}
 
-	/// A client CA on a stream-only server is refused: no QUIC listener would
-	/// verify it, and the stream listeners never ask for a client certificate.
+	/// A client CA or pinned peers on a stream-only server are refused: no QUIC
+	/// listener would verify them, and the stream listeners never ask for a client certificate.
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
-	async fn client_ca_without_a_quic_listener_is_rejected() {
-		let mut config = crate::listen::Config::default();
-		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-		config.tls.root = vec!["ca.pem".into()];
+	async fn client_auth_without_a_quic_listener_is_rejected() {
+		type Set = fn(&mut crate::listen::Config);
+		let cases: [Set; 2] = [
+			|c| c.tls.root = vec!["ca.pem".into()],
+			|c| c.tls.peers = Some(crate::tls::Peers::new()),
+		];
+		for set in cases {
+			let mut config = crate::listen::Config::default();
+			config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+			set(&mut config);
 
-		assert!(matches!(
-			config.clone().init(Default::default()),
-			Err(Error::MtlsUnsupported)
-		));
-		// A worker group owning QUIC verifies it, so the streams alone accept it.
-		config.init_streams().expect("streams beside worker-owned QUIC");
+			assert!(matches!(
+				config.clone().init(Default::default()),
+				Err(Error::MtlsUnsupported)
+			));
+			// A worker group owning QUIC verifies it, so the streams alone accept it.
+			config.init_streams().expect("streams beside worker-owned QUIC");
+		}
 	}
 
 	/// An explicit QUIC bind cannot be honored without a QUIC backend.

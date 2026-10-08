@@ -145,7 +145,7 @@ with geometry and color metadata intact; call `I420::into_data()` only when
 packed bytes are required. `decode::Config::scale_hint` is best effort and only
 a decoder with a hardware scaler honors it; `Frame::resize` is the exact-size
 operation. `decode::Consumer` takes `decode::Options`, which carries the
-subscription's `start` and `max_age` beside the decoder config.
+subscription's `start` and `max_delay` beside the decoder config.
 
 External Linux Vulkan producers construct `frame::vulkan::Slot` from exported
 memory and timeline FDs, an `Image` describing the format, allocation, and
@@ -173,9 +173,10 @@ and a release guard; their buffers also refuse CPU download.
 ## Encoder presets
 
 A preset trades per-frame encode time for compression at the configured
-bitrate. None reorders frames, and none describes keyframe join time, transport
-delay, or viewer playout. Each backend maps a preset onto the controls it has,
-and reports what it applied rather than echoing the request:
+bitrate. None describes keyframe join time, transport delay, or viewer playout.
+Each backend maps a preset onto the controls it has, and reports what it applied
+rather than echoing the request. Only a reported preset confirms its controls,
+including that no frames are reordered:
 
 | Backend | Low latency | Balanced | Quality |
 | --- | --- | --- | --- |

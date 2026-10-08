@@ -1,13 +1,14 @@
 //! Open a browser WebTransport connection for `moq-net`.
 //!
-//! `web-transport-wasm` implements the poll traits `moq-net` requires, so all that
-//! is left here is the dial: the ALPN list, and the browser's two trust modes.
+//! The browser backend is adapted to moq-net's owned poll traits here.
+
+mod adapter;
 
 use url::Url;
 use web_transport_wasm::{ClientBuilder, Error};
 
 /// The connected browser WebTransport session `moq-net` runs over.
-pub use web_transport_wasm::Session;
+pub type Session = adapter::Session<web_transport_wasm::Session>;
 
 /// Options for a browser WebTransport connection.
 ///
@@ -35,5 +36,5 @@ pub async fn connect(url: Url, options: Options) -> Result<Session, Error> {
 		true => client.with_system_roots(),
 		false => client.with_server_certificate_hashes(options.server_certificate_hashes),
 	};
-	client.connect(url).await
+	client.connect(url).await.map(Session::new)
 }

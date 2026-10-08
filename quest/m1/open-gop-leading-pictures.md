@@ -41,7 +41,7 @@ decode, and the JS test should drive the software decoder.
   sample of a group to `keyframe`, and `js/watch/src/video/decoder.ts` submits
   it as `"key"`): for the first group after any non-continuous transition,
   skip delta frames stamped before that group's keyframe. That covers a
-  subscribe, a declared discontinuity, and a latency skip: `#checkMaxAge`
+  subscribe, a declared discontinuity, and a latency skip: `#checkMaxDelay`
   records the skip through `#gap` and `next()` reports the next frame with
   `continuous: false`. Latency skip also bumps playhead generation (startup
   delay) but does not flush the decoder. Leading pictures after that
@@ -75,10 +75,6 @@ decode, and the JS test should drive the software decoder.
   that plays continuously, then latency-skips into a later open GOP, has that
   group's leading pictures trimmed too, so an implementation that only trims
   the initial group fails. Both cases in both languages.
-
-## Required
-
-- [Fixed-delay release](/quest/m1/tstd/delay.md) - the TS export this trims lands with #4645
 
 ## Related
 

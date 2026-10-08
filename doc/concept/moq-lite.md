@@ -100,8 +100,7 @@ through, which is how forwarding loops are caught, and a cost, which is how a
 subscriber picks among several routes to the same broadcast. A route may also
 carry a [publisher epoch](#publisher-epochs), which says which routes serve the
 same bytes. A hop of 0 is
-the anonymous mark and travels the chain unchanged; when it is the first hop, a
-relay puts a random ID, fresh per connection, in front of it. A route that passed through an
+the anonymous mark and travels the chain unchanged. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
 the costs say; among anonymous routes, cost keeps ordering.
 
@@ -315,15 +314,25 @@ Each subscription carries the knobs that decide behavior under congestion:
 | --- | --- |
 | **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
 | **Order** | Which group to send first when several are pending. Newest first for live, oldest first for catch-up. |
-| **Max age** | How old a non-latest group may get before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
+| **Max delay** | How far a non-latest group may fall behind the live edge before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 
-Max age is measured on the media timeline, not the wall clock, so a backlog
-delivered as a burst is still old while a congestion stall never expires
+Max delay is measured on the media timeline, not the wall clock, so a backlog
+delivered as a burst is still late while a congestion stall never expires
 anything on its own. Both ends apply it: the publisher skips a group rather
 than sending it, and the subscriber skips it again as it reads, since the
 publisher only ever sees the most tolerant budget across its subscribers.
 
-A route failover is invisible to max age: a group open across the change carries
+A track is all timed or all untimed: it declares a timescale or none, and a
+frame that doesn't match is refused. An untimed track stays untimed at every
+hop: no receiver fills in arrival time, which would change whenever a route
+fails over. An untimed group is never too old, so the cache's own expiry is what
+reclaims it, and a new subscriber to an untimed track starts at its latest group
+unless it names a start. Tracks from lite before 05, or from moq-transport
+without a `TIMESCALE` (every track on drafts 14–16), arrive untimed. Lite cannot
+mark a track untimed yet, so a lite-05 or later publisher sends each frame of an
+untimed track with its send time.
+
+A route failover is invisible to max delay: a group open across the change carries
 on from the new route at the frame where the old one stopped, and a group only a
 replaced route that went quiet still holds is given up once it falls a full
 budget behind the new route's live edge. A successor group with no timestamp
@@ -349,7 +358,7 @@ IETF carries this value as MAX\_CACHE\_DURATION, received on every supported dra
 and sent from draft 17 onward. A relay reads it from FETCH\_OK as well as SUBSCRIBE\_OK, so a track it
 only fetches still learns its window. Drafts 14–16 remain receive-only for compatibility
 with older implementations. This is an approximate mapping: IETF measures wall
-time, while max age uses media timestamps and always keeps the newest group.
+time, while the publisher's retention window uses media timestamps and always keeps the newest group.
 EXPIRES describes subscription lifetime and does not set retention.
 
 Lite-07 encodes a finite limit as milliseconds plus one, with zero meaning no limit.
@@ -360,7 +369,7 @@ timer cap schedules periodic age checks and does not shorten that window.
 
 Put together, a conference might use:
 
-| Track | Priority | Order | Max age |
+| Track | Priority | Order | Max delay |
 | --- | --- | --- | --- |
 | audio | 100 | ascending | 500 ms |
 | video | 50 | descending | 2 s |
@@ -374,6 +383,12 @@ Since moq-lite 05, a publisher can send a tiny single-frame group as a QUIC
 datagram: unreliable, unordered, under about 1200 bytes, and never
 retransmitted. It suits real-time audio and sensor data. There is no stream
 fallback, so a datagram that doesn't fit isn't delivered that way.
+
+Nothing caches a datagram. A subscription gets the ones inside its group
+range, and a new one may get the few still in the publisher's short send
+buffer, but `FETCH` never returns one. A publisher that knows the sequence was
+a datagram refuses with `NOT_FETCHABLE` (moq-lite-07), otherwise with
+`NOT_FOUND`. Use a group for anything a late joiner needs.
 
 ## What moq-lite leaves out
 

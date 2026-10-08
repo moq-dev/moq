@@ -7,7 +7,7 @@ import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { TAIL_GRACE_MS, Tail } from "./tail.ts";
-import { Milli } from "./time.ts";
+import { Milli, Timescale } from "./time.ts";
 import type { Ordered } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -15,7 +15,7 @@ const url = new URL("https://localhost:4443/test");
 
 // Long enough that no group is skipped as stale, and the moq-lite grace for the one group the
 // IETF case never produces.
-const MAX_AGE = Milli(100);
+const MAX_DELAY = Milli(100);
 
 async function session(protocol: string) {
 	const pair = createMockTransportPair(protocol);
@@ -26,9 +26,9 @@ async function session(protocol: string) {
 	]);
 	const broadcast = origin.createBroadcast(Path.from("test"));
 	broadcast.announce();
-	const video = broadcast.createTrack("video");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const remote = wireOf(client).consume(Path.from("test"));
-	const reader = remote.track("video").subscribe({ maxAge: MAX_AGE }).ordered();
+	const reader = remote.track("video").subscribe({ maxDelay: MAX_DELAY }).ordered();
 
 	return {
 		video,
