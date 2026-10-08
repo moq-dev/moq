@@ -45,8 +45,9 @@ What needs the info is decoding the response and approving the group, so:
   reject the fetch and reset the stream.
 - moq-transport: send TRACK_STATUS alongside the FETCH and take timestamps'
   units from it (or FETCH_OK properties where present). Draft-17's
-  TRACK_STATUS answer carries no properties, so draft-17 keeps #4974's
-  fallback and is not pipelined.
+  TRACK_STATUS answer carries no properties, and its FETCH_OK timescale is
+  decoded but not surfaced (`ietf/fetch.rs`), so draft-17 keeps #4974's
+  SUBSCRIBE fallback and is not pipelined.
 
 The line's shared decisions apply: early response data stays unread in QUIC,
 a failed info fails the fetch, and legacy serial peers keep working.
