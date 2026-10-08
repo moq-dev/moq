@@ -19,4 +19,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Reproducible relay CPU and allocation profiles](/quest/m1/performance-profiles.md) - the profiling setup this can use
+- [Relay profiling](/quest/m1/perf/lock-profile.md) - the `just` profiling recipe this can use

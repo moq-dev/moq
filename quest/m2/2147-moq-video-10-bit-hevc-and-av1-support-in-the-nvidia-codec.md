@@ -12,6 +12,9 @@ Decided in the 2026-09-30 audit: AV1 encoding split out to
 [NVENC AV1](/quest/m3/nvenc-av1.md), because it needs an Ada GPU and the only
 GPU CI host is an RTX 3070 Ti. Main10 stays here since that host can verify it.
 
+Decided 2026-10-08: moved to m3. No 10-bit encode pipeline or consumer
+exists yet.
+
 Extend the settled frame and NVENC contracts with Main10 surfaces, profile
 selection, and accurate codec metadata. Audit byte pitch, plane layout, CPU
 download, and P016 input/output together; a codec enum alone does not establish

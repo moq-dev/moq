@@ -27,4 +27,5 @@ Guidance:
 
 ## Required
 
+- [lite-07 Live flag](/quest/m1/lite-live.md) - reshapes the same `Subscription` first
 - [Coalesce dynamic tracks](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic track per name with sequences kept across replacements, which range requests build on (#4929)

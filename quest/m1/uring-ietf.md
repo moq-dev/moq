@@ -9,9 +9,10 @@ ring then drops no client protocol over raw QUIC.
 
 ## Plan
 
-`rs/moq-relay/src/uring.rs` states "Sessions are moq-lite only": `bind`
-keeps `versions.iter().filter(|v| v.is_lite())`, refuses the lite versions
-that negotiate in SETUP, and warns about configured moq-transport versions.
+The io_uring listener's bind in `rs/moq-relay/src/uring.rs` advertises only
+the lite ALPNs (`is_lite`), refuses a lite version named in the config that
+negotiates in SETUP, and only warns when the config lists moq-transport
+versions.
 The tokio path already drives both wires through one session type, so the
 gap is in the worker's accept path, not in moq-net.
 
@@ -27,9 +28,10 @@ gap is in the worker's accept path, not in moq-net.
   caveat.
 
 Additive, so it lands on main. moq.pro's fleet deploy of the
-ring requires the release carrying it.
+ring requires the release carrying it. Decided 2026-10-08: moved to m2 with
+that fleet deploy, which is m2 work.
 
 ## Related
 
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - the other protocol gap
-  on the ring, WebSocket and HTTP, deferred to m2
+  on the ring, WebSocket and HTTP

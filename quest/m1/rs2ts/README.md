@@ -53,11 +53,16 @@ Decided in planning (2026-09-27), with the spike data in
   them; it is months out.
 
 Decided in the 2026-09-30 audit: the lite half stays in m1 with an explicit
-go/no-go after the no-downgrade report below; a no-go stops the line before
-anything else is generated. The IETF half (the sans-IO IETF session,
-generated IETF, and IETF parameters) moved to m2 and waits on that go.
+go/no-go. The IETF half (the sans-IO IETF session, generated IETF, and IETF
+parameters) moved to m2 and waits on that go.
 
-This README's own work is the no-downgrade report once generated lite ships:
+Decided 2026-10-08: the go/no-go comes right after the
+[translator](/quest/m1/rs2ts/translator.md), before the sans-IO refactors
+break moq-net's published API. It compares the generated lite codec with
+js/net's hand-written one on bundle size and per-frame CPU. A no-go stops the
+line there.
+
+This README's own work is the final no-downgrade report once generated lite ships:
 bundle size, per-frame CPU, and first-frame latency against the hand-written
 js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-benchmarks.md).
 

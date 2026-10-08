@@ -3,9 +3,9 @@
 ## Goal
 
 Worker UDP sockets live in a ring-owned fixed-file table and every socket SQE
-addresses a `types::Fixed` slot (today `types::Fd`, rs/moq-uring/src/udp.rs:934,
-:976, :1014), with slot teardown ordered so a stale SQE can never hit a reused
-fd.
+addresses a `types::Fixed` slot (today the send and receive SQE builders in
+`rs/moq-uring/src/udp.rs` use `types::Fd`), with slot teardown ordered so a
+stale SQE can never hit a reused fd.
 
 ## Plan
 
@@ -31,7 +31,8 @@ Registered files let SQEs address a stable table slot with `types::Fixed`. This 
 Benchmark steady-state send/receive traffic and high socket-churn workloads. Record CPU, cycles, instructions, throughput, and socket lifetime cost. Keep the implementation only if the hot-path win justifies the slot-lifecycle complexity.
 
 Decided in the 2026-09-30 audit: moved to m2. The hot-path win is
-unmeasured on noq, and io_uring ships in no package.
+unmeasured on noq, and io_uring ships in no package. Decided 2026-10-08:
+moved to m3 with the rest of the speculative ring work; no fleet demand.
 
 ## Closes
 

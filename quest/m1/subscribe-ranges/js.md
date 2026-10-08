@@ -9,8 +9,7 @@ publisher serves requested ranges that are no longer in its live cache.
 
 ## Plan
 
-Mirror the Rust names. The JS FETCH cancel and JS FETCH quests shape the
-current `fetchGroup` surface; fold whatever of them is still open into this.
+Mirror the Rust names.
 
 Decided in the 2026-10-05 audit: the producer half of
 [JavaScript FETCH](/quest/m1/js-fetch.md) folds in here, so `@moq/net`'s

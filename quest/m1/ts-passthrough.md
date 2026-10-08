@@ -49,7 +49,9 @@ Decided (2026-10-01), from a discussion with t0ms:
   epoch, so object timestamps never go backwards within one broadcast. A
   flagged forward jump starts a group, and an unflagged rewind is fatal
   (decided 2026-10-07 in the final-head audit of #4670, which had a backward
-  flag start a group in place).
+  flag start a group in place). When the operator pinned the epoch with
+  `--epoch`, a flagged rewind is fatal instead, as TS restart decides
+  (2026-10-08), so both hosts of a redundant pair keep the operator's epoch.
 - `randomAccess` is true only while the PAT lists a single program with at
   most one video PID, and every group has started at a
   `random_access_indicator`. The first group that starts without one (a
@@ -108,6 +110,10 @@ its output is the other's less that object's packets. A flagged backward PCR
 discontinuity publishes two broadcasts, and the same rewind unflagged errors.
 A dropped object is counted, and the rest still go out on time. Rerun the
 #4613 netem rig (10% loss, 120 s) against it.
+
+Lands in two PRs (decided 2026-10-08): #5003 is the import half and the
+`m2ts` catalog section, and waits on TS restart; the export half follows on
+the fixed-delay release stage. This quest finishes with the export.
 
 Update `doc/bin/cli.md` for both flags, `doc/concept` for the section, and
 the draft's comparison section to say this repository now publishes both
