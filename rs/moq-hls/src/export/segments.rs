@@ -93,7 +93,7 @@ pub(crate) const MAX_SEGMENTS: usize = 256;
 /// Whether a window of `len` rows, whose rows after the oldest span `rest`, should drop its
 /// oldest: it lists more than [`MAX_SEGMENTS`], or the rest still covers `window` and still
 /// holds a start (`keeps_start`, see [`starts`]). A GOP longer than the window keeps its sync
-/// row, so the window can grow to one GOP plus `window`, and stays startable.
+/// row, so the window stretches to that one GOP, and stays startable.
 pub(crate) fn evicts(window: Duration, len: usize, rest: Duration, keeps_start: bool) -> bool {
 	len > MAX_SEGMENTS || (len >= 2 && rest >= window && keeps_start)
 }
@@ -219,11 +219,13 @@ impl Producer {
 	}
 
 	/// Append a row, evicting the front of the window past `window` (see [`evicts`]). With no
-	/// `window`, only source timeline pops remove rows.
-	pub fn push(&self, row: Row, window: Option<Duration>) {
+	/// `window`, only source timeline pops remove rows. Returns whether the timeline jumped
+	/// backwards, which starts a new publisher run.
+	pub fn push(&self, row: Row, window: Option<Duration>) -> bool {
 		let Ok(mut state) = self.state.write() else {
-			return;
+			return false;
 		};
+		let mut restarted = false;
 
 		if let Some(back) = state.rows.back() {
 			// A backward jump in pts or segment number means the publisher restarted its timeline;
@@ -231,6 +233,7 @@ impl Producer {
 			if Duration::from(row.pts) < Duration::from(back.pts) || row.segment <= back.segment {
 				tracing::warn!("timeline jumped backwards; resetting the playlist window");
 				state.rows.clear();
+				restarted = true;
 			}
 		}
 		if state.rows.is_empty() {
@@ -251,6 +254,7 @@ impl Producer {
 			state.rows.pop_front();
 		}
 		state.sequence = state.rows.front().unwrap().segment;
+		restarted
 	}
 
 	/// Remove rows whose source timeline indices fall within `range`.

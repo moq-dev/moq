@@ -75,8 +75,8 @@ join, never the whole history. The window lists at most 256
 segments however short they are, so every edge shows the same
 `EXT-X-MEDIA-SEQUENCE`. Below that cap the window never evicts its newest
 segment that starts on a video sync point, so a GOP longer than `--window`
-stretches the window to one GOP plus `--window` rather than leave nothing a
-player can start at. A rendition with no media for a span lists that span as
+stretches the window to that one GOP rather than leave nothing a player can
+start at. A rendition with no media for a span lists that span as
 a duration-preserving `EXT-X-GAP` and goes on listing after it. The master
 playlist advertises a video rendition only once a listed segment starts at a
 group start that is a sync point, so an early master may list audio alone, and

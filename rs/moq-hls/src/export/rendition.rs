@@ -92,7 +92,7 @@ struct Run {
 	epoch: u64,
 	/// A listed segment of this run started where a player can, so the master keeps advertising
 	/// the rendition even once a GOP past [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts
-	/// that segment.
+	/// that segment. A new generation or a timeline that jumps backwards starts a new run.
 	startable: bool,
 }
 
@@ -412,10 +412,11 @@ impl Rendition {
 			end: entry.end_time(),
 			discontinuity,
 		};
-		if self.is(reference) && row.starts_sync() {
-			self.run.lock().expect("run lock poisoned").startable = true;
+		let starts = self.is(reference) && row.starts_sync();
+		let restarted = self.live.push(row, window);
+		if starts || restarted {
+			self.run.lock().expect("run lock poisoned").startable = starts;
 		}
-		self.live.push(row, window);
 		self.trim();
 	}
 

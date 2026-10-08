@@ -3379,6 +3379,8 @@ mod tests {
 		}
 		let window = test.listed("video0", 2).await;
 		assert_eq!(numbers(&window), [0, 1, 2], "the sync start stays listed");
+		let joined = test.join().listed("video0", 2).await;
+		assert_eq!(numbers(&joined), [0, 1, 2], "a fresh edge lists the same window");
 		assert_eq!(advertised(&test.renditions), ["video0", "audio0"]);
 
 		video0.push(&span(3, 30_000, 10_000, 1)).unwrap();
@@ -3406,6 +3408,18 @@ mod tests {
 		let window = test.listed("video0", records - 1).await;
 		assert_eq!(numbers(&window)[0], 44, "the cap evicted the sync start");
 		assert_eq!(advertised(&test.renditions), ["video0"]);
+
+		// A new run starts unadvertised until it lists its own sync start.
+		test.renditions.fanout().set_generation(Some("a".into()));
+		test.renditions.fanout().set_generation(Some("b".into()));
+		video0
+			.push(&split(records, records * 40, 40, records..records + 1))
+			.unwrap();
+		test.listed("video0", records).await;
+		assert!(
+			advertised(&test.renditions).is_empty(),
+			"the latch belongs to the old run"
+		);
 	}
 
 	// A span with no media in one rendition keeps its slot as a gap of the same duration there
