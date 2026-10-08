@@ -29,26 +29,26 @@ point.
 Where the reads are:
 
 - The drive loop reads once per turn to fire timers
-  (`self.shared.timers.borrow_mut().fire(Instant::now())`,
-  rs/moq-uring/src/worker.rs:183).
-- The noq driver reads the clock for
-  `close` (rs/moq-uring/src/quic/noq/connection.rs:239), `handle_timeout`
-  (:671), and `poll_transmit` (:786). The last one runs once per GSO train,
+  (`self.shared.timers.borrow_mut().fire(Instant::now())` in
+  rs/moq-uring/src/worker.rs).
+- The noq driver (rs/moq-uring/src/quic/noq/connection.rs) reads the clock
+  for `close`, `handle_timeout`, and `poll_transmit`. The last one runs once per GSO train,
   since `flush` stages one train per turn (see
   [Run to quiescence](/quest/m1/perf/uring-quiescence.md)).
 
 The same profile shows the timer heap at ~1.6%:
-`<moq_uring::timer::Timer as moq_net::runtime::Timer>::set` 0.92% plus
-`btree::search::search_tree` 0.65%. `timer::Heap` is a
-`BTreeMap<(Instant, u64), Rc<Slot>>` (rs/moq-uring/src/timer.rs:19-20), so
+`moq_uring::timer::Timer::set` 0.92% (profiled as a `moq_net::runtime::Timer`
+impl, a trait since removed) plus `btree::search::search_tree` 0.65%.
+`timer::Heap` (rs/moq-uring/src/timer.rs) keys a
+`BTreeMap<(Instant, u64), Rc<Slot>>`, so
 every QUIC timeout re-arm is an O(log n) map removal and insertion with `Rc`
 traffic. The #2875 design note called for a timer wheel. Not urgent at these
 connection counts, but it is on the same hot path and grows with it.
 
-moq-net's runtime is crate-private now, and its drivers already receive the
-current instant from their owner (`Runtime::now`, "the latest instant
-supplied by the owner", in `rs/moq-net/src/runtime.rs`); moq-uring's worker
-passes `Instant::now()` to `driver.poll` once per poll
+moq-net's drivers already receive the current instant from their owner
+(`Clock::now`, "the latest instant supplied by the owning driver", in
+`rs/moq-net/src/time.rs`); moq-uring's worker passes `Instant::now()` to its
+single `driver.poll(Instant::now(), ...)` call once per poll
 (`rs/moq-uring/src/worker.rs`). Sample once per drive turn there and pass
 that instant through `fire`, the `handle_timeout`, and `poll_transmit`.
 

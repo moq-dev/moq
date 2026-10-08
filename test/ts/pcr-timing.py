@@ -13,6 +13,8 @@ instrument pointed at another:
 
 and a constant-rate stream makes a fourth, which `schedule` grades: that the bytes
 between consecutive PCRs are the bytes the mux rate implies for that interval.
+`rate` (--live only) grades the clock's rate against arrival, within the 30 ppm
+ISO 13818-1 2.4.2.1 allows.
 
 Every check is an invariant on the stream, not an assertion about how the stream
 was produced. `release` grades arrival against the PCR's *own* values rather than
@@ -74,6 +76,7 @@ class Scan:
     def __init__(self):
         self.pcr = []  # (packet_index, ticks, arrival_or_None, pid)
         self.packets = 0
+        self.first_null = None  # the first null packet: a padded stream's schedule starts there
         self.bad_sync = 0
         self.transport_error = 0
         self.cc_errors = []
@@ -97,6 +100,8 @@ class Scan:
         if p[1] & 0x80:
             self.transport_error += 1
         pid = ((p[1] & 0x1F) << 8) | p[2]
+        if pid == 0x1FFF and self.first_null is None:
+            self.first_null = index
 
         # ISO 13818-1 2.4.3.3 allows the counter to jump when the adaptation field sets
         # discontinuity_indicator, and allows one packet to be sent twice, repeating its
@@ -434,6 +439,48 @@ def check_release(scan, args):
     )
 
 
+def check_rate(scan, args):
+    """The PCR clock must run within 30 ppm of the clock its bytes are released on.
+
+    ISO/IEC 13818-1 2.4.2.1 holds a system clock to 27 MHz +/- 810 Hz, 30 ppm. A sender
+    that steers its clock after a drifting source may use that much and no more, and a
+    receiver locks to the rate it sees the PCR arrive at. `release` cannot see this: a
+    clock running at a steady wrong rate keeps its intervals and only adds to the drift.
+    The rate is the least-squares slope of PCR value against arrival over each time base,
+    after the first third of the sample (the start-up fill), which averages the per-PCR
+    release jitter down to a few ppm.
+    """
+    stamped = [i for i, (_, _, arrival, _) in enumerate(scan.pcr) if arrival is not None]
+    if len(stamped) < 3:
+        return ("pcr-rate", HARD, True, "not measured (no arrival stamps)", {})
+    cut = len(stamped) // 3
+    segments = [[]]
+    for i in stamped[cut:]:
+        if i in scan.new_base:
+            segments.append([])
+        segments[-1].append((scan.pcr[i][2], scan.pcr[i][1] / (TICKS_PER_MS * 1000.0)))
+    rates = []
+    for points in segments:
+        if len(points) < 3 or points[-1][0] - points[0][0] < 1.0:
+            continue
+        mx = statistics.fmean(x for x, _ in points)
+        my = statistics.fmean(y for _, y in points)
+        var = sum((x - mx) ** 2 for x, _ in points)
+        cov = sum((x - mx) * (y - my) for x, y in points)
+        rates.append((cov / var - 1.0) * 1e6)
+    if not rates:
+        return ("pcr-rate", HARD, False, "no gradable span (each time base under a second)", {})
+    worst = max(rates, key=abs)
+    detail = {"ppm": [round(r, 2) for r in rates], "limit_ppm": args.rate_ppm}
+    return (
+        "pcr-rate",
+        HARD,
+        abs(worst) <= args.rate_ppm,
+        f"PCR clock {worst:+.2f} ppm against arrival (limit ±{args.rate_ppm:g} ppm, ISO 13818-1 2.4.2.1)",
+        detail,
+    )
+
+
 def check_position(scan, args):
     """A PCR packet must sit among the media bytes whose arrival it describes.
 
@@ -491,6 +538,11 @@ def check_schedule(scan, args):
     as a start that is not yet padded, biases every interval's error by the same amount;
     pass the rate whenever it is known.
 
+    With --mux-rate, the intervals before the first null packet are not graded: an
+    exporter pads only once its catalog records the rate, which import measures over the
+    source's first two seconds, so a subscriber that starts with the publisher begins
+    unpadded. The report counts them.
+
     Report-only unless --schedule-pct-min is given: a VBR stream has no schedule to keep,
     and `export ts` is VBR unless a mux rate is declared, so only the caller knows whether
     this property was promised.
@@ -500,11 +552,15 @@ def check_schedule(scan, args):
     required = args.schedule_pct_min if hard else 99.0
     graded = []
     skipped = 0
+    unpadded = 0
     for kb, (a, b) in enumerate(zip(scan.pcr, scan.pcr[1:]), start=1):
         seconds = (b[1] - a[1]) / TICKS_PER_MS / 1000.0
         # An interval spanning a signalled new time base measures nothing, as in the value
         # check. A non-positive one is a duplicate packet (legal) or a backwards clock (the
         # value check's defect to report); neither has a rate to compare against.
+        if args.mux_rate and scan.first_null is not None and b[0] <= scan.first_null:
+            unpadded += 1
+            continue
         if kb in scan.new_base or seconds <= 0:
             skipped += 1
             continue
@@ -531,6 +587,7 @@ def check_schedule(scan, args):
         "other_pcr_pids": scan.other_pcr_pids,
         "count": len(graded),
         "skipped": skipped,
+        "unpadded_lead": unpadded,
         "rate_bps": round(rate),
         "rate_source": "declared" if args.mux_rate else "estimated",
         "aggregate_bps": round(aggregate),
@@ -566,7 +623,7 @@ def check_schedule(scan, args):
 # A file is graded for sync and continuity by compliance.py, through TSDuck's tsanalyze.
 # A pipe cannot be: tsp in front of it would rebuffer the very arrivals `release` stamps.
 LIVE_CHECKS = [check_sync, check_continuity]
-CHECKS = [check_value_interval, check_release, check_position, check_schedule]
+CHECKS = [check_value_interval, check_release, check_rate, check_position, check_schedule]
 
 
 def coincidence(scan, args):
@@ -628,8 +685,14 @@ def main():
         type=float,
         default=500.0,
         help="bound on accumulated release drift, being the standing lag the sender may "
-        "hold; set it to the sender's latency budget (moq export ts --max-age, "
+        "hold; set it to the sender's latency budget (moq export ts --delay, "
         "itself 500ms by default)",
+    )
+    ap.add_argument(
+        "--rate-ppm",
+        type=float,
+        default=30.0,
+        help="how far the PCR clock may run off the arrival clock, in ppm (default 30, ISO 13818-1 2.4.2.1)",
     )
     ap.add_argument(
         "--adjacent-packets", type=int, default=1, help="packet gap at or below which two PCRs count as clustered"

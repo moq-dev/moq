@@ -11,8 +11,8 @@ marks fall back to no ECN, and a viewer's session is unaffected.
 
 ECT(0) marking and ACK ECN counts are carried end to end, and BBR's classic
 CE response ([moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12), in
-moq-noq 1.3.2) is the baseline. This quest adds the scalable policy separately.
-noq-proto has no ECN knob: `sending_ecn` starts on per path and validation
+moq-noq 1.3.2; `main` pins moq-noq-proto 2.0.1) is the baseline. This quest
+adds the scalable policy separately. noq-proto has no ECN knob: `sending_ecn` starts on per path and validation
 failure or an ACK without counts turns it off, so both `off` and `ect1`
 need the fork.
 

@@ -117,14 +117,11 @@ mod tests {
 		producer
 	}
 
-	/// The next route and whether it is active, skipping the caught-up marker.
+	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		loop {
-			return match announced.next().await? {
-				moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-				moq_net::announce::Event::End(route) => Some((route, false)),
-				moq_net::announce::Event::Live => continue,
-			};
+		match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
 
@@ -180,7 +177,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path).await.expect("resolve");
+		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
 		let sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		Feed {
@@ -199,7 +196,7 @@ mod tests {
 		assert!(active);
 		origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(update.prefix.as_str()))
+			.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None)
 			.await
 			.expect("resolve")
 	}

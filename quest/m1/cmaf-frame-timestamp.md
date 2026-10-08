@@ -30,11 +30,12 @@ shifts `trun` data offsets.
   the quest.
 - `main`: a behavior fix with no API change.
 
-Open PR [#4826](https://github.com/moq-dev/moq/pull/4826) implements this. It
-lands after [#4822](https://github.com/moq-dev/moq/pull/4822)
-([untimed model](/quest/m1/untimed-model.md)), which brings untimed frames to
-`main`. Timedness is per track there, so the decoder can check the track
-rather than each frame.
+Open PR [#4826](https://github.com/moq-dev/moq/pull/4826) implements this.
+Its blocker, [#4822](https://github.com/moq-dev/moq/pull/4822) (the untimed
+model), has merged. Timedness is per track there, so the decoder can check the
+track rather than each frame. It lands first among the CMAF decode changes:
+#5037 (in-band parameter sets), #5015 (catalog init), then
+[CMAF sample defaults](/quest/m1/cmaf-sample-defaults.md) rebase onto it.
 
 Test: in Rust and JS, a fragment whose `tfdt` disagrees with its frame
 timestamp decodes at the frame timestamp, with B-frame offsets preserved, and
@@ -43,10 +44,7 @@ an untimed fragment decodes at its `tfdt`.
 Public API: none. Wire: none; this states what the frame timestamp already
 means.
 
-## Required
-
-- [Untimed model](/quest/m1/untimed-model.md) - untimed frames reach `main`, so the `tfdt` fallback has something to decode
-
 ## Related
 
 - [Shared clock](/quest/m1/shared-clock.md) - the first publisher to rely on it
+- [CMAF sample defaults](/quest/m1/cmaf-sample-defaults.md) - the same `decode` functions, landing after this

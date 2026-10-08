@@ -7,7 +7,9 @@ use super::Version;
 use crate::ietf::Param;
 
 /// MOQ Object Property IDs (the MOQ Object Properties registry, shared with
-/// draft-ietf-moq-loc-04). Even type ids carry a single varint value.
+/// draft-ietf-moq-loc-04). Even type ids carry a single varint value. The object-scope
+/// Timescale is only skipped on decode, so only tests name it.
+#[cfg(test)]
 const PROP_TIMESCALE: u64 = 0x08;
 const PROP_TIMESTAMP: u64 = 0x10;
 
@@ -52,16 +54,15 @@ fn encode_object_property_type(w: &mut Encoder<'_>, kind: u64, prev: u64, versio
 /// Decode the Timestamp (0x10) Object Property from an object's extension block,
 /// skipping any other properties. Returns `None` when no Timestamp property is present.
 ///
-/// `timescale` is the track's declared units. An object-scope Timescale (0x08) overrides
-/// it for that object alone, which draft-ietf-moq-loc-04 permits and we still honor on
-/// decode even though we no longer write one.
+/// `timescale` is the track's declared units. An object-scope Timescale (0x08), which
+/// draft-ietf-moq-loc-04 permits, is ignored: timedness and units are per track, so the
+/// track's TIMESCALE alone decides them.
 pub fn decode_object_time(
 	r: &mut Decoder<'_>,
 	timescale: Timescale,
 	version: Version,
 ) -> Result<Option<Timestamp>, DecodeError> {
 	let mut timestamp: Option<u64> = None;
-	let mut override_scale: Option<u64> = None;
 	let mut prev_type: u64 = 0;
 	let mut first = true;
 
@@ -80,7 +81,6 @@ pub fn decode_object_time(
 			let value = r.varint()?;
 			match abs {
 				PROP_TIMESTAMP | PROP_TIMESTAMP_DRAFT03 => timestamp = Some(value),
-				PROP_TIMESCALE => override_scale = Some(value),
 				_ => {}
 			}
 		} else {
@@ -90,16 +90,9 @@ pub fn decode_object_time(
 		}
 	}
 
-	let Some(value) = timestamp else {
-		return Ok(None);
-	};
-	let scale = match override_scale {
-		Some(s) => Timescale::new(s).map_err(|_| DecodeError::InvalidValue)?,
-		None => timescale,
-	};
-	Ok(Some(
-		Timestamp::new(value, scale).map_err(|_| DecodeError::InvalidValue)?,
-	))
+	timestamp
+		.map(|value| Timestamp::new(value, timescale).map_err(|_| DecodeError::InvalidValue))
+		.transpose()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
@@ -140,9 +133,16 @@ impl Param for GroupOrder {
 
 	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let v = u8::param_decode(r, version)?;
-		Ok(GroupOrder::try_from(v)
-			.unwrap_or(GroupOrder::Descending)
-			.any_to_descending())
+		match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => Ok(GroupOrder::try_from(v)
+				.unwrap_or(GroupOrder::Descending)
+				.any_to_descending()),
+			_ => match v {
+				1 => Ok(GroupOrder::Ascending),
+				2 => Ok(GroupOrder::Descending),
+				_ => Err(DecodeError::InvalidValue),
+			},
+		}
 	}
 }
 
@@ -411,9 +411,9 @@ mod tests {
 		assert_eq!(varints(&buf, Version::Draft15), [PROP_TIMESTAMP, 96_000]);
 	}
 
-	/// An object-scope Timescale (which LOC permits) overrides the track's for that object.
+	/// An object-scope Timescale (which LOC permits) is ignored: the track's units apply.
 	#[test]
-	fn test_object_time_honors_an_object_scope_timescale() {
+	fn test_object_time_ignores_an_object_scope_timescale() {
 		let buf = from_varints(
 			&[
 				PROP_TIMESCALE,
@@ -426,10 +426,10 @@ mod tests {
 
 		let decoded = decode_time(&buf, Timescale::MICRO, Version::Draft18).unwrap();
 		assert_eq!(decoded.value(), 42);
-		assert_eq!(decoded.scale(), Timescale::MILLI);
+		assert_eq!(decoded.scale(), Timescale::MICRO);
 	}
 
-	/// Without an object-scope override, the track's timescale supplies the units.
+	/// The track's timescale supplies the units.
 	#[test]
 	fn test_object_time_defaults_to_the_track_scale() {
 		let buf = from_varints(&[PROP_TIMESTAMP, 1234], Version::Draft18);
@@ -449,7 +449,7 @@ mod tests {
 		assert_eq!(decoded.scale(), Timescale::MICRO);
 	}
 
-	/// No Timestamp property at all yields None (the caller wall-clock-stamps).
+	/// No Timestamp property at all yields None.
 	#[test]
 	fn test_object_time_absent() {
 		assert!(decode_time(&[], Timescale::MICRO, Version::Draft18).is_none());

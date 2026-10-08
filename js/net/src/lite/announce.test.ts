@@ -287,7 +287,7 @@ const GOLDEN_RESOLVED = [
 // Pinned from the Rust encoder (`lite::compress::tests::golden_stream_is_pinned`), so the
 // JS decoder is checked against real compressed output.
 const GOLDEN =
-	"001600000a726f6f6d2f612f63616d00029111a222000000000d0102036d69630101b3330100000209000101c04444010000010101000c020101620201c05555010000";
+	"001700000a726f6f6d2f612f63616d0000029111a222000000000e0102036d6963000101b3330100000209000101c04444010000010101000d02010162000201c05555010000";
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
@@ -295,7 +295,7 @@ test("AnnounceHistory resolves the Rust encoder's compressed stream", async () =
 
 // JS always encodes literally; Rust decodes these bytes too (`js_literal_stream_decodes`).
 const JS_LITERAL =
-	"001600000a726f6f6d2f612f63616d00029111a222000000001600000a726f6f6d2f612f6d69630002b333a222000000020b000002c04444a2220000000101010013000006726f6f6d2f620002c05555a222000000";
+	"001700000a726f6f6d2f612f63616d0000029111a222000000001700000a726f6f6d2f612f6d6963000002b333a222000000020b000002c04444a2220000000101010014000006726f6f6d2f62000002c05555a222000000";
 
 test("the literal draft-07 stream matches what Rust decodes", async () => {
 	const wire = await bytes(async (w) => {
@@ -391,12 +391,12 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 		expect(got).toMatchObject({ cost: { warm: ceiling, cold: ceiling } });
 	}
 
-	// ANNOUNCE_START: path base, path keep, empty suffix, hop base, no hops, hop keep, then
-	// warm and cold at 2^64-1, which only lite-07's varints can carry.
+	// ANNOUNCE_START: path base, path keep, empty suffix, no epoch, hop base, no hops, hop
+	// keep, then warm and cold at 2^64-1, which only lite-07's varints can carry.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
-		await w.u53(24);
-		for (const b of [0, 0, 0, 0, 0, 0]) await w.u8(b);
+		await w.u53(25);
+		for (const b of [0, 0, 0, 0, 0, 0, 0]) await w.u8(b);
 		await w.u62(huge);
 		await w.u62(huge);
 	}, Version.DRAFT_07);

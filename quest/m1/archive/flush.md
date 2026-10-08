@@ -23,13 +23,14 @@ Decided:
 - The segmenter stays pure: it takes `now` as an input and exposes the next
   wall-clock deadline at which a record must close. Callers arm the timer. The
   moq-archive writer uses tokio time; moq-mux's `Recorder` must stay wasm-safe
-  (moq-mux builds for wasm32), so it uses moq-net's runtime `Timer` or
-  `web_async` time, never `tokio::time`.
+  (moq-mux builds for wasm32), so it uses `web_async` time, never
+  `tokio::time` (moq-net's runtime `Timer` went away in #4437).
 - Manual flush is per track: `Control::flush(name)` on the writer, beside the
   broadcast-wide `cut`, and `Recorder::flush()` on a timeline.
-- JS mirrors it: `@moq/hang`'s `Timeline.Recorder` gets the same idle
-  deadline and a `flush()`, so Rust and JS timelines stay one API. Without it,
-  an idle browser track keeps today's unbounded behavior (Codex on #4301).
+- Rust only (decided 2026-10-07): JS publishes no timeline yet, so its idle
+  deadline and `flush()` belong to
+  [JS per-track timelines](/quest/m1/archive/js-timelines.md), and this quest
+  does not wait on the port.
 - The bound covers closing a record, not upload latency: a slow object-store
   PUT still delays the durable commit, which the writer already serializes.
 - Tests inject `now` into the segmenter and run the writer on paused tokio
@@ -37,6 +38,6 @@ Decided:
   track after a finished group, a manual flush mid-group, and a publisher whose
   timestamps run ahead of or behind the wall clock.
 
-## Required
+## Related
 
-- [Per-track timelines](/quest/m1/archive/track-timeline.md) - the per-track segmenter, writer, and JS recorder this extends, so the flush lands on the per-track shape rather than the aligned one it replaces
+- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - carries the JS idle deadline and `flush()`

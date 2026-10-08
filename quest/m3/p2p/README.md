@@ -79,8 +79,10 @@ negotiated `maxMessageSize` (256 KiB in Chrome).
 The cost is head-of-line blocking: one lost chunk stalls every stream until
 SCTP retransmits it. qmux frames already carry stream offsets, so the
 follow-up is a qmux transport parameter that permits reordering plus receiver
-reassembly, which [qmux on the QUIC core](/quest/m2/quic-qmux.md) provides
-for free. Both sides advertise that capability in the roster before the
+reassembly. [qmux on the QUIC core](/quest/m2/quic-qmux.md) provides that
+reassembly for the Rust qmux only, so [unordered qmux](/quest/m3/p2p/unordered.md)
+covers native pairs, and a pair with a browser stays ordered (decided
+2026-10-06). Both sides advertise that capability in the roster before the
 channel is created so it can run `ordered: false`; a loss then stalls only
 the stream it hit. `RTCDataChannel.ordered` cannot change after the
 channel exists, so the first qmux record is too late to choose. The
@@ -126,15 +128,15 @@ WASM build, so the browser side stays TypeScript.
 ## Required
 
 - [Data channel transport](/quest/m3/p2p/transport.md) - `@moq/p2p` speaks qmux over one ordered RTCDataChannel behind the WebTransport shape `@moq/net` consumes
+- [Peer grants](/quest/m3/p2p/peer-grant.md) - the relay issues a node-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
 - [Signaling and policy](/quest/m3/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
 - [Native data channel transport](/quest/m3/p2p/webrtc.md) - `moq-tokio` holds a moq-net session with a browser over str0m with a full ICE agent
 - [moq-cli joins](/quest/m3/p2p/cli.md) - `--p2p` publishes a roster entry with its iroh endpoint, dials iroh between native peers, and serves browsers as a transit hop
 - [Direct peers win](/quest/m3/p2p/cost-scopes.md) - a direct link wins only when the peer is the origin or a routing node, by link costs the node sets itself
 - [Watch opts in](/quest/m3/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the cheapest route
 - [Harness](/quest/m3/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
-- [Unordered qmux](/quest/m3/p2p/unordered.md) - qmux tolerates reordering so the data channel runs unordered and a loss stalls one stream
+- [Unordered qmux](/quest/m3/p2p/unordered.md) - between native peers, qmux tolerates reordering so the data channel runs unordered and a loss stalls one stream
 
 ## Related
 
-- [Peer grants](/quest/m1/auth/peer-grant.md) - the hop-bound credential a direct session presents; HMAC keys issue none
 - [E2EE](/quest/m1/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary

@@ -34,15 +34,20 @@ from whichever platform a user happened to be on.
   they do not get their own schema.
 - Add the lane to the nightly matrix beside the browser one.
 
-Nothing here is a second estimator. Compare the two runtimes at the estimator
-first: the target series each produces from the same arrival trace, which is
-the conformance corpus's own comparison and carries no device timing in it. A
-disagreement there is a finding against [Audio jitter
-target](/quest/m0/audio-jitter-target/README.md) and never a reason to widen a
-budget. Only then compare end-to-end totals, with the backend-dependent stages
-isolated: this lane deliberately accepts real device callback noise, so a
-difference in totals alone proves nothing about the estimator.
+Nothing here is a second estimator, and this lane does not compare the two
+runtimes' target series: the [Audio jitter
+target](/quest/m0/audio-jitter-target/README.md) line replays its recorded
+trace through the native decode path and asserts the browser's target series
+(2026-10-06 audit). This lane relies on that result; a disagreement there is
+a finding against that line and never a reason to widen a budget. It grades
+only end-to-end budgets, with the backend-dependent stages isolated: this
+lane deliberately accepts real device callback noise, so a difference in
+totals alone proves nothing about the estimator.
 
 Standalone in m1 rather than a child of the m0 audio quality harness line
 (decided in the 2026-09-28 quest audit): nothing in m0 waits on it. The native jitter target
 it grades is done on the jitter target line.
+
+## Related
+
+- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - its native trace replay is the estimator comparison this lane relies on

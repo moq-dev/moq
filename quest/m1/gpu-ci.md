@@ -16,7 +16,8 @@ skipping inside the Nix shell.
   Nix shell's loader path lacks Ubuntu's `/usr/lib/x86_64-linux-gnu`.
 - Select every test that needs the GPU, not only names containing `nvdec`,
   `nvenc`, or `cuda`: `safe::session::tests::failed_submission_releases_the_session`
-  in `rs/moq-nvenc` needs hardware and matches none of them. Find them by
+  and `safe::session::tests::start_session_refuses_held_frames` in `rs/moq-nvenc`
+  need hardware and match none of them. Find them by
   their driver probes (`hw_available`, `driver_libs_present`, `Api::get` and
   friends in `moq-nvenc` and `moq-video`). Recommendation: follow the
   existing `#[ignore = "requires ..."]` convention (as `frame/vulkan_test.rs`

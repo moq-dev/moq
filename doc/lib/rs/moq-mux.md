@@ -14,27 +14,28 @@ Turns existing container formats into hang broadcasts and back. This is what
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
 | fMP4 / CMAF | yes | yes | Passthrough as `cmaf` or repackaged as `legacy`. |
-| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
+| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1 for a Vorbis head (other mappings refused); SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
 | Matroska / WebM | yes | yes | |
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
 
 Importers parse the bitstream to fill the catalog (resolution, codec string,
 `description`), split groups at keyframes, and stamp timestamps. Exporters do
-the inverse and skip stalled groups past a max age. Per-codec
+the inverse and skip stalled groups past a max delay. Per-codec
 producers (`import::Opus`, H.264, and so on) are available for feeding frames
 you already have.
 
-MPEG-TS `Import::stats` returns cumulative per-PID `StreamStats`: delivered
-`units`, transport-clock `quiet` time, a `class` of audio, video, or data, audio
-`resyncs`, scanned bytes `discarded`, frames `unconfirmed`, damaged units refused
-in `damaged`, and the PID's share of the TR 101 290 counters. A malformed media
-packet, PES header, or codec unit is dropped whole; only that PID loses sync, and
-video closes its group at the break and waits for its next keyframe. Publishing
-and catalog failures remain fatal. `ts::stats::Log` reports these counters for
+MPEG-TS `Import::stats` returns a `ts::stats::Snapshot` of cumulative per-PID
+`ts::stats::Stream` rows: delivered `units`, transport-clock `quiet` time, a
+`class` of audio, video, or data, audio `resyncs`, scanned bytes `discarded`,
+frames `unconfirmed`, damaged units refused in `damaged`, and the PID's share of
+the TR 101 290 counters. A malformed media packet, PES header, or codec unit is
+dropped whole; only that PID loses sync, and video closes its group at the break
+and waits for its next keyframe. Publishing and catalog failures remain fatal. `ts::stats::Log` reports these counters for
 both the CLI and SRT gateway, and grades a stopped stream for audio and video
 only; a sparse data PID such as SCTE-35 stays in the row and is not logged for a
-quiet second. The exporter's `damaged` count remains zero.
+quiet second. `Export::stats` returns a `ts::stats::Export` of the same rows,
+where only `units` and `quiet` move.
 
 fMP4 export emits one fragment per publisher group by default, including audio.
 A closed group flushes even if the live publisher pauses before its next frame.
