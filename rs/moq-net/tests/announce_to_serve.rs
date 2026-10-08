@@ -12,9 +12,9 @@ mod support;
 
 use std::time::Duration;
 
+use futures::{StreamExt, channel::mpsc};
 use moq_net::{Error, Hop, Timestamp, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
-use tokio::sync::mpsc;
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
 const SETTLE: Duration = Duration::from_secs(1);
@@ -23,7 +23,7 @@ const PATH: &str = "bcast";
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -45,7 +45,6 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 			Event::Start(announce) => ("Start", announce),
 			Event::Update(announce) => ("Update", announce),
 			Event::End(announce) => ("End", announce),
-			Event::Live => continue,
 		};
 		seen.push(format!("{kind} {}", announce.prefix));
 	}
@@ -54,7 +53,7 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 
 /// How a request for the path answers.
 async fn request(consumer: &origin::Consumer) -> Result<moq_net::broadcast::Consumer, String> {
-	consumer.request_broadcast(PATH).await.map_err(|err| match err {
+	consumer.request_broadcast(PATH, None).await.map_err(|err| match err {
 		Error::Unroutable => "unroutable".to_string(),
 		err => err.to_string(),
 	})
@@ -78,17 +77,17 @@ async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::Unb
 		.subscribe(subscription)
 		.await
 		.expect("subscribe");
-	let (tx, rx) = mpsc::unbounded_channel();
-	tokio::spawn(async move {
+	let (tx, rx) = mpsc::unbounded();
+	moq_net_sim::spawn(async move {
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
 				Ok(None) => {
-					let _ = tx.send("end".to_string());
+					let _ = tx.unbounded_send("end".to_string());
 					return;
 				}
 				Err(err) => {
-					let _ = tx.send(format!("error {err}"));
+					let _ = tx.unbounded_send(format!("error {err}"));
 					return;
 				}
 			};
@@ -96,7 +95,7 @@ async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::Unb
 			while let Ok(Some(frame)) = group.read_frame().await {
 				frames.push(String::from_utf8_lossy(&frame.payload).into_owned());
 			}
-			if tx.send(frames.join(",")).is_err() {
+			if tx.unbounded_send(frames.join(",")).is_err() {
 				return;
 			}
 		}
@@ -106,7 +105,7 @@ async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::Unb
 
 /// The reader's next report, or `stalled` if nothing arrives in time.
 async fn next(rx: &mut mpsc::UnboundedReceiver<String>) -> String {
-	match tokio::time::timeout(SETTLE, rx.recv()).await {
+	match moq_net_sim::timeout(SETTLE, rx.next()).await {
 		Ok(Some(report)) => report,
 		_ => "stalled".to_string(),
 	}
@@ -139,7 +138,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	// Created, not yet announced: nobody can see or reach it.
 	let broadcast = publisher.create_broadcast(PATH).unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
-	tokio::time::sleep(SETTLE).await;
+	moq_net_sim::sleep(SETTLE).await;
 	log.push(format!(
 		"created: {:?} {}",
 		drain(&mut announced),
@@ -148,14 +147,14 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	// Announced: listed, and a request resolves.
 	broadcast.announce(Default::default()).unwrap();
-	tokio::time::sleep(SETTLE).await;
+	moq_net_sim::sleep(SETTLE).await;
 	let first = request(&consumer).await;
 	log.push(format!("announced: {:?} {}", drain(&mut announced), outcome(&first)));
 	let first = first.expect("an announced broadcast resolves");
 
 	// A track in flight across the unannounce.
 	let mut reader = read(&first, "video").await;
-	tokio::time::timeout(SETTLE, track.demand().used())
+	moq_net_sim::timeout(SETTLE, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -166,7 +165,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	// than joining the broadcast still draining, which ends, while the track
 	// already in flight carries on to its own end.
 	broadcast.unannounce();
-	tokio::time::sleep(SETTLE).await;
+	moq_net_sim::sleep(SETTLE).await;
 	log.push(format!(
 		"unannounced: {:?} {} closed={}",
 		drain(&mut announced),
@@ -183,7 +182,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	// Announced again: listed and servable, through a fresh broadcast.
 	broadcast.announce(Default::default()).unwrap();
-	tokio::time::sleep(SETTLE).await;
+	moq_net_sim::sleep(SETTLE).await;
 	let again = request(&consumer).await;
 	log.push(format!(
 		"reannounced: {:?} {} fresh={}",
@@ -195,7 +194,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	let audio = broadcast.create_track("audio", None).unwrap();
 	let mut reader = read(&again, "audio").await;
-	tokio::time::timeout(SETTLE, audio.demand().used())
+	moq_net_sim::timeout(SETTLE, audio.demand().used())
 		.await
 		.expect("no subscriber appeared after reannouncing")
 		.unwrap();
@@ -215,21 +214,18 @@ const EXPECTED: &[&str] = &[
 	"serving again: again",
 ];
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn local_consumer_sees_only_announced_broadcasts() {
-	tokio::time::pause();
 	assert_eq!(lifecycle(Observer::Local).await, EXPECTED);
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn remote_lite_consumer_sees_what_a_local_one_does() {
-	tokio::time::pause();
 	assert_eq!(lifecycle(Observer::Remote("moq-lite-05")).await, EXPECTED);
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn remote_ietf_consumer_sees_what_a_local_one_does() {
-	tokio::time::pause();
 	// Drafts 14 to 16 carry each request over the control stream; 17 and later give it
 	// its own stream. Both have to end a finished track the way moq-lite does.
 	for version in [

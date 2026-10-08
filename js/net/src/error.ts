@@ -92,10 +92,12 @@ export const StreamCode = Object.freeze(
 		Evicted: 0x35 as StreamCode,
 		/** A frame declared a payload larger than the receiver accepts. */
 		FrameTooLarge: 0x38 as StreamCode,
-		/** The publisher could serve this request but has no capacity for it now. */
-		NoCapacity: 0x30 as StreamCode,
+		/** The broadcast is neither announced nor served, so there is no route to it. */
+		Unroutable: 0x36 as StreamCode,
 		/** A group grew past its cache budget and was aborted. */
 		GroupTooLarge: 0x32 as StreamCode,
+		/** A frame's timedness or timestamp doesn't match its track's timescale. */
+		TimestampMismatch: 0x39 as StreamCode,
 	} as const),
 );
 
@@ -151,7 +153,7 @@ export interface StreamOptions {
  * This surfaces on every transport, so catch this type rather than feature-detecting
  * `WebTransportError`, which a non-browser runtime never defines and the WebSocket fallback
  * never throws. Local conditions with a code of their own subclass it ({@link TooFarBehind},
- * {@link FrameTooLarge}, {@link GroupTooLarge}, {@link NotFound}), so the same `code` check catches a condition
+ * {@link FrameTooLarge}, {@link GroupTooLarge}, {@link TimestampMismatch}, {@link NotFound}), so the same `code` check catches a condition
  * whether it was raised here or reported by the peer.
  *
  * ```ts
@@ -231,6 +233,25 @@ export class GroupTooLarge extends Stream {
 			message: "group too large: exceeded the cache budget",
 		});
 		this.name = "GroupTooLarge";
+	}
+}
+
+/**
+ * A frame's timedness doesn't match its track: a timestamp on a track with no timescale, or
+ * none on a track that has one.
+ *
+ * Raised locally by a frame or datagram write, and decoded from a moq-lite peer's
+ * `TIMESTAMP_MISMATCH` reset. Mirrors the Rust `Error::TimestampMismatch`.
+ *
+ * @public
+ */
+export class TimestampMismatch extends Stream {
+	constructor(options?: { cause?: unknown }) {
+		super(StreamCode.TimestampMismatch, {
+			...options,
+			message: "frame timestamp doesn't match track timescale",
+		});
+		this.name = "TimestampMismatch";
 	}
 }
 
@@ -376,6 +397,7 @@ export function fromTransport(err: unknown, options?: TransportErrorOptions): Er
 	if (code === StreamCode.TooFarBehind) return new TooFarBehind({ cause: err });
 	if (code === StreamCode.FrameTooLarge) return new FrameTooLarge({ cause: err });
 	if (code === StreamCode.GroupTooLarge) return new GroupTooLarge({ cause: err });
+	if (code === StreamCode.TimestampMismatch) return new TimestampMismatch({ cause: err });
 	return new Stream(code, { cause: err });
 }
 

@@ -7,7 +7,8 @@
  */
 import type { Dispose, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Frame, Consumer as GroupConsumer } from "./group.ts";
+import type * as Epoch from "./epoch.ts";
+import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
@@ -160,6 +161,11 @@ export const hooks: {
 	 * `setGroups`, which never rewinds.
 	 */
 	replaceGroups: (subscriber: Subscriber, groups: Groups) => void;
+	/**
+	 * Bind a group to its track's timedness, so a frame whose timestamp disagrees is refused.
+	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
+	 */
+	bindGroupTimed: (group: GroupProducer, timed: boolean) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
@@ -177,10 +183,12 @@ export const hooks: {
 	/** Attach the origin advertisement of a created broadcast. */
 	attachAnnouncer: (
 		producer: BroadcastProducer,
-		announcer: { announce(route: Route): void; unannounce(): void },
+		announcer: { announce(route: Route): void; unannounce(): void; route(): Route | undefined },
 	) => void;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
+	/** Name the epoch of the route an origin resolved a broadcast handle through. */
+	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 } = {
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");
@@ -199,6 +207,9 @@ export const hooks: {
 	},
 	replaceGroups: () => {
 		throw new Error("track.ts not loaded");
+	},
+	bindGroupTimed: () => {
+		throw new Error("group.ts not loaded");
 	},
 	groupTimestamp: () => {
 		throw new Error("group.ts not loaded");
@@ -224,4 +235,27 @@ export const hooks: {
 	stampPath: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
+	stampEpoch: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
 };
+
+/**
+ * Spreads equal routes across paths: FNV-1a 64 of `path` then each hop, oldest first, as 8
+ * little-endian bytes. Keyed on the requested path so an equal-cost pool advertising one
+ * prefix shares its paths, and every node holding the same routes picks the same member.
+ * Mirrors `fnv_key` in `rs/moq-net`; the seed is the draft's Spread Hash offset basis.
+ */
+export function spreadHash(path: string, hops: readonly bigint[]): bigint {
+	const prime = 0x100000001b3n;
+	let hash = 0x420c0decb00bn;
+	for (const byte of new TextEncoder().encode(path)) {
+		hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * prime);
+	}
+	for (const hop of hops) {
+		for (let shift = 0n; shift < 64n; shift += 8n) {
+			hash = BigInt.asUintN(64, (hash ^ ((hop >> shift) & 0xffn)) * prime);
+		}
+	}
+	return hash;
+}

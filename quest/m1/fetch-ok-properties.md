@@ -26,13 +26,14 @@ sends an empty block.
   Ascending order and priority 128 where SUBSCRIBE_OK says Descending.
 - FETCH preserves object properties, Timestamp included. Decided in the
   2026-10-05 audit (maintainer: "FETCH must send stamped objects? It's not
-  legal to remove the property."): the standalone FETCH path sending its
-  objects unstamped because no SUBSCRIBE declared a timescale
-  (`ietf/publisher.rs`, around line 1346) is a bug to fix here. FETCH_OK declares the track's TIMESCALE, and every
-  fetched object keeps its Timestamp, so a fetch-only reader is timed exactly
-  when the track is, as [Typed timedness](/quest/m1/typed-timedness.md)
-  requires. Rejected: omitting timescale from FETCH_OK and leaving fetch-only
-  readers untimed.
+  legal to remove the property."). [#4822](https://github.com/moq-dev/moq/pull/4822) makes the standalone FETCH keep
+  each object's Timestamp in the track's units, since a subscribed relay
+  treats a timed track's object without one as malformed. What's left here is
+  FETCH_OK declaring the track's TIMESCALE, so a fetch-only reader is timed
+  exactly when the track is, as the untimed model requires. Today our
+  subscriber takes the units only from SUBSCRIBE_OK, and a fetch-only reader
+  is untimed. Rejected: omitting timescale from FETCH_OK and leaving
+  fetch-only readers untimed.
 - Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20, once
   [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) serves draft-20 FETCH at
   all (today our publisher refuses every one). It defaults to sending the

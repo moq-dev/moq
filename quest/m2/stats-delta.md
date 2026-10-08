@@ -20,9 +20,10 @@ stats subscriber in the worst scenario below), so bytes alone do not justify
 a new format. The motivation is relay encode CPU at 10k+ broadcasts and
 aggregator fan-in. #4019 already cut `.json.z` decode allocations about 42x
 (time 2.5-4x) by dropping per-key path tracking; `rs/moq-stats/benches/decode.rs`
-measures it. Proceed only if CPU still matters after a profile of the
-moq-json snapshot encoder (about 100 ms per tick at 10k broadcasts) has fixed
-or ruled out its cost. Re-run the benchmark against that baseline; if JSON is
+measures it. `rs/moq-stats/benches/producer_tick.rs` profiles the encode side:
+a full rewrite at 10k held paths is about 22 ms per tick for one tier and
+91 ms for four. Proceed only if CPU still matters after that profile has fixed
+or ruled out the moq-json snapshot encoder's cost. Re-run the benchmark against that baseline; if JSON is
 close enough, abandon this quest with the numbers.
 
 **Evidence.** A prototype benchmark on top of #3955's commit `d86496be2`
@@ -105,10 +106,6 @@ maintainer's call; ask before writing one.
 
 Public API impact: additive on moq-stats unless the helpers change. Wire
 impact: new on-demand tracks; existing tracks unchanged.
-
-## Required
-
-- [Bench coverage](/quest/m2/bench-coverage.md) - its stats producer benchmark is the moq-json snapshot encoder profile the gate needs
 
 ## Related
 

@@ -308,8 +308,10 @@ mod tests {
 		let before = spawned();
 
 		// `--cluster-id 0` is rejected, so the cache is dropped before it is attached.
-		let mut cluster = crate::cluster::Config::default();
-		cluster.id = Some(0);
+		let cluster = crate::cluster::Config {
+			id: Some(0),
+			..Default::default()
+		};
 		assert!(attach(&governed(), cluster).is_err(), "cluster id 0 is rejected");
 
 		settle().await;

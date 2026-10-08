@@ -166,7 +166,7 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Catal
 /// segment, and silently skipping it would mask a publisher bug.
 fn container_from_msf(track: &moq_msf::Track) -> Result<Option<Container>> {
 	match &track.packaging {
-		// Neither is ISO-BMFF boxed, but they frame differently: a LOC property block against a VarInt
+		// Neither is ISO-BMFF boxed, but they frame differently: a LOC property block against a varint
 		// timestamp prefix. Reading one as the other misparses the head of every frame.
 		moq_msf::Packaging::Loc => Ok(Some(Container::Loc)),
 		moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),
@@ -233,7 +233,6 @@ fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> 
 	config.coded_width = track.width;
 	config.coded_height = track.height;
 	config.bitrate = track.bitrate;
-	config.stalled = track.stalled;
 	config.framerate = track.framerate;
 	config.container = container;
 	config.jitter = track.jitter;
@@ -408,7 +407,6 @@ mod test {
 		track.height = Some(1080);
 		track.framerate = Some(30.0);
 		track.bitrate = Some(5_000_000);
-		track.stalled = Some(true);
 		track.init_data = init_data.map(str::to_string);
 		track.render_group = Some(1);
 		track
@@ -446,7 +444,6 @@ mod test {
 		assert_eq!(video.coded_height, Some(1080));
 		assert_eq!(video.framerate, Some(30.0));
 		assert_eq!(video.bitrate, Some(5_000_000));
-		assert_eq!(video.stalled, Some(true));
 	}
 
 	#[test]

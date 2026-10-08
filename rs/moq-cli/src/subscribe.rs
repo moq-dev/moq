@@ -176,7 +176,7 @@ pub struct SubscribeArgs {
 	pub format: SubscribeFormat,
 
 	/// How far playback may drift from the live edge before skipping groups.
-	pub max_age: Duration,
+	pub max_delay: Duration,
 
 	/// How long to wait for the broadcast to come back after it ends (TS only).
 	pub linger: Duration,
@@ -276,7 +276,7 @@ impl Subscribe {
 		// yields moof+mdat fragments in timestamp order across tracks.
 		let stream = self.stream().await?;
 		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.source, stream)
-			.with_max_age(self.args.max_age)
+			.with_max_delay(self.args.max_delay)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = fmp4.next().await? {
@@ -295,7 +295,7 @@ impl Subscribe {
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
 		let stream = self.stream().await?;
 		let mut mkv = moq_mux::container::mkv::Export::new(self.source, stream)
-			.with_max_age(self.args.max_age)
+			.with_max_delay(self.args.max_delay)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = mkv.next().await? {
@@ -310,7 +310,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_max_age(self.args.max_age);
+		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -324,7 +324,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_max_age(self.args.max_age);
+		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -346,7 +346,7 @@ impl Subscribe {
 		let mut broadcast = source.broadcast().await?;
 		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
-			.with_max_age(self.args.max_age);
+			.with_max_age(self.args.max_delay);
 		if let Some(mux_rate) = self.args.mux_rate {
 			ts = ts.with_mux_rate(mux_rate);
 		}
@@ -359,7 +359,7 @@ impl Subscribe {
 		// repair (#2984). See [`Delivery`] for how the pacing stays
 		// bounded; it needs to know whether each frame was waited for, hence the
 		// hand-rolled poll instead of `ts.next()`.
-		let mut delivery = Delivery::new(self.args.max_age);
+		let mut delivery = Delivery::new(self.args.max_delay);
 		let linger = self.args.linger;
 		// Reports a track that stops reaching the output while the rest keeps flowing,
 		// the way `publish` reports one that stops arriving.
@@ -387,7 +387,7 @@ impl Subscribe {
 
 				if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 					sampled = tokio::time::Instant::now();
-					log.sample(ts.stats());
+					log.sample(ts.stats().into());
 				}
 			};
 
@@ -416,11 +416,8 @@ impl Subscribe {
 		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
-		let select = self.args.selection()?;
-		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.source, self.catalog)
-			.await?
-			.with_max_age(self.args.max_age)
-			.with_select(select);
+		let stream = self.stream().await?;
+		let mut flv = moq_mux::container::flv::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
 
 		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;

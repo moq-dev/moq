@@ -19,9 +19,11 @@ Docker; see [Install](/setup/install).
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Pull a remote HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
+| `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
+| `export` | `archive <url>` | Record the broadcast into an object store. |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
 | `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
@@ -42,10 +44,12 @@ moq <MoQ side> fetch <track> [options]
 The **MoQ side** goes first and attaches the process to the network:
 `--connect <url>` dials a relay (the path is the auth path, `?jwt=`
 carries a token), and `--broadcast <name>` names the broadcast. A process can
-instead host sessions with `--listen`, or both at once. A listener admits
+instead host sessions with `--listen`, or both at once; without a listener,
+the `--listen-*` and `--auth-*` flags are refused. A listener admits
 clients by `--auth-url` or `--auth-public`, as the relay does (see
 [Authentication](/bin/relay/auth)); public rules ignore certificates, so
-`--auth-public` refuses to start with `--listen-tls-root`. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
+`--auth-public` refuses to start with `--listen-tls-root`, and only `--listen`
+(QUIC) verifies one. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
@@ -135,6 +139,16 @@ MPEG-TS export frames AAC as ADTS, which labels only the AAC Main, LC, SSR,
 and LTP profiles. HE-AAC and HE-AACv2 go out as their AAC-LC core, and decoders
 find the SBR and PS in band, as ffmpeg's ADTS output does. A track whose
 profile or channel layout ADTS cannot label is refused rather than mislabeled.
+An Opus track is labeled with the plain channel code its extension descriptor
+can name: a family 0 head, a family 1 head with the Vorbis mapping, or mono or
+stereo when the track has no OpusHead. Any other head is refused rather than
+written with a guessed channel code.
+
+An AAC layout without a channelConfiguration, such as quad, rides in a program
+config element. `export ts` repeats it in the first frame after each PAT/PMT, so a
+receiver tuning in mid-stream can decode. ffmpeg writes it in the first frame
+only, so `import ts` joining an ffmpeg source mid-stream publishes the rest of
+the program without that AAC track, and adds the track if an element arrives.
 
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
@@ -148,7 +162,7 @@ The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports select renditions with
 flags before the sink: `--video-name` and `--audio-name` pick a rendition,
 `--video-codec` and `--audio-codec` keep a codec family, and `--no-video` or
 `--no-audio` leaves a role out. `h264` and `h265` refuse `--no-video` and the
-audio selection flags. `ts` and the gateways don't apply selection, so they
+audio selection flags. `ts`, `archive`, and the gateways don't apply selection, so they
 refuse these flags.
 
 ```bash
@@ -186,11 +200,12 @@ moq ... play --no-video             # audio only
 
 Decodes H.264, H.265, and AV1 video using the platform hardware decoder where
 available, and Opus, PCM, and AAC-LC (mono or stereo) audio in software. The
-log names the decoder each track opened. `--video-name` and `--audio-name`
-pick a rendition, and `--no-video` or `--no-audio` leaves a role out.
-`--no-video` still opens a window, which stays blank; closing it stops
-playback. HE-AAC signaled only in band (implicit SBR, as over MPEG-TS) plays as
-its half-rate AAC-LC core.
+opt-in `vpx` feature adds software VP8 and VP9 (8-bit 4:2:0) through libvpx,
+which the build host must provide. The log names the decoder each track
+opened. `--video-name` and `--audio-name` pick a rendition, and `--no-video` or
+`--no-audio` leaves a role out. `--no-video` still opens a window, which stays
+blank; closing it stops playback. HE-AAC signaled only in band (implicit SBR, as
+over MPEG-TS) plays as its half-rate AAC-LC core.
 
 Playback runs on a clock it owns. `--delay` is how far it trails the live
 edge: the jitter a late frame may absorb. The default, `auto`, measures how
@@ -333,9 +348,49 @@ zero-based `frame` and padded standard base64.
 
 `<track>` is the literal track name. `/fetch` splits its path on the last `/`,
 so the two agree only for names without one. Fetch only dials `--connect`, and
-refuses any listener, cluster, auth, or `--hop` flag. It gives up after 30
+refuses any listener, cluster, auth, or `--epoch` flag. It gives up after 30
 seconds, as `/fetch` does, and exits non-zero when the broadcast or group is not
 found (before writing anything), the relay refuses, or the deadline passes.
+
+## Archive
+
+```bash
+# Record a broadcast until it ends
+moq --connect https://relay.example.com/anon --broadcast event.hang export archive s3://recordings/event
+
+# Replay it under another name
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event
+```
+
+`export archive` records one broadcast with
+[moq-archive](https://docs.rs/moq-archive), reading its catalog as it changes.
+Every track gets its own timeline, stored in spans cut at group boundaries
+between 2s and 10s. The catalog and every text, JSON, and binary track are
+sparse data, so each of their groups is stored as soon as it finishes, and a
+group that never closes is stored in pieces as it grows. It refuses a rendition served
+from another broadcast, one that returns after the catalog dropped it, and an
+untimed track, which has no timestamps to record (any track over moq-lite before
+05, or moq-transport without `TIMESCALE`, such as drafts 14–16). The
+stage ends once the broadcast does. A store URL that already holds a
+recording is continued: each track resumes after its newest stored span. A source
+announced under another [epoch](/concept/moq-lite#publisher-epochs) than the recording
+restarted, so the export fails; start a new prefix. A source without an epoch fails the
+same way once its timestamps jump back before the stored span. `--retention 1h` keeps only the last hour (a DVR),
+deleting expired objects, and timeline objects no longer needed to recover it,
+`--retention-grace` (default 30s) after the timeline stops needing them. Every
+track keeps at least its newest span, so a catalog that never changes outlives
+the video it was published with.
+
+`import archive` republishes a recording: each track's timeline replays as a
+live track and every track's groups are served on request, one object GET per
+stored span. By default it replays what is stored and ends the timelines there;
+`--follow 2s` keeps checking for new spans, and newly recorded tracks, of a
+recording still being made.
+
+Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
+`gs://bucket/prefix`, or `az://container/prefix`. Cloud credentials come from
+the usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables. The `s3`,
+`gcs`, and `azure` cargo features are on by default.
 
 ## Multiple stages
 
@@ -345,16 +400,34 @@ over one connection:
 ```bash
 moq --connect https://relay.example.com/anon \
     import --broadcast event.hang srt --listen 0.0.0.0:9000 \
-    -- export --broadcast event.hang hls --listen 0.0.0.0:8080
+    -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
+    -- export --broadcast event.hang archive file:///recordings/event
 ```
 
 ## Redundant publishers
 
-Two publishers of the same broadcast name are interchangeable sources:
-relays hold both routes and fail over between them mid-group. They must
-produce identical tracks with aligned groups. A restarted encoder is the same
-broadcast too, so one whose groups restart from 0 must publish under a new
-name, or viewers wait for its sequence to catch up.
+Each run announces a fresh epoch, so a restarted publisher replaces the old
+broadcast instead of resuming into it. Two publishers that pass the same
+`--epoch` (a lowercase, hyphenated UUIDv7, such as util-linux `uuidgen -7`
+prints) are interchangeable sources: relays hold both routes and fail over
+between them mid-group. They must produce identical tracks with aligned groups,
+which no importer guarantees yet (see
+[#4352](https://github.com/moq-dev/moq/issues/4352) and
+[#4354](https://github.com/moq-dev/moq/issues/4354)). A member restarted with
+the same epoch rejoins as the same content, so if its groups restart from 0,
+viewers wait for its sequence to catch up.
+
+```bash
+EPOCH=$(uuidgen -7)
+# On each of the two hosts:
+moq --connect https://relay.example.com/anon --broadcast event.hang --epoch "$EPOCH" import ts < feed.ts
+```
+
+`--epoch` applies to the sources announced once per run. The RTMP, SRT, and
+WHIP ingests and `import ts --program all` announce their own, so they refuse it.
+
+`--epoch` replaces the removed `--hop`. `MOQ_HOP` is no longer read, so drop it
+from any deployment and pass `MOQ_EPOCH` instead.
 
 ## Cluster
 
@@ -427,8 +500,9 @@ See [Authentication](/bin/relay/auth).
 ## Retention and latency
 
 `import --max-age` (default 30 s) tells relays how long to keep old
-groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-age` (default 500 ms) is how long *this* consumer waits for a
-stalled group before skipping. Raising the first never delays playback.
+groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-delay` (default 500 ms) is how far a stalled group may fall
+behind the live edge before *this* consumer skips it. Raising the first never delays playback.
+`export ts` still spells its budget `--max-age`.
 
 For `export ts`, `--max-age` also bounds how long the muxer holds a leading
 track for a lagging one. Frames go out in media-time order across all tracks,

@@ -30,14 +30,20 @@ use std::{
 	time::Duration,
 };
 
+#[cfg(test)]
+mod mem;
 mod preset;
 
 pub use preset::Preset;
 
 use anyhow::Context;
+#[cfg(test)]
+use mem::UdpSocket;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 use serde::{Deserialize, Serialize};
-use tokio::{net::UdpSocket, sync::mpsc, task::JoinSet, time::Instant};
+#[cfg(not(test))]
+use tokio::net::UdpSocket;
+use tokio::{sync::mpsc, task::JoinSet, time::Instant};
 
 /// How one direction of the path treats each datagram.
 ///
@@ -405,6 +411,8 @@ pub struct Shaper {
 	tally: Arc<[Tally; 2]>,
 	/// Why forwarding stopped, if it did.
 	failed: Arc<OnceLock<String>>,
+	/// How many [`Outage`]s are holding the path down.
+	cuts: Arc<AtomicU64>,
 	task: tokio::task::JoinHandle<()>,
 }
 
@@ -423,12 +431,14 @@ impl Shaper {
 
 		let tally = Arc::new([Tally::default(), Tally::default()]);
 		let failed = Arc::new(OnceLock::new());
+		let cuts = Arc::new(AtomicU64::new(0));
 		let task = tokio::spawn({
 			let setup = setup.clone();
 			let tally = tally.clone();
 			let failed = failed.clone();
+			let cuts = cuts.clone();
 			async move {
-				if let Err(err) = run(Arc::new(listen), setup, tally).await {
+				if let Err(err) = run(Arc::new(listen), setup, tally, cuts).await {
 					let _ = failed.set(format!("{err:#}"));
 				}
 			}
@@ -439,8 +449,21 @@ impl Shaper {
 			setup,
 			tally,
 			failed,
+			cuts,
 			task,
 		})
+	}
+
+	/// Take the path down both ways until the returned [`Outage`] drops.
+	///
+	/// Every datagram is dropped untreated meanwhile, the way a severed link
+	/// loses it, so it counts toward no impairment. Datagrams already treated
+	/// still leave on time; only what arrives during the outage is lost.
+	pub fn cut(&self) -> Outage {
+		self.cuts.fetch_add(1, Ordering::Relaxed);
+		Outage {
+			cuts: self.cuts.clone(),
+		}
 	}
 
 	/// The address clients send to.
@@ -523,6 +546,23 @@ impl Drop for Shaper {
 	}
 }
 
+/// A path taken down by [`Shaper::cut`]; dropping it restores the path.
+#[must_use = "dropping the outage restores the path at once"]
+pub struct Outage {
+	cuts: Arc<AtomicU64>,
+}
+
+impl Drop for Outage {
+	fn drop(&mut self) {
+		self.cuts.fetch_sub(1, Ordering::Relaxed);
+	}
+}
+
+/// Whether an [`Outage`] is holding the path down.
+fn is_cut(cuts: &AtomicU64) -> bool {
+	cuts.load(Ordering::Relaxed) > 0
+}
+
 const UP: usize = 0;
 const DOWN: usize = 1;
 
@@ -562,7 +602,7 @@ fn bump(counter: &AtomicU64) {
 /// A flow is a socket of its own toward the target, so the target sees one
 /// address per client just as it would without the shaper in the way. Each
 /// flow takes a link of its own each way, unless the path is shared.
-async fn run(listen: Arc<UdpSocket>, setup: Setup, tally: Arc<[Tally; 2]>) -> anyhow::Result<()> {
+async fn run(listen: Arc<UdpSocket>, setup: Setup, tally: Arc<[Tally; 2]>, cuts: Arc<AtomicU64>) -> anyhow::Result<()> {
 	let config = &setup.config;
 	let mut flows = HashMap::<SocketAddr, Flow>::new();
 	let mut tasks = JoinSet::new();
@@ -585,6 +625,9 @@ async fn run(listen: Arc<UdpSocket>, setup: Setup, tally: Arc<[Tally; 2]>) -> an
 			}
 
 		};
+		if is_cut(&cuts) {
+			continue;
+		}
 		let now = Instant::now();
 
 		let number = flows.len() as u64;
@@ -604,6 +647,7 @@ async fn run(listen: Arc<UdpSocket>, setup: Setup, tally: Arc<[Tally; 2]>) -> an
 					listen.clone(),
 					from,
 					tally.clone(),
+					cuts.clone(),
 				));
 
 				entry.insert(Flow { upstream, up })
@@ -670,12 +714,13 @@ async fn reply(
 	listen: Arc<UdpSocket>,
 	client: SocketAddr,
 	tally: Arc<[Tally; 2]>,
+	cuts: Arc<AtomicU64>,
 ) -> anyhow::Result<()> {
 	let mut buf = vec![0u8; u16::MAX as usize];
 	loop {
 		let (size, from) = socket.recv_from(&mut buf).await.context("receive from the target")?;
 		// Anything else reaching this ephemeral port is not part of the path.
-		if from != target {
+		if from != target || is_cut(&cuts) {
 			continue;
 		}
 		let datagram = buf[..size].to_vec();
@@ -995,7 +1040,7 @@ mod tests {
 		got
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn forwards_both_ways_untouched() {
 		let (shaper, client) = setup(1, Profile::default(), Profile::default()).await;
 		let got = round_trip(&client, 50).await;
@@ -1004,6 +1049,32 @@ mod tests {
 		let stats = shaper.verify().expect("an empty profile has nothing to apply");
 		assert_eq!(stats.up.packets, 50);
 		assert_eq!(stats.down.packets, 50);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_cut_path_drops_both_ways_until_restored() {
+		// The delay holds the datagram already treated on its way up, so the
+		// echo comes back while the path is cut.
+		let delayed = Profile {
+			delay: Duration::from_millis(10),
+			..Default::default()
+		};
+		let (shaper, client) = setup(1, delayed, Profile::default()).await;
+		client.send(b"held").await.unwrap();
+		while shaper.stats().up.packets == 0 {
+			tokio::time::sleep(Duration::from_millis(1)).await;
+		}
+
+		let outage = shaper.cut();
+		let got = round_trip(&client, 10).await;
+		assert!(got.is_empty(), "a cut path delivered {got:?}");
+		let stats = shaper.stats();
+		assert_eq!(stats.up.packets, 1, "a cut path treated what arrived up: {stats}");
+		assert_eq!(stats.down.packets, 0, "a cut path treated the echo: {stats}");
+
+		drop(outage);
+		let got = round_trip(&client, 10).await;
+		assert_eq!(got, (0..10).collect::<Vec<_>>(), "the restored path lost datagrams");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1022,7 +1093,7 @@ mod tests {
 		assert_eq!(start.elapsed(), Duration::ZERO);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_seed_reproduces_the_losses() {
 		let lossy = Profile {
 			loss: 0.3,
@@ -1042,7 +1113,7 @@ mod tests {
 		assert_eq!(first_got.len() as u64, 200 - first.stats().up.lost);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn reorder_and_jitter_overtake() {
 		let shuffled = Profile {
 			delay: Duration::from_millis(20),
@@ -1062,7 +1133,7 @@ mod tests {
 		assert!(stats.up.reordered > 0, "{stats}");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_rate_limit_queues_then_drops() {
 		// 100 datagrams of 4 bytes is 3200 bits: at 8 kbit/s they need 400ms,
 		// and the queue only holds 100ms of it.
@@ -1085,7 +1156,7 @@ mod tests {
 		assert!(got.windows(2).all(|pair| pair[0] < pair[1]), "{got:?}");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_rate_limit_wider_than_the_traffic_passes_everything() {
 		let wide = Profile {
 			rate: Some(Rate {
@@ -1102,7 +1173,7 @@ mod tests {
 		assert_eq!(shaper.verify().unwrap().up.overflowed, 0);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_burst_counts_the_datagram_itself() {
 		// A burst of one datagram lets the first out at once and holds the second.
 		let one = Profile {
@@ -1184,7 +1255,7 @@ mod tests {
 		assert_eq!(unapplied(&phases, &stats), ["loss"]);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn an_invalid_profile_is_refused() {
 		let refused = |bad: Profile, why: &'static str| async move {
 			let err = Shaper::bind(Config {
@@ -1268,7 +1339,7 @@ mod tests {
 		steps: Vec::new(),
 	};
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn only_the_gaussian_model_keeps_the_order() {
 		let jittery = Profile {
 			delay: Duration::from_millis(20),
@@ -1387,7 +1458,7 @@ mod tests {
 		assert!(first_counters.lost > 0 && first_counters.reordered > 0);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_gaussian_sigma_may_exceed_the_delay() {
 		// The uniform model refuses this; a gaussian clamps its draw at zero.
 		let wide = Profile {
@@ -1457,7 +1528,7 @@ mod tests {
 		got
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_shared_path_keeps_the_order_across_clients() {
 		let jittery = Profile {
 			delay: Duration::from_millis(20),
@@ -1530,7 +1601,7 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_batch_releases_on_count_and_on_the_window() {
 		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
 		let ms = |ms| Duration::from_millis(ms);
@@ -1609,7 +1680,7 @@ mod tests {
 		assert_eq!(tally.batched.load(Ordering::Relaxed), 0);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_batch_releases_datagrams_together() {
 		let (shaper, client) = shaped(|config| Setup {
 			up: batched(7, Duration::from_millis(160)),
@@ -1644,7 +1715,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_window_releases_a_batch_that_never_fills() {
 		let (shaper, client) = shaped(|config| Setup {
 			up: batched(100, Duration::from_millis(80)),
@@ -1659,7 +1730,7 @@ mod tests {
 		assert_eq!(shaper.verify().unwrap().up.delayed, 3);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_shared_batch_fills_from_every_client() {
 		// Three datagrams from each of two clients, into batches of six: only a
 		// shared path fills one, and separate links wait out the window.
@@ -1684,7 +1755,7 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_batch_needs_a_count_and_a_window() {
 		let refused = |options: Options, why: &'static str| async move {
 			let config = Config {
@@ -1812,7 +1883,7 @@ mod tests {
 		assert_eq!(lost(start + secs(60)), 0, "the step back never cleared");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_step_gets_worse_part_way_through() {
 		let ms = Duration::from_millis;
 		let (shaper, client) = shaped(|config| Setup {
@@ -1849,7 +1920,7 @@ mod tests {
 		shaper.verify().unwrap();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_step_the_run_never_reached_is_unapplied() {
 		let (shaper, client) = shaped(|config| Setup {
 			down: stepped(vec![Step {
@@ -1866,8 +1937,7 @@ mod tests {
 		assert!(format!("{err:#}").contains("the down step at 60s"), "{err:#}");
 	}
 
-	// Real sockets, so the wall clock: a paused one could jump past a step while a datagram is still in the kernel.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_step_no_datagram_saw_is_unapplied() {
 		let ms = Duration::from_millis;
 		let (shaper, client) = shaped(|config| Setup {
@@ -1909,7 +1979,7 @@ mod tests {
 		assert!(!err.contains("the up step at 200ms"), "{err}");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_profile_no_datagram_saw_before_its_step_is_unapplied() {
 		let ms = Duration::from_millis;
 		let (shaper, client) = shaped(|config| Setup {
@@ -1954,7 +2024,7 @@ mod tests {
 		assert_eq!(owed(&mut link, start + Duration::from_secs(1), &[16]), [Duration::ZERO]);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn steps_that_would_be_skipped_or_do_nothing_are_refused() {
 		let refused = |steps: Vec<Step>, why: &'static str| async move {
 			let config = Config {

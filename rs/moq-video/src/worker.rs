@@ -19,17 +19,18 @@ use crate::Error;
 
 /// The reply channel a worker thread uses to report that its codec is built.
 ///
-/// Sending the name hands the caller a live worker; sending an error fails its
-/// `open`. Dropping it without either (the thread panicked) fails it too.
-pub(crate) struct Ready(oneshot::Sender<Result<String, Error>>);
+/// Sending what the codec resolved to (`I`, at least its backend name) hands the
+/// caller a live worker; sending an error fails its `open`. Dropping it without
+/// either (the thread panicked) fails it too.
+pub(crate) struct Ready<I>(oneshot::Sender<Result<I, Error>>);
 
-impl Ready {
-	/// Report the codec as open, under the backend name it resolved to. `false`
-	/// means the caller gave up already, so the thread should exit without
-	/// serving anything.
+impl<I> Ready<I> {
+	/// Report the codec as open, with what it resolved to. `false` means the
+	/// caller gave up already, so the thread should exit without serving
+	/// anything.
 	#[must_use]
-	pub(crate) fn ok(self, name: &str) -> bool {
-		self.0.send(Ok(name.to_string())).is_ok()
+	pub(crate) fn ok(self, info: I) -> bool {
+		self.0.send(Ok(info)).is_ok()
 	}
 
 	/// Report that the codec could not be built.
@@ -40,19 +41,20 @@ impl Ready {
 
 /// A codec running on its own thread, and the channel to it.
 ///
-/// `R` is the request type the codec's serve loop matches on.
-pub(crate) struct Worker<R> {
+/// `R` is the request type the codec's serve loop matches on, and `I` what the
+/// codec reported resolving to when it opened.
+pub(crate) struct Worker<R, I> {
 	/// `Option` so `Drop` can drop the sender (signalling the thread to exit)
 	/// before joining.
 	tx: Option<mpsc::UnboundedSender<R>>,
 	handle: Option<JoinHandle<()>>,
-	name: String,
+	info: I,
 	/// Set between queueing a request and taking its reply, so a cancelled call
 	/// is caught rather than silently skipped. See [`Worker::request`].
 	abandoned: bool,
 }
 
-impl<R: Send + 'static> Worker<R> {
+impl<R: Send + 'static, I: Send + 'static> Worker<R, I> {
 	/// Spawn `run` on a thread called `thread_name` and wait for it to report
 	/// its codec open, so a bad config surfaces here rather than on first use.
 	///
@@ -61,10 +63,10 @@ impl<R: Send + 'static> Worker<R> {
 	/// created and dropped there, which is the point.
 	pub(crate) async fn open(
 		thread_name: &'static str,
-		run: impl FnOnce(Ready, mpsc::UnboundedReceiver<R>) + Send + 'static,
+		run: impl FnOnce(Ready<I>, mpsc::UnboundedReceiver<R>) + Send + 'static,
 	) -> Result<Self, Error> {
 		let (req_tx, req_rx) = mpsc::unbounded_channel::<R>();
-		let (ready_tx, ready_rx) = oneshot::channel::<Result<String, Error>>();
+		let (ready_tx, ready_rx) = oneshot::channel::<Result<I, Error>>();
 
 		let handle = std::thread::Builder::new()
 			.name(thread_name.into())
@@ -72,10 +74,10 @@ impl<R: Send + 'static> Worker<R> {
 			.map_err(|err| Error::Codec(anyhow::anyhow!("failed to spawn the {thread_name} thread: {err}")))?;
 
 		match ready_rx.await {
-			Ok(Ok(name)) => Ok(Self {
+			Ok(Ok(info)) => Ok(Self {
 				tx: Some(req_tx),
 				handle: Some(handle),
-				name,
+				info,
 				abandoned: false,
 			}),
 			Ok(Err(err)) => Err(err),
@@ -88,9 +90,9 @@ impl<R: Send + 'static> Worker<R> {
 		}
 	}
 
-	/// The backend name the codec resolved to, e.g. `"mediafoundation"`.
-	pub(crate) fn name(&self) -> &str {
-		&self.name
+	/// What the codec reported resolving to when it opened.
+	pub(crate) fn info(&self) -> &I {
+		&self.info
 	}
 
 	/// Queue a request without waiting for it, mapping a dead thread onto an
@@ -127,7 +129,7 @@ impl<R: Send + 'static> Worker<R> {
 	}
 }
 
-impl<R> Drop for Worker<R> {
+impl<R, I> Drop for Worker<R, I> {
 	fn drop(&mut self) {
 		// Drop the sender so the thread's `blocking_recv` returns `None` and it
 		// exits, dropping the codec on its own thread; then join so teardown (COM

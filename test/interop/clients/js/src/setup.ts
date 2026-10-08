@@ -57,6 +57,10 @@ if (role === "publish") {
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
 	publish({
+		liveGop: () => {
+			if (!fixture) throw new Error("the fixture is stopped");
+			return fixture.liveGop();
+		},
 		stop: () => {
 			fixture?.close();
 			fixture = undefined;
@@ -65,6 +69,8 @@ if (role === "publish") {
 			fixture?.close();
 			fixture = new Fixture(host, url, broadcast, fault);
 		},
+		disableVideo: () => fixture?.setVideo(false),
+		enableVideo: () => fixture?.setVideo(true),
 	});
 } else if (role === "subscribe") {
 	await customElements.whenDefined("moq-watch");

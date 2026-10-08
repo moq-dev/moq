@@ -3,8 +3,6 @@ package dev.moq
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
@@ -23,13 +21,9 @@ import kotlin.time.Duration.Companion.milliseconds
 @Serializable
 private data class Status(val state: String)
 
-/** The next announce event that is not Live, which lands wherever the backlog ends. */
-private suspend fun AnnounceConsumer.nextRoute(): AnnounceEvent {
-    while (true) {
-        val event = checkNotNull(next()) { "announce stream ended" }
-        if (event !is AnnounceEventLive) return event
-    }
-}
+/** The next announce event. */
+private suspend fun AnnounceConsumer.nextRoute(): AnnounceEvent =
+    checkNotNull(next()) { "announce stream ended" }
 
 private fun opusHead(): ByteArray =
     "OpusHead".encodeToByteArray() + byteArrayOf(
@@ -179,7 +173,7 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", null)
             val group = track.appendGroup()
-            group.writeFrame(Frame(payload = "cached".encodeToByteArray()))
+            group.writeFrame(Frame(payload = "cached".encodeToByteArray(), timestampUs = 0uL))
             group.finish()
 
             val fetched = broadcast.consume().fetchGroup(
@@ -387,27 +381,6 @@ class SmokeTest {
                 val update = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals("room/alice/chat", update.announce.prefix)
                 assertEquals(listOf("alice"), update.announce.captures)
-            }
-        }
-    }
-
-    @Test
-    fun `announced yields Live once caught up`() = runTest {
-        OriginProducer(OriginConfig()).use { origin ->
-            val consumer = origin.consume()
-            val empty = consumer.announced(AnnounceConfig())
-            assertEquals(AnnounceEventLive, empty.next())
-            empty.cancel()
-
-            origin.createBroadcast("cam").use { broadcast ->
-                broadcast.announce(Route())
-                consumer.announcedBroadcast("cam").available()
-
-                val listed = consumer.announcements()
-                    .takeWhile { it !is AnnounceEventLive }
-                    .map { (it as AnnounceEventStart).announce.prefix }
-                    .toList()
-                assertEquals(listOf("cam"), listed)
             }
         }
     }

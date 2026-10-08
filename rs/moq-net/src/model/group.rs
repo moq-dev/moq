@@ -70,7 +70,7 @@ pub struct Info {
 }
 
 impl Info {
-	/// Create an untimed producer for this group.
+	/// Create a producer for this group on a default (millisecond) track.
 	///
 	/// Test-only: real groups are created via [`track::Producer`], which
 	/// supplies the parent track's [`track::Info`]. This helper exists for in-crate
@@ -78,6 +78,12 @@ impl Info {
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> Producer {
 		Producer::new(self, track::Info::default(), Default::default())
+	}
+
+	/// Create a producer for this group on an untimed track. Test-only, like [`Self::produce`].
+	#[cfg(test)]
+	pub(crate) fn produce_untimed(self) -> Producer {
+		Producer::new(self, track::Info::default().with_timescale(None), Default::default())
 	}
 }
 
@@ -114,7 +120,7 @@ impl From<u16> for Info {
 /// The in-flight (tail) frame being written. At most one exists at a time, since a
 /// group is a single ordered stream.
 pub(crate) struct Partial {
-	timestamp: Timestamp,
+	timestamp: Option<Timestamp>,
 	buf: FrameBuf,
 	// How much of `buf` has been charged to the cache so far.
 	charged: u64,
@@ -154,17 +160,9 @@ pub(crate) struct GroupState {
 	// against the byte budget tracks evict toward.
 	charge: cache::Charge,
 
-	// The first frame's timestamp, recorded once and never revised: the group's
-	// presentation start. Kept here rather than read off `frames` so an abort
-	// doesn't erase where the group sat in time. `None` until the first frame is
-	// written, which is the only honest answer: an empty group has not presented
-	// anything yet.
-	timestamp: Option<Timestamp>,
-
-	// The newest frame's timestamp: the group's presentation end so far. A reader
-	// that has taken every frame sits here, which is what a drift budget measures it
-	// against. Kept alongside `timestamp` for the same reasons.
-	latest: Option<Timestamp>,
+	// Where the group sits in presentation time, settled by its first frame. Kept here
+	// rather than read off `frames` so an abort doesn't erase it.
+	timeline: Timeline,
 
 	// Once finalized, the total number of frames the group will ever contain. Recorded
 	// at finish so the count outlives an abort that clears the cache.
@@ -174,6 +172,23 @@ pub(crate) struct GroupState {
 	// `Alive::aborted`, so [`Producer::abort`] stays the only writer: anything else
 	// setting this would leave track scans reading a group as live.
 	pub(crate) abort: Option<Error>,
+}
+
+/// Where a group sits in presentation time.
+///
+/// Its first frame settles which: an empty group has not presented anything yet, which
+/// is a different answer from a group on an untimed track, whose frames carry no time.
+#[derive(Clone, Copy, Debug, Default)]
+enum Timeline {
+	/// No frame opened yet.
+	#[default]
+	Empty,
+	/// The track is untimed, so the group has no place in media time.
+	Untimed,
+	/// `start` is the first frame's timestamp, never revised. `latest` is the newest
+	/// frame's: the group's presentation end so far, which a reader that has taken
+	/// every frame sits at and a drift budget measures it against.
+	Timed { start: Timestamp, latest: Timestamp },
 }
 
 impl GroupState {
@@ -279,11 +294,15 @@ impl GroupState {
 		self.poll_terminal(index)
 	}
 
-	/// Record where the group starts and currently ends in presentation time.
-	/// `timestamp` keeps the first frame only; `latest` follows every frame.
-	fn stamp(&mut self, timestamp: Timestamp) {
-		self.timestamp.get_or_insert(timestamp);
-		self.latest = Some(timestamp);
+	/// Record a frame's place in presentation time: the first frame starts the group,
+	/// and each later one extends a timed group's end. Every frame matches its track
+	/// ([`on_track`]), so a group never mixes the two.
+	fn stamp(&mut self, timestamp: Option<Timestamp>) {
+		self.timeline = match (self.timeline, timestamp) {
+			(Timeline::Timed { start, .. }, Some(latest)) => Timeline::Timed { start, latest },
+			(_, Some(start)) => Timeline::Timed { start, latest: start },
+			(_, None) => Timeline::Untimed,
+		};
 	}
 
 	/// Whether adding `extra_frames` totaling `extra_bytes` would exceed the group budget.
@@ -313,6 +332,21 @@ impl GroupState {
 		self.partial = None;
 		self.cache = 0;
 		self.charge.clear();
+	}
+}
+
+/// `timestamp` at the track's `timescale`.
+///
+/// A track is all timed or all untimed, so a frame must match it: a timed frame on an
+/// untimed track, or an untimed one on a timed track, is [`Error::TimestampMismatch`],
+/// as is a timestamp the track's scale can't hold.
+pub(crate) fn on_track(timestamp: Option<Timestamp>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
+	match (timestamp, timescale) {
+		(Some(timestamp), Some(timescale)) => Ok(Some(
+			timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?,
+		)),
+		(None, None) => Ok(None),
+		_ => Err(Error::TimestampMismatch),
 	}
 }
 
@@ -461,8 +495,8 @@ impl Producer {
 		self.info
 	}
 
-	/// The parent track's timescale.
-	pub fn timescale(&self) -> Timescale {
+	/// The parent track's timescale, or `None` when it declared no timeline.
+	pub fn timescale(&self) -> Option<Timescale> {
 		self.track.timescale
 	}
 
@@ -502,12 +536,10 @@ impl Producer {
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
 	/// But an upfront size is required.
 	///
-	/// `timestamp` is converted into the parent track's timescale. For data without
-	/// a presentation time, pass [`Timestamp::now`] explicitly.
-	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
-		let timestamp = timestamp
-			.convert(self.track.timescale)
-			.map_err(|_| Error::TimestampMismatch)?;
+	/// `timestamp` is converted into the parent track's timescale. Pass `None` on an
+	/// untimed track; a frame that doesn't match its track is [`Error::TimestampMismatch`].
+	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: impl Into<Option<Timestamp>>, data: B) -> Result<()> {
+		let timestamp = on_track(timestamp.into(), self.track.timescale)?;
 		let payload = data.into_bytes();
 		if payload.len() as u64 > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
@@ -540,6 +572,10 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
 		self.cache.settle(now);
+		// An untimed frame presents nothing, so it can expire no read.
+		if let Some(timestamp) = timestamp {
+			self.cache.wakes().presented(timestamp);
+		}
 
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
@@ -559,10 +595,7 @@ impl Producer {
 	/// group, since appending around it would reorder the group.
 	pub fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
 		for frame in frames.filled() {
-			frame
-				.timestamp
-				.convert(self.track.timescale)
-				.map_err(|_| Error::TimestampMismatch)?;
+			on_track(frame.timestamp, self.track.timescale)?;
 			if frame.payload.len() as u64 > MAX_CACHE_BYTES {
 				return Err(Error::FrameTooLarge);
 			}
@@ -587,15 +620,14 @@ impl Producer {
 
 		// The last frame's tick, reused below so settling does not re-read the clock.
 		let mut now = None;
+		let mut latest = None;
 		for mut frame in frames.drain() {
-			frame.timestamp = frame
-				.timestamp
-				.convert(self.track.timescale)
-				.expect("timestamp scale checked above");
+			frame.timestamp = on_track(frame.timestamp, self.track.timescale).expect("timestamp scale checked above");
 			let size = frame.payload.len() as u64;
 			state.cache += size;
 			now = state.charge.add(size);
 			state.stamp(frame.timestamp);
+			latest = frame.timestamp;
 			state.frames.push_back(frame);
 		}
 		state.next_index = next_index;
@@ -603,6 +635,9 @@ impl Producer {
 		drop(state);
 
 		self.cache.settle(now);
+		if let Some(latest) = latest {
+			self.cache.wakes().presented(latest);
+		}
 		self.stats.frames(count as u64);
 		self.stats.bytes(bytes);
 		Ok(())
@@ -652,10 +687,7 @@ impl Producer {
 	/// Its bytes are charged to the cache as they are written, not here: the declared
 	/// size is only a promise until they arrive.
 	fn open_frame(&mut self, frame: frame::Info, buf: &FrameBuf) -> Result<frame::Info> {
-		let timestamp = frame
-			.timestamp
-			.convert(self.track.timescale)
-			.map_err(|_| Error::TimestampMismatch)?;
+		let timestamp = on_track(frame.timestamp, self.track.timescale)?;
 		if frame.size > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
 		}
@@ -691,6 +723,10 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
 		self.cache.settle(now);
+		// An untimed frame presents nothing, so it can expire no read.
+		if let Some(timestamp) = timestamp {
+			self.cache.wakes().presented(timestamp);
+		}
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// producer writes them.
@@ -859,21 +895,22 @@ impl Producer {
 		(state.committed > state.offset).then_some(state.committed)
 	}
 
-	/// Where the group starts in presentation time: its first frame's timestamp,
-	/// or `None` while no frame has been opened.
+	/// Where the group starts in presentation time: its first frame's timestamp, or
+	/// `None` while no frame has been opened or when that frame is untimed.
 	///
 	/// Stamped once, when the group's first frame arrives, so it measures the group's
 	/// place in the media timeline rather than when it happened to be delivered. That
 	/// is what lets the track tell a burst of old content apart from live content (see
-	/// [`track::Subscriber`]). On protocols whose wire can't carry a timestamp the
-	/// receiver stamps frames with [`Timestamp::now`], which makes this the local
-	/// receive time instead: an estimate that a burst compresses.
+	/// [`track::Subscriber`]).
 	pub(crate) fn timestamp(&self) -> Option<Timestamp> {
-		self.state.read().timestamp
+		match self.state.read().timeline {
+			Timeline::Timed { start, .. } => Some(start),
+			Timeline::Empty | Timeline::Untimed => None,
+		}
 	}
 
-	/// Where the group ends in presentation time: its newest frame's timestamp, or
-	/// `None` while no frame has been opened.
+	/// Where the group ends in presentation time: its newest timed frame's timestamp, or
+	/// `None` while no frame has been opened or when the group is untimed.
 	///
 	/// This is what a drift budget measures an untouched group against. A group is not
 	/// late because it *started* long ago: a two-second group whose tail is level with
@@ -881,7 +918,10 @@ impl Producer {
 	/// fallen behind is there nothing left worth delivering. Grows as the group does, so
 	/// a group still receiving frames stays fresh and a stalled one ages in place.
 	pub(crate) fn latest(&self) -> Option<Timestamp> {
-		self.state.read().latest
+		match self.state.read().timeline {
+			Timeline::Timed { latest, .. } => Some(latest),
+			Timeline::Empty | Timeline::Untimed => None,
+		}
 	}
 
 	/// The group's full cached footprint (payload plus fixed overhead), used by the
@@ -954,10 +994,11 @@ impl Producer {
 		}
 	}
 
-	/// Register for the first-frame timestamp while the group is still unstamped.
-	pub(crate) fn poll_timestamp(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// Register for the group's first frame, which settles its [`Self::timestamp`], while
+	/// none has been opened.
+	pub(crate) fn poll_started(&self, waiter: &kio::Waiter) -> Poll<()> {
 		match self.state.poll(waiter, |state| {
-			if state.timestamp.is_some() || state.fin.is_some() || state.abort.is_some() {
+			if !matches!(state.timeline, Timeline::Empty) || state.fin.is_some() || state.abort.is_some() {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
@@ -1200,7 +1241,7 @@ pub(crate) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
 	/// A logical reader supplies its current budget after the original copy is gone.
-	fn is_expired(&self, max_age: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
+	fn is_expired(&self, max_delay: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
@@ -1405,7 +1446,7 @@ impl Consumer {
 		self.cursor.expiry_pending()
 	}
 
-	/// Whether this cursor failed because its subscription max age budget expired.
+	/// Whether this cursor failed because its subscription max delay budget expired.
 	#[cfg(test)]
 	pub(crate) fn latency_expired(&self) -> bool {
 		self.expired
@@ -1435,8 +1476,8 @@ impl Consumer {
 		self.cursor.state.poll_closed(waiter)
 	}
 
-	/// The parent track's timescale.
-	pub fn timescale(&self) -> Timescale {
+	/// The parent track's timescale, or `None` when it declared no timeline.
+	pub fn timescale(&self) -> Option<Timescale> {
 		self.track.timescale
 	}
 
@@ -1924,7 +1965,7 @@ mod test {
 	fn one_frame_fits_the_charged_slots() {
 		let mut frames: VecDeque<Frame> = VecDeque::new();
 		frames.push_back(Frame {
-			timestamp: Timestamp::ZERO,
+			timestamp: Some(Timestamp::ZERO),
 			payload: Bytes::new(),
 		});
 		let capacity = frames.capacity();
@@ -1976,8 +2017,52 @@ mod test {
 
 		let mut consumer = producer.consume();
 		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.timestamp.as_micros(), 20_000);
+		assert_eq!(frame.timestamp.unwrap().as_micros(), 20_000);
 		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
+	}
+
+	/// An untimed frame reads back untimed, and still counts as the group's first frame:
+	/// an empty group and a group on an untimed track are different answers.
+	#[test]
+	fn an_untimed_frame_still_starts_the_group() {
+		let mut producer = Info { sequence: 0 }.produce_untimed();
+		let waiter = kio::Waiter::noop();
+		assert!(producer.poll_started(&waiter).is_pending(), "nothing presented yet");
+
+		producer.write_frame(None, Bytes::from_static(b"hello")).unwrap();
+		producer.finish().unwrap();
+
+		assert!(producer.poll_started(&waiter).is_ready());
+		assert_eq!(producer.timestamp(), None);
+		assert_eq!(producer.latest(), None);
+
+		let mut consumer = producer.consume();
+		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.timestamp, None);
+		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
+	}
+
+	/// A track is all timed or all untimed, so a frame that doesn't match it is refused.
+	#[test]
+	fn a_mismatched_frame_is_refused() {
+		let mut untimed = Info { sequence: 0 }.produce_untimed();
+		assert!(matches!(
+			untimed.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")),
+			Err(Error::TimestampMismatch)
+		));
+
+		let mut timed = Info { sequence: 0 }.produce();
+		assert!(matches!(
+			timed.write_frame(None, Bytes::from_static(b"x")),
+			Err(Error::TimestampMismatch)
+		));
+		assert!(matches!(
+			timed.create_frame(frame::Info {
+				size: 1,
+				timestamp: None
+			}),
+			Err(Error::TimestampMismatch)
+		));
 	}
 
 	#[test]
@@ -1987,7 +2072,7 @@ mod test {
 			let mut frame = producer
 				.create_frame(frame::Info {
 					size: 10,
-					timestamp: Timestamp::ZERO,
+					timestamp: Some(Timestamp::ZERO),
 				})
 				.unwrap();
 			frame.write(Bytes::from_static(b"hello")).unwrap();
@@ -2011,7 +2096,7 @@ mod test {
 		let mut frame = producer
 			.create_frame(frame::Info {
 				size: 6,
-				timestamp: Timestamp::ZERO,
+				timestamp: Some(Timestamp::ZERO),
 			})
 			.unwrap();
 		frame.write(Bytes::from_static(b"foo")).unwrap();
@@ -2132,7 +2217,7 @@ mod test {
 			drop(writer);
 			drop(producer);
 		});
-		assert!(warns >= 1, "unfinished drop must emit unfinished-producer WARN");
+		assert_eq!(warns, 1, "unfinished drop must emit one unfinished-producer WARN");
 	}
 
 	#[test]
@@ -2151,8 +2236,8 @@ mod test {
 		assert_eq!(frame.payload, Bytes::from_static(b"data"));
 	}
 
-	#[tokio::test]
-	async fn pending_then_ready() {
+	#[test]
+	fn pending_then_ready() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 
@@ -2262,7 +2347,7 @@ mod test {
 		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::MAX);
 		let before = producer.cache_accessed();
 
-		crate::model::clock::advance(std::time::Duration::from_millis(600));
+		pool.step(std::time::Duration::from_millis(600));
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 
 		assert!(producer.cache_accessed() > before, "the pool cadence is used");
@@ -2275,7 +2360,7 @@ mod test {
 		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::from_secs(1));
 		let before = producer.cache_accessed();
 
-		crate::model::clock::advance(std::time::Duration::from_millis(600));
+		pool.step(std::time::Duration::from_millis(600));
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 
 		assert!(producer.cache_accessed() > before, "the track cadence remains in force");
@@ -2433,22 +2518,22 @@ mod test {
 	/// a write guard was mutably accessed, so `frame_notify` must mark the guard
 	/// modified; a guard dropped untouched wakes nobody and the reader would
 	/// stall until the frame completed.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn chunk_write_wakes_parked_reader() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 		let mut frame = producer
 			.create_frame(frame::Info {
 				size: 6,
-				timestamp: Timestamp::ZERO,
+				timestamp: Some(Timestamp::ZERO),
 			})
 			.unwrap();
 		let mut f = consumer.next_frame().await.unwrap().unwrap();
-		let handle = tokio::spawn(async move { f.read_chunk().await });
+		let handle = moq_net_sim::spawn(async move { f.read_chunk().await });
 		// Let the reader park on the empty partial before the chunk lands.
-		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		moq_net_sim::sleep(std::time::Duration::from_millis(50)).await;
 		frame.write(Bytes::from_static(b"foo")).unwrap();
-		let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+		let chunk = moq_net_sim::timeout(std::time::Duration::from_secs(2), handle)
 			.await
 			.expect("parked chunk reader was never woken by the chunk write")
 			.unwrap()
@@ -2469,16 +2554,16 @@ mod test {
 		);
 		let frame = frame::Info {
 			size: 3,
-			timestamp: Timestamp::from_millis(1).unwrap(), // 1ms -> 1000µs
+			timestamp: Some(Timestamp::from_millis(1).unwrap()), // 1ms -> 1000µs
 		};
 		let writer = producer.create_frame(frame).unwrap();
-		assert_eq!(writer.timestamp.scale(), Timescale::MICRO);
-		assert_eq!(writer.timestamp.value(), 1000);
+		assert_eq!(writer.timestamp.unwrap().scale(), Timescale::MICRO);
+		assert_eq!(writer.timestamp.unwrap().value(), 1000);
 	}
 
 	/// An explicit current timestamp is converted to the group's scale.
-	#[tokio::test]
-	async fn create_frame_converts_current_timestamp() {
+	#[test]
+	fn create_frame_converts_current_timestamp() {
 		use crate::Timescale;
 
 		let mut producer = Producer::new(
@@ -2489,11 +2574,11 @@ mod test {
 		let writer = producer
 			.create_frame(frame::Info {
 				size: 3,
-				timestamp: Timestamp::now(),
+				timestamp: Some(Timestamp::now()),
 			})
 			.unwrap();
-		assert_eq!(writer.timestamp.scale(), Timescale::MICRO);
-		assert!(!writer.timestamp.is_zero(), "local clock should be non-zero");
+		assert_eq!(writer.timestamp.unwrap().scale(), Timescale::MICRO);
+		assert!(!writer.timestamp.unwrap().is_zero(), "local clock should be non-zero");
 	}
 
 	/// A group can start partway in, so a route can serve the tail of a group whose
@@ -2656,7 +2741,7 @@ mod test {
 		let mut producer = Info { sequence: 0 }.produce();
 		let result = producer.create_frame(frame::Info {
 			size: MAX_CACHE_BYTES + 1,
-			timestamp: Timestamp::ZERO,
+			timestamp: Some(Timestamp::ZERO),
 		});
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
 	}
@@ -2664,7 +2749,7 @@ mod test {
 	fn sized(size: u64) -> frame::Info {
 		frame::Info {
 			size,
-			timestamp: Timestamp::ZERO,
+			timestamp: Some(Timestamp::ZERO),
 		}
 	}
 

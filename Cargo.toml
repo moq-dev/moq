@@ -22,8 +22,11 @@ members = [
     "rs/moq-native",
     "rs/moq-net",
     "rs/moq-net/fuzz",
+    "rs/moq-net/sim",
+    "rs/moq-net/sim/macros",
     "rs/moq-nvenc",
     "rs/moq-pattern",
+    "rs/moq-quic",
     "rs/moq-relay",
     "rs/moq-room",
     "rs/moq-rtc",
@@ -63,6 +66,7 @@ default-members = [
     "rs/moq-native",
     "rs/moq-nvenc",
     "rs/moq-pattern",
+    "rs/moq-quic",
     "rs/moq-relay",
     "rs/moq-room",
     "rs/moq-rtc",
@@ -138,6 +142,7 @@ loom = { version = "0.7.2", features = ["futures"] }
 # DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.21", features = ["async"] }
+moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
 moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
@@ -150,19 +155,18 @@ moq-net = { version = "0.3.10", path = "rs/moq-net" }
 # The MoQ fork of noq (moq-dev/noq). iroh keeps upstream noq, so a build with the
 # iroh feature carries both stacks.
 moq-noq-proto = { version = "2.0.1", default-features = false }
-moq-noq-udp = "2.0.1"
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.1.2", path = "rs/moq-nvenc" }
 moq-pattern = { version = "0.1.2", path = "rs/moq-pattern" }
-moq-relay = { version = "0.17.1", path = "rs/moq-relay", default-features = false }
-moq-rtc = { version = "0.3.11", path = "rs/moq-rtc" }
+moq-relay = { version = "0.17.2", path = "rs/moq-relay", default-features = false }
+moq-rtc = { version = "0.3.12", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.3.11", path = "rs/moq-rtmp" }
 moq-sock = { version = "0.2.0", path = "rs/moq-sock" }
 moq-srt = { version = "0.3.11", path = "rs/moq-srt" }
-moq-stats = { version = "0.2.11", path = "rs/moq-stats" }
-moq-tokio = { version = "0.19.22", path = "rs/moq-tokio", default-features = false }
+moq-stats = { version = "0.2.12", path = "rs/moq-stats" }
+moq-tokio = { version = "0.19.23", path = "rs/moq-tokio", default-features = false }
 # Default features off on moq-transcode and moq-video so each workspace consumer
 # chooses native codecs, OpenH264, and rendering explicitly. Both crates still
 # provide working native plus software defaults when depended on directly.

@@ -10,7 +10,7 @@ mod support;
 use std::time::Duration;
 
 use moq_net::{Hop, Timestamp, Version};
-use support::harness::{MockConnectOptions, MockPair, connect_mock};
+use support::harness::{MockConnectOptions, MockPair, connect_mock, peer};
 
 /// Maximum time any single test may run before being treated as a deadlock.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -20,7 +20,7 @@ const PAYLOAD: &[u8] = b"datagram payload";
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -48,7 +48,7 @@ async fn connect_datagram_track() -> Fixture {
 
 	let consumer = consumer_origin.consume();
 	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 	let subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 
 	Fixture {
@@ -66,9 +66,9 @@ async fn connect_datagram_track() -> Fixture {
 /// asserts what delivery actually guarantees rather than a fixed count: whatever
 /// arrives is intact and in order, and the last one written arrives, since nothing
 /// is pushed during the drain to evict it.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn datagrams_reach_the_subscriber_in_order() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	moq_net_sim::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_datagram_track().await;
 		const COUNT: u64 = 32;
 
@@ -90,7 +90,7 @@ async fn datagrams_reach_the_subscriber_in_order() {
 			assert_eq!(&datagram.payload[..], PAYLOAD, "payload corrupted in transit");
 			assert_eq!(
 				datagram.timestamp,
-				Timestamp::from_millis(datagram.sequence).unwrap(),
+				Some(Timestamp::from_millis(datagram.sequence).unwrap()),
 				"timestamp did not survive the wire"
 			);
 			if let Some(previous) = seen.last() {
@@ -111,7 +111,7 @@ async fn datagrams_reach_the_subscriber_in_order() {
 
 /// MoQ Transport carries a datagram as an OBJECT_DATAGRAM at object 0, so it arrives as a
 /// datagram with its sequence, alongside the groups on streams.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn ietf_delivers_datagrams() {
 	for version in [
 		"moq-transport-14",
@@ -119,7 +119,7 @@ async fn ietf_delivers_datagrams() {
 		"moq-transport-17",
 		"moq-transport-20",
 	] {
-		tokio::time::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
+		moq_net_sim::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
 			.await
 			.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
@@ -140,7 +140,7 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 
 	let consumer = consumer_origin.consume();
 	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 	let mut subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 
 	// A group first, so the subscription's alias is bound before any datagram lands.
@@ -149,8 +149,15 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 		.unwrap();
 	let mut before = subscriber.recv_group().await.unwrap().unwrap();
 	assert_eq!(before.sequence, 0, "{version}");
-	// Drafts without a track timescale stamp objects on arrival, datagrams included.
-	let stamped = before.next_frame().await.unwrap().unwrap().timestamp.value() == 0;
+	// Drafts 14 to 16 can't carry TIMESCALE, so the track arrives untimed, datagrams
+	// included.
+	let timed = !matches!(version, "moq-transport-14" | "moq-transport-16");
+	let first = before.next_frame().await.unwrap().unwrap().timestamp;
+	assert_eq!(
+		first.map(|timestamp| timestamp.is_zero()),
+		timed.then_some(true),
+		"{version}"
+	);
 
 	producer
 		.insert_datagram(
@@ -162,14 +169,14 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 	let datagram = subscriber.recv_datagram().await.unwrap().unwrap();
 	assert_eq!(datagram.sequence, 5, "{version}: the relay must not renumber");
 	assert_eq!(&datagram.payload[..], PAYLOAD, "{version}");
-	if stamped {
-		let expected = Timestamp::from_millis(7).unwrap();
-		assert_eq!(
-			datagram.timestamp.convert(expected.scale()).unwrap(),
-			expected,
-			"{version}"
-		);
-	}
+	let expected = Timestamp::from_millis(7).unwrap();
+	assert_eq!(
+		datagram
+			.timestamp
+			.map(|timestamp| timestamp.convert(expected.scale()).unwrap()),
+		timed.then_some(expected),
+		"{version}"
+	);
 
 	// The group sequence continues past the datagram.
 	producer
@@ -180,9 +187,9 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 }
 
 /// Explicit insert keeps the origin sequence on the lite wire, including a gap.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn inserted_sequences_survive_the_lite_wire() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	moq_net_sim::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_datagram_track().await;
 
 		fixture
@@ -206,16 +213,66 @@ async fn inserted_sequences_survive_the_lite_wire() {
 		assert_eq!(first.sequence, 5);
 		assert_eq!(
 			first.timestamp,
-			Timestamp::from_millis(5).unwrap(),
+			Some(Timestamp::from_millis(5).unwrap()),
 			"timestamp did not survive the wire"
 		);
 		assert_eq!(&first.payload[..], PAYLOAD);
 
 		let second = fixture.subscriber.recv_datagram().await.unwrap().unwrap();
 		assert_eq!(second.sequence, 2);
-		assert_eq!(second.timestamp, Timestamp::from_millis(2).unwrap());
+		assert_eq!(second.timestamp, Some(Timestamp::from_millis(2).unwrap()));
 		assert_eq!(&second.payload[..], PAYLOAD);
 	})
 	.await
 	.expect("timed out");
+}
+
+/// A FETCH for a sequence the publisher sent as a datagram is refused with NOT_FETCHABLE on
+/// moq-lite-07, and with the NOT_FOUND an earlier version has for it. A relay carries the
+/// answer across in the downstream version's terms. The moq-transport side (DOES_NOT_EXIST)
+/// is covered by the IETF publisher's own tests.
+#[moq_net_sim::test]
+async fn a_fetched_datagram_is_refused_per_version() {
+	const NOT_FETCHABLE: &str = "not fetchable";
+	const NOT_FOUND: &str = "not found";
+
+	/// Fetch a datagram's sequence over one hop per version, publisher first.
+	async fn fetch_a_datagram(versions: &[&str]) -> &'static str {
+		let nodes: Vec<_> = (1..=versions.len() as u64 + 1).map(produce_origin).collect();
+		let mut _pairs = Vec::new();
+		for (pair, version) in nodes.windows(2).zip(versions) {
+			_pairs.push(peer(version.parse().unwrap(), &pair[0], &pair[1]).await);
+		}
+
+		let broadcast = nodes[0].create_broadcast("room").unwrap();
+		let mut producer = broadcast.create_track("datagrams", None).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
+
+		let consumer = nodes.last().unwrap().consume();
+		consumer.routed("room").await.unwrap();
+		let remote = consumer.request_broadcast("room", None).await.unwrap();
+		let err = match remote.track("datagrams").unwrap().fetch_group(sequence, None).await {
+			Ok(_) => panic!("{versions:?}: a datagram was fetched"),
+			Err(err) => err,
+		};
+		match err {
+			moq_net::Error::Stream(moq_net::StreamError::NotFetchable) => NOT_FETCHABLE,
+			moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound) => NOT_FOUND,
+			err => panic!("{versions:?}: refused with {err:?}"),
+		}
+	}
+
+	for (versions, expected) in [
+		(&["moq-lite-05"][..], NOT_FOUND),
+		(&["moq-lite-06"], NOT_FOUND),
+		(&["moq-lite-07-wip"], NOT_FETCHABLE),
+		(&["moq-lite-07-wip", "moq-lite-07-wip"], NOT_FETCHABLE),
+		(&["moq-lite-07-wip", "moq-lite-06"], NOT_FOUND),
+	] {
+		let refused = moq_net_sim::timeout(TEST_TIMEOUT, fetch_a_datagram(versions))
+			.await
+			.unwrap_or_else(|_| panic!("{versions:?}: timed out"));
+		assert_eq!(refused, expected, "{versions:?}");
+	}
 }

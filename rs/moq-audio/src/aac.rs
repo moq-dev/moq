@@ -78,14 +78,13 @@ pub(crate) fn description(catalog: &hang::catalog::AudioConfig, profile: u8) -> 
 				channel_count: catalog.channel_count,
 			};
 
-			// Synthesis is lossy in every field: the encoder masks the object type to
-			// the five bits it has, rewrites a channel count the config table can't
-			// name, and drops the sample rate's bits past 24. A rendition we can't
-			// decode would come back out of it looking like decodable stereo, so
-			// check the catalog's own numbers before encoding them.
+			// Synthesis still drops bits the config cannot hold: the object type is
+			// masked to five bits, and the sample rate to 24. Encode refuses a channel
+			// count that does not pick a channelConfiguration, but check the catalog
+			// first so the error stays the decoder's.
 			validate(&config)?;
 
-			config.encode()
+			config.encode().map_err(moq_mux::Error::from)?
 		}
 	};
 
@@ -239,15 +238,14 @@ mod tests {
 
 	#[test]
 	fn rejects_more_than_stereo() {
-		// Synthesis would rewrite an unnameable count to stereo; 6 is nameable but
-		// still past what the decoder opens.
+		// 12 has no channelConfiguration; 6 does, but the decoder only opens mono and stereo.
 		assert!(matches!(
 			description(&catalog(2, 48_000, 12), 2),
-			Err(Error::Unsupported(_))
+			Err(Error::Unsupported(msg)) if msg.contains("limited to mono and stereo")
 		));
 		assert!(matches!(
 			description(&catalog(2, 48_000, 6), 2),
-			Err(Error::Unsupported(_))
+			Err(Error::Unsupported(msg)) if msg.contains("limited to mono and stereo")
 		));
 	}
 

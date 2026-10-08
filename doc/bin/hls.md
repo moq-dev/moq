@@ -17,16 +17,27 @@ moq --connect https://relay.example.com/anon --broadcast my-stream.hang export h
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang import hls https://example.com/live/master.m3u8
 ```
 
-Export never subscribes to media. It reads the broadcast's
-[timeline track](/concept/hang#catalog), a log of complete segments aligned
-across every rendition, to build playlists, then fetches exactly the groups a
-requested segment covers from the relay's cache and transmuxes them to CMAF on
-demand. So a segment is servable for as long as the relay's
+Export never subscribes to media. It reads each rendition's
+[timeline track](/concept/hang#catalog), a small index of that rendition's
+groups, to build playlists, then fetches exactly the frames a requested segment
+covers from the relay's cache and transmuxes them to CMAF on demand. So a
+segment is servable for as long as the relay's
 [cache](/bin/relay/config#cache) retains it, and idle renditions cost nothing.
-Because segments are aligned, the same number names the same span of content in
-every media playlist; a record with nothing for a rendition renders as
-`EXT-X-GAP` and a jump in content time as `EXT-X-DISCONTINUITY`. A broadcast
-whose catalog advertises no timeline is skipped. One server exposes every
+Segment boundaries come from one reference rendition (the first video
+rendition by name, or the first audio one without video) and are numbered by
+its records. A video choice sticks while the rendition stays in the catalog, so
+a newer rendition that sorts earlier does not rewind `EXT-X-MEDIA-SEQUENCE`; an
+audio choice switches to video once a video rendition has a timeline. Every
+other video rendition snaps each boundary to its nearest keyframe within about a
+second, and a segment with none in range renders as `EXT-X-GAP`; audio takes every frame
+inside the segment's span. A jump in content time renders as
+`EXT-X-DISCONTINUITY`. Gaps are a fallback: a publisher wanting clean HLS
+export should align video GOPs across renditions. A timeline that fails
+(malformed, refused, or lost) is not retried, since the relay already rides out
+transient source failures. The reference timeline failing ends every playlist
+with `EXT-X-ENDLIST`, and any other rendition's timeline failing ends that
+rendition's playlist at the last segment it covers. A broadcast
+whose catalog advertises no timelines is skipped. One server exposes every
 broadcast by path:
 
 ```text
@@ -34,17 +45,55 @@ broadcast by path:
 /{broadcast}/manifest.mpd
 /{broadcast}/{video|audio}/{rendition}/media.m3u8
 /{broadcast}/{video|audio}/{rendition}/init.{hash}.mp4
-/{broadcast}/{video|audio}/{rendition}/seg/{segment}.m4s
-/{broadcast}/{video|audio}/{rendition}/seg/t{pts}.m4s
+/{broadcast}/{video|audio}/{rendition}/seg/{reference}.{segment}.m4s
+/{broadcast}/{video|audio}/{rendition}/seg/{reference}.t{pts}.m4s
 ```
+
+Segment boundaries come from one reference rendition's timeline, and its records
+number the segments. `{reference}` is a short hash of that rendition's kind and
+name, so every edge that chose it derives the same URL. A reference that leaves
+the catalog starts a new numbering under new URLs rather than reusing the old
+ones for other content.
+
+A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
+`Reader` is served the same way, with no second stored copy. Playlists come
+from the replayed timelines alone, and a segment GETs only its rendition's
+stored objects, so switching renditions never downloads both. An
+inline-parameter-set codec with no catalog `description` is the exception:
+the first playlist render GETs one keyframe group to build the init segment,
+then caches it. Out-of-band configs need no media GET. A recording's playlists
+list the same capped window as a live broadcast. A library embedder can set
+`export::Config::history` to list past it instead: when the catalog's `archive`
+entry names a `store` and no `replay` path, its spans are durable on this
+broadcast, so only the recording's own retention trims the playlists and DASH
+`timeShiftBufferDepth` is the listed span. The listing starts at the records
+the timeline restates when the exporter joins (at most 256 from a `moq-mux`
+publisher). The playlist ends with `EXT-X-ENDLIST` only once the reader's caller
+declares the recording finished; the store holds no completion marker.
+
+A viewer joining a days-old broadcast costs what the window lists, not the
+broadcast's age: the exporter reads only the records its timeline restates on
+join, never the whole history. The window lists at most 256
+segments however short they are, so every edge shows the same
+`EXT-X-MEDIA-SEQUENCE`. Below that cap the window never evicts its newest
+segment that starts on a video sync point, so a GOP longer than `--window`
+stretches the window to that one GOP rather than leave nothing a player can
+start at. A rendition with no media for a span lists that span as
+a duration-preserving `EXT-X-GAP` and goes on listing after it. The master
+playlist advertises a video rendition only once a listed segment starts at a
+group start that is a sync point, so an early master may list audio alone, and
+answers 404 while no rendition can start. Once advertised, a rendition stays in
+the master for the rest of the publisher run, even if a GOP longer than 256
+records evicts its sync segment.
 
 The init URL carries a hash of its bytes, so a reconfigured rendition gets a
 new one. An embedder of the library can also label the publisher's run with
 `Broadcaster::set_generation`. Every segment URL then carries it
-(`seg/{generation}.{segment}.m4s`), since a restarted publisher reuses segment
+(`seg/{generation}.{reference}.{segment}.m4s`), since a restarted publisher reuses segment
 numbers for different media.
 
-`--window` sets the playlist duration (default 16 s),
+`--window` sets the playlist duration (default 16 s) and caps segment
+`Cache-Control: max-age` for every broadcast,
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers.
 H.264/H.265 and AAC/Opus renditions are served. Import handles classic HLS;

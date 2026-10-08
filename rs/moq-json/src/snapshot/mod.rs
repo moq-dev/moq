@@ -341,7 +341,7 @@ mod test {
 			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 				panic!("expected a frame");
 			};
-			assert_eq!(frame.timestamp.as_micros(), stamp.as_micros());
+			assert_eq!(frame.timestamp.unwrap().as_micros(), stamp.as_micros());
 			assert_eq!(size, Some(frame.payload.len()));
 		}
 	}
@@ -704,7 +704,7 @@ mod test {
 	/// allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
 		let mut info = moq_net::track::Info::default();
-		info.timescale = moq_net::Timescale::new((1u64 << 62) - 1).unwrap();
+		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
 
 		moq_net::broadcast::Info::new()
 			.produce()

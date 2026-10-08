@@ -141,7 +141,13 @@ mod test {
 
 		let catalog: Catalog<Extra> = serde_json::from_str(json).expect("legacy text section broke the catalog");
 		assert!(catalog.text.is_empty());
+		assert!(catalog.video.is_empty());
+		assert!(catalog.audio.is_empty());
 		assert!(catalog.ext.get("scte35").is_some(), "unrelated sections still decode");
+
+		// Republishing drops the empty media sections the old payload carried.
+		let output = serde_json::to_string(&catalog).expect("failed to encode");
+		assert_eq!(output, r#"{"scte35":{"spliceId":7}}"#);
 	}
 
 	#[test]

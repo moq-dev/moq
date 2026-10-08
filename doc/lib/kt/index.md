@@ -26,7 +26,7 @@ import dev.moq.*
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
     moq.announcements(AnnounceConfig(prefix = "live/", filter = "*/camera")).collect { event ->
-        if (event !is AnnounceEventStart) return@collect // Update, End, or Live
+        if (event !is AnnounceEventStart) return@collect // Update or End
         // Prefixes stay origin-relative; captures reports what each wildcard matched.
         println(event.announce.captures)
         val broadcast = moq.requestBroadcast(event.announce.prefix)
@@ -72,8 +72,7 @@ serve. A route is a capability, not an inventory. `announcements(config)` takes
 a literal prefix plus an optional relative pattern and yields `AnnounceEvent`s:
 `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce`, whose `prefix` stays origin-relative and whose
-`captures` reports the wildcard matches, or `AnnounceEventLive` once every route
-live at subscribe time has been delivered. Paths with
+`captures` reports the wildcard matches. Paths with
 a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden = true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
@@ -150,5 +149,7 @@ reads it as a `kotlin.time.Duration`.
 - Artifacts: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq), [dev.moq:moq-ffi](https://central.sonatype.com/artifact/dev.moq/moq-ffi)
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+A raw `Frame` or `Datagram` has a null `timestampUs` (and `timestamp`) when it was read from an untimed track; see [untimed tracks](/concept/moq-lite#subscriptions). A raw track you publish is always timed.
 
 Call suspending `session.shutdown()` or `moq.shutdown()` to drain finished tracks before disconnecting. They throw if delivery has not completed within one second. Finish or abort live tracks first. `cancel(0u)` and synchronous `Moq.close()` remain immediate; `use { }` therefore cancels on exit. IETF media streams are not drained yet.

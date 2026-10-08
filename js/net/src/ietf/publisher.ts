@@ -73,6 +73,8 @@ function change(
 	next: Advertised | undefined,
 ): "same" | "restart" | Reprice {
 	if (held === undefined || next === undefined || held.identity !== next.identity) return "restart";
+	// A new epoch is another broadcast, even from the same entry.
+	if (held.route.epoch !== next.route.epoch) return "restart";
 	const from = clusterFor(base, held.route);
 	const to = clusterFor(base, next.route);
 	if (from === undefined || to === undefined) return from === to ? "same" : "restart";
@@ -130,8 +132,8 @@ interface Namespaces {
 	/** What the peer refused, and whether coming back is worth anything. */
 	refused: Map<Path.Valid, Refused>;
 
-	/** The identity each refusal was about, so a republish at the same path clears it. */
-	offered: Map<Path.Valid, object>;
+	/** The advertisement each refusal was about, so a republish or new epoch at the same path clears it. */
+	offered: Map<Path.Valid, Advertised>;
 }
 
 /** Where one announce loop sends its advertisements. */
@@ -154,20 +156,19 @@ interface RunGroup {
 	/** The group to serve. */
 	group: group.Consumer;
 
-	/** The track's advertised timescale, applied to every frame timestamp. */
-	timescale: Timescale;
+	/**
+	 * The units each object's presentation timestamp is written in, or undefined when objects
+	 * carry none.
+	 *
+	 * Undefined when SUBSCRIBE_OK carries no TIMESCALE: the track has no timeline, the
+	 * subscriber sent INCLUDE_PROPERTIES=0, or the draft (14-16) cannot send the property. A
+	 * timestamp whose units were never declared is worse than none. Our own reader discards
+	 * it; another may read it as some default and time the media wrong.
+	 */
+	timescale?: Timescale;
 
 	/** The publisher's tie-break priority, already converted to the IETF wire convention. */
 	publisherPriority: number;
-
-	/**
-	 * Whether objects carry their presentation timestamp.
-	 *
-	 * False once the subscriber sends INCLUDE_PROPERTIES=0: that drops TIMESCALE from
-	 * SUBSCRIBE_OK, and a timestamp whose units were never declared is worse than none. Our
-	 * own reader discards it; another may read it as some default and time the media wrong.
-	 */
-	stamped: boolean;
 
 	/** The objects of this group the subscription's filter selects. */
 	slice: GroupSlice;
@@ -205,11 +206,8 @@ interface RunFill {
 	 */
 	cache: TrackSubscriber;
 
-	/** The track's advertised timescale, applied to every frame timestamp. */
-	timescale: Timescale;
-
-	/** Whether objects carry their presentation timestamp; see {@link RunGroup.stamped}. */
-	stamped: boolean;
+	/** The units objects are stamped in, if any; see {@link RunGroup.timescale}. */
+	timescale?: Timescale;
 
 	/** Settles when the subscriber leaves, releasing a fill still waiting on its group. */
 	unsubscribed: Promise<void>;
@@ -319,7 +317,9 @@ export class Publisher {
 			} catch (err: unknown) {
 				const e = error(err);
 				const condition =
-					e instanceof StreamError && e.code === StreamCode.NotFound ? "does_not_exist" : "internal";
+					e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
+						? "does_not_exist"
+						: "internal";
 				refusal = { errorCode: toRequestCode(condition, "subscribe", version), reasonPhrase: reason(e) };
 			}
 		}
@@ -354,16 +354,17 @@ export class Publisher {
 			// producer retained and let the receiving subscriber enforce its own budget.
 			// Keep the sentinel encodable if this demand crosses a Lite hop before the
 			// producer's retention bound is known.
-			maxAge: Milli(Varint.MAX_U53),
+			maxDelay: Milli(Varint.MAX_U53),
 		});
 
 		let cache: TrackSubscriber | undefined;
 
 		try {
-			// Declaring the timescale is what opts the track into timestamps; every object
-			// Timestamp below is in these units.
 			const info = await track.info();
-			const timescale = info.timescale;
+			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
+			// Drafts 14-16 never write that property, so their objects stay unstamped.
+			const timescale =
+				msg.propertiesWanted && Properties.sendsTimescale(version) ? (info.timescale ?? undefined) : undefined;
 			// The model ranks higher-first, the IETF wire lower-first. Every group this
 			// subscription serves carries the same publisher priority, which is what lets a
 			// relay prefer catalog and audio over video when it has no subscriber preference
@@ -384,7 +385,7 @@ export class Publisher {
 			// group; the model's `endGroup` is exclusive.
 			track.update({
 				priority,
-				maxAge: Milli(Varint.MAX_U53),
+				maxDelay: Milli(Varint.MAX_U53),
 				groups: {
 					start: range.start ? { included: Number(range.start.group) } : undefined,
 					end: range.end ? { included: Number(range.end.group) } : undefined,
@@ -399,7 +400,8 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			const fill =
 				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
-			cache = fill && fill.kind !== "empty" ? track.fork({ priority, maxAge: Milli(Varint.MAX_U53) }) : undefined;
+			cache =
+				fill && fill.kind !== "empty" ? track.fork({ priority, maxDelay: Milli(Varint.MAX_U53) }) : undefined;
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
@@ -421,11 +423,11 @@ export class Publisher {
 						? { groupId: edge.largest.group, objectId: edge.largest.object }
 						: { groupId: edge.largest.group, objectId: 0n }),
 				properties: msg.propertiesWanted
-					? // Declaring the timescale is what opts the track into timestamps; every
-						// object Timestamp below is in these units. We serve the newest group
-						// first, matching moq-lite.
+					? // TIMESCALE is what opts the track into timestamps, on drafts that can
+						// send it. We serve the newest group first, matching moq-lite.
 						{
-							timescale,
+							// An untimed track declares none, so it stays untimed downstream.
+							timescale: info.timescale ?? undefined,
 							priority: publisherPriority,
 							groupOrder: Properties.DESCENDING,
 							maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
@@ -519,7 +521,6 @@ export class Publisher {
 						group,
 						timescale,
 						publisherPriority,
-						stamped: msg.propertiesWanted,
 						slice: groupSlice(range, group.sequence),
 						unsubscribed,
 						streams,
@@ -539,7 +540,6 @@ export class Publisher {
 							fill,
 							cache,
 							timescale,
-							stamped: msg.propertiesWanted,
 							unsubscribed,
 							streams,
 						})
@@ -624,7 +624,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, publisherPriority, stamped, slice, unsubscribed, streams } = options;
+		const { requestId, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -649,7 +649,7 @@ export class Publisher {
 				flags: {
 					// The object properties carry the timestamp, so there is nothing to write
 					// when the track declared no units to read one in.
-					hasExtensions: stamped,
+					hasExtensions: timescale !== undefined,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
 					hasEnd: true,
@@ -759,7 +759,7 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, fill, cache, timescale, stamped, unsubscribed, streams } = options;
+		const { requestId, fill, cache, timescale, unsubscribed, streams } = options;
 		const version = this.#session.version;
 
 		// Everything is inside the try so the cache fork is released on every path out,
@@ -784,7 +784,7 @@ export class Publisher {
 
 			const group = takeGroup(cache, Number(fill.sequence));
 			try {
-				await this.#writeFillGroup(stream, group, fill, timescale, stamped, unsubscribed);
+				await this.#writeFillGroup(stream, group, fill, timescale, unsubscribed);
 			} finally {
 				group.close();
 			}
@@ -811,8 +811,7 @@ export class Publisher {
 		stream: Writer,
 		group: group.Consumer,
 		fill: FillGroup,
-		timescale: Timescale,
-		stamped: boolean,
+		timescale: Timescale | undefined,
 		unsubscribed: Promise<void>,
 	) {
 		let first = true;
@@ -840,7 +839,7 @@ export class Publisher {
 			next = BigInt(frame.sequence) + 1n;
 			if (fill.until !== undefined && BigInt(frame.sequence) >= fill.until) break;
 
-			const obj = new FetchFrame({ payload: frame.payload, timestamp: stamped ? frame.timestamp : undefined });
+			const obj = new FetchFrame({ payload: frame.payload, timestamp: frame.timestamp });
 			await obj.encode(
 				stream,
 				{ group: Number(fill.sequence), object: frame.sequence, first },
@@ -1090,7 +1089,9 @@ export class Publisher {
 		// by rebuilding the watched entry.
 		for (const key of [...ns.refused.keys()]) {
 			const snap = updated.get(key);
-			if (snap === undefined || ns.offered.get(key) !== snap.identity) {
+			const offered = ns.offered.get(key);
+			// A new epoch is another broadcast too, even from the same front.
+			if (snap === undefined || offered?.identity !== snap.identity || offered.route.epoch !== snap.route.epoch) {
 				ns.refused.delete(key);
 				ns.offered.delete(key);
 			}
@@ -1125,7 +1126,7 @@ export class Publisher {
 				held.delete(key);
 				if (answer !== "dropped") {
 					ns.refused.set(key, answer);
-					ns.offered.set(key, snap.identity);
+					ns.offered.set(key, snap);
 				}
 			}
 		}

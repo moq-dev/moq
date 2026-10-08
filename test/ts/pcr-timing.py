@@ -80,6 +80,8 @@ class Scan:
         self.cc_on_empty = []
         self.wraps = 0
         self.new_base = set()  # positions in self.pcr that state a new time base
+        self.pcr_pid = None  # the PID graded, once keep_busiest_pcr_pid has run
+        self.other_pcr_pids = []
         self._cc = {}
         self._dup = {}
         self._new_base = set()  # PIDs whose next PCR states a new time base
@@ -156,6 +158,21 @@ class Scan:
                 self._dup[pid] = False
         elif cc != prev:
             self.cc_on_empty.append((index, pid, prev, cc))
+
+    def keep_busiest_pcr_pid(self):
+        """Grade one clock: the PID carrying the most PCRs.
+
+        Each program may carry its own PCR, and two correct grids offset from one another
+        pool into one grid of half the interval that neither keeps.
+        """
+        pids = collections.Counter(pid for _, _, _, pid in self.pcr)
+        self.pcr_pid = pids.most_common(1)[0][0] if pids else None
+        self.other_pcr_pids = sorted(p for p in pids if p != self.pcr_pid)
+        if not self.other_pcr_pids:
+            return
+        kept = [(k, e) for k, e in enumerate(self.pcr) if e[3] == self.pcr_pid]
+        self.new_base = {n for n, (k, _) in enumerate(kept) if k in self.new_base}
+        self.pcr = [e for _, e in kept]
 
 
 def scan_file(path):
@@ -252,18 +269,6 @@ def check_continuity(scan, args):
         f"{len(scan.cc_errors)} continuity discontinuities, {len(scan.cc_on_empty)} payload-less "
         f"packets advanced the counter (ISO 13818-1 2.4.3.3)",
         detail,
-    )
-
-
-def check_pcr_single_pid(scan, args):
-    """Every PCR must ride the one PID the PMT declares."""
-    pids = collections.Counter(pid for _, _, _, pid in scan.pcr)
-    return (
-        "pcr-single-pid",
-        HARD,
-        len(pids) <= 1,
-        f"PCR carried on {len(pids)} PID(s): " + ", ".join(f"{k} ({v})" for k, v in pids.most_common()),
-        {"pids": {str(k): v for k, v in pids.items()}},
     )
 
 
@@ -493,16 +498,9 @@ def check_schedule(scan, args):
     hard = args.schedule_pct_min is not None
     severity = HARD if hard else SHAPE
     required = args.schedule_pct_min if hard else 99.0
-    # One PID only. Two PIDs each on a correct grid, offset from one another, pool into a
-    # grid of half the interval with half the bytes in each slot, which is a schedule
-    # neither of them keeps. pcr-single-pid already fails a stream carrying two; grading
-    # the busier one keeps this check's answer about one clock rather than about both.
-    pids = collections.Counter(pid for _, _, _, pid in scan.pcr)
-    pid = pids.most_common(1)[0][0] if pids else None
-    on_pid = [(k, e) for k, e in enumerate(scan.pcr) if e[3] == pid]
     graded = []
     skipped = 0
-    for (_, a), (kb, b) in zip(on_pid, on_pid[1:]):
+    for kb, (a, b) in enumerate(zip(scan.pcr, scan.pcr[1:]), start=1):
         seconds = (b[1] - a[1]) / TICKS_PER_MS / 1000.0
         # An interval spanning a signalled new time base measures nothing, as in the value
         # check. A non-positive one is a duplicate packet (legal) or a backwards clock (the
@@ -513,7 +511,7 @@ def check_schedule(scan, args):
         graded.append(((b[0] - a[0]) * PKT, seconds))
     if len(graded) < 3:
         # Asked to gate, an ungradable stream is a failure rather than a clean one.
-        return ("pcr-schedule", severity, not hard, "not measured (too few PCR intervals on one PID)", {})
+        return ("pcr-schedule", severity, not hard, "not measured (too few PCR intervals)", {})
 
     aggregate = 8.0 * sum(n for n, _ in graded) / sum(s for _, s in graded)
     rate = args.mux_rate if args.mux_rate else aggregate
@@ -529,8 +527,8 @@ def check_schedule(scan, args):
     within = sum(1 for (n, _), w, s in zip(graded, want, slack) if abs(n - w) <= s)
     median_s = statistics.median(s for _, s in graded)
     detail = {
-        "pid": pid,
-        "other_pcr_pids": sorted(p for p in pids if p != pid),
+        "pid": scan.pcr_pid,
+        "other_pcr_pids": scan.other_pcr_pids,
         "count": len(graded),
         "skipped": skipped,
         "rate_bps": round(rate),
@@ -565,15 +563,10 @@ def check_schedule(scan, args):
     )
 
 
-CHECKS = [
-    check_sync,
-    check_continuity,
-    check_pcr_single_pid,
-    check_value_interval,
-    check_release,
-    check_position,
-    check_schedule,
-]
+# A file is graded for sync and continuity by compliance.py, through TSDuck's tsanalyze.
+# A pipe cannot be: tsp in front of it would rebuffer the very arrivals `release` stamps.
+LIVE_CHECKS = [check_sync, check_continuity]
+CHECKS = [check_value_interval, check_release, check_position, check_schedule]
 
 
 def coincidence(scan, args):
@@ -598,9 +591,7 @@ def coincidence(scan, args):
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", nargs="?", help="TS file; omit with --live to read stdin")
     ap.add_argument("--live", action="store_true", help="read stdin and stamp arrivals, grading release timing")
     ap.add_argument("--seconds", type=float, default=45.0, help="live capture window (default 45)")
@@ -630,8 +621,7 @@ def main():
         "--live-cover-pct",
         type=float,
         default=50.0,
-        help="share of the --seconds window a --live sample must span, or it is treated as "
-        "truncated (default 50)",
+        help="share of the --seconds window a --live sample must span, or it is treated as truncated (default 50)",
     )
     ap.add_argument(
         "--drift-ms",
@@ -684,7 +674,8 @@ def main():
     else:
         ap.error("give a path or --live")
 
-    results = [check(scan, args) for check in CHECKS]
+    scan.keep_busiest_pcr_pid()
+    results = [check(scan, args) for check in (LIVE_CHECKS if args.live else []) + CHECKS]
     width = max(len(r[0]) for r in results)
 
     print(f"### PCR timing report - {scan.packets} packets, {len(scan.pcr)} PCR")
@@ -721,8 +712,7 @@ def main():
                     "pcr_count": len(scan.pcr),
                     "live": args.live,
                     "checks": [
-                        {"name": n, "severity": s, "ok": ok, "headline": h, "detail": d}
-                        for n, s, ok, h, d in results
+                        {"name": n, "severity": s, "ok": ok, "headline": h, "detail": d} for n, s, ok, h, d in results
                     ],
                 },
                 f,

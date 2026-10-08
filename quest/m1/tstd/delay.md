@@ -80,11 +80,16 @@ to `main` once the line (#4640) lands, and merge `main` in.
 
 Update `doc/bin/cli.md` and the `moq export ts` examples.
 
+Promote `tstd` in `test/ts/compliance.py` from shape to hard, so `just test
+ts` fails a round-trip the T-STD model rejects; it reports only until then.
+
 Public API: `ts::Export` takes the delay in place of its max age and loses the
-hold; breaking. `Export::stats` returns `ts::stats::Export` (decided in the
-2026-10-05 audit, matching [TS stats module](/quest/m1/ts-stats-module.md)),
-not a new `ts::export::Stats`. Wire:
-none.
+hold; breaking. `Export::stats` already returns `ts::stats::Export`, the
+per-stream rows, so the release-clock counters (`dropped`, `drift`,
+`out_of_tolerance`) become fields on it rather than a new `ts::export::Stats`
+(decided in the 2026-10-05 audit). `stats::Log` reads an export through
+`From<Export> for Snapshot`, which drops anything but the rows, so `Log` must
+report the new counters too, or `moq subscribe` never logs them. Wire: none.
 
 ## Closes
 
@@ -95,4 +100,3 @@ none.
 - [FLV export delay](/quest/m1/flv-export-delay.md) - adopts the release stage
 - [MKV export delay](/quest/m1/mkv-export-delay.md) - adopts the release stage
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - uses this delay as its mux-ahead buffer delay
-- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - subscriber staleness is renamed; publisher retention stays `max_age`

@@ -8,9 +8,9 @@ use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
-use crate::Error;
 #[cfg(feature = "iroh")]
 use crate::iroh;
+use crate::{Error, Transport};
 use moq_net::Session;
 use url::Url;
 
@@ -290,6 +290,11 @@ impl Server {
 		quic.validate()?;
 
 		let build_quic = parts.quic() && (config.bind.is_some() || !config.has_stream_listener());
+		// A stream-only server would silently ignore what only QUIC reads. A caller
+		// opening only the streams owns QUIC elsewhere, which reads them.
+		if parts.quic() && !build_quic {
+			config.validate_stream_only()?;
+		}
 		// Read before the member is taken out below, which consumes `parts`.
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let build_streams = parts.streams();
@@ -301,17 +306,16 @@ impl Server {
 			return Err(Error::NoBackend("--listen requires the noq feature"));
 		}
 
-		if build_quic && !config.tls.root.is_empty() {
-			// Only the QUIC backend validates client certificates; the qmux listeners
-			// (tcp/unix/websocket) carry no TLS of their own.
-			#[cfg(feature = "noq")]
-			let mtls_supported = true;
+		// Only the QUIC backend verifies client certificates; the qmux listeners
+		// (tcp/unix/websocket) never ask for one, even over `tls://`, so a
+		// stream-only server would ignore the CA or pinned peers. A caller opening
+		// only the streams owns QUIC elsewhere.
+		if parts.quic() && !build_quic && (!config.tls.root.is_empty() || config.tls.peers.is_some()) {
+			return Err(Error::MtlsUnsupported);
+		}
+		if parts.quic() && !config.tls.root.is_empty() {
 			#[cfg(not(feature = "noq"))]
-			let mtls_supported = false;
-
-			if !mtls_supported {
-				return Err(Error::MtlsUnsupported);
-			}
+			return Err(Error::NoBackend("--listen-tls-root requires the noq feature"));
 		}
 
 		// The member is a serving handle released by a complete reuseport group,
@@ -329,7 +333,11 @@ impl Server {
 		let mut stream_binds = Vec::new();
 		#[cfg(feature = "tcp")]
 		if let Some(addr) = config.tcp.bind.filter(|_| build_streams) {
-			stream_binds.push(StreamBind::Tcp(addr));
+			let tls = match config.tcp.tls == Some(true) {
+				true => Some(TcpTls::new(&config, &versions)?),
+				false => None,
+			};
+			stream_binds.push(StreamBind::Tcp(addr, tls));
 		}
 		#[cfg(all(feature = "uds", unix))]
 		if let Some(path) = config.unix.bind.clone().filter(|_| build_streams) {
@@ -646,7 +654,9 @@ impl Server {
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, super::noq::accept(_conn, alpns)).await?;
 							link.local = local;
 							let (request, deadline) = setup.accept(session, deadline).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)), deadline })
+							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
+							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
+							Ok(Request { transport, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)), deadline })
 						}.boxed());
 					}
 				}
@@ -798,7 +808,7 @@ impl Listener {
 		self.server.websocket_local_addr()
 	}
 
-	/// The address the plain TCP (qmux) listener bound to, if one was configured.
+	/// The address the TCP (qmux) listener bound to, if one was configured.
 	#[cfg(feature = "tcp")]
 	pub fn tcp_local_addr(&self) -> Option<net::SocketAddr> {
 		self.server.streams.tcp_local_addr
@@ -876,10 +886,8 @@ impl Setup {
 	where
 		S: web_transport_trait::Session,
 		crate::transport::Session<S>: moq_net::transport::poll::Boxable,
-		<crate::transport::Session<S> as web_transport_trait::poll::Session>::SendStream:
-			web_transport_trait::MaybeSync,
-		<crate::transport::Session<S> as web_transport_trait::poll::Session>::RecvStream:
-			web_transport_trait::MaybeSync,
+		<crate::transport::Session<S> as moq_net::transport::poll::Session>::SendStream: moq_net::transport::MaybeSync,
+		<crate::transport::Session<S> as moq_net::transport::poll::Session>::RecvStream: moq_net::transport::MaybeSync,
 	{
 		let session = crate::transport::Session::new(session);
 		let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
@@ -988,10 +996,65 @@ fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 /// A configured stream listener (`--listen-tcp-bind` / `--listen-unix-bind`).
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 enum StreamBind {
+	/// With its TLS when the listener serves `tls://`.
 	#[cfg(feature = "tcp")]
-	Tcp(net::SocketAddr),
+	Tcp(net::SocketAddr, Option<TcpTls>),
 	#[cfg(all(feature = "uds", unix))]
 	Unix(PathBuf),
+}
+
+/// The TLS a `--listen-tcp-tls` listener serves, reloading its certificate
+/// while this lives.
+#[cfg(feature = "tcp")]
+struct TcpTls {
+	config: std::sync::Arc<rustls::ServerConfig>,
+	#[cfg(all(feature = "watch", feature = "_certs"))]
+	_reload: crate::tls::ReloadingServerConfig,
+}
+
+#[cfg(all(feature = "tcp", feature = "_certs"))]
+impl TcpTls {
+	/// Serve the listen certificate, accepting each stream version as a
+	/// `qmux-01.<alpn>` TLS ALPN.
+	///
+	/// Asks for no client certificate: qmux's TLS accept keeps no peer identity
+	/// for the auth server to read, so neither a `tls.root` nor pinned `peers`
+	/// meant for QUIC apply, and a peer on this listener authenticates with a token.
+	fn new(config: &crate::listen::Config, versions: &moq_net::Versions) -> crate::Result<Self> {
+		let mut listen = config.tls.clone();
+		listen.root.clear();
+		listen.peers = None;
+		let alpn = stream_versions(versions)
+			.alpns()
+			.iter()
+			.map(|alpn| format!("{}{alpn}", qmux::Version::QMux01.prefix()).into_bytes())
+			.collect();
+		Self::serve(&listen, alpn)
+	}
+
+	#[cfg(feature = "watch")]
+	fn serve(listen: &crate::tls::Listen, alpn: Vec<Vec<u8>>) -> crate::Result<Self> {
+		let reload = listen.server_config_reloading(alpn)?;
+		Ok(Self {
+			config: reload.config(),
+			_reload: reload,
+		})
+	}
+
+	#[cfg(not(feature = "watch"))]
+	fn serve(listen: &crate::tls::Listen, alpn: Vec<Vec<u8>>) -> crate::Result<Self> {
+		Ok(Self {
+			config: listen.server_config(alpn)?,
+		})
+	}
+}
+
+#[cfg(all(feature = "tcp", not(feature = "_certs")))]
+impl TcpTls {
+	/// Without a crypto provider there is no certificate to serve.
+	fn new(_config: &crate::listen::Config, _versions: &moq_net::Versions) -> crate::Result<Self> {
+		Err(Error::NoBackend("--listen-tcp-tls requires a crypto provider feature"))
+	}
 }
 
 /// A bound stream listener, before its accept loop is spawned.
@@ -1009,7 +1072,7 @@ impl StreamBind {
 	fn name(&self) -> &'static str {
 		match self {
 			#[cfg(feature = "tcp")]
-			Self::Tcp(_) => "tcp",
+			Self::Tcp(..) => "tcp",
 			#[cfg(all(feature = "uds", unix))]
 			Self::Unix(_) => "unix",
 		}
@@ -1025,6 +1088,9 @@ impl StreamBind {
 /// stopped when the [`Listener`] closes or drops, so no socket lingers.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
+	/// Keeps the TCP listener's TLS certificate reloading while it serves.
+	#[cfg(feature = "tcp")]
+	_tcp_tls: Option<TcpTls>,
 	binds: Vec<StreamBind>,
 	/// One per entry in `binds`, in the same order, and created up front rather than
 	/// with the listener: an owner registering these with a metrics endpoint does so
@@ -1057,6 +1123,8 @@ impl StreamListeners {
 			.map(|bind| crate::accept::Health::new(bind.name()))
 			.collect();
 		Self {
+			#[cfg(feature = "tcp")]
+			_tcp_tls: None,
 			binds,
 			health,
 			versions,
@@ -1086,16 +1154,21 @@ impl StreamListeners {
 			let alpns = self.versions.alpns();
 			match bind {
 				#[cfg(feature = "tcp")]
-				StreamBind::Tcp(addr) => {
-					if !addr.ip().is_loopback() {
+				StreamBind::Tcp(addr, tls) => {
+					if tls.is_none() && !addr.ip().is_loopback() {
 						tracing::warn!(%addr, "tcp listener bound to a non-loopback address; qmux is UNENCRYPTED, ensure the network is trusted");
 					}
-					let listener = crate::tcp::Listener::bind(addr)
+					let mut listener = crate::tcp::Listener::bind(addr)
 						.await?
 						.with_protocols(alpns)
 						.with_accept_health(health);
+					let encrypted = tls.is_some();
+					if let Some(tls) = tls {
+						listener = listener.with_tls(tls.config.clone());
+						self._tcp_tls = Some(tls);
+					}
 					let local = listener.local_addr()?;
-					tracing::info!(addr = %local, "listening (tcp)");
+					tracing::info!(addr = %local, tls = encrypted, "listening (tcp)");
 					self.tcp_local_addr = Some(local);
 					pending.push(BoundListener::Tcp(listener));
 				}
@@ -1326,41 +1399,6 @@ pub struct Link {
 	/// The negotiated application protocol: the TLS ALPN on raw QUIC, the chosen
 	/// sub-protocol on WebTransport and WebSocket.
 	pub alpn: Option<String>,
-}
-
-/// The network transport carrying an incoming MoQ session.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Transport {
-	/// QUIC, either directly or through WebTransport over HTTP/3.
-	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
-	/// A WebSocket connection using qmux framing.
-	WebSocket,
-	/// A plaintext TCP connection using qmux framing.
-	Tcp,
-	/// A Unix domain socket using qmux framing.
-	Unix,
-}
-
-impl Transport {
-	/// Returns the stable lowercase name used in logs and external metadata.
-	pub const fn as_str(self) -> &'static str {
-		match self {
-			Self::Quic => "quic",
-			Self::Iroh => "iroh",
-			Self::WebSocket => "websocket",
-			Self::Tcp => "tcp",
-			Self::Unix => "unix",
-		}
-	}
-}
-
-impl std::fmt::Display for Transport {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(self.as_str())
-	}
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
@@ -1620,14 +1658,11 @@ impl Request {
 mod tests {
 	use super::*;
 
-	/// The next route and whether it is active, skipping the caught-up marker.
+	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		loop {
-			return match announced.next().await? {
-				moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-				moq_net::announce::Event::End(route) => Some((route, false)),
-				moq_net::announce::Event::Live => continue,
-			};
+		match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
 
@@ -2225,7 +2260,7 @@ mod tests {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active);
-		let broadcast = consumer.request_broadcast("test").await.expect("resolve");
+		let broadcast = consumer.request_broadcast("test", None).await.expect("resolve");
 
 		let mut track = broadcast
 			.track("video")
@@ -2307,12 +2342,59 @@ mod tests {
 		drop((session, connection));
 	}
 
+	/// A client CA or pinned peers on a stream-only server are refused: no QUIC
+	/// listener would verify them, and the stream listeners never ask for a client certificate.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn client_auth_without_a_quic_listener_is_rejected() {
+		type Set = fn(&mut crate::listen::Config);
+		let cases: [Set; 2] = [
+			|c| c.tls.root = vec!["ca.pem".into()],
+			|c| c.tls.peers = Some(crate::tls::Peers::new()),
+		];
+		for set in cases {
+			let mut config = crate::listen::Config::default();
+			config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+			set(&mut config);
+
+			assert!(matches!(
+				config.clone().init(Default::default()),
+				Err(Error::MtlsUnsupported)
+			));
+			// A worker group owning QUIC verifies it, so the streams alone accept it.
+			config.init_streams().expect("streams beside worker-owned QUIC");
+		}
+	}
+
 	/// An explicit QUIC bind cannot be honored without a QUIC backend.
 	#[cfg(not(feature = "noq"))]
 	#[test]
 	fn quic_bind_without_a_quic_backend_is_rejected() {
 		let config = crate::listen::Config {
 			bind: Some("127.0.0.1:0".parse().unwrap()),
+			..Default::default()
+		};
+
+		assert!(matches!(
+			Config {
+				listen: config,
+				..Default::default()
+			}
+			.init(),
+			Err(Error::NoBackend(_))
+		));
+	}
+
+	/// A client CA on the default QUIC listener names the missing backend, not a
+	/// stream-only server the caller never configured.
+	#[cfg(not(feature = "noq"))]
+	#[test]
+	fn client_ca_without_a_quic_backend_is_rejected() {
+		let config = crate::listen::Config {
+			tls: crate::tls::Listen {
+				root: vec!["ca.pem".into()],
+				..Default::default()
+			},
 			..Default::default()
 		};
 
@@ -2344,6 +2426,7 @@ mod tests {
 		assert_eq!(Transport::WebSocket.as_str(), "websocket");
 		assert_eq!(Transport::Tcp.as_str(), "tcp");
 		assert_eq!(Transport::Unix.as_str(), "unix");
+		assert_eq!(Transport::WebTransport.as_str(), "webtransport");
 	}
 
 	/// Building the endpoint needs a runtime, and `certificates()` must stay

@@ -114,10 +114,12 @@ async fn rendition_is_not_published_when_the_media_track_fails() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
-	// Squat the broadcast's timeline track, so enrolling the first rendition (and with it building
-	// its media producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// Squat the catalog's timeline track, so enrolling the first rendition (which enrolls the catalog
+	// too, and with it building its media producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
 	// dropping it frees the name.
-	let _squat = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
+	let _squat = broadcast
+		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
+		.unwrap();
 
 	let mut importer = Import::new(broadcast, catalog.reserve());
 	// A track it cannot build surfaces in the catalog rather than in this result.
@@ -172,7 +174,7 @@ async fn import_emits_frames() {
 	let track = consumer
 		.track(&video_name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -495,7 +497,7 @@ async fn import_enhanced_av1() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -605,7 +607,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -645,7 +647,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(

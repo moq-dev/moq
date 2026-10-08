@@ -36,6 +36,11 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
 
+File demuxers load when decoding a file whose MIME type is empty or does not
+start with `image/`. Camera, screen, and files identified as images do not
+load them. The file picker opens synchronously, before any decoder module
+is loaded.
+
 Camera and microphone failures are readable through the element's
 `el.sources.video` and `el.sources.audio` signals. When these hold a
 `Publish.Source.Camera` or `Publish.Source.Microphone`, their `out.error` signal
@@ -60,6 +65,19 @@ negative or non-finite fade drops the rendition until it is fixed.
 Disabling a rendition (`muted` on the element) ends the audio timeline with
 a marker, so a viewer that stays subscribed, or joins during the pause, never
 plays the audio before it as live.
+
+Each audio frame is its own group by default, so a relay pays a stream and a
+group's bookkeeping per 20ms frame. `el.audio.groupDuration` sets a minimum
+per group instead, such as `Time.Milli(100)`: the first frame at least 100ms
+after the group's first timestamp opens the next group and closes the previous
+one. If encoding pauses, the current group stays open until the next frame or
+timeline marker. Frames still forward as they are encoded, so grouping does
+not buffer them, but loss gets coarser: a viewer that falls behind skips a
+whole group, and a lost frame holds back the rest of its group until it is retransmitted. A 60ms
+Opus `frameDuration` also cuts the group rate, without code, at the cost of
+encoder latency. The synthetic `just bench-audio` workload reports higher p99
+delivery latency with longer groups; immediate forwarding is not a promise of
+unchanged end-to-end latency.
 
 `el.video.cut()` asks for a keyframe on top of the `keyframeInterval` cadence,
 for a resume, a recording cut, or a known tune-in moment. Requests coalesce into
@@ -97,13 +115,18 @@ can serve its own tracks alongside the media. It is recreated on each
 
 ```ts
 import * as Json from "@moq/json";
+import * as Moq from "@moq/net";
 
 signals.run((effect) => {
     const net = effect.get(broadcast.net);
     if (!net) return;
 
-    // A day-long retention so a late viewer still replays the last value.
-    const track = net.createTrack("meta.json", { maxAge: 86_400_000 });
+    // A day-long retention so a late viewer still replays the last value. JSON
+    // values are stamped when written, so the track declares a timescale.
+    const track = net.createTrack("meta.json", {
+        timescale: Moq.Time.Timescale.MILLI,
+        maxAge: Moq.Time.Milli(86_400_000),
+    });
     effect.cleanup(() => track.close());
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });

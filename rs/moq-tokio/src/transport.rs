@@ -1,18 +1,61 @@
 //! Adapts the async transport interface to the poll one moq-net requires.
 //!
-//! moq-net only accepts the poll interface (`web_transport_trait::poll`).
+//! moq-net accepts its own `moq_net::transport::poll` traits.
 //! A backend that offers only the async interface (qmux, iroh, noq) is wrapped
 //! in [`Session`] here, at the edge where async already lives. The wrapping
 //! costs one allocation per operation and one copy per write, and its
 //! closed-watch emulation is weaker than a native implementation (see
 //! [`Session`]), so a backend that implements the poll interface itself is
-//! handed to moq-net directly.
+//! adapted to moq-net at this boundary.
+//!
+//! It also names the [`Transport`] a session runs on, for the accept and dial sides alike.
 
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
 use futures::FutureExt;
 use web_transport_trait::poll as wt_poll;
+
+mod owned;
+pub use owned::Error;
+
+/// The network transport carrying a MoQ session, on either side of it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Transport {
+	/// Raw QUIC, negotiating a MoQ ALPN directly.
+	Quic,
+	/// An Iroh QUIC connection.
+	Iroh,
+	/// A WebSocket connection using qmux framing.
+	WebSocket,
+	/// A plaintext TCP connection using qmux framing.
+	Tcp,
+	/// A Unix domain socket using qmux framing.
+	Unix,
+	/// WebTransport over HTTP/3 on QUIC.
+	WebTransport,
+}
+
+impl Transport {
+	/// Returns the stable lowercase name used in logs and external metadata.
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::Quic => "quic",
+			Self::Iroh => "iroh",
+			Self::WebSocket => "websocket",
+			Self::Tcp => "tcp",
+			Self::Unix => "unix",
+			Self::WebTransport => "webtransport",
+		}
+	}
+}
+
+impl std::fmt::Display for Transport {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.as_str())
+	}
+}
 
 /// A stored in-flight operation future. Native transports are Send, so the
 /// plain boxed flavor suffices.
@@ -1206,5 +1249,68 @@ mod tests {
 		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(Some(4))));
 		assert_eq!(&dst, b"tail");
 		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(None)));
+	}
+
+	/// An async-interface session that never accepts, opens, or closes.
+	#[derive(Clone)]
+	struct FakeSession;
+
+	impl web_transport_trait::Session for FakeSession {
+		type SendStream = FakeSend;
+		type RecvStream = FakeRecv;
+		type Error = FakeError;
+
+		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
+			std::future::pending().await
+		}
+
+		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+			std::future::pending().await
+		}
+
+		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+			std::future::pending().await
+		}
+
+		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
+			std::future::pending().await
+		}
+
+		fn send_datagram(&self, _payload: Bytes) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
+			std::future::pending().await
+		}
+
+		fn max_datagram_size(&self) -> usize {
+			0
+		}
+
+		fn close(&self, _code: u32, _reason: &str) {}
+
+		async fn closed(&self) -> Self::Error {
+			std::future::pending().await
+		}
+	}
+
+	#[test]
+	fn owned_poll_adapter_forwards_writes_and_resets() {
+		use moq_net::transport::poll;
+		let fake = FakeSend::default();
+		let mut send = SendStream::new(fake.clone());
+		let mut cx = cx();
+		assert!(matches!(
+			poll::SendStream::poll_write(&mut send, &mut cx, b"hello"),
+			Poll::Ready(Ok(5))
+		));
+		poll::SendStream::set_priority(&mut send, 7);
+		poll::SendStream::reset(&mut send, 0x33);
+		assert_eq!(fake.writes.lock().unwrap().as_slice(), b"hello");
+		assert_eq!(fake.priorities.lock().unwrap().as_slice(), &[7]);
+		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[0x33]);
+		let mut session = Session::new(FakeSession);
+		assert!(poll::Session::poll_accept_uni(&mut session, &mut cx).is_pending());
 	}
 }

@@ -6,7 +6,7 @@
 //! parameter sets on keyframes). These build a synthetic broadcast, export to
 //! TS, and re-parse with the `mpeg2ts` reader.
 
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -17,7 +17,7 @@ use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::ts::export::PCR_INTERVAL;
-use crate::container::ts::{Export, Stats, catalog as tscat};
+use crate::container::ts::{Export, catalog as tscat, stats};
 use crate::container::{Frame, Kind, Producer};
 use moq_net::Timestamp;
 
@@ -1084,7 +1084,7 @@ async fn export_scte35_roundtrip() {
 	let track = consumer2
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
@@ -1197,7 +1197,7 @@ async fn export_pes_verbatim_roundtrip() {
 	let track = consumer2
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
@@ -1272,7 +1272,7 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: 
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(kind));
@@ -1481,7 +1481,121 @@ async fn aac_program_config_roundtrip() {
 	assert_eq!(audio2.channel_count, 4);
 	assert_eq!(audio2.description, audio.description);
 	let roundtripped = read_frames(&consumer2, name2, Kind::Audio).await;
-	assert_eq!(roundtripped, ingested, "the element is written once, not per frame");
+	assert_eq!(roundtripped, ingested, "the element leaves the frames on import");
+}
+
+/// For each AAC PES, whether it follows a PAT and whether a program config element leads its
+/// first raw data block.
+fn aac_program_configs(ts: &[u8]) -> Vec<(bool, bool)> {
+	let mut reader = TsPacketReader::new(Cursor::new(ts));
+	let mut out = Vec::new();
+	let mut after_pat = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		match packet.payload {
+			Some(TsPayload::Pat(_)) => after_pat = true,
+			Some(TsPayload::PesStart(pes)) => {
+				let header = super::adts::Header::parse(&pes.data).unwrap();
+				assert_eq!(header.channel_config, 0);
+				// ID_PCE in the first three bits of the raw data block.
+				out.push((std::mem::take(&mut after_pat), pes.data[header.header_len] >> 5 == 5));
+			}
+			_ => {}
+		}
+	}
+	out
+}
+
+/// A receiver tunes in at a PAT/PMT, so the program config element follows each one rather
+/// than riding the first frame only, including after a marker restarts the program clock. The
+/// output cut at a later PAT imports as the same quad track.
+#[tokio::test(start_paused = true)]
+async fn aac_program_config_follows_each_table() {
+	let mut quad = vec![0x11, 0x80, 0x04, 0xC4, 0x04, 0x00, 0x21, 0x10, 0x0C];
+	quad.extend_from_slice(b"Lavc63.1.101");
+	let payload = Bytes::from_static(&[0x20; 10]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track("a.aac", hang::container::track_info(hang::catalog::PRIORITY.audio))
+		.unwrap();
+	let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 4);
+	cfg.container = Container::Legacy;
+	cfg.description = Some(Bytes::from(quad.clone()));
+	catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.insert("a.aac".to_string(), cfg);
+	let mut producer = Producer::new(track, HangContainer::Legacy(Kind::Audio));
+	let mut export = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+
+	let write = |producer: &mut Producer<HangContainer>, ms: std::ops::Range<u64>| {
+		for ms in ms.step_by(100) {
+			producer
+				.write(Frame {
+					timestamp: Timestamp::from_millis(ms).unwrap(),
+					duration: None,
+					payload: payload.clone(),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+	};
+	write(&mut producer, 0..2_000);
+	producer.discontinuity().unwrap();
+	write(&mut producer, 2_000..3_000);
+	producer.finish().unwrap();
+	let frames = drain_frames(&mut export).await;
+	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	assert_packet_aligned(&ts);
+
+	let units = aac_program_configs(&ts);
+	assert_eq!(units.len(), 30);
+	for (i, (after_pat, pce)) in units.iter().enumerate() {
+		assert_eq!(
+			after_pat, pce,
+			"unit {i}: the element rides with the tables, and only there"
+		);
+	}
+	assert!(units[20].1, "the restarted clock re-sends the element");
+
+	// Join at the second PAT.
+	let pats: Vec<usize> = ts
+		.chunks(188)
+		.enumerate()
+		.filter(|(_, p)| p[1] & 0x1f == 0 && p[2] == 0)
+		.map(|(i, _)| i * 188)
+		.collect();
+	assert!(pats.len() > 2, "PAT on its cadence");
+	let mut joined = moq_net::broadcast::Info::new().produce();
+	let joined_consumer = joined.consume();
+	let joined_catalog = crate::catalog::Producer::new(&mut joined, crate::catalog::Config::default()).unwrap();
+	let mut import = crate::container::ts::Import::new(joined, joined_catalog.reserve());
+	import.decode(&BytesMut::from(&ts[pats[1]..])).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = joined_catalog.snapshot();
+	let (name, audio) = snapshot
+		.audio
+		.renditions
+		.iter()
+		.next()
+		.expect("the late join lost the AAC track");
+	assert_eq!(audio.channel_count, 4);
+	assert_eq!(audio.description.as_deref(), Some(quad.as_slice()));
+	let imported = read_frames(&joined_consumer, name, Kind::Audio).await;
+	assert!(!imported.is_empty());
+	assert!(
+		imported.iter().all(|frame| frame[..] == payload[..]),
+		"the repeated element leaves every frame"
+	);
 }
 
 /// GStreamer 1.28 `fdkaacenc` output, 48 kHz stereo, remuxed to FLV by ffmpeg 9.0.1. Its
@@ -1738,7 +1852,7 @@ async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
@@ -1920,7 +2034,7 @@ async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> 
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_start(moq_net::track::Position::group(0))
-				.with_max_age(Duration::from_secs(5)),
+				.with_max_delay(Duration::from_secs(5)),
 		)
 		.await
 		.unwrap();
@@ -3786,6 +3900,182 @@ async fn opus_export_import_roundtrip() {
 	}
 }
 
+/// An OpusHead for `channels` channels. `pre_skip` is libopus's usual 6.5 ms, so the
+/// bytes are a real head rather than a channel count with the magic glued on.
+fn opus_head(channels: u32, mapping: Option<crate::codec::opus::Mapping>) -> Bytes {
+	let mut config = crate::codec::opus::Config::new(48_000, channels);
+	config.pre_skip = 312;
+	config.mapping = mapping;
+	config.encode().expect("a real OpusHead")
+}
+
+fn opus_mapping(family: u8, streams: u8, coupled: u8, table: &[u8]) -> crate::codec::opus::Mapping {
+	crate::codec::opus::Mapping::new(crate::codec::opus::mapping::Config {
+		family,
+		streams,
+		coupled,
+		table,
+	})
+	.expect("mapping")
+}
+
+/// Publish one Opus frame and export it. `Err` is the exporter's refusal.
+async fn export_opus_track(channel_count: u32, description: Option<Bytes>) -> Result<BytesMut, String> {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".opus"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	let mut cfg = AudioConfig::new(AudioCodec::Opus, 48_000, channel_count);
+	cfg.container = Container::Legacy;
+	cfg.description = description;
+	catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.insert(track.name().to_string(), cfg);
+
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	producer
+		.write(Frame {
+			timestamp: Timestamp::ZERO,
+			duration: None,
+			payload: opus_packet(0x01, 8),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.finish().unwrap();
+
+	let mut exporter = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+	let mut out = BytesMut::new();
+	loop {
+		match tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+			Ok(Ok(Some(frame))) => out.extend_from_slice(&frame.payload),
+			Ok(Ok(None)) => return Ok(out),
+			Ok(Err(err)) => return Err(err.to_string()),
+			Err(_) => return Ok(out),
+		}
+	}
+}
+
+/// The plain `channel_config_code` on the first PMT.
+fn opus_config_code(ts: &[u8]) -> u8 {
+	let mut reader = TsPacketReader::new(Cursor::new(ts));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			let ext = pmt.es_info[0]
+				.descriptors
+				.iter()
+				.find(|d| d.tag == 0x7f)
+				.expect("extension descriptor");
+			assert_eq!(ext.data[0], 0x80, "extension_descriptor_tag");
+			return ext.data[1];
+		}
+	}
+	panic!("missing PMT");
+}
+
+/// Channel count ffprobe reads from the descriptor. ffmpeg's demuxer is what a plain
+/// code has to agree with; a clamped or guessed code shows up here as the wrong count.
+fn ffprobe_opus_channels(ts: &[u8]) -> u32 {
+	let mut child = std::process::Command::new("ffprobe")
+		.args([
+			"-v",
+			"error",
+			"-select_streams",
+			"a:0",
+			"-show_entries",
+			"stream=codec_name,channels",
+			"-of",
+			"csv=p=0",
+			"-i",
+			"pipe:0",
+		])
+		.stdin(std::process::Stdio::piped())
+		.stdout(std::process::Stdio::piped())
+		.stderr(std::process::Stdio::piped())
+		.spawn()
+		.expect("ffprobe is in the dev shell");
+	child.stdin.take().unwrap().write_all(ts).unwrap();
+	let output = child.wait_with_output().unwrap();
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	let stderr = String::from_utf8_lossy(&output.stderr);
+	assert!(output.status.success(), "ffprobe failed: {stderr} stdout={stdout}");
+	let line = stdout.lines().next().unwrap_or("").trim();
+	let (codec, channels) = line.split_once(',').unwrap_or_else(|| panic!("ffprobe: {line}"));
+	assert_eq!(codec, "opus", "ffprobe: {line} ({stderr})");
+	channels
+		.trim()
+		.parse()
+		.unwrap_or_else(|_| panic!("ffprobe channels in {line}"))
+}
+
+/// A head the extension descriptor can name keeps the plain channel code, and
+/// ffprobe reads that count. A family 255 or ambisonic head, a family 1 table that
+/// is not Vorbis, a head that contradicts the catalog, or more than stereo with no
+/// head is refused rather than labeled with a clamped count.
+#[tokio::test(start_paused = true)]
+async fn opus_export_refuses_a_head_it_cannot_label() {
+	for channels in 1..=2 {
+		let ts = export_opus_track(channels, Some(opus_head(channels, None)))
+			.await
+			.expect("family 0");
+		assert_eq!(opus_config_code(&ts), channels as u8);
+		assert_eq!(ffprobe_opus_channels(&ts), channels);
+		let ts = export_opus_track(channels, None).await.expect("no head");
+		assert_eq!(opus_config_code(&ts), channels as u8);
+		assert_eq!(ffprobe_opus_channels(&ts), channels);
+	}
+	for channels in 1..=8u32 {
+		let mapping = crate::codec::opus::Mapping::vorbis(channels as u8).unwrap();
+		let ts = export_opus_track(channels, Some(opus_head(channels, Some(mapping))))
+			.await
+			.unwrap_or_else(|err| panic!("{channels} channel Vorbis head: {err}"));
+		assert_eq!(opus_config_code(&ts), channels as u8, "{channels} channels");
+		assert_eq!(ffprobe_opus_channels(&ts), channels, "{channels} channels");
+	}
+
+	// 5.1 with the center and LFE swapped, still four streams and two coupled.
+	let swapped = opus_mapping(1, 4, 2, &[0, 4, 1, 2, 5, 3]);
+	// The uncoupled identity table ffmpeg writes as `0x80 | channels`, which its demuxer does not read.
+	let identity = opus_mapping(1, 6, 0, &[0, 1, 2, 3, 4, 5]);
+	let ambisonic = opus_mapping(2, 4, 0, &[0, 1, 2, 3]);
+	let family_255 = opus_mapping(255, 2, 0, &[0, 1]);
+	let wide = opus_mapping(255, 9, 0, &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+	let refused: [(u32, Option<Bytes>, &str); 9] = [
+		(0, None, "no OpusHead"),
+		(6, None, "no OpusHead"),
+		(9, None, "no OpusHead"),
+		(6, Some(opus_head(6, Some(swapped))), "not the Vorbis layout"),
+		(6, Some(opus_head(6, Some(identity))), "not the Vorbis layout"),
+		(4, Some(opus_head(4, Some(ambisonic))), "not the Vorbis layout"),
+		(2, Some(opus_head(2, Some(family_255))), "not the Vorbis layout"),
+		(9, Some(opus_head(9, Some(wide))), "not the Vorbis layout"),
+		(6, Some(opus_head(2, None)), "catalog declares"),
+	];
+	for (channels, description, needle) in refused {
+		let err = export_opus_track(channels, description)
+			.await
+			.expect_err("a guessed channel_config_code");
+		assert!(err.contains(needle), "expected {needle} in {err}");
+	}
+
+	let err = export_opus_track(2, Some(Bytes::from_static(b"not-an-opus-head")))
+		.await
+		.expect_err("a head that does not parse");
+	assert!(err.contains("cannot read the OpusHead"), "{err}");
+}
+
 // Two exporters of one broadcast, started at different times, must render the same packets
 // from the moment they overlap. That is what a redundant (SMPTE ST 2022-7) pair compares, and
 // it is what lets a leg be restarted without the merge at the far end seeing the two disagree.
@@ -5016,8 +5306,8 @@ async fn contiguous_same_version_commit_replaces_stale_sections() {
 }
 
 /// The cut debounce runs on the host clock, so a revision publishes even when no
-/// media ever advances a PTS (an audio-only or SI-only input). This test spends
-/// real wall time on the debounce window; media timestamps stay pinned at zero
+/// media ever advances a PTS (an audio-only or SI-only input). The paused tokio
+/// clock steps over the debounce window; media timestamps stay pinned at zero
 /// throughout, which is exactly the case a media-clock debounce wedges on.
 #[tokio::test(start_paused = true)]
 async fn debounce_opens_without_a_media_clock() {
@@ -5038,8 +5328,8 @@ async fn debounce_opens_without_a_media_clock() {
 		.unwrap();
 	assert_eq!(track.latest(), Some(0), "a revision inside the window is held");
 
-	// ...and publishes once the window passes in *real* time, no finish, no PTS.
-	std::thread::sleep(Duration::from_millis(1200));
+	// ...and publishes once the window passes on the host clock, no finish, no PTS.
+	tokio::time::advance(Duration::from_millis(1200)).await;
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 3)[..]))
 		.unwrap();
@@ -6086,7 +6376,7 @@ async fn export_stats_skip_output_a_failure_discards() {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		(broadcast, catalog)
 	};
-	let units = |stats: Stats| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
+	let units = |stats: stats::Export| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
 
 	let (mut broadcast, mut catalog) = publish();
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
@@ -6144,7 +6434,7 @@ async fn export_stats_skip_output_a_failure_discards() {
 ///
 /// Drained after every write, like [`export_twice`], so the export reads every frame and a row
 /// stops only because its track did.
-async fn export_liveness(sample: u64, stop: u64) -> (Stats, Stats, Vec<Frame>) {
+async fn export_liveness(sample: u64, stop: u64) -> (stats::Export, stats::Export, Vec<Frame>) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -6174,7 +6464,7 @@ async fn export_liveness(sample: u64, stop: u64) -> (Stats, Stats, Vec<Frame>) {
 	];
 
 	let mut export = Export::new(crate::source::announced(&consumer)).await.unwrap();
-	assert!(export.stats().is_empty(), "no row before the program tables");
+	assert!(export.stats().streams.is_empty(), "no row before the program tables");
 	let (mut sampled, mut frames) = (None, Vec::new());
 	let mut audio_index = 0;
 	for tick in 0..TICKS {
@@ -6226,7 +6516,7 @@ async fn export_liveness(sample: u64, stop: u64) -> (Stats, Stats, Vec<Frame>) {
 async fn export_stats_advance_every_stream() {
 	let (mid, end, _) = export_liveness(TICKS / 2, TICKS).await;
 
-	let tracks: Vec<&str> = end.streams.values().map(|row| row.track).collect();
+	let tracks: Vec<&str> = end.streams.values().map(|row| row.track.as_str()).collect();
 	assert_eq!(tracks, [".aac", ".aac", ".avc3"], "one row per elementary stream");
 	for (pid, row) in &end.streams {
 		let before = &mid.streams[pid];

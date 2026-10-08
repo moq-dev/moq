@@ -29,7 +29,7 @@ let client = Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
-    guard case .start(let announcement) = event else { continue } // .update, .end, or .live
+    guard case .start(let announcement) = event else { continue } // .update or .end
     // Prefixes stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
@@ -74,7 +74,7 @@ route is a capability, not an inventory. `announced(prefix:filter:)` combines a
 literal root with an optional relative pattern and yields `AnnounceEvent`s:
 `.start`, `.update`, or `.end` carrying an `Announce`, whose `prefix`
 stays relative to the origin and whose `captures` reports what the wildcards
-matched, or `.live` once every route live at subscribe time has been delivered.
+matched.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `hidden: true`.
 
@@ -150,5 +150,7 @@ not the same as zero.
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+A raw `Frame` or `Datagram` has a nil `timestampUs` when it was read from an untimed track; see [untimed tracks](/concept/moq-lite#subscriptions). A raw track you publish is always timed.
 
 Use `try await session.shutdown()` to drain finished tracks before disconnecting. It throws if delivery has not completed within one second. `session.cancel(code: 0)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

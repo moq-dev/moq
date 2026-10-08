@@ -338,13 +338,13 @@ mod tests {
 	///
 	/// The root spec is the globals plus the first stage, so answering a later chunk
 	/// against it offers process-wide flags that the chunk refuses.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn retargets_to_the_active_stage() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		// A stage offers its own flags, and none of the globals it would refuse.
 		let staged = complete("moq --connect http://x/y import fmp4 -- export fmp4 --").await;
 		assert!(!staged.is_empty(), "a later stage completed nothing");
-		for global in ["--connect", "--hop", "--broadcast"] {
+		for global in ["--connect", "--epoch", "--broadcast"] {
 			assert!(
 				!staged.iter().any(|candidate| candidate == global),
 				"{global} leaked into a stage that refuses it: {staged:?}"

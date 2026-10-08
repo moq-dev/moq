@@ -124,6 +124,10 @@ pub enum Error {
 	#[error("duplicate moov")]
 	DuplicateMoov,
 
+	/// A moov arrived after `finish()`, so the tracks it declares could never finish.
+	#[error("moov after finish")]
+	MoovAfterFinish,
+
 	#[error("missing trun")]
 	MissingTrun,
 
@@ -454,7 +458,7 @@ fn encode(group: &mut moq_net::group::Producer, frames: &[Frame], info: Fragment
 	// fragment's earliest presentation time so a relay can order it.
 	let mut writer = group.create_frame(moq_net::frame::Info {
 		size: bytes.len() as u64,
-		timestamp: frames[0].timestamp,
+		timestamp: Some(frames[0].timestamp),
 	})?;
 	writer.write(bytes)?;
 	writer.finish()?;
@@ -739,8 +743,8 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 				Some(description) => {
 					let head = crate::codec::opus::Config::parse(&mut description.as_ref())?;
 					// dOps shares OpusHead's family 0 layout; a mapping table would need writing too.
-					if head.mapping_family != 0 {
-						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(head.mapping_family).into());
+					if let Some(mapping) = head.mapping {
+						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(mapping.family()).into());
 					}
 					if head.channel_count != config.channel_count {
 						return Err(Error::OpusChannelCount {

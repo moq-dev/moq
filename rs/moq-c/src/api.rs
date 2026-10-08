@@ -15,7 +15,7 @@ use tracing::Level;
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_container_kind {
-	/// A QUIC VarInt timestamp prefix followed by the raw codec payload.
+	/// A QUIC varint timestamp prefix followed by the raw codec payload.
 	/// Timestamps are in microseconds.
 	MOQ_CONTAINER_KIND_LEGACY = 0,
 	/// Fragmented MP4: each frame is a complete moof+mdat fragment, described by
@@ -466,8 +466,13 @@ pub struct moq_frame {
 	pub payload: *const u8,
 	pub payload_size: usize,
 
-	/// The presentation timestamp of the frame in microseconds
+	/// The presentation timestamp of the frame in microseconds, or 0 when
+	/// `timestamp_present` is false.
 	pub timestamp_us: u64,
+
+	/// Whether the frame carries a timestamp. Media frames always do; a raw frame read
+	/// from an untimed track does not.
+	pub timestamp_present: bool,
 
 	/// Whether this frame opens a group or is a video keyframe; audio is true only at a group start.
 	pub keyframe: bool,
@@ -481,8 +486,12 @@ pub struct moq_datagram {
 	pub payload: *const u8,
 	pub payload_size: usize,
 
-	/// The presentation timestamp of the datagram in microseconds.
+	/// The presentation timestamp of the datagram in microseconds, or 0 when
+	/// `timestamp_present` is false.
 	pub timestamp_us: u64,
+
+	/// Whether the datagram carries a timestamp. One read from an untimed track does not.
+	pub timestamp_present: bool,
 
 	/// Per-track sequence number, drawn from the same namespace as groups.
 	pub sequence: u64,
@@ -500,7 +509,7 @@ pub struct moq_track_info {
 	pub priority: u8,
 
 	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
-	/// The publisher-side half of `moq_subscription.max_age_us`.
+	/// The publisher-side half of `moq_subscription.max_delay_us`.
 	pub max_age_us: u64,
 	/// Whether `max_age_us` is set. When false, the publisher imposes no age limit.
 	pub max_age_present: bool,
@@ -555,11 +564,11 @@ pub struct moq_subscription {
 	/// Delivery priority. Higher values preempt lower ones under contention.
 	pub priority: u8,
 
-	/// Maximum age of a non-latest group before it is skipped, in microseconds.
+	/// How far a non-latest group may fall behind the live edge before it is skipped, in microseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
-	pub max_age_us: u64,
+	pub max_delay_us: u64,
 
-	/// The lowest group to deliver (a floor). A floor is not a request: `max_age_us` is
+	/// The lowest group to deliver (a floor). A floor is not a request: `max_delay_us` is
 	/// what asks for data, and delivery starts at the oldest group at or above the floor
 	/// within that budget (the latest group at the default budget of 0).
 	pub group_start: u64,
@@ -577,7 +586,7 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 	fn from(subscription: &moq_subscription) -> Self {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
-			.with_max_age(std::time::Duration::from_micros(subscription.max_age_us));
+			.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us));
 		if subscription.group_start_present {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
@@ -726,13 +735,9 @@ pub enum moq_announce_kind {
 	MOQ_ANNOUNCE_KIND_UPDATE = 1,
 	/// No route covers the prefix any more.
 	MOQ_ANNOUNCE_KIND_END = 2,
-	/// Every route live when the listener started has been delivered; what
-	/// follows is live changes. Delivered once, with no prefix or captures.
-	MOQ_ANNOUNCE_KIND_LIVE = 3,
 }
 
-/// An announce event from an origin: a route starting, updating, or ending,
-/// or the listener catching up.
+/// An announce event from an origin: a route starting, updating, or ending.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_event {
@@ -747,7 +752,7 @@ pub struct moq_announce_event {
 	pub captures_len: usize,
 	pub has_captures: bool,
 
-	/// Which event this is. A LIVE event carries no prefix or captures.
+	/// Which event this is.
 	pub kind: moq_announce_kind,
 }
 
@@ -3286,25 +3291,25 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 	})
 }
 
-/// Query whether the publisher recommends temporarily avoiding a video rendition.
+/// Query whether a video rendition may be selected.
 ///
-/// The track remains available. A false value also covers catalogs that omit the
-/// optional field.
+/// False means no frames are coming and the rendition must not be selected. A catalog that
+/// omits the optional field reads as true.
 ///
 /// Returns zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that `dst` points to properly aligned, writable storage for a `bool`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_video_stalled(catalog: u32, index: u32, dst: *mut bool) -> i32 {
+pub unsafe extern "C" fn moq_consume_video_enabled(catalog: u32, index: u32, dst: *mut bool) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		if dst.is_null() {
 			return Err(Error::InvalidPointer);
 		}
 
-		let stalled = State::lock().consume.video_stalled(catalog, index as usize)?;
-		unsafe { dst.write(stalled) };
+		let enabled = State::lock().consume.video_enabled(catalog, index as usize)?;
+		unsafe { dst.write(enabled) };
 		Ok(())
 	})
 }
@@ -3415,7 +3420,7 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 
 /// Consume a video track from a broadcast, delivering frames in order.
 ///
-/// - `max_age_us` controls the maximum amount of buffering allowed before skipping a GoP.
+/// - `max_delay_us` controls the maximum amount of buffering allowed before skipping a GoP.
 /// - `on_frame` is called with a positive frame ID per frame, then exactly once
 ///   more with a terminal code: `0` (closed cleanly) or a negative error. After
 ///   the terminal (`<= 0`) callback, `on_frame` is never called again and
@@ -3430,16 +3435,16 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
-	max_age_us: u64,
+	max_delay_us: u64,
 	on_frame: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_age = std::time::Duration::from_micros(max_age_us);
+		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.video(catalog, index, max_age, on_frame)
+		State::lock().consume.video(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3464,7 +3469,7 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [moq_consume_audio_cancel].
-/// The `max_age_us` parameter controls how long to wait before skipping frames.
+/// The `max_delay_us` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -3474,16 +3479,16 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
-	max_age_us: u64,
+	max_delay_us: u64,
 	on_frame: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_age = std::time::Duration::from_micros(max_age_us);
+		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.audio(catalog, index, max_age, on_frame)
+		State::lock().consume.audio(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3601,7 +3606,8 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 ///
 /// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
 /// frame is released with [moq_consume_frame_free]. `dst.timestamp_us` is the
-/// frame presentation timestamp in microseconds. `dst.keyframe` is reported as
+/// frame presentation timestamp in microseconds, when `dst.timestamp_present` says it
+/// has one. `dst.keyframe` is reported as
 /// false because raw tracks do not parse codec metadata.
 ///
 /// Returns a zero on success, or a negative code on failure.
@@ -3678,7 +3684,8 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 /// Read a datagram delivered via the [moq_consume_datagrams] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size` (valid until the datagram is released with
-/// [moq_consume_datagram_free]), plus `dst.timestamp_us` and `dst.sequence`.
+/// [moq_consume_datagram_free]), plus `dst.timestamp_us` (when `dst.timestamp_present`)
+/// and `dst.sequence`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

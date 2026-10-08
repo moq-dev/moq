@@ -25,6 +25,18 @@ codec requirements in `encode::Settings`; `encode::Options` adds publication
 policy. Decoding likewise separates low-level `decode::Config`, PCM
 `decode::Output`, and subscription `decode::Options`.
 
+`encode::Settings::with_preset` stores an `encode::Preset`, read back with
+`Settings::preset`, and applies it without touching codec, rate, layout,
+bitrate, or DTX. `LowLatency` packs 10 ms of audio per packet, `Balanced` (the
+default, and what `Settings::new` builds) and `Quality` 20 ms. AAC frames are
+fixed at 1024 samples, so a preset leaves AAC's frame duration alone. That is
+packetization, not a delay guarantee: Opus adds its 6.5 ms lookahead either way.
+libopus already runs at full complexity, where a 10 ms stereo packet takes about
+0.1 ms to encode, so Quality has nothing further to spend and matches Balanced.
+Like `moq-video`, `Encoder::applied()` reports the preset whose packetization
+took effect rather than echoing the request: `Quality` reports `Balanced`, and
+AAC or a custom frame duration reports none.
+
 | Module | Does |
 | --- | --- |
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |
@@ -79,9 +91,23 @@ and no platform encoder is wired in yet, so `Codec::Aac` is refused at
 construction on every host for now. Linux has no OS encoder, so it will stay
 that way there.
 
+Each packet is its own group by default, so a relay pays a stream and a
+group's bookkeeping per 20 ms Opus frame. `encode::Options::group_duration`
+sets a minimum per group instead, for every codec: the packet that reaches it
+closes the group. During a pause or after `reset_epoch()`, a partial group
+stays open until the next write; `discontinuity()` closes it immediately.
+Packets forward as they are encoded rather than waiting for the group to fill,
+but loss gets coarser: a subscriber that falls behind skips a whole
+group, and a lost packet holds back the rest of its group until it is
+retransmitted. A 60 ms Opus `Settings::frame_duration` also cuts the group
+rate, without code, at the cost of encoder latency. The synthetic
+`just bench-audio` workload reports higher p99 delivery latency with longer
+groups; immediate forwarding is not a promise of unchanged end-to-end latency.
+
 Highlights:
 
 - **`encode::Control`** advertises the track and opens the microphone only while someone listens. Stop, swap devices, and restart without changing the track subscribers know; read a level meter for the UI.
+- **Capture time.** A microphone buffer is stamped at the instant its first sample was captured on the catalog clock, so it lines up with video acquired then (up to one 10 ms frame later with echo cancellation on, which delays the samples it processes). A capture instant before the clock's PTS zero stamps zero, and one after the read stamps the read. A host with no usable capture time stamps the buffer when it is read.
 - **A/V sync signal.** `Sink::buffered()` reports how far ahead the speaker is, which is what a video clock steers by.
 - **Activity per packet**, read off the Opus stream, so a call UI shows who is talking without a second voice detector.
 - **One Linux build dependency**: ALSA headers, and only when `capture` or `playback` is enabled.

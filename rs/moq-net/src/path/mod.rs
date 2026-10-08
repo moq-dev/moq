@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
 /// An owned version of [`Path`] with a `'static` lifetime.
 pub type PathOwned = Path<'static>;
@@ -353,25 +353,6 @@ impl<'a> Path<'a> {
 		}
 	}
 
-	/// Split off a final `@<uuidv7>` segment, leaving all other paths unchanged.
-	pub fn split_epoch(&self) -> (Path<'_>, Option<crate::Epoch>) {
-		let text = self.as_str();
-		let (name, segment) = text.rsplit_once('/').unwrap_or(("", text));
-		if let Some(epoch) = segment.strip_prefix('@').and_then(|text| text.parse().ok()) {
-			(Path::new(name), Some(epoch))
-		} else {
-			(self.borrow(), None)
-		}
-	}
-
-	/// Append an optional epoch as a final `@<uuidv7>` segment.
-	pub fn join_epoch(&self, epoch: Option<&crate::Epoch>) -> PathOwned {
-		match epoch {
-			Some(epoch) => self.join(format!("@{epoch}")),
-			None => self.to_owned(),
-		}
-	}
-
 	/// Resolve a [`Relative`] against this path.
 	///
 	/// A non-empty reference replaces the last segment of the base, matching relative URL
@@ -598,12 +579,9 @@ impl Display for Path<'_> {
 	}
 }
 
-impl<V: Copy> Decode<V> for Path<'_>
-where
-	String: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let path: Path = String::decode(r, version)?.into();
+impl<V> Decode<V> for Path<'_> {
+	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+		let path: Path = r.string()?.into();
 		if path.parts().count() > Path::MAX_PARTS {
 			return Err(DecodeError::BoundsExceeded);
 		}
@@ -611,16 +589,12 @@ where
 	}
 }
 
-impl<V: Copy> Encode<V> for Path<'_>
-where
-	for<'a> &'a str: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl<V> Encode<V> for Path<'_> {
+	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
 		if self.parts().count() > Path::MAX_PARTS {
 			return Err(EncodeError::BoundsExceeded);
 		}
-		self.as_str().encode(w, version)?;
-		Ok(())
+		w.string(self.as_str())
 	}
 }
 
@@ -786,49 +760,6 @@ impl<'de> serde::Deserialize<'de> for Relative<'static> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn epoch_vectors() {
-		let vectors: serde_json::Value = serde_json::from_str(include_str!("epoch.json")).unwrap();
-		for row in vectors["valid"].as_array().unwrap() {
-			let text = row["text"].as_str().unwrap();
-			let epoch: crate::Epoch = text.parse().unwrap();
-			assert_eq!(epoch.as_str(), text);
-			assert_eq!(
-				epoch.time().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
-				row["unix_ms"].as_u64().unwrap() as u128
-			);
-		}
-		for row in vectors["invalid"].as_array().unwrap() {
-			assert!(row.as_str().unwrap().parse::<crate::Epoch>().is_err(), "{row}");
-		}
-		let ordered: Vec<crate::Epoch> = vectors["ordered"]
-			.as_array()
-			.unwrap()
-			.iter()
-			.map(|row| row.as_str().unwrap().parse().unwrap())
-			.collect();
-		assert!(ordered.windows(2).all(|pair| pair[0] < pair[1]));
-		for row in vectors["paths"].as_array().unwrap() {
-			let path = Path::new(row["path"].as_str().unwrap());
-			let (name, epoch) = path.split_epoch();
-			assert_eq!(name.as_str(), row["name"].as_str().unwrap());
-			assert_eq!(epoch.as_ref().map(|epoch| epoch.as_str()), row["epoch"].as_str());
-			assert_eq!(name.join_epoch(epoch.as_ref()), path);
-			assert_eq!(path.is_hidden(), name.is_hidden());
-		}
-	}
-
-	#[test]
-	fn epoch_segments_are_literal_pattern_components() {
-		let epoch: crate::Epoch = "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f".parse().unwrap();
-		let path = Path::new("demo/video").join_epoch(Some(&epoch));
-		assert!("demo/**".parse::<Pattern>().unwrap().matches(path.as_str()));
-		assert!("demo/video/@*".parse::<Pattern>().unwrap().matches(path.as_str()));
-		assert!(!"demo/video".parse::<Pattern>().unwrap().matches(path.as_str()));
-		assert!(path.as_str().parse::<Pattern>().unwrap().matches(path.as_str()));
-		assert!(!path.is_hidden());
-	}
 
 	#[test]
 	fn test_has_prefix() {
@@ -1313,22 +1244,26 @@ mod tests {
 		let too_deep = format!("{ok}/extra");
 
 		// Encode enforces the limit.
-		let mut buf = bytes::BytesMut::new();
-		Path::new(&ok).encode(&mut buf, Version::Lite04).unwrap();
+		let mut buf = Vec::new();
+		Path::new(&ok)
+			.encode(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
+			.unwrap();
 		assert!(matches!(
-			Path::new(&too_deep).encode(&mut bytes::BytesMut::new(), Version::Lite04),
+			Path::new(&too_deep).encode_bytes(Version::Lite04),
 			Err(EncodeError::BoundsExceeded)
 		));
 
 		// Decode round-trips at the limit.
-		let decoded = Path::decode(&mut buf.freeze(), Version::Lite04).unwrap();
+		let decoded = crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Path::decode).unwrap();
 		assert_eq!(decoded.as_str(), ok);
 
 		// Decode enforces the limit on a raw string that encode would have refused.
-		let mut buf = bytes::BytesMut::new();
-		too_deep.as_str().encode(&mut buf, Version::Lite04).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Lite04.into())
+			.string(too_deep.as_str())
+			.unwrap();
 		assert!(matches!(
-			Path::decode(&mut buf.freeze(), Version::Lite04),
+			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Path::decode),
 			Err(DecodeError::BoundsExceeded)
 		));
 	}
