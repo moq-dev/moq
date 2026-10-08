@@ -4,10 +4,13 @@
 
 A client or publisher holds sessions to several CDNs at once, ranked by its
 own preference: moq.pro as primary, Cloudflare as secondary. A subscription
-goes over the most preferred link that has a route and resumes on the next
-one when that route goes away; a publisher pushes the same path to every CDN,
-so the move resumes instead of restarting. The secondary needs nothing from us:
-a moq-transport relay that speaks no ROUTE is just a link.
+goes over the most preferred link that has a route and moves to the next
+one when that route goes away; a publisher pushes the same path to every CDN.
+The move resumes only between lite-07 routes with the same epoch. The
+secondary needs nothing from us: a moq-transport relay that speaks no ROUTE is
+just a link, but its routes carry no epoch, so moving onto it is a `Restart`
+([Restart](/quest/m0/broadcast-epoch/restart.md)) and the player
+re-requests.
 
 ## Plan
 
@@ -31,13 +34,19 @@ Decided 2026-10-01 (moq-dev/moq#4694):
   in the bindings that expose connect config. Pick the smallest shape that
   covers both publish and subscribe.
 
-Test with mocked time: a subscriber linked to a lite relay (preferred) and a
-moq-transport relay (secondary), with a publisher pushing one path to both;
-losing the preferred relay resumes the subscription on the secondary with no
-timestamp rewind, and its return moves it back.
+Test with mocked time: a subscriber linked to a lite-07 relay (preferred) and
+a second lite-07 relay, with a publisher pushing one path and epoch to both;
+losing the preferred relay resumes the subscription on the second with no
+timestamp rewind, and its return moves it back. With a moq-transport relay as
+the secondary, the same loss delivers `Restart` (or an end and start) and a
+re-request lands on the secondary.
 
 Docs: a multi-CDN section in the routing concept page and the client
 connect docs.
 
 Public API: per-upstream preference in client config, in Rust, JS, and the
 bindings. Wire: none.
+
+## Related
+
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - an epochless secondary takes over as a restart, not a resume

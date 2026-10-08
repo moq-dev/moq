@@ -12,12 +12,14 @@ failover `export ts` sees a timestamp rewind and exits (#4354).
 
 ## Plan
 
-Decided: every publisher of one path MUST publish the same broadcasts and
-tracks, since any route covering a path resumes its subscriptions. A redundant
-pair is keyed by a shared explicit epoch (decided 2026-10-03: `--hop` no
-longer exists to key it). Make every container importer (ts, fmp4, flv, mkv,
-and the SRT, RTMP, and HLS gateways that reuse them) meet the contract when
-fed one encoded stream. Capture is out: two encoders never align.
+Decided: every publisher of one path and epoch MUST publish the same
+broadcasts and tracks, since routes with the same epoch resume each other's
+subscriptions. A redundant pair is keyed by a shared explicit epoch (decided
+2026-10-03: `--hop` no longer exists to key it). Make every container importer
+that `moq import --epoch` accepts (ts, fmp4, flv, mkv) meet the contract when
+fed one encoded stream. The SRT, RTMP, and RTC gateways and `ts --program all`
+are out: they mint an epoch per ingest connection (#4962), so two of them
+never share one. Capture is out too: two encoders never align.
 
 - A group's sequence derives from its keyframe's media timestamp (PTS in TS),
   not a per-process counter. Decide how both processes agree across a
@@ -60,3 +62,4 @@ issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`, two
 ## Related
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
+- [E2EE](/quest/m1/e2ee/README.md) - an encrypting publisher refuses a shared epoch, so a redundant pair is plaintext only

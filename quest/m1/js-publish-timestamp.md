@@ -9,9 +9,10 @@ payload published without a timestamp goes out untimed.
 
 ## Plan
 
-Today the json and flate snapshot and stream producers default
-`at = Timestamp.now()`, the json window producer always uses now, and js/net's
-`writeString`, `writeJson`, and `writeBool` stamp now.
+The remaining work is these defaults (checked 2026-10-08): the json and
+flate snapshot and stream producers default `at = Timestamp.now()`, the json
+window producer always uses now, and js/net's `writeString`, `writeJson`, and
+`writeBool` (`js/net/src/group.ts`) stamp now.
 
 Decided (2026-10-01): `@moq/net` exports `Timed<T>`
 (`{ value: T; at?: Time.Timestamp }`), the Rust name and shape. Each producer

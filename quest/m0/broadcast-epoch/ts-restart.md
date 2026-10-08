@@ -20,8 +20,9 @@ and a flagged forward jump publishes break markers and carries on.
 Decided (maintainer, 2026-09-30):
 
 - A rewind is new content, so it is always a new broadcast at a new epoch,
-  never a continuation of the old one. Viewers follow it because the newest
-  epoch wins the path.
+  never a continuation of the old one. The newest epoch wins the path, and
+  viewers follow the `Restart` announce it produces (an end and start on
+  older versions).
 - `decode` stops at the flagged rewind and reports it. The caller finishes the
   old broadcast (a clean end, not an abort, so its viewers read to its end),
   publishes a new broadcast at the same path, minting a fresh epoch, and calls
@@ -42,8 +43,10 @@ connection carries both epochs. Update `doc/bin/cli.md` and `doc/bin/srt.md`.
 
 Public API: breaking in moq-mux, `ts::Import::decode` reports a restart
 and `restart` is new. Wire: none.
-
-
 ## Closes
 
 - [#4582](https://github.com/moq-dev/moq/issues/4582) - a signalled backward TS discontinuity ends the import
+
+## Related
+
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - the announce event viewers follow onto the new epoch

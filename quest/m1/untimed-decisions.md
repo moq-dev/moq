@@ -22,9 +22,9 @@ answered.
      replay an untimed track untimed.
 2. **A malformed object in a FETCH.** On a TIMESCALE track, a subgroup object
    without a Timestamp ends the whole track with `MalformedTrack`
-   (`rs/moq-net/src/ietf/subscriber.rs`, `run_group`), as js/net does
+   (`rs/moq-net/src/ietf/subscriber.rs`, `recv_group`), as js/net does
    ([#4968](https://github.com/moq-dev/moq/pull/4968)), and so does one in a
-   joining FETCH's fill. The same object in a standalone group FETCH, which a
+   joining FETCH's fill (`recv_fill`). The same object in a standalone group FETCH, which a
    relay sends to fill a cache miss (`run_group_fetch`), fails only that group.
    - Recommended: end the track too. The publisher broke the track, however
      the object arrived.

@@ -39,3 +39,7 @@ traffic yet.
 ## Required
 
 - [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+
+## Related
+
+- [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) - edits the same `bbr3/mod.rs` packet bookkeeping and lands first; this keeps the metadata it preserves

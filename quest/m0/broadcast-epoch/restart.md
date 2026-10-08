@@ -16,6 +16,13 @@ route goes, so the application decides whether to stay on the old broadcast
 or follow the new one. New requests resolve the current winner and never join
 a front pinned to a replaced route.
 
+Routes without an epoch never splice (maintainer, 2026-10-08). A `Restart`
+(or an `End` then `Start` on older wires) tells every downstream subscriber,
+a downstream relay included, to drop its copy of the old source and
+resubscribe fresh. A copy resumes or splices only across routes with an
+identical epoch, so the old copy's cached groups never reach a subscriber of
+the new source.
+
 ## Plan
 
 Decided in planning (2026-10-07, from #4970's review):
@@ -71,7 +78,11 @@ Decided in planning (2026-10-07, from #4970's review):
   stays on its first route (`pick`'s `Some(None)` arm in `origin.rs`, the
   module docs in `model/front.rs`), so a request joins it even after the
   winner changed, and a player that re-requests gets the dead broadcast
-  again. JS already swaps per path.
+  again. JS already swaps per path. The same holds when the route entry
+  stays put but its source changed behind it, as for a downstream relay
+  whose upstream session delivers the `Restart` (or END then START): the
+  relay retires that copy for new requests and opens a fresh one, never
+  joining or resuming into the old copy.
 - **Wire.** lite-07 (`moq-lite-07-wip`) gains an explicit restart message on
   the announce stream. Older lite versions and moq-transport send
   `ANNOUNCE_END` then `ANNOUNCE_START` for a source change, a new rule for a
@@ -86,13 +97,15 @@ Decided in planning (2026-10-07, from #4970's review):
   lite-07 changelog's "ends subscriptions to the older one". The rule that a
   subscription between routes without an Epoch "stays on its route and ends
   with it" holds as written.
-- **Players.** `moq play` (#4970) and `@moq/watch` restart on `Restart`
-  instead of treating every epochless `Update` as a restart, so a re-price
-  that keeps its winner, or a same-epoch failover, no longer restarts
-  playback. An epochless drain onto a different entry still does.
-  `moqsrc` (planned in #4960) switches on `Restart` too. On lite-06 and
+- **Players** follow `Restart` in [Apps](/quest/m0/broadcast-epoch/apps.md);
+  `moqsrc` (planned in #4960) switches on it too. On lite-06 and
   moq-transport, a pair not coalesced reaches players as `End` then
   `Start`: a stop, then a fresh play.
+- **Every Rust consumer** of announce events handles `Restart` in the same
+  PR, since the enum match is exhaustive: moq-ffi's `MoqAnnounceEvent` gains
+  `Restart` (its wrappers follow in
+  [Bindings](/quest/m0/broadcast-epoch/bindings.md)), and moq-c, moq-stats,
+  moq-relay, moq-room, moq-boy, moq-cli, moq-rtc, and moq-tokio map it.
 - **Rejected** (in #5013): `@moq/watch` resubscribing on `Internal` or
   `SessionClosed` (#4999), since players recover on announcements, not
   errors; announcing only once the old front dies, since viewers stay blank
@@ -118,8 +131,11 @@ on `B`. Add a regression case where an epochless replacement at equal cost
 and chain length, on a different hop chain whose hash is the larger one (the
 pinned `pool/job-0` pair in `origin.rs` has one), competes with the lingering
 old route: no `Restart` and new requests stay on the old route until it is
-withdrawn, then `Restart` and a re-request lands on the replacement. Run
-`just drafts check` and `just test interop --all`.
+withdrawn, then `Restart` and a re-request lands on the replacement. With
+mocked time, a lite-06 relay chain where an epochless publisher restarts: the
+downstream relay's cached groups from the old instance never reach a new
+subscriber mixed with the new instance's groups. Run `just drafts check` and
+`just test interop --all`.
 
 Docs: update `doc/concept/moq-lite.md` (publisher epochs) and
 `doc/lib/{rs,js}` announce sections inline, plus `doc/bin/rtmp.md`,
@@ -134,4 +150,4 @@ send END then START where they sent UPDATE for a source change.
 
 ## Related
 
-- [Apps](/quest/m0/broadcast-epoch/apps.md) - #4970 drives `@moq/watch` and `moq play` from announcements, which this relies on
+- [Apps](/quest/m0/broadcast-epoch/apps.md) - the players that follow `Restart`
