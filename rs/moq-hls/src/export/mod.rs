@@ -8,10 +8,12 @@
 //! way and is skipped. A `moq-archive` recording replayed onto a broadcast is served the same way:
 //! its playlists read only the stored timelines, and a segment GETs only its rendition's objects.
 //!
-//! Segment boundaries come from one reference rendition's records (the first video rendition, or
-//! the first audio one when there is no video), numbered by record sequence, so every edge and
-//! every reload agree without the publisher cutting for HLS. Every other rendition resolves each
-//! segment against its own timeline.
+//! Segment boundaries come from one reference rendition's records, numbered by record sequence,
+//! so edges that share the choice agree without the publisher cutting for HLS. The first choice
+//! is the first video rendition, or the first audio one when there is no video. A video choice
+//! sticks while that rendition stays in the catalog: a newer rendition that sorts earlier must
+//! not rewind `EXT-X-MEDIA-SEQUENCE`. An audio choice switches to video once a video rendition
+//! has a timeline. Every other rendition resolves each segment against its own timeline.
 //! An inline-parameter-set codec with no catalog `description` GETs one keyframe
 //! group on the first playlist render to build its init, then caches it.
 //!
@@ -394,8 +396,8 @@ async fn watch_catalog(
 				}
 				renditions.sync(&upstream, &catalog);
 
-				// Follow the reference rendition's timeline; a new reference renumbers every segment.
-				let next = self::reference(&catalog);
+				// Keep the reference while it stays. Replacing it renumbers every segment.
+				let next = self::reference(&catalog, reference.as_ref());
 				if next != reference {
 					if let Some(watcher) = timeline_watcher.lock().unwrap().take() {
 						watcher.abort();
@@ -425,24 +427,39 @@ async fn watch_catalog(
 	renditions.close();
 }
 
-/// The rendition every segment boundary comes from: the first video rendition with a timeline,
-/// or the first audio one when the broadcast has no video. Renditions are ordered by name, so
-/// every edge picks the same one.
-fn reference(catalog: &moq_mux::catalog::hang::Catalog) -> Option<Reference> {
+/// The rendition every segment boundary comes from.
+///
+/// The first choice is the first video rendition with a timeline, or the first audio one when
+/// the broadcast has no video. Renditions are ordered by name, so edges choosing together pick
+/// the same one. A video `current` stays while it is still a rendition with a timeline: a newer
+/// rendition that sorts earlier must not take over, or `EXT-X-MEDIA-SEQUENCE` rewinds. An audio
+/// `current` stays only while no video rendition has a timeline, since video segments cut on
+/// audio records would mostly be gaps; that switch, like a reference that leaves, rewinds.
+fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Reference>) -> Option<Reference> {
 	let archive = catalog.archive.as_ref()?;
-	let indexed = |name: &&String| archive.timelines.contains_key(*name);
+	let indexed = |name: &str| archive.timelines.contains_key(name);
 	let video = catalog
 		.video
 		.renditions
 		.keys()
-		.find(indexed)
+		.find(|name| indexed(name))
 		.map(|name| (Kind::Video, name));
+	if let Some(current) = current {
+		let (kind, name) = current.as_ref();
+		let listed = match kind {
+			Kind::Video => catalog.video.renditions.contains_key(name),
+			Kind::Audio => video.is_none() && catalog.audio.renditions.contains_key(name),
+		};
+		if listed && indexed(name) {
+			return Some(Arc::clone(current));
+		}
+	}
 	let audio = || {
 		catalog
 			.audio
 			.renditions
 			.keys()
-			.find(indexed)
+			.find(|name| indexed(name))
 			.map(|name| (Kind::Audio, name))
 	};
 	video.or_else(audio).map(|(kind, name)| Arc::new((kind, name.clone())))
@@ -2936,7 +2953,7 @@ mod tests {
 			let watcher = tokio::spawn(watch_timeline(
 				upstream.broadcast.clone(),
 				catalog.archive.clone().unwrap(),
-				reference(catalog).unwrap(),
+				reference(catalog, None).unwrap(),
 				renditions.fanout(),
 			));
 			(renditions, watcher)
@@ -3099,6 +3116,181 @@ mod tests {
 			listed.segments.iter().all(|s| !s.gap),
 			"every listed segment still resolves: {:?}",
 			numbers(&listed)
+		);
+	}
+
+	// RFC 8216 §6.2.2: EXT-X-MEDIA-SEQUENCE must not decrease across reloads. A rendition that
+	// sorts ahead of the reference must not take over, or the playlist rewinds to that
+	// rendition's own record numbers and its URLs name other content.
+	#[tokio::test(start_paused = true)]
+	async fn an_earlier_rendition_does_not_rewind_the_media_sequence() {
+		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
+		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
+
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut video0 = catalog.test_video("video0").unwrap();
+		video0.set(video_config()).unwrap();
+		drop(reserved);
+
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
+			.unwrap();
+		// 2s GOPs against a 6s window, so the oldest records leave and the sequence is no longer 0.
+		for micros in (0..=10_000_000u64).step_by(2_000_000) {
+			media.write(payload_frame(micros, true, OLD)).unwrap();
+		}
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let config = Config {
+			window: Duration::from_secs(6),
+			..Config::default()
+		};
+		let broadcaster = Broadcaster::new(source, config).await.unwrap();
+		let sequence_of = |playlist: &str| -> u64 {
+			between(playlist, "#EXT-X-MEDIA-SEQUENCE:", "\n")
+				.parse()
+				.expect("media sequence")
+		};
+		let rendition = tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0")
+					&& let Some(playlist) = rendition.media_playlist(None)
+					&& sequence_of(&playlist) >= 2
+				{
+					break rendition;
+				}
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("video0 playlist slid past its first segments");
+
+		let before = rendition.media_playlist(None).expect("playable");
+		let sequence = sequence_of(&before);
+		assert!(sequence >= 2, "the window should have slid, got {sequence}\n{before}");
+		let tag = segments::tag(&(Kind::Video, "video0".to_string()));
+		assert!(before.contains(&format!("seg/{tag}.{sequence}.m4s\n")), "{before}");
+		let bytes = rendition
+			.listed_segment(sequence)
+			.await
+			.unwrap()
+			.expect("listed segment");
+		assert!(contains(&bytes, OLD), "the listed segment is not video0's media");
+
+		// Enroll the earlier timeline before the rendition, so the catalog snapshot that adds
+		// the rendition already indexes it. The reference decision runs in that same update.
+		let earlier = broadcast.create_track("a", None).unwrap();
+		let mut earlier_media = catalog
+			.media_producer(
+				earlier,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
+			.unwrap();
+		for micros in (0..=4_000_000u64).step_by(2_000_000) {
+			earlier_media.write(payload_frame(micros, true, NEW)).unwrap();
+		}
+		let mut added = catalog.test_video("a").unwrap();
+		added.set(video_config()).unwrap();
+
+		tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				if broadcaster.rendition(Kind::Video, "a").is_some() {
+					break;
+				}
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("the earlier rendition is in the catalog");
+
+		let new_tag = segments::tag(&(Kind::Video, "a".to_string()));
+		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+		let mut previous = sequence;
+		let mut reloads = 0;
+		while reloads < 5 && tokio::time::Instant::now() < deadline {
+			let Some(playlist) = rendition.media_playlist(None) else {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+				continue;
+			};
+			let next = sequence_of(&playlist);
+			assert!(
+				next >= previous,
+				"EXT-X-MEDIA-SEQUENCE decreased from {previous} to {next}\n{playlist}"
+			);
+			assert!(
+				playlist.contains(&format!("seg/{tag}.")),
+				"segment URLs left the original reference\n{playlist}"
+			);
+			assert!(
+				!playlist.contains(&format!("seg/{new_tag}.")),
+				"the earlier rendition's numbering replaced the reference\n{playlist}"
+			);
+			previous = next;
+			reloads += 1;
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		assert!(reloads >= 5, "the playlist did not stay reloadable");
+
+		let again = rendition
+			.listed_segment(sequence)
+			.await
+			.unwrap()
+			.expect("the original segment URL still resolves");
+		assert_eq!(again, bytes, "the original URL names other content");
+		assert!(
+			!contains(&again, NEW),
+			"the earlier rendition's media replaced the segment"
+		);
+
+		drop((media, earlier_media, video0, added, broadcast));
+	}
+
+	// A video reference sticks while it stays listed with a timeline, and falls back to the
+	// first choice once it leaves. An audio reference yields once video has a timeline.
+	#[test]
+	fn the_reference_sticks_until_it_leaves() {
+		let catalog = |videos: &[&str], audios: &[&str]| {
+			let mut catalog = moq_mux::catalog::hang::Catalog::default();
+			for name in videos {
+				catalog.video.renditions.insert(name.to_string(), video_config());
+			}
+			for name in audios {
+				catalog.audio.renditions.insert(
+					name.to_string(),
+					hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+				);
+			}
+			catalog.archive = Some(archive(&[videos, audios].concat()));
+			catalog
+		};
+		let video = |name: &str| Arc::new((Kind::Video, name.to_string()));
+		let audio = |name: &str| Arc::new((Kind::Audio, name.to_string()));
+
+		let first = reference(&catalog(&["b"], &[]), None);
+		assert_eq!(first, Some(video("b")));
+		assert_eq!(reference(&catalog(&["a", "b"], &[]), first.as_ref()), Some(video("b")));
+		assert_eq!(reference(&catalog(&["a", "c"], &[]), first.as_ref()), Some(video("a")));
+
+		let first = reference(&catalog(&[], &["b"]), None);
+		assert_eq!(first, Some(audio("b")));
+		assert_eq!(reference(&catalog(&[], &["a", "b"]), first.as_ref()), Some(audio("b")));
+		// Video listed before its timeline exists doesn't take over yet.
+		let mut pending = catalog(&[], &["b"]);
+		pending.video.renditions.insert("v".to_string(), video_config());
+		assert_eq!(reference(&pending, first.as_ref()), Some(audio("b")));
+		assert_eq!(
+			reference(&catalog(&["v"], &["a", "b"]), first.as_ref()),
+			Some(video("v"))
 		);
 	}
 

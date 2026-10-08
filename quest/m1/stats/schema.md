@@ -15,7 +15,9 @@ and the hang draft specs both. Nothing produces them yet.
   the wire when absent. `path` is relative to the broadcast serving the
   catalog and resolves through `try_resolve`, like a rendition's
   `broadcast`; `<name>.echo` is appended to the result. A path that escapes
-  the root refuses the catalog. Shared fixtures pin both in both languages. Additive on main.
+  the root refuses the catalog. Shared fixtures in `rs/hang/fixtures` (beside
+  `catalog-clock.json`, which JS mirrors) pin both in both languages.
+  Additive on main.
 - `rs/hang/src/stats.rs`: the publisher snapshot,
   `Snapshot<E = ()> { transport, renditions: BTreeMap<String, Track>, #[serde(flatten)] ext: E }`.
   The generic lets moq-mux flatten `{ mpegts: ts::stats::Snapshot }` in beside it, the

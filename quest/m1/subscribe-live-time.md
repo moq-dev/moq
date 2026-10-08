@@ -43,9 +43,11 @@ Decided in planning (2026-10-03):
   and no receiver invents one.
 - **lite-07 only.** It is still WIP (`moq-lite-07-wip`), so the field is added
   without negotiation. Older versions keep the gap rule.
-- **API: `track::Subscriber::live().await`** resolves once the route answered, to
-  `Live { start, latest: Option<Position>, time: Option<Timestamp> }`: the resolved
-  start, the largest group/frame, and the live media time. Mirrored in js/net.
+- **API: `track::Subscriber::answered().await`** resolves once the route
+  answered, to `LiveEdge { start, latest: Option<Position>, time:
+  Option<Timestamp> }`: the resolved start, the largest group/frame, and the
+  live media time. Mirrored in js/net. Not `live`/`Live`: #5029's lite-07
+  `live` flag already takes that name.
 - **Independent of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md)**,
   which rewrites the same messages: whichever lands second rebases.
 - `js/watch/src/sync.ts` stays as it is: its latency range (from #1620) is
