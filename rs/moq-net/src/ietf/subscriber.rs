@@ -558,12 +558,12 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// The origin naming this link for split-horizon (`Route.via`) when the peer
 	// declares none of its own (see `session_route`). Base moq-transport carries no
 	// hop ids, so a peer only has an identity if it negotiated the MoQ Cluster
-	// extension or the caller assigned it one (`Client::with_peer_hop`).
+	// extension; otherwise this is the one the session assigned it (a fresh id per
+	// dialed or accepted session, unless the caller pinned one with `with_peer_hop`),
+	// or `Hop::UNKNOWN` (0) when none was assigned.
 	//
-	// Otherwise this is `Hop::UNKNOWN` (0), the reserved "no identity" value.
 	// The assigned id stays local: it is never written into a hop chain, so a peer
-	// that withheld an identity is not named on the wire. A server answers it per
-	// accepted session; a client only when it knows the peer.
+	// that withheld an identity is not named on the wire.
 	session_origin: crate::Hop,
 	// A random Hop ID of this connection's own, written as the first hop of any path
 	// that arrives naming no publisher, so a publisher that reconnects reads downstream

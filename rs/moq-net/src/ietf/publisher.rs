@@ -319,8 +319,8 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	// origin we consume so it matches the local relay identity across every session,
 	// which is what makes cross-session loop detection work.
 	self_origin: crate::Hop,
-	// The identity assigned to the peer by the caller (`Client::with_peer_hop`, or
-	// the per-session default a server hands every request), used when the peer declares
+	// The identity assigned to the peer (a fresh per-session id, or one the caller
+	// pinned with `with_peer_hop`), used when the peer declares
 	// none itself. A peer that negotiates the MoQ Cluster extension declares its own,
 	// which wins unless it withheld it as the reserved 0.
 	peer_hop: Option<crate::Hop>,
@@ -438,8 +438,8 @@ where
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
 	///
 	/// A peer that declared an identity supplies its own; otherwise fall back to the one
-	/// we assigned it (`Client::with_peer_hop` when dialing, `Request::with_peer_hop`
-	/// or a fresh per-session id when accepting), since moq-transport carries no identity
+	/// we assigned it (a fresh per-session id, or one pinned with `Client::with_peer_hop`
+	/// or `Request::with_peer_hop`), since moq-transport carries no identity
 	/// of its own. A peer that declared the reserved 0 declared no identity, so it takes
 	/// the fallback like any other anonymous peer.
 	fn exclude(&self, peer: &cluster::Peer) -> crate::Hop {
