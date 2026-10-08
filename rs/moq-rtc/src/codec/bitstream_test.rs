@@ -188,7 +188,7 @@ async fn egress_opus_passthrough() {
 	// Snapshot the catalog while the bridge is still alive (Drop tears down
 	// the rendition entry). Open the egress track from the snapshot first.
 	let snapshot = catalog.snapshot();
-	let (name, _) = snapshot.audio.renditions.iter().next().expect("rendition");
+	let (name, config) = snapshot.audio.renditions.iter().next().expect("rendition");
 	let consumer = producer.consume();
 	let track = consumer
 		.track(name)
@@ -196,7 +196,41 @@ async fn egress_opus_passthrough() {
 		.subscribe(None)
 		.await
 		.expect("subscribe");
-	let mut track = Track::opus(track);
+	let mut track = Track::opus(track, config).expect("opus track");
+
+	let frame = track.next().await.expect("ok").expect("frame");
+	assert_eq!(frame.timestamp_us, 20_000);
+	assert_eq!(frame.payload.as_ref(), payload.as_ref());
+}
+
+/// An Opus rendition in LOC is read as LOC, not as the legacy varint-timestamp format.
+#[tokio::test(start_paused = true)]
+async fn egress_opus_reads_the_rendition_container() {
+	let producer = moq_net::broadcast::Info::new().produce();
+	let mut writer = moq_mux::container::Producer::new(
+		producer.create_track("audio", None).expect("track"),
+		moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Audio),
+	);
+	let payload = Bytes::from_static(&[0xfc, 0xff, 0xfe]);
+	writer
+		.write(moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(20_000).unwrap(),
+			duration: None,
+			payload: payload.clone(),
+			keyframe: true,
+		})
+		.expect("write");
+
+	let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+	config.container = hang::catalog::Container::Loc;
+	let track = producer
+		.consume()
+		.track("audio")
+		.expect("track")
+		.subscribe(None)
+		.await
+		.expect("subscribe");
+	let mut track = Track::opus(track, &config).expect("opus track");
 
 	let frame = track.next().await.expect("ok").expect("frame");
 	assert_eq!(frame.timestamp_us, 20_000);

@@ -19,7 +19,3 @@ Test mixed and all-disabled catalogs, plus disable/re-enable transitions.
 A C `moq_consume_audio_enabled` getter is added only if a C consumer needs it;
 any FFI/C API change updates all wrappers and their docs in the same PR.
 Update native consumer docs for the selection behavior.
-
-## Related
-
-- [Audio ranked](/quest/m1/audio-ranked.md) - its audio `ranked()` orders enabled renditions first, the audio half of the shared eligible selection

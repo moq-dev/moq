@@ -42,7 +42,7 @@ use crate::rml::time::RtmpTimestamp;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use hang::catalog::{AudioCodec, VideoCodecKind, VideoConfig};
+use hang::catalog::{AudioCodec, AudioCodecKind, VideoCodecKind, VideoConfig};
 use moq_mux::catalog::{CatalogFormat, Stream as CatalogStream};
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
 use moq_mux::select;
@@ -920,23 +920,23 @@ impl<S: Stream> Play<S> {
 	}
 }
 
-/// Narrow a play to the video the client can decode, or refuse it.
+/// Narrow a play to what the client can decode, or refuse it.
 ///
 /// A multitrack client receives every rendition, so it must play them all. A
-/// single-track client receives the best video rendition it can play.
+/// single-track client receives the best rendition of each kind it can play.
 fn play_selection(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	capabilities: &ClientCapabilities,
 ) -> std::result::Result<select::Broadcast, String> {
-	let playable = |config: &VideoConfig| plays_video(capabilities, config.codec.kind());
-	let refused = if capabilities.multitrack {
-		catalog.video.renditions.values().find(|config| !playable(config))
-	} else if catalog.video.renditions.values().any(playable) {
+	let video_playable = |config: &VideoConfig| plays_video(capabilities, config.codec.kind());
+	let video_refused = if capabilities.multitrack {
+		catalog.video.renditions.values().find(|config| !video_playable(config))
+	} else if catalog.video.renditions.values().any(video_playable) {
 		None
 	} else {
 		catalog.video.ranked().next().map(|(_, config)| config)
 	};
-	if let Some(config) = refused {
+	if let Some(config) = video_refused {
 		return Err(match video_fourcc(config.codec.kind(), capabilities.multitrack) {
 			Some(fourcc) => format!(
 				"client did not advertise required RTMP FourCC {}",
@@ -946,22 +946,26 @@ fn play_selection(
 		});
 	}
 
-	// Audio is still the first rendition by name for a single-track client.
-	let limit = if capabilities.multitrack { usize::MAX } else { 1 };
-	for config in catalog.audio.renditions.values().take(limit) {
-		let Some(fourcc) = audio_fourcc(&config.codec, capabilities.multitrack) else {
-			continue;
-		};
-		if !capabilities.supports_audio(&fourcc) {
-			return Err(format!(
+	let audio_playable = |config: &hang::catalog::AudioConfig| plays_audio(capabilities, &config.codec);
+	let audio_refused = if capabilities.multitrack {
+		catalog.audio.renditions.values().find(|config| !audio_playable(config))
+	} else if catalog.audio.renditions.values().any(audio_playable) {
+		None
+	} else {
+		catalog.audio.ranked().next().map(|(_, config)| config)
+	};
+	if let Some(config) = audio_refused {
+		return Err(match audio_fourcc(&config.codec, capabilities.multitrack) {
+			Some(fourcc) => format!(
 				"client did not advertise required RTMP FourCC {}",
 				fourcc_label(&fourcc)
-			));
-		}
+			),
+			None => format!("RTMP can't carry audio codec {}", config.codec),
+		});
 	}
 
 	let mut video = select::Video::default();
-	let mut any = false;
+	let mut any_video = false;
 	for kind in [
 		VideoCodecKind::H264,
 		VideoCodecKind::H265,
@@ -970,12 +974,58 @@ fn play_selection(
 	] {
 		if plays_video(capabilities, kind) {
 			video = video.codec(kind);
-			any = true;
+			any_video = true;
 		}
 	}
 	// An empty codec list would select every codec, so a client that plays none gets no video.
-	let select = select::Broadcast::default().audio(select::Audio::default());
-	Ok(if any { select.video(video) } else { select })
+	let mut select = select::Broadcast::default();
+	if any_video {
+		select = select.video(video);
+	}
+
+	let mut audio = select::Audio::default();
+	let mut any_audio = false;
+	for kind in playable_audio_kinds(capabilities) {
+		audio = audio.codec(kind);
+		any_audio = true;
+	}
+	// Same as video: an empty list would keep codecs the client never advertised.
+	if any_audio {
+		select = select.audio(audio);
+	}
+	Ok(select)
+}
+
+/// Whether a client with `capabilities` can play `codec` over FLV.
+fn plays_audio(capabilities: &ClientCapabilities, codec: &AudioCodec) -> bool {
+	match audio_fourcc(codec, capabilities.multitrack) {
+		Some(fourcc) => capabilities.supports_audio(&fourcc),
+		// Every client plays AAC and MP3 by their legacy CodecIDs; nothing else goes without a FourCC.
+		None => matches!(codec, AudioCodec::AAC(_) | AudioCodec::Mp3),
+	}
+}
+
+/// Codec families this client can play.
+///
+/// AAC and MP3 need no FourCC on a single-track client.
+fn playable_audio_kinds(capabilities: &ClientCapabilities) -> Vec<AudioCodecKind> {
+	let samples = [
+		AudioCodec::AAC(hang::catalog::AAC { profile: 2 }),
+		AudioCodec::Mp3,
+		AudioCodec::Opus,
+		AudioCodec::Ac3,
+		AudioCodec::Ec3,
+	];
+	let mut kinds = Vec::new();
+	for codec in samples {
+		if plays_audio(capabilities, &codec) {
+			let kind = codec.kind();
+			if !kinds.contains(&kind) {
+				kinds.push(kind);
+			}
+		}
+	}
+	kinds
 }
 
 /// Whether a client with `capabilities` can play `kind` over FLV.
@@ -1919,6 +1969,82 @@ mod tests {
 
 		// Multitrack carries every rendition, so one the client can't decode refuses the play.
 		let multitrack = ClientCapabilities::new(CAPS_EX_MULTITRACK, hevc, FourCcSupport::default());
+		assert!(play_selection(&catalog, &multitrack).is_err());
+	}
+
+	/// A single-track client gets the best audio rendition it can play, not the first by name.
+	/// A multitrack client must still play every rendition.
+	#[test]
+	fn play_selection_picks_the_best_playable_audio() {
+		fn audio(codec: AudioCodec, bitrate: u64) -> hang::catalog::AudioConfig {
+			let mut config = hang::catalog::AudioConfig::new(codec, 48_000, 2);
+			config.bitrate = Some(bitrate);
+			config
+		}
+
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		// Name order would check Opus first and refuse a legacy client that can play the AAC.
+		catalog
+			.audio
+			.renditions
+			.insert("a".to_string(), audio(AudioCodec::Opus, 128_000));
+		catalog.audio.renditions.insert(
+			"b".to_string(),
+			audio(AudioCodec::AAC(hang::catalog::AAC { profile: 2 }), 64_000),
+		);
+
+		let legacy = ClientCapabilities::default();
+		let select = play_selection(&catalog, &legacy).expect("aac is playable");
+		let mut kept = catalog.clone();
+		select.retain(&mut kept);
+		assert_eq!(
+			kept.audio.renditions.keys().map(String::as_str).collect::<Vec<_>>(),
+			["b"]
+		);
+
+		// Nothing the client can play: cite the best rendition, not the first name.
+		let mut unsupported = moq_mux::catalog::hang::Catalog::default();
+		unsupported
+			.audio
+			.renditions
+			.insert("a".to_string(), audio(AudioCodec::Opus, 32_000));
+		unsupported
+			.audio
+			.renditions
+			.insert("b".to_string(), audio(AudioCodec::Ac3, 128_000));
+		let err = play_selection(&unsupported, &legacy).expect_err("no playable audio");
+		assert!(err.contains("ac-3"), "{err}");
+
+		// An advertised enhanced codec is kept, but not a sibling codec the client never
+		// advertised, even at a higher bitrate: an AC-3 decoder can't play E-AC-3.
+		let mut ac3 = moq_mux::catalog::hang::Catalog::default();
+		ac3.audio
+			.renditions
+			.insert("a".to_string(), audio(AudioCodec::Ac3, 128_000));
+		ac3.audio
+			.renditions
+			.insert("b".to_string(), audio(AudioCodec::Ec3, 256_000));
+		let support = FourCcSupport {
+			any: false,
+			fourccs: vec![*b"ac-3"],
+		};
+		let select = play_selection(&ac3, &ClientCapabilities::new(0, FourCcSupport::default(), support)).unwrap();
+		let mut kept = ac3.clone();
+		select.retain(&mut kept);
+		assert_eq!(
+			kept.audio.renditions.keys().map(String::as_str).collect::<Vec<_>>(),
+			["a"]
+		);
+
+		// Multitrack still requires every rendition.
+		let multitrack = ClientCapabilities::new(
+			CAPS_EX_MULTITRACK,
+			FourCcSupport::default(),
+			FourCcSupport {
+				any: false,
+				fourccs: vec![*b"Opus"],
+			},
+		);
 		assert!(play_selection(&catalog, &multitrack).is_err());
 	}
 

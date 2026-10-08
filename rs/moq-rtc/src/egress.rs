@@ -192,22 +192,18 @@ fn valid_reference(source: &moq_mux::Source, broadcast: Option<&moq_net::path::R
 	source.resolve_reference(broadcast).is_some()
 }
 
-/// Find a catalog rendition for the given codec (the best one, for video) and
+/// Find a catalog rendition for the given codec (the best ranked one) and
 /// build a [`codec::Track`] subscribed to it, honoring an optional cross-broadcast
 /// reference (the rendition's catalog `broadcast` field). Returns `None` if no
 /// rendition matches.
 async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -> Result<Option<codec::Track>> {
 	match codec {
 		Codec::Opus => {
-			let Some((name, config)) =
-				catalog.audio.renditions.iter().find(|(_, c)| {
-					matches!(c.codec, AudioCodec::Opus) && valid_reference(source, c.broadcast.as_ref())
-				})
-			else {
+			let Some((name, config)) = pick_audio(source, catalog) else {
 				return Ok(None);
 			};
 			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;
-			Ok(Some(codec::Track::opus(track)))
+			Ok(Some(codec::Track::opus(track, config)?))
 		}
 		Codec::H264 | Codec::H265 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 => {
 			let target = match codec {
@@ -226,6 +222,16 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 		}
 		other => Err(Error::UnsupportedCodec(format!("{other:?}"))),
 	}
+}
+
+/// The best [ranked](hang::catalog::Audio::ranked) Opus rendition that `source` can reach.
+fn pick_audio<'a>(
+	source: &moq_mux::Source,
+	catalog: &'a Catalog,
+) -> Option<(&'a String, &'a hang::catalog::AudioConfig)> {
+	catalog.audio.ranked().find(|(_, config)| {
+		matches!(config.codec, AudioCodec::Opus) && valid_reference(source, config.broadcast.as_ref())
+	})
 }
 
 /// The best [ranked](hang::catalog::Video::ranked) video rendition in `target`'s codec
@@ -384,6 +390,35 @@ mod tests {
 		let (name, _) = pick_video(&source, &catalog, VideoCodecKind::VP8).unwrap();
 		assert_eq!(name, "d");
 		assert!(pick_video(&source, &catalog, VideoCodecKind::AV1).is_none());
+	}
+
+	#[test]
+	fn picks_the_best_opus_rendition_whatever_its_name() {
+		let origin = produce_origin();
+		let source = moq_mux::Source::new(origin.consume(), "a/pub");
+		let mut catalog = Catalog::default();
+
+		let opus = |bitrate: Option<u64>| {
+			let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+			config.bitrate = bitrate;
+			config
+		};
+		// Name order would pick the weakest Opus. The louder AAC is not Opus.
+		catalog.audio.renditions.insert("a".to_string(), opus(Some(32_000)));
+		let mut louder = AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+		louder.bitrate = Some(256_000);
+		catalog.audio.renditions.insert("b".to_string(), louder);
+		catalog.audio.renditions.insert("c".to_string(), opus(Some(128_000)));
+
+		let (name, _) = pick_audio(&source, &catalog).unwrap();
+		assert_eq!(name, "c");
+
+		// A higher-bitrate Opus this source cannot reach loses to the best one it can.
+		let mut escaped = opus(Some(512_000));
+		escaped.broadcast = Some(Relative::new("../../source").to_owned());
+		catalog.audio.renditions.insert("d".to_string(), escaped);
+		let (name, _) = pick_audio(&source, &catalog).unwrap();
+		assert_eq!(name, "c");
 	}
 
 	#[test]
