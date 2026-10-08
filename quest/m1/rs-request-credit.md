@@ -19,12 +19,17 @@ leaves, or the session closes, and a relay shouldn't kill a subscribe on a
 slow upstream hop.
 
 A single `Pending` poll of `open_bi` is not "no credit": on WebTransport,
-`web-transport-quinn` opens the QUIC stream and then writes the session header,
+`web-transport-moq` opens the QUIC stream and then writes the session header,
 which can be pending under send-window pressure. Check credit at the QUIC
-level instead, likely a non-waiting open on the transport trait. Also note that
+level instead, likely a non-waiting open on moq-net's `transport::poll`
+session trait. Also note that
 `moq-tokio`'s `poll_open_bi` parks an abandoned open in the session's slot
 rather than dropping it, so the next request inherits it; the non-waiting open
-should avoid that.
+should avoid that. The async backends `moq-tokio` wraps (qmux, iroh, noq) have
+no credit query in `web-transport-trait`, which `moq-tokio` needs to
+implement that method for them; prefer adding one upstream in
+moq-dev/web-transport over leaving them waiting, and say in the PR which
+backends fail fast.
 
 Propose the error variant's name in the PR. Public API: one new `Error`
-variant, and possibly a transport-trait method. Wire: none.
+variant, and possibly a `transport::poll` session method. Wire: none.

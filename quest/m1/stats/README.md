@@ -11,7 +11,9 @@ its own connection. A dashboard reads both the same way a publisher does. One
 shared model turns either report into a health verdict, and a bounded
 preflight run reports which media layer of a broadcast is broken. Stats and
 feedback cost nothing on the network unless someone subscribes. Not here: the
-relay's `moq-stats` layout, which stays as it is; clock synchronization; any
+relay's `moq-stats` layout, which this line does not change (the
+[broadcast epoch](/quest/m0/broadcast-epoch/README.md) line reshapes it);
+clock synchronization; any
 requirement that a client report; and feedback as an input to billing,
 authorization, or route selection.
 
@@ -26,7 +28,7 @@ catalog keyed by rendition, not a stats track per rendition and not a sum per
 kind.
 
 - **Media stats leave moq-stats.** The relay is media-agnostic and keeps
-  `Traffic`, `Presence`, and `.stats/node/<node>` unchanged. Media stats are
+  `Traffic`, `Presence`, and `.stats/node/<node>` as this line found them. Media stats are
   hang tracks, discovered through the catalog, so no `Producer<E>`
   extension, `Merge` wrapper, or flattened generic is needed. One layout for
   relay and clients is given up on purpose.

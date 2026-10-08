@@ -12,6 +12,6 @@ this quest and every `Required` entry that links it.
 
 ## Plan
 
-As of 2026-09-30 `gh api repos/moq-dev/moq/actions/runners` lists none.
+As of 2026-10-08 `gh api repos/moq-dev/moq/actions/runners` still lists none.
 Register it with the dedicated label and hardening that
 [GPU CI](/quest/m1/gpu-ci.md) describes.

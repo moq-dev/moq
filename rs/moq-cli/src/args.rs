@@ -301,6 +301,28 @@ impl Invocation {
 	/// Called before anything binds a port or dials out, so a refused invocation has
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
+		if self.moq.epoch.is_some() {
+			let mut publishes = false;
+			for command in &self.stages {
+				match command {
+					Command::Import(import) => {
+						anyhow::ensure!(
+							import.source.takes_epoch(),
+							"--epoch names one publisher instance, but the RTMP, SRT, and WHIP ingests and `import ts --program all` announce their own per connection or program"
+						);
+						publishes = true;
+					}
+					#[cfg(feature = "transcode")]
+					Command::Transcode(_) => publishes = true,
+					_ => {}
+				}
+			}
+			anyhow::ensure!(
+				publishes,
+				"--epoch names what this process publishes, but nothing here publishes"
+			);
+		}
+
 		for command in &self.stages {
 			let Command::Export(export) = command else {
 				continue;
@@ -394,21 +416,14 @@ pub struct MoqSide {
 	#[usage(long = "name", hide = true)]
 	name: Option<String>,
 
-	/// Fix this process's Hop ID instead of minting a fresh random one.
+	/// Announce under this epoch (a UUIDv7) instead of minting a fresh one per run.
 	///
-	/// The Hop ID is the first hop of every announcement this process
-	/// publishes, and relays treat it as the broadcast's content identity:
-	/// redundant publishers of the same broadcast share an id so relays fail
-	/// over between them at a group boundary. Leave unset outside a redundant
-	/// (1+1) chain; the default fresh id per run is what makes a restarted
-	/// publisher look like new content instead of silently splicing.
-	#[usage(long, env = "MOQ_HOP", help_heading = "MoQ")]
-	pub hop: Option<u64>,
-
-	/// The released spelling of [`Self::hop`], kept in the parser only so a
-	/// process that still passes it is told what to pass instead.
-	#[usage(name = "origin", long = "origin", env = "MOQ_ORIGIN", hide = true)]
-	pub origin: Option<u64>,
+	/// Relays resume a subscription only between routes with the same epoch, so
+	/// redundant publishers of one broadcast pass the same value and fail over
+	/// seamlessly. Leave it unset otherwise: a fresh epoch per run is what makes a
+	/// restarted publisher replace the old broadcast instead of resuming into it.
+	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
+	pub epoch: Option<hang::moq_net::Epoch>,
 
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
 	#[usage(flatten)]
@@ -449,9 +464,6 @@ impl MoqSide {
 		found.extend(self.server.deprecated());
 		found.extend(self.cluster.deprecated());
 		found.extend(self.auth.deprecated());
-		if self.origin.is_some() {
-			found.flag("--origin", Some("MOQ_ORIGIN"), "--hop / MOQ_HOP");
-		}
 		if self.name.is_some() {
 			found.flag("--name", None, "--broadcast");
 		}
@@ -459,18 +471,10 @@ impl MoqSide {
 	}
 
 	/// The cluster this process publishes and subscribes on. Built once; the
-	/// origin is its origin. `--hop` fills `--cluster-id` when the latter is
-	/// unset; they must agree when both are set.
+	/// origin is its origin, whose Hop ID is random per run unless `--cluster-id`
+	/// names the node.
 	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
-		let mut config = self.cluster.clone();
-		match (config.id, self.hop) {
-			(None, Some(hop)) => config.id = Some(hop),
-			(Some(id), Some(hop)) if id != hop => {
-				anyhow::bail!("--hop {hop} and --cluster-id {id} must agree")
-			}
-			_ => {}
-		}
-		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(config))
+		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.
@@ -771,6 +775,17 @@ impl ImportSource {
 			Self::Flv => PublishFormat::Flv,
 			_ => return None,
 		})
+	}
+
+	/// Whether this source announces one publisher instance per run, which `--epoch`
+	/// can name. The ingest gateways and `ts --program all` announce their own.
+	pub fn takes_epoch(&self) -> bool {
+		match self {
+			Self::Ts(args) => args.program != Some(TsProgram::All),
+			Self::Rtmp(_) | Self::Srt(_) => false,
+			Self::Rtc(rtc) => rtc.listen.is_none(),
+			_ => true,
+		}
 	}
 }
 
@@ -1281,31 +1296,31 @@ mod tests {
 		}
 	}
 
-	/// `moq-cli`'s own rename rides the same refusal as the flags it flattens from
-	/// `moq-tokio`, and lands in the same message.
-	///
-	/// Both halves matter: `--origin` must not silently pin a Hop ID onto the field
-	/// `--hop` now owns, and the migration has to name the environment variable too,
-	/// since a deployment that sets `MOQ_ORIGIN` never typed the flag.
+	/// `--epoch` reaches the stages that announce once per run, and is refused where
+	/// it would be ignored: an ingest that announces per connection, or no publisher.
 	#[test]
-	fn the_released_origin_spelling_is_refused_with_a_migration() {
-		let Err(err) = Invocation::try_parse_from([
-			"moq",
-			"--origin",
-			"42",
-			"--connect",
-			"http://relay/anon",
-			"export",
-			"ts",
-		]) else {
-			panic!("--origin must not start a run");
+	fn epoch_applies_only_to_a_once_per_run_publisher() {
+		let _env = crate::test_env::EnvGuard::clear(&["MOQ_EPOCH"]);
+		let epoch = hang::moq_net::Epoch::mint().to_string();
+		let parse = |stage: &[&str]| {
+			let argv = ["moq", "--connect", "http://relay/anon", "--epoch", &epoch].into_iter();
+			Invocation::try_parse_from(argv.chain(stage.iter().copied())).expect("parse")
 		};
 
-		let reported = err.to_string();
-		assert!(
-			reported.contains("--origin / MOQ_ORIGIN -> --hop / MOQ_HOP"),
-			"missing the migration from {reported}"
-		);
+		let cli = parse(&["import", "fmp4"]);
+		cli.validate().expect("a stdin import takes an epoch");
+		assert_eq!(cli.moq.epoch.map(|epoch| epoch.to_string()), Some(epoch.clone()));
+
+		for refused in [
+			&["import", "rtmp", "--listen", "[::]:1935"][..],
+			&["import", "ts", "--program", "all"],
+			&["export", "fmp4"],
+		] {
+			assert!(parse(refused).validate().is_err(), "{refused:?} accepted --epoch");
+		}
+
+		let malformed = Invocation::try_parse_from(["moq", "--epoch", "42", "import", "fmp4"]);
+		assert!(malformed.is_err(), "--epoch accepted a value that is not a UUIDv7");
 	}
 
 	/// A stage carries config of its own, and the check has to reach it.
@@ -1903,7 +1918,7 @@ mod tests {
 			&["--listen-tcp-bind", "127.0.0.1:0"],
 			&["--cluster-node", "https://self.example"],
 			&["--auth-public", "**"],
-			&["--hop", "1"],
+			&["--epoch", "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b"],
 		];
 		let dial: &[&[&str]] = &[
 			&["--connect", "https://relay.example"],

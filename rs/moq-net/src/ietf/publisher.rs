@@ -322,8 +322,8 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	// origin we consume so it matches the local relay identity across every session,
 	// which is what makes cross-session loop detection work.
 	self_origin: crate::Hop,
-	// The identity assigned to the peer by the caller (`Client::with_peer_hop`, or
-	// the per-session default a server hands every request), used when the peer declares
+	// The identity assigned to the peer (a fresh per-session id, or one the caller
+	// pinned with `with_peer_hop`), used when the peer declares
 	// none itself. A peer that negotiates the MoQ Cluster extension declares its own,
 	// which wins unless it withheld it as the reserved 0.
 	peer_hop: Option<crate::Hop>,
@@ -441,8 +441,8 @@ where
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
 	///
 	/// A peer that declared an identity supplies its own; otherwise fall back to the one
-	/// we assigned it (`Client::with_peer_hop` when dialing, `Request::with_peer_hop`
-	/// or a fresh per-session id when accepting), since moq-transport carries no identity
+	/// we assigned it (a fresh per-session id, or one pinned with `Client::with_peer_hop`
+	/// or `Request::with_peer_hop`), since moq-transport carries no identity
 	/// of its own. A peer that declared the reserved 0 declared no identity, so it takes
 	/// the fallback like any other anonymous peer.
 	fn exclude(&self, peer: &cluster::Peer) -> crate::Hop {
@@ -620,7 +620,7 @@ where
 			let broadcast = match self
 				.serving_origin()
 				.await
-				.request_broadcast(&msg.track_namespace)
+				.request_broadcast(&msg.track_namespace, None)
 				.await
 			{
 				Ok(broadcast) => broadcast,
@@ -1373,7 +1373,7 @@ where
 
 				// The peer must have seen the announcement to name this namespace, so this
 				// resolves like a SUBSCRIBE does.
-				let broadcast = match self.serving_origin().await.request_broadcast(&namespace).await {
+				let broadcast = match self.serving_origin().await.request_broadcast(&namespace, None).await {
 					Ok(broadcast) => broadcast,
 					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 				};
@@ -4867,6 +4867,34 @@ mod serve_tests {
 					fetch_refusal(buf, version),
 					does_not_exist(version),
 					"{version}: group {missing}"
+				);
+			}
+		}
+	}
+
+	/// A datagram group is never fetchable: a FETCH for one is refused like a group that
+	/// does not exist, newest or not, and opens no fetch stream for its payload.
+	#[moq_net_sim::test]
+	async fn a_standalone_fetch_of_a_datagram_group_is_refused() {
+		for version in FETCH_DRAFTS {
+			for newest in [true, false] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 2, None);
+				let sequence = h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
+				if !newest {
+					h.track.append_group().unwrap().finish().unwrap();
+				}
+				settle().await;
+
+				let location = Location {
+					group: sequence,
+					object: 0,
+				};
+				let buf = standalone_fetch(&h, location, location, GroupOrder::Ascending).await;
+				assert_eq!(
+					fetch_refusal(buf, version),
+					does_not_exist(version),
+					"{version}: newest={newest}"
 				);
 			}
 		}

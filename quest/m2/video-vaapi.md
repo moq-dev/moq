@@ -16,7 +16,7 @@ encode, H.265 decode, pre-generated bindings, the resize pool) and cutting the
 release, then bumping the workspace requirement here. The resize-pool quest
 folds in for the same reason.
 
-**Decode.** The H.264 decoder landed (moq-vaapi 0.0.4, `decode/backend/vaapi.rs`),
+**Decode.** The H.264 decoder landed (`decode/backend/vaapi.rs`; the workspace pins moq-vaapi 0.1.0),
 with the default `decode::Config::output` of `Output::Native` handing out
 DMA-BUF surfaces the renderer imports without a download. H.265 decode is still missing, so a Linux box
 without NVDEC has no hardware path for it.
@@ -27,13 +27,13 @@ converts them through VPP (`dmabuf`, `vpp`, `Encoder::encode_dmabuf`,
 without a download, and `Surface::resize` scales one through VPP. Validated on
 Intel Meteor Lake. What is left is H.265, below.
 
-**H.265.** The VAAPI backend advertises H.264 only. `moq-vaapi` 0.0.2 vendors
+**H.265.** The VAAPI backend advertises H.264 only. `moq-vaapi` 0.1.0 vendors
 the HEVC buffer types (`src/buffer/hevc.rs`) but its `Encoder` is hardcoded to
 `VAProfileH264Main` (with `VAEntrypointEncSlice`, or the low-power entrypoint
 where that is all a device has), so exposing an HEVC encoder is a
 change to that crate, not a flag here.
 
-**Build cost.** `moq-vaapi` 0.0.3 dlopens libva (no `DT_NEEDED`), so a
+**Build cost.** `moq-vaapi` dlopens libva (no `DT_NEEDED`), so a
 libva-less host starts and `backend::open` falls through to the next encoder.
 What remains is the build side: its build script runs bindgen over the
 vendored libva headers, so every consumer needs libclang on the build host.

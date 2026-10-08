@@ -419,11 +419,8 @@ impl Subscribe {
 		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
-		let select = self.args.selection()?;
-		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.source, self.catalog)
-			.await?
-			.with_max_delay(self.args.max_delay)
-			.with_select(select);
+		let stream = self.stream().await?;
+		let mut flv = moq_mux::container::flv::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
 
 		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;

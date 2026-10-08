@@ -41,7 +41,7 @@ Decided in planning interviews on 2026-10-01:
 - Video only. Optional on the wire, omitted when 0 (as `enabled` is omitted at its default).
   Additive, so older players ignore it.
 - Selection order in `js/watch/src/video/source.ts`: drop disabled
-  renditions ([enabled flag](/quest/m1/catalog-enabled.md)), then decode
+  renditions (catalog `enabled: false`), then decode
   support, then keep the highest preference among supported renditions, then
   the existing target and bitrate pick within what is left. Preference is
   about decodability only.
@@ -70,10 +70,6 @@ Decided in planning interviews on 2026-10-01:
 - Out of scope: moq-ffi, libmoq, and the bindings until a native player needs
   the field. moq-transcode producing same-size codec fallbacks; the consumer
   publishes its own.
-
-## Required
-
-- [Enabled flag](/quest/m1/catalog-enabled.md) - the `enabled` field selection filters on first
 
 ## Related
 

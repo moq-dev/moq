@@ -16,7 +16,7 @@ This questline adds an AUTH exchange to both wires: one stream per token, a
 grant per token, the union of every accepted token as the session's scope,
 and a loud failure when a publish can never be honored. It ends with the
 credential able to travel in band, while the URL keeps working for every peer
-that predates the stream. Hop-bound peer grants for direct sessions belong to
+that predates the stream. Node-bound peer grants for direct sessions belong to
 [P2P](/quest/m3/p2p/peer-grant.md), their only consumer.
 
 ## Plan
@@ -117,5 +117,5 @@ published version in place, so AUTH and its stream code land in
 
 ## Related
 
-- [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's hop-bound credential,
+- [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's node-bound credential,
   built on this line's relay tokens

@@ -360,7 +360,7 @@ zero-based `frame` and padded standard base64.
 
 `<track>` is the literal track name. `/fetch` splits its path on the last `/`,
 so the two agree only for names without one. Fetch only dials `--connect`, and
-refuses any listener, cluster, auth, or `--hop` flag. It gives up after 30
+refuses any listener, cluster, auth, or `--epoch` flag. It gives up after 30
 seconds, as `/fetch` does, and exits non-zero when the broadcast or group is not
 found (before writing anything), the relay refuses, or the deadline passes.
 
@@ -384,7 +384,10 @@ from another broadcast, one that returns after the catalog dropped it, and an
 untimed track, which has no timestamps to record (any track over moq-lite before
 05, or moq-transport without `TIMESCALE`, such as drafts 14–16). The
 stage ends once the broadcast does. A store URL that already holds a
-recording is continued: each track resumes after its newest stored span. `--retention 1h` keeps only the last hour (a DVR),
+recording is continued: each track resumes after its newest stored span. A source
+announced under another [epoch](/concept/moq-lite#publisher-epochs) than the recording
+restarted, so the export fails; start a new prefix. A source without an epoch fails the
+same way once its timestamps jump back before the stored span. `--retention 1h` keeps only the last hour (a DVR),
 deleting expired objects, and timeline objects no longer needed to recover it,
 `--retention-grace` (default 30s) after the timeline stops needing them. Every
 track keeps at least its newest span, so a catalog that never changes outlives
@@ -415,11 +418,28 @@ moq --connect https://relay.example.com/anon \
 
 ## Redundant publishers
 
-Two publishers of the same broadcast name are interchangeable sources:
-relays hold both routes and fail over between them mid-group. They must
-produce identical tracks with aligned groups. A restarted encoder is the same
-broadcast too, so one whose groups restart from 0 must publish under a new
-name, or viewers wait for its sequence to catch up.
+Each run announces a fresh epoch, so a restarted publisher replaces the old
+broadcast instead of resuming into it. Two publishers that pass the same
+`--epoch` (a lowercase, hyphenated UUIDv7, such as util-linux `uuidgen -7`
+prints) are interchangeable sources: relays hold both routes and fail over
+between them mid-group. They must produce identical tracks with aligned groups,
+which no importer guarantees yet (see
+[#4352](https://github.com/moq-dev/moq/issues/4352) and
+[#4354](https://github.com/moq-dev/moq/issues/4354)). A member restarted with
+the same epoch rejoins as the same content, so if its groups restart from 0,
+viewers wait for its sequence to catch up.
+
+```bash
+EPOCH=$(uuidgen -7)
+# On each of the two hosts:
+moq --connect https://relay.example.com/anon --broadcast event.hang --epoch "$EPOCH" import ts < feed.ts
+```
+
+`--epoch` applies to the sources announced once per run. The RTMP, SRT, and
+WHIP ingests and `import ts --program all` announce their own, so they refuse it.
+
+`--epoch` replaces the removed `--hop`. `MOQ_HOP` is no longer read, so drop it
+from any deployment and pass `MOQ_EPOCH` instead.
 
 ## Cluster
 

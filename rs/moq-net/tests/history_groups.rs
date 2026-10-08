@@ -71,7 +71,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -217,7 +217,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	let first_pair = connect_mock(options).await;
 	let consumer = first.consume();
 	consumer.routed("bcast").await.unwrap();
-	let remote = consumer.request_broadcast("bcast").await.unwrap();
+	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
 	let subscription = Subscription::default()
 		.with_max_delay(FOREVER)
 		.with_start(Position::group(0));
@@ -257,7 +257,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	let late_pair = connect_mock(options).await;
 	let consumer = late.consume();
 	consumer.routed("bcast").await.unwrap();
-	let remote = consumer.request_broadcast("bcast").await.unwrap();
+	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
 	let mut late_sub = remote.track("history").unwrap().subscribe(subscription).await.unwrap();
 	moq_net_sim::timeout(TIMEOUT, read_history(&mut late_sub))
 		.await
