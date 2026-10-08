@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
@@ -236,9 +237,8 @@ test("a second GOAWAY on the control stream closes the session", async () => {
 	await expect(running).rejects.toThrow("duplicate GOAWAY");
 });
 
-// Draft-14 to -16 session codes. Past the advertised maximum, or more open requests
-// than the window, is TOO_MANY_REQUESTS; a parity or duplicate error is INVALID_REQUEST_ID.
-const TOO_MANY_REQUESTS = 0x7;
+// Past the advertised maximum, or more open requests than the window, is TOO_MANY_REQUESTS.
+// A parity or duplicate error is draft-14 to -16's INVALID_REQUEST_ID.
 const INVALID_REQUEST_ID = 0x4;
 
 const WINDOW_DRAFTS = [
@@ -317,7 +317,7 @@ test("an id at the advertised maximum closes the session", async () => {
 				const { pair, peer, running } = await windowed(version, alpn, 2n, client);
 				await trackStatus(peer, version, requestId);
 				await expect(running).rejects.toThrow("request id exceeds max");
-				expect((await pair.client.closed).closeCode).toBe(TOO_MANY_REQUESTS);
+				expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
 			}
 		}
 	}
@@ -412,7 +412,7 @@ test("an update naming an open request does not grow the window", async () => {
 				await update(peer, version, heldId);
 				await trackStatus(peer, version, nextId);
 				await expect(running).rejects.toThrow("request id exceeds max");
-				expect((await pair.client.closed).closeCode).toBe(TOO_MANY_REQUESTS);
+				expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
 			}
 		}
 	} finally {
@@ -433,7 +433,7 @@ test("reused update ids cannot hold more than the window", async () => {
 			if (!(await adapter.acceptBi())) throw new Error("no stream");
 			await trackStatus(peer, version, 6n);
 			await expect(running).rejects.toThrow("too many open requests");
-			expect((await pair.client.closed).closeCode).toBe(TOO_MANY_REQUESTS);
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
 		}
 	} finally {
 		warn.mockRestore();

@@ -163,17 +163,26 @@ impl Class {
 }
 
 /// What each elementary stream an [`Export`](super::Export) writes has delivered, keyed by
-/// PID.
+/// PID, and how the release clock is keeping up with the source.
 ///
 /// Take one with [`Export::stats`](super::Export::stats). Its rows are an import's, but only
 /// `units` and `quiet` move: the exporter builds every frame header itself, so it has no frame
 /// sync to lose and it runs no TR 101 290 checks. [`Log`] still grades an audio or video row
 /// whose `units` stay still.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Export {
 	/// One row per elementary stream PID the exporter writes, ordered by PID.
 	pub streams: BTreeMap<u16, Stream>,
+	/// Frames dropped for arriving after their deadline, and the frames a video track then
+	/// dropped waiting for its next keyframe.
+	pub dropped: u64,
+	/// How fast the source's clock runs against ours, in parts per million (positive runs
+	/// fast), as last measured. `None` until there is a measurement.
+	pub drift: Option<f64>,
+	/// How many measurements found the source's clock further off ours than the 30 ppm an
+	/// MPEG-TS system clock may be (ISO/IEC 13818-1 2.4.2.1), which the output cannot follow.
+	pub out_of_tolerance: u64,
 }
 
 /// An export's rows with every stream-wide counter zero, so one [`Log`] reads either edge.

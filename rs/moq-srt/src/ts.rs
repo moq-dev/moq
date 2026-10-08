@@ -72,10 +72,15 @@ impl Publisher {
 		config: moq_mux::catalog::Config,
 		program: Option<Program>,
 	) -> Result<Self> {
+		// Each connection is its own publisher instance, so an encoder reconnecting
+		// under the same stream id replaces the stale broadcast instead of resuming into
+		// it. `ts::Programs` mints one per program likewise.
+		let mut epoch = None;
 		let importer = match program {
 			Some(Program::All) => Importer::All(Box::new(ts::Programs::new(origin.clone(), path, config))),
 			Some(Program::One(_)) | None => {
-				let mut broadcast = origin.publish(path, moq_net::origin::Route::default())?;
+				let route = moq_net::origin::Route::default().with_epoch(epoch.insert(moq_net::Epoch::mint()).clone());
+				let mut broadcast = origin.publish(path, route)?;
 				let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 				let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
@@ -88,7 +93,7 @@ impl Publisher {
 				}
 			}
 		};
-		tracing::info!(%path, ?program, "publishing ingest broadcast");
+		tracing::info!(%path, ?program, epoch = epoch.as_ref().map(tracing::field::display), "publishing ingest broadcast");
 
 		Ok(Self {
 			importer,
@@ -168,13 +173,13 @@ pub struct Subscriber {
 impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
-	/// `latency` bounds how long the muxer waits for a stalled group before it
-	/// skips ahead to a newer one. We reuse the locally configured SRT receive
-	/// latency for it: SRT paces egress on the media clock, so the skip threshold
-	/// shares the same latency budget. It's the configured value, not the
-	/// handshake result (srt-tokio doesn't expose the negotiated latency), so a
-	/// peer that requests a higher receive latency gets a larger actual buffer
-	/// than this skip threshold.
+	/// `latency` is the muxer's jitter-buffer delay: each frame is muxed that long after
+	/// its decode time, a frame arriving later is dropped, and a stalled group is
+	/// skipped after half of it. We reuse the locally configured SRT receive latency for
+	/// it, the same budget an SRT hop gives a packet. It's the configured value,
+	/// not the handshake result (srt-tokio doesn't expose the negotiated latency),
+	/// so a peer that requests a higher receive latency gets a larger actual
+	/// buffer than this delay.
 	///
 	/// Returns `Ok(None)` if the broadcast can never be served (path outside the
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
@@ -190,7 +195,7 @@ impl Subscriber {
 		let source = moq_mux::Source::new(origin.consume(), path);
 		let export = ts::Export::with_ts(source, moq_mux::catalog::CatalogFormat::Hang)
 			.await?
-			.with_max_age(latency);
+			.with_delay(latency);
 		Ok(Some(Self { export }))
 	}
 
@@ -421,7 +426,7 @@ mod tests {
 			.await
 			.expect("announce timed out")
 			.expect("the broadcast is announced");
-		let broadcast = consumer.request_broadcast(path).await.unwrap();
+		let broadcast = consumer.request_broadcast(path, None).await.unwrap();
 		let mut catalog = moq_mux::catalog::Consumer::<ts::Ext>::new(&broadcast, CatalogFormat::Hang)
 			.await
 			.unwrap();
@@ -446,6 +451,39 @@ mod tests {
 		};
 		let refused = inner.downcast_ref::<ts::MultipleProgramsError>();
 		assert_eq!(refused.map(|refused| refused.programs.as_slice()), Some(&[1, 2][..]));
+	}
+
+	/// A caller reconnecting under the same stream id while its stale connection is
+	/// still open replaces the stale broadcast at once: each connection is its own
+	/// epoch, so viewers re-request instead of stalling on the old one.
+	#[tokio::test(start_paused = true)]
+	async fn a_reconnect_replaces_the_stale_connection() {
+		let origin = produce_origin();
+		let consumer = origin.consume();
+		let _stale = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
+		let stale = consumer.request_broadcast("ingest", None).await.unwrap();
+		let mut catalog = stale
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+
+		let _fresh = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
+		let ended = tokio::time::timeout(Duration::from_secs(1), async {
+			loop {
+				match catalog.recv_group().await {
+					Ok(Some(_)) => continue,
+					Ok(None) => panic!("the stale broadcast ended cleanly"),
+					Err(err) => return err,
+				}
+			}
+		})
+		.await
+		.expect("the stale viewer stalled");
+		assert!(matches!(ended, moq_net::Error::Unroutable), "{ended:?}");
+		let fresh = consumer.request_broadcast("ingest", None).await.unwrap();
+		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected caller");
 	}
 
 	/// `Program::One` publishes the chosen program alone on the ingest's path.
@@ -493,7 +531,7 @@ mod tests {
 
 		let consumer = origin.consume();
 		consumer.routed("live/cam0").await.unwrap();
-		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().query().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -543,7 +581,7 @@ mod tests {
 			.await
 			.expect("announce timed out")
 			.expect("the ingest broadcast is announced");
-		let broadcast = consumer.request_broadcast("ingest").await.unwrap();
+		let broadcast = consumer.request_broadcast("ingest", None).await.unwrap();
 
 		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 

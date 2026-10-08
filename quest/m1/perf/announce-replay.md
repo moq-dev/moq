@@ -22,3 +22,7 @@ hashing and `Path` comparison, so check whether a faster hasher for
 path-keyed maps pays off on both.
 
 Keep the replay's order and its last-update-wins semantics.
+
+## Related
+
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - reshapes the same announce stream; measure the replay on its wire too

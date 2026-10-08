@@ -24,3 +24,7 @@ Guidance:
   `moq_relay::fetch_group` (added in the 2026-10-05 audit).
 - `max_delay` caps every range.
 - Benchmark range count and span as separate axes (AGENTS.md fan-out rule).
+
+## Required
+
+- [Coalesce dynamic tracks](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic track per name with sequences kept across replacements, which range requests build on (#4929)

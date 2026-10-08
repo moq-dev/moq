@@ -154,6 +154,11 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Whether `flag` is one of the flags `T` declares.
+fn owns<T: usage::spec::CommandArgs>(flag: &usage::Flag<'_>) -> bool {
+	T::COMMAND.flags.iter().any(|own| own.key == flag.key)
+}
+
 impl Invocation {
 	/// Parse the process arguments, exiting with Usage's rendered message on error.
 	///
@@ -194,11 +199,6 @@ impl Invocation {
 	/// `--iroh-*` settings it dials with. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
-		use usage::spec::CommandArgs;
-
-		fn owns<T: CommandArgs>(flag: &usage::Flag<'_>) -> bool {
-			T::COMMAND.flags.iter().any(|own| own.key == flag.key)
-		}
 		let dials = |flag: &&&usage::Flag<'_>| {
 			#[cfg(feature = "iroh")]
 			if owns::<moq_tokio::iroh::Config>(flag) {
@@ -213,6 +213,23 @@ impl Invocation {
 
 		if let Some(flags) = Self::names(self.given.iter().filter(|flag| !dials(flag))) {
 			anyhow::bail!("`{command}` only dials a relay with --connect; drop {flags}");
+		}
+		Ok(())
+	}
+
+	/// Refuse the listener flags (`--listen-*`, `--auth-*`) when nothing listens,
+	/// rather than silently ignoring them. Answered from the command line, like
+	/// [`Self::reject`].
+	pub fn unserved(&self) -> anyhow::Result<()> {
+		if self.moq.serves() {
+			return Ok(());
+		}
+		let listens =
+			|flag: &&&usage::Flag<'_>| owns::<moq_tokio::listen::Config>(flag) || owns::<moq_relay::auth::Config>(flag);
+		if let Some(flags) = Self::names(self.given.iter().filter(listens)) {
+			anyhow::bail!(
+				"{flags} configure a listener, but none is bound; add --listen, --listen-tcp-bind, --listen-unix-bind, or --cluster-lan"
+			);
 		}
 		Ok(())
 	}
@@ -284,6 +301,28 @@ impl Invocation {
 	/// Called before anything binds a port or dials out, so a refused invocation has
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
+		if self.moq.epoch.is_some() {
+			let mut publishes = false;
+			for command in &self.stages {
+				match command {
+					Command::Import(import) => {
+						anyhow::ensure!(
+							import.source.takes_epoch(),
+							"--epoch names one publisher instance, but the RTMP, SRT, and WHIP ingests and `import ts --program all` announce their own per connection or program"
+						);
+						publishes = true;
+					}
+					#[cfg(feature = "transcode")]
+					Command::Transcode(_) => publishes = true,
+					_ => {}
+				}
+			}
+			anyhow::ensure!(
+				publishes,
+				"--epoch names what this process publishes, but nothing here publishes"
+			);
+		}
+
 		for command in &self.stages {
 			let Command::Export(export) = command else {
 				continue;
@@ -377,21 +416,14 @@ pub struct MoqSide {
 	#[usage(long = "name", hide = true)]
 	name: Option<String>,
 
-	/// Fix this process's Hop ID instead of minting a fresh random one.
+	/// Announce under this epoch (a UUIDv7) instead of minting a fresh one per run.
 	///
-	/// The Hop ID is the first hop of every announcement this process
-	/// publishes, and relays treat it as the broadcast's content identity:
-	/// redundant publishers of the same broadcast share an id so relays fail
-	/// over between them at a group boundary. Leave unset outside a redundant
-	/// (1+1) chain; the default fresh id per run is what makes a restarted
-	/// publisher look like new content instead of silently splicing.
-	#[usage(long, env = "MOQ_HOP", help_heading = "MoQ")]
-	pub hop: Option<u64>,
-
-	/// The released spelling of [`Self::hop`], kept in the parser only so a
-	/// process that still passes it is told what to pass instead.
-	#[usage(name = "origin", long = "origin", env = "MOQ_ORIGIN", hide = true)]
-	pub origin: Option<u64>,
+	/// Relays resume a subscription only between routes with the same epoch, so
+	/// redundant publishers of one broadcast pass the same value and fail over
+	/// seamlessly. Leave it unset otherwise: a fresh epoch per run is what makes a
+	/// restarted publisher replace the old broadcast instead of resuming into it.
+	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
+	pub epoch: Option<hang::moq_net::Epoch>,
 
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
 	#[usage(flatten)]
@@ -432,9 +464,6 @@ impl MoqSide {
 		found.extend(self.server.deprecated());
 		found.extend(self.cluster.deprecated());
 		found.extend(self.auth.deprecated());
-		if self.origin.is_some() {
-			found.flag("--origin", Some("MOQ_ORIGIN"), "--hop / MOQ_HOP");
-		}
 		if self.name.is_some() {
 			found.flag("--name", None, "--broadcast");
 		}
@@ -442,18 +471,10 @@ impl MoqSide {
 	}
 
 	/// The cluster this process publishes and subscribes on. Built once; the
-	/// origin is its origin. `--hop` fills `--cluster-id` when the latter is
-	/// unset; they must agree when both are set.
+	/// origin is its origin, whose Hop ID is random per run unless `--cluster-id`
+	/// names the node.
 	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
-		let mut config = self.cluster.clone();
-		match (config.id, self.hop) {
-			(None, Some(hop)) => config.id = Some(hop),
-			(Some(id), Some(hop)) if id != hop => {
-				anyhow::bail!("--hop {hop} and --cluster-id {id} must agree")
-			}
-			_ => {}
-		}
-		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(config))
+		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.
@@ -755,6 +776,17 @@ impl ImportSource {
 			_ => return None,
 		})
 	}
+
+	/// Whether this source announces one publisher instance per run, which `--epoch`
+	/// can name. The ingest gateways and `ts --program all` announce their own.
+	pub fn takes_epoch(&self) -> bool {
+		match self {
+			Self::Ts(args) => args.program != Some(TsProgram::All),
+			Self::Rtmp(_) | Self::Srt(_) => false,
+			Self::Rtc(rtc) => rtc.listen.is_none(),
+			_ => true,
+		}
+	}
 }
 
 /// The MPEG-TS stdin container: which programs of a multiplex to publish.
@@ -918,7 +950,7 @@ impl ExportSink {
 			},
 			Self::Ts(args) => Stdout {
 				format: SubscribeFormat::Ts,
-				max_delay: args.max_age.into_std(),
+				max_delay: args.delay.into_std(),
 				linger: args.linger.into_std(),
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
@@ -934,6 +966,7 @@ impl ExportSink {
 /// A stdout sink's format and the options that apply to it.
 pub struct Stdout {
 	pub format: SubscribeFormat,
+	/// The staleness budget, which `ts` also holds every frame for (`--delay`).
 	pub max_delay: Duration,
 	pub linger: Duration,
 	pub fragment_duration: Option<Duration>,
@@ -976,14 +1009,14 @@ impl Container {
 }
 
 /// The MPEG-TS stdout container.
-// It keeps `--max-age` rather than `Container`'s `--max-delay`: TS export is moving to a
-// fixed release delay that subsumes the staleness budget under its own flag.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Transport {
-	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
+	/// How long after its decode time each frame is written (e.g. `500ms`), like an SRT
+	/// receiver's latency. A frame that arrives later than this is dropped, and a stalled
+	/// group is skipped once it falls half this behind the newest content.
 	#[usage(long, default = "500ms")]
-	pub max_age: crate::duration::Duration,
+	pub delay: crate::duration::Duration,
 
 	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
 	/// The output stops while it is gone and resumes flagged as a break.
@@ -996,16 +1029,24 @@ pub struct Transport {
 	#[usage(long)]
 	pub mux_rate: Option<u64>,
 
-	/// The released spelling of [`Self::max_age`].
+	/// The released spelling of [`Self::delay`].
+	#[usage(long = "max-age", hide = true)]
+	max_age: Option<crate::duration::Duration>,
+
+	/// The released spelling of [`Self::delay`], before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<crate::duration::Duration>,
 }
 
 impl Transport {
 	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		const HOLDS: &str = "it also holds every frame that long after its decode time";
 		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.max_age.is_some() {
+			found.changed("--max-age", None, "--delay", HOLDS);
+		}
 		if self.latency_max.is_some() {
-			found.flag("--latency-max", None, "--max-age");
+			found.changed("--latency-max", None, "--delay", HOLDS);
 		}
 		found
 	}
@@ -1067,6 +1108,32 @@ mod tests {
 				parse(format, "0s").validate().is_ok(),
 				"{format}: no linger is always fine"
 			);
+		}
+	}
+
+	/// `export ts` holds every frame for its staleness budget, so the budget is spelled
+	/// `--delay` there, and the released spellings stop a run with a migration.
+	#[test]
+	fn export_ts_takes_a_delay() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["moq", "export", "--broadcast", "b", "ts"];
+			argv.extend_from_slice(args);
+			Invocation::try_parse_from(argv)
+		};
+		let stdout = |args: &[&str]| {
+			let cli = parse(args).unwrap();
+			let Command::Export(export) = &cli.stages[0] else {
+				panic!("not an export");
+			};
+			export.sink.stdout().unwrap().max_delay
+		};
+		assert_eq!(stdout(&[]), Duration::from_millis(500));
+		assert_eq!(stdout(&["--delay", "2s"]), Duration::from_secs(2));
+		for old in ["--max-age", "--latency-max"] {
+			let Err(err) = parse(&[old, "1s"]) else {
+				panic!("{old} must not start a run");
+			};
+			assert!(err.to_string().contains(&format!("{old} -> --delay")), "{err}");
 		}
 	}
 
@@ -1229,31 +1296,31 @@ mod tests {
 		}
 	}
 
-	/// `moq-cli`'s own rename rides the same refusal as the flags it flattens from
-	/// `moq-tokio`, and lands in the same message.
-	///
-	/// Both halves matter: `--origin` must not silently pin a Hop ID onto the field
-	/// `--hop` now owns, and the migration has to name the environment variable too,
-	/// since a deployment that sets `MOQ_ORIGIN` never typed the flag.
+	/// `--epoch` reaches the stages that announce once per run, and is refused where
+	/// it would be ignored: an ingest that announces per connection, or no publisher.
 	#[test]
-	fn the_released_origin_spelling_is_refused_with_a_migration() {
-		let Err(err) = Invocation::try_parse_from([
-			"moq",
-			"--origin",
-			"42",
-			"--connect",
-			"http://relay/anon",
-			"export",
-			"ts",
-		]) else {
-			panic!("--origin must not start a run");
+	fn epoch_applies_only_to_a_once_per_run_publisher() {
+		let _env = crate::test_env::EnvGuard::clear(&["MOQ_EPOCH"]);
+		let epoch = hang::moq_net::Epoch::mint().to_string();
+		let parse = |stage: &[&str]| {
+			let argv = ["moq", "--connect", "http://relay/anon", "--epoch", &epoch].into_iter();
+			Invocation::try_parse_from(argv.chain(stage.iter().copied())).expect("parse")
 		};
 
-		let reported = err.to_string();
-		assert!(
-			reported.contains("--origin / MOQ_ORIGIN -> --hop / MOQ_HOP"),
-			"missing the migration from {reported}"
-		);
+		let cli = parse(&["import", "fmp4"]);
+		cli.validate().expect("a stdin import takes an epoch");
+		assert_eq!(cli.moq.epoch.map(|epoch| epoch.to_string()), Some(epoch.clone()));
+
+		for refused in [
+			&["import", "rtmp", "--listen", "[::]:1935"][..],
+			&["import", "ts", "--program", "all"],
+			&["export", "fmp4"],
+		] {
+			assert!(parse(refused).validate().is_err(), "{refused:?} accepted --epoch");
+		}
+
+		let malformed = Invocation::try_parse_from(["moq", "--epoch", "42", "import", "fmp4"]);
+		assert!(malformed.is_err(), "--epoch accepted a value that is not a UUIDv7");
 	}
 
 	/// A stage carries config of its own, and the check has to reach it.
@@ -1661,12 +1728,6 @@ mod tests {
 		};
 		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
 
-		let Err(err) = Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "ts", "--latency-max", "1s"])
-		else {
-			panic!("--latency-max must not start a run");
-		};
-		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
-
 		let Err(err) = Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "mkv", "--latency-max", "1s"])
 		else {
 			panic!("--latency-max must not start a run");
@@ -1675,7 +1736,7 @@ mod tests {
 	}
 
 	/// A publisher's retention is `--max-age` on `import`; a subscriber's staleness budget is
-	/// `--max-delay` on `export`, except `export ts`, which still spells it `--max-age`.
+	/// `--max-delay` on `export`, except `export ts`, which spells it `--delay`.
 	#[test]
 	fn export_staleness_is_max_delay_and_import_retention_is_max_age() {
 		let export = |args: &[&str]| {
@@ -1704,8 +1765,8 @@ mod tests {
 			assert!(err.to_string().contains("--max-age -> --max-delay"), "{format}: {err}");
 		}
 
-		assert_eq!(stdout(&["ts", "--max-age", "2s"]), Duration::from_secs(2));
-		assert!(export(&["ts", "--max-delay", "2s"]).is_err(), "ts keeps --max-age");
+		assert_eq!(stdout(&["ts", "--delay", "2s"]), Duration::from_secs(2));
+		assert!(export(&["ts", "--max-delay", "2s"]).is_err(), "ts spells it --delay");
 
 		let rtmp = |flag: &str| export(&["rtmp", "--connect", "rtmp://example.com/live/key", flag, "2s"]);
 		let cli = rtmp("--max-delay").unwrap();
@@ -1857,7 +1918,7 @@ mod tests {
 			&["--listen-tcp-bind", "127.0.0.1:0"],
 			&["--cluster-node", "https://self.example"],
 			&["--auth-public", "**"],
-			&["--hop", "1"],
+			&["--epoch", "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b"],
 		];
 		let dial: &[&[&str]] = &[
 			&["--connect", "https://relay.example"],
@@ -1893,6 +1954,34 @@ mod tests {
 				.dial_only("fetch", &["--broadcast"])
 				.unwrap_or_else(|err| panic!("{flag:?}: {err}"));
 		}
+	}
+
+	/// A listener or auth flag with nothing listening is refused, naming it, and
+	/// accepted once a listener is bound.
+	#[test]
+	fn listener_flags_need_a_listener() {
+		let parse = |flags: &[&str]| {
+			let argv = ["moq", "--connect", "https://relay.example"]
+				.iter()
+				.chain(flags)
+				.chain(&["import", "ts"])
+				.copied();
+			Invocation::try_parse_from(argv).unwrap_or_else(|err| panic!("{flags:?}: {err}"))
+		};
+		for flag in [
+			&["--listen-tls-root", "ca.pem"][..],
+			&["--listen-tls-cert", "cert.pem"],
+			&["--listen-tcp-tls"],
+			&["--listen-version", "moq-lite-02"],
+			&["--auth-public", "**"],
+		] {
+			let err = parse(flag).unserved().unwrap_err().to_string();
+			assert!(err.contains(flag[0]), "{flag:?}: {err}");
+		}
+		parse(&["--listen", "[::]:0", "--listen-tls-root", "ca.pem"])
+			.unserved()
+			.expect("a listener reads it");
+		parse(&[]).unserved().expect("nothing to refuse");
 	}
 
 	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a

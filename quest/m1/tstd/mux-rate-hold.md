@@ -9,7 +9,7 @@ never settles is published without it once the window closes.
 
 ## Plan
 
-Decided (2026-10-01). Found in [fixed-delay release](/quest/m1/tstd/delay.md)
+Decided (2026-10-01). Found in the fixed-delay release
 (#4645): the importer's meter (`rs/moq-mux/src/container/ts/mux_rate.rs`)
 publishes `mpegts.muxRate` only after a 2 s window agrees. So the export's
 first ~2 s go out unpadded, and the harness skips them (`pcr-timing.py`
@@ -33,7 +33,3 @@ grades from the first null packet).
   source's catalog arrives after the window without it, and a CBR import
   shorter than 2 s still publishes its catalog. A TS→TS export passes
   `pcr-schedule` from its first PCR.
-
-## Required
-
-- [Fixed-delay release](/quest/m1/tstd/delay.md) - its export is what reads the rate from the start

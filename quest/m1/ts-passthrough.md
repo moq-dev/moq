@@ -42,6 +42,14 @@ Decided (2026-10-01), from a discussion with t0ms:
   inside a group. A source that never sets the random-access indicator
   falls back to a group every N PCRs (N to be fixed in the PR, with a group
   spanning at most 1 s of PCR time). Pacing stays on the PCR PID throughout.
+- A flagged PCR discontinuity that rewinds is a restart, as
+  [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) decides for the
+  demultiplexed lane: the passthrough broadcast finishes cleanly and the rest
+  of the input continues as a new broadcast at the same path under a fresh
+  epoch, so object timestamps never go backwards within one broadcast. A
+  flagged forward jump starts a group, and an unflagged rewind is fatal
+  (decided 2026-10-07 in the final-head audit of #4670, which had a backward
+  flag start a group in place).
 - `randomAccess` is true only while the PAT lists a single program with at
   most one video PID, and every group has started at a
   `random_access_indicator`. The first group that starts without one (a
@@ -62,8 +70,8 @@ Decided (2026-10-01), from a discussion with t0ms:
 - A multiplex is paced on one PCR PID: the `PCR_PID` in the PMT of the PAT's
   first program, or `--pcr-pid`. Every byte stays in order behind it. Programs
   on independent clocks are out of scope.
-- The export reuses the [fixed-delay release](/quest/m1/tstd/delay.md)
-  stage, keyed on each object's PCR time instead of a DTS, which also
+- The export reuses the TS export's jitter buffer (`rs/moq-mux/src/jitter.rs`,
+  #4645), keyed on each object's PCR time instead of a DTS, which also
   spreads each object's bytes at the PCR-implied rate. It must pace on the
   source's PCR, not on arrival: a pacer that re-clocks on arrival moves the
   PCR-to-PTS offset over a long capture and fails the decoder buffers, even
@@ -96,9 +104,10 @@ fixture with the PCR on its audio PID starts groups at video random access
 points only. PCR discovery finds a PCR PID that differs from the PMT PID, with
 the PMT section split across packets. Two exporters fed the same objects with
 different arrival skew emit identical bytes; when only one misses a deadline,
-its output is the other's less that object's packets. A dropped object is
-counted, and the rest still go out on time. Rerun the #4613 netem rig (10%
-loss, 120 s) against it.
+its output is the other's less that object's packets. A flagged backward PCR
+discontinuity publishes two broadcasts, and the same rewind unflagged errors.
+A dropped object is counted, and the rest still go out on time. Rerun the
+#4613 netem rig (10% loss, 120 s) against it.
 
 Update `doc/bin/cli.md` for both flags, `doc/concept` for the section, and
 the draft's comparison section to say this repository now publishes both
@@ -109,10 +118,9 @@ hang catalog gains an `m2ts` root section; additive.
 
 ## Required
 
-- [Fixed-delay release](/quest/m1/tstd/delay.md) - the release stage this reuses, with its clock recovery (#4645)
+- [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - the restart-under-a-new-epoch path a backward PCR discontinuity reuses
 
 ## Related
 
 - [TS hitless](/quest/m2/ts-hitless.md) - the demultiplexed lane's 2022-7 legs and the `--sync` anchor
 - [MSFTS convergence](/quest/m2/msfts-convergence.md) - the ES-level side of the same mapping
-- [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - the remux's equivalent of pacing on the source PCR

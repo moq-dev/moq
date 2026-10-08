@@ -19,7 +19,12 @@ import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
-import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace, SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
+import {
+	SUBSCRIBE_TRACKS_ID,
+	SubscribeNamespace,
+	SubscribeNamespaceLegacy,
+	SubscribeOptions,
+} from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
@@ -220,6 +225,10 @@ export class Connection implements Established {
 
 	async #run(early: Reader[]): Promise<void> {
 		try {
+			// Both run together. runPublishNamespaces is a no-op when the peer asked to be
+			// solicited; otherwise it pushes PUBLISH_NAMESPACE. On draft-16 and later a
+			// SUBSCRIBE_NAMESPACE stream is filled either way. A NAMESPACE is discovery,
+			// not a second route.
 			await Promise.all([this.#runBidis(), this.#runUnis(early), this.#publisher.runPublishNamespaces()]);
 		} catch (err) {
 			if (!this.#closed) {
@@ -269,7 +278,8 @@ export class Connection implements Established {
 
 		switch (typeId) {
 			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
-			// to the same request_id + namespace; the legacy options field is ignored.
+			// to the same request_id + namespace. We never send PUBLISH, so a legacy
+			// request for PUBLISH alone is refused, and one for both gets only NAMESPACE.
 			case BigInt(SubscribeNamespace.id): {
 				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
 				await this.#publisher.runSubscribeNamespace(msg, stream);
@@ -277,6 +287,10 @@ export class Connection implements Established {
 			}
 			case BigInt(SubscribeNamespaceLegacy.id): {
 				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
+				if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
+					await this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream);
+					break;
+				}
 				const msg = new SubscribeNamespace({
 					requestId: legacy.requestId,
 					namespace: legacy.namespace,

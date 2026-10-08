@@ -1,7 +1,7 @@
 import { Once } from "@moq/signals";
 import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
-import { error, ProtocolViolation } from "../error.ts";
+import { error, ProtocolViolation, SessionCode } from "../error.ts";
 import { Reader, Stream, type Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
@@ -11,14 +11,6 @@ import { type IetfVersion, Version } from "./version.ts";
 
 /** Draft-14 to -16: the request ID is not valid for this peer (wrong parity or a duplicate). */
 const INVALID_REQUEST_ID = 0x4;
-
-/**
- * Draft-14 to -16: the request ID is at or past the MAX_REQUEST_ID we advertised.
- *
- * Section 9.1 also names INVALID_REQUEST_ID for an ID past the maximum. The session
- * registry and section 9.5 assign that case to this code, so this is the one we send.
- */
-const TOO_MANY_REQUESTS = 0x7;
 
 /** The peer used a request ID the draft closes the session for. */
 export class RequestWindowError extends Error {
@@ -476,7 +468,9 @@ export class ControlStreamAdapter implements Session {
 	/** Reject a request ID the peer is not allowed to use. */
 	#checkPeer(requestId: bigint): void {
 		if (requestId >= this.#peerMax) {
-			this.#refuse(TOO_MANY_REQUESTS, "request id exceeds max");
+			// Section 9.1 also names INVALID_REQUEST_ID here, but the session registry and
+			// section 9.5 assign an ID past the maximum to TOO_MANY_REQUESTS.
+			this.#refuse(SessionCode.TooManyRequests, "request id exceeds max");
 		}
 		// Even IDs are the client's. `#client` is this side, so the peer's IDs are the other parity.
 		const even = (requestId & 1n) === 0n;
@@ -508,7 +502,7 @@ export class ControlStreamAdapter implements Session {
 	/** A peer reusing IDs below the bound still cannot hold more than the window open. */
 	#checkLive(): void {
 		if (BigInt(this.#open.size) >= this.#peerWindow) {
-			this.#refuse(TOO_MANY_REQUESTS, "too many open requests");
+			this.#refuse(SessionCode.TooManyRequests, "too many open requests");
 		}
 	}
 

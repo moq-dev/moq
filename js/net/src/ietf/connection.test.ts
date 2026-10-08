@@ -2,14 +2,23 @@ import { expect, spyOn, test } from "bun:test";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Connection } from "./connection.ts";
+import * as Message from "./message.ts";
+import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
-import { SetupOption, SetupOptions } from "./parameters.ts";
+import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
 import { initialMaxRequestId, MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
-import { SUBSCRIBE_TRACKS_ID, SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
+import {
+	SUBSCRIBE_TRACKS_ID,
+	SubscribeNamespace,
+	SubscribeNamespaceEntry,
+	SubscribeNamespaceLegacy,
+	SubscribeOptions,
+} from "./subscribe_namespace.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const PADDING = 0x132b3e28n;
@@ -151,6 +160,109 @@ test("SUBSCRIBE_TRACKS refuses only its request", async () => {
 });
 
 /**
+ * A draft-16/17 SUBSCRIBE_NAMESPACE gets NAMESPACE whenever it asks for namespaces, and one
+ * asking for PUBLISH alone is refused, since we never send PUBLISH. Draft-18 has no
+ * Subscribe Options and always asks for namespaces.
+ */
+for (const [version, alpn, options, namespaces] of [
+	[Version.DRAFT_16, ALPN.DRAFT_16, SubscribeOptions.PUBLISH, false],
+	[Version.DRAFT_16, ALPN.DRAFT_16, SubscribeOptions.NAMESPACE, true],
+	[Version.DRAFT_16, ALPN.DRAFT_16, SubscribeOptions.BOTH, true],
+	[Version.DRAFT_17, ALPN.DRAFT_17, SubscribeOptions.PUBLISH, false],
+	[Version.DRAFT_17, ALPN.DRAFT_17, SubscribeOptions.NAMESPACE, true],
+	[Version.DRAFT_17, ALPN.DRAFT_17, SubscribeOptions.BOTH, true],
+	[Version.DRAFT_18, ALPN.DRAFT_18, undefined, true],
+] as const) {
+	test(`${alpn} SUBSCRIBE_NAMESPACE with Subscribe Options ${options ?? "absent"}`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.server, { version });
+		const origin = new OriginProducer();
+		origin.createBroadcast(Path.from("room")).announce();
+		const connection = new Connection({
+			url: new URL("https://example.com"),
+			quic: pair.server,
+			control,
+			maxRequestId: 100n,
+			version,
+			client: false,
+			publish: origin.consume(),
+			solicit: true,
+		});
+
+		try {
+			const stream = await Stream.open(pair.client, { version });
+			if (options === undefined) {
+				await stream.writer.u53(SubscribeNamespace.id);
+				await new SubscribeNamespace({ namespace: Path.empty(), requestId: 0n }).encode(stream.writer, version);
+			} else {
+				await stream.writer.u53(SubscribeNamespaceLegacy.id);
+				await new SubscribeNamespaceLegacy({
+					namespace: Path.empty(),
+					requestId: 0n,
+					subscribeOptions: options,
+				}).encode(stream.writer, version);
+			}
+
+			if (namespaces) {
+				expect(await stream.reader.u53()).toBe(RequestOk.id);
+				await RequestOk.decode(stream.reader, version);
+				expect(await stream.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+				expect((await SubscribeNamespaceEntry.decode(stream.reader, version)).suffix).toBe(Path.from("room"));
+			} else {
+				expect(await stream.reader.u53()).toBe(RequestError.id);
+				const refused = await RequestError.decode(stream.reader, version);
+				expect(refused.errorCode).toBe(0x3);
+				expect(refused.requestId).toBe(version === Version.DRAFT_16 ? 0n : undefined);
+				expect(await stream.reader.done()).toBe(true);
+			}
+		} finally {
+			connection.abort();
+			origin.close();
+		}
+	});
+}
+
+/** The drafts define only 0x00 through 0x02; any other value closes the session, even past 2^53. */
+for (const [version, alpn] of [
+	[Version.DRAFT_16, ALPN.DRAFT_16],
+	[Version.DRAFT_17, ALPN.DRAFT_17],
+] as const) {
+	for (const options of [3n, 2n ** 53n]) {
+		test(`${alpn} Subscribe Options ${options} closes the session`, async () => {
+			const logged = spyOn(console, "error").mockImplementation(() => void 0);
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.server, { version });
+			const connection = new Connection({
+				url: new URL("https://example.com"),
+				quic: pair.server,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: false,
+			});
+
+			try {
+				const stream = await Stream.open(pair.client, { version });
+				await stream.writer.u53(SubscribeNamespaceLegacy.id);
+				await Message.encode(stream.writer, async (w) => {
+					await w.u62(1n); // Request ID
+					if (version === Version.DRAFT_17) await w.u62(0n); // Required Request ID delta
+					await Namespace.encode(w, Path.empty());
+					await w.u62(options);
+					await new Parameters().encode(w, version);
+				});
+
+				const info = await pair.client.closed;
+				expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
+			} finally {
+				logged.mockRestore();
+				connection.abort();
+			}
+		});
+	}
+}
+
+/**
  * Padding and group streams that beat the peer's SETUP are held and classified once it
  * lands. The drafts say to buffer early data; failing the handshake over it broke a peer
  * that already held a subscription or probed for bandwidth straight away.
@@ -283,7 +395,7 @@ test("draft-16 subscribe namespace past the request window closes the session", 
 		}).encode(stream.writer, version);
 
 		const info = await pair.client.closed;
-		expect(info.closeCode).toBe(0x7);
+		expect(info.closeCode).toBe(SessionCode.TooManyRequests);
 		expect(logged).not.toHaveBeenCalled();
 	} finally {
 		logged.mockRestore();
@@ -331,3 +443,45 @@ test("draft-16 subscribe namespace grants another request id when it ends", asyn
 		connection.abort();
 	}
 });
+
+for (const [version, alpn] of [
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	for (const [value, nested] of [
+		[0, false],
+		[3, false],
+		[255, false],
+		[0, true],
+		[3, true],
+		[255, true],
+	] as const) {
+		if (nested && version === Version.DRAFT_18) continue; // FILL_PARAMETERS starts in draft-20.
+		test(`invalid ${nested ? "fill " : ""}GROUP_ORDER ${value} closes ${alpn}`, async () => {
+			const logged = spyOn(console, "error").mockImplementation(() => void 0);
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.server, { version });
+			const connection = new Connection({
+				url: new URL("https://example.com"),
+				quic: pair.server,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: false,
+			});
+			try {
+				const stream = await Stream.open(pair.client, { version });
+				await stream.writer.u53(3);
+				const params = nested ? [0x23, 3, 1, 0x22, value] : [0x22, value];
+				const body = [0, 1, 1, 97, 1, 98, 1, ...params];
+				await stream.writer.write(new Uint8Array([0, body.length, ...body]));
+				const info = await pair.client.closed;
+				expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
+			} finally {
+				logged.mockRestore();
+				connection.abort();
+			}
+		});
+	}
+}

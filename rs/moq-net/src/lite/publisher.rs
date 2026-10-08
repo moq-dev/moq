@@ -3,7 +3,7 @@ use std::{
 	collections::{BTreeSet, HashMap},
 	ops::{Bound, ControlFlow},
 	sync::{
-		Arc,
+		Arc, Mutex,
 		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll, ready},
@@ -39,6 +39,8 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
+	/// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
+	pub subscriptions: crate::session::Slots,
 }
 
 /// Context shared by every control-stream child.
@@ -51,8 +53,8 @@ struct Shared<S: crate::transport::poll::Session> {
 	// peer from a source whose chain excludes them, keeping the data plane on
 	// the same split-horizon rule as the announces we send them.
 	peer_setup: super::PeerSetup,
-	// The identity assigned to the peer by the caller (`Client::with_peer_hop`, or
-	// the per-session default a server hands every request), standing in wherever the
+	// The identity assigned to the peer (a fresh per-session id, or one the caller
+	// pinned with `with_peer_hop`), standing in wherever the
 	// peer declines to declare one. Backs both the announce filter and the serving
 	// origin, so a peer that names itself nowhere on the wire is still split-horizoned.
 	peer_hop: Option<Hop>,
@@ -64,6 +66,10 @@ struct Shared<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
+	subscriptions: crate::session::Slots,
+	// The send time an untimed track's frames carry, since no lite version can mark them
+	// untimed yet (see `wire_timestamp`).
+	runtime: crate::time::Clock,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -167,6 +173,8 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				version: config.version,
 				goaway: config.goaway,
 				owed: AtomicUsize::new(0),
+				subscriptions: config.subscriptions,
+				runtime: config.runtime.clone(),
 			}),
 			runtime: config.runtime,
 			accept,
@@ -190,6 +198,7 @@ where
 						shared: self.shared.clone(),
 						runtime: self.runtime.clone(),
 						state: ControlState::Start { stream },
+						_slot: None,
 					});
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -234,6 +243,8 @@ struct Control<S: crate::transport::poll::Session> {
 	// Handed to the children that arm timers (PROBE, announce linger).
 	runtime: crate::time::Clock,
 	state: ControlState<S>,
+	// A subscription's place under the session's cap, held until the stream ends.
+	_slot: Option<crate::session::Slot>,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -297,9 +308,20 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Announce => {
 							ControlState::Announce(AnnounceServe::new(self.shared.clone(), stream))
 						}
-						lite::ControlType::Subscribe => {
-							ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
-						}
+						lite::ControlType::Subscribe => match self.shared.subscriptions.acquire() {
+							Ok(slot) => {
+								self._slot = Some(slot);
+								ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
+							}
+							// A peer past its limits loses the session, not just this request.
+							Err(err) => {
+								self.shared
+									.session
+									.clone()
+									.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
+								return Poll::Ready(Err(err));
+							}
+						},
 						// The Track Stream and FETCH are lite-05+ only.
 						lite::ControlType::Fetch | lite::ControlType::Track
 							if !self.shared.version.has_track_stream() =>
@@ -539,8 +561,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 					// The identity whose routes we filter out. Lite-04/05 carry it per
 					// announce stream; lite-06+ reads the session-wide SETUP Hop
 					// parameter, the same identity the subscribe path excludes. A peer that
-					// declares nothing falls back to the identity the caller assigned it
-					// (`with_peer_hop`), if any.
+					// declares nothing falls back to the identity the session assigned it.
 					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
 					if self.shared.version.has_exclude_hop() {
 						let exclude_hop = match interest.exclude_hop {
@@ -1201,13 +1222,13 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let info = ready!(self.querying.poll_ok(waiter))?;
 
-		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where every
-		// track is timed, so the model's timescale and retention bound go on the wire
-		// verbatim.
+		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where the
+		// timescale is mandatory. An untimed track declares the default, the scale its
+		// frames' send times go out at (see `wire_timestamp`).
 		writer.buffer(&lite::TrackInfo {
 			priority: info.priority,
 			max_age: info.max_age,
-			timescale: info.timescale,
+			timescale: info.timescale.unwrap_or_default(),
 		})?;
 		Poll::Ready(Ok(ControlFlow::Break(())))
 	}
@@ -1305,7 +1326,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					// "don't emit the prefix" (the frames still carry timestamps in the
 					// model, just not on this wire).
 					let timescale = if shared.version.has_track_stream() {
-						Some(track.info().timescale)
+						Some(track.info().timescale.unwrap_or_default())
 					} else {
 						None
 					};
@@ -1339,6 +1360,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						track_priority_seen: msg.priority,
 						version: shared.version,
 						timescale,
+						runtime: shared.runtime.clone(),
 						opens: Default::default(),
 					};
 
@@ -1453,7 +1475,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					// FETCH is gated to lite-05+, which learned the track timescale via
 					// TRACK_INFO.
 					let timescale = if shared.version.has_track_stream() {
-						Some(group.timescale())
+						Some(group.timescale().unwrap_or_default())
 					} else {
 						None
 					};
@@ -1498,6 +1520,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 								batched.payload.len() as u64,
 								*timescale,
 								prev_ts,
+								&shared.runtime,
 							)?;
 							let payload = std::mem::take(&mut batched.payload);
 							if !payload.is_empty() {
@@ -1517,7 +1540,14 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 							}
 							match ready!(group.poll_next_frame(waiter))? {
 								Some(next) => {
-									buffer_frame_info(writer, next.timestamp, next.size, *timescale, prev_ts)?;
+									buffer_frame_info(
+										writer,
+										next.timestamp,
+										next.size,
+										*timescale,
+										prev_ts,
+										&shared.runtime,
+									)?;
 									*frame = Some(next);
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
@@ -2032,21 +2062,41 @@ mod announce_test {
 /// (catalogs, control channels, IETF transport).
 ///
 /// `prev_ts` carries the running baseline, so the first frame deltas against 0. The
-/// model layer (`group::Producer::create_frame`) already converted the timestamp
-/// into the track timescale, so its raw value goes straight onto the wire. Mirrors
-/// the decode in the subscriber's `run_group`.
+/// model layer (`group::Producer::create_frame`) already converted a timed frame into
+/// the track timescale, so its raw value goes straight onto the wire. Mirrors the
+/// decode in the subscriber's `run_group`.
 fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
-	timestamp: crate::Timestamp,
+	timestamp: Option<crate::Timestamp>,
 	size: u64,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
+	runtime: &crate::time::Clock,
 ) -> Result<(), Error> {
-	if timescale.is_some() {
-		buffer_zigzag_delta(writer, timestamp.value(), prev_ts)?;
+	if let Some(timescale) = timescale {
+		buffer_zigzag_delta(writer, wire_timestamp(timestamp, timescale, runtime)?, prev_ts)?;
 	}
 	writer.buffer_varint(size)?;
 	Ok(())
+}
+
+/// A frame or datagram timestamp as its raw value at the wire `timescale`.
+///
+/// No lite version encodes an absent timestamp yet, so a payload on an untimed track
+/// carries its send time on `runtime` instead, at the default scale its TRACK_INFO
+/// declares. A timed payload is already at the track's timescale.
+fn wire_timestamp(
+	timestamp: Option<crate::Timestamp>,
+	timescale: crate::Timescale,
+	runtime: &crate::time::Clock,
+) -> Result<u64, Error> {
+	match timestamp {
+		Some(timestamp) => Ok(timestamp.value()),
+		None => crate::Timestamp::from(runtime.now())
+			.convert(timescale)
+			.map(|now| now.value())
+			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded)),
+	}
 }
 
 /// Buffer `curr` as a zigzag-mapped varint delta against `*prev`, then advance
@@ -2248,6 +2298,8 @@ struct Subscription<S: crate::transport::poll::Session> {
 	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
 	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
 	timescale: Option<crate::Timescale>,
+	/// The clock an untimed track's send times are read from.
+	runtime: crate::time::Clock,
 	/// The group streams this subscription opened, shared by every group it serves.
 	opens: Arc<Opens>,
 }
@@ -2256,10 +2308,15 @@ struct Subscription<S: crate::transport::poll::Session> {
 ///
 /// A group is pending from the moment it is queued until its stream opens, or it gives
 /// up first (expired, or the open failed) and is never counted.
+///
+/// `unencodable` rides along because every group machine and the run loop already share
+/// this handle. A header that cannot be encoded writes nothing, so the group-stream
+/// reset is not a stream the subscriber can pin to this subscription.
 #[derive(Default)]
 struct Opens {
 	pending: AtomicU64,
 	opened: AtomicU64,
+	unencodable: Mutex<Option<Error>>,
 }
 
 impl<S: crate::transport::poll::Session> Subscription<S> {
@@ -2268,11 +2325,15 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
 	fn serve_datagram(&mut self, datagram: crate::Datagram) {
+		// Datagrams are lite-05+, which always declares a timescale in TRACK_INFO.
+		let Ok(timestamp) = wire_timestamp(datagram.timestamp, self.timescale.unwrap_or_default(), &self.runtime)
+		else {
+			return;
+		};
 		let body = lite::Datagram {
 			subscribe: self.id,
 			sequence: datagram.sequence,
-			// Already at the track timescale (normalized by the model producer).
-			timestamp: datagram.timestamp.value(),
+			timestamp,
 			payload: datagram.payload,
 		};
 		// has_datagrams is checked before this runs, so encoding never hits the version guard.
@@ -2298,6 +2359,21 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	fn track_priority_current(&mut self) -> u8 {
 		self.track_priority_seen = *self.track_priority.read();
 		self.track_priority_seen
+	}
+
+	/// Remember an encode failure the group stream could not carry.
+	///
+	/// The first one wins. The run loop resets the subscribe stream with it.
+	fn note_unencodable(&self, err: &Error) {
+		let mut slot = self.opens.unencodable.lock().unwrap();
+		if slot.is_none() {
+			*slot = Some(err.clone());
+		}
+	}
+
+	/// Take the encode failure, if a group recorded one.
+	fn take_unencodable(&self) -> Option<Error> {
+		self.opens.unencodable.lock().unwrap().take()
 	}
 
 	/// Test shim: drive one group stream like the old `serve_group`, surfacing the
@@ -2440,6 +2516,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 		// Drive the in-flight group machines; completions just retire.
 		let _ = self.children.poll(waiter);
+		// A group whose header does not fit this peer's varint wrote nothing. The
+		// reset is on a stream the subscriber never tied to this subscription, so
+		// forward it here or the reader waits forever.
+		if let Some(err) = self.ctx.take_unencodable() {
+			return Poll::Ready(Err(err));
+		}
 
 		// The first group waits for the source to resolve where its feed starts; datagrams
 		// keep flowing meanwhile.
@@ -2719,6 +2801,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						frame_start: self.frame_start,
 					};
 					if let Err(err) = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg)) {
+						// The header wrote nothing, so the group-stream reset has nothing to pin
+						// it to this subscription. The run loop reads the slot and resets the
+						// subscribe stream instead.
+						self.ctx.note_unencodable(&err);
 						self.state = GroupState::Done;
 						writer.abort(&err);
 						return Poll::Ready(Err(err));
@@ -2794,6 +2880,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									batched.payload.len() as u64,
 									self.ctx.timescale,
 									&mut self.prev_ts,
+									&self.ctx.runtime,
 								);
 								if let Err(err) = buffered {
 									break 'serve Err(err);
@@ -2823,6 +2910,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 											next.size,
 											self.ctx.timescale,
 											&mut self.prev_ts,
+											&self.ctx.runtime,
 										);
 										if let Err(err) = buffered {
 											break 'serve Err(err);
@@ -3032,6 +3120,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3071,6 +3160,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3114,6 +3204,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3122,7 +3213,7 @@ mod serve_group_test {
 		let mut old = track.append_group().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
-				timestamp: Timestamp::ZERO,
+				timestamp: Some(Timestamp::ZERO),
 				size: 2,
 			})
 			.unwrap();
@@ -3175,6 +3266,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3245,6 +3337,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3287,6 +3380,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3328,6 +3422,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3372,6 +3467,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite07,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 		let bounds = Bounds {
@@ -3441,6 +3537,7 @@ mod serve_group_test {
 				track_priority_seen: 0,
 				version: Version::Lite07,
 				timescale: Some(crate::Timescale::default()),
+				runtime: crate::time::Clock::sim(),
 				opens: opens.clone(),
 			};
 			let bounds = Bounds {
@@ -3697,16 +3794,21 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
+			subscriptions: Default::default(),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
 		use futures::FutureExt;
 		assert!(
-			serving.request_broadcast("echoed/x").now_or_never().unwrap().is_err(),
+			serving
+				.request_broadcast("echoed/x", None)
+				.now_or_never()
+				.unwrap()
+				.is_err(),
 			"served the peer its own route"
 		);
 		assert!(
-			serving.request_broadcast("local/x").now_or_never().is_none(),
+			serving.request_broadcast("local/x", None).now_or_never().is_none(),
 			"withheld an independent route"
 		);
 	}
@@ -3858,6 +3960,7 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}
@@ -4030,6 +4133,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 
 		let mut script = Vec::new();
@@ -4153,6 +4257,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 
 		let mut script = Vec::new();
@@ -4206,5 +4311,41 @@ mod tests {
 			panic!("the subscription is not running");
 		};
 		assert_eq!(*run.track_priority_tx.read(), 7, "the update was lost");
+	}
+
+	/// A subscription past the session's cap closes the session with TOO_MANY_REQUESTS.
+	#[moq_net_sim::test]
+	async fn subscriptions_past_the_cap_close_the_session() {
+		use crate::coding::Encode as _;
+
+		const VERSION: Version = Version::Lite06;
+		let mut script = Vec::new();
+		lite::ControlType::Subscribe
+			.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+			.unwrap();
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
+		let log = session.log.clone();
+
+		let origin = Hop::random().produce();
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let mut publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::sim(),
+			session,
+			origin: origin.consume(),
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::default(),
+			goaway,
+			peer_hop: None,
+			subscriptions: crate::session::Slots::new(0),
+		});
+
+		let _ = publisher.poll(&kio::Waiter::noop());
+		assert_eq!(
+			log.closes(),
+			vec![(
+				crate::SessionError::TooManyRequests.to_code(),
+				"too many subscriptions".to_string()
+			)]
+		);
 	}
 }
