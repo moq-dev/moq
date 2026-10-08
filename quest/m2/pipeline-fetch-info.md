@@ -10,9 +10,7 @@ and passes the origin's consistency check.
 ## Plan
 
 Decided 2026-10-07, while landing #4974 (fetch-only IETF demand), which keeps
-a sequential TRACK_STATUS before the first FETCH. Decided 2026-10-08: it
-Requires [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) (#4974),
-since that adds the TRACK_STATUS this pipelines.
+a sequential TRACK_STATUS before the first FETCH.
 
 Why the round trip exists (facts, 2026-10-07): nothing in a FETCH request
 needs the info. Two serial gates do:
@@ -49,7 +47,3 @@ released before its route's info passes. Measure the first-fetch latency
 before and after.
 
 Public API: none. Wire: none (ordering only).
-
-## Required
-
-- [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - adds the sequential TRACK_STATUS before the first FETCH that this pipelines

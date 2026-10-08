@@ -52,10 +52,9 @@ Decided with the maintainer on 2026-10-04 and 2026-10-05:
   keep it as far as the publisher's track lookup (`run_subscribe_stream`
   in `ietf/publisher.rs`). `Error::Timeout` already maps to
   TIMEOUT (`ietf/error.rs`).
-- Decided 2026-10-08: start after [Parameters per
-  draft](/quest/m0/ietf-params-per-draft.md)
-  ([#5028](https://github.com/moq-dev/moq/pull/5028)), which rewrites the
-  same parameter decode and leaves the REQUEST_UPDATE delivery timeouts to
+- Decided 2026-10-08: build on
+  [#5028](https://github.com/moq-dev/moq/pull/5028) (merged), which rewrote
+  the same parameter decode and left the REQUEST_UPDATE delivery timeouts to
   this quest.
 - One regression test per case, failing without its fix and asserting the
   draft's code, or the fallback recorded in `doc/concept/standard.md`.
@@ -63,10 +62,6 @@ Decided with the maintainer on 2026-10-04 and 2026-10-05:
 
 Public API: none expected. Wire: none new; replies move closer to the
 drafts.
-
-## Required
-
-- [Parameters per draft](/quest/m0/ietf-params-per-draft.md) - rewrites the parameter decode this builds on
 
 ## Related
 

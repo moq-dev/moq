@@ -150,7 +150,7 @@ export class Subscribe {
 			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority, filter, forward });
 		}
 		// v15+: fields are in parameters
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "subscribe");
 		const subscriberPriority = params.subscriberPriority ?? 128;
 		let groupOrder = params.groupOrder ?? GROUP_ORDER;
 		if (groupOrder > 2) {
@@ -306,7 +306,7 @@ export class SubscribeOk {
 			// v15+: parameters followed by Track Properties (draft-17+). LARGEST_OBJECT is
 			// required on every draft once the track has content, so rejecting it would tear
 			// down a session over a parameter compliant publishers must send.
-			const params = await Parameters.decode(r, version);
+			const params = await Parameters.decode(r, version, "subscribe-ok");
 			largest = params.largest;
 			properties = await Properties.decode(r, version);
 			if (version === Version.DRAFT_15) properties.maxCacheDuration = params.maxCacheDuration;
@@ -413,7 +413,7 @@ export class SubscribeUpdate {
 		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			const requestId = await r.u62();
 			await r.u62(); // subscription_request_id
-			await Parameters.decode(r, version);
+			await Parameters.decode(r, version, "subscribe-update");
 			return new SubscribeUpdate({ requestId });
 		} else {
 			// v17+: REQUEST_UPDATE
@@ -421,7 +421,7 @@ export class SubscribeUpdate {
 			if (version === Version.DRAFT_17) {
 				await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 			}
-			await Parameters.decode(r, version);
+			await Parameters.decode(r, version, "subscribe-update");
 			return new SubscribeUpdate({ requestId });
 		}
 	}

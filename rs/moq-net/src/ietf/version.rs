@@ -137,6 +137,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: false,
 		};
 
 		let group = GroupHeader {

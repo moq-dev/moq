@@ -661,3 +661,93 @@ async fn redundant_pair_fails_over_when_the_incumbent_ends() {
 		.await
 		.expect("timed out");
 }
+
+/// `P` serves `video` on demand and replaces its producer partway through the broadcast,
+/// the way a publisher restarts an encoder. `R` reads through `A`, whose route stays up,
+/// so the logical track resumes onto the replacement. The replacement continues the
+/// track's sequence namespace, so its first group reaches `R` at once instead of being
+/// skipped until a fresh counter caught up with what `R` already read.
+async fn producer_replaced(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let subscriber = produce_origin(3);
+
+	let broadcast = publisher.create_broadcast("live").unwrap();
+	let mut dynamic = broadcast.dynamic();
+	broadcast.announce(Default::default()).unwrap();
+	let (tx, mut producers) = mpsc::unbounded();
+	moq_net_sim::spawn(async move {
+		while let Ok(request) = dynamic.requested_track().await {
+			if tx.unbounded_send(request.accept(None)).is_err() {
+				return;
+			}
+		}
+	});
+
+	let _p_to_a = link(version, &publisher, &relay).await;
+	let _a_to_r = link(version, &relay, &subscriber).await;
+
+	let consumer = subscriber.consume();
+	consumer.routed("live").await.unwrap();
+	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+	let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
+	let mut rx = read(sub);
+
+	let first = producers.next().await.unwrap();
+	for sequence in 0..2 {
+		let mut group = first.append_group().unwrap();
+		assert_eq!(group.sequence, sequence, "{version}");
+		for frame in 0..FRAMES {
+			group.write_frame(Timestamp::ZERO, payload(sequence, frame)).unwrap();
+			assert_eq!(next(&mut rx).await, (sequence, payload(sequence, frame)), "{version}");
+		}
+		group.finish().unwrap();
+	}
+
+	// The encoder restarts: the old producer goes away mid-broadcast, and the resumed
+	// subscription asks for the track again.
+	first.abort(Error::Cancel).unwrap();
+	let second = moq_net_sim::timeout(Duration::from_secs(10), producers.next())
+		.await
+		.expect("the track was not requested again")
+		.unwrap();
+
+	let mut group = second.append_group().unwrap();
+	assert_eq!(group.sequence, 2, "{version}: the replacement restarted its sequences");
+	for frame in 0..FRAMES {
+		group.write_frame(Timestamp::ZERO, payload(2, frame)).unwrap();
+		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");
+	}
+	group.finish().unwrap();
+
+	settle().await;
+	assert!(
+		matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+		"{version}: trailing delivery, or the subscription ended"
+	);
+	drop((second, broadcast));
+}
+
+macro_rules! producer_replaced_tests {
+	($($name:ident: $version:literal,)*) => {
+		$(
+			#[moq_net_sim::test]
+			async fn $name() {
+				moq_net_sim::timeout(TEST_TIMEOUT, producer_replaced($version))
+					.await
+					.expect("timed out");
+			}
+		)*
+	};
+}
+
+producer_replaced_tests! {
+	replaced_lite_07: "moq-lite-07-wip",
+	replaced_lite_06: "moq-lite-06",
+	replaced_lite_05: "moq-lite-05",
+	replaced_lite_04: "moq-lite-04",
+	replaced_ietf_19: "moq-transport-19",
+	replaced_ietf_22: "moq-transport-22",
+}

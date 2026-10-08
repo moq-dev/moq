@@ -10,7 +10,3 @@ that rank instead of by name.
 ## Plan
 
 Mirror `Catalog.ranked` for video (#4988). Name it to match Rust per AGENTS.md.
-
-## Required
-
-- [Audio rendition pick](/quest/m1/audio-ranked.md) - #4993 adds the Rust `Audio::ranked` this mirrors

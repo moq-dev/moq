@@ -4,6 +4,8 @@ import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Cluster from "./cluster.ts";
+import * as Message from "./message.ts";
+import * as Namespace from "./namespace.ts";
 import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
@@ -227,6 +229,26 @@ test("Cluster: PUBLISH_NAMESPACE carries the parameters only once negotiated", a
 	// dispatch closes over rather than losing only the stream.
 	const bare = new PublishNamespace({ requestId: 1n, trackNamespace: Path.from("alice.hang") });
 	await expect(PublishNamespace.decode(reader(await encode(bare)), VERSION, true)).rejects.toThrow(ProtocolViolation);
+});
+
+test("Cluster: a negotiated PUBLISH_NAMESPACE may carry AUTHORIZATION_TOKEN", async () => {
+	// The advertisement shares its decode with NAMESPACE, whose list has no token. A
+	// PUBLISH_NAMESPACE's own list does, so the token must not close the session.
+	const advert = { hops: hops(7n, 9n), cost: 5n };
+	const withToken = {
+		async encode(w: Writer, version: IetfVersion) {
+			await Message.encode(w, async (wr) => {
+				await wr.u62(1n);
+				await Namespace.encode(wr, Path.from("alice.hang"));
+				const params = Cluster.intoParams(advert);
+				params.bytes.set(0x03n, new Uint8Array([1, 2, 3])); // AUTHORIZATION_TOKEN
+				await params.encode(wr, version);
+			});
+		},
+	};
+
+	const decoded = await PublishNamespace.decode(reader(await encode(withToken)), VERSION, true);
+	expect(decoded.cluster).toEqual(advert);
 });
 
 test("Cluster: every malformed PUBLISH_NAMESPACE update is a protocol violation", async () => {

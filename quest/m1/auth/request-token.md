@@ -40,8 +40,8 @@ nor a lease.
   `decode_params!` path, where each request reads the repeatable key into an
   ignored `Vec<Opaque>`, and draft-14's `Parameters::skip`, which consumes it
   unread. `js/net` keeps every instance in `Parameters` and reads none.
-- Land after [moq-transport parameters per draft](/quest/m0/ietf-params-per-draft.md)
-  (#5028), which reworks the same per-message decode.
+- Build on #5028's per-draft parameter decode (merged), which reworked the
+  same per-message decode.
 - 0x13 and 0x17 join the shared session registry: `SessionError`
   (`rs/moq-net/src/error.rs`) and `SessionCode` (`js/net/src/error.ts`).
   Lite codes below 32 carry moq-transport's meaning, so add both rows to the
@@ -61,5 +61,4 @@ Public API: none beyond the two session codes. Wire: session codes 0x13 and
 
 ## Related
 
-- [moq-transport parameters per draft](/quest/m0/ietf-params-per-draft.md) - the same per-message decode; lands first
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the lease a deferred per-request grant would reuse

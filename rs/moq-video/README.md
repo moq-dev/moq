@@ -144,43 +144,33 @@ libvpx comes from the build host through pkg-config (set `VPX_STATIC=1` to link
 the archive, as the Nix dev shell does). `render` is also opt-in so codec-only
 consumers do not compile wgpu.
 
-### Vulkan producers on NVIDIA
+### External Vulkan producers
 
-`frame::vulkan::Importer` accepts dedicated optimal-tiling
-`VK_FORMAT_R8G8B8A8_UNORM` (`Image::rgba8`) or `VK_FORMAT_B8G8R8A8_UNORM`
-(`Image::bgra8`) images exported as opaque memory FDs. The producer
-also exports a timeline semaphore and supplies the Vulkan physical-device UUID;
-imports with another CUDA device, format, layout, allocation shape, or sync
-mechanism are refused. Vulkan signals `Timeline::ready` after writes and the
-transition to `VK_IMAGE_LAYOUT_GENERAL`. CUDA waits on that value and signals
-`Timeline::complete` after all readers queued on the frame stream.
+External Linux Vulkan producers construct `frame::vulkan::Slot` from exported
+memory and timeline FDs, an `Image` describing the format, allocation, and
+memory handle type, and a guard retaining the producer's allocation. Device
+and driver UUIDs identify the exporter; opaque memory also carries its original
+memory type index, while DMA-BUF memory carries its DRM modifier and explicit
+plane offsets and row pitches, including producer padding.
 
-An imported `Slot<T>` owns the producer's `T`. `Slot::publish` consumes it and
-`Completion::wait` returns the same slot only after CUDA completion, so a pool
-cannot overwrite an in-flight image. Importer capacity bounds retained slots,
-and a dedicated worker drains completion after capture stops or a receiver is
-cancelled without blocking the producer thread. If the original application
-image is not exportable, copy it on Vulkan into a dedicated exportable slot;
-that is one GPU image copy, not zero-copy. There is no CPU mapping, download, or
-staging fallback for `Surface::Vulkan`.
+Set `encode::Config::input` to the image's device before opening or probing the
+encoder. `Kind::Auto` selects an importing backend on that device and refuses
+unsupported devices without a CPU fallback. Feed each published image through
+`Surface::Vulkan`; NVENC privately imports it into CUDA, shares one full-size
+NV12 conversion per capture and color space, and scales each rendition on the
+GPU. Pin `Config::color` when renditions cross the SD/HD color-inference boundary.
 
-`frame::cuda::Converter` turns a published Vulkan frame into the NV12
-`Surface::Cuda` that NVENC encodes in place. It runs on the GPU in one declared
-color space (matrix and range), averages 4:2:0 chroma per 2x2 block, applies no
-transfer function, and draws every buffer from a pool sized at construction.
-`Converter::reserve` holds one as a `cuda::Slot`; `Slot::convert` fills it with
-the captured frame and `Slot::resize` with a smaller rendition. One captured
-frame feeding HD and SD therefore holds a fixed number of buffers, and a
-producer that outruns its encoder gets `None` from `reserve`, its cue to drop
-the frame, rather than unbounded device memory. A slot dropped unfilled, or
-consumed by a failed conversion, returns its buffer, so only a real failure is
-an error. Open the encoder with `encode::Kind::Named("nvenc")` and the same
-`encode::Config::color`: `Kind::Auto` could fall back to a software encoder that
-reads the frame back, and the portable `Surface::resize` downloads when the GPU
-scaler fails. Everything under `frame::cuda` and `frame::vulkan` runs on the
-device or returns an error.
+`Slot::publish` consumes the producer slot and `Completion::wait` returns it
+only after the last reader finishes its GPU work. Publish only what you will
+encode: an unconsumed or failed frame fails completion and loses its slot for
+good, since nothing signalled its timeline, so drop excess captures before
+publishing. Non-exportable application images need a GPU copy into an exportable
+slot. External Vulkan images have no CPU mapping or download fallback.
 
-Run `just rs vulkan-cuda` for the opt-in native hardware exercise. It creates a
+External DMA-BUF producers use `DmaBuf::new` with an owned FD, `DmaBufLayout`,
+and a release guard; their buffers also refuse CPU download.
+
+Run `just rs gpu` for the opt-in native hardware exercise. It creates a
 Vulkan image independently of Unreal, imports it once into CUDA, checks repeated
 slot reuse and held-reader ordering, and tears down through cancellation; a
 second test converts RGBA and BGRA uploads to NV12, scales them, fills the pool,

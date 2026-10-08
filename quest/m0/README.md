@@ -41,6 +41,11 @@ gates the next release (decided 2026-10-03:
 viewers). #4741 can merge to main, but no release ships until first-party
 publishers mint epochs.
 
+Liveness: a serve loop with work always ready never yields, which starved
+an FFI publisher's QUIC driver and fails hosted Interop's go lanes (found
+2026-10-08 landing #4225). The [serve budget](/quest/m0/serve-budget.md)
+bounds every kio task's loop.
+
 Audio playout: the jitter target is default in both languages (#4162); the
 [line](/quest/m1/audio-jitter-target/README.md) moved to m1 in the
 2026-10-08 audit, since only a manual browser proof and a native trace replay
@@ -48,8 +53,8 @@ remain and no release waits on them.
 
 ## Required
 
+- [Serve budget](/quest/m0/serve-budget.md) - a kio task that always has work ready yields after a budget, so a fast publisher can't starve its own QUIC driver
 - [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - moqt-22 LOCATION_FILTER carries its type instead of a Length in Rust and JS, so a draft-22 peer reads our Next Object correctly
-- [moq-transport parameters per draft](/quest/m0/ietf-params-per-draft.md) - every control message accepts exactly the parameters its draft allows, so moqx's draft-16 SUBSCRIBE_NAMESPACE with FORWARD stops failing
 - [Capped stream END_OF_GROUP](/quest/m0/ietf-end-of-track-location.md) - a stream capped by the subscription's end Location never claims END_OF_GROUP; moving End of Track's Location is deferred
 - [End of Group status](/quest/m0/ietf-end-of-group-status.md) - an End of Group status on a stream whose header already marks the group's end is accepted, so imquic's last object per group arrives
 - [TRACK stream demand](/quest/m0/track-stream-demand.md) - a lite-05+ subscribe shows the publisher one `used` edge, not a flap between TRACK and SUBSCRIBE
