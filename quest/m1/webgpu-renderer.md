@@ -72,8 +72,8 @@ added this quest). Re-planned from issue #703, whose stub quest the
   swapped canvas actually paints through Canvas2D.
 
 Public API: new `@moq/video` package; a `renderer` attribute and option on
-`<moq-watch>` and `<moq-publish>`; the renderer's `out.error` output; the publish preview's renderer moves to
-the shared one. Wire: none.
+`<moq-watch>` and `<moq-publish>`; the renderer's `out.error` output; the
+publish preview's renderer moves to the shared one. Wire: none.
 
 ## Closes
 
