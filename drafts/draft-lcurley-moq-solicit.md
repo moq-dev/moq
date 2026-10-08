@@ -157,6 +157,12 @@ This document defines only the values 0 and 1; a later extension that needs to s
 
 --- back
 
+# Changelog
+
+## Since draft-lcurley-moq-solicit-00 (in progress)
+
+- A namespace heard both unsolicited and in answer to SUBSCRIBE_NAMESPACE is one advertisement, replacing the advice not to advertise it both ways.
+
 # Acknowledgments
 {:numbered="false"}
 
