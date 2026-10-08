@@ -1759,10 +1759,10 @@ where
 
 		// Demand with nobody subscribing (fetches, or a TRACK_STATUS downstream) learns the
 		// track from TRACK_STATUS rather than a SUBSCRIBE: a finished track refuses one, and
-		// one made only to learn the track races the fetches it was for.
+		// one made only to learn the track races the fetches it was for. Draft-17 still
+		// SUBSCRIBEs: its TRACK_STATUS answer cannot say whether the track is timed.
 		let mut target = match request.subscription() {
-			Some(_) => Target::Request(request),
-			None => {
+			None if ietf::TrackStatusOk::describes_track(self.version) => {
 				let Some(idle) = self.track_status(&broadcast_path, &track_name, request).await else {
 					return;
 				};
@@ -1774,6 +1774,7 @@ where
 				};
 				Target::Resume(next)
 			}
+			_ => Target::Request(request),
 		};
 		loop {
 			let Some(idle) = self
@@ -2028,8 +2029,7 @@ where
 			largest,
 		} = accepted;
 		// A resumed copy opts out of the properties from draft-20, so it keeps the units it
-		// learned. Before that the answer still declares them, and may be the first to: draft-17's
-		// TRACK_STATUS_OK has no properties block.
+		// learned. Before that the answer declares them again.
 		let timescale = timescale.or(resumed.as_ref().and_then(|idle| idle.timescale));
 		let info = accepted_info(timescale, max_age, priority);
 		// The copy already holds the track: it is current again up to the answer's Largest
@@ -5489,9 +5489,7 @@ mod tests {
 
 	/// A copy that already knows its track, here from TRACK_STATUS_OK, opts out of the
 	/// properties when a subscriber returns, and keeps the units it learned rather than
-	/// taking the empty block the opted-out SUBSCRIBE_OK carries. On draft-17, where
-	/// TRACK_STATUS_OK has no properties block and SUBSCRIBE cannot opt out, the copy takes
-	/// the units SUBSCRIBE_OK declares.
+	/// taking the empty block the opted-out SUBSCRIBE_OK carries.
 	#[moq_net_sim::test]
 	async fn a_resumed_subscribe_opts_out_of_known_properties() {
 		use crate::coding::Encode as _;
@@ -5506,7 +5504,7 @@ mod tests {
 		}
 
 		let declared = Timescale::new(90_000).unwrap();
-		for version in [Version::Draft17, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let opts_out = ietf::Filter::is_draft20(version);
 			let declares = |yes: bool| ietf::Properties {
 				timescale: yes.then_some(declared),
@@ -5517,13 +5515,14 @@ mod tests {
 				&ietf::TrackStatusOk {
 					request_id: None,
 					largest: None,
-					properties: declares(opts_out),
+					properties: declares(true),
 				},
 				version,
 			);
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![
 				status_ok,
-				// Empty when opted out. Draft-17 cannot opt out, so it declares the units.
+				// Empty when opted out. Before draft-20 SUBSCRIBE cannot opt out, so it declares
+				// the units again.
 				message(
 					ietf::SubscribeOk::ID,
 					&ietf::SubscribeOk {

@@ -75,7 +75,9 @@ so every track there is untimed.
 A Rust subscriber learns a track that is only fetched, never subscribed, from
 `TRACK_STATUS` instead of a `SUBSCRIBE`, so a finished track stays fetchable
 and a relay puts no live subscription upstream to race its fetches. A
-publisher that refuses `TRACK_STATUS` refuses the fetch. The Rust publisher
+publisher that refuses `TRACK_STATUS` refuses the fetch. Draft-17 is the
+exception and still subscribes: its `TRACK_STATUS` answer has no properties
+block, so it can't say whether the track is timed. The Rust publisher
 answers `TRACK_STATUS` with what its `SUBSCRIBE_OK` would carry, as far as the
 draft's answer has room: the Largest Location on every draft, and the Track
 Properties from draft-18, when the answer gained them. A relay with no

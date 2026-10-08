@@ -82,12 +82,12 @@ fn frames(sequence: u64) -> Vec<Vec<u8>> {
 }
 
 /// Drafts whose FETCH we serve, and the newest, whose FETCH we refuse until draft-20
-/// FETCH lands: it must still not subscribe.
+/// FETCH lands: it must still not subscribe. Draft-17 is absent: its TRACK_STATUS answer
+/// cannot say whether the track is timed, so it still SUBSCRIBEs to learn the track.
 const VERSIONS: &[(&str, bool)] = &[
 	("moq-transport-14", true),
 	("moq-transport-15", true),
 	("moq-transport-16", true),
-	("moq-transport-17", true),
 	("moq-transport-18", true),
 	("moq-transport-19", true),
 	("moq-transport-22", false),
@@ -158,6 +158,50 @@ async fn relayed(version: &str) {
 	);
 
 	drop((remote, downstream, upstream, broadcast, client, relay, publisher));
+}
+
+/// A subscriber arriving at a copy learned from TRACK_STATUS still gets timestamped
+/// frames: the copy is timed from TRACK_STATUS_OK, and the resumed SUBSCRIBE keeps it so.
+#[moq_net_sim::test]
+async fn a_subscribe_after_track_status_keeps_timestamps() {
+	for version in ["moq-transport-18", "moq-transport-19", "moq-transport-22"] {
+		moq_net_sim::timeout(TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let broadcast = publisher.create_broadcast("bcast").unwrap();
+			let track = broadcast.create_track("video", None).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+
+			let client = produce_origin(2);
+			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(client.clone());
+			let _pair = connect_mock(options).await;
+
+			let remote = resolve(&client).await;
+			let copy = remote.track("video").unwrap();
+			let info = copy.query().await.expect("TRACK_STATUS resolves the track");
+			assert!(info.timescale.is_some(), "{version}: the copy is untimed");
+			assert!(track.subscription().is_none(), "{version}: the query subscribed");
+
+			let mut sub = copy.subscribe(None).await.unwrap();
+			track.demand().used().await.unwrap();
+			// Far from any arrival time, so a frame stamped on arrival cannot pass.
+			let stamp = Timestamp::from_millis(123_456).unwrap();
+			let mut group = track.append_group().unwrap();
+			group.write_frame(stamp, b"frame".as_ref()).unwrap();
+			group.finish().unwrap();
+
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			let frame = group.read_frame().await.unwrap().unwrap();
+			assert_eq!(
+				frame.timestamp.map(Timestamp::as_millis),
+				Some(stamp.as_millis()),
+				"{version}"
+			);
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
 }
 
 /// A relay serves a downstream fetch with a fetch upstream, never a subscription.
