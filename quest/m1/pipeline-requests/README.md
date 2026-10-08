@@ -5,8 +5,9 @@
 A track request never waits a round trip for the track's info before the
 request that carries data goes out: SUBSCRIBE and the first FETCH travel with
 TRACK (lite) or TRACK_STATUS (moq-transport) at every hop, so first data
-arrives one round trip sooner per hop. Peers that send them serially keep
-working unchanged.
+arrives one round trip sooner per hop. Draft-17's first FETCH stays serial
+(see [the FETCH quest](/quest/m1/pipeline-requests/fetch.md)). Peers that send
+them serially keep working unchanged.
 
 ## Plan
 

@@ -56,11 +56,13 @@ Decisions:
   way.
 - Only the max age SUBSCRIBE and SUBSCRIBE_UPDATE carry on the wire stops
   being clamped by TRACK_INFO (`max_age_bound()`, `model/track.rs`): it is the
-  subscribers' own, and the publisher enforces its own. The local cache
-  ceiling, the per-reader lateness budget, and the drift check keep
-  `max_age_bound()`. Accepting TRACK_INFO never emits a SUBSCRIBE_UPDATE.
-  Rejected: a SUBSCRIBE_UPDATE once TRACK_INFO lands. Narrowed 2026-10-08
-  from review. This agrees with
+  subscribers' own, still capped by the local cache ceiling (which needs no
+  info), and the publisher enforces its own. The per-reader lateness budget
+  (`is_expired`) and the drift check (`poll_drift`) keep `max_age_bound()`.
+  Accepting TRACK_INFO never emits a SUBSCRIBE_UPDATE. Reword the docs that
+  promise a clamped aggregate (`track::Producer::subscription`,
+  `max_age_bounds_the_budget`). Rejected: a SUBSCRIBE_UPDATE once TRACK_INFO
+  lands. Narrowed 2026-10-08 from review. This agrees with
   [One max_age meaning](/quest/m1/cache-max-age.md): both budgets apply one
   staleness rule, so a group is stale under the smaller budget exactly when it
   is stale under either.
