@@ -360,14 +360,19 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 /// is dropped. Once every clone is dropped *and* every reservation resolves, the first catalog
 /// snapshot is published atomically with the complete track list, so a one-shot muxer (fMP4,
 /// MPEG-TS) never sees a half-converged catalog.
+///
+/// It belongs to one [`Input`](super::Input), whose offset the importer handed it shifts its
+/// timestamps by. Clones share that input.
 pub struct Reserved<E: CatalogExt = ()> {
 	catalog: Producer<E>,
+	input: super::Input<E>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
-	pub(super) fn new(catalog: Producer<E>) -> Self {
+	pub(super) fn new(input: super::Input<E>) -> Self {
+		let catalog = input.catalog.clone();
 		catalog.add_reserver();
-		Self { catalog }
+		Self { catalog, input }
 	}
 
 	/// Track properties for a media track under this catalog, carrying any retention it declares.
@@ -457,6 +462,13 @@ impl<E: CatalogExt> Reserved<E> {
 	pub(crate) fn producer(&self) -> Producer<E> {
 		self.catalog.clone()
 	}
+
+	/// The input this reservation belongs to, which outlives it without gating the catalog.
+	///
+	/// An importer anchors through it on its first frame and shifts every frame by its offset.
+	pub(crate) fn input(&self) -> super::Input<E> {
+		self.input.clone()
+	}
 }
 
 impl<E: CatalogExt> Clone for Reserved<E> {
@@ -464,6 +476,7 @@ impl<E: CatalogExt> Clone for Reserved<E> {
 		self.catalog.add_reserver();
 		Self {
 			catalog: self.catalog.clone(),
+			input: self.input.clone(),
 		}
 	}
 }
@@ -551,7 +564,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 
 	/// The broadcast clock the catalog stamps its tracks on.
 	pub(crate) fn clock(&self) -> crate::Clock {
-		self.catalog.clock()
+		self.catalog.current_clock()
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).

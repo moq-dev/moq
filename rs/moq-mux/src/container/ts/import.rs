@@ -25,6 +25,7 @@ use super::catalog;
 use super::health::{Continuation, Continuity, Health};
 use super::psi::{self, PesStart, Pmt};
 use super::stats;
+use crate::catalog::Offset;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2, opus};
 use moq_net::Timestamp;
@@ -60,6 +61,10 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// final. A one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
 	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
+
+	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
+	/// its offset onto the catalog clock.
+	input: crate::catalog::Input<E>,
 
 	/// The PAT, reassembled off PID 0.
 	pat: PatReader,
@@ -151,6 +156,7 @@ impl<E: catalog::Catalog> Import<E> {
 			broadcast,
 			catalog,
 			container,
+			input: reserved.input(),
 			initial_reservation: Some(reserved),
 			pat: PatReader::default(),
 			pmt_sections: HashMap::new(),
@@ -202,8 +208,9 @@ impl<E: catalog::Catalog> Import<E> {
 		self
 	}
 
+	/// A reservation on this program's input, so every stream shifts by its offset.
 	fn reserve(&self) -> crate::catalog::Reserved<E> {
-		self.catalog.reserve()
+		self.input.reserve()
 	}
 
 	/// The video hint for a decoded rendition: this importer's container, nothing else.
@@ -276,7 +283,8 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			if let Some(section) = self.sections.get_mut(&pid) {
-				let units = section.packet(&pkt, self.last_pts)?;
+				let offset = self.input.offset().unwrap_or_default();
+				let units = section.packet(&pkt, self.last_pts, offset)?;
 				self.published |= units > 0;
 				self.liveness.delivered(pid, units);
 				continue;
@@ -668,6 +676,12 @@ impl<E: catalog::Catalog> Import<E> {
 		if pes.pts.is_some() && !matches!(stream, Stream::Verbatim(_) | Stream::Ignored) {
 			self.health.pts(pid.as_u16(), self.liveness.now());
 		}
+		// The first PTS anchors the program: it needs no unwrap yet. Anchoring at the PES start
+		// rather than its flush keeps the section clock below on the same offset as the media.
+		let offset = match pes.pts {
+			Some(pts) => self.input.anchor(Timestamp::from_scale(pts, 90_000)?)?,
+			None => Offset::default(),
+		};
 		if is_video {
 			for stream in self.streams.values_mut() {
 				if let Stream::Aac(audio) = stream {
@@ -679,15 +693,14 @@ impl<E: catalog::Catalog> Import<E> {
 			// frame must be timestamped with this frame's PTS ("now"), not the
 			// previous one's.
 			if pes.pts.is_some() {
-				self.last_pts = unwrap_pts(&mut self.media_unwrap, pes.pts)?;
+				self.last_pts = unwrap_pts(&mut self.media_unwrap, pes.pts, offset)?;
 			}
 		}
 
 		if is_clock {
 			// A clock-only stream never flushes, but sections are stamped with its PTS, so it
-			// anchors the catalog here like a flushed PES would.
-			if let Some(pts) = pes.pts {
-				self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
+			// releases the reservation here like a flushed PES would.
+			if pes.pts.is_some() {
 				self.initial_reservation = None;
 			}
 			// Nothing is published, but each PES is a picture the source delivered.
@@ -697,6 +710,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 		let mut pending = Pending {
 			pts: pes.pts,
+			offset,
 			dts: pes.dts,
 			stream_id: pes.stream_id,
 			data: Vec::with_capacity(pes.data.len()),
@@ -749,12 +763,11 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		// The first PES is live on arrival: its PTS needs no unwrap yet. Anchor before releasing
-		// the reservation, so the first snapshot carries the final clock: an Opus config comes
-		// from the PMT and would otherwise publish first. Every stream in the initial program
-		// reserved at its PMT, so any stream's PES releases it.
-		if let Some(pts) = pending.pts {
-			self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
+		// Its PES start anchored the input. Release the reservation only now, so the first
+		// snapshot carries the final clock: an Opus config comes from the PMT and would otherwise
+		// publish first. Every stream in the initial program reserved at its PMT, so any stream's
+		// PES releases it.
+		if pending.pts.is_some() {
 			self.initial_reservation = None;
 		}
 		let units = match stream.write(pending, batched) {
@@ -1053,6 +1066,8 @@ fn list_programs(programs: &[u16]) -> String {
 struct Pending {
 	/// Raw 90 kHz PTS, before wrap-unwrapping.
 	pts: Option<u64>,
+	/// The input's offset, which the unwrapped PTS shifts by onto the catalog clock.
+	offset: Offset,
 	/// Raw 90 kHz DTS, before wrap-unwrapping. Present on reordered (B-frame) video; its
 	/// distance below the PTS is the reorder delay published as the catalog jitter.
 	dts: Option<u64>,
@@ -1068,6 +1083,7 @@ impl Pending {
 	fn empty() -> Self {
 		Self {
 			pts: None,
+			offset: Offset::default(),
 			dts: None,
 			stream_id: 0,
 			data: Vec::new(),
@@ -1193,11 +1209,13 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	/// Consume one 188-byte TS packet, publishing each completed section and returning how
 	/// many. `pts` is the current media clock used to timestamp a section (its arrival on the
 	/// timeline; the splice time itself is inside the section bytes), if one is running.
-	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>) -> anyhow::Result<u64> {
+	/// `offset` is what the media shifted by, which a SCTE-35 section absorbs too.
+	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>, offset: Offset) -> anyhow::Result<u64> {
 		let mut sections = Vec::new();
 		self.reassembler.push(pkt, &mut sections);
 		let published = sections.len() as u64;
-		for section in sections {
+		for mut section in sections {
+			adjust_splice(&mut section, offset);
 			self.emit(section, pts)?;
 		}
 		Ok(published)
@@ -1243,6 +1261,37 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
+}
+
+/// Shift a SCTE-35 `splice_info_section`'s splice times by `offset`, the shift its media took
+/// onto the catalog clock.
+///
+/// Its `pts_time` fields name the source's PTS base, which nothing downstream can recover once
+/// the media moved, so the section's `pts_adjustment` (added to every `pts_time`, modulo 2^33)
+/// absorbs the offset and the `CRC_32` is recomputed. The field is outside the encrypted part, so
+/// an encrypted section is adjusted alike. Any other section, one too short to be a SCTE-35
+/// section, or one failing its CRC is left alone.
+fn adjust_splice(section: &mut [u8], offset: Offset) {
+	const TABLE_ID: u8 = 0xFC;
+	const FIELD: i128 = 1 << 33;
+	// table_id through cw_index, plus the CRC_32: the shortest section carrying the field.
+	if offset == Offset::default() || section.len() < 14 || section[0] != TABLE_ID {
+		return;
+	}
+	// A corrupt section stays corrupt rather than gaining a CRC that vouches for it.
+	if psi::CRC.checksum(section) != 0 {
+		return;
+	}
+
+	// pts_adjustment: the low bit of byte 4, then bytes 5..9.
+	let field = ((section[4] as u64 & 1) << 32) | u32::from_be_bytes(section[5..9].try_into().unwrap()) as u64;
+	let adjusted = (field as i128 + offset.ticks(90_000)).rem_euclid(FIELD) as u64;
+	section[4] = (section[4] & !1) | (adjusted >> 32) as u8;
+	section[5..9].copy_from_slice(&(adjusted as u32).to_be_bytes());
+
+	let body = section.len() - 4;
+	let crc = psi::CRC.checksum(&section[..body]);
+	section[body..].copy_from_slice(&crc.to_be_bytes());
 }
 
 /// Publishes whole reassembled PES payloads verbatim as frames on a track
@@ -1302,7 +1351,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 			self.stream_id_recorded = true;
 		}
 
-		let pts = match unwrap_pts(&mut self.unwrap, pending.pts)? {
+		let pts = match unwrap_pts(&mut self.unwrap, pending.pts, pending.offset)? {
 			Some(pts) => pts,
 			// No clock of its own, so land on the edge.
 			None => self.track.live_edge().unwrap_or(Timestamp::ZERO),
@@ -1758,7 +1807,7 @@ impl<E: catalog::Catalog> Stream<E> {
 		match self {
 			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = unwrap_pts(unwrap, pending.pts)?;
+				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
 				frames.extend(split.flush(pts).map_err(unit_error)?);
@@ -1774,7 +1823,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			}
 			Stream::H265 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = unwrap_pts(unwrap, pending.pts)?;
+				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
 				frames.extend(split.flush(pts).map_err(unit_error)?);
@@ -2190,7 +2239,7 @@ struct AacStream<E: CatalogExt = ()> {
 
 impl<E: CatalogExt> AacStream<E> {
 	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<u64> {
-		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, pending.offset)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
 		let carried = self.tail.len();
@@ -2473,7 +2522,7 @@ struct OpusStream {
 
 impl OpusStream {
 	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
-		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+		let base = unwrap_pts(&mut self.unwrap, pending.pts, pending.offset)?;
 
 		let packets = opus_packets(&pending.data).map_err(Damaged)?;
 		let mut published = 0;
@@ -2805,7 +2854,7 @@ struct LegacyStream<E: CatalogExt = ()> {
 impl<E: CatalogExt> LegacyStream<E> {
 	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
 		let mut published = 0;
-		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, pending.offset)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
 		let carried = self.tail.len();
@@ -3078,13 +3127,13 @@ fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow
 	Ok(Some(pts.checked_add(advance.convert(pts.scale())?)?))
 }
 
-/// Convert a raw 90 kHz PTS to a microsecond [`Timestamp`], unwrapping the
-/// 33-bit field. Returns `None` when the PES carried no PTS.
-fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>) -> anyhow::Result<Option<Timestamp>> {
+/// Convert a raw 90 kHz PTS to a [`Timestamp`] on the catalog clock, unwrapping the
+/// 33-bit field and shifting by the input's `offset`. Returns `None` when the PES carried no PTS.
+fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>, offset: Offset) -> anyhow::Result<Option<Timestamp>> {
 	let Some(raw) = pts else {
 		return Ok(None);
 	};
-	Ok(Some(Timestamp::from_scale(unwrap.unwrap(raw), 90_000)?))
+	Ok(Some(offset.apply(Timestamp::from_scale(unwrap.unwrap(raw), 90_000)?)?))
 }
 
 /// The reorder delay `PTS - DTS` for one PES, as a microsecond [`Timestamp`]. `None` unless
@@ -5579,7 +5628,7 @@ pub(super) mod test {
 			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
 		)
 		.unwrap();
-		let provisional = catalog.clock().wall();
+		let provisional = catalog.snapshot().clock.expect("a clock");
 		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
@@ -5592,7 +5641,7 @@ pub(super) mod test {
 		import
 			.decode(&audio_pes_packet(DATA_PID, 0, 3_600 * 90_000, &[0xDE, 0xAD]))
 			.unwrap();
-		let anchored = catalog.clock().wall();
+		let anchored = catalog.snapshot().clock.expect("a clock");
 		assert_ne!(anchored, provisional, "the first PES anchors the clock");
 		let published = clocks.drain();
 		assert!(!published.is_empty(), "the first PES publishes the catalog");
