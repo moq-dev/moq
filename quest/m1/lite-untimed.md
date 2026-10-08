@@ -47,7 +47,3 @@ JS-to-Rust on lite-07. lite-06 still receives a timestamp. Run
 `just drafts check` and `just test interop --all`.
 
 Public API: none. Wire: lite-07-wip only, which is unpublished.
-
-## Required
-
-- [@moq/net carries untimed frames faithfully](/quest/m1/js-untimed-model.md) - the same for JS

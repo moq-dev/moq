@@ -87,7 +87,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 
-	const track = new Moq.Track.Producer("video/hd").accept();
+	const track = new Moq.Track.Producer("video/hd").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
@@ -124,7 +124,7 @@ test("a demand gap marks a discontinuity and leaves the broadcast-owned track op
 	using _videoEncoder = installFakeVideoEncoder();
 	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
 
-	const track = new Moq.Track.Producer("video").accept({ priority: 60 });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
 	const live = new Signal<Moq.Track.Producer | undefined>(track);
 	const rendition = {
 		config: new Signal(undefined),
@@ -173,7 +173,7 @@ test("a demand gap marks a discontinuity and leaves the broadcast-owned track op
 test("a bandwidth estimate updates the bitrate without blanking the config or re-probing", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 
-	const track = new Moq.Track.Producer("video").accept({ priority: 60 });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
 		config: new Signal(undefined),
@@ -254,7 +254,7 @@ test("every published config was probed for its own codec and dimensions", async
 	using _videoEncoder = installFakeVideoEncoder();
 	FakeVideoEncoder.accepted = [];
 
-	const track = new Moq.Track.Producer("video").accept({ priority: 60 });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
 		config: new Signal(undefined),
@@ -575,7 +575,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		{ clone: (frame) => frame.clone(), release: (frame) => frame.close() },
 	);
 
-	const track = new Moq.Track.Producer("video").accept();
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
@@ -734,7 +734,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const probe = spyOn(FakeVideoEncoder, "isConfigSupported");
 
-	const track = new Moq.Track.Producer("video").accept({ priority: 60 });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
 		config: new Signal(undefined),
@@ -893,7 +893,7 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 		{ clone: (frame) => frame.clone(), release: (frame) => frame.close() },
 	);
 
-	const track = new Moq.Track.Producer("video").accept();
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),

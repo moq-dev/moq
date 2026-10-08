@@ -62,6 +62,7 @@ export async function readLiveGop(track: Moq.Track.Consumer): Promise<LiveGop> {
 		try {
 			const frame = await group.readFrame();
 			if (!frame) throw new Error("the fixture GOP has no keyframe");
+			if (!frame.timestamp) throw new Error("the fixture video arrived untimed");
 			return { timestamp: frame.timestamp.asMillis() };
 		} finally {
 			group.close();
