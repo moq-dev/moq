@@ -26,10 +26,11 @@ A JSON value is published over a [`@moq/net`](../net) track as a series of group
 
 ```ts
 import { Snapshot } from "@moq/json";
+import { Time } from "@moq/net";
 
 // Publish: each update supersedes the last.
 const producer = new Snapshot.Producer({ track });
-producer.update({ hello: "world" });
+producer.update({ value: { hello: "world" }, at: Time.Timestamp.now() });
 
 // Consume: yields the latest reconstructed value, collapsing any backlog.
 const consumer = new Snapshot.Consumer({ track: track.subscribe() });
@@ -48,13 +49,15 @@ An ordered log of self-contained records, one JSON value per frame, all riding a
 import { Stream } from "@moq/json";
 
 const producer = new Stream.Producer({ track });
-producer.append({ event: "started" });
-producer.append({ event: "stopped" });
+producer.append({ value: { event: "started" }, at: Time.Timestamp.now() });
+producer.append({ value: { event: "stopped" }, at: Time.Timestamp.now() });
 
 const consumer = new Stream.Consumer({ track: track.subscribe() });
 for await (const record of consumer) {
 	console.log(record);
 }
 ```
+
+Producers take `{ value, at }`, where `at` is the capture time written as the frame timestamp. Nothing fills in now: a timed track needs `at` on every write, and an untimed track takes none.
 
 Both modes support optional group-scoped DEFLATE compression (`{ compression: "deflate" }` on both sides), interoperable with the Rust `moq-json` crate. `Config` is the codec options; `Producer.Config` / `Consumer.Config` add the track.
