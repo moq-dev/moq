@@ -2,7 +2,10 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{Epoch, Hop, Hops, Path, coding::*, origin::Cost};
 
-use super::{Message, Version, message::decode_size};
+use super::{
+	Message, Version,
+	message::{MAX_MESSAGE_SIZE, decode_size},
+};
 
 // lite-06 announce message types: an outer discriminator carried before the length
 // prefix, so each announcement is an independently-typed, length-delimited message
@@ -260,6 +263,10 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 				}
 				Self::Ended { .. } | Self::Skipped => unreachable!("refused above"),
 			}
+			if w.since(&prefix) > MAX_MESSAGE_SIZE {
+				w.discard(prefix);
+				return Err(EncodeError::TooLarge);
+			}
 			return w.fill(prefix);
 		}
 
@@ -287,6 +294,10 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 				return Err(EncodeError::Version);
 			}
 		}
+		if w.since(&prefix) > MAX_MESSAGE_SIZE {
+			w.discard(prefix);
+			return Err(EncodeError::TooLarge);
+		}
 		w.fill(prefix)
 	}
 }
@@ -296,7 +307,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 		if version.has_announce_id() {
 			// Lite06+: outer type, then a size-prefixed body decoded within its bounds.
 			let typ = buf.varint()?;
-			let size = decode_size(buf)?;
+			let size = decode_size(buf, MAX_MESSAGE_SIZE)?;
 			let mut body = buf.sub(size)?;
 			let msg = match typ {
 				ANNOUNCE_START => Self::Active {
@@ -325,7 +336,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 		}
 
 		// Older versions: a single size-prefixed ANNOUNCE_BROADCAST with an inner status.
-		let size = decode_size(buf)?;
+		let size = decode_size(buf, MAX_MESSAGE_SIZE)?;
 		let mut body = buf.sub(size)?;
 		let msg = Self::decode_legacy(&mut body, version)?;
 		if !body.is_empty() {
@@ -474,6 +485,9 @@ pub struct AnnounceInit<'a> {
 }
 
 impl Message for AnnounceInit<'_> {
+	// Published lite01/02 carry the whole initial set in one message.
+	const MAX_SIZE: usize = 64 * 1024 * 1024;
+
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}

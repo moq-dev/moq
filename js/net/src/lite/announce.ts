@@ -483,14 +483,17 @@ export class AnnounceInit {
 		return new AnnounceInit(suffixes);
 	}
 
+	// The whole initial set in one message, so it scales with the publisher's broadcasts.
+	static readonly MAX_SIZE = 64 * 1024 * 1024;
+
 	async encode(w: Writer, version: Version): Promise<void> {
 		AnnounceInit.#guard(version);
-		return Message.encode(w, this.#encode.bind(this));
+		return Message.encode(w, this.#encode.bind(this), AnnounceInit.MAX_SIZE);
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AnnounceInit> {
 		AnnounceInit.#guard(version);
-		return Message.decode(r, AnnounceInit.#decode);
+		return Message.decode(r, AnnounceInit.#decode, AnnounceInit.MAX_SIZE);
 	}
 }
 

@@ -9,19 +9,19 @@ kind instead of mapping `TooManyRequests` to Unknown.
 
 ## Plan
 
-Blocked until request caps (#4820) lands. That PR proposes generous
-defaults in moq-net (100,000 announces and 10,000 subscriptions per session),
-sized for relay meshes, so viewer sessions would get loose limits. Confirm
-the landed API and defaults before implementing this quest. The relay knows
+Request caps (#4820) set generous defaults in moq-net (100,000 announces and
+10,000 subscriptions per session), sized for relay meshes, so viewer sessions
+get loose limits. The relay knows
 which sessions are peers, so it picks the limit per session. Propose the flag
 and TOML names in the PR.
+
+Past a cap the session closes with TOO_MANY_REQUESTS, so until cluster peers
+get higher caps (or none), a link carrying more than 10,000 subscriptions
+closes and flaps on reconnect. This does not gate a release (decided
+2026-10-08).
 
 Add the error kind to `rs/moq-ffi` and every wrapper per the Cross-Package
 Sync table.
 
 Public API: a relay config field and flag, and a new error kind in moq-ffi
 and the bindings. Wire: none.
-
-## Required
-
-- [Request caps](/quest/m0/request-caps.md) - the session limits and TooManyRequests error exist on main

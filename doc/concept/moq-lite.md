@@ -345,8 +345,11 @@ reader or the next fetch finds its cache. That copy is not live meanwhile:
 readers get nothing from its cache until the source answers again, since how
 stale it is cannot be told. lite-07 and moq-transport answer with their largest
 position, and older lite versions are asked from the head of the newest cached
-group, so their first frame says where their feed is. A feed that has moved on
-past everything cached leaves the cache below it to fetches.
+group, so their first frame says where their feed is. Readers resume once the
+cache shows the answered position: a received group stays hidden until its
+first frame lands or its stream ends, since a bare group header would leave the
+older cached group looking like the live edge. A feed that has moved on past
+everything cached leaves the cache below it to fetches.
 
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. The origin cache ceiling and cache pool may still

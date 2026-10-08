@@ -566,6 +566,37 @@ mod tests {
 		assert_eq!(wire_hops, chain(2, &[5], 1));
 	}
 
+	/// Hop 100 is 2 bytes as a QUIC varint and 1 byte as leading-ones. Sharing that
+	/// single hop from 128 announcements back costs 4 bytes in both forms (the base
+	/// is 2 bytes either way). The literal chain is 5 bytes in QUIC and 4 in
+	/// leading-ones, so QUIC would compress and leading-ones ties. A tie stays literal.
+	#[test]
+	fn a_tie_stays_literal_where_hop_100_sizes_differ() {
+		let quic = Form::Quic;
+		let leading = Form::LeadingOnes { seven: true };
+		assert_eq!(varint_size(100, quic), 2);
+		assert_eq!(varint_size(100, leading), 1);
+
+		let base = 128;
+		let compressed = |form| varint_size(base, form) + varint_size(0, form) + varint_size(1, form);
+		let literal = |form| varint_size(0, form) * 2 + varint_size(1, form) + varint_size(100, form);
+		assert!(compressed(quic) < literal(quic));
+		assert_eq!(compressed(leading), literal(leading));
+
+		let mut encoder = AnnounceEncoder::new(VERSION);
+		let mut decoder = AnnounceDecoder::default();
+		start(&mut encoder, &mut decoder, "origin", &[100]);
+		for n in 1..128 {
+			let suffix = format!("f{n}");
+			start(&mut encoder, &mut decoder, &suffix, &[1]);
+		}
+		let (_, wire_path, wire_hops) = encoder.start(Path::new("again").to_owned(), hops(&[100]));
+		assert_eq!(wire_hops, HopsRef::literal(hops(&[100])));
+		let (got_path, got_hops) = decoder.start(wire_path, wire_hops).unwrap();
+		assert_eq!(got_path.as_str(), "again");
+		assert_eq!(got_hops, hops(&[100]));
+	}
+
 	#[test]
 	fn encoder_sends_literal_when_nothing_is_shared() {
 		let mut encoder = AnnounceEncoder::new(VERSION);

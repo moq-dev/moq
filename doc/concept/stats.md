@@ -129,13 +129,19 @@ should prefer the canonical name and fall back to the legacy one.
 ### Presence
 
 ```json
-{ "acme": { "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10 } }
+{ "acme": { "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects under an
 auth root on the tier, whether or not any data flows. `sessions` and
 `sessions_closed` are their legacy spellings. A session moved to a new tier
 ends on the old one and starts on the new.
+
+`announces_peak` and `subscriptions_peak` are the most broadcasts announced to
+the relay, and subscriptions held on it, by any one session under the root.
+Compare them with the relay's per-session limits: a session that goes past one
+is closed with `TOO_MANY_REQUESTS`. A peak never goes down while the root has a
+session, and summing nodes takes the largest.
 
 ### Counters
 
