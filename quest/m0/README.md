@@ -43,6 +43,11 @@ gates the next release (decided 2026-10-03:
 viewers). #4741 can merge to main, but no release ships until first-party
 publishers mint epochs.
 
+Liveness: a serve loop with work always ready never yields, which starved
+an FFI publisher's QUIC driver and fails hosted Interop's go lanes (found
+2026-10-08 landing #4225). The [serve budget](/quest/m0/serve-budget.md)
+bounds every kio task's loop.
+
 Audio playout: the jitter target replaces the round-trip guess. The browser
 audio quality harness in `test/audio-quality/` has landed; it grades playout
 nightly and records the traces it replays. Its native lane is a standalone m1
@@ -52,6 +57,7 @@ a published `@moq/watch` break.
 
 ## Required
 
+- [Serve budget](/quest/m0/serve-budget.md) - a kio task that always has work ready yields after a budget, so a fast publisher can't starve its own QUIC driver
 - [Held group wakes](/quest/m0/held-group-wakes.md) - a group held across a route switch is woken when its successor's first timestamp or abort makes it stale, not at the next unrelated append
 - [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - moqt-22 LOCATION_FILTER carries its type instead of a Length in Rust and JS, so a draft-22 peer reads our Next Object correctly
 - [End of Track Location](/quest/m0/ietf-end-of-track-location.md) - a relay forwards END_OF_TRACK at its upstream's Location, on the last group's stream, instead of re-sending it at the next group's object 0

@@ -21,9 +21,13 @@ FFI publisher's 2 s audio max age parked hundreds of group serves.
 - Find which step stalls and why, from the player trace and the publisher
   side. Check whether #5005 alone fixed it before changing anything else.
 - Never raise the timeout or add a retry.
+- Found 2026-10-08 while landing #4225: an FFI publisher's serve loop can
+  starve moq-ffi's single runtime thread until the relay times it out.
+  Re-check these cells once [Serve budget](/quest/m0/serve-budget.md) lands.
 
 Public API: none expected. Wire: none.
 
 ## Related
 
+- [Serve budget](/quest/m0/serve-budget.md) - likely the same stall
 - [CI runner stalls](/quest/m1/ci-runner-stalls.md) - shorter freezes of both interop tracks on CI runners
