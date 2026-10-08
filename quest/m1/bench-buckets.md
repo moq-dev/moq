@@ -17,11 +17,10 @@ Decided 2026-10-05 in moq.pro's quest audit: percentiles neither window nor
 merge, and moq.pro's load harness sums several generators against one relay,
 so the bench emits mergeable buckets. Approved as recommended.
 
-- `Latency` (`rs/moq-bench/src/stats.rs`) already counts 1 ms buckets for the
-  whole run. [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md)
-  adds the interval's delta for its per-interval percentiles; this quest
-  emits that same delta in a mergeable layout, so the two share one
-  representation.
+- `Latency` (`rs/moq-bench/src/stats.rs`) counts 1 ms buckets for the whole
+  run and diffs them each interval for the `latency_interval_*` percentiles
+  ([#5021](https://github.com/moq-dev/moq/pull/5021)); this quest emits that
+  same delta in a mergeable layout, so the two share one representation.
 - 60,001 dense buckets per line is too much JSON. Pick a compact layout (sparse
   non-zero buckets, or a log-linear layout with bounded relative error) and
   record why.
@@ -40,14 +39,10 @@ so the bench emits mergeable buckets. Approved as recommended.
 
 Lands on main, then is backported to `release` as an additive cherry-pick
 PR, like [#4882](https://github.com/moq-dev/moq/pull/4882), since moq.pro's load
-harness tracks `release` (decided 2026-10-05). The backport carries #3126's
+harness tracks `release` (decided 2026-10-05). The backport carries #5021's
 delta along if `release` does not have it yet.
 
 Public API: none (CLI output only). Wire: none.
-
-## Required
-
-- [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - the per-interval bucket delta these buckets emit
 
 ## Related
 

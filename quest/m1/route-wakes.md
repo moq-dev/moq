@@ -63,7 +63,7 @@ Verification: `origin/pool_churn` leaves flat in served paths at every pool
 width it already sweeps, and a unit test that counts `select` calls per
 route change: zero for an unrelated route's leave, only the won paths on a
 join, and a parked waiter retrying when a deeper advertise-only claim over a
-served root is withdrawn. Keep `pool_resolve` unchanged.
+served root is withdrawn.
 
 Public API: none. Wire: none.
 

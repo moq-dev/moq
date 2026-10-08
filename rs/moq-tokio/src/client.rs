@@ -230,8 +230,8 @@ impl Client {
 		self
 	}
 
-	/// Assign an origin (hop) id to the peers this client dials, used whenever a
-	/// peer doesn't declare one itself; see [`moq_net::Client::with_peer_hop`].
+	/// Pin the identity a dialed peer's routes are attributed to, for a peer whose
+	/// identity the caller has established; see [`moq_net::Client::with_peer_hop`].
 	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
 		self.moq = self.moq.with_peer_hop(hop);
 		self
