@@ -95,7 +95,7 @@ auth root's stats `sessions` row reports `announces_peak` and
 `subscriptions_peak`, the most any one session held, so an operator sees how
 close sessions come. On moq-transport drafts 14 to 16 the limits also size the
 `MAX_REQUEST_ID` window advertised in SETUP, granted back as requests close.
-That window counts every request, FETCH and SUBSCRIBE_UPDATE included, so very
+That window counts every request, FETCH and SUBSCRIBE\_UPDATE included, so very
 low limits can starve it. A request ID past it also closes the session with
 `TOO_MANY_REQUESTS`, as the draft requires.
 
