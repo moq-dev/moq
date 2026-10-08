@@ -92,7 +92,8 @@ struct Run {
 	epoch: u64,
 	/// A listed segment of this run started where a player can, so the master keeps advertising
 	/// the rendition even once a GOP past [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts
-	/// that segment. A new generation or a timeline that jumps backwards starts a new run.
+	/// that segment. A new generation, or a timeline that jumps backwards, resets it with the
+	/// window.
 	startable: bool,
 }
 
@@ -413,10 +414,12 @@ impl Rendition {
 			discontinuity,
 		};
 		let starts = self.is(reference) && row.starts_sync();
-		let restarted = self.live.push(row, window);
-		if starts || restarted {
-			self.run.lock().expect("run lock poisoned").startable = starts;
+		// Held across the push, so a concurrent `poll_advertised` can't latch a cleared window.
+		let mut run = self.run.lock().expect("run lock poisoned");
+		if self.live.push(row, window) || starts {
+			run.startable = starts;
 		}
+		drop(run);
 		self.trim();
 	}
 
@@ -660,6 +663,8 @@ impl Rendition {
 			return self.poll_playable(waiter);
 		}
 		self.media.sync(&self.live);
+		// Held across the scan, so a reset (`push`, `restart`) can't land between it and the latch.
+		let mut run = self.run.lock().expect("run lock poisoned");
 		let startable = self.live.poll_rows(waiter, |rows| {
 			for row in rows {
 				let mut content = self.resolve(row);
@@ -680,7 +685,7 @@ impl Rendition {
 			Poll::Pending
 		});
 		if startable.is_ready() {
-			self.run.lock().expect("run lock poisoned").startable = true;
+			run.startable = true;
 		}
 		startable
 	}

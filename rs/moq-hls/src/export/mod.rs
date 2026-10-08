@@ -3422,6 +3422,28 @@ mod tests {
 		);
 	}
 
+	// A publisher restarted without a new generation rewinds the timeline, which resets the
+	// advertisement latch with the window.
+	#[tokio::test(start_paused = true)]
+	async fn a_rewound_timeline_drops_the_latch() {
+		let test = Timelines::with(&["video0"], &[]);
+		let (_track, mut video0) = test.publish("video0");
+		video0.push(&split(0, 0, 40, 0..1)).unwrap();
+		test.listed("video0", 0).await;
+		video0.push(&split(1, 40, 40, 1..2)).unwrap();
+		test.listed("video0", 1).await;
+		assert_eq!(advertised(&test.renditions), ["video0"]);
+
+		// The new run opens mid-GOP at an earlier time, under later record numbers.
+		video0.push(&split(2, 0, 40, 5..6)).unwrap();
+		let window = test.listed("video0", 2).await;
+		assert_eq!(numbers(&window), [2], "the rewind reset the window");
+		assert!(
+			advertised(&test.renditions).is_empty(),
+			"the latch belongs to the old run"
+		);
+	}
+
 	// A span with no media in one rendition keeps its slot as a gap of the same duration there
 	// alone. The rendition goes on listing after it, at a sync point a player can switch onto,
 	// and its siblings never notice.

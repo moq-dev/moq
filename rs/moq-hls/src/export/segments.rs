@@ -220,7 +220,7 @@ impl Producer {
 
 	/// Append a row, evicting the front of the window past `window` (see [`evicts`]). With no
 	/// `window`, only source timeline pops remove rows. Returns whether the timeline jumped
-	/// backwards, which starts a new publisher run.
+	/// backwards, which resets the window.
 	pub fn push(&self, row: Row, window: Option<Duration>) -> bool {
 		let Ok(mut state) = self.state.write() else {
 			return false;
@@ -639,16 +639,16 @@ mod tests {
 	fn backwards_jump_resets_the_window() {
 		let live = Producer::new();
 		let window = Some(Duration::from_secs(30));
-		live.push(row(0, 0, 10_000, 2_000), window);
-		live.push(row(1, 1, 12_000, 2_000), window);
-		live.push(row(2, 2, 1_000, 2_000), window); // restart: pts rewound
+		assert!(!live.push(row(0, 0, 10_000, 2_000), window));
+		assert!(!live.push(row(1, 1, 12_000, 2_000), window));
+		assert!(live.push(row(2, 2, 1_000, 2_000), window)); // restart: pts rewound
 
 		let snapshot = live.window();
 		assert_eq!(snapshot.segments.len(), 1, "the window restarted at the new row");
 		assert_eq!(snapshot.segments[0].segment, 2);
 
 		// A segment number that rewinds (a restarted publisher) resets the same way.
-		live.push(row(0, 0, 2_000, 2_000), window);
+		assert!(live.push(row(0, 0, 2_000, 2_000), window));
 		assert_eq!(live.window().segments.len(), 1);
 	}
 
