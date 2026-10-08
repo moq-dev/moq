@@ -1,7 +1,7 @@
 //! Derivative catalog construction: pick the source rendition, size the ladder
 //! against it, and fill the output catalog with rung + passthrough entries.
 
-use hang::catalog::{AV1, Video, VideoCodec, VideoConfig};
+use hang::catalog::{AV1, Container, Video, VideoCodec, VideoConfig};
 use moq_net::path::RelativeOwned;
 use moq_video::decode::Codec;
 
@@ -144,11 +144,13 @@ impl Decoders {
 
 	/// Open and drop a decoder for `rendition`.
 	async fn open(&self, rendition: &VideoConfig) -> Result<(), moq_video::Error> {
-		// Parameter sets in band, so the probe asks about the backend and not about
-		// this rendition's description: a malformed one belongs to the stream and
-		// fails when the rendition is decoded, not as a verdict on the whole codec.
+		// Annex-B with the parameter sets in band, so the probe asks about the backend
+		// and not about this rendition's description or container: a malformed one
+		// belongs to the stream and fails when the rendition is decoded, not as a
+		// verdict on the whole codec.
 		let mut config = rendition.clone();
 		config.description = None;
+		config.container = Container::Legacy;
 		match &mut config.codec {
 			VideoCodec::H264(h264) => h264.inline = true,
 			VideoCodec::H265(h265) => h265.in_band = true,
@@ -159,13 +161,15 @@ impl Decoders {
 }
 
 /// Pick the rendition to transcode from: the best [ranked](Video::ranked) rendition local
-/// to the source broadcast that this host can decode.
+/// to the source broadcast that this host can decode, enabled ones first.
 ///
 /// [`Error::NoSource`] means wait for a later snapshot. Any other error means
 /// nothing on offer can be decoded here, and is why the best one refused.
 pub(crate) async fn choose_source(video: &Video, decoders: &mut Decoders) -> Result<(String, VideoConfig), Error> {
 	// Best first. A rendition without dimensions ranks after every one with them:
 	// it can't be chosen yet, but it can still keep the transcoder waiting.
+	// A disabled rendition ranks last, so it is the source only when nothing enabled is,
+	// and the rungs inherit `enabled: false` rather than the ladder vanishing.
 	let candidates = video
 		.ranked()
 		// A rendition that itself lives in another broadcast can't be subscribed
@@ -216,6 +220,7 @@ pub(crate) async fn follow_source(
 	current: &str,
 	decoders: &mut Decoders,
 ) -> Result<(String, VideoConfig), Error> {
+	let mut kept = None;
 	if let Some(config) = video.renditions.get(current)
 		&& config.broadcast.is_none()
 		&& dimensions(config).is_some()
@@ -223,9 +228,19 @@ pub(crate) async fn follow_source(
 		// The name can stay while the codec changes under it.
 		&& decoders.probe(codec, config).await
 	{
-		return Ok((current.to_string(), config.clone()));
+		if config.enabled {
+			return Ok((current.to_string(), config.clone()));
+		}
+		kept = Some(config);
 	}
-	choose_source(video, decoders).await
+
+	// A disabled source gives way only to an enabled one. An enabled source is never
+	// swapped for a better one, even its own predecessor re-enabled, to avoid churning the ladder.
+	match (kept, choose_source(video, decoders).await) {
+		(Some(config), Ok((_, chosen))) if !chosen.enabled => Ok((current.to_string(), config.clone())),
+		(Some(config), Err(_)) => Ok((current.to_string(), config.clone())),
+		(_, chosen) => chosen,
+	}
 }
 
 /// Whether a rung decoding `old` can keep decoding `new` untouched.
@@ -327,10 +342,11 @@ pub(crate) async fn rung_entry(
 	Ok(entry)
 }
 
-/// Rungs inherit the state of the rendition the pipeline actually decodes.
-pub(crate) fn inherit_stalled(rungs: &mut [Published], source: &VideoConfig) {
+/// Rungs are enabled exactly when the rendition the pipeline decodes is: a disabled source sends
+/// no frames, so neither can its rungs.
+pub(crate) fn inherit_enabled(rungs: &mut [Published], source: &VideoConfig) {
 	for published in rungs {
-		published.entry.stalled = source.stalled;
+		published.entry.enabled = source.enabled;
 	}
 }
 
@@ -415,10 +431,10 @@ mod tests {
 	}
 
 	#[test]
-	fn rungs_inherit_a_stalled_source() {
+	fn rungs_inherit_a_disabled_source() {
 		let mut source_catalog = moq_mux::catalog::hang::Catalog::default();
 		let mut src = source(1280, 720, Some(2_500_000));
-		src.stalled = Some(true);
+		src.enabled = false;
 		source_catalog.video.insert("video", src).unwrap();
 
 		let mut published = [Published {
@@ -432,20 +448,17 @@ mod tests {
 			entry: source(640, 360, Some(600_000)),
 		}];
 
-		inherit_stalled(&mut published, &source_catalog.video.renditions["video"]);
+		inherit_enabled(&mut published, &source_catalog.video.renditions["video"]);
 		let mut out = moq_mux::catalog::hang::Catalog::default();
 		populate(&mut out, &source_catalog, &published, None).unwrap();
-		assert_eq!(
-			out.video.renditions.get("video/360p").and_then(|c| c.stalled),
-			Some(true)
-		);
+		assert!(!out.video.renditions["video/360p"].enabled);
 
-		// A different local rendition may stay stalled after the selected input recovers.
+		// Following an enabled input re-enables the rungs.
 		let healthy = source(1920, 1080, Some(5_000_000));
 		source_catalog.video.insert("healthy", healthy.clone()).unwrap();
-		inherit_stalled(&mut published, &healthy);
+		inherit_enabled(&mut published, &healthy);
 		populate(&mut out, &source_catalog, &published, None).unwrap();
-		assert_eq!(out.video.renditions["video/360p"].stalled, None);
+		assert!(out.video.renditions["video/360p"].enabled);
 	}
 
 	#[test]
@@ -821,6 +834,47 @@ mod tests {
 		video.renditions.insert("avc".to_string(), hevc(640, 360));
 		let (name, _) = follow_source(&video, "avc", &mut decoders).await.unwrap();
 		assert_eq!(name, "tall");
+	}
+
+	/// A disabled rendition sends no frames, so an enabled one wins even when it ranks lower,
+	/// and a disabled one is chosen only when nothing enabled is on offer.
+	#[tokio::test]
+	async fn chooses_an_enabled_source_first() {
+		let mut video = Video::default();
+		let mut high = source(1920, 1080, None);
+		high.enabled = false;
+		video.insert("high", high).unwrap();
+		video.insert("low", source(640, 360, None)).unwrap();
+
+		let (name, _) = choose_source(&video, &mut decodes_all()).await.unwrap();
+		assert_eq!(name, "low");
+
+		video.renditions.get_mut("low").unwrap().enabled = false;
+		let (name, config) = choose_source(&video, &mut decodes_all()).await.unwrap();
+		assert_eq!(name, "high");
+		assert!(!config.enabled);
+	}
+
+	/// A source that is disabled gives way to an enabled rendition, but stays put when every
+	/// rendition is disabled, so its rungs inherit `enabled: false` instead of switching.
+	#[tokio::test]
+	async fn follow_leaves_a_disabled_source_only_for_an_enabled_one() {
+		let mut video = Video::default();
+		let mut low = source(640, 360, None);
+		low.enabled = false;
+		video.insert("low", low).unwrap();
+		let mut high = source(1920, 1080, None);
+		high.enabled = false;
+		video.insert("high", high).unwrap();
+		let mut decoders = decodes_all();
+
+		let (name, config) = follow_source(&video, "low", &mut decoders).await.unwrap();
+		assert_eq!(name, "low");
+		assert!(!config.enabled);
+
+		video.renditions.get_mut("high").unwrap().enabled = true;
+		let (name, _) = follow_source(&video, "low", &mut decoders).await.unwrap();
+		assert_eq!(name, "high");
 	}
 
 	/// Probing opens a real decoder, so each codec is opened once per transcoder

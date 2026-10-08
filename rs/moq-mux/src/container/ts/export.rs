@@ -38,7 +38,7 @@ use moq_net::Timestamp;
 use crate::catalog::hang::Catalog;
 use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::video::Reorder;
-use crate::codec::{aac, annexb};
+use crate::codec::{aac, annexb, opus};
 use crate::container::{ExportSource, Frame};
 
 use super::adts;
@@ -402,13 +402,14 @@ enum Kind {
 	/// Video carries its TS stream type (H.264 = 0x1B, H.265 = 0x24).
 	Video(StreamType),
 	/// AAC, framed as ADTS. A `channel_config` of 0 defers the layout to a program config
-	/// element, which leads the next raw data block written and is then taken. A catalog update
-	/// rebuilds the kind and so repeats it once, which a decoder tuning in mid-stream welcomes.
-	Aac(aac::InBand),
+	/// element, which leads the first raw data block after each PAT/PMT, so a receiver that tunes
+	/// in at the tables can decode from there. `repeat` marks that the next frame carries it.
+	Aac { config: aac::InBand, repeat: bool },
 	/// Opus (private stream_type 0x06). Each frame is one Opus packet, prefixed with
 	/// the Opus-in-TS access-unit control header and announced with the 'Opus'
-	/// registration plus DVB extension descriptor.
-	Opus { channel_count: u32 },
+	/// registration plus DVB extension descriptor. `channel_config_code` is a plain
+	/// code that descriptor can name, never a count clamped into range.
+	Opus { channel_config_code: u8 },
 	/// MP2, carried verbatim. The sample rate picks the stream type on the way
 	/// out (0x03 vs 0x04).
 	Mp2 { sample_rate: u32 },
@@ -1486,7 +1487,7 @@ impl<E: catalog::Catalog> Export<E> {
 				tracks.iter().find(|t| {
 					matches!(
 						t.kind,
-						Kind::Aac(_) | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
+						Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
 					)
 				})
 			})
@@ -1498,7 +1499,7 @@ impl<E: catalog::Catalog> Export<E> {
 			.map(|t| {
 				let stream_type = match &t.kind {
 					Kind::Video(stream_type) => *stream_type,
-					Kind::Aac(_) => StreamType::AdtsAac,
+					Kind::Aac { .. } => StreamType::AdtsAac,
 					// Opus rides private-data PES; the registration + extension descriptors
 					// below tell the demuxer it's Opus.
 					Kind::Opus { .. } => StreamType::from_u8(0x06).map_err(anyhow::Error::msg)?,
@@ -1528,7 +1529,7 @@ impl<E: catalog::Catalog> Export<E> {
 							tag: 0x05,
 							data: b"EAC3".to_vec(),
 						}],
-						Kind::Opus { channel_count } => opus_descriptors(*channel_count),
+						Kind::Opus { channel_config_code } => opus_descriptors(*channel_config_code),
 						_ => Vec::new(),
 					}
 				};
@@ -1653,13 +1654,22 @@ impl<E: catalog::Catalog> Export<E> {
 		if self.span_counters.is_none() {
 			self.span_counters = Some(self.counters.clone());
 		}
+		let is_video = matches!(self.tracks.get(name).context("missing track")?.kind, Kind::Video(_));
+		// Refresh PSI at keyframes or after the interval lapses.
+		let psi = (is_video && frame.keyframe) || due(frame.timestamp, self.last_psi, PSI_INTERVAL);
+		if psi {
+			for track in self.tracks.values_mut() {
+				if let Kind::Aac { repeat, .. } = &mut track.kind {
+					*repeat = true;
+				}
+			}
+		}
 		let track = self.tracks.get_mut(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
-		if let Kind::Aac(aac) = &mut track.kind {
-			aac.program_config.take();
+		if let Kind::Aac { repeat, .. } = &mut track.kind {
+			*repeat = false;
 		}
-		let is_video = matches!(kind, Kind::Video(_));
 		let timestamp = frame.timestamp;
 		let keyframe = frame.keyframe;
 
@@ -1668,10 +1678,15 @@ impl<E: catalog::Catalog> Export<E> {
 		// verbatim streams carry no PES payload; the section is written separately below.
 		let es_payload = match &kind {
 			Kind::Video(stream_type) => Some(video_es_payload(*stream_type, track.source.description(), &frame)?),
-			Kind::Aac(aac) => {
-				let pce = aac.program_config.as_deref().unwrap_or_default();
+			Kind::Aac { config, repeat } => {
+				let pce = if *repeat {
+					config.program_config.as_deref().unwrap_or_default()
+				} else {
+					&[]
+				};
 				let raw_len = pce.len() + frame.payload.len();
-				let header = adts::write_header(aac.object_type, aac.sample_rate, aac.channel_config, raw_len)?;
+				let header =
+					adts::write_header(config.object_type, config.sample_rate, config.channel_config, raw_len)?;
 				let mut framed = Vec::with_capacity(header.len() + raw_len);
 				framed.extend_from_slice(&header);
 				framed.extend_from_slice(pce);
@@ -1705,8 +1720,7 @@ impl<E: catalog::Catalog> Export<E> {
 
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
-		// Refresh PSI at keyframes or after the interval lapses.
-		if (is_video && frame.keyframe) || due(frame.timestamp, self.last_psi, PSI_INTERVAL) {
+		if psi {
 			let psi = self.psi.as_ref().context("PSI not built")?;
 			let pmt_pid = psi.pmt_pid;
 			let pat = TsPayload::Pat(psi.pat.clone());
@@ -2435,7 +2449,7 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 		AudioCodec::AAC(codec) => {
 			// The description is exact, and names the LC core under explicit SBR or PS. Without
 			// one, the catalog is all there is.
-			Ok(Kind::Aac(match &config.description {
+			let in_band = match &config.description {
 				Some(asc) => aac::in_band(asc)?,
 				None => aac::InBand {
 					object_type: codec.profile,
@@ -2443,13 +2457,19 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 					channel_config: adts::channel_config_from_count(config.channel_count)?,
 					program_config: None,
 				},
-			}))
+			};
+			// A rebuilt kind repeats the element too, so a catalog update between a PAT/PMT and
+			// this track's next frame cannot drop it.
+			Ok(Kind::Aac {
+				config: in_band,
+				repeat: true,
+			})
 		}
 		AudioCodec::Mp2 => Ok(Kind::Mp2 {
 			sample_rate: config.sample_rate,
 		}),
 		AudioCodec::Opus => Ok(Kind::Opus {
-			channel_count: config.channel_count,
+			channel_config_code: opus_channel_code(config, name)?,
 		}),
 		AudioCodec::Ac3 => Ok(Kind::Ac3),
 		AudioCodec::Ec3 => Ok(Kind::Eac3),
@@ -2460,7 +2480,10 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 /// The two PMT descriptors for an Opus elementary stream: the `Opus` registration
 /// descriptor (which sets the codec) and the DVB extension descriptor 0x80 carrying
 /// the channel configuration. ffmpeg's demuxer requires both to recognize the stream.
-fn opus_descriptors(channel_count: u32) -> Vec<Descriptor> {
+///
+/// `channel_config_code` is already a plain code ([`opus_channel_code`]): 1 is mono,
+/// 2 is stereo, and 3..=8 is the Vorbis family 1 mapping for that many channels.
+fn opus_descriptors(channel_config_code: u8) -> Vec<Descriptor> {
 	vec![
 		Descriptor {
 			tag: 0x05,
@@ -2468,11 +2491,58 @@ fn opus_descriptors(channel_count: u32) -> Vec<Descriptor> {
 		},
 		Descriptor {
 			tag: 0x7f,
-			// extension_descriptor_tag 0x80, then channel_config_code (1=mono, 2=stereo,
-			// = channel count for the Vorbis mapping), clamped to the 1..=8 the demuxer reads.
-			data: vec![0x80, channel_count.clamp(1, 8) as u8],
+			// extension_descriptor_tag 0x80, then the plain channel_config_code.
+			data: vec![0x80, channel_config_code],
 		},
 	]
+}
+
+/// Plain `channel_config_code` for an Opus track the extension descriptor can name.
+///
+/// Family 0, and family 1 with the Vorbis mapping, use that channel count. A missing
+/// head is mono or stereo only. Every other layout is refused: the descriptor has no
+/// code for it, and a clamped count would name a layout the packets do not have.
+fn opus_channel_code(config: &AudioConfig, name: &str) -> anyhow::Result<u8> {
+	let Some(description) = config.description.as_deref() else {
+		anyhow::ensure!(
+			matches!(config.channel_count, 1 | 2),
+			"TS export cannot label Opus track '{name}' with {} channels and no OpusHead",
+			config.channel_count
+		);
+		return Ok(config.channel_count as u8);
+	};
+
+	let mut buf = description;
+	let head = opus::Config::parse(&mut buf)
+		.map_err(|err| anyhow::anyhow!("TS export cannot read the OpusHead on track '{name}': {err}"))?;
+	anyhow::ensure!(
+		head.channel_count == config.channel_count,
+		"Opus head has {} channels but the catalog declares {} (track '{name}')",
+		head.channel_count,
+		config.channel_count
+	);
+
+	if let Some(mapping) = &head.mapping {
+		let channels = mapping.table().len() as u8;
+		let vorbis = opus::Mapping::vorbis(channels).ok();
+		anyhow::ensure!(
+			vorbis.as_ref() == Some(mapping),
+			"TS export cannot label Opus track '{name}': channel mapping family {} is not the Vorbis layout",
+			mapping.family()
+		);
+	}
+
+	let code = u8::try_from(head.channel_count).with_context(|| {
+		format!(
+			"TS export cannot label Opus track '{name}' with {} channels",
+			head.channel_count
+		)
+	})?;
+	anyhow::ensure!(
+		(1..=8).contains(&code),
+		"TS export cannot label Opus track '{name}' with {code} channels"
+	);
+	Ok(code)
 }
 
 /// Wrap a raw Opus packet in the Opus-in-TS access-unit control header, producing one

@@ -23,11 +23,13 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Publishers learn their cap](/quest/m2/rate-grant.md) - the AUTH grant carries the caps and publishers clamp their encoder to them
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - `moq-uring`'s workers host the UDP demux, so a ring relay keeps STUN, WebRTC, and SRT on its QUIC port
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
+- [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [Hitless TS legs](/quest/m2/ts-hitless.md) - two `--sync` export legs emit packet-identical TS for ST 2022-7
 - [DVB E-AC-3](/quest/m2/ts-eac3.md) - E-AC-3 private data is split per sync frame and buffer-modelled in TS export
 - [T-STD controls](/quest/m2/tstd-controls.md) - the harness gains an MB-overflow control and an AAC broadcast reference
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
+- [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
@@ -86,7 +88,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane
 - [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: validate PipeWire DMA-BUFs into the Vulkan renderer on hardware
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
-- [Benchmark the moq-stats producer](/quest/m2/stats-producer-bench.md) - a Criterion target for one relay's per-tick stats drain and encode, swept over held paths
 - [Binary delta stats](/quest/m2/stats-delta.md) - an on-demand varint delta flavor of every stats track, if relay encode CPU still matters after the JSON fixes
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - moq-uring receives from the buffer ring and transmits into registered buffers with no copy, once a profile says where
@@ -107,7 +108,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Audio capture time](/quest/m2/audio-capture-time.md) - native audio stamps a buffer's capture instant, not when the driver reads it
 - [Egress profile](/quest/m2/quic-egress-profile.md) - measure relay send-path syscalls, pacing bursts, and allocations before optimizing any of them
 - [Compressed tracks](/quest/m2/flate.md) - moq-ffi and every wrapper expose flate tracks through a `flate` namespace like `json`
-- [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite announcements and interests carry prefix, exact, suffix, or prefix+suffix shapes that survive relay hops, benchmarked over the announce table
 - [moq-transport cluster peers](/quest/m2/ietf-cluster-peers.md) - an extended cluster draft lets moq-transport relays peer again, carrying the cluster route layer
 - [MSFTS convergence](/quest/m2/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where the two still differ: program tables and the ES payload unit
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them

@@ -110,14 +110,14 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer trackConsumer.Cancel()
 
 	payload := []byte("served dynamically")
-	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 0}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: us(0)}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := trackConsumer.ReadFrame(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != string(payload) || frame.TimestampUs != 0 {
+	if frame == nil || string(frame.Payload) != string(payload) || frame.TimestampUs == nil || *frame.TimestampUs != 0 {
 		t.Fatalf("frame = %+v, want payload=%q ts=0", frame, payload)
 	}
 
@@ -138,7 +138,7 @@ func TestPublishAudioLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), TimestampUs: 1000}); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), TimestampUs: us(1000)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := media.Finish(); err != nil {
@@ -410,7 +410,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cached.WriteFrame(moq.Frame{Payload: []byte("cached"), TimestampUs: 0}); err != nil {
+	if err := cached.WriteFrame(moq.Frame{Payload: []byte("cached"), TimestampUs: us(0)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := cached.Finish(); err != nil {
@@ -451,7 +451,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), TimestampUs: request.Sequence() * 20_000}); err != nil {
+	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), TimestampUs: us(request.Sequence() * 20_000)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := produced.Finish(); err != nil {
@@ -540,7 +540,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	defer mediaConsumer.Cancel()
 
 	payload := []byte("opus audio payload data")
-	if err := media.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 1_000_000}); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: payload, TimestampUs: us(1_000_000)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -574,7 +574,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 	defer consumer.Cancel()
 
-	if err := track.WriteFrame(moq.Frame{Payload: []byte("hello"), TimestampUs: 12_345}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("hello"), TimestampUs: us(12_345)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -585,7 +585,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a frame")
 	}
-	if string(frame.Payload) != "hello" || frame.TimestampUs != 12_345 {
+	if string(frame.Payload) != "hello" || frame.TimestampUs == nil || *frame.TimestampUs != 12_345 {
 		t.Fatalf("frame = %+v, want payload=hello ts=12345", frame)
 	}
 
@@ -598,7 +598,7 @@ func TestTrackPublishConsume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer groupConsumer.Cancel()
-	if err := group.WriteFrame(moq.Frame{Payload: []byte("group"), TimestampUs: 23_456}); err != nil {
+	if err := group.WriteFrame(moq.Frame{Payload: []byte("group"), TimestampUs: us(23_456)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := group.Finish(); err != nil {
@@ -611,7 +611,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a group frame")
 	}
-	if string(frame.Payload) != "group" || frame.TimestampUs != 23_456 {
+	if string(frame.Payload) != "group" || frame.TimestampUs == nil || *frame.TimestampUs != 23_456 {
 		t.Fatalf("frame = %+v, want payload=group ts=23456", frame)
 	}
 }
@@ -641,7 +641,7 @@ func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	if err := empty.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := track.WriteFrame(moq.Frame{Payload: []byte("populated"), TimestampUs: 2_000}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("populated"), TimestampUs: us(2_000)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -649,7 +649,7 @@ func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != "populated" || frame.TimestampUs != 2_000 {
+	if frame == nil || string(frame.Payload) != "populated" || frame.TimestampUs == nil || *frame.TimestampUs != 2_000 {
 		t.Fatalf("frame = %+v, want payload=populated ts=2000", frame)
 	}
 }
@@ -871,7 +871,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := []byte("hello dynamic track")
-	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 0}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: us(0)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -891,7 +891,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != string(payload) || frame.TimestampUs != 0 {
+	if frame == nil || string(frame.Payload) != string(payload) || frame.TimestampUs == nil || *frame.TimestampUs != 0 {
 		t.Fatalf("frame = %+v, want payload=%q ts=0", frame, payload)
 	}
 	if err := track.Finish(); err != nil {
@@ -970,7 +970,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	defer mediaConsumer.Cancel()
 
 	payload := []byte("dynamic opus frame")
-	if err := media.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 20_000}); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: payload, TimestampUs: us(20_000)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1228,7 +1228,7 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 	}
 
 	payload := []byte("still publishing")
-	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 0}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: us(0)}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := consumer.ReadFrame(readCtx)
@@ -1494,3 +1494,6 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// us is a raw frame's optional timestamp in microseconds.
+func us(v uint64) *uint64 { return &v }

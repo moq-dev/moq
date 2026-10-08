@@ -62,7 +62,7 @@ async def main() -> None:
     subscriber = await consumer.subscribe_track("data", None)
 
     # Written once the read is parked, so the runtime thread delivers the wake.
-    asyncio.get_running_loop().call_later(0.05, track.write_frame, moq_ffi.MoqFrame(payload=b"hello"))
+    asyncio.get_running_loop().call_later(0.05, track.write_frame, moq_ffi.MoqFrame(payload=b"hello", timestamp_us=0))
     frame = await subscriber.read_frame()
     assert frame is not None
     # Flushed now: a write left for exit would hand the GIL over early.

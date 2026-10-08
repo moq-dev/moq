@@ -91,9 +91,9 @@ pub struct MoqVideo {
 	pub coded: Option<MoqDimensions>,
 	pub display_aspect: Option<MoqDimensions>,
 	pub bitrate: Option<u64>,
-	/// Whether the publisher recommends temporarily avoiding this rendition.
-	#[uniffi(default = false)]
-	pub stalled: bool,
+	/// Whether this rendition may be selected; when false, no frames are coming.
+	#[uniffi(default = true)]
+	pub enabled: bool,
 	pub framerate: Option<f64>,
 	pub container: MoqContainer,
 }
@@ -112,6 +112,9 @@ pub struct MoqAudio {
 	pub sample_rate: u32,
 	pub channel_count: u32,
 	pub bitrate: Option<u64>,
+	/// Whether this rendition may be selected; when false, no frames are coming.
+	#[uniffi(default = true)]
+	pub enabled: bool,
 	pub container: MoqContainer,
 }
 
@@ -124,9 +127,10 @@ pub struct MoqAudio {
 pub struct MoqFrame {
 	/// The frame payload.
 	pub payload: Vec<u8>,
-	/// Presentation timestamp in microseconds.
-	#[uniffi(default = 0)]
-	pub timestamp_us: u64,
+	/// Presentation timestamp in microseconds, or null on a frame read from an untimed
+	/// track. A raw track published here is timed, so writing one needs it.
+	#[uniffi(default = None)]
+	pub timestamp_us: Option<u64>,
 }
 
 /// A [`MoqFrame`] plus the codec metadata a media track carries.
@@ -149,9 +153,10 @@ pub struct MoqDatagram {
 	/// Per-track sequence number, shared with groups.
 	#[uniffi(default = 0)]
 	pub sequence: u64,
-	/// Presentation timestamp in microseconds.
-	#[uniffi(default = 0)]
-	pub timestamp_us: u64,
+	/// Presentation timestamp in microseconds, or null on a datagram read from an untimed
+	/// track. A raw track published here is timed, so appending one needs it.
+	#[uniffi(default = None)]
+	pub timestamp_us: Option<u64>,
 	/// Datagram payload, capped at 1200 bytes.
 	pub payload: Vec<u8>,
 }
@@ -379,7 +384,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 						_ => None,
 					},
 					bitrate: config.bitrate,
-					stalled: config.stalled.unwrap_or(false),
+					enabled: config.enabled,
 					framerate: config.framerate,
 					container: MoqContainer::from_catalog(&config.container)?,
 				},
@@ -402,6 +407,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					sample_rate: config.sample_rate,
 					channel_count: config.channel_count,
 					bitrate: config.bitrate,
+					enabled: config.enabled,
 					container: MoqContainer::from_catalog(&config.container)?,
 				},
 			))
@@ -434,17 +440,21 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn catalog_exposes_stalled_renditions() {
+	fn catalog_exposes_disabled_renditions() {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		let active = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		catalog.video.renditions.insert("active".to_string(), active);
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		video.stalled = Some(true);
+		video.enabled = false;
 		catalog.video.renditions.insert("video".to_string(), video);
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.enabled = false;
+		catalog.audio.renditions.insert("audio".to_string(), audio);
 
 		let converted = convert_catalog(&catalog);
-		assert!(!converted.video["active"].stalled);
-		assert!(converted.video["video"].stalled);
+		assert!(converted.video["active"].enabled);
+		assert!(!converted.video["video"].enabled);
+		assert!(!converted.audio["audio"].enabled);
 	}
 
 	/// A rendition may name a sibling broadcast, and the track then lives there. Dropping the

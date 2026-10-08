@@ -1181,7 +1181,7 @@ mod test {
 		let mut frame = open
 			.create_frame(crate::frame::Info {
 				size: 4,
-				timestamp: ts(0),
+				timestamp: Some(ts(0)),
 			})
 			.unwrap();
 		frame.write(b"ab".as_ref()).unwrap();
@@ -1373,7 +1373,7 @@ mod test {
 			let mut frame = open
 				.create_frame(crate::frame::Info {
 					size: 4,
-					timestamp: ts(0),
+					timestamp: Some(ts(0)),
 				})
 				.unwrap();
 			frame.write(b"ab".as_ref()).unwrap();
@@ -1422,7 +1422,7 @@ mod test {
 			let mut frame = open
 				.create_frame(crate::frame::Info {
 					size: 4,
-					timestamp: ts(0),
+					timestamp: Some(ts(0)),
 				})
 				.unwrap();
 			frame.write(b"a".as_ref()).unwrap();
@@ -1435,7 +1435,7 @@ mod test {
 			let mut replacement_frame = replacement
 				.create_frame(crate::frame::Info {
 					size: 4,
-					timestamp: ts(0),
+					timestamp: Some(ts(0)),
 				})
 				.unwrap();
 			replacement_frame.write(b"ab".as_ref()).unwrap();
@@ -1752,7 +1752,7 @@ mod test {
 								let mut frame = group
 									.create_frame(crate::frame::Info {
 										size: 4,
-										timestamp: ts(1),
+										timestamp: Some(ts(1)),
 									})
 									.unwrap();
 								frame.write(b"ab".as_ref()).unwrap();
