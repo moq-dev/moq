@@ -1049,7 +1049,6 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		track.height = config.coded_height;
 		track.framerate = config.framerate;
 		track.bitrate = config.bitrate;
-		track.stalled = config.stalled;
 		track.init_data = init_data;
 		track.render_group = Some(1);
 		track.alt_group = if has_multiple_video { Some(1) } else { None };
@@ -1151,11 +1150,11 @@ mod test {
 
 		let info = catalog.track_info(hang::catalog::PRIORITY.video);
 		assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
-		assert_eq!(info.timescale, hang::container::TIMESCALE);
+		assert_eq!(info.timescale, Some(hang::container::TIMESCALE));
 
 		let at = info.with_timescale(moq_net::Timescale::MILLI);
 		assert_eq!(at.max_age, Some(std::time::Duration::from_secs(3)));
-		assert_eq!(at.timescale, moq_net::Timescale::MILLI);
+		assert_eq!(at.timescale, Some(moq_net::Timescale::MILLI));
 
 		// Every handle mints under the same policy, whatever order it was taken in: the codec
 		// paths hold a reservation and the container paths hold a clone.
@@ -1572,7 +1571,6 @@ mod test {
 		video_config.coded_width = Some(1280);
 		video_config.coded_height = Some(720);
 		video_config.bitrate = Some(6_000_000);
-		video_config.stalled = Some(true);
 		video_config.framerate = Some(30.0);
 		video_config.container = Container::Legacy;
 
@@ -1603,7 +1601,6 @@ mod test {
 		assert_eq!(video.height, Some(720));
 		assert_eq!(video.framerate, Some(30.0));
 		assert_eq!(video.bitrate, Some(6_000_000));
-		assert_eq!(video.stalled, Some(true));
 		assert!(video.init_data.is_none());
 		// H.264 may carry B-frames, so SAP starting type is 2 (leading pictures allowed).
 		assert_eq!(video.max_grp_sap_starting_type, Some(2));

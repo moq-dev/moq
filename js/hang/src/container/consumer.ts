@@ -446,7 +446,7 @@ export class Consumer {
 	 * the end of that group or, when `end` is present, an exclusive media endpoint carried by a
 	 * legacy marker. The overall result is undefined once closed. When `discontinuity`
 	 * jumps relative to the previous call, re-apply startup delay and skip: it is a playhead
-	 * event, not a decoder flush.
+	 * event, and the next frame may be a delta that continues the interrupted group.
 	 *
 	 * `continuous` is true when this result picks up exactly where the previous frame left off, so
 	 * the span between them can be treated as delivered. It is false on the first frame, after a

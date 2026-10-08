@@ -44,6 +44,12 @@ with the MoQ timeout code once its transport is up. The `[web]` listeners apply 
 headers and, for the WebSocket fallback, to the SETUP after the upgrade. The
 `io_uring` workers do not apply it yet.
 
+A setting no configured listener reads stops startup rather than being ignored.
+A stream-only relay refuses `preferred_v4`, `preferred_v6`, and `lb_id` (or `load_balancer`), which
+only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
+`tcp.tls` serves it.
+`unix.allow` needs `unix.bind`.
+
 ## \[quic]
 
 Transport tuning, applied to accepted and dialed connections alike.
@@ -109,9 +115,8 @@ taking the sockets out and driving them yourself is how a later library
 update can drop QUIC while still compiling. `io_uring` additionally needs Linux 6.12+, the `io-uring` cargo
 feature, and exactly one certificate read at startup; it serves moq-lite only,
 and refuses to start anywhere it cannot deliver. `[quic]` applies either way,
-except that `mtu_discovery` (its datagram path sends a fixed payload) and the
-three flow-control windows (these workers run fixed ones) are refused under
-`io_uring` rather than quietly ignored. Each worker reports its own counters at
+except that `mtu_discovery` (its datagram path sends a fixed payload) is refused
+under `io_uring` rather than quietly ignored. Each worker reports its own counters at
 [`/metrics`](/bin/relay/http#get-metrics). The kernel charges each worker's
 ring (~56 KiB, plus a page per socket) to `RLIMIT_MEMLOCK`, a budget shared by
 every io\_uring the user runs; raise it (`LimitMEMLOCK=` under systemd) if
@@ -125,7 +130,7 @@ listen = "[::]:4443"                 # HTTP: fingerprint, announced, fetch, heal
 
 [web.https]
 listen = "[::]:443"                  # HTTPS plus the WebSocket fallback.
-cert = "cert.pem"
+cert = "cert.pem"                    # cert, key, and root need listen.
 key = "key.pem"
 
 [internal]
