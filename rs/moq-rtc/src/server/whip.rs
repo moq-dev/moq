@@ -221,7 +221,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 		let _stale_session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
-		let stale = consumer.request_broadcast("live/cam0").await.unwrap();
+		let stale = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -243,7 +243,7 @@ mod tests {
 		.await
 		.expect("the stale viewer stalled");
 		assert!(matches!(ended, moq_net::Error::Unroutable), "{ended:?}");
-		let fresh = consumer.request_broadcast("live/cam0").await.unwrap();
+		let fresh = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected session");
 	}
 }

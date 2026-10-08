@@ -100,11 +100,16 @@ pub async fn export(
 	}
 }
 
-/// Republish the recording at `args.store` as the broadcast `name`.
+/// Republish the recording at `args.store` as the broadcast `name`, announced under `epoch`.
 ///
 /// Each track's timeline replays as a live track and every other track's groups are served on
 /// request.
-pub async fn import(origin: moq_net::origin::Producer, name: String, args: ImportArgs) -> anyhow::Result<()> {
+pub async fn import(
+	origin: moq_net::origin::Producer,
+	name: String,
+	args: ImportArgs,
+	epoch: moq_net::Epoch,
+) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
 	// A second handle lists the recording's timelines while the reader owns the first.
 	let listing = open(&args.store)?;
@@ -119,7 +124,7 @@ pub async fn import(origin: moq_net::origin::Producer, name: String, args: Impor
 		.with_context(|| format!("no readable recording at {}", args.store))?;
 	let serve = reader.serve();
 	broadcast
-		.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default().with_epoch(epoch))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(%name, store = %args.store, "replaying");
@@ -400,7 +405,12 @@ mod tests {
 			store: url,
 			follow: None,
 		};
-		let serving = tokio::spawn(import(replay.clone(), "replay.hang".into(), args));
+		let serving = tokio::spawn(import(
+			replay.clone(),
+			"replay.hang".into(),
+			args,
+			moq_net::Epoch::mint(),
+		));
 
 		let consumer = replay.consume().routed_broadcast("replay.hang").await.unwrap();
 		let audio = consumer.track("audio").unwrap();

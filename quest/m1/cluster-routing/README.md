@@ -86,7 +86,7 @@ vector the 2026-09-30 cache-tiers audit kept:
 
 Kept from 2026-09-30: core links are configured and may skip PoPs; Warm and
 Cold collapse to one cost ([One route cost](/quest/m1/route-cost.md));
-`--hop` removal and One route cost land on their own. Decided 2026-10-06: a
+One route cost lands on its own (`--hop` was replaced by `--epoch` in #4969). Decided 2026-10-06: a
 path plus its [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs) is
 a source's identity, whoever serves it.
 Anything specific to moq.pro's deployment is planned in moq.pro.
@@ -139,7 +139,6 @@ Once every child has landed:
 ## Related
 
 - [P2P](/quest/m3/p2p/README.md) - browser and native peers that become routing nodes over this layer
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - redundant publishers share an explicit epoch
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static cost
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch

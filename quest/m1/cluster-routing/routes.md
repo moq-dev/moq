@@ -7,8 +7,8 @@ lite-07 (the current wip version, decided 2026-10-05), for every session. A ROUT
 origin node; an ANNOUNCE says a prefix lives at a route's node and carries no
 path. A link flap or relay loss sends one ROUTE change per origin whose best
 route changed, never a re-announce per broadcast; ending a broadcast reaches
-each node about once and nothing hunts; failover to another neighbour is
-seamless; and no state of disagreeing neighbours keeps a dead broadcast
+each node about once and nothing hunts; failover to another neighbour with
+the same epoch is seamless; and no state of disagreeing neighbours keeps a dead broadcast
 alive.
 
 ## Plan
@@ -22,7 +22,11 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   it; the bit rides UPDATE so a route moving between a mesh path and a CDN
   fallback changes it without retracting its announces.
   ANNOUNCE_START carries the prefix (keeping today's Path Base/Keep
-  compression), a Route ID, and the origin's cost for that prefix.
+  compression), a Route ID, the origin's cost for that prefix, and the epoch,
+  and lite-07's restart message from
+  [Restart](/quest/m0/broadcast-epoch/restart.md) keeps its meaning. On a
+  route without an epoch, the source is the origin node and its ANNOUNCE: a
+  new one at the same path is a restart.
   ANNOUNCE_UPDATE re-prices it and ANNOUNCE_END ends one broadcast while the
   route stays up. An announce never changes its Route ID: another origin
   serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
@@ -68,9 +72,10 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   No per-announce seqno.
 - Origin selection keeps `route_order`'s shape and swaps its inputs: the
   candidates become the origin nodes announcing the path, ranked by longest
-  prefix, then the link's preference
+  prefix, then the newest epoch, then the link's preference
   ([Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md)), then the
-  route metric to the node, then the path-keyed rendezvous hash.
+  route metric to the node, then the path-keyed rendezvous hash, with the
+  origin node id breaking a full tie.
 - Down-only bit: set on a route learned on an upstream link, kept across
   other links, and a route carrying it is never sent on an upstream link
   (extending the `upstream` link mark in `doc/bin/relay/cluster.md`).
@@ -80,7 +85,7 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   A relay advertising routes to a client sends them as usual; node ids reveal
   nothing about the backbone.
 - Every hop re-selects; SUBSCRIBE names no origin, and the reply names none
-  either: any route announcing a path resumes it.
+  either: any route announcing a path under the same epoch resumes it.
 - Mixed versions: a lite-06 peer keeps today's path vector, translated at the
   relay that speaks both, for the rollout window only.
 
@@ -121,3 +126,7 @@ release.
 ## Required
 
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - the numbers that confirm the design before the wire is written
+
+## Related
+
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - the lite-07 restart message ANNOUNCE_START sits beside

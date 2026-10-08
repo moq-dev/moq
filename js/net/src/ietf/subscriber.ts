@@ -14,10 +14,10 @@ import {
 	sessionCause,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import { type Cursor, Reader, type Stream } from "../stream.ts";
+import { type Cursor, Reader, type Stream, UnexpectedEnd } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Milli, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
@@ -28,7 +28,7 @@ import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.
 import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
-import { decodeObjectTime, Frame, type Group as GroupMessage } from "./object.ts";
+import { decodeObjectTime, Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -132,10 +132,6 @@ export class Subscriber {
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
 
-	// A random Hop ID of this connection's own, written as the first hop of any path that
-	// names no publisher, so a publisher that reconnects reads as a new one.
-	#stamp = randomHop();
-
 	// Paths with a legacy PUBLISH_NAMESPACE request in flight, reserved synchronously.
 	// The count below is only taken once the OK is written, and two requests that both
 	// got past the duplicate check before either attached would both take one.
@@ -199,16 +195,10 @@ export class Subscriber {
 		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
 	}
 
-	/**
-	 * The route an advertisement carries; one without a path is free. A path that names no
-	 * publisher, or none at all, gets this connection's stamp in front of a 0.
-	 */
+	/** The route an advertisement carries; one without a path is anonymous and free. */
 	#route(advert: Cluster.Advert | undefined): Route {
-		if (advert === undefined) return { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
-		// A full chain, or a stamp colliding with an entry (a 1-in-2^53 draw), keeps the
-		// path as sent.
-		const hops = stampHops(advert.hops, this.#stamp) ?? [...advert.hops];
-		return { hops, cost: { warm: advert.cost, cold: advert.cost } };
+		if (advert === undefined) return { hops: [UNKNOWN_HOP], cost: Cost.zero };
+		return { hops: advert.hops, cost: { warm: advert.cost, cold: advert.cost } };
 	}
 
 	/**
@@ -1081,20 +1071,28 @@ export class Subscriber {
 		};
 
 		try {
-			// FIRST_OBJECT clear says this stream starts partway through the group, which the
-			// draft lets a publisher do to answer a filter. Nothing above here can use it: the
-			// objects that would arrive are not decodable without the missing head, and a group
-			// is the unit an application resyncs on. Drop it and pick up at the next group, the
-			// same degradation as a publisher that no longer holds the head.
+			// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
+			// through the group. The first Object ID is absolute either way, and IDs start
+			// at 0, so a clear bit on object 0 is still the whole group. Any other first ID,
+			// or a stream with no object, has a hole at the front: drop it and pick up at
+			// the next group.
 			//
-			// This only saves reading a stream we would throw away. The bit is the publisher's
-			// claim, so what is enforced is the object ids themselves: `Frame.decode` holds every
-			// object to starting at 0 and incrementing by 1, whatever the header said and on the
-			// drafts that have no such bit to read.
+			// Drafts before the bit cannot say this in the header. A non-zero delta on the
+			// first object is the same hole, and the catch below drops that stream too. A
+			// later gap, or a header that claimed the group starts at object 0, still fails
+			// it: `Frame.decode` refuses every non-zero delta.
 			if (!group.flags.firstObject) {
-				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
-				stream.stop(new Error("a group must start at object 0"));
-				return;
+				let id: bigint | undefined;
+				try {
+					id = await stream.peekU62();
+				} catch (err: unknown) {
+					if (!(err instanceof UnexpectedEnd)) throw err;
+				}
+				if (id !== 0n) {
+					console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+					stream.stop(new Error("a group must start at object 0"));
+					return;
+				}
 			}
 
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
@@ -1144,6 +1142,15 @@ export class Subscriber {
 			open().close();
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
+			// The producer is still unopened only when the first object failed. On a draft
+			// with no FIRST_OBJECT bit, that non-zero delta is a headless group: drop the
+			// stream and leave the subscription up for the next group. Delivering the
+			// object would renumber a P-frame as the keyframe the group opens with.
+			if (producer === undefined && e instanceof ObjectIdGap && !hasFirstObjectBit(this.#session.version)) {
+				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+				stream.stop(new Error("a group must start at object 0"));
+				return;
+			}
 			if (e instanceof ProtocolViolation || (e instanceof StreamError && e.code === StreamCode.MalformedTrack)) {
 				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);

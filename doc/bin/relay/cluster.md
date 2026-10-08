@@ -61,12 +61,6 @@ A route whose original publisher (its first hop) changes is updated in place on
 both wire protocols, so the broadcast never briefly vanishes downstream, and
 subscriptions in flight carry on through it.
 
-A publisher whose protocol names no hop (moq-transport without the cluster
-extension, moq-lite 01 through 03, or a peer that sends 0) gets a random first
-hop from the relay it connects to, fresh for each connection, followed by a 0.
-Its reconnect is therefore a new first hop downstream, a reprice on the same
-connection stays in place, and the 0 keeps it ranked as anonymous.
-
 ## Topology
 
 List the peers each relay dials. That's the whole topology: a relay dials only
@@ -109,8 +103,11 @@ The mark belongs to the link, whichever side dialed. A peer this relay dials
 is upstream when its `connect` or `connect_api` entry says so. A peer that
 dials in is upstream when its [grant](/bin/relay/auth#the-contract) sets
 `"upstream": true` beside `"peer": true`, so an edge whose auth server grants
-that to core certificates treats a core that dials it as upstream too. A
-relay that predates the mark treats every link as transit, so a cluster
+that to core certificates treats a core that dials it as upstream too.
+`moq auth serve --mtls-peer --mtls-upstream` grants it to every certificate,
+so use it only where nothing but cores dial in with mTLS: on a hub that
+leaves dial into, it marks every leaf upstream, and the hub stops forwarding
+between them. A relay that predates the mark treats every link as transit, so a cluster
 migrates one region at a time.
 
 Which relay dials which is still the peer list's job: there are no roles and
@@ -282,10 +279,12 @@ URL, `token` on a peer object, or a shared `cluster.token` file for every
 listed peer). The
 accepting relay admits a peer through the same lease as any client: its
 certificate is reported to the auth server, which grants it, so a mesh needs
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server of
-your own that grants the cluster CA) behind `--auth-url`. A relay on
-`--auth-public '**'` admits peers through that grant instead, as long as they
-send no `cluster.token`: public rules refuse a token. LAN peers
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` (or a
+server of your own that grants the cluster CA with `peer: true`) behind
+`--auth-url`. A relay on `--auth-public '**'` admits peers through that grant
+instead, as long as they send no `cluster.token`: public rules refuse a token.
+Such a peer is admitted as a client, so what it forwards counts as ingested
+here. LAN peers
 authenticate with the mDNS credential on `/.cluster/<credential>`, a secret
 the relay minted for itself and checks locally, and never receive
 `cluster.token`. Dials retry forever with capped backoff, so a rejected peer
@@ -294,9 +293,9 @@ is loud in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls
 A relay records whether each route entered here or came from a peer, which the
 hop list alone cannot say: a client and a peer each add one hop. Routes over a
 dial this relay made, and over an accepted LAN peer, count as a peer's. An
-accepted peer counts only when its grant sets `peer: true`; otherwise it looks
-like a client ingesting here. An embedder reads this as `Route::source()` and
-filters with `origin::Consumer::local()`.
+accepted peer counts only when its grant sets `peer: true`, as `--mtls-peer`
+does; otherwise it looks like a client ingesting here. An embedder reads this
+as `Route::source()` and filters with `origin::Consumer::local()`.
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.

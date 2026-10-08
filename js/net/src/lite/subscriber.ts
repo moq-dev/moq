@@ -7,7 +7,7 @@ import * as DatagramStream from "../datagram_stream.ts";
 import type * as Epoch from "../epoch.ts";
 import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type OpenOptions, type Reader, Stream } from "../stream.ts";
@@ -143,10 +143,6 @@ export class Subscriber {
 	// once and asks for it on every request, so a later epoch never feeds an older handle.
 	#epochs = new Map<Path.Valid, Epoch.Valid>();
 
-	// A random Hop ID of this connection's own, written as the first hop of any chain that
-	// names no publisher, so a publisher that reconnects reads as a new one.
-	#stamp: Hop;
-
 	// Dedup in-flight one-shot fetches, keyed by [broadcast, track, sequence]. Concurrent (or
 	// repeat, while still open) fetchGroup() calls for the same group share one FETCH stream and
 	// each get an independent mirror; the entry is evicted once the group closes.
@@ -181,7 +177,6 @@ export class Subscriber {
 		this.#quic = quic;
 		this.version = version;
 		this.hop = hop;
-		this.#stamp = randomHop();
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
 	}
@@ -271,13 +266,13 @@ export class Subscriber {
 					// they go on record and obey the same one-per-path rule: the initial set
 					// naming a path twice is the same violation as two ANNOUNCE_STARTs for it,
 					// and the record is what catches either. Draft01/02 carry no hop ids and no
-					// ANNOUNCE_OK, so this connection's stamp is the first hop.
+					// ANNOUNCE_OK, so nothing names the publisher.
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						const route = { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
+						const route = { hops: [UNKNOWN_HOP], cost: Cost.zero };
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { live, route, captures });
@@ -413,18 +408,15 @@ export class Subscriber {
 					continue;
 				}
 
-				// The first hop is the original publisher; an empty chain means the peer itself
-				// originated it. One that names nobody (lite-01..03, or a peer reporting 0)
-				// gets this connection's stamp in front of its 0.
-				const fullHops = stampHops(
+				const fullHops =
 					hops !== undefined && responderOrigin !== undefined
 						? [...hops, responderOrigin]
-						: [...(hops ?? [])],
-					this.#stamp,
-				);
+						: [...(hops ?? [])];
+				// A received empty list is the anonymous mark, not a local announcement.
+				if (fullHops.length === 0) fullHops.push(UNKNOWN_HOP);
 				// Appending a withheld AnnounceOk(0) onto a 32-entry list is the same
 				// drop Rust's Hops::push makes: do not expose an overlong chain.
-				if (fullHops === undefined || fullHops.length > MAX_HOPS) {
+				if (fullHops.length > MAX_HOPS) {
 					console.debug(`announced: broadcast=${path} dropped (hop chain at MAX_HOPS)`);
 					advertised.set(path, {
 						live: false,

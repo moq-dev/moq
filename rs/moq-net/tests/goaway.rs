@@ -342,7 +342,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		// Subscribe BEFORE the GOAWAY and receive a first group.
 		let sub = sub_origin.consume();
 		sub.routed("test").await.expect("route announced");
-		let bc = sub.request_broadcast("test").await.expect("broadcast resolves");
+		let bc = sub.request_broadcast("test", None).await.expect("broadcast resolves");
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut group = track.append_group().expect("append group");

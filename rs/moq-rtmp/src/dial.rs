@@ -227,10 +227,12 @@ impl<S: Stream> Client<S> {
 		let queued = std::mem::take(&mut self.work);
 		self.drain(queued).await?;
 
-		let mut export = FlvExport::new(moq_mux::Source::new(origin, path))
+		let source = moq_mux::Source::new(origin, path);
+		let catalog = source
+			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await
-			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
-			.with_max_delay(self.export_max_delay);
+			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
+		let mut export = FlvExport::new(source, catalog).with_max_delay(self.export_max_delay);
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 
@@ -602,7 +604,7 @@ mod tests {
 			.await
 			.expect("client republish timed out")
 			.expect("broadcast announced in client origin");
-		let broadcast = announced.request_broadcast("pulled/cam0").await.unwrap();
+		let broadcast = announced.request_broadcast("pulled/cam0", None).await.unwrap();
 
 		// It should carry a hang catalog track (proof the FLV demux produced real
 		// media on the far side): subscribe to it and read one catalog frame.

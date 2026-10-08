@@ -215,7 +215,7 @@ in
             "${pkgs.moq-cli}/bin/moq auth serve"
             "--listen 127.0.0.1:${toString cfg.auth.port}"
             "--key ${authKey}"
-            "--mtls-publish '**' --mtls-subscribe '**'"
+            "--mtls-publish '**' --mtls-subscribe '**' --mtls-peer"
           ]
           ++ lib.optionals (cfg.auth.publicPath != null) [
             "--public-publish '${publicPattern}' --public-subscribe '${publicPattern}'"

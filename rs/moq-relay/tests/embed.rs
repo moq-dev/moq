@@ -283,7 +283,7 @@ async fn embed_and_stop(mut config: Config) {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");

@@ -296,7 +296,7 @@ async fn subscribe_named(consume: moq_net::origin::Consumer, path: String, stats
 		.routed(path.as_str())
 		.await
 		.ok_or_else(|| anyhow::anyhow!("target broadcast was never announced: {path}"))?;
-	let broadcast = consume.request_broadcast(path.as_str()).await?;
+	let broadcast = consume.request_broadcast(path.as_str(), None).await?;
 	drain(broadcast, &stats).await
 }
 
@@ -352,7 +352,7 @@ async fn subscribe(
 
 	let mut selected = pool.len() as u64;
 	for path in pool {
-		let Ok(broadcast) = consume.request_broadcast(path.as_str()).await else {
+		let Ok(broadcast) = consume.request_broadcast(path.as_str(), None).await else {
 			continue;
 		};
 		spawn_drain(&mut tasks, path, broadcast, stats.clone());
@@ -370,7 +370,7 @@ async fn subscribe(
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}
-		let Ok(broadcast) = consume.request_broadcast(path.as_str()).await else {
+		let Ok(broadcast) = consume.request_broadcast(path.as_str(), None).await else {
 			continue;
 		};
 		selected += 1;

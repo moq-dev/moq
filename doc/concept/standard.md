@@ -87,8 +87,11 @@ A moq-lite datagram is a single-frame group, so on moq-transport it travels
 as an `OBJECT_DATAGRAM` at object 0 whose Group ID is the sequence, and a relay
 forwards it without renumbering. A datagram carrying any other Object ID, or a
 status other than Normal, is dropped, as is one for an alias not yet bound. A
-malformed one closes the session. Rust and JavaScript both carry datagrams on
-every supported draft.
+malformed one closes the session. Datagrams are never fetchable: a fetch
+object flagged as a datagram fails only that fetch, as `NotFetchable`, and a
+relay answers its own downstream FETCH with `DOES_NOT_EXIST`, or `NOT_FETCHABLE`
+to a moq-lite-07 peer. Rust and JavaScript both carry datagrams on every
+supported draft.
 
 A client may present one credential in its `SETUP` with the `AUTHORIZATION
 TOKEN` option. The server reads a value (`USE_VALUE`, or `REGISTER`, which it
@@ -120,13 +123,39 @@ before a `SUBSCRIBE_NAMESPACE` is caught up, and
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension: it encrypts application
 payloads so relays still forward named tracks they cannot read.
 
+### Deliberate deviations
+
+These three answers differ from the draft on purpose. They are the
+product's model, not bugs, and the relay does not change them.
+
+- **One publisher per path.** A broadcast path names one piece of content, so a
+  `SUBSCRIBE` goes to one route, not to every publisher whose namespace matches.
+  [Draft 16 §8.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-16.html#section-8.5)
+  requires the relay to send that `SUBSCRIBE` to all matching publishers. See
+  [publisher epochs](/concept/moq-lite#publisher-epochs) for how that one route
+  is chosen.
+- **Unknown object properties are dropped.**
+  [Draft 18 §2.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-18.html#section-2.5)
+  says a relay that does not understand a property still forwards and caches
+  it. The model keeps a payload and a timestamp, and
+  [leaves other per-object metadata out](/concept/moq-lite#what-moq-lite-leaves-out),
+  so a property it does not understand stops at the session that delivered it.
+- **`SUBSCRIBE_OK` before an old source answers.** moq-lite 01 through 04 have
+  no track stream, so the relay cannot learn from that source whether the track
+  exists before answering. A moq-transport subscriber gets `SUBSCRIBE_OK`
+  before the source answers, and a missing track ends as `PUBLISH_DONE`, not
+  `REQUEST_ERROR`.
+  [Draft 16 §8.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-16.html#section-8.4)
+  requires an established upstream subscription before `SUBSCRIBE_OK`. From
+  moq-lite 05 the track stream answers first, and a missing track is refused
+  before `SUBSCRIBE_OK`.
+
 ## MSF
 
 The MoQ Streaming Format is a catalog, playing the role HLS playlists and SDP
 do elsewhere. It overlaps with the [hang catalog](/concept/hang) and the two
 will likely converge. The tools track draft-01 and hide the version on the
 wire, so draft-00 catalogs still decode and init data always arrives inline.
-The `stalled` rendition hint is shared between the two formats.
 
 ## LOC
 
