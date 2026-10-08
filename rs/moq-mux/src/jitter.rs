@@ -315,6 +315,20 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			return Ok(self.queue(key, arrival, previous.generation, deadline, false));
 		}
 		let deadline = self.deadline(&clock, arrival.decode);
+		// A track still on an earlier generation, crossing no restart, that the previous clock
+		// refused and the current one does not land is on the old timeline: it is late, and
+		// says nothing about the current clock.
+		let behind = self
+			.tracks
+			.get(&key)
+			.filter(|track| track.generation != clock.generation && track.restart == arrival.restart);
+		if let Some(track) = behind
+			&& !self.delay.is_zero()
+			&& !self.lands(deadline, arrival.arrived)
+		{
+			let generation = track.generation;
+			return Ok(self.queue(key, arrival, generation, None, false));
+		}
 		if self.released && !self.delay.is_zero() {
 			self.steer(&key, deadline, &arrival)?;
 		}
@@ -1059,6 +1073,44 @@ mod tests {
 	async fn a_track_crossing_before_any_lead_keeps_the_generations_in_turn() {
 		let (out, _) = cross(10, 1).await;
 		assert!(out.is_sorted(), "a generation went out after the next: {out:?}");
+	}
+
+	/// A restart from 10 s onto a timeline at `to`, then, once the new generation's first frame
+	/// went out, a frame of the old timeline from a track that crossed no restart: it lands on
+	/// neither clock, so it drops as late without steering, and the track's next frame on the
+	/// new timeline still joins it.
+	async fn stray(to: u64) {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.expect([1]);
+		buffer.push(1, arrival(start, 10_000, "v")).unwrap();
+		buffer.push(2, arrival(start, 10_000, "d")).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["v", "d"]);
+
+		let resume = start + Duration::from_secs(1);
+		tokio::time::advance(resume - Instant::now()).await;
+		buffer.push(1, after(1, arrival(resume, to, "v'"))).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("v'", 1)]);
+
+		let now = Instant::now();
+		assert_eq!(buffer.push(2, arrival(now, 10_040, "d")).unwrap(), Push::Late);
+		assert!(buffer.is_empty(), "the old frame was queued on the new clock");
+		assert!(buffer.steer.floor.is_none(), "the old frame was steered on");
+		assert_eq!(buffer.push(2, arrival(now, to + 40, "d'")).unwrap(), Push::Queued);
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("d'", 1)]);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_old_frame_after_a_forward_restart_is_not_steered_on() {
+		stray(20_000).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_old_frame_after_a_backward_restart_is_dropped() {
+		stray(0).await;
 	}
 
 	/// A skipped group whose timeline carried on keeps the clock: a frame it made late is
