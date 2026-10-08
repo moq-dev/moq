@@ -44,6 +44,13 @@ The cut:
   rather than misparse; no compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
   passes.
+- Preserve SETUP's rule: "a receiver MUST treat a longer SETUP as a protocol
+  violation and MAY reject it based on the length prefix alone" (65,536
+  bytes). The general cap proposed by request caps (#4820) only permits
+  rejection (MAY), so it does not replace SETUP's stronger requirement.
+  Remove the SETUP sentence only if the general rule requires the same
+  rejection. If SETUP keeps its own rule, the lite-07 changelog still names
+  that rejection, not only the cap.
 
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.
@@ -61,12 +68,13 @@ is published; older versions are unchanged.
 ## Required
 
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - lite-07 loses NO_CAPACITY and stamping
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
+- [lite-07 Live flag](/quest/m1/lite-live.md) - SUBSCRIBE carries `Live` apart from its floor
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Live media time](/quest/m1/subscribe-live-time.md) - SUBSCRIBE_OK carries the publisher's live media time
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
 - [One route cost](/quest/m1/route-cost.md) - ANNOUNCE carries one cost
+- [Claim-served epochs](/quest/m0/broadcast-epoch/claim-epochs.md) - TRACK_INFO carries the epoch of the instance that answered
 
 ## Related
 

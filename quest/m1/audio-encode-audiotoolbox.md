@@ -3,7 +3,10 @@
 ## Goal
 
 On macOS and iOS, `Codec::Aac` encodes through AudioToolbox at the input's
-layout, up to 7.1, and the result plays in the browser, `moq play`, and OBS.
+layout, mono through 5.1 and 7.1, and the result plays in the browser,
+`moq play`, and OBS. 6.1 is refused: since #4973 a synthesized ASC names no
+program config element. Carrying the converter's magic cookie verbatim would
+lift that once a caller needs it.
 
 ## Plan
 

@@ -142,7 +142,7 @@ case "$action" in
         if wants '(moq-wasm|moq-mux|moq-ffi)'; then just rs wasm-fix; fi
         ;;
     test)
-        # A selection can hold nothing testable (moq-wasm has no host tests), and
+        # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
         just rs test "${flags[@]}"

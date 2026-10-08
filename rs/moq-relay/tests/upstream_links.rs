@@ -171,7 +171,7 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 	let broadcast = within(&format!("route to {path}"), consumer.routed_broadcast(path))
 		.await
 		.unwrap_or_else(|err| panic!("{path} unroutable: {err}"));
-	let subscription = moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1));
+	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1));
 	let mut track = within(
 		&format!("subscribe to {path}"),
 		broadcast.track("video").expect("track handle").subscribe(subscription),
@@ -191,22 +191,20 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 /// Each path `origin` routes now, with its route's hop ids, oldest first.
 ///
 /// Read from a fresh cursor's initial set, which reflects the route table as it
-/// stands, unlike a live cursor that holds a best-route change back briefly.
-async fn routes(origin: &origin::Producer) -> BTreeMap<String, Vec<u64>> {
+/// stands, unlike a live cursor that holds a best-route change back briefly. The
+/// cursor replays that set when it registers, all starts and none held, so it
+/// drains without waiting.
+fn routes(origin: &origin::Producer) -> BTreeMap<String, Vec<u64>> {
 	let mut announced = origin.consume().announced();
 	let mut routes = BTreeMap::new();
-	loop {
-		match announced.next().await.expect("origin closed") {
-			announce::Event::Start(announce) | announce::Event::Update(announce) => {
-				let hops = announce.route.hops.iter().map(|hop| hop.id()).collect();
-				routes.insert(announce.prefix.as_str().to_string(), hops);
-			}
-			announce::Event::End(announce) => {
-				routes.remove(announce.prefix.as_str());
-			}
-			announce::Event::Live => return routes,
-		}
+	while let Some(event) = announced.try_next() {
+		let announce::Event::Start(announce) = event else {
+			panic!("an initial set is only starts: got {event:?}");
+		};
+		let hops = announce.route.hops.iter().map(|hop| hop.id()).collect();
+		routes.insert(announce.prefix.as_str().to_string(), hops);
 	}
+	routes
 }
 
 /// Wait until `origin`'s routes satisfy `ready`, and return them.
@@ -219,7 +217,7 @@ async fn routes_when(
 		// Created first, so a change landing between two reads still wakes us.
 		let mut changes = origin.consume().announced();
 		loop {
-			let routes = routes(origin).await;
+			let routes = routes(origin);
 			if ready(&routes) {
 				return routes;
 			}

@@ -25,6 +25,10 @@ benchmark swept over requesters and route-table churn would show whether the
 re-mint is a real slope or noise, and it is the same benchmark that would
 show the replacement is cheaper.
 
+The filtered front a peer session leaves behind, folded in here on
+2026-10-05, moved to [Idle fronts](/quest/m0/idle-fronts.md) on 2026-10-07:
+it ends once unread like any other front.
+
 Public API: no signature change expected. `routed_broadcast` and
 `request_broadcast` keep their contracts; only where the waiting happens
 changes.
@@ -33,7 +37,3 @@ Decided in the 2026-09-30 audit: this may move to m2 if that benchmark shows
 the retry loop's re-mint is noise. Fronts are now keyed by effective exclusion
 (`Horizon::effective`), so viewers share them; the `origin/viewer_*` benches
 do not cover the retry loop.
-
-## Required
-
-- [Wildcard](/quest/m0/wildcard/README.md) - `routed_broadcast`, `request_broadcast`, and the pool code this reworks exist only on its line branch

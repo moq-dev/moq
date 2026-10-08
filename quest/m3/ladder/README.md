@@ -18,8 +18,7 @@ state.
 Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer for the
 publisher-side ladder.
 
-The catalog and player half is the rendition `enabled` flag
-([enabled flag](/quest/m1/catalog-enabled.md)), which replaces the `stalled`
+The catalog and player half is the rendition `enabled` flag, which replaced the `stalled`
 state shipped in [moq#2865](https://github.com/moq-dev/moq/pull/2865):
 `enabled: false` means no frames are coming and a viewer must not select the
 rendition. Routing, decoder, and presentation identities are split so a
@@ -39,27 +38,25 @@ alone. Send order is a different number today: `Priority::cmp`
 (`rs/moq-net/src/lite/priority.rs`) ranks first by `Priority.track`, which is
 the subscriber's priority from SUBSCRIBE (`msg.priority` in
 `rs/moq-net/src/lite/publisher.rs`), not the publisher's `Info::priority`.
-The controller quest makes the publisher's number the tiebreak after it, so
-the same number decides what to produce and, among equal subscriber
-priorities, what to send first;
-[Scope track priority](/quest/m1/track-priority-scope.md) settles what that
-ranking means on the first mile versus a cluster session before the
-controller depends on it.
+[Scope track priority](/quest/m1/track-priority-scope.md) owns making the
+publisher's number the tiebreak after it, so the same number decides what to
+produce and, among equal subscriber priorities, what to send first; the
+controller only consumes that tiebreak.
 
 
 ### Adaptive bands
 
-`moq_transcode::Rung::bitrate` (`rs/moq-transcode/src/ladder.rs:14-17`) stays
+`moq_transcode::Rung::bitrate` (`rs/moq-transcode/src/ladder.rs`) stays
 the configured maximum and never follows the instantaneous target. For a
 rendition with configured maximum `max` and the next lower rendition's
 `lower`:
 
 ```text
-stall = (max + 2 * lower) / 3
+disable = (max + 2 * lower) / 3
 ```
 
 The lowest rendition takes `lower = 0`, so its boundary is `max / 3`. An
-encoder may adapt within `[stall, max]`; below the boundary the rung is
+encoder may adapt within `[disable, max]`; below the boundary the rung is
 disabled (`enabled: false`) and stops encoding, and it is enabled again only
 once a target at or above the same boundary is successfully applied. Catalog state follows the last target the encoder
 *accepted*, not the one the controller requested, so a transient rate-control

@@ -1,0 +1,5 @@
+connections = 65
+fanout = "audio"
+fps = 50
+frame_size = 200
+group_size = 0

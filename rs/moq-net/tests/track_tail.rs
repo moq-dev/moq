@@ -19,7 +19,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(10);
 const PAYLOAD: &[u8] = b"frame";
 
-/// How long a subscriber waits for a group it cannot account for, with no max age set.
+/// How long a subscriber waits for a group it cannot account for, with no max delay set.
 const GRACE: Duration = Duration::from_secs(1);
 
 /// moq-lite drafts with and without SUBSCRIBE_END, and IETF drafts over the control stream
@@ -85,7 +85,7 @@ async fn connect(version: &str) -> Pair {
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

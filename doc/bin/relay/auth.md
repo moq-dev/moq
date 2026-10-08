@@ -243,11 +243,21 @@ decision: the relay reports its facts in the request's `tls` and enforces the
 grant it gets back. `moq auth serve` grants a certificate only what
 `--mtls-publish` and `--mtls-subscribe` name, empty by default. Public rules
 ignore certificates, so a relay or `moq --listen` on `--auth-public` refuses
-to start with `listen.tls.root` or `web.https.root`.
+to start with `listen.tls.root` or `web.https.root`. Only the QUIC listener
+verifies `listen.tls.root`, so a stream-only relay (no `listen.bind`) refuses
+to start with it too.
 
 Cluster peers are admitted the same way, so a mesh runs
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server
-granting its cluster CA everything); see [Clustering](/bin/relay/cluster).
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` (or a
+server granting its cluster CA everything with `peer: true`); see
+[Clustering](/bin/relay/cluster). `--mtls-peer` marks every certificate as
+another relay, whose broadcasts entered the cluster elsewhere; leave it off
+when certificates identify clients. `--mtls-upstream` also marks those relays
+[upstream](/bin/relay/cluster#upstream-links) and needs `--mtls-peer`.
+Adding or removing either flag on a running server ends each live mTLS session
+at its next re-check, from the `--revalidate` cadence or a
+[push](#the-contract) such as `moq auth revalidate`, so the mesh redials once;
+until then, a session keeps its old marks.
 The LAN mesh credential on `/.cluster/<credential>` stays relay-internal: it
 is a secret the relay minted for itself, checked locally, and never a request
 to the server.
@@ -270,7 +280,7 @@ hold, answered over the contract above.
 moq auth serve --listen 127.0.0.1:4440 \
   --key-dir /etc/moq/keys \
   --public-subscribe 'anon/**' --public-publish 'anon/**' \
-  --mtls-publish '**' --mtls-subscribe '**' \
+  --mtls-publish '**' --mtls-subscribe '**' --mtls-peer \
   --tier edge --expires 1d --revalidate 1m --limit-remote 64
 ```
 
@@ -298,7 +308,7 @@ certificate, not both.
 
 `--mtls-*` and `--public-*` are rooted at `/`, like a token with an empty root,
 and a session they reach nothing at is refused. Cluster peers are admitted by
-certificate; a mesh needs `--mtls-publish '**' --mtls-subscribe '**'`.
+certificate; a mesh needs `--mtls-publish '**' --mtls-subscribe '**' --mtls-peer`.
 
 Every grant carries `--tier`. As in 0.14, nothing is re-checked or closed by
 default: a session lives until its token's `exp` or its certificate's notAfter.
@@ -336,7 +346,7 @@ anonymous rules move too.
 | `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe`, as patterns |
 | `--auth-public-api URL` | your own server answering the contract |
 | `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
-| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**'` |
+| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-peer` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
 | `--auth-domain` | your server reads `server_name` and decides |
 

@@ -55,18 +55,22 @@ Interview paper trail (✅ marks the choice):
 
 Remaining:
 
-- Land each line's umbrella PR with `/quest-complete`, then delete its branch:
-  #4403 wildcard, #4034 archive, #4039 auth, #4079 cpp, #4519 ffi-shape,
-  #4080 obs-moq-video, #4133 qos (held until
-  [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed),
-  #4640 tstd. #4162 (audio-jitter-target), #4180 (transport-upgrade), #4437 rs2ts
-  (with #4438 folded in), and #4653 (test-flakes-2) landed.
-- Fold #4255 (archive/track-timeline) into the archive branch before #4034
-  lands; as of the 2026-10-05 audit it has not happened and #4034 is a draft.
-- Before a line lands and its branch is deleted, merge or retarget every child
-  PR still based on it, or GitHub closes it with the branch. As of the
-  2026-10-05 audit: #4645 (tstd/delay, retarget to `main` after #4640),
-  #4732 (ffi-shape/request-accept), and #4675 (auth/request-token).
+- Land each line's umbrella PR with `/quest-complete`, then delete its branch.
+  Landed so far: #4403 wildcard, #4034 archive (with #4255 folded in), #4080
+  obs-moq-video, #4162 audio-jitter-target, #4180 transport-upgrade, #4437
+  rs2ts (with #4438 folded in), #4640 tstd, and #4653 test-flakes-2. As of
+  2026-10-06 four lines remain, each waiting before it lands:
+  - #4039 auth waits on its `wip-version.md` child: AUTH still turns on for
+    lite-06, but wire work belongs on the wip version.
+  - #4079 cpp waits on its `cpp-generated-newline.md` child: `OBS (macOS)`
+    fails until the generated-newline fork tag is cut.
+  - #4519 ffi-shape waits on
+    [Bindings](/quest/m0/broadcast-epoch/bindings.md).
+  - #4133 qos waits on [Lag across a splice](/quest/m1/qos/lag-splice.md).
+- Child PRs still based on a line merge into it first, or GitHub closes them
+  with the branch: #4675 (auth/request-token) needs the updated auth line
+  merged in. #4645 (tstd/delay) now targets `main`; #4732 and #4863
+  landed.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.

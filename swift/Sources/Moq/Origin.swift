@@ -132,8 +132,7 @@ public final class OriginConsumer: Sendable {
 }
 
 /// A stream of announce events. Iterate directly:
-/// `for try await event in announced { ... }`. A `.live` event follows the routes
-/// live at subscribe time, so a loop can `break` there to list what is live.
+/// `for try await event in announced { ... }`.
 /// The sequence ends when the origin closes; cancelling the consuming task
 /// cancels the subscription.
 public final class AnnounceConsumer: AsyncSequence, Sendable {

@@ -230,8 +230,8 @@ impl Client {
 		self
 	}
 
-	/// Assign an origin (hop) id to the peers this client dials, used whenever a
-	/// peer doesn't declare one itself; see [`moq_net::Client::with_peer_hop`].
+	/// Pin the identity a dialed peer's routes are attributed to, for a peer whose
+	/// identity the caller has established; see [`moq_net::Client::with_peer_hop`].
 	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
 		self.moq = self.moq.with_peer_hop(hop);
 		self
@@ -1697,17 +1697,13 @@ mod tests {
 		websocket_handle.abort();
 		let _ = websocket_handle.await;
 
-		// Skip the caught-up marker; the first route event must be the announcement.
-		let update = loop {
-			match announcements.next().await.expect("origin closed") {
-				moq_net::announce::Event::Live => continue,
-				moq_net::announce::Event::Start(update) => break update,
-				event => panic!("expected announcement, got {event:?}"),
-			}
+		let update = match announcements.next().await.expect("origin closed") {
+			moq_net::announce::Event::Start(update) => update,
+			event => panic!("expected announcement, got {event:?}"),
 		};
 		assert_eq!(update.prefix.as_str(), "test");
 		let broadcast = sub_consumer
-			.request_broadcast("test")
+			.request_broadcast("test", None)
 			.await
 			.expect("broadcast resolves");
 		let mut track = broadcast
