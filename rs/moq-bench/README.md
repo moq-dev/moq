@@ -173,7 +173,7 @@ pinning once the relay grows a thread-per-core mode.
 Run the load from one machine and the sampler on the relay's host, then join
 the two JSONL files on `timestamp_ms` over the same steady-state window. Skip
 the `--startup` window while connections ramp. For latency on the lines inside
-that window, read `latency_interval_p50_ms`, `latency_interval_p90_ms`,
+the steady-state window, read `latency_interval_p50_ms`, `latency_interval_p90_ms`,
 `latency_interval_p99_ms`, and `latency_interval_max_ms`. Each is only the
 samples since the previous line, with `latency_interval_samples` as its count.
 The cumulative `latency_p*` fields still include the ramp, and `latency_samples`
