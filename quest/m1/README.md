@@ -166,13 +166,12 @@ blocks. The quests that gated m0 lines moved under them.
 - [Audio warmup](/quest/m1/audio-warmup.md) - a viewer joining an Opus rendition mid-stream never hears the unconverged first 80 ms
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - moq-gst picks the broadcast wall epoch; a restarted source is a new epoch, not a forward re-anchor
 - [TS passthrough](/quest/m1/ts-passthrough.md) - `--passthrough` carries the multiplex as whole packets, listed in an `m2ts` catalog section, and writes it back byte-identical (less late drops) on a fixed delay
-- [FLV export delay](/quest/m1/flv-export-delay.md) - FLV interleaves through the shared fixed-delay release stage
-- [MKV export delay](/quest/m1/mkv-export-delay.md) - MKV interleaves through the shared fixed-delay release stage
+- [FLV export delay](/quest/m1/flv-export-delay.md) - FLV interleaves through the shared jitter buffer
+- [MKV export delay](/quest/m1/mkv-export-delay.md) - MKV interleaves through the shared jitter buffer
 - [MKV lacing](/quest/m1/mkv-lacing.md) - laced MKV blocks import as one timed frame each, refused without DefaultDuration
 - [Release profile](/quest/m1/release-profile.md) - every release build gets fat LTO, one codegen unit, and stripping from the workspace profile instead of three script exports
 - [Size report](/quest/m1/size-report.md) - a nightly job reports every shipped artifact's size, native and JS, and alerts when one grows
 - [JS bundle trims](/quest/m1/js-bundle-trims.md) - no bowser, split pako, and lazy qmux and captions
-- [Slim Docker images](/quest/m1/docker-slim.md) - images carry only the package's nix closure, not ~170 MiB of nixos/nix
 - [Bindings size profile](/quest/m1/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [Go mirror delivery](/quest/m1/go-mirror-delivery.md) - the Go binding's staticlibs stop growing git history by ~210 MiB per release
 - [Relay iroh opt-in](/quest/m1/relay-iroh-opt-in.md) - moq-relay drops iroh from its defaults and shipped builds, while moq-cli keeps it for P2P

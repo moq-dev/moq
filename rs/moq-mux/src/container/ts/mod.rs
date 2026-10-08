@@ -25,6 +25,7 @@ mod import;
 mod mux_rate;
 mod programs;
 mod psi;
+mod schedule;
 mod si;
 
 // The `mpegts` catalog section (per-track PID + descriptors plus verbatim carriage
@@ -33,7 +34,7 @@ mod si;
 mod catalog;
 
 pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, SiEntry, Track, Verbatim};
-pub use export::*;
+pub use export::Export;
 pub use import::*;
 pub use programs::Programs;
 
@@ -41,5 +42,7 @@ pub mod stats;
 
 #[cfg(test)]
 mod export_test;
+#[cfg(test)]
+mod export_timing_test;
 #[cfg(test)]
 mod import_test;

@@ -370,3 +370,45 @@ test("truncated uni stream before SETUP is skipped", async () => {
 	const { early } = await exchangeSetup(pair.server, version, "test");
 	expect(early.length).toBe(0);
 });
+
+for (const [version, alpn] of [
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	for (const [value, nested] of [
+		[0, false],
+		[3, false],
+		[255, false],
+		[0, true],
+		[3, true],
+		[255, true],
+	] as const) {
+		if (nested && version === Version.DRAFT_18) continue; // FILL_PARAMETERS starts in draft-20.
+		test(`invalid ${nested ? "fill " : ""}GROUP_ORDER ${value} closes ${alpn}`, async () => {
+			const logged = spyOn(console, "error").mockImplementation(() => void 0);
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.server, { version });
+			const connection = new Connection({
+				url: new URL("https://example.com"),
+				quic: pair.server,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: false,
+			});
+			try {
+				const stream = await Stream.open(pair.client, { version });
+				await stream.writer.u53(3);
+				const params = nested ? [0x23, 3, 1, 0x22, value] : [0x22, value];
+				const body = [0, 1, 1, 97, 1, 98, 1, ...params];
+				await stream.writer.write(new Uint8Array([0, body.length, ...body]));
+				const info = await pair.client.closed;
+				expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
+			} finally {
+				logged.mockRestore();
+				connection.abort();
+			}
+		});
+	}
+}

@@ -613,7 +613,11 @@ impl Param for Fill {
 					buf.varint()?;
 				}
 				Framing::Byte => {
-					buf.u8()?;
+					if key == 0x22 {
+						super::GroupOrder::param_decode(&mut buf, version)?;
+					} else {
+						buf.u8()?;
+					}
 				}
 			}
 		}
@@ -631,6 +635,25 @@ mod fill_tests {
 	use super::*;
 
 	const NEW: Version = Version::Draft20;
+
+	#[test]
+	fn fill_rejects_invalid_group_order() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			for value in [0, 3, 255] {
+				let bytes = [3, 1, 0x22, value];
+				let mut r = Decoder::new(&bytes, version.into());
+				assert!(matches!(
+					Fill::param_decode(&mut r, version),
+					Err(DecodeError::InvalidValue)
+				));
+			}
+			for value in [1, 2] {
+				let bytes = [3, 1, 0x22, value];
+				let mut r = Decoder::new(&bytes, version.into());
+				assert_eq!(Fill::param_decode(&mut r, version).unwrap(), Fill::default());
+			}
+		}
+	}
 
 	fn round_trip(fill: Fill) -> Fill {
 		let mut buf = Vec::new();

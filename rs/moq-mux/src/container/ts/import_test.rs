@@ -12,6 +12,12 @@ use bytes::BytesMut;
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live edge:
 /// completeness has to be asked for.
 const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a drain waits for the next frame: past the recording delay, the mux-ahead
+/// window a multiplex rate adds on top of it, and the clip, so the first frame goes out,
+/// and then until output stops.
+const DRAIN: std::time::Duration = RECORDING_MAX_AGE
+	.saturating_mul(3)
+	.saturating_add(std::time::Duration::from_secs(1));
 
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
@@ -471,9 +477,10 @@ async fn import_export_import_roundtrip() {
 	let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
 	let mut out = BytesMut::new();
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
+	while let Ok(res) = tokio::time::timeout(DRAIN, exporter.next()).await {
 		match res.expect("exporter error") {
 			Some(frame) => out.extend_from_slice(&frame.payload),
 			None => break,

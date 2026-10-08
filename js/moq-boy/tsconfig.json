@@ -8,5 +8,5 @@
 		"emitDeclarationOnly": true,
 		"types": ["bun"]
 	},
-	"include": ["src", "../common/worklet.d.ts"]
+	"include": ["src"]
 }

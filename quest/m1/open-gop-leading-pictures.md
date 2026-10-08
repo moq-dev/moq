@@ -76,10 +76,6 @@ decode, and the JS test should drive the software decoder.
   group's leading pictures trimmed too, so an implementation that only trims
   the initial group fails. Both cases in both languages.
 
-## Required
-
-- [Fixed-delay release](/quest/m1/tstd/delay.md) - the TS export this trims lands with #4645
-
 ## Related
 
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the `recovery_frame_cnt > 0` case this rule does not cover
