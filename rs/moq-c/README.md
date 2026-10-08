@@ -117,7 +117,7 @@ int32_t moq_consume_catalog(uint32_t broadcast, moq_status_callback on_catalog, 
 int32_t moq_consume_catalog_cancel(uint32_t catalog);
 int32_t moq_consume_catalog_free(uint32_t catalog);
 int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_config *dst);
-int32_t moq_consume_video_stalled(uint32_t catalog, uint32_t index, bool *dst);
+int32_t moq_consume_video_enabled(uint32_t catalog, uint32_t index, bool *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 
 // Consuming: Video

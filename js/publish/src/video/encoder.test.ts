@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -488,83 +489,154 @@ test("frame sources retain their dimensions and nominal frame rate", async () =>
 	}
 });
 
-test.each(["encoder lag", "quiet startup"])("marks a rendition stalled for %s", async (reason) => {
-	const clock = spyOn(performance, "now").mockReturnValue(0);
-	// The fake holds every live output, like a throttled encoder that never hands frames to the session.
-	using _videoEncoder = installFakeVideoEncoder();
+// A viewer released before `enabled` keeps selecting a disabled rendition, so the last picture it
+// decodes has to be black rather than a frozen frame. The rendition stays in the catalog with its last
+// config, even once the capture is released.
+test("disabling encodes one black keyframe and keeps the rendition with enabled: false", async () => {
+	const encoded: { timestamp: number; keyFrame: boolean; black: boolean }[] = [];
+
+	class RecordingVideoFrame {
+		readonly timestamp: number;
+		readonly black: boolean;
+		constructor(data: unknown, init?: { timestamp?: number }) {
+			this.timestamp = init?.timestamp ?? 0;
+			this.black = data instanceof Uint8Array && data[0] === 0x10;
+		}
+		close(): void {}
+	}
+
+	class RecordingVideoEncoder {
+		state: CodecState = "unconfigured";
+		#output: VideoEncoderInit["output"];
+		#codec?: string;
+		#last = 0;
+
+		constructor(init: VideoEncoderInit) {
+			this.#output = init.output;
+		}
+
+		static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
+			return { supported: config.codec.startsWith("avc1") };
+		}
+
+		configure(config: VideoEncoderConfig): void {
+			this.state = "configured";
+			this.#codec = config.codec;
+		}
+
+		encode(frame: { timestamp: number; black?: boolean }, options?: VideoEncoderEncodeOptions): void {
+			this.#last = frame.timestamp;
+			encoded.push({ timestamp: frame.timestamp, keyFrame: !!options?.keyFrame, black: !!frame.black });
+		}
+
+		// Emits the newest frame, and reports the configured codec as Chrome does.
+		async flush(): Promise<void> {
+			const chunk = { type: "key", timestamp: this.#last, byteLength: 1, copyTo: () => {} };
+			this.#output(chunk as never, { decoderConfig: { codec: this.#codec } } as never);
+		}
+
+		close(): void {
+			this.state = "closed";
+		}
+	}
+
+	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
+	Object.defineProperty(globalThis, "VideoEncoder", {
+		configurable: true,
+		value: RecordingVideoEncoder,
+		writable: true,
+	});
+	const videoFrame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
+	Object.defineProperty(globalThis, "VideoFrame", {
+		configurable: true,
+		value: RecordingVideoFrame,
+		writable: true,
+	});
 
 	class Frame {
-		codedWidth = 640;
-		codedHeight = 480;
-		timestamp: number;
-		closed = false;
+		readonly timestamp: number;
 		constructor(timestamp: number) {
 			this.timestamp = timestamp;
 		}
 		clone(): Frame {
 			return new Frame(this.timestamp);
 		}
-		close(): void {
-			this.closed = true;
-		}
+		close(): void {}
 	}
 
 	const { Fanout } = await import("../fanout");
 	let controller!: ReadableStreamDefaultController<VideoFrame>;
-	const stream = new ReadableStream<VideoFrame>({
-		start: (c) => {
-			controller = c;
-		},
-	});
-	const fanout = new Fanout(stream, {
-		clone: (frame) => frame.clone(),
-		release: (frame) => frame.close(),
-	});
+	const fanout = new Fanout(
+		new ReadableStream<VideoFrame>({
+			start: (c) => {
+				controller = c;
+			},
+		}),
+		{ clone: (frame) => frame.clone(), release: (frame) => frame.close() },
+	);
 
-	const track = new Moq.Track.Producer("video/hd").accept({ timescale: Moq.Time.Timescale.MILLI });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => track.close(),
 	};
+	const source = new Signal<unknown>({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) });
 	const capture = {
-		in: {
-			source: new Signal({
-				getSettings: () => ({ frameRate: 30 }),
-				getConstraints: () => ({}),
-			} as never),
-		},
-		out: {
-			display: new Signal({ width: 640, height: 480 }),
-			frames: new Signal(fanout),
-		},
+		in: { source },
+		out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(fanout) },
 	};
-	const encoder = new Encoder("video/hd", {
-		enabled: true,
+	const enabled = new Signal(true);
+	const encoder = new Encoder("video", {
+		enabled,
 		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 	});
 
 	try {
 		await settle();
-		expect(encoder.out.catalog.peek()?.stalled).toBeUndefined();
+		const before = encoder.out.catalog.peek();
+		expect(before?.codedWidth).toBe(Catalog.u53(640));
+		expect(before?.enabled).toBeUndefined();
 
-		if (reason === "encoder lag") {
-			// Five frames at 30fps exceed three frame intervals of unaccepted capture.
-			for (let i = 0; i < 5; i++) {
-				controller.enqueue(new Frame(i * 33_333) as unknown as VideoFrame);
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
-		} else {
-			clock.mockReturnValue(200);
-			await new Promise((resolve) => setTimeout(resolve, 60));
+		for (const millis of [0, 33, 66]) {
+			controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
+			await new Promise((resolve) => setTimeout(resolve, 5));
 		}
+		expect(encoded.filter((frame) => frame.black)).toEqual([]);
+
+		enabled.set(false);
 		await settle();
-		expect(encoder.out.catalog.peek()?.stalled).toBe(true);
+		expect(encoded.filter((frame) => frame.black)).toEqual([
+			{ timestamp: 66_000 + 33_333, keyFrame: true, black: true },
+		]);
+		expect(encoder.out.active.peek()).toBe(false);
+
+		// Muting releases the capture; the rendition keeps advertising what it last published.
+		source.set(undefined);
+		await settle();
+		const disabled = encoder.out.catalog.peek();
+		expect(disabled?.enabled).toBe(false);
+		expect(disabled?.codec).toBe(before?.codec);
+		expect(disabled?.codedWidth).toBe(before?.codedWidth);
+
+		// Re-enabled before the capture reopens: still the same rendition, still disabled.
+		enabled.set(true);
+		await settle();
+		expect(encoder.out.catalog.peek()).toEqual(disabled);
+
+		source.set({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) });
+		await settle();
+		expect(encoder.out.catalog.peek()?.enabled).toBeUndefined();
+		expect(encoded.filter((frame) => frame.black)).toHaveLength(1);
 	} finally {
 		encoder.close();
 		fanout.close();
-		clock.mockRestore();
+		track.close();
+		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
+		else Reflect.deleteProperty(globalThis, "VideoEncoder");
+		if (videoFrame) Object.defineProperty(globalThis, "VideoFrame", videoFrame);
+		else Reflect.deleteProperty(globalThis, "VideoFrame");
 	}
 });
 

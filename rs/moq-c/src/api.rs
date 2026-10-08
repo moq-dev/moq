@@ -3291,25 +3291,25 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 	})
 }
 
-/// Query whether the publisher recommends temporarily avoiding a video rendition.
+/// Query whether a video rendition may be selected.
 ///
-/// The track remains available. A false value also covers catalogs that omit the
-/// optional field.
+/// False means no frames are coming and the rendition must not be selected. A catalog that
+/// omits the optional field reads as true.
 ///
 /// Returns zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that `dst` points to properly aligned, writable storage for a `bool`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_video_stalled(catalog: u32, index: u32, dst: *mut bool) -> i32 {
+pub unsafe extern "C" fn moq_consume_video_enabled(catalog: u32, index: u32, dst: *mut bool) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		if dst.is_null() {
 			return Err(Error::InvalidPointer);
 		}
 
-		let stalled = State::lock().consume.video_stalled(catalog, index as usize)?;
-		unsafe { dst.write(stalled) };
+		let enabled = State::lock().consume.video_enabled(catalog, index as usize)?;
+		unsafe { dst.write(enabled) };
 		Ok(())
 	})
 }

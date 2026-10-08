@@ -70,15 +70,26 @@ test("video config accepts canonical display aspect fields", () => {
 	expect("displayRatioHeight" in parsed).toBe(false);
 });
 
-test("video config accepts optional stalled state", () => {
+test("video config accepts optional enabled state", () => {
 	const active = VideoConfigSchema.parse({
 		codec: "avc1.64001f",
 		container: { kind: "legacy" },
 	});
-	const stalled = VideoConfigSchema.parse({ ...active, stalled: true });
+	const disabled = VideoConfigSchema.parse({ ...active, enabled: false });
 
-	expect(active.stalled).toBeUndefined();
-	expect(stalled.stalled).toBe(true);
+	expect(active.enabled).toBeUndefined();
+	expect(disabled.enabled).toBe(false);
+});
+
+test("video config ignores a legacy stalled flag", () => {
+	const parsed = VideoConfigSchema.parse({
+		codec: "avc1.64001f",
+		container: { kind: "legacy" },
+		stalled: true,
+	});
+
+	expect("stalled" in parsed).toBe(false);
+	expect(parsed.enabled).toBeUndefined();
 });
 
 test("video config accepts a human-readable label", () => {

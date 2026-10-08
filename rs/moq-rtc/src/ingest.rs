@@ -68,10 +68,6 @@ impl session::MediaSink for IngestSink {
 		self.bridges.push(mid, frame)
 	}
 
-	fn tick(&mut self) -> Result<()> {
-		self.bridges.tick()
-	}
-
 	fn abort(&mut self, err: moq_net::Error) {
 		self.bridges.abort(err);
 	}

@@ -260,6 +260,7 @@ async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: T
 		config,
 		encoder,
 		enabled,
+		capture,
 		track,
 		rendition,
 		feed,
@@ -349,6 +350,35 @@ test("disabling with a subscriber attached marks where submitted audio ends", as
 		[100_000, 0],
 		[140_000, 1],
 	]);
+});
+
+// A muted rendition stays in the catalog, so a viewer deselects it with a one-field delta instead of
+// seeing it removed and re-added.
+test("disabling keeps the rendition in the catalog with enabled: false", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { encoder, enabled, capture, rendition } = env;
+
+	const before = encoder.out.catalog.peek();
+	expect(before).toBeDefined();
+	expect(before?.enabled).toBeUndefined();
+
+	enabled.set(false);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+	expect(rendition.config.peek()).toEqual({ ...before, enabled: false } as never);
+	expect(encoder.out.active.peek()).toBe(false);
+
+	// Muting released the microphone, so re-enabling waits on its format without dropping the rendition.
+	const format = capture.out.format.peek();
+	capture.out.format.set(undefined as never);
+	enabled.set(true);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+
+	capture.out.format.set(format);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual(before);
 });
 
 // Closing tears down the subscription and the pipeline, which both end the epoch; cleanups run

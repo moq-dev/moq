@@ -156,6 +156,22 @@ test("appendDatagram delivers to a subscriber", async () => {
 	expect(got && dec.decode(got.payload)).toBe("hello");
 });
 
+// The in-range datagrams, sent between the dropped ones, show the reader is live, so the
+// range is what dropped the others.
+test("the group range bounds datagrams", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe({ groups: { start: { included: 5 } } });
+	track.setGroups({ end: { excluded: 7 } });
+	for (const sequence of [4, 5, 7, 6]) {
+		producer.insertDatagram(sequence, Timestamp.fromMillis(0), enc.encode("x"));
+	}
+	producer.close();
+
+	expect((await track.recvDatagram())?.sequence).toBe(5);
+	expect((await track.recvDatagram())?.sequence).toBe(6);
+	expect(await track.recvDatagram()).toBeUndefined();
+});
+
 test("datagram buffers drop oldest at capacity without delaying active subscribers", async () => {
 	const producer = new TrackProducer("test");
 	const slow = producer.subscribe();
