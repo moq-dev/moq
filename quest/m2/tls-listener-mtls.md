@@ -30,3 +30,7 @@ that refusal for a server with a `tls://` listener and updates the refusal's
 test.
 
 Public API: relay config may gain a listener option. Wire: none.
+
+## Related
+
+- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - moves qmux in-tree; if it lands first, the peer-certificate accessor lands here instead of upstream

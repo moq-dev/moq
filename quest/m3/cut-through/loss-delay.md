@@ -22,10 +22,10 @@ Independent of the bench; it can start once `moq-quic` lands.
   when the application reads, so it stays meaningful once reads go unordered.
   When a stream ends with a hole still open (reset, stop, or session close),
   buffered bytes that have already waited one smoothed RTT are counted then.
-- `moq-quic` exposes the per-stream count, and `web-transport-trait`'s
-  `RecvStream` gains an accessor returning `Option` (`None` when the backend
-  cannot see it), following the trait's `Stats` convention. Release the trait
-  and implement it in the in-tree `web-transport-moq`, as
+- `moq-quic` exposes the per-stream count, and moq-net's
+  `transport::poll::RecvStream` gains an accessor returning `Option` (`None`
+  when the backend cannot see it), following the module's `Stats`
+  convention. The moq-tokio and moq-uring adapters implement it, as
   [poll_acked](/quest/m2/quic-ack-hook.md) does.
 - The lite and IETF subscribers read the count at each frame boundary and when
   the group stream ends, adding the delta to the broadcast's ingress row, so a

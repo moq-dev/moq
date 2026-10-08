@@ -32,7 +32,14 @@ echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
 - The demo sets both attributes, so the media test can read a browser
   viewer's feedback through `moq export echo`.
 - `doc/lib/js` documents the attributes.
+- An encrypted (E2EE) broadcast refuses the stats track and the `echo` attribute: they would publish rendition
+  IDs and per-track counters in plaintext beside it. Recommended in the
+  2026-10-08 audit over encrypting them through the E2EE `Generation`.
 
 ## Required
 
 - [Schema](/quest/m1/stats/schema.md) - the zod schemas this fills
+
+## Related
+
+- [E2EE](/quest/m1/e2ee/README.md) - protected broadcasts expose no semantic metadata

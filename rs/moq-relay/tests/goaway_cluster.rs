@@ -158,7 +158,10 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let session_a = within("A accepts", accepted_a.recv()).await.expect("A accepts");
 	let consumer = cluster.origin.consume();
 	within("routed via A", consumer.routed("cam")).await.expect("routed");
-	let bc = consumer.request_broadcast("cam").await.expect("broadcast resolves");
+	let bc = consumer
+		.request_broadcast("cam", None)
+		.await
+		.expect("broadcast resolves");
 	let mut sub = within("subscribe", bc.track("video").expect("track").subscribe(None))
 		.await
 		.expect("subscribe");
@@ -304,7 +307,10 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 			.routed("cam")
 			.await
 			.expect("broadcast announced through sibling A");
-		let bc = consumer.request_broadcast("cam").await.expect("broadcast resolves");
+		let bc = consumer
+			.request_broadcast("cam", None)
+			.await
+			.expect("broadcast resolves");
 		let mut sub = bc
 			.track("video")
 			.expect("track handle")
@@ -542,7 +548,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let bc = within("broadcast resolves on the subscriber origin", async {
 		let consumer = sub_origin.consume();
 		consumer.routed("diamond").await?;
-		consumer.request_broadcast("diamond").await.ok()
+		consumer.request_broadcast("diamond", None).await.ok()
 	})
 	.await
 	.expect("broadcast announced");
@@ -771,7 +777,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let bc = within("broadcast announced", async {
 		let consumer = cluster.origin.consume();
 		consumer.routed("cam").await?;
-		consumer.request_broadcast("cam").await.ok()
+		consumer.request_broadcast("cam", None).await.ok()
 	})
 	.await
 	.expect("broadcast announced");

@@ -66,7 +66,7 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 			.expect("origin closed"),
 		moq_tokio::moq_net::announce::Event::Start(_)
 	) {}
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("demo"))
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("demo", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
