@@ -14,7 +14,11 @@ This absorbs the relay half of fetch-span (#4558) and builds on fetch-fill's
 checks (#4544). Receiving a multi-group FETCH stream means several groups on
 one stream. Absent sequences between the FETCH's groups become drops, and a
 group already cached is discarded as a duplicate. Cap a downstream FETCH at
-the Largest Object, as the moq-transport drafts require.
+the Largest Object, as the moq-transport drafts require. A relay with only
+fetch demand learns the upstream's Largest from TRACK_STATUS without a
+SUBSCRIBE, as open #4974 does for fetch-only demand.
+[Cross-relay FETCH over moq-transport](/quest/m1/ietf-peer-fetch-old.md)
+fixes the same FETCH path refusing held groups as `old`.
 
 Serving downstream lifts the one-group refusal ("FETCH spanning several
 groups not supported") in `run_fetch_stream`

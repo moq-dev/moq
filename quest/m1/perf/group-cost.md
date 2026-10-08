@@ -33,7 +33,8 @@ as candidates to measure, not separate quests.
   the lite and IETF publishers. That is lock, clock, and atomic work that may
   allocate nothing, so time it rather than count allocations: CPU per
   viewer-group for fast fanout and flow-controlled readers, over SUBSCRIBE
-  and FETCH. It protects a drain longer than `latency_max`, so keep
+  and FETCH. It keeps a group alive through a drain longer than the pool's
+  idle expiry, so keep
   per-frame liveness and `slow_prefetch_reader_survives_expiry`
   (rs/moq-net/src/model/track.rs); fewer refresh calls alone are not a win.
 - Owned decode copies: `rs/moq-net/src/coding/decode.rs` decodes `Vec<u8>`

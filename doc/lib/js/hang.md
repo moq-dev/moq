@@ -24,6 +24,12 @@ import * as Container from "@moq/hang/container";
 `Catalog.EscapingBroadcast` for a `broadcast` reference that walks above the
 handle's `path`. Run the same checks on a catalog from another source with
 `Catalog.checkRenditions(root)` and `Catalog.checkResolvable(root, base)`.
+
+`Catalog.ranked(renditions)` orders a video rendition map best first: largest
+coded picture, then highest bitrate, then name. A missing width, height, or
+bitrate ranks below a known value. `<moq-watch>` uses that order when nothing
+caps the rendition.
+
 `Hang.Timeline.Consumer.subscribe(broadcast, root.archive, track)` reads one
 track's timeline as record `push`, `pop`, and `skip` events when a root advertises it.
 

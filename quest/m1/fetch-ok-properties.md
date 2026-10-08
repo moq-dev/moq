@@ -24,17 +24,17 @@ opts out with INCLUDE_PROPERTIES = 0. Other fetch-only readers still need it.
   Ascending order and priority 128 where SUBSCRIBE_OK says Descending.
 - FETCH preserves object properties, Timestamp included. Decided in the
   2026-10-05 audit (maintainer: "FETCH must send stamped objects? It's not
-  legal to remove the property."): the standalone FETCH path sending its
-  objects unstamped because no SUBSCRIBE declared a timescale
-  (`ietf/publisher.rs`, around line 1346) is a bug to fix here. FETCH_OK declares the track's TIMESCALE, and every
-  fetched object keeps its Timestamp, so a fetch-only reader is timed exactly
-  when the track is, as the [untimed model](/quest/m1/untimed-model.md)
-  requires. Rejected: omitting timescale from FETCH_OK and leaving fetch-only
-  readers untimed.
-- Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20. It defaults to
-  sending the properties; at 0 the block is present but empty. `fetch.rs`
-  decodes it into `Fetch::properties_wanted`, which the publisher does not
-  honour yet.
+  legal to remove the property."). [#4822](https://github.com/moq-dev/moq/pull/4822) makes the standalone FETCH keep
+  each object's Timestamp in the track's units, since a subscribed relay
+  treats a timed track's object without one as malformed. What's left here is
+  FETCH_OK declaring the track's TIMESCALE, so a fetch-only reader is timed
+  exactly when the track is, as the untimed model requires. Today our
+  subscriber takes the units only from SUBSCRIBE_OK, and a fetch-only reader
+  is untimed. Rejected: omitting timescale from FETCH_OK and leaving
+  fetch-only readers untimed.
+- Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20. It defaults to sending the
+  properties; at 0 the block is present but empty. `fetch.rs` decodes it into
+  `Fetch::properties_wanted`, which the publisher does not honour yet.
 - Test per draft range: FETCH_OK round-trips the properties SUBSCRIBE_OK would
   carry, a standalone FETCH's objects arrive stamped, and
   INCLUDE_PROPERTIES = 0 empties the block.

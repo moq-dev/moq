@@ -41,5 +41,5 @@ rather than creating another benchmark runner.
 
 ## Related
 
-- [Windowed latency](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - owns histogram/window semantics
+- [Mergeable bench buckets](/quest/m1/bench-buckets.md) - owns histogram/window semantics
 - [Relay profiling](/quest/m1/performance-profiles.md) - shares workload and artifact conventions

@@ -149,7 +149,7 @@ typedef Frame = MoqFrame;
 /// A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts.
 typedef MediaFrame = MoqMediaFrame;
 
-/// The catalog description of a video track, including whether the publisher recommends temporarily avoiding it.
+/// The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming).
 typedef Video = MoqVideo;
 
 /// Caller-provided catalog fields for a video track.
@@ -164,7 +164,7 @@ typedef VideoProperties = MoqVideoProperties;
 /// A single video codec an importer can parse.
 typedef VideoFormat = MoqVideoFormat;
 
-/// The catalog description of an audio track: codec, sample rate, channels, and container.
+/// The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container.
 typedef Audio = MoqAudio;
 
 /// An audio codec, its required init bytes, and an optional label.

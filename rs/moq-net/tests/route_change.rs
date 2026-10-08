@@ -109,7 +109,7 @@ impl Topology {
 
 		let consumer = subscriber.consume();
 		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live").await.unwrap();
+		let remote = consumer.request_broadcast("live", None).await.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
@@ -161,7 +161,7 @@ impl Topology {
 }
 
 /// A frame as the reader saw it: its group, then its timestamp and payload.
-type Delivery = (u64, moq_net::Result<(Timestamp, Vec<u8>)>);
+type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
 
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
@@ -203,7 +203,7 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Vec<u8>) {
 }
 
 /// [`next`], keeping the frame's timestamp.
-async fn next_timed(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Timestamp, Vec<u8>) {
+async fn next_timed(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
 	let (group, frame) = moq_net_sim::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
@@ -447,7 +447,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<Deliver
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
 		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live").await.unwrap();
+		let remote = consumer.request_broadcast("live", None).await.unwrap();
 		let preferences = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
@@ -585,7 +585,7 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 	settle().await;
 
 	let consumer = subscriber.consume();
-	let remote = consumer.request_broadcast("live").await.unwrap();
+	let remote = consumer.request_broadcast("live", None).await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
@@ -636,7 +636,7 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 	assert_eq!(frames, expected, "{version} {loss:?}");
 	for pair in seen.windows(2) {
 		assert!(
-			pair[0].1 < pair[1].1,
+			pair[0].1.expect("timed") < pair[1].1.expect("timed"),
 			"{version} {loss:?}: timestamp rewound at {pair:?}"
 		);
 	}

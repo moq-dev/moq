@@ -7,7 +7,8 @@
  */
 import type { Dispose, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import type { Frame, Consumer as GroupConsumer } from "./group.ts";
+import type * as Epoch from "./epoch.ts";
+import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
@@ -160,6 +161,11 @@ export const hooks: {
 	 * `setGroups`, which never rewinds.
 	 */
 	replaceGroups: (subscriber: Subscriber, groups: Groups) => void;
+	/**
+	 * Bind a group to its track's timedness, so a frame whose timestamp disagrees is refused.
+	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
+	 */
+	bindGroupTimed: (group: GroupProducer, timed: boolean) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
@@ -181,6 +187,8 @@ export const hooks: {
 	) => void;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
+	/** Name the epoch of the route an origin resolved a broadcast handle through. */
+	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 } = {
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");
@@ -199,6 +207,9 @@ export const hooks: {
 	},
 	replaceGroups: () => {
 		throw new Error("track.ts not loaded");
+	},
+	bindGroupTimed: () => {
+		throw new Error("group.ts not loaded");
 	},
 	groupTimestamp: () => {
 		throw new Error("group.ts not loaded");
@@ -222,6 +233,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampPath: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	stampEpoch: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 };

@@ -49,7 +49,7 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 
 				let consumer = relay.consume();
 				consumer.routed("bench").await.unwrap();
-				let remote = consumer.request_broadcast("bench").await.unwrap();
+				let remote = consumer.request_broadcast("bench", None).await.unwrap();
 
 				let ts = |ms| Timestamp::from_millis(ms).unwrap();
 				let prefs = || track::Subscription::default().with_max_delay(Duration::from_secs(10));
@@ -142,7 +142,7 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 
 			let consumer = relay.consume();
 			consumer.routed("bench").await.unwrap();
-			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench", None).await.unwrap();
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
 
 			// Held for fetches only: it keeps the relay's copy without subscribing.
@@ -214,7 +214,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 
 			let consumer = client.consume();
 			consumer.routed("bench").await.unwrap();
-			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench", None).await.unwrap();
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
@@ -226,7 +226,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			assert_eq!(rejoined.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
 			track.demand().used().await.unwrap();
 
-			let later = relay.consume().request_broadcast("bench").await.unwrap();
+			let later = relay.consume().request_broadcast("bench", None).await.unwrap();
 			let mut sub = later.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.sequence, 0, "{version}");
@@ -286,7 +286,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 
 			let consumer = client.consume();
 			consumer.routed("bench").await.unwrap();
-			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench", None).await.unwrap();
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
@@ -313,7 +313,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 				.unwrap();
 			next.finish().unwrap();
 
-			let local = relay.consume().request_broadcast("bench").await.unwrap();
+			let local = relay.consume().request_broadcast("bench", None).await.unwrap();
 			let mut sub = local.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.sequence, 1, "{version}");
@@ -350,7 +350,7 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 
 			let consumer = relay.consume();
 			consumer.routed("bench").await.unwrap();
-			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench", None).await.unwrap();
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
 
 			let mut group = track.append_group().unwrap();
@@ -371,6 +371,16 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 			let group = sub.recv_group().await.unwrap().unwrap();
+			// A track that arrives untimed has no media age to skip the cached group by, so
+			// its reader starts at the newest group cached when it subscribed and reads on
+			// from there.
+			if sub.info().timescale.is_none() {
+				let mut sequence = group.sequence;
+				while sequence < 3 {
+					sequence = sub.recv_group().await.unwrap().unwrap().sequence;
+				}
+				return;
+			}
 			assert_eq!(
 				group.sequence, 3,
 				"{version}: the rejoining reader got the stale cache first"
@@ -423,7 +433,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 					let pair = connect_mock(options).await;
 					let consumer = client.consume();
 					consumer.routed("bench").await.unwrap();
-					let remote = consumer.request_broadcast("bench").await.unwrap();
+					let remote = consumer.request_broadcast("bench", None).await.unwrap();
 					(remote, pair)
 				}
 			};
@@ -486,7 +496,7 @@ async fn rejoin_keeps_source_timestamps() {
 
 			let consumer = client.consume();
 			consumer.routed("bench").await.unwrap();
-			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench", None).await.unwrap();
 			// Far from any arrival time, so a frame stamped on arrival cannot pass.
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
 
@@ -505,8 +515,8 @@ async fn rejoin_keeps_source_timestamps() {
 				};
 				let frame = group.read_frame().await.unwrap().unwrap();
 				assert_eq!(
-					frame.timestamp.as_millis(),
-					u128::from(ms),
+					frame.timestamp.map(Timestamp::as_millis),
+					Some(u128::from(ms)),
 					"{version} group {sequence}"
 				);
 				drop((group, sub));

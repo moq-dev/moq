@@ -7,8 +7,8 @@ use crate::{Error, StreamError, ietf, lite};
 /// Every [`Reader`](super::Reader) and [`Writer`](super::Writer) carries the negotiated
 /// version, which is what picks the registry here. The two wires draw on the same names,
 /// but they do not agree on every value: moq-lite's are fixed by
-/// [`StreamError::to_code`], while moq-transport's moved across the drafts we negotiate
-/// (see the `ietf::error` module). Sending a code from the wrong table is silent, because the
+/// [`StreamError::to_code`] (a later version adds codes but never moves one), while
+/// moq-transport's moved across the drafts we negotiate (see the `ietf::error` module). Sending a code from the wrong table is silent, because the
 /// number is valid in both.
 ///
 /// Encoding and decoding live on one trait so a peer cannot be told a code from one table
@@ -38,15 +38,21 @@ pub trait StreamCodes {
 	}
 }
 
-/// moq-lite's registry, specified by draft-lcurley-moq-lite (Error Codes) and identical
-/// across the versions we negotiate.
+/// moq-lite's registry, specified by draft-lcurley-moq-lite (Error Codes). A code a version
+/// lacks is sent there as the closest one it has, and not read back there.
 impl StreamCodes for lite::Version {
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
-		err.to_code()
+		match err {
+			StreamError::NotFetchable if !self.has_not_fetchable() => StreamError::NotFound.to_code(),
+			err => err.to_code(),
+		}
 	}
 
 	fn decode_stream_code(&self, code: u32) -> StreamError {
-		StreamError::from_code(code)
+		match StreamError::from_code(code) {
+			StreamError::NotFetchable if !self.has_not_fetchable() => StreamError::Unknown(code),
+			err => err,
+		}
 	}
 }
 
@@ -107,6 +113,32 @@ mod tests {
 		assert_eq!(
 			draft17.encode_stream_code(&StreamError::GoingAway),
 			ietf::error::INTERNAL_ERROR
+		);
+	}
+
+	/// NOT_FETCHABLE is lite-07's: an earlier peer is told NOT_FOUND, the miss it would
+	/// have been told before, and is not credited with a code its version never assigned.
+	#[test]
+	fn not_fetchable_is_lite_07s() {
+		for version in [lite::Version::Lite05, lite::Version::Lite06] {
+			assert_eq!(
+				version.encode_stream_code(&StreamError::NotFetchable),
+				StreamError::NotFound.to_code(),
+				"{version}"
+			);
+			assert_eq!(
+				version.decode_stream_code(0x3a),
+				StreamError::Unknown(0x3a),
+				"{version}"
+			);
+		}
+
+		let version = lite::Version::Lite07;
+		assert_eq!(version.encode_stream_code(&StreamError::NotFetchable), 0x3a);
+		assert_eq!(version.decode_stream_code(0x3a), StreamError::NotFetchable);
+		assert_eq!(
+			version.decode_stream_code(StreamError::NotFound.to_code()),
+			StreamError::NotFound
 		);
 	}
 

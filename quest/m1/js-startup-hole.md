@@ -6,14 +6,14 @@
 frames as soon as it arrives, whatever died before it. Today, if the first
 group dies before a frame is read and the next arriving group is not adjacent
 (16 reset, then 18), `next()` delivers nothing until a later group lets
-`#checkMaxAge` skip, which can cost a whole group (2.5 s of video) before the
+`#checkMaxDelay` skip, which can cost a whole group (2.5 s of video) before the
 first picture after a reattach.
 
 ## Plan
 
 Root cause (verified 2026-10-06): a hole only exists relative to presented
 content, but `next()`'s promotion guard in
-`js/hang/src/container/consumer.ts` needs `maxAge === 0` or a defined
+`js/hang/src/container/consumer.ts` needs `maxDelay === 0` or a defined
 `#presentedEnd` to promote a head that is not contiguous with `#active`.
 Two paths reach it with nothing presented:
 
@@ -31,7 +31,7 @@ discontinuity, matching the "start with the first group" policy.
 
 Open for the implementer: which field means "nothing presented".
 `#presentedEnd` can stay undefined after frames were delivered when
-`#checkMaxAge` drops the delivered group without `#recordPresented`;
+`#checkMaxDelay` drops the delivered group without `#recordPresented`;
 `#deliveredGroup === undefined` may be the sounder predicate.
 
 Tests: both paths above, as bun tests with mocked or flushed time, deliver

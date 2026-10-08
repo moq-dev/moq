@@ -104,6 +104,13 @@ impl TrackStatusOk {
 		}
 	}
 
+	/// Whether this answer describes the track as fully as SUBSCRIBE_OK on `version`.
+	/// Draft-17 is the gap: SUBSCRIBE_OK declares TIMESCALE, but REQUEST_OK has no
+	/// properties block to say whether the track is timed.
+	pub(crate) fn describes_track(version: Version) -> bool {
+		Self::has_properties(version) || !super::Properties::sends_timescale(version)
+	}
+
 	/// Whether the answer carries a Track Properties block on `version`.
 	fn has_properties(version: Version) -> bool {
 		!matches!(
