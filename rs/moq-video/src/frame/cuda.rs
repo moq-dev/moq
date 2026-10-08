@@ -447,6 +447,12 @@ impl Converter {
 		self.color
 	}
 
+	/// Import `frame` as its reader, so dropping it returns the producer slot
+	/// even when no pool buffer is free to convert it.
+	pub(crate) fn import(&self, frame: &vulkan::Frame) -> Result<(), Error> {
+		self.importer.import(frame).map(drop)
+	}
+
 	/// Hold one pool buffer for the next frame, or `None` while every buffer is
 	/// live: back-pressure, so drop the frame and try again after the encoder
 	/// releases one.

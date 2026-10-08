@@ -252,6 +252,9 @@ impl Backend for Nvenc {
 				))
 			})?;
 			let converted = image.converted(converter.color(), || {
+				// Read before reserving: an exhausted pool must still signal the
+				// producer's timeline, or the unread frame loses its slot.
+				converter.import(image)?;
 				converter
 					.reserve()
 					.ok_or_else(|| Error::Unsupported("CUDA conversion pool exhausted".into()))?

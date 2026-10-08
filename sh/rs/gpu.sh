@@ -10,8 +10,9 @@ for device in /sys/bus/pci/devices/*; do
     case "$vendor" in
         0x10de | 0x1002 | 0x8086) ;;
         *)
-            echo "Unsupported GPU vendor $vendor at $device" >&2
-            exit 1
+            # A BMC or virtual display adapter has no tests; a supported GPU still must.
+            echo "Skipping unsupported display controller $vendor at $device" >&2
+            continue
             ;;
     esac
     [[ -L "$device/driver" ]] || {
