@@ -42,6 +42,11 @@ added this quest). Re-planned from issue #703, whose stub quest the
   falls back.
 - Device loss: request a new device and rebuild the pipeline. If no adapter
   comes back, `"auto"` switches to Canvas2D (logged) rather than going black.
+  A canvas that acquired a `webgpu` context never returns a `2d` one, even
+  after device loss, and the canvas is caller-owned (the `<canvas>` child of
+  `<moq-watch>` or `<moq-publish>`, or a transferred `OffscreenCanvas`). Open:
+  who supplies the replacement surface for this fallback, including in the
+  worker. Settle it with the maintainer before building the fallback.
 - The renderer takes an `HTMLCanvasElement` or an `OffscreenCanvas`, so the
   [watch worker](/quest/m1/watch-worker.md) move transfers the canvas and
   carries this renderer over unchanged. This lands first, on the main thread,
@@ -58,7 +63,9 @@ added this quest). Re-planned from issue #703, whose stub quest the
   per-browser Canvas2D vs WebGPU comparison is a follow-up, not a gate.
 - Tests: selection (auto picks WebGPU or Canvas2D by support, an explicit
   `"webgpu"` refuses where missing), rotation and flip parity between the two
-  paths, device-loss recovery and fallback, and the preview's rotation.
+  paths, device-loss recovery, and the preview's rotation. The fallback
+  test runs in a real browser: paint with WebGPU, lose the device with no
+  adapter to recover, then check Canvas2D actually paints.
 
 Public API: new `@moq/video` package; a `renderer` attribute and option on
 `<moq-watch>` and `<moq-publish>`; the publish preview's renderer moves to
