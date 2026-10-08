@@ -22,9 +22,13 @@ rolling out browser playback wants an error rate it cannot see client-side):
 - **Refusals stay unattributed here** (decided 2026-10-08). The relay verifies
   no token itself (its deciders are the auth server, public rules, or
   refuse-all in `rs/moq-relay/src/auth.rs`), and a refused session has no
-  grant, so no root or tier. Count refusals in the default tier's totals;
-  `expired` and per-root attribution need the auth server to say so, which
-  [Typed refusal reason](/quest/m1/auth/refusal-reason.md) adds.
+  grant, so no root or tier. Count a refusal under the empty root on the
+  default tier. `group_key` sends the empty root to the root group
+  (`<prefix>/node/<node>`) at any `--stats-depth`, so it lands there, created
+  on first sight and following stats-split's linger and epoch; a project's
+  group never sees it. Sessions admitted under the empty root (public rules)
+  share that group. `expired` and per-root attribution need the decider to
+  say so, which [Typed refusal reason](/quest/m1/auth/refusal-reason.md) adds.
 - **Ends are classified from a typed close kind, not a string.** A peer's
   application close is already typed (`Error::from_transport` decodes it into
   `Error::Session`), but `moq_net::Error::Transport(String)` still flattens
@@ -36,20 +40,20 @@ rolling out browser playback wants an error rate it cannot see client-side):
   `Error::Cancel` today, so a classifier built on it would count every normal
   browser close as failed. A lease ending `expired` is the expired kind.
 - **Wire shape:** `Presence` gains `sessions_refused` and `sessions_failed`,
-  each a map from reason or kind to a cumulative count. `sessions_ended` stays
+  fixed named counters per reason and per kind, so `Presence` stays `Copy`
+  (what moq.pro#2267 plans against). `sessions_ended` stays
   the total, so the live count (`sessions_started - sessions_ended`) is
   unchanged. They ride stats-split's totals and per-root track, not
   `sessions.json`, which stats-split retires (quest audit, 2026-10-08).
-  `Presence` is `Copy` today; maps drop that (a moq-net API break to report),
-  while a fixed counter per reason and kind keeps it. The PR picks.
 - **Outcomes follow stats-split's counter rules.** A pruned root folds its
   counts into the group totals, and the aggregator merges with a baseline per
   upstream (node, epoch), so a node leaving or returning never reads as new
   errors or a drop.
 - Tests: a forbidden path and an auth server refusal each count under their
-  reason; a clean close, a peer's zero-code close, an idle timeout, and a peer
-  application error each count as their kind; the aggregator sums both maps
-  across nodes, and a node departing and returning while another stays leaves
+  reason; a refusal with `--stats-depth 1` and no admitted session appears in
+  the root group's totals; a clean close, a peer's zero-code close, an idle
+  timeout, and a peer application error each count as their kind; the
+  aggregator sums the counters across nodes, and a node departing and returning while another stays leaves
   the merged counts unchanged.
 
 ## Required
