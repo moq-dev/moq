@@ -153,8 +153,9 @@ on data tracks remain data, including empty text cues.
 A video group is a GoP: it begins with a keyframe and holds the frames that
 depend on it. That alignment is what makes MoQ's congestion behavior safe. A
 relay can drop a whole group, a viewer can join at any group boundary, and the
-decoder never sees a frame whose reference is missing. Audio groups are
-independent too and typically hold about a second.
+decoder never sees a frame whose reference is missing. Audio frames are
+independent, so an audio group can end at any frame; the first-party encoders
+put one packet in each unless told otherwise.
 
 The `description` field carries out-of-band codec setup (an `avcC` box for
 H.264). When it is absent, the parameter sets ride inline before each keyframe,
