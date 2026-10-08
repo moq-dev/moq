@@ -3690,7 +3690,18 @@ where
 			request.finish_track_at(final_sequence);
 		}
 
-		// An empty answer opens no fetch stream at all.
+		// From draft-20 an empty answer still covers its start, so an End Location before it
+		// is malformed and closes the session (section 10.14).
+		if draft20 && (end.group, end.object) <= (sequence, start) {
+			let err = Error::ProtocolViolation;
+			tracing::warn!(group = sequence, ?end, "FETCH_OK's End Location is before its start");
+			self.session
+				.clone()
+				.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
+			request.reject(err);
+			return;
+		}
+		// Before draft-20, an empty answer opens no fetch stream at all.
 		if (end.group, end.object) <= (sequence, start) {
 			request.reject(Error::NotFound);
 			let _ = stream.writer.close().await;
@@ -9619,6 +9630,70 @@ mod joining_fetch_tests {
 			.await;
 
 		assert!(fetch.await.is_err(), "the accepted group was aborted");
+	}
+
+	/// From draft-20 an End Location before the FETCH's start is malformed (section 10.14):
+	/// the session closes with PROTOCOL_VIOLATION rather than reading it as an empty answer.
+	#[moq_net_sim::test]
+	async fn a_draft20_end_location_before_the_start_closes_the_session() {
+		const VERSION: Version = Version::Draft20;
+		const GROUP: u64 = 4;
+		const START: u64 = 3;
+
+		let ok = message_bytes(
+			ietf::FetchOk::ID,
+			&ietf::FetchOk {
+				request_id: None,
+				group_order: GroupOrder::Ascending,
+				end_of_track: false,
+				end_location: ietf::Location {
+					group: GROUP,
+					object: START - 1,
+				},
+				properties: Default::default(),
+			},
+			VERSION,
+		);
+
+		let session = ScriptedSession::per_stream_eof(vec![ok]);
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session.clone(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::default().with_timescale(None),
+		);
+		let dynamic = track.dynamic();
+		let consumer = track.consume();
+		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, group::Fetch::default().with_frame_start(START)));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		let request = dynamic.requested_group().await.expect("no group requested");
+
+		subscriber
+			.clone()
+			.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
+			.await;
+
+		assert!(matches!(fetch.await, Err(Error::ProtocolViolation)));
+		let violation = SessionError::from(&Error::ProtocolViolation).to_code();
+		assert!(
+			session.log.closes().iter().any(|(code, _)| *code == violation),
+			"{:?}",
+			session.log.closes()
+		);
 	}
 
 	/// A cache miss for a group's tail asks upstream from the frame the reader wants and
