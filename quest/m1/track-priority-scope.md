@@ -22,8 +22,8 @@ Where the model stands today, all in `rs/moq-net`:
   packs track priority and the group's position within its own subscription
   into one send order (`js/net/src/lite/priority.ts`), so two tracks at equal
   priority interleave rather than one draining first.
-- Group order within a track follows the subscription's `order` (newest first
-  by default; see [Subscribe ranges](/quest/m1/subscribe-ranges/README.md)).
+- Group order within a track is fixed newest first today; a subscription-chosen
+  order arrives with [Subscribe ranges](/quest/m1/subscribe-ranges/README.md).
 - A relay forwards the max of its downstream subscriber priorities upstream
   (`model/subscription.rs`, `lite/subscriber.rs`), never the publisher's track
   priority, so one viewer asking for 255 raises that track above every other

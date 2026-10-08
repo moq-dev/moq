@@ -8,6 +8,8 @@ the Rust crate name for name, without putting keys or crypto policy in `@moq/net
 
 ## Plan
 
+From the Rust fix (#4994): a grouped authentication or identity failure wakes every parked frame, group, and datagram read and releases the track and group demand; dropping the track consumer releases demand even while a group handle is held; a bad datagram stays an event until its key is exhausted. Use the same error and event types.
+
 - Add the package above `@moq/net`. `Credential` accepts a 32-byte secret or a nonextractable HKDF `CryptoKey` with `deriveBits` usage, rejects extractable keys, and never serializes the secret. `credential.path(semantic)` returns the opaque broadcast name and `credential.generation(epoch)` returns a `Generation` with `name()`, `produce()`, `consume()`, and epochs come from the shared `@moq/net` `Epoch`.
 - Mirror the Rust modules: `Track.Producer`, `Track.Consumer`, `Group.Producer`, `Group.Consumer`, `Datagram.Event`, and a `Failure` whose `code` is the draft's typed set. No catalog helpers, no exported constants beyond the profile limits an application sizes payloads with, no stateless `protect`/`open` with caller-chosen identities, and no test-only methods on public classes.
 - WebCrypto AES-GCM is async, so each producer and consumer runs a serial pump: one AEAD call in flight, completions in submit order, a bounded waiter queue that throws when full. Depth one keeps frame ordinals equal to the inner `@moq/net` write order without reservation sets; raise it only when a measured capture burst needs it. Propagate backpressure, cancellation, and authentication failure explicitly; never reorder media or fall back to plaintext.

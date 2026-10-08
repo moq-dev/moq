@@ -22,6 +22,11 @@ Decided in planning (2026-10-06, after #4955 found that no quest covered
   An `Update` (a re-price or same-epoch failover) changes nothing, so it
   stays a seamless mid-group resume. Restart owns deciding what is a source
   change, so `moqsrc` never compares epochs itself.
+- **Route-level restarts (maintainer, 2026-10-08).** A `Restart` names a
+  route, which can be a prefix covering the path (such as `pool`) rather
+  than the path itself. `moqsrc` switches on a `Restart` of the route its
+  path resolves through; the re-request re-resolves upstream, and if it
+  lands on the same source the run still restarts on the same pads.
 - **Errors keep today's handling.** A replacement no longer ends the old
   subscriptions, so a catalog error posts the session error and a track error
   logs and ends that pad, as today. The earlier rule treating `Unroutable` as
@@ -65,7 +70,8 @@ Decided in planning (2026-10-06, after #4955 found that no quest covered
 - **Test.** An in-process test republishes the path under a newer epoch while
   the old publisher stays up: the new run's buffers render through a synced
   sink, a pad linked by name keeps flowing, and the bus carries no error.
-  Cover an epochless source change that also switches, a same-epoch
+  Cover an epochless source change that also switches, a `Restart` of a
+  prefix route covering the path that switches too, a same-epoch
   re-announce (`Update`) that does not, a switch with new caps that keeps the
   pad, and with `linger` set: an `End` then `Start` that resumes on the same
   pads (media FIN, a delay, catalog FIN, `End`, then `Start`), an old

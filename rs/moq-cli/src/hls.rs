@@ -32,9 +32,9 @@ pub struct ExportArgs {
 	#[usage(flatten)]
 	pub tls: moq_tokio::tls::Listen,
 
-	/// Minimum media listed in each rendition's playlist window. Keep it within the
-	/// relay's group-cache retention, since segments are fetched from there on request.
-	/// A timeline durable in a catalog-named store lists everything it retains instead.
+	/// Minimum media listed in each rendition's playlist window, at most 256 segments.
+	/// Keep it within the relay's group-cache retention, since segments are fetched from
+	/// there on request.
 	#[usage(long, default = "16s")]
 	pub window: crate::duration::Duration,
 

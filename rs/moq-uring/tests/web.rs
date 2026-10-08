@@ -247,7 +247,10 @@ fn lite_session_over_webtransport() {
 			let bc = {
 				let consumer = sub_origin.consume();
 				consumer.routed("test").await.expect("broadcast announced");
-				consumer.request_broadcast("test").await.expect("broadcast resolves")
+				consumer
+					.request_broadcast("test", None)
+					.await
+					.expect("broadcast resolves")
 			};
 			let mut track = bc
 				.track("data")
