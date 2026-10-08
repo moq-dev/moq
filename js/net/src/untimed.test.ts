@@ -82,13 +82,20 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 	const copy = new BroadcastProducer();
 	const video = copy.createTrack("video", await subscription.info());
 	void (async () => {
-		const groups = subscription.ordered();
-		for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
-			const out = video.appendGroup();
-			for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
-			out.close();
+		try {
+			const groups = subscription.ordered();
+			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
+				const out = video.appendGroup();
+				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
+				out.close();
+			}
+		} catch (err) {
+			// An upstream abort goes downstream as an abort, never as a clean end.
+			video.close(err instanceof Error ? err : new Error(String(err)));
+		} finally {
+			copy.close();
 		}
-	})().finally(() => copy.close());
+	})();
 	return copy;
 }
 
