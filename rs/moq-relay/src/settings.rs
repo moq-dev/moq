@@ -75,6 +75,9 @@ struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_CONNECT_API", cli("--cluster-connect-api"))]
 	connect_api: Option<String>,
 
+	#[usage(env = "MOQ_CLUSTER_CONNECT_API_TLS_ROOT", cli("--cluster-connect-api-tls-root"))]
+	connect_api_tls_root: Option<Vec<String>>,
+
 	#[usage(env = "MOQ_CLUSTER_NODE", cli("--cluster-node"))]
 	node: Option<String>,
 
