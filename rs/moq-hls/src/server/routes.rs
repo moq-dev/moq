@@ -234,11 +234,14 @@ async fn master(server: &Server, broadcast: &str, query: Option<&str>) -> Respon
 	let Some(broadcaster) = server.broadcaster(broadcast).await else {
 		return not_found();
 	};
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
-	if broadcaster.is_empty() {
+	// A master listing no variant is unplayable: wait for one that can start, else answer
+	// unavailable.
+	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.advertised()).await;
+	let (video, audio) = broadcaster.variants(query);
+	if video.is_empty() && audio.is_empty() {
 		return not_found();
 	}
-	m3u8(broadcaster.master_playlist(query))
+	m3u8(crate::export::master::render(&video, &audio))
 }
 
 async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Response {
@@ -655,6 +658,22 @@ mod tests {
 		oneshot(app.clone(), uri).await.status()
 	}
 
+	/// A master listing no variant would be unplayable, so it answers 404 until a rendition can
+	/// start.
+	#[tokio::test(start_paused = true)]
+	async fn master_answers_404_until_a_rendition_can_start() {
+		let origin = moq_tokio::origin::spawn();
+		let mut broadcast = origin.create_broadcast("live").expect("publish");
+		broadcast.announce(Default::default()).expect("announce");
+		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), None);
+
+		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		assert_eq!(status(&app, "/live/master.m3u8").await, StatusCode::NOT_FOUND);
+
+		write_three_gops(&mut media);
+		wait_listed(&app, "/live/master.m3u8", "video/video0/media.m3u8").await;
+	}
+
 	/// Only the URLs the renderers emit are served: the init under its hash, segments under the
 	/// current generation.
 	#[tokio::test]
@@ -753,7 +772,7 @@ mod tests {
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
 		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
 
-		let remote = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("live"))
+		let remote = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("live", None))
 			.await
 			.expect("remote resolve timed out")
 			.expect("remote broadcast");
@@ -798,10 +817,13 @@ mod tests {
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
 		wait_listed(&app, "/room/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
 
-		let remote_media = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("room/source"))
-			.await
-			.expect("sibling resolve timed out")
-			.expect("sibling broadcast");
+		let remote_media = tokio::time::timeout(
+			TIMEOUT,
+			pair.sub_origin.consume().request_broadcast("room/source", None),
+		)
+		.await
+		.expect("sibling resolve timed out")
+		.expect("sibling broadcast");
 		drop(media);
 		drop(media_broadcast);
 		tokio::time::timeout(TIMEOUT, remote_media.closed())

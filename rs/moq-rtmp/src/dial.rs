@@ -604,7 +604,7 @@ mod tests {
 			.await
 			.expect("client republish timed out")
 			.expect("broadcast announced in client origin");
-		let broadcast = announced.request_broadcast("pulled/cam0").await.unwrap();
+		let broadcast = announced.request_broadcast("pulled/cam0", None).await.unwrap();
 
 		// It should carry a hang catalog track (proof the FLV demux produced real
 		// media on the far side): subscribe to it and read one catalog frame.

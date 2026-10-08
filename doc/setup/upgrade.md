@@ -47,6 +47,23 @@ These land with the next breaking release, not the 2026-09-23 train.
   `producer.demand().used` and `.unused()`, as are `Group.Producer`'s, and
   `Allocator.reserve` takes `producer.demand()`, replacing the
   `Bandwidth.Demand` interface.
+- **`request_broadcast` takes an epoch.** In Rust,
+  `origin::Consumer::request_broadcast(path)` is
+  `request_broadcast(path, None)`; pass an `Epoch` instead to refuse any other
+  publisher instance. In TypeScript, `RequestOptions.epoch` does the same. A
+  dynamic route updated to another epoch now refuses the requests its handler
+  still holds with `Unroutable`, so a handler answering them late sees its
+  answer dropped.
+- **`moq --hop` is removed; `--epoch` replaces it.** A redundant pair shares an
+  epoch, a UUIDv7 such as `uuidgen -7` prints, instead of a Hop ID: pass the
+  same `--epoch` (or `MOQ_EPOCH`) to both. Unlike a rename, `--hop` is now an
+  unknown flag and `MOQ_HOP` is silently ignored, so remove it from any
+  deployment: a pair still keyed on `MOQ_HOP` mints an epoch per process, and
+  whenever either member starts or restarts, its new epoch replaces the other's
+  broadcast and restarts its viewers. `--cluster-id` no longer falls
+  back to `--hop`, so a node that pinned its Hop ID with `--hop` passes
+  `--cluster-id`. Relays no longer put a random hop in front of a route that
+  names no publisher; it keeps its 0.
 - **The `"auto"` delay is measured, not derived from RTT** (#4162). It is sized
   from how late frames arrive (see [audio jitter](/concept/audio-jitter)) in
   `@moq/watch` and `moq play`, which now defaults `--delay` to `auto` instead of
@@ -234,7 +251,7 @@ variables follow the flag (`MOQ_SERVER_BIND` is `MOQ_LISTEN`).
 | `--cluster-linger` | removed; a broadcast closes when its last publisher is lost |
 | `--cluster-connect host:port` | a full URL, `https://host/?jwt=TOKEN` |
 | `--cluster-mesh`, TOML `mesh` | removed; list every peer with `--cluster-connect` or `--cluster-connect-api` |
-| `moq --origin`, `--name`, `--latency-max` | `--hop`, `--broadcast`, `--max-age` |
+| `moq --origin`, `--name`, `--latency-max` | `--hop` (removed for `--epoch` after [Unreleased](#unreleased)), `--broadcast`, `--max-age` |
 | `moq publish`, `moq subscribe` | `moq import`, `moq export` |
 | `moq token`, the `moq-token` binary | `moq auth` |
 
@@ -279,8 +296,8 @@ Other changes to a deployment:
 - **`moq auth serve` never re-checks or expires by default**, as 0.14 never
   did. `--revalidate` needs `--expires`, and `--limit-*` needs `--revalidate`.
 - **mTLS admits nothing on its own.** A verified client certificate is reported
-  to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` restores the old full access for every certificate
-  the relay's client CA verifies, so keep that CA to cluster peers.
+  to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` restores the old full access for every certificate
+  the relay's client CA verifies, as a cluster peer, so keep that CA to cluster peers.
 - **`moq --listen` needs auth.** A CLI listener refuses to start without
   `--auth-url` or `--auth-public` instead of accepting everyone.
 - **Gossip discovery is removed.** A relay dials only the peers it lists or
@@ -325,7 +342,7 @@ Other changes to a deployment:
   `origin::Config`.
 - **Announcements are prefix routes** (#3225, #3770). `announce::Update` is
   `{ prefix, route, kind, captures }`: skip `!update.kind.is_active()` and
-  resolve the broadcast with `consumer.request_broadcast(&update.prefix)`.
+  resolve the broadcast with `consumer.request_broadcast(&update.prefix, update.route.epoch)`.
   Serve a subtree on demand with `origin.dynamic(prefix, route)`.
 - **Tracks.** `with_latency_max` / `latency_max` is `with_max_age` / `max_age`.
   `write_datagram(Datagram)` is `insert_datagram(sequence, timestamp, payload)`

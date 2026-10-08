@@ -23,11 +23,13 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Publishers learn their cap](/quest/m2/rate-grant.md) - the AUTH grant carries the caps and publishers clamp their encoder to them
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - `moq-uring`'s workers host the UDP demux, so a ring relay keeps STUN, WebRTC, and SRT on its QUIC port
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
+- [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [Hitless TS legs](/quest/m2/ts-hitless.md) - two `--sync` export legs emit packet-identical TS for ST 2022-7
 - [DVB E-AC-3](/quest/m2/ts-eac3.md) - E-AC-3 private data is split per sync frame and buffer-modelled in TS export
 - [T-STD controls](/quest/m2/tstd-controls.md) - the harness gains an MB-overflow control and an AAC broadcast reference
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
+- [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
@@ -65,6 +67,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Catalog colour model](/quest/m2/color-catalog.md) - the catalog describes a rendition's colour and HDR properties once a renderer consumes them
 - [Archive S3 wire proof](/quest/m2/archive-s3.md) - the archive proof also runs through the S3 client against an in-process S3-compatible server
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
+- [DASH rendition URLs](/quest/m2/dash-rendition-uri.md) - DASH init and segment URLs percent-encode the rendition name, so a name with a slash resolves to its own rendition
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - Rust captures the camera and screen on iOS
 - [Android capture](/quest/m2/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs
@@ -79,7 +82,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Video codec coverage](/quest/m2/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps
 - [#2147](/quest/m2/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - moq-video: 10-bit HEVC in the NVIDIA codec path; AV1 is m3
 - [NVENC buffer pool](/quest/m2/nvenc-pool.md) - NVENC reuses input and output buffers instead of allocating per frame, if a benchmark shows it wins
-- [NVENC held frames](/quest/m2/nvenc-held-frames.md) - moq-nvenc refuses or drives configurations whose frames the driver holds back
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - Windows presents without downloading every frame to system memory
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - video with periodic intra refresh publishes, imports, and tunes in cleanly with one group per sweep and a catalog `warmup`
 - [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane
@@ -95,17 +97,14 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
 - [Socket close](/quest/m2/noq-socket-close.md) - `moq-quic` releases an endpoint's socket on close, so moq-tokio drops its wrapper
-- [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
 - [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
-- [Audio capture time](/quest/m2/audio-capture-time.md) - native audio stamps a buffer's capture instant, not when the driver reads it
 - [Egress profile](/quest/m2/quic-egress-profile.md) - measure relay send-path syscalls, pacing bursts, and allocations before optimizing any of them
 - [Compressed tracks](/quest/m2/flate.md) - moq-ffi and every wrapper expose flate tracks through a `flate` namespace like `json`
-- [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite announcements and interests carry prefix, exact, suffix, or prefix+suffix shapes that survive relay hops, benchmarked over the announce table
 - [moq-transport cluster peers](/quest/m2/ietf-cluster-peers.md) - an extended cluster draft lets moq-transport relays peer again, carrying the cluster route layer
 - [MSFTS convergence](/quest/m2/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where the two still differ: program tables and the ES payload unit
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
@@ -116,5 +115,8 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [GPU capacity and health](/quest/m2/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
 - [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - malformed draft-18 and draft-21 control input closes the session with the draft's code, or PROTOCOL_VIOLATION where a code is a real burden and the fallback is recorded in `doc/concept/standard.md`, in moq-net and js/net
 - [moq-transport request codes](/quest/m2/ietf-request-codes.md) - Range Filters (INVALID_FILTER), reserved namespaces, and RENDEZVOUS_TIMEOUT get the draft's answer, or a recorded fallback code, and the deliberate deviations are documented
-- [Leftover worklet types](/quest/m2/worklet-leftovers.md) - `@moq/hang` drops its unused `@types/audioworklet` dependency, and moq-boy stops including the shared worklet declaration
 - [Native enabled](/quest/m2/native-enabled.md) - native players and the ffi/C paths never select a disabled rendition
+- [JS audio ranking](/quest/m2/js-audio-ranked.md) - @moq/hang and HLS rank audio renditions like Rust
+- [ts::Export catalog stream](/quest/m2/ts-export-catalog.md) - TS export takes (source, catalog) like the other exporters
+- [C backend copy](/quest/m2/c-backend-copy.md) - one payload copy out of the C backend, benchmarked
+- [Load-balancer refusals](/quest/m2/listener-lb-refusals.md) - refuse ignored or conflicting QUIC load-balancer settings

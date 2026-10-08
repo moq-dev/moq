@@ -282,6 +282,57 @@ fn test_av1_catalog() {
 	assert_eq!(mvex.trex[0].track_id, moov.trak[0].tkhd.track_id);
 }
 
+/// An avc3 track imports as in-band H.264. Its avcC, though it lists no parameter
+/// sets, is still the description: it carries the NAL length size of the samples.
+#[test]
+fn avc3_imports_in_band() {
+	use hang::catalog::{H264, VideoCodec, VideoConfig};
+	use mp4_atom::Atom;
+
+	// configurationVersion, profile, compatibility, level, 4-byte lengths, no SPS, no PPS.
+	const AVCC: &[u8] = &[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe0, 0x00];
+
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	let mut trak = super::synthesize_video_trak(1, 90_000, &config, Some(AVCC)).unwrap();
+	trak.mdia.minf.stbl.stsd.codecs = vec![
+		mp4_atom::Avc3 {
+			visual: mp4_atom::Visual {
+				data_reference_index: 1,
+				width: 320,
+				height: 240,
+				..Default::default()
+			},
+			avcc: mp4_atom::Avcc::decode_body(&mut std::io::Cursor::new(AVCC)).unwrap(),
+			..Default::default()
+		}
+		.into(),
+	];
+	let trex = mp4_atom::Trex {
+		track_id: 1,
+		default_sample_description_index: 1,
+		..Default::default()
+	};
+	let init = super::encode_init(None, vec![trak], vec![trex]).unwrap();
+
+	let catalog = run_fmp4(&init);
+	let video = catalog.video.renditions.values().next().expect("an avc3 rendition");
+	let VideoCodec::H264(h264) = &video.codec else {
+		panic!("expected H.264, got {}", video.codec);
+	};
+	assert!(h264.inline, "avc3 carries its parameter sets in band");
+	assert_eq!(video.codec.to_string(), "avc3.42c01f");
+	assert_eq!(video.description.as_deref(), Some(AVCC));
+	assert_eq!((video.coded_width, video.coded_height), (Some(320), Some(240)));
+	assert!(matches!(video.container, Container::Cmaf { .. }));
+}
+
 #[test]
 fn test_vp9_catalog() {
 	let data = include_bytes!("test_data/vp9.mp4");

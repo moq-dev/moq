@@ -224,7 +224,7 @@ impl From<hang::catalog::VideoConfig> for VideoHint {
 	///
 	/// Total by construction: every field the hint can hold is taken from the config, so there is no
 	/// per-field copy for a caller to forget. Fields with no hint slot (`broadcast`, `description`,
-	/// `stalled`) are set through the catalog directly.
+	/// `enabled`) are set through the catalog directly.
 	fn from(config: hang::catalog::VideoConfig) -> Self {
 		Self {
 			label: config.label,

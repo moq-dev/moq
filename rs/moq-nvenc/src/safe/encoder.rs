@@ -10,7 +10,7 @@ use cudarc::driver::CudaContext;
 
 use super::{
 	api::{self, EncodeAPI, LoadError},
-	result::EncodeError,
+	result::{EncodeError, ErrorKind},
 	session::Session,
 };
 use crate::sys::nvEncodeAPI::{
@@ -386,6 +386,8 @@ impl Encoder {
 
 	/// Initialize an encoder session with the given configuration.
 	///
+	/// Refuses lookahead and B-frames, including those a preset selects when no config is given.
+	///
 	/// You must do this before you can encode a picture.
 	/// You should use the [`EncoderInitParams`] builder
 	/// via [`EncoderInitParams::new`].
@@ -396,6 +398,8 @@ impl Encoder {
 	///
 	/// Could error if the `initialize_params` are invalid
 	/// or if we run out of memory.
+	/// Lookahead (`enableLookahead` or `enableExtLookahead`) and B-frames
+	/// (`frameIntervalP` greater than 1) return [`ErrorKind::InvalidParam`].
 	///
 	/// # Examples
 	///
@@ -428,6 +432,24 @@ impl Encoder {
 		buffer_format: NV_ENC_BUFFER_FORMAT,
 		mut initialize_params: EncoderInitParams,
 	) -> Result<Session, EncodeError> {
+		// Refuse before initialize. A held frame comes back as need-more-input,
+		// and locking it fails, which no caller can recover from here.
+		let reason = match initialize_params.config.as_deref() {
+			Some(config) => held_output_reason(config),
+			// No config: the driver applies the preset, so those are the settings.
+			None => {
+				let preset = self.get_preset_config(
+					initialize_params.param.encodeGUID,
+					initialize_params.param.presetGUID,
+					initialize_params.param.tuningInfo,
+				)?;
+				held_output_reason(&preset.presetCfg)
+			}
+		};
+		if let Some(reason) = reason {
+			return Err(EncodeError::new(ErrorKind::InvalidParam, Some(reason.into())));
+		}
+
 		let mut config = initialize_params.config.take();
 		initialize_params.param.encodeConfig = config.as_deref_mut().map_or(std::ptr::null_mut(), std::ptr::from_mut);
 		let initialize_params = &mut initialize_params.param;
@@ -452,6 +474,17 @@ impl Encoder {
 			init,
 			config,
 		})
+	}
+}
+
+/// Why `config` would make NVENC hold output until a later submission.
+fn held_output_reason(config: &NV_ENC_CONFIG) -> Option<&'static str> {
+	if config.rcParams.enableLookahead() != 0 || config.rcParams.enableExtLookahead() != 0 {
+		Some("lookahead holds frames, which this session cannot return")
+	} else if config.frameIntervalP > 1 {
+		Some("B-frames hold frames, which this session cannot return")
+	} else {
+		None
 	}
 }
 
@@ -623,6 +656,28 @@ mod tests {
 		let error = open_session(|_| fail(ErrorKind::OutOfMemory), |_| panic!("destroyed a null session"))
 			.expect_err("open failed");
 		assert_eq!(error.kind(), ErrorKind::OutOfMemory);
+	}
+
+	#[test]
+	fn lookahead_and_b_frames_hold_output() {
+		let mut config = NV_ENC_CONFIG::default();
+		assert_eq!(held_output_reason(&config), None);
+
+		config.frameIntervalP = 1;
+		assert_eq!(held_output_reason(&config), None);
+
+		config.rcParams.set_enableLookahead(1);
+		assert!(held_output_reason(&config).is_some());
+		config.rcParams.set_enableLookahead(0);
+
+		config.rcParams.set_enableExtLookahead(1);
+		assert!(held_output_reason(&config).is_some());
+		config.rcParams.set_enableExtLookahead(0);
+
+		config.frameIntervalP = 2;
+		assert!(held_output_reason(&config).is_some());
+		config.frameIntervalP = 0;
+		assert_eq!(held_output_reason(&config), None);
 	}
 
 	#[test]

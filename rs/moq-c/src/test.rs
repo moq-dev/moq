@@ -754,10 +754,10 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
-	let stalled_video_name = "video-stalled";
-	let stalled_video = moq_video_config {
-		name: stalled_video_name.as_ptr() as *const c_char,
-		name_len: stalled_video_name.len(),
+	let disabled_video_name = "video-disabled";
+	let disabled_video = moq_video_config {
+		name: disabled_video_name.as_ptr() as *const c_char,
+		name_len: disabled_video_name.len(),
 		label: std::ptr::null(),
 		label_len: 0,
 		codec: video_codec.as_ptr() as *const c_char,
@@ -768,7 +768,7 @@ fn publish_catalog_roundtrip() {
 		coded_height: height,
 		container: moq_container::default(),
 	};
-	assert_eq!(unsafe { moq_publish_video_config(broadcast, &stalled_video) }, 0);
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &disabled_video) }, 0);
 	{
 		let mut state = State::lock();
 		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
@@ -777,9 +777,9 @@ fn publish_catalog_roundtrip() {
 			.unwrap()
 			.video
 			.renditions
-			.get_mut(stalled_video_name)
+			.get_mut(disabled_video_name)
 			.unwrap()
-			.stalled = Some(true);
+			.enabled = false;
 	}
 	let properties = moq_video_properties {
 		display_width: 1080,
@@ -845,30 +845,30 @@ fn publish_catalog_roundtrip() {
 	);
 	assert_eq!(video_cfg.coded_width, 1920);
 	assert_eq!(video_cfg.coded_height, 1080);
-	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
+	let mut enabled = std::mem::MaybeUninit::<bool>::uninit();
 	assert_eq!(
-		unsafe { moq_consume_video_stalled(catalog_id, 0, stalled.as_mut_ptr()) },
+		unsafe { moq_consume_video_enabled(catalog_id, 0, enabled.as_mut_ptr()) },
 		0
 	);
-	assert!(!unsafe { stalled.assume_init() });
+	assert!(unsafe { enabled.assume_init() });
 
-	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
+	let mut enabled = std::mem::MaybeUninit::<bool>::uninit();
 	assert_eq!(
-		unsafe { moq_consume_video_stalled(catalog_id, 1, stalled.as_mut_ptr()) },
+		unsafe { moq_consume_video_enabled(catalog_id, 1, enabled.as_mut_ptr()) },
 		0
 	);
-	assert!(unsafe { stalled.assume_init() });
+	assert!(!unsafe { enabled.assume_init() });
 	assert_eq!(
-		unsafe { moq_consume_video_stalled(catalog_id, 0, std::ptr::null_mut()) },
+		unsafe { moq_consume_video_enabled(catalog_id, 0, std::ptr::null_mut()) },
 		-6,
-		"null stalled pointer should return InvalidPointer (-6)"
+		"null enabled pointer should return InvalidPointer (-6)"
 	);
 	assert_eq!(
 		unsafe {
 			moq_publish_video_remove(
 				broadcast,
-				stalled_video_name.as_ptr() as *const c_char,
-				stalled_video_name.len(),
+				disabled_video_name.as_ptr() as *const c_char,
+				disabled_video_name.len(),
 			)
 		},
 		0

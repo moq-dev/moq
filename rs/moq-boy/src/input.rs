@@ -75,7 +75,7 @@ pub async fn handle_viewers(
 		let viewer_id = update.prefix.to_string();
 
 		if active {
-			let Ok(broadcast) = viewer_origin.request_broadcast(&update.prefix).await else {
+			let Ok(broadcast) = viewer_origin.request_broadcast(&update.prefix, None).await else {
 				continue;
 			};
 			tracing::info!(%viewer_id, "viewer connected");

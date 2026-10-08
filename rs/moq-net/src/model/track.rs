@@ -513,6 +513,11 @@ impl TrackState {
 		}
 	}
 
+	/// Whether `sequence` was sent as a datagram still in the send buffer.
+	fn holds_datagram(&self, sequence: u64) -> bool {
+		self.datagrams.iter().any(|datagram| datagram.sequence == sequence)
+	}
+
 	/// Push a datagram, dropping the oldest when the send buffer is full.
 	fn push_datagram(&mut self, datagram: Datagram) {
 		if self.datagrams.len() == MAX_DATAGRAMS {
@@ -1546,9 +1551,10 @@ impl Producer {
 	/// [`Self::append_group`] never reuses a number). There is no group fallback: each
 	/// session drops (with a debug log) any datagram whose encoded body exceeds the
 	/// transport's datagram size, and sessions that can't carry datagrams at all (moq-lite
-	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
-	/// publisher uses this; a relay preserving upstream numbering uses
-	/// [`Self::insert_datagram`].
+	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU.
+	/// A datagram is never cached or served by a fetch, so use a group for anything a late
+	/// joiner needs. An origin publisher uses this; a relay preserving upstream numbering
+	/// uses [`Self::insert_datagram`].
 	///
 	/// Pass `None` on an untimed track; a datagram that doesn't match its track is
 	/// [`Error::TimestampMismatch`].
@@ -2753,8 +2759,9 @@ impl Consumer {
 	/// or `group::Fetch::default()`.
 	///
 	/// The returned future resolves to [`Error::NotFound`] when the group can never be served
-	/// (past the final sequence, or no [`Dynamic`] on the track), the handler's rejection
-	/// (a relay's upstream miss is [`StreamError::NotFound`](crate::StreamError::NotFound)),
+	/// (past the final sequence, or no [`Dynamic`] on the track), [`Error::NotFetchable`]
+	/// instead when this track sent the sequence as a datagram still buffered, the handler's
+	/// rejection (a relay's upstream miss is [`StreamError::NotFound`](crate::StreamError::NotFound)),
 	/// or the track's abort error if it's already closed. Concurrent fetches for the same sequence coalesce onto one
 	/// handler request.
 	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
@@ -3221,11 +3228,15 @@ impl kio::Task for Fetching {
 		let Some(result) = result else {
 			// Never queued: no handler existed when the fetch was made. Fail fast while
 			// that's still true; a handler that appeared since may yet fill the cache.
+			// A sequence this track sent as a datagram says so, rather than a plain miss.
 			return match fetch.poll(waiter, |fetch| match fetch.has_handlers() {
 				false => Poll::Ready(()),
 				true => Poll::Pending,
 			}) {
-				Poll::Ready(_guard) => Poll::Ready(Err(Error::NotFound)),
+				Poll::Ready(_guard) => Poll::Ready(Err(match state.read().holds_datagram(sequence) {
+					true => Error::NotFetchable,
+					false => Error::NotFound,
+				})),
 				Poll::Pending => Poll::Pending,
 			};
 		};
@@ -3638,15 +3649,34 @@ impl Cursor {
 		}
 	}
 
+	/// The next datagram inside this subscriber's range, dropping the ones outside it.
+	///
+	/// The range is the one groups get: the floor, the cap, and a start frame past 0, which
+	/// excludes the start group's only frame. A datagram is judged when the cursor reaches
+	/// it, against the range in force then, and one outside it is gone for good: unlike a
+	/// group past the cap, nothing holds it for a later raise.
 	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
-		let Some((datagram, found_index)) =
-			ready!(self.poll(waiter, |state| state.poll_recv_datagram(self.datagram_index))?)
-		else {
-			return Poll::Ready(Ok(None));
-		};
+		loop {
+			let Some((datagram, found_index)) =
+				ready!(self.poll(waiter, |state| state.poll_recv_datagram(self.datagram_index))?)
+			else {
+				return Poll::Ready(Ok(None));
+			};
+			self.datagram_index = found_index + 1;
 
-		self.datagram_index = found_index + 1;
-		Poll::Ready(Ok(Some(datagram)))
+			let sequence = datagram.sequence;
+			let mid_group = self
+				.subscription
+				.read()
+				.start
+				.is_some_and(|start| start.group == sequence && start.frame > 0);
+			if sequence >= self.min_sequence
+				&& super::subscription::before_end(sequence, self.end_sequence)
+				&& !mid_group
+			{
+				return Poll::Ready(Ok(Some(datagram)));
+			}
+		}
 	}
 
 	/// The lowest servable group past the last one returned, walking off everything the
@@ -3867,8 +3897,9 @@ impl Subscriber {
 	///
 	/// Datagrams are a separate best-effort channel from groups (see
 	/// [`Producer::append_datagram`]); they share only the sequence namespace, and
-	/// neither cursor moves the other. A consumer that falls too far behind silently
-	/// loses the oldest datagrams.
+	/// neither cursor moves the other. A new subscriber may get the few still in the send
+	/// buffer, and any outside its group range are skipped. A consumer that falls too far
+	/// behind silently loses the oldest datagrams.
 	///
 	/// Returns `Poll::Ready(Ok(Some(datagram)))` when one is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
@@ -4808,6 +4839,94 @@ mod test {
 			.append_datagram(Timestamp::from_millis(0).unwrap(), &b"go"[..])
 			.unwrap();
 		assert_eq!(&recv_datagram(&mut dg).payload[..], b"go");
+	}
+
+	/// A fetch never serves a datagram group, and says so rather than reporting a plain
+	/// miss, whether or not a group followed it.
+	#[test]
+	fn a_datagram_group_is_not_fetchable() {
+		let mut producer = track_producer("test", None);
+		let consumer = producer.consume();
+		let _subscriber = producer.subscribe(None);
+		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
+		let fetch = |sequence| consumer.fetch_group(sequence, None).now_or_never();
+		assert!(
+			matches!(fetch(sequence), Some(Err(Error::NotFetchable))),
+			"the newest sequence"
+		);
+
+		producer.append_group().unwrap();
+		assert!(
+			matches!(fetch(sequence), Some(Err(Error::NotFetchable))),
+			"below a newer group"
+		);
+		// A sequence that was never a datagram is a plain miss.
+		assert!(
+			matches!(fetch(sequence + 2), Some(Err(Error::NotFound))),
+			"a missing group"
+		);
+	}
+
+	/// The subscription's floor and cap bound datagrams as they bound groups. The datagrams
+	/// in range, sent between the dropped ones, show the reader is live, so the range is
+	/// what dropped the others.
+	#[test]
+	fn the_group_range_bounds_datagrams() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_start(Position::group(5)));
+		subscriber.set_groups(..7);
+		for sequence in [4, 5, 7, 6] {
+			producer
+				.insert_datagram(sequence, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+				.unwrap();
+		}
+
+		assert_eq!(recv_datagram(&mut subscriber).sequence, 5);
+		assert_eq!(recv_datagram(&mut subscriber).sequence, 6);
+		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
+	}
+
+	/// A start past the start group's first frame excludes that group's datagram, its only
+	/// frame; a start at frame 0 keeps it.
+	#[test]
+	fn a_mid_group_start_drops_the_start_groups_datagram() {
+		let mut producer = track_producer("test", None);
+		let mut mid = producer.subscribe(Subscription::default().with_start(Position { group: 5, frame: 1 }));
+		let mut whole = producer.subscribe(Subscription::default().with_start(Position::group(5)));
+		for sequence in [5, 6] {
+			producer
+				.insert_datagram(sequence, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+				.unwrap();
+		}
+
+		assert_eq!(recv_datagram(&mut mid).sequence, 6);
+		assert_eq!(recv_datagram(&mut whole).sequence, 5);
+		assert_eq!(recv_datagram(&mut whole).sequence, 6);
+	}
+
+	/// A range update judges the datagrams still buffered when they are read, and one it
+	/// dropped stays dropped once the cap rises again: nothing holds it like a parked group.
+	#[test]
+	fn a_range_update_applies_to_buffered_datagrams() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		for sequence in 1..=4 {
+			producer
+				.insert_datagram(sequence, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+				.unwrap();
+		}
+
+		subscriber.set_groups(2..4);
+		assert_eq!(recv_datagram(&mut subscriber).sequence, 2);
+		assert_eq!(recv_datagram(&mut subscriber).sequence, 3);
+		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
+
+		subscriber.set_groups(..);
+		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
+		producer
+			.insert_datagram(5, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert_eq!(recv_datagram(&mut subscriber).sequence, 5);
 	}
 
 	/// Exercises the full producer -> publisher-encode -> subscriber-decode -> producer seam

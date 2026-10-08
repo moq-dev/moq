@@ -115,9 +115,8 @@ taking the sockets out and driving them yourself is how a later library
 update can drop QUIC while still compiling. `io_uring` additionally needs Linux 6.12+, the `io-uring` cargo
 feature, and exactly one certificate read at startup; it serves moq-lite only,
 and refuses to start anywhere it cannot deliver. `[quic]` applies either way,
-except that `mtu_discovery` (its datagram path sends a fixed payload) and the
-three flow-control windows (these workers run fixed ones) are refused under
-`io_uring` rather than quietly ignored. Each worker reports its own counters at
+except that `mtu_discovery` (its datagram path sends a fixed payload) is refused
+under `io_uring` rather than quietly ignored. Each worker reports its own counters at
 [`/metrics`](/bin/relay/http#get-metrics). The kernel charges each worker's
 ring (~56 KiB, plus a page per socket) to `RLIMIT_MEMLOCK`, a budget shared by
 every io\_uring the user runs; raise it (`LimitMEMLOCK=` under systemd) if
@@ -238,7 +237,10 @@ Each node publishes `publisher.json`, `subscriber.json`, and `sessions.json`
 tracks (plus compressed `.json.z` twins) of cumulative counters per broadcast
 and auth root, split by a **tier** label chosen by the auth server's grant or
 `--cluster-tier`, which is what makes billing per customer or per region
-possible. [Stats](/concept/stats) describes the paths, tracks, and encodings;
+possible. Each run, and each group returning after its linger, announces under
+a fresh [epoch](/concept/moq-lite#publisher-epochs) on its route, so a restart
+is a new broadcast at the same path.
+[Stats](/concept/stats) describes the paths, tracks, and encodings;
 read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]

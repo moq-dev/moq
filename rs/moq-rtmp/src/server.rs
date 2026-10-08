@@ -1801,7 +1801,7 @@ mod tests {
 
 		let consumer = origin.consume();
 		consumer.routed("live/cam0").await.unwrap();
-		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().query().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -2282,7 +2282,7 @@ mod tests {
 			.await
 			.expect("stale publish timed out")
 			.unwrap();
-		let stale = consumer.request_broadcast("live/cam0").await.unwrap();
+		let stale = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -2307,7 +2307,7 @@ mod tests {
 		assert!(matches!(ended, moq_net::Error::Unroutable), "{ended:?}");
 		assert!(!stale_client.is_finished(), "the stale connection is still open");
 
-		let fresh = consumer.request_broadcast("live/cam0").await.unwrap();
+		let fresh = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected publish");
 
 		stale_client.abort();
