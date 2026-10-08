@@ -1,6 +1,7 @@
 // A track keeps its timedness end to end: no receive path fills in arrival time, and a
 // wire that can't declare a timeline delivers frames untimed. Mirrors rs/moq-net/tests/untimed.rs.
 import { expect, test } from "bun:test";
+import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
@@ -75,6 +76,31 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 	return { info, frames };
 }
 
+/** Copy `input`'s video track into a broadcast this node produced, until `input` closes. */
+async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
+	const subscription = input.track("video").subscribe();
+	const copy = new BroadcastProducer();
+	const video = copy.createTrack("video", await subscription.info());
+	void (async () => {
+		try {
+			const groups = subscription.ordered();
+			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
+				const out = video.appendGroup();
+				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
+				out.close();
+			}
+			// Closing the broadcast does not end a track inserted into it.
+			video.close();
+		} catch (err) {
+			// An upstream abort goes downstream as an abort, never as a clean end.
+			video.close(err instanceof Error ? err : new Error(String(err)));
+		} finally {
+			copy.close();
+		}
+	})();
+	return copy;
+}
+
 test("a forwarded untimed track stays untimed", async () => {
 	// The publisher's hop (lite-04) can't declare a timeline, and the forwarding node must
 	// not claim one on its moq-transport hop either.
@@ -101,10 +127,16 @@ test("a forwarded untimed track stays untimed", async () => {
 		}
 	})();
 
-	// Serve the downstream session from the upstream one.
+	// Serve the downstream session from the upstream one. A JS origin refuses to serve a
+	// broadcast a session delivered, so the forwarding node republishes a copy it produced.
 	const dynamic = relay.dynamic(Path.from("test"));
+	const inputs: BroadcastConsumer[] = [];
 	const forwarding = (async () => {
-		for await (const request of dynamic.requested()) request.accept(wireOf(ingest).consume(request.path));
+		for await (const request of dynamic.requested()) {
+			const input = wireOf(ingest).consume(request.path);
+			inputs.push(input);
+			request.accept(await republish(input));
+		}
 	})();
 
 	const remote = wireOf(subscriber).consume(Path.from("test"));
@@ -117,6 +149,7 @@ test("a forwarded untimed track stays untimed", async () => {
 	broadcast.close();
 	await serving;
 	remote.close();
+	for (const input of inputs) input.close();
 	dynamic.close();
 	await forwarding;
 	for (const session of [publisher, ingest, serve, subscriber]) session.abort();

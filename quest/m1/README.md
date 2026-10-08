@@ -88,6 +88,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [IETF object gaps](/quest/m1/ietf-object-gaps.md) - a gapped object ID is refused loudly like a subgroup in Rust and JS, and an overflowing one closes the session in Rust
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
+- [Relay session limits](/quest/m1/relay-session-limits.md) - moq-relay sets per-session request limits, tighter for clients than peers, and the bindings name a refused request
 - [Churn with held subscriptions](/quest/m1/session-churn-held.md) - opening and closing a request costs the same with 1 or 1,024 held subscriptions
 - [Export linger](/quest/m1/export-ts-linger.md) - `moq export ts --linger` fails on an export error while the broadcast is live, and lingers once it closes or is replaced
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist
@@ -137,7 +138,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [Frame slot charge](/quest/m1/frame-slot-charge.md) - a group's frame slots past the first four count against the cache pool, including capacity a released group keeps
 - [Front deadlines](/quest/m1/front-deadline-index.md) - a front's per-event cost stops growing with its track count: an expiry index and per-track wakes, proven by a churn benchmark
 - [Listener deadlines](/quest/m1/listener-deadlines.md) - io_uring, HTTP/2, and the internal listener bound slow handshakes and headers, and iroh honors `quic.keep_alive`
-- [Papercuts](/quest/m1/papercuts.md) - JS refuses to serve a broadcast it did not produce, and a uring test stops sleeping
 - [Rust papercuts](/quest/m1/papercuts-rs.md) - HTTP refusals are counted, a `u64::MAX` resume is unbounded, GOING_AWAY falls forward, and GRO stride 0 cannot panic
 - [JS papercuts](/quest/m1/papercuts-js.md) - IETF status 0 keeps the subgroup open, a muted rendition change settles, and bad element attributes warn
 - [Front parking](/quest/m1/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
