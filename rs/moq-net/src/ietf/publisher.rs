@@ -1524,10 +1524,10 @@ where
 		let draft20 = Filter::is_draft20(self.version);
 		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
 		// Draft-20 caps the response at Largest Object, and refuses a start past it (section
-		// 10.13). Both only bite when Largest Object is in the fetched group, so this is its
-		// Object ID there, `Some(None)` for a final group with nothing from the start. The
-		// cache knows it at the track's end, or when a live feed's newest object it can name
-		// is in this group. Otherwise (a relay's copy with no upstream subscription, or a
+		// 10.13). Both only bite when Largest Object is in the fetched group or behind it, so
+		// this is its Object ID there, or `Some(None)` when the group holds nothing at or
+		// past it. The cache knows it at the track's end, or when a live feed's newest object
+		// it can name is in or behind this group. Otherwise (a relay's copy with no upstream subscription, or a
 		// newest group it cannot read) it neither caps nor refuses: the read waits out an
 		// unfinished group, so echoing the requested end over a finished one only says
 		// objects it never held do not exist.
