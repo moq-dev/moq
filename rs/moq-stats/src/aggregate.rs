@@ -531,7 +531,9 @@ fn advance<V: Mergeable>(
 					if node.epoch.is_none()
 						&& node.identity.is_some()
 						&& broadcast
-							.epoch()
+							.info()
+							.epoch
+							.as_ref()
 							.is_some_and(|epoch| node.identity.as_ref() != Some(epoch)) =>
 				{
 					tracing::debug!(name, "stats: node resolved another publisher");

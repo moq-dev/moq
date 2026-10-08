@@ -45,6 +45,13 @@ pub struct Info {
 	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
 	/// root: any `..` reference escapes.
 	pub path: crate::PathOwned,
+
+	/// The epoch of the route a [`Consumer`] was resolved through, naming the publisher
+	/// instance it reads.
+	///
+	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
+	/// route without an epoch and for a handle not resolved through an origin.
+	pub epoch: Option<crate::Epoch>,
 }
 
 impl Default for Info {
@@ -53,6 +60,7 @@ impl Default for Info {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
 			path: crate::PathOwned::default(),
+			epoch: None,
 		}
 	}
 }
@@ -352,7 +360,6 @@ impl Producer {
 			alive: self.alive.token.consume(),
 			state: self.state.clone(),
 			stats: stats::Scope::default(),
-			epoch: None,
 		}
 	}
 
@@ -574,7 +581,6 @@ impl Dynamic {
 			alive: self.alive.token.consume(),
 			state: self.state.clone(),
 			stats: stats::Scope::default(),
-			epoch: None,
 		}
 	}
 
@@ -627,8 +633,6 @@ pub struct Consumer {
 	// handoff. Inherited by the tracks subscribed through this handle. Empty (no-op)
 	// for an untagged broadcast.
 	stats: stats::Scope,
-	// The epoch of the route an origin resolved this handle through.
-	epoch: Option<crate::Epoch>,
 }
 
 impl Clone for Consumer {
@@ -638,7 +642,6 @@ impl Clone for Consumer {
 			alive: self.alive.clone(),
 			state: self.state.clone(),
 			stats: self.stats.clone(),
-			epoch: self.epoch.clone(),
 		}
 	}
 }
@@ -667,20 +670,14 @@ impl Consumer {
 		self
 	}
 
-	/// Stamp the epoch of the route an origin resolved this handle through.
+	/// Stamp the epoch of the route this handle was resolved through, overriding [`Info::epoch`].
 	pub(crate) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
-		self.epoch = epoch;
+		if self.info.epoch != epoch {
+			let mut info = (*self.info).clone();
+			info.epoch = epoch;
+			self.info = Arc::new(info);
+		}
 		self
-	}
-
-	/// The publisher epoch of the route this handle was resolved through, if it has one.
-	///
-	/// Set by [`origin::Consumer::request_broadcast`](crate::origin::Consumer::request_broadcast)
-	/// together with the result, so it names the publisher instance actually serving this
-	/// handle even when the request was unpinned. `None` for a route without an epoch or a
-	/// handle taken straight from a producer.
-	pub fn epoch(&self) -> Option<&crate::Epoch> {
-		self.epoch.as_ref()
 	}
 
 	/// The broadcast's metadata, as reached through this handle.
@@ -825,7 +822,6 @@ impl WeakConsumer {
 			alive: self.alive.consume(),
 			state: self.state.clone(),
 			stats: stats::Scope::default(),
-			epoch: None,
 		}
 	}
 }

@@ -1521,8 +1521,9 @@ export class Subscriber {
 	 * Receive the next datagram in arrival order.
 	 *
 	 * Datagrams are a separate best-effort channel from groups (see
-	 * {@link Producer.appendDatagram}); they share only the sequence namespace. A consumer
-	 * that falls too far behind silently loses the oldest datagrams. Read this alongside
+	 * {@link Producer.appendDatagram}); they share only the sequence namespace. Those outside
+	 * the group range are skipped. A consumer that falls too far behind silently loses the
+	 * oldest datagrams. Read this alongside
 	 * {@link recvGroup} (e.g. in a separate loop) to receive both channels concurrently.
 	 * The two cursors are independent: a datagram never moves the group cursor.
 	 */
@@ -1537,8 +1538,11 @@ export class Subscriber {
 		for (;;) {
 			const datagrams = this.#state.datagrams.peek();
 
-			if (datagrams.length > 0) {
-				return datagrams.shift();
+			// The group range bounds datagrams too, judged when each is read. One outside it is
+			// gone for good: nothing holds it for a later raise, unlike a group past the cap.
+			const { start, end } = this.#cursor.peek();
+			for (let datagram = datagrams.shift(); datagram; datagram = datagrams.shift()) {
+				if (datagram.sequence >= start && (end === undefined || datagram.sequence < end)) return datagram;
 			}
 
 			const closed = this.#state.closed.peek();

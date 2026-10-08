@@ -221,6 +221,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 		sample_rate: 48_000,
 		channel_count: 2,
 		bitrate: None,
+		enabled: true,
 		container: MoqContainer::Legacy,
 	}
 }

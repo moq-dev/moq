@@ -86,7 +86,10 @@ tracks waiting for a group that never arrives.
 A moq-lite datagram is a single-frame group, so on moq-transport it travels
 as an `OBJECT_DATAGRAM` at object 0 whose Group ID is the sequence, and a relay
 forwards it without renumbering. A datagram carrying any other Object ID, or a
-status other than Normal, is dropped. JavaScript does not yet carry datagrams
+status other than Normal, is dropped. Datagrams are never fetchable: a fetch
+object flagged as a datagram fails only that fetch, as `NotFetchable`, and a
+relay answers its own downstream FETCH with `DOES_NOT_EXIST`, or `NOT_FETCHABLE`
+to a moq-lite-07 peer. JavaScript does not yet carry datagrams
 on moq-transport.
 
 A client may present one credential in its `SETUP` with the `AUTHORIZATION
@@ -125,7 +128,6 @@ The MoQ Streaming Format is a catalog, playing the role HLS playlists and SDP
 do elsewhere. It overlaps with the [hang catalog](/concept/hang) and the two
 will likely converge. The tools track draft-01 and hide the version on the
 wire, so draft-00 catalogs still decode and init data always arrives inline.
-The `stalled` rendition hint is shared between the two formats.
 
 ## LOC
 

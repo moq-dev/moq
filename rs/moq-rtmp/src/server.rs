@@ -793,7 +793,7 @@ impl<S: Stream> Play<S> {
 
 		// Resolve the catalog and reject the play up front if the client can't handle its
 		// codecs, before telling the viewer playback started.
-		let mut catalog = moq_mux::catalog::Consumer::new(&broadcast, CatalogFormat::default())
+		let mut check = moq_mux::catalog::Consumer::new(&broadcast, CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init catalog check: {e}"))?;
 		let catalog = tokio::select! {
@@ -803,7 +803,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			catalog = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut catalog)) => {
+			catalog = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut check)) => {
 				match catalog {
 					Ok(Ok(Some(catalog))) => catalog,
 					Ok(Ok(None)) => {
@@ -818,6 +818,7 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
+		drop(check);
 		let select = match play_selection(&catalog, &self.capabilities) {
 			Ok(select) => select,
 			Err(reason) => {
@@ -826,14 +827,19 @@ impl<S: Stream> Play<S> {
 			}
 		};
 
-		// The export re-resolves the broadcast (and any sibling broadcast a rendition's
-		// catalog `broadcast` field references) through the origin.
-		let mut export = FlvExport::new(moq_mux::Source::new(origin.consume(), path.as_str()))
+		// The capability check consumed its snapshot, so the export follows a fresh
+		// subscription narrowed to what the client can play. It resolves through the
+		// same source as the tracks, so a publisher that reconnected since the check
+		// doesn't split the catalog from its media.
+		let source = moq_mux::Source::new(origin.consume(), path.as_str());
+		let stream = source
+			.catalog::<()>(CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
+			.select(select);
+		let mut export = FlvExport::new(source, stream)
 			.with_max_delay(self.latency)
-			.with_multitrack(self.capabilities.multitrack)
-			.with_select(select);
+			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
 		// broadcast that never produces a playable FLV header looks successful to the
@@ -1201,11 +1207,11 @@ async fn pump<S: Stream>(
 /// pings, `deleteStream`) so a long playback stays healthy. The read and write
 /// halves run independently, so media keeps flowing regardless of when the viewer
 /// next sends anything.
-async fn play_pump<S: Stream>(
+async fn play_pump<S: Stream, C: CatalogStream>(
 	stream: &mut S,
 	session: &mut ServerSession,
 	work: &mut VecDeque<ServerSessionResult>,
-	export: &mut FlvExport,
+	export: &mut FlvExport<C>,
 	mut tags: flv::TagReader,
 	stream_id: u32,
 	peer: SocketAddr,

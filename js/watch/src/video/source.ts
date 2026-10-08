@@ -185,16 +185,9 @@ function byBitrate(target: number): RenditionFilter {
 	};
 }
 
-/** Return unstalled renditions, or the lowest bitrate or resolution when every option is stalled. */
-function selectableRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
-	const active = Object.entries(renditions).filter(([, config]) => !config.stalled);
-	if (active.length > 0) return Object.fromEntries(active);
-
-	const entries = Object.entries(renditions);
-	if (entries.length === 0) return {};
-	const byRate = byBitrate(0)(entries);
-	const lowest = byRate.length === 1 ? byRate[0] : byDimensions(0, 0)(entries)[0];
-	return { [lowest]: renditions[lowest] };
+/** Return the renditions that may be selected: a disabled one has no frames coming. */
+function enabledRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
+	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => config.enabled !== false));
 }
 
 /**
@@ -307,19 +300,16 @@ export class Source {
 	}
 
 	#runSelected(effect: Effect): void {
-		const supported = effect.get(this.#out.available);
+		const available = enabledRenditions(effect.get(this.#out.available));
 		const target = effect.get(this.in.target);
 
-		// A manual choice stays selected while stalled. `stalled` steers automatic adaptation; it
-		// must not silently override an explicit user selection.
-		if (target?.name && target.name in supported) {
-			const config = supported[target.name];
+		if (target?.name && target.name in available) {
+			const config = available[target.name];
 			effect.set(this.#out.track, target.name);
 			effect.set(this.#out.config, config);
 			return;
 		}
 
-		const available = selectableRenditions(supported);
 		if (Object.keys(available).length === 0) return;
 
 		// Auto-select: use recv bandwidth if no explicit bitrate target.

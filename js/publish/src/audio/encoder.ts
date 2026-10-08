@@ -76,8 +76,9 @@ export interface Stats {
 
 // Signals the encoder reads.
 export type EncoderInput = {
-	// Whether to publish (and encode) this rendition. Defaults to true. When false the rendition drops out of the
-	// catalog and stops encoding, ending the epoch, but stays registered so a subscriber still gets an idle track.
+	// Whether to encode this rendition. Defaults to true. When false it stops encoding, ending the epoch,
+	// but stays in the catalog with `enabled: false` and its last config, and stays registered so a
+	// subscriber still gets an idle track.
 	enabled: Getter<boolean>;
 
 	// The broadcast to register the rendition on. Undefined resolves the config but has nowhere to publish.
@@ -109,7 +110,8 @@ export type EncoderProps = Inputs<EncoderInput> & {
 };
 
 type EncoderOutput = {
-	// The catalog config published for this rendition, or undefined while there's no capture.
+	// The catalog config published for this rendition, `enabled: false` while disabled, or undefined
+	// while there's no capture.
 	catalog: Signal<Catalog.AudioConfig | undefined>;
 	// The head of the capture graph, so callers can tap the raw capture. Volume is applied to the
 	// PCM rather than in the graph, so this is pre-gain. Undefined for a source that isn't a track.
@@ -218,6 +220,14 @@ export class Encoder {
 
 	#signals = new Effect();
 	#estimator = new Estimator();
+	// The estimator's jitter and delay, republished whenever either rises.
+	#estimate = new Signal<Estimator["estimate"]>({});
+	// The last config published while enabled, which a disabled rendition keeps advertising.
+	#last?: Catalog.AudioConfig;
+	// Whether the rendition was disabled since a config last resolved, so it keeps advertising `#last`
+	// as disabled until the re-enabled capture resolves a new one. A capture that never reopens leaves
+	// it disabled, which is accurate: no frames are coming.
+	#paused = false;
 
 	constructor(name: string, props?: EncoderProps) {
 		// `source` moved to Audio.Capture, which renditions share. TypeScript catches this, but a
@@ -391,8 +401,8 @@ export class Encoder {
 	// Derive the encoder config from the captured format and the codec. Re-runs whenever either changes, so a
 	// codec update (bitrate, frame duration) reconfigures without waiting for a channel-count change.
 	//
-	// Gated on `enabled` the same way the video encoder is: a disabled rendition has to drop out of
-	// the catalog, and a sample source keeps its format while muted rather than tearing down.
+	// Gated on `enabled` the same way the video encoder is: a disabled rendition stops resolving a
+	// config, and a sample source keeps its format while muted rather than tearing down.
 	#runConfig(effect: Effect): void {
 		const fade = effect.get(this.fade);
 		if (!Number.isFinite(fade) || fade < 0)
@@ -415,20 +425,25 @@ export class Encoder {
 	}
 
 	// Publish the config immediately so a consumer can request the demand-gated track. Once encoding
-	// starts, republish Opus with the exact decoder description reported for that encoder config.
+	// starts, republish Opus with the exact decoder description reported for that encoder config. A
+	// disabled rendition keeps its last config, since muting also releases the capture, and stays
+	// disabled after re-enabling until the reopened capture reports its format.
 	#runCatalog(effect: Effect): void {
-		const config = effect.get(this.#config)?.catalog;
+		const estimate = effect.get(this.#estimate);
+		const enabled = effect.get(this.in.enabled);
+		if (!enabled) this.#paused = true;
+		const config = enabled ? effect.get(this.#config)?.catalog : undefined;
 		if (!config) {
-			effect.set(this.#out.catalog, undefined);
+			const last = this.#paused ? this.#last : undefined;
+			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
 			return;
 		}
+		this.#paused = false;
 
 		const decoder = effect.get(this.#decoderDescription);
 		const catalog = decoder?.config === config ? { ...config, description: decoder.description } : config;
-		effect.set(this.#out.catalog, {
-			...catalog,
-			...this.#estimator.estimate,
-		});
+		this.#last = { ...catalog, ...estimate };
+		effect.set(this.#out.catalog, this.#last);
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the
@@ -516,8 +531,7 @@ export class Encoder {
 						if (keyframe) live.start = timestamp;
 						live.producer.encode(frame, timestamp, keyframe);
 						if (this.#estimator.flush(frame.timestamp, baseline)) {
-							const catalog = this.#out.catalog.peek();
-							if (catalog) this.#out.catalog.set({ ...catalog, ...this.#estimator.estimate });
+							this.#estimate.set({ ...this.#estimator.estimate });
 						}
 					},
 					error: (err) => {
