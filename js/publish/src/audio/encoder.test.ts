@@ -207,7 +207,7 @@ function configured(): Promise<AudioEncoderConfig> {
 async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: Time.Milli) {
 	const configuring = configured();
 
-	const track = new Moq.Track.Producer("audio").accept();
+	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const written: [number, number][] = [];
 	const groups: number[] = [];
 	const appended: ReturnType<typeof track.appendGroup>[] = [];

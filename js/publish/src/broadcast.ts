@@ -252,6 +252,8 @@ export class Broadcast {
 				// that sole closed snapshot replayable so a viewer arriving after the ordinary media
 				// retention window can still bootstrap.
 				const track = broadcast.createTrack(name, {
+					// Each catalog snapshot is stamped when written.
+					timescale: Moq.Time.Timescale.MILLI,
 					maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
 					priority: Catalog.PRIORITY.catalog,
 				});

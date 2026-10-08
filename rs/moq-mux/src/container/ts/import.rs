@@ -519,18 +519,30 @@ impl<E: catalog::Catalog> Import<E> {
 			Some(StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc) => self.legacy_stream(pid, &eac3::DESCRIPTOR),
 			// Opus rides private-data PES (0x06), distinguished from other private streams
 			// by an 'Opus' registration descriptor. Channels and the (always 48 kHz) rate
-			// come from the descriptors, so the importer is built up front.
+			// come from the descriptors, so the importer is built up front. A channel code
+			// the descriptor cannot justify drops this PID; the rest of the program stays.
 			Some(StreamType::Mpeg2PacketizedData) if registration_format(descriptors) == Some(*b"Opus") => {
-				let config = opus_config(descriptors)?;
-				let track = self
-					.broadcast
-					.unique_track(".opus", self.catalog.track_info(hang::catalog::PRIORITY.audio))?;
-				let mut config: hang::catalog::AudioConfig = config.into();
-				config.container = self.container.clone();
-				Stream::Opus(Box::new(OpusStream {
-					import: opus::Import::new(track, self.reserve(), config)?,
-					unwrap: PtsUnwrap::default(),
-				}))
+				match opus_config(descriptors) {
+					Ok(config) => {
+						let track = self
+							.broadcast
+							.unique_track(".opus", self.catalog.track_info(hang::catalog::PRIORITY.audio))?;
+						let mut config: hang::catalog::AudioConfig = config.into();
+						config.container = self.container.clone();
+						Stream::Opus(Box::new(OpusStream {
+							import: opus::Import::new(track, self.reserve(), config)?,
+							unwrap: PtsUnwrap::default(),
+						}))
+					}
+					Err(err) => {
+						tracing::warn!(
+							pid = pid.as_u16(),
+							error = %err,
+							"unsupported Opus channel configuration, dropping"
+						);
+						Stream::Ignored
+					}
+				}
 			}
 			Some(StreamType::Mpeg1Video | StreamType::Mpeg2Video) => Stream::Clock,
 			// A codec we don't decode, named or not. Carry it verbatim as PES when the
@@ -2541,28 +2553,190 @@ fn registration_format(descriptors: &[catalog::Descriptor]) -> Option<[u8; 4]> {
 
 /// The OpusHead implied by the DVB extension descriptor (tag 0x7f, ext tag 0x80).
 ///
-/// `channel_config_code` follows the Opus-in-TS mapping (and ffmpeg's demuxer): 0 is dual
-/// mono (decoded as stereo), 1..=8 is the channel count directly, with family 0 for mono and
-/// stereo and the Vorbis family 1 mapping above that. Higher codes (0x81 explicitly-coded
-/// layouts, reserved values) aren't supported, so they fall back to stereo rather than being
-/// read as a raw 129..=255 count.
-fn opus_config(descriptors: &[catalog::Descriptor]) -> crate::Result<opus::Config> {
-	let channels = descriptors
+/// Codes 0x00..=0x08 follow the plain Opus-in-TS table (and ffmpeg's demuxer): 0 is dual
+/// mono read as one stereo stream, and 1..=8 is that many channels, family 0 up to stereo
+/// and the Vorbis family 1 mapping above it. The packet shape of code 0 is one coupled
+/// stream either way, so this keeps the family 0 head those streams already imported with.
+///
+/// 0x80 and 0x82..=0x88 are the other named layouts in Table 4-3 of the Opus-in-TS draft
+/// (Xiph's "ETSI TS opus" v0.1.3, never published by ETSI): two
+/// independent mono streams, and the uncoupled family 1 tables ffmpeg writes as
+/// `0x80 | channels` and then does not read back. 0x81 carries the layout in the
+/// descriptor (channel count, mapping family, then the stream counts and table,
+/// bit-packed). A reserved code, or an explicit layout that does not parse, refuses this
+/// stream. A stream with no extension descriptor stays stereo.
+fn opus_config(descriptors: &[catalog::Descriptor]) -> anyhow::Result<opus::Config> {
+	let Some(data) = descriptors
 		.iter()
 		.find(|d| d.tag == 0x7f && d.data.first() == Some(&0x80))
-		.and_then(|d| d.data.get(1))
-		.and_then(|&cc| match cc {
-			0 => Some(2),
-			1..=8 => Some(cc as u32),
-			_ => None,
-		})
-		.unwrap_or(2);
+		.map(|d| d.data.as_ref())
+	else {
+		return Ok(opus::Config::new(48_000, 2));
+	};
+	let Some(&code) = data.get(1) else {
+		anyhow::bail!("Opus extension descriptor has no channel_config_code");
+	};
 
-	let mut config = opus::Config::new(48_000, channels);
-	if channels > 2 {
-		config.mapping = Some(opus::Mapping::vorbis(channels as u8)?);
+	match code {
+		0 => Ok(opus::Config::new(48_000, 2)),
+		1..=2 => Ok(opus::Config::new(48_000, u32::from(code))),
+		3..=8 => vorbis(code),
+		0x80 => {
+			anyhow::ensure!(data.len() == 2, "trailing bytes after Opus channel_config_code 0x80");
+			mapped(2, 255, 2, 0, &[0, 1])
+		}
+		0x81 => explicit_layout(&data[2..]),
+		0x82..=0x88 => {
+			anyhow::ensure!(
+				data.len() == 2,
+				"trailing bytes after Opus channel_config_code 0x{code:02x}"
+			);
+			let channels = code - 0x80;
+			const IDENTITY: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+			mapped(u32::from(channels), 1, channels, 0, &IDENTITY[..channels as usize])
+		}
+		_ => anyhow::bail!("reserved Opus channel_config_code 0x{code:02x}"),
 	}
+}
+
+/// Family 1 Vorbis mapping for a plain channel count of 3..=8.
+fn vorbis(channels: u8) -> anyhow::Result<opus::Config> {
+	let mut config = opus::Config::new(48_000, u32::from(channels));
+	config.mapping = Some(opus::Mapping::vorbis(channels)?);
 	Ok(config)
+}
+
+/// A mapping table checked by [`opus::Mapping::new`].
+fn mapped(channels: u32, family: u8, streams: u8, coupled: u8, table: &[u8]) -> anyhow::Result<opus::Config> {
+	let mut config = opus::Config::new(48_000, channels);
+	config.mapping = Some(opus::Mapping::new(opus::mapping::Config {
+		family,
+		streams,
+		coupled,
+		table,
+	})?);
+	Ok(config)
+}
+
+/// The bit-packed layout after `channel_config_code` 0x81 (Opus-in-TS draft Table 4-2).
+///
+/// `channel_count` and `mapping_family` are bytes. Family 0 stops there. Otherwise
+/// `stream_count - 1`, `coupled_stream_count`, and each `channel_mapping` entry follow
+/// at `ceil(log2(...))` bits, MSB first, then zero pad to a byte. The all-ones mapping
+/// value is silence, which an OpusHead stores as 255.
+///
+/// gstreamer sizes each field with `g_bit_storage(n)`, one bit wider than the draft
+/// whenever `n` is a power of two. Those descriptors fail the trailing or pad check and
+/// are refused. Retrying with gstreamer's widths could misread a descriptor written to
+/// the draft, so there is no fallback.
+fn explicit_layout(data: &[u8]) -> anyhow::Result<opus::Config> {
+	let (&channel_count, rest) = data.split_first().context("truncated Opus channel configuration")?;
+	let (&family, rest) = rest.split_first().context("truncated Opus channel configuration")?;
+	anyhow::ensure!(channel_count > 0, "Opus channel_count is zero");
+	if family == 0 {
+		anyhow::ensure!(
+			rest.is_empty(),
+			"trailing bytes after a family 0 Opus channel configuration"
+		);
+		anyhow::ensure!(
+			(1..=2).contains(&channel_count),
+			"channel mapping family 0 does not allow {channel_count} channels"
+		);
+		return Ok(opus::Config::new(48_000, u32::from(channel_count)));
+	}
+
+	let mut bits = Bits::new(rest);
+	let stream_count = bits.read(ceil_log2(u32::from(channel_count)))? + 1;
+	anyhow::ensure!(
+		stream_count <= u32::from(channel_count),
+		"Opus stream_count {stream_count} exceeds channel_count {channel_count}"
+	);
+	let coupled = bits.read(ceil_log2(stream_count + 1))?;
+	anyhow::ensure!(
+		coupled <= stream_count,
+		"Opus coupled_stream_count {coupled} exceeds stream_count {stream_count}"
+	);
+	let decoded = stream_count + coupled;
+	anyhow::ensure!(
+		decoded <= 255,
+		"Opus channel configuration has {decoded} coded channels"
+	);
+	let width = ceil_log2(decoded + 1);
+	let silence = (1u32 << width) - 1;
+	let mut table = Vec::with_capacity(channel_count as usize);
+	for _ in 0..channel_count {
+		let entry = bits.read(width)?;
+		table.push(if entry == silence { 255 } else { entry as u8 });
+	}
+	let pad = (8 - (bits.taken % 8)) % 8;
+	if pad > 0 {
+		let reserved = bits.read(pad as u8)?;
+		anyhow::ensure!(reserved == 0, "nonzero reserved bits in Opus channel configuration");
+	}
+	bits.finish()?;
+
+	mapped(
+		u32::from(channel_count),
+		family,
+		stream_count as u8,
+		coupled as u8,
+		&table,
+	)
+}
+
+/// `ceil(log2(n))` for `n >= 1`. `ceil(log2(1))` is 0, a zero-width field.
+fn ceil_log2(n: u32) -> u8 {
+	debug_assert!(n >= 1);
+	(u32::BITS - (n - 1).leading_zeros()) as u8
+}
+
+/// MSB-first reader over the bit-packed tail of an explicit Opus channel configuration.
+struct Bits<'a> {
+	data: &'a [u8],
+	index: usize,
+	current: u8,
+	left: u8,
+	/// Bits returned so far, padding included, so the caller can byte-align.
+	taken: u32,
+}
+
+impl Bits<'_> {
+	fn new(data: &[u8]) -> Bits<'_> {
+		Bits {
+			data,
+			index: 0,
+			current: 0,
+			left: 0,
+			taken: 0,
+		}
+	}
+
+	fn read(&mut self, n: u8) -> anyhow::Result<u32> {
+		let mut value = 0u32;
+		for _ in 0..n {
+			if self.left == 0 {
+				self.current = *self
+					.data
+					.get(self.index)
+					.context("truncated Opus channel configuration")?;
+				self.index += 1;
+				self.left = 8;
+			}
+			self.left -= 1;
+			value = (value << 1) | u32::from((self.current >> self.left) & 1);
+		}
+		self.taken += u32::from(n);
+		Ok(value)
+	}
+
+	/// The descriptor ended on the byte the layout consumed, with nothing after it.
+	fn finish(self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.left == 0 && self.index == self.data.len(),
+			"trailing bytes in Opus channel configuration"
+		);
+		Ok(())
+	}
 }
 
 /// Validate the complete PES before exposing any of its declared Opus units.
@@ -7016,5 +7190,159 @@ pub(super) mod test {
 		media(&mut stimulus, &mut cc, 31 * 90_000);
 
 		assert_eq!(export_discontinuities(&stimulus).await, 1, "one flag per program break");
+	}
+
+	fn opus_extension(body: &[u8]) -> Vec<super::catalog::Descriptor> {
+		vec![super::catalog::Descriptor {
+			tag: 0x7f,
+			data: bytes::Bytes::copy_from_slice(body),
+		}]
+	}
+
+	fn mapping(config: &crate::codec::opus::Config) -> (u8, u8, u8, Vec<u8>) {
+		let mapping = config.mapping.expect("a channel mapping");
+		(
+			mapping.family(),
+			mapping.streams(),
+			mapping.coupled(),
+			mapping.table().to_vec(),
+		)
+	}
+
+	/// Codes at 0x80 and above are the Opus-in-TS draft table, not a stereo guess.
+	/// The 6-channel 0x81 body is the descriptor gstreamer writes for family 255
+	/// (`[0x81, 6, 255, 160, 20, 229]`); the other bodies are hand-built from that table.
+	#[test]
+	fn opus_channel_codes_keep_their_layout() {
+		let ext = |body: &[u8]| super::opus_config(&opus_extension(body));
+
+		let missing = super::opus_config(&[]).unwrap();
+		assert_eq!(missing.channel_count, 2);
+		assert!(missing.mapping.is_none(), "no descriptor stays family 0 stereo");
+
+		let plain = ext(&[0x80, 6]).unwrap();
+		assert_eq!(plain.channel_count, 6);
+		assert_eq!(mapping(&plain), (1, 4, 2, vec![0, 4, 1, 2, 3, 5]));
+
+		// 0x80: two independent mono streams, not one coupled stereo stream.
+		let dual = ext(&[0x80, 0x80]).unwrap();
+		assert_eq!(dual.channel_count, 2);
+		assert_eq!(mapping(&dual), (255, 2, 0, vec![0, 1]));
+
+		// 0x82: ffmpeg's `0x80 | channels` uncoupled family 1 table.
+		let uncoupled = ext(&[0x80, 0x82]).unwrap();
+		assert_eq!(uncoupled.channel_count, 2);
+		assert_eq!(mapping(&uncoupled), (1, 2, 0, vec![0, 1]));
+
+		let wide = ext(&[0x80, 0x88]).unwrap();
+		assert_eq!(wide.channel_count, 8);
+		assert_eq!(mapping(&wide), (1, 8, 0, vec![0, 1, 2, 3, 4, 5, 6, 7]));
+
+		// gstreamer, 6 uncoupled channels, family 255.
+		let gst = ext(&[0x80, 0x81, 6, 255, 160, 20, 229]).unwrap();
+		assert_eq!(gst.channel_count, 6);
+		assert_eq!(mapping(&gst), (255, 6, 0, vec![0, 1, 2, 3, 4, 5]));
+
+		// Hand-built 5.1 Vorbis table: streams 4, coupled 2, map {0,4,1,2,3,5}.
+		let surround = ext(&[0x80, 0x81, 6, 1, 0x68, 0x42, 0x9d]).unwrap();
+		assert_eq!(surround.channel_count, 6);
+		assert_eq!(mapping(&surround), (1, 4, 2, vec![0, 4, 1, 2, 3, 5]));
+
+		// Silence is the all-ones field (1 bit here), stored as 255 in the OpusHead.
+		let silent = ext(&[0x80, 0x81, 2, 255, 0x10]).unwrap();
+		assert_eq!(silent.channel_count, 2);
+		assert_eq!(mapping(&silent), (255, 1, 0, vec![0, 255]));
+
+		let mono = ext(&[0x80, 0x81, 1, 0]).unwrap();
+		assert_eq!(mono.channel_count, 1);
+		assert!(mono.mapping.is_none());
+	}
+
+	#[test]
+	fn a_reserved_or_unparseable_opus_channel_code_is_refused() {
+		let err = |body: &[u8]| {
+			super::opus_config(&opus_extension(body))
+				.expect_err("this code must not import")
+				.to_string()
+		};
+
+		for code in [0x09_u8, 0x7f, 0x89, 0xff] {
+			let message = err(&[0x80, code]);
+			assert!(message.contains("reserved"), "{code:#04x}: {message}");
+		}
+		assert!(err(&[0x80]).contains("no channel_config_code"));
+		assert!(err(&[0x80, 0x81]).contains("truncated"));
+		assert!(err(&[0x80, 0x81, 0, 1]).contains("channel_count is zero"));
+		assert!(err(&[0x80, 0x81, 3, 0]).contains("family 0"));
+		assert!(err(&[0x80, 0x81, 2, 0, 0]).contains("trailing"));
+		assert!(err(&[0x80, 0x82, 0]).contains("trailing"));
+		// Nonzero pad bits on the silence layout above (0x10 with the pad set).
+		assert!(err(&[0x80, 0x81, 2, 255, 0x1f]).contains("reserved bits"));
+		// Mapping index 2 with only two coded channels, and not the silence value.
+		assert!(err(&[0x80, 0x81, 2, 255, 0x84]).contains("mapping"));
+		// gstreamer's 4 uncoupled channels: `g_bit_storage` widths at a power of two.
+		assert!(err(&[0x80, 0x81, 4, 255, 0x60, 0x14, 0xc0]).contains("trailing"));
+	}
+
+	/// PAT/PMT for an MP2 PID plus an Opus PID whose extension body is `extension`.
+	fn opus_program(extension: &[u8]) -> Vec<u8> {
+		let mut descriptors = vec![0x05, 4, b'O', b'p', b'u', b's', 0x7f, extension.len() as u8];
+		descriptors.extend_from_slice(extension);
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100)]));
+		data.extend(psi_packets(
+			0x0100,
+			&mut 0,
+			&[],
+			&pmt_section(
+				1,
+				0,
+				&[
+					(StreamType::Mpeg1Audio as u8, 0x0061, &[]),
+					(StreamType::Mpeg2PacketizedData as u8, 0x0062, &descriptors),
+				],
+			),
+		));
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		data
+	}
+
+	fn import_program(data: &[u8]) -> crate::catalog::hang::Catalog {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.decode(data).unwrap();
+		import.finish().unwrap();
+		catalog.snapshot()
+	}
+
+	/// A 0x81 descriptor reaches the catalog as its real OpusHead, beside the other track.
+	#[test]
+	fn an_explicit_opus_channel_code_publishes_its_head() {
+		// gstreamer's 6-channel family 255 descriptor, in a hand-built program.
+		let catalog = import_program(&opus_program(&[0x80, 0x81, 6, 255, 160, 20, 229]));
+		assert_eq!(catalog.audio.renditions.len(), 2, "MP2 and Opus both publish");
+
+		let opus = catalog
+			.audio
+			.renditions
+			.values()
+			.find(|audio| audio.codec.to_string() == "opus")
+			.expect("the Opus track");
+		assert_eq!(opus.channel_count, 6);
+		let head = crate::codec::opus::Config::parse(&mut opus.description.as_deref().expect("an OpusHead")).unwrap();
+		assert_eq!(head.channel_count, 6);
+		let map = head.mapping.expect("family 255");
+		assert_eq!(map.family(), 255);
+		assert_eq!((map.streams(), map.coupled()), (6, 0));
+		assert_eq!(map.table(), &[0, 1, 2, 3, 4, 5]);
+	}
+
+	/// A reserved code drops that PID. The program's other audio still imports.
+	#[test]
+	fn a_reserved_opus_channel_code_drops_only_that_stream() {
+		let catalog = import_program(&opus_program(&[0x80, 0xff]));
+		assert_eq!(catalog.audio.renditions.len(), 1, "only the MP2 track");
+		let audio = catalog.audio.renditions.values().next().unwrap();
+		assert_eq!(audio.codec.to_string(), "mp2");
 	}
 }
