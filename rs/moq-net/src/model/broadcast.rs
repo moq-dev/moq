@@ -841,8 +841,7 @@ impl super::WeakEntry for WeakConsumer {
 /// Obtained from [`Producer::demand`] or [`Consumer::demand`]; the broadcast-level sibling of
 /// [`track::Demand`](crate::track::Demand). Demand means live interest in the
 /// broadcast's content: a pending track request or a consumed track. A publisher
-/// uses it to run expensive work only while someone is watching, and routing
-/// uses it to advertise a warm copy at zero cost.
+/// uses it to run expensive work only while someone is watching.
 ///
 /// It's a weak handle: it neither keeps the broadcast alive nor counts as
 /// demand itself. Once every producer is gone, [`used`](Self::used) /

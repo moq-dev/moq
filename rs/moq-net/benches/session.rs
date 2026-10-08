@@ -20,6 +20,11 @@
 //! one small frame per track per tick. Throughput counts tracks, so a flat
 //! elements/s across a sweep means the cost per track stays constant.
 //!
+//! `session_churn_*` times one request opened and closed by a session that already
+//! holds others open, swept over sessions and requests held per session. On
+//! moq-transport 14 every close is credited back through the MAX_REQUEST_ID window,
+//! so a slope here is that bookkeeping growing with the sessions or the requests.
+//!
 //! Everything runs on one current-thread runtime, so the only work measured is
 //! the protocol and model code, never scheduling across threads.
 //!
@@ -637,6 +642,107 @@ fn allocations() {
 	}
 }
 
+/// Versions for the churn sweep: the one draft with a MAX_REQUEST_ID window, the
+/// newest draft without it, and lite.
+const CHURN_VERSIONS: [&str; 3] = ["moq-transport-14", "moq-transport-22", "moq-lite-06"];
+
+/// Sessions on one relay, each holding `held` subscriptions open while it churns one more.
+#[derive(Clone, Copy)]
+struct Churn {
+	sessions: usize,
+	held: usize,
+}
+
+impl Churn {
+	fn id(&self, version: &str) -> String {
+		format!("{version}/sessions={}/held={}", self.sessions, self.held)
+	}
+}
+
+/// One relay publishing a broadcast with `held` shared tracks plus one churn track per session.
+struct ChurnRoom {
+	_cluster: Cluster,
+	_held: Vec<track::Producer>,
+	_viewers: Vec<Viewer>,
+	/// Each session's view of the broadcast, to open the churned subscription on.
+	broadcasts: Vec<broadcast::Consumer>,
+	/// The relay's side of each session's churn track, to wait out its close.
+	churn: Vec<track::Producer>,
+}
+
+impl ChurnRoom {
+	async fn new(version: &str, shape: Churn) -> Self {
+		let mut cluster = Cluster::new(
+			version,
+			Shape {
+				relays: 1,
+				publishers: 1,
+				viewers: 0,
+				..Shape::BASE
+			},
+		)
+		.await;
+		let published = &cluster._broadcasts[0];
+		let held: Vec<_> = (0..shape.held).map(|i| format!("held{i}")).collect();
+		let tracks: Vec<_> = held
+			.iter()
+			.map(|name| published.create_track(name.as_str(), None).unwrap())
+			.collect();
+		let churn: Vec<_> = (0..shape.sessions)
+			.map(|i| published.create_track(format!("churn{i}"), None).unwrap())
+			.collect();
+
+		let mut viewers = Vec::new();
+		let mut broadcasts = Vec::new();
+		for _ in 0..shape.sessions {
+			let mut viewer = cluster.join(0).await;
+			viewer.watch(&path(0), &held).await;
+			broadcasts.push(viewer.origin.consume().routed_broadcast(&path(0)).await.unwrap());
+			viewers.push(viewer);
+		}
+		Self {
+			_cluster: cluster,
+			_held: tracks,
+			_viewers: viewers,
+			broadcasts,
+			churn,
+		}
+	}
+
+	/// Open and close one subscription per iteration, round-robin over the sessions.
+	async fn measure(&self, iters: u64) -> Duration {
+		let start = Instant::now();
+		for iter in 0..iters as usize {
+			let session = iter % self.broadcasts.len();
+			let track = self.broadcasts[session].track(&format!("churn{session}")).unwrap();
+			let subscriber = track.subscribe(None).await.unwrap();
+			// The relay saw the request, rather than a cached track answering it locally.
+			self.churn[session].demand().used().await.unwrap();
+			drop(subscriber);
+			drop(track);
+			self.churn[session].demand().unused().await.unwrap();
+		}
+		start.elapsed()
+	}
+}
+
+fn churn(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Churn>) {
+	let rt = runtime();
+	let shapes: Vec<_> = shapes.into_iter().collect();
+	let mut group = c.benchmark_group(format!("session_churn_{name}"));
+	group.throughput(Throughput::Elements(1));
+	for version in CHURN_VERSIONS {
+		for shape in &shapes {
+			let mut room = None;
+			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
+				let room = room.get_or_insert_with(|| rt.block_on(ChurnRoom::new(version, *shape)));
+				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
+			});
+		}
+	}
+	group.finish();
+}
+
 /// Withdraw a batch across a full mesh, sweeping both peers and prefixes.
 /// Paused protocol time lets the quiet-point timeout drain pending work without
 /// including a real wait in the measured duration.
@@ -766,6 +872,9 @@ fn session(c: &mut Criterion) {
 		}),
 	);
 	join(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
+
+	churn(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));
+	churn(c, "held", [1, 64, 1024].map(|held| Churn { sessions: 4, held }));
 
 	// Production (2026-09): ~34 nodes x >=5 projects x ~24 tracks.
 	let prod = Dash {

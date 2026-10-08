@@ -37,9 +37,9 @@ session to close on its own or at the handover cap. See the
   connect deadline. A refusal, a stall, or moq-lite-03/-04 (no server SETUP)
   keeps WebSocket with no GOAWAY sent. This crate's servers send SETUP after
   admission; other servers may still refuse afterward.
-- A self-sent GOAWAY must gate new requests on the old session too, not only
-  a received one: [JS GOAWAY requests](/quest/m1/js-goaway-requests.md)
-  covers the received case, so check it also covers this path.
+- A self-sent GOAWAY must reprice the old session's routes to the drain cost
+  too, not only a received one, so new requests move to the QUIC session once
+  its route answers; sending one still has to set that same signal.
 - On a successful upgrade delete the URL from `websocketWon`.
 - Tests in the browser harness against the in-tree relay: with the
   WebTransport dial delayed past the head start, a watched track keeps every
@@ -53,4 +53,3 @@ session to close on its own or at the handover cap. See the
 ## Required
 
 - [JS track handover](/quest/m1/js-group-handover.md) - tracks carry across the handover this upgrade reuses without a dropped group
-- [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - no new request opens on a session that is going away

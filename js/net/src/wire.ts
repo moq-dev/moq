@@ -23,6 +23,11 @@ export interface Broadcast {
 	resolveTrackInfo(name: string): Promise<track.Info>;
 	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
+	/**
+	 * A session delivered this broadcast. An originated route refuses to serve it:
+	 * publishing it would name this origin's hop for upstream content.
+	 */
+	fromSession?: boolean;
 }
 
 /** The protocol-facing operations behind an origin producer. */
@@ -33,7 +38,7 @@ export interface OriginProducer {
 	accepts(prefix: Path.Valid): boolean;
 	receive(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint },
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] },
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;
@@ -86,14 +91,19 @@ export function registerWire(handle: object, view: View): void {
 	views.set(handle, view);
 }
 
-/** Replace selected operations on a broadcast's package-private view. */
+/**
+ * Replace selected operations on a broadcast's package-private view.
+ *
+ * Only a session-delivered broadcast does this, so the replacement is marked.
+ * An origin refuses to serve that broadcast on a route it originated.
+ */
 export function overrideBroadcastWire(
 	handle: broadcast.Consumer,
 	overrides: Partial<Pick<Broadcast, "resolveTrackInfo" | "fetchGroup">>,
 ): void {
 	const view = views.get(handle);
 	if (!view) throw new Error("broadcast has no wire view");
-	views.set(handle, { ...(view as Broadcast), ...overrides });
+	views.set(handle, { ...(view as Broadcast), ...overrides, fromSession: true });
 }
 
 export function wireOf(handle: broadcast.Producer | broadcast.Consumer): Broadcast;
