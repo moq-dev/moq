@@ -108,8 +108,9 @@ dials in is upstream when its [grant](/bin/relay/auth#the-contract) sets
 `"upstream": true` beside `"peer": true`, so an edge whose auth server grants
 that to core certificates treats a core that dials it as upstream too.
 `moq auth serve --mtls-peer --mtls-upstream` grants it to every certificate,
-so use it only where nothing but cores dial in with mTLS. A
-relay that predates the mark treats every link as transit, so a cluster
+so use it only where nothing but cores dial in with mTLS: on a hub that
+leaves dial into, it marks every leaf upstream, and the hub stops forwarding
+between them. A relay that predates the mark treats every link as transit, so a cluster
 migrates one region at a time.
 
 Which relay dials which is still the peer list's job: there are no roles and

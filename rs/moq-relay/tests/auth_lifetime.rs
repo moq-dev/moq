@@ -878,13 +878,29 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 /// is a cluster peer: what it announces entered the cluster elsewhere.
 #[tokio::test]
 async fn an_mtls_peer_is_a_cluster_peer() {
+	let source = mtls_route_source(true).await;
+	assert!(
+		matches!(source, moq_net::origin::Source::Peer(_)),
+		"an mTLS peer's route counted as {source:?}"
+	);
+}
+
+/// Without `--mtls-peer`, a certificate identifies a client ingesting here.
+#[tokio::test]
+async fn an_mtls_client_ingests_here() {
+	assert_eq!(mtls_route_source(false).await, moq_net::origin::Source::Local);
+}
+
+/// The source the relay records for a broadcast announced over a certificate
+/// session, admitted by `moq auth serve` with `mtls_peer` set as given.
+async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.mtls = moq_auth::Permissions::new(all(), all());
-	policy.mtls_peer = true;
+	policy.mtls_peer = mtls_peer;
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();
@@ -922,12 +938,8 @@ async fn an_mtls_peer_is_a_cluster_peer() {
 		.expect("timed out waiting for forwarded")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "forwarded");
-	assert!(
-		matches!(update.route.source(), moq_net::origin::Source::Peer(_)),
-		"an mTLS peer's route counted as {:?}",
-		update.route.source()
-	);
 	relay.abort();
+	update.route.source()
 }
 
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
