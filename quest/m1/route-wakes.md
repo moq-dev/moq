@@ -49,11 +49,19 @@ Decisions:
   them when it closes. The lookup walks descendants but skips subtrees whose
   waiting set is empty, keeping cost in woken fronts rather than served
   paths.
-- A serving front follows the best route, per the wildcard line (decided
-  2026-10-04, replacing Stay). A join or re-price must rehash every front
-  below the prefix, since rendezvous moves exactly the paths the changed
-  route now wins; only those fronts re-select. A leave wakes only the fronts
-  the leaver served or was requesting through.
+- A serving front follows the best route among those it may resume across
+  (decided 2026-10-04, replacing Stay; narrowed 2026-10-07 after #4942 and
+  [Restart](/quest/m0/broadcast-epoch/restart.md)): routes with its epoch. A
+  front resolved without one, or replaced by a newer epoch, stays on its route
+  for its subscribers until that route goes and never splices onto another
+  (maintainer, 2026-10-08); new requests take a fresh front on the winner
+  instead of waking it. An idle front (every track
+  forgotten, no consumer holding its broadcast, not waiting for coverage)
+  ends instead of moving
+  ([Idle fronts](/quest/m0/idle-fronts.md)). A join or re-price must rehash
+  every epoch front below the prefix, since rendezvous moves exactly the paths
+  the changed route now wins; only those fronts re-select. A leave wakes only
+  the fronts the leaver served or was requesting through.
 - Builds on fronts keyed by effective exclusion, so the index hangs off the final front
   identity. `origin-front-parks.md` replaces the `routed_broadcast` retry
   loop, one of the watch consumers here; whichever lands second adapts it.
