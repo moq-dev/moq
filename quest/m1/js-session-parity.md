@@ -16,10 +16,10 @@ relay behaves like a Rust one.
   wait for missing groups below a declared end until the tail settles, mirror
   the hold. JS readers still end at the end with groups missing
   (`doc/lib/js/net.md`).
-- Resolved epoch (#4904, still open, and #4967): once Rust
-  `broadcast::Consumer::epoch()` and `broadcast::Info::epoch` carry the epoch
-  of the route a request resolved through, check that JS and the bindings
-  (moq-ffi) surface the same value.
+- Resolved epoch (#4904 and #4967, landed): Rust `broadcast::Info::epoch`
+  carries the epoch of the route a request resolved through. Check that JS
+  (`broadcast.Consumer.epoch`) and the bindings (moq-ffi) surface the same
+  value.
 
 Test each against the Rust behavior, with mocked time.
 
@@ -30,4 +30,3 @@ Test each against the Rust behavior, with mocked time.
 ## Related
 
 - [JS request window](/quest/m1/js-request-window.md) - JS grants request IDs as requests close, the other half of JS request limits
-- [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - #4904, which the resolved-epoch check follows

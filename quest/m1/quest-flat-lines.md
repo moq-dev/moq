@@ -67,19 +67,10 @@ Remaining:
   - #4519 ffi-shape waits on
     [Bindings](/quest/m0/broadcast-epoch/bindings.md).
   - #4133 qos waits on [Lag across a splice](/quest/m1/qos/lag-splice.md).
-    When it merges `main`, the merge drops `lag-splice.md`'s Related link to
-    the line's finished `final-lag-sample.md`.
 - Child PRs still based on a line merge into it first, or GitHub closes them
   with the branch: #4675 (auth/request-token) needs the updated auth line
   merged in. #4645 (tstd/delay) now targets `main`; #4732 and #4863
   landed.
-- Retiring the auth branch reconciles `quest/m1/auth/` with `main`'s copy
-  (decided 2026-10-05). Drop the children the branch finished or moved (lite,
-  interop, unauthorized, auth-ok-preflight, error-codes, narrowing, peer-grant,
-  moq-transport), keep the branch's new ones (wip-version, not-supported,
-  violations, js-fetch-watch), and fold violations' lite decode gap into
-  [malformed grant](/quest/m1/auth/malformed-grant.md). The branch's
-  wip-version quest moves its lite-06 wire text to `moq-lite-07-wip`.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.
