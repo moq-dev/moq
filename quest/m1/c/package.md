@@ -25,8 +25,9 @@ under the same names.
   `moq_shutdown_dispatcher`.
 - moq-c and moq-cpp each embed the moq-ffi staticlib, so one program can't link
   both; say so in the docs.
-- Every Cross-Package Sync row that names libmoq for moq-ffi changes points at
-  the generated package instead; update `AGENTS.md` in this quest.
+- The Cross-Package Sync rows that name the hand-written `rs/moq-c` (as the
+  target of `rs/moq-ffi` changes, and its `moq.h` C ABI) point at the
+  generated package instead; update `AGENTS.md` in this quest.
 
 ## Required
 

@@ -2,7 +2,7 @@
 
 ## Goal
 
-`maybe_park` (rs/moq-uring/src/worker.rs:363) waits with a CQE batch target
+`Worker::maybe_park` (`rs/moq-uring/src/worker.rs`) waits with a CQE batch target
 and a `min_wait_usec`, the three return paths are tested, and the benchmark
 matrix shows fewer wakeups per message without a p99 regression before any
 default changes.
@@ -37,6 +37,10 @@ Benchmark chat, 1:1 video, and fanout workloads with `N = 1/4/8/16` and `t = 0/5
 
 Decided in the 2026-09-30 audit: moved to m2. It trades latency for CPU,
 the win is unmeasured on noq, and io_uring ships in no package.
+
+## Required
+
+- [One enter per turn](/quest/m1/perf/uring-one-enter.md) - reshapes the same park and enter path, and adds the per-enter metrics this measures
 
 ## Closes
 

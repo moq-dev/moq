@@ -1,12 +1,11 @@
-# [L] UDP demux
+# [M] UDP demux
 
 ## Goal
 
-`moq-relay` reads one UDP socket and serves QUIC and STUN Binding answers from
-it. A P2P client can list `stun:<relay>:<port>`. The WebRTC
-media path is an embedder hook: the demux hands its class to an embedder such
-as moq.pro's edge, which feeds it to `moq-rtc`, since `moq-relay` serves no
-WHIP or WHEP.
+`moq-relay` reads one UDP socket and serves QUIC from it. The WebRTC media
+path (DTLS, RTP, and ICE's STUN checks) is an embedder hook: the demux hands
+its class to an embedder such as moq.pro's edge, which feeds it to
+`moq-rtc`, since `moq-relay` serves no WHIP or WHEP.
 
 ## Plan
 
@@ -27,18 +26,12 @@ QUIC: `moq-tokio`'s noq server takes the virtual socket through
 `new_with_abstract_socket`. QUIC-bit greasing is already off, from
 [shard steering](/quest/m2/one-port/shard-steering.md).
 
-STUN: a `stun` virtual socket answered by a small responder in `moq-sock`,
-Binding request to Binding success with XOR-MAPPED-ADDRESS, str0m's
-`StunMessage` or a maintained crate for the codec, behind a per-source token
-bucket and a global budget since the answer is up to 2.2 times the request.
-The per-source table is fixed-capacity with expiry, or a hashed/stateless
-limiter; spoofed sources cannot grow it.
-An ICE connectivity check is also a Binding request, so the STUN class splits
-on the USERNAME attribute: a request carrying one belongs to a WebRTC session
-and goes to the mux, which reads the local ufrag from it; a request without
-one is a public query and goes to the responder. Public STUN clients never
-send USERNAME and ICE agents always do.
-Off by default in `moq-relay`, on with `--stun`.
+STUN: an ICE connectivity check is a Binding request carrying USERNAME, so
+it goes to the WebRTC hook, whose mux reads the local ufrag from it. A
+Binding request without USERNAME is a public query; drop and count it.
+Decided 2026-10-08: the public STUN responder is left to the P2P line
+(m3), its only consumer, so `moq-sock` takes no STUN codec
+dependency (str0m included).
 
 WebRTC: DTLS, RTP, and USERNAME-carrying STUN go to a `webrtc` hook that
 `moq-relay` leaves unconsumed and an embedder takes: the datagrams, a send
@@ -46,14 +39,14 @@ path through the shared socket, and a way to pin a 4-tuple to WebRTC in the
 flow table and release it. [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md)
 makes `moq-rtc` consume it.
 
-Decided in the 2026-09-30 audit: narrowed to QUIC plus STUN in the relay,
+Decided in the 2026-09-30 audit: the relay itself serves only QUIC here,
 because `moq-relay` has no `moq-rtc` dependency and serves no WHIP or WHEP.
 Decided 2026-10-05: feeding `moq-rtc` moved from the embedder to
 rtc-feed, because `moq-rtc` is an upstream, generic crate.
 
 Tests: a unit test per first-byte class routes to the right virtual socket,
-including the WebRTC hook; an integration test runs a QUIC client and a STUN
-Binding round trip against one bound port. `moq-relay` docs list the port once.
+including the WebRTC hook; an integration test runs a QUIC client against
+the demuxed port. `moq-relay` docs list the port once.
 
 ## Required
 
@@ -61,5 +54,5 @@ Binding round trip against one bound port. `moq-relay` docs list the port once.
 
 ## Related
 
-- [P2P](/quest/m3/p2p/README.md) - the client side of the STUN answer
+- [P2P](/quest/m3/p2p/README.md) - the only consumer of a public STUN responder, which it plans when it needs one
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - runs this classifier and flow table on the io_uring workers

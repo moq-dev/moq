@@ -24,19 +24,19 @@ up to. Two gaps follow:
 - `GroupState::release` (on abort, too-large, or a dropped producer) calls
   `frames.clear()`, which keeps the capacity, then zeroes `cache` and clears
   the charge. A consumer still holding the group pins those slots uncharged.
-  Dropping the deque's storage on release is likely enough here.
 
-The fix is not a bigger constant. The charge has to follow the deque's
-capacity: charge the growth at each `charge.add` site (`write_frame`, the
-`write_frames` loop, and `GroupState::charge_partial` for a streamed frame), keeping
-`FRAME_SLOTS` as the part `CACHE_OVERHEAD` already paid.
+Decided 2026-10-08, two changes and no more:
 
-Decide what `MAX_CACHE_BYTES` compares against before touching any of it.
-`GroupState::would_overflow` reads `cache` as a payload limit, and the tests
-and its doc ("maximum total size of frames") read it that way, so folding
-slots into `cache` silently changes the per-group ceiling. Either keep a
-separate payload counter for that check or restate the limit; do not let one
-field mean both.
+- Free the deque's storage in `GroupState::release`, not just `clear()` it.
+- Charge the growth past `FRAME_SLOTS` to the pool at each `charge.add` site
+  (`write_frame`, the `write_frames` loop, and `GroupState::charge_partial`
+  for a streamed frame), keeping `FRAME_SLOTS` as the part `CACHE_OVERHEAD`
+  already paid. The fix is not a bigger constant.
+
+`MAX_CACHE_BYTES` stays a payload limit: `GroupState::would_overflow` keeps
+reading `cache` as payload bytes, so slot charges go to the pool charge and
+never into `cache`. Restating that limit needs a measurement first and is not
+this quest.
 
 `rs/moq-net/tests/group_charge.rs` weighs the process with a counting
 allocator and is the place to prove it: add a many-small-frames shape beside
@@ -46,4 +46,4 @@ boundary and asserts the pool charge moved.
 Found by CodeRabbit on #3523, which fixed the one-frame-per-group undercount
 that was OOM-killing relays serving chat, and deliberately left out of it.
 
-Public API: none, unless `MAX_CACHE_BYTES` is restated. Wire: none.
+Public API: none. Wire: none.

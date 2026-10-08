@@ -42,14 +42,10 @@ Decided (2026-10-01), from a discussion with t0ms:
   inside a group. A source that never sets the random-access indicator
   falls back to a group every N PCRs (N to be fixed in the PR, with a group
   spanning at most 1 s of PCR time). Pacing stays on the PCR PID throughout.
-- A flagged PCR discontinuity that rewinds is a restart, as
-  [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) decides for the
-  demultiplexed lane: the passthrough broadcast finishes cleanly and the rest
-  of the input continues as a new broadcast at the same path under a fresh
-  epoch, so object timestamps never go backwards within one broadcast. A
-  flagged forward jump starts a group, and an unflagged rewind is fatal
-  (decided 2026-10-07 in the final-head audit of #4670, which had a backward
-  flag start a group in place).
+- Any PCR rewind, flagged or not, is fatal, as on the demultiplexed lane: an
+  importer never restarts a broadcast in-process (decided 2026-10-08; a
+  supervisor that wants to continue publishes a new broadcast under a new
+  epoch). A flagged forward jump starts a group.
 - `randomAccess` is true only while the PAT lists a single program with at
   most one video PID, and every group has started at a
   `random_access_indicator`. The first group that starts without one (a
@@ -109,6 +105,10 @@ discontinuity publishes two broadcasts, and the same rewind unflagged errors.
 A dropped object is counted, and the rest still go out on time. Rerun the
 #4613 netem rig (10% loss, 120 s) against it.
 
+Lands in two PRs (decided 2026-10-08): #5003 is the import half and the
+`m2ts` catalog section, refusing any PCR rewind; the export half follows on
+the fixed-delay release stage. This quest finishes with the export.
+
 Update `doc/bin/cli.md` for both flags, `doc/concept` for the section, and
 the draft's comparison section to say this repository now publishes both
 shapes.
@@ -116,11 +116,7 @@ shapes.
 Public API: new import and export modes; nothing existing breaks. Wire: the
 hang catalog gains an `m2ts` root section; additive.
 
-## Required
-
-- [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - the restart-under-a-new-epoch path a backward PCR discontinuity reuses
-
 ## Related
 
 - [TS hitless](/quest/m2/ts-hitless.md) - the demultiplexed lane's 2022-7 legs and the `--sync` anchor
-- [MSFTS convergence](/quest/m2/msfts-convergence.md) - the ES-level side of the same mapping
+- [MSFTS convergence](/quest/m3/msfts-convergence.md) - the ES-level side of the same mapping

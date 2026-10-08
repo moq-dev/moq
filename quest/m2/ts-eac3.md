@@ -10,15 +10,15 @@ the fixed-delay export (#4645).
 
 ## Plan
 
-Found in #4645: E-AC-3 carried as DVB private data still goes out unsplit,
+Found in the fixed-delay export review: E-AC-3 carried as DVB private data still goes out unsplit,
 with no buffer model, so a multi-frame PES can overflow B.
 
-- Split it the way #4645 splits DVB AC-3, but per access unit: an
+- Split it the way `rs/moq-mux/src/container/ts/export.rs` splits DVB AC-3, but per access unit: an
   independent sync frame plus the dependent substreams that follow it share
   one presentation interval (ETSI TS 102 366 Annex E), so they go out in one
   PES on one decode time. Read sizes from each sync frame's `frmsiz`, and
   drop a frame shorter than its header says.
-- The buffer is the DVB one, not ATSC's: #4645's 12,896 B is A/52 Annex G's
+- The buffer is the DVB one, not ATSC's: the export's 12,896 B is A/52 Annex G's
   for `stream_type` 0x87, and DVB AC-3 uses 5,696 B. Take the E-AC-3 value
   from ETSI TS 101 154, cite the clause, and add it to the schedule's
   per-PID admission and to the `tstd` model in `compliance.py`, which

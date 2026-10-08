@@ -13,8 +13,7 @@ lists from its middle.
 Found by #4978 (bounded HLS playlists), which kept the full listing behind
 `moq_hls::export::Config::history` and confirmed the gap with a 4-record limit:
 12 replayed segments listed from `EXT-X-MEDIA-SEQUENCE:8`. The archive test
-missed it because its hand-built timeline repeats every record. Start after
-#4978 lands.
+missed it because its hand-built timeline repeats every record.
 
 Decided 2026-10-07: read the stored timeline groups in history mode rather
 than only the restated tail, so the exporter or the archive reader replays

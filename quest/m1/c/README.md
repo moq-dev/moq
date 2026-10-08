@@ -49,7 +49,7 @@ and fetch quests were abandoned for this line, and hidden is done.
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - the generator fork, package recipe, and OBS move this line builds on
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
-- [Retire libmoq](/quest/m1/c/retire.md) - the hand-written crate is deleted after its final release points at the generated package
+- [Retire the hand-written moq-c](/quest/m1/c/retire.md) - the hand-written crate is deleted after its final release points at the generated package
 
 ## Related
 

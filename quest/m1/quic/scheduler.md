@@ -119,8 +119,6 @@ where the new implementation makes it redundant.
   a policy consumer of the same hierarchy
 - [Scope track priority](/quest/m1/track-priority-scope.md) - owns the
   priority semantics this mechanism realizes, including the scheduling-domain
-  scope
-- [Signed priority](/quest/m2/signed-priority.md) - changes the priority type
-  this orders on; keep the ordering, not just the type
+  scope and the priority type change; keep the ordering, not just the type
 - [noq#816](https://github.com/n0-computer/noq/issues/816) - the send-group proposal to n0; this quest supersedes it
 - [noq#817](https://github.com/n0-computer/noq/issues/817) - the 64-bit priority ask; send groups replace the scalar, but the per-stream order within a group must still hold a 64-bit group sequence

@@ -1,4 +1,4 @@
-# [M] qmux returns every byte's credit and sends its close frame
+# [XS] qmux returns every byte's credit and sends its close frame
 
 ## Goal
 
@@ -45,9 +45,10 @@ targets `qmux-v0.5.x`):
 
 Remaining here, once both ship: bump `main` to that 0.6.x and backport
 `release`'s pin to that 0.5.x. `release` stays on 0.5: 0.6 needs web-transport-trait 0.5, a
-breaking change.
+breaking change. Sized XS (2026-10-08), since the fixes live upstream and only
+the pin bumps remain here.
 
-Why m0: the WebSocket fallback and the planned edge-to-core `tls://` links
+Why m0: the WebSocket fallback and the edge-to-core `tls://` links (#4816)
 both run on qmux, and MoQ drops streams constantly.
 
 Public API: none. Wire: none.
@@ -58,4 +59,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [qmux on noq-proto](/quest/m2/quic-qmux.md) - replaces these stream maps later
+- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - replaces these stream maps later

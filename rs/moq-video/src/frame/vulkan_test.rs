@@ -1,25 +1,10 @@
 use std::ffi::CStr;
-use std::num::NonZeroUsize;
 use std::os::fd::{FromRawFd, OwnedFd};
 
 use ash::vk;
 use cudarc::driver::sys;
 
 use super::*;
-
-#[test]
-fn rejects_invalid_image_contracts() {
-	assert!(Image::rgba8([0; 16], Size::new(0, 2), 4096).is_err());
-	assert!(Image::rgba8([0; 16], Size::new(3, 5), 4096).is_ok());
-	assert!(Image::rgba8([0; 16], Size::new(2, 2), 0).is_err());
-}
-
-#[test]
-fn rejects_non_monotonic_timeline_values() {
-	assert!(Timeline::new(4, 4).is_err());
-	assert!(Timeline::new(5, 4).is_err());
-	assert_eq!(Timeline::new(4, 5).unwrap(), Timeline { ready: 4, complete: 5 });
-}
 
 /// Real hardware only: a native Vulkan producer clears one exportable image to
 /// distinct identities, CUDA imports it once, and the same producer slot makes
@@ -28,23 +13,13 @@ fn rejects_non_monotonic_timeline_values() {
 #[tokio::test]
 #[ignore = "requires a Linux NVIDIA GPU with Vulkan/CUDA external-memory support"]
 async fn vulkan_cuda_slot_reuse_and_teardown() {
-	if unsafe { libloading::Library::new("libcuda.so.1") }.is_err() {
-		eprintln!("skipping: libcuda.so.1 unavailable");
-		return;
-	}
-	let Some(mut producer) = Producer::new(Size::new(64, 32)) else {
-		eprintln!("skipping: no compatible Vulkan NVIDIA device");
-		return;
-	};
+	let mut producer = Producer::new(Size::new(64, 32)).expect("NVIDIA Vulkan device required by opted-in test");
 
-	let importer = Importer::new(0, NonZeroUsize::new(1).unwrap()).expect("CUDA importer");
-	let image = Image::rgba8(producer.uuid, producer.size, producer.allocation_size).unwrap();
+	let importer = super::super::cuda_vulkan::Importer::new(0).expect("CUDA importer");
+	let image = producer.contract(Format::Rgba8);
 	let (released, release) = tokio::sync::oneshot::channel();
 	let owner = Owner(Some(released));
-	let mut slot = importer
-		.import(producer.export(), image, owner)
-		.map_err(ImportError::into_parts)
-		.expect("import Vulkan image into CUDA");
+	let mut slot = Slot::new(producer.export(), image, owner).expect("import Vulkan image into CUDA");
 
 	for identity in 1u8..=16 {
 		let ready = u64::from(identity) * 2 - 1;
@@ -54,7 +29,9 @@ async fn vulkan_cuda_slot_reuse_and_teardown() {
 
 		let (frame, mut completion) = slot.publish(Timeline::new(ready, complete).unwrap()).unwrap();
 		let held = frame.clone();
-		let pixels = readback(&frame);
+		let imported = importer.import(&frame).expect("CUDA image import");
+		let pixels = readback(&imported);
+		drop(imported);
 		eprintln!("cuda validation readback identity={identity} bytes={}", pixels.len());
 		assert_eq!(&pixels[..4], &[identity, 255 - identity, identity / 2, 255]);
 
@@ -64,10 +41,7 @@ async fn vulkan_cuda_slot_reuse_and_teardown() {
 			"a held reader returned the producer slot"
 		);
 		drop(held);
-		slot = tokio::time::timeout(std::time::Duration::from_secs(2), completion.wait())
-			.await
-			.expect("CUDA completion timed out")
-			.expect("completion worker stopped");
+		slot = completion.wait().await.expect("completion worker stopped");
 		eprintln!("cuda complete={complete}; producer slot returned");
 	}
 
@@ -77,12 +51,10 @@ async fn vulkan_cuda_slot_reuse_and_teardown() {
 	producer.clear(33, Some(32), ready);
 	let (frame, completion) = slot.publish(Timeline::new(ready, 34).unwrap()).unwrap();
 	drop(completion);
+	drop(importer.import(&frame).expect("CUDA image import"));
 	drop(frame);
 	drop(importer);
-	tokio::time::timeout(std::time::Duration::from_secs(2), release)
-		.await
-		.expect("cancelled completion did not drain")
-		.expect("owner release sender dropped");
+	release.await.expect("owner release sender dropped");
 	eprintln!("cancelled consumer drained; imported resources and producer owner released");
 }
 
@@ -97,7 +69,7 @@ impl Drop for Owner {
 	}
 }
 
-fn readback(frame: &Frame) -> Vec<u8> {
+fn readback(frame: &super::super::cuda_vulkan::Frame) -> Vec<u8> {
 	let width = frame.width() as usize;
 	let height = frame.height() as usize;
 	let mut pixels = vec![0u8; width * height * 4];
@@ -147,6 +119,8 @@ pub(crate) struct Producer {
 	staging_memory: vk::DeviceMemory,
 	staging_ptr: *mut u8,
 	pub(crate) uuid: [u8; 16],
+	pub(crate) driver_uuid: [u8; 16],
+	pub(crate) memory_type: u32,
 	pub(crate) size: Size,
 	pub(crate) allocation_size: u64,
 	first: bool,
@@ -322,11 +296,29 @@ impl Producer {
 			staging_memory,
 			staging_ptr,
 			uuid,
+			driver_uuid: id.driver_uuid,
+			memory_type,
 			size,
 			allocation_size: requirements.size,
 			first: true,
 			pending_commands: Vec::new(),
 		})
+	}
+
+	pub(crate) fn contract(&self, format: Format) -> Image {
+		Image {
+			device: Device {
+				device_uuid: self.uuid,
+				driver_uuid: self.driver_uuid,
+				render_node: None,
+			},
+			memory: Memory::OpaqueFd {
+				memory_type: self.memory_type,
+			},
+			size: self.size,
+			allocation_size: self.allocation_size,
+			format,
+		}
 	}
 
 	pub(crate) fn export(&self) -> Handles {
@@ -351,7 +343,12 @@ impl Producer {
 				.expect("export Vulkan timeline semaphore")
 		};
 		// SAFETY: Vulkan returned fresh owned opaque fds to the caller.
-		unsafe { Handles::new(OwnedFd::from_raw_fd(memory), OwnedFd::from_raw_fd(timeline)) }
+		unsafe {
+			Handles {
+				memory: OwnedFd::from_raw_fd(memory),
+				timeline: OwnedFd::from_raw_fd(timeline),
+			}
+		}
 	}
 
 	/// Clear the whole image to a color derived from `identity`.
@@ -510,4 +507,20 @@ impl Drop for Producer {
 			self.instance.destroy_instance(None);
 		}
 	}
+}
+
+/// The GPU recipe must distinguish a driverless GPU from a GPU-less host.
+#[test]
+#[ignore = "requires the host PCI GPU's Vulkan driver; run just rs gpu"]
+fn vulkan_gpu_device() {
+	let vendor = std::env::var("MOQ_GPU_VENDOR").expect("just rs gpu supplies the PCI vendor");
+	let vendor = u32::from_str_radix(vendor.trim_start_matches("0x"), 16).unwrap();
+	let entry = unsafe { ash::Entry::load() }.expect("Vulkan loader missing");
+	let instance = unsafe { entry.create_instance(&vk::InstanceCreateInfo::default(), None) }.expect("Vulkan instance");
+	let devices = unsafe { instance.enumerate_physical_devices() }.expect("Vulkan devices");
+	let found = devices
+		.into_iter()
+		.any(|physical| unsafe { instance.get_physical_device_properties(physical) }.vendor_id == vendor);
+	unsafe { instance.destroy_instance(None) };
+	assert!(found, "no Vulkan driver exposes detected PCI GPU vendor {vendor:#x}");
 }

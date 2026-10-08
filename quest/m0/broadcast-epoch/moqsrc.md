@@ -6,8 +6,8 @@ When the source behind `moqsrc`'s path restarts (an announce `Restart`), the
 pipeline keeps running and switches to the new broadcast: a fresh catalog on
 the same pads, with no error on the bus. Once subscriptions are sticky,
 `moqsrc` would otherwise keep playing the replaced broadcast until its route
-goes, then end or error. A broadcast that ends with no successor still ends as
-it does today, unless the opt-in `linger` holds it.
+goes, then end or error. A broadcast that ends holds its pads until the path
+is announced again, like a player going offline and back online.
 
 ## Plan
 
@@ -27,12 +27,15 @@ Decided in planning (2026-10-06, after #4955 found that no quest covered
   than the path itself. `moqsrc` switches on a `Restart` of the route its
   path resolves through; the re-request re-resolves upstream, and if it
   lands on the same source the run still restarts on the same pads.
-- **Errors keep today's handling.** A replacement no longer ends the old
-  subscriptions, so a catalog error posts the session error and a track error
-  logs and ends that pad, as today. The earlier rule treating `Unroutable` as
+- **Errors keep today's handling, except source loss.** A replacement no
+  longer ends the old subscriptions, so a malformed catalog or track posts
+  the session error or ends that pad, as today. Losing the source (the
+  publisher's session closing, or the route going away) is not fatal: it
+  enters the held state below even when it arrives before the announce
+  `End`, since `catalog.next()` and session completion
+  (`rs/moq-gst/src/source/imp.rs`) see it first today. The earlier rule treating `Unroutable` as
   a switch in flight is dropped: it could not tell a switch from a dead route
-  and could hang. Only `linger` below defers an error, and only for its
-  window.
+  and could hang.
 - **Cutover.** Cancel the old pumps as soon as the `Restart` is seen, without
   waiting for their subscriptions to end.
 - **Pads (decided 2026-10-07, reconfirmed after the Restart re-scope).**
@@ -48,22 +51,16 @@ Decided in planning (2026-10-06, after #4955 found that no quest covered
   restarts at 0) as late. An in-run caps or container change keeps its pad
   the same way. A rendition the new catalog drops ends with EOS; a new or
   renamed one gets a new pad.
-- **Linger (decided 2026-10-07).** A `linger` property, default 0, that
-  covers a lite-06 or moq-transport restart whose END and START are not
-  coalesced into a `Restart`, and a crashed or withdrawn source. While
-  `linger` > 0, a track that ends or loses its source (the route went,
-  `Dropped`, or the upstream session closed) hands its pad back without EOS,
-  since tracks, the catalog, and `End` arrive on different streams in either
-  order. A rendition the catalog already retired still drains to EOS as today.
-  The window starts on the first of `End`, the catalog finishing (a prefix
-  can stay announced after its output finishes), or the catalog losing its
-  source. A `Start` or `Restart` in it resumes on the same pads. At expiry
-  every held pad gets EOS, and the session error posts only if the catalog
-  lost its source; a pump still streaming ends as it would without linger. A
-  held track whose catalog and path stay live waits the same bound from its
-  own end, then ends its pad as it would at 0; opening the window cancels
-  those per-track timers, so held pads follow the window's expiry. The bound
-  keeps this from becoming a silent hang. At 0 nothing changes from today.
+- **Hold pads from `End` to `Start` (decided 2026-10-08, replacing the
+  `linger` timer).** This covers a lite-06 or moq-transport restart whose END
+  and START are not coalesced into a `Restart`, and a withdrawn source. A
+  track that ends or loses its source hands its pad back without EOS, since
+  tracks, the catalog, and `End` arrive on different streams in either order;
+  the next `Start` resumes on the same pads. The regression covers both
+  orders: source loss before `End`, and `End` before source loss. A rendition the catalog retired
+  still drains to EOS. No timer and no property: announcements already say
+  when the source is back, and a timer cannot tell a slow restart from a
+  dead source.
 - **Where.** The logic stays in `rs/moq-gst/src/source`. If
   [Apps](/quest/m0/broadcast-epoch/apps.md) lands a shared helper for
   following announcements first, use it instead.
@@ -73,20 +70,16 @@ Decided in planning (2026-10-06, after #4955 found that no quest covered
   Cover an epochless source change that also switches, a `Restart` of a
   prefix route covering the path that switches too, a same-epoch
   re-announce (`Update`) that does not, a switch with new caps that keeps the
-  pad, and with `linger` set: an `End` then `Start` that resumes on the same
-  pads (media FIN, a delay, catalog FIN, `End`, then `Start`), an old
-  publisher's session closed (not finished) over a relay that resumes on the
-  next `Start`, and a finished output under a still-announced prefix that
-  gets EOS by the deadline, and a lone track losing its source while its
-  siblings and the catalog stay live, which ends only that pad. With
-  `linger` at 0, each of these ends or errors as today. Drive the linger
-  window with mocked time.
+  pad, an `End` then `Start` that resumes on the same pads (media FIN, a
+  delay, catalog FIN, `End`, then `Start`), and an old publisher's session
+  closed (not finished) over a relay that resumes on the next `Start`.
 
 Update the `moqsrc` section of `doc/bin/gstreamer.md`: a restart keeps each
 pad by rendition name, a format change keeps its pad, a dropped rendition gets
-EOS, and `linger`.
+EOS, and an ended broadcast holds its pads until the next `Start`.
 
-Public API: a new `linger` property on `moqsrc`. Wire: none.
+Public API: no new property, but an ended broadcast no longer sends EOS on
+its pads. Wire: none.
 
 ## Required
 

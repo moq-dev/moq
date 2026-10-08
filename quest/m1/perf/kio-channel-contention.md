@@ -28,17 +28,17 @@ across every thread (ramp included, unlike the table's steady window):
 - `Consumer::read` (`rs/kio/src/consumer.rs:131`): 11.7s, 1,079,139 contended acquires
 
 `kio::Lock` is a plain `std::sync::Mutex`, and every poll takes it: the
-closure check, the closed check, and the waiter registration. The cache pool
-line ([Cache shard](/quest/m2/cache-shard.md)) is not among the hot sites.
+closure check, the closed check, and the waiter registration. The cache
+pool's shared counters are not among the hot sites.
 `Shared::lock` (`rs/kio/src/shared.rs:47`) shows up too, but stays flat with
 the worker count.
 
 Decided (maintainer, 2026-10-07):
 
 - Decide the fix from the stacks. First run the
-  [lock profile](/quest/m1/perf/lock-profile.md) to name the contended
-  channels (track, group, broadcast, origin state) from the callers above
-  these sites. Then bring the options back with numbers. Candidates: a
+  [profiling recipe](/quest/m1/perf/lock-profile.md)'s lock-wait mode to
+  name the contended channels (track, group, broadcast, origin state) from
+  the callers above these sites. Then bring the options back with numbers. Candidates: a
   lock-free read path (a version counter lets poll and read skip the mutex
   when nothing changed); shrinking the closures that run under the lock;
   restructuring the hottest channel. Submitting staged io_uring SQEs before a
@@ -48,8 +48,4 @@ Decided (maintainer, 2026-10-07):
 
 ## Required
 
-- [Lock profile](/quest/m1/perf/lock-profile.md) - the bpftrace recipe that names the contended channels and measures before and after
-
-## Related
-
-- [Cache shard](/quest/m2/cache-shard.md) - stays parked: the pool line is not where the wait is
+- [Relay profiling](/quest/m1/perf/lock-profile.md) - the recipe's lock-wait mode names the contended channels and measures before and after

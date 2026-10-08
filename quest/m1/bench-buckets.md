@@ -31,7 +31,7 @@ so the bench emits mergeable buckets. Approved as recommended.
   on one clock and buckets from several hosts merge without skew;
   `latency_clock_skew` keeps flagging a violation. Replace the README's
   advice to NTP-sync separate publisher and subscriber hosts
-  (`rs/moq-bench/README.md:117-118`) with this rule.
+  (`rs/moq-bench/README.md`, "Machine-readable output") with this rule.
 - A test sums fixture buckets from two runs and checks the percentiles
   against the concatenated samples, binned by the same layout and the same
   overflow bucket (60,000 ms and above today) before the percentile is

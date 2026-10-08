@@ -13,8 +13,8 @@ Triaged from Fastly's follow-up on #5020 (#issuecomment-6046932019, runs of
 2026-10-07 on `0f310a5`). d16 §10.4.2 says the bit only lets a subscriber
 infer the group's end at FIN, and nothing forbids sending the status too.
 
-Where it lives: `IngestPhase::Status` in `rs/moq-net/src/ietf/subscriber.rs`
-(around line 3992) accepts 0x3 only when `!self.has_end` and otherwise
+Where it lives: the `IngestPhase::Status` arm in
+`rs/moq-net/src/ietf/subscriber.rs` accepts 0x3 only when `!self.has_end` and otherwise
 returns `Unsupported`, which aborts the local group producer (`recv_group`
 then returns `Ok`, so the session is not stopped). A downstream reader only
 gets the rest of the group if the model's fetch path recovers it. Accept the
@@ -24,3 +24,7 @@ Test: a d18 stream with the END_OF_GROUP bit, objects 0..4, then a 0x3
 status at 5 delivers a finished group with five frames.
 
 Public API: none. Wire: none.
+
+## Related
+
+- [JS papercuts](/quest/m1/papercuts-js.md) - edits the same status branch in `js/net/src/ietf/object.ts`; whichever lands second rebases

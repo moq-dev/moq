@@ -43,3 +43,5 @@ layer.
 ## Required
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the origin node ids and metrics this compares
+- [Signaling and policy](/quest/m3/p2p/signal.md) - `Peers`, which gains the cost knobs
+- [moq-cli joins](/quest/m3/p2p/cli.md) - `moq-cli --p2p`, which mirrors them

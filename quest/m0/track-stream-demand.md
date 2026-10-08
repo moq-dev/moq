@@ -12,6 +12,10 @@ encoders and waits for the next keyframe. It happens under a prefix claim and
 for an exact announce alike. lite-04 and moq-transport don't do this. Rust,
 JS, and the lite draft.
 
+The other edge holds too: in `@moq/net`, a TRACK or FETCH requester that
+resets its stream or loses its session before the answer releases its hold,
+and `Broadcast.Demand` drops once no requester is left, as in Rust.
+
 ## Plan
 
 Facts from `main`:
@@ -50,6 +54,17 @@ Decisions (2026-10-07):
 - Not pipelining TRACK and SUBSCRIBE, which the draft already allows: it
   still races, and every hop would have to buffer frames until TRACK_INFO.
 - Consumers never debounce demand; the docs promise clean edges.
+- JS query lifetime (folded in from the JS probe-lifetime quest, 2026-10-08:
+  the same publisher plumbing). Rust's query is a consumer of the track state
+  that drops with the serve (`TrackInfoServe`). In JS, `resolveTrackInfo`
+  (`js/net/src/broadcast.ts`) pins demand for as long as the lookup runs,
+  whoever still wants it. Give it a cancel signal, and have the lite
+  publisher (`runTrackInfo`, `runFetch`, and `#resolveTrackInfo` in
+  `js/net/src/lite/publisher.ts`) release its hold when the TRACK or FETCH
+  stream is reset; the shared per-front query ends with its last holder.
+  Also from #4956's review: `removeTrack` on a name cached only by a
+  `consume()` subscription is outside its documented contract; document or
+  refuse it.
 - Scope: Rust and JS, plus one sentence in the draft's Track Stream section.
   Run `just test interop --all`.
 
@@ -60,7 +75,10 @@ fails on `main` today. The relay case controls the ordering so the
 downstream TRACK FIN is handled before its SUBSCRIBE. A boundary test fills
 the per-session subscription cap with held TRACK streams, turns each into a
 live SUBSCRIBE with no `unused` edge, and checks that one more TRACK closes
-the session with TOO_MANY_REQUESTS. JS counterparts for the JS side.
+the session with TOO_MANY_REQUESTS. JS counterparts for the JS side, plus a
+JS requester (TRACK or FETCH) that disconnects before the answer and drops
+broadcast demand, while a second requester keeps it pinned until it leaves
+too.
 
 Public API: none. Wire: semantics only (holding the TRACK stream open), no new
 fields.

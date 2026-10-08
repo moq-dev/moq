@@ -98,14 +98,27 @@ Separating "the path changed" (ROUTE) from "the broadcast ended" (ANNOUNCE)
 removes that trade, and the failover tests must show no front loses its
 route while a working one exists. Decide whether #4642's hold can then go.
 
+Simulator findings so far, from moq-dev/moq.pro#2152 (open, awaiting the
+maintainer's decision on a design revision):
+
+- Live origin-end costs 134.5 KiB against path vector's 3668.1/1243.0 KiB,
+  but still emits 2150 client updates against an 840 once-only minimum and
+  re-announces 655 times. The Goal's "reaches each node about once" is not
+  met yet; find where the extra updates come from before the wire is written.
+- A deterministic five-node ring keeps a working longer backup yet stays
+  starved until the origin advances its seqno. The simulator recommends
+  Babel seqno requests.
+
 Open, for the implementer to settle and record:
 
 - Seqno lifetime across restarts of a node with a configured stable id
   (persist it, fold an incarnation into the id, or Babel's seqno request).
-- Whether starvation recovery needs a request message, or session restart
-  covers it.
+- Starvation recovery: the simulator's ring says session restart does not
+  cover it; confirm a seqno request message or record why not.
 - The window where an origin's ANNOUNCE_END and a next-hop change cross in
-  flight, and whether it needs more than the next END to arrive.
+  flight, and whether it needs more than the next END to arrive. The
+  simulator keeps this open until snapshot authority has deterministic
+  acceptance tests.
 - How much of today's route trie, fronts, and `route_order` survives intact.
 
 Tests, time mocked: #4644's live-graph withdrawal and failover tests

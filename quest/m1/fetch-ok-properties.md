@@ -14,9 +14,9 @@ properties block. Our own subscriber no longer reads it (#4974): it learns a
 track from SUBSCRIBE_OK or TRACK_STATUS_OK before any FETCH, and from draft 20
 opts out with INCLUDE_PROPERTIES = 0. Other fetch-only readers still need it.
 
-- `rs/moq-net/src/ietf/publisher.rs` sends FETCH_OK with
-  `properties: Default::default()`. SUBSCRIBE_OK fills them in the block near
-  `publisher.rs:655`. Share that code so the two can't diverge.
+- `run_fetch_stream` (`rs/moq-net/src/ietf/publisher.rs`) sends FETCH_OK
+  with `properties: Default::default()`. `run_subscribe_stream` fills them in
+  its `ietf::SubscribeOk` encode. Share that code so the two can't diverge.
 - Drafts 14-15 allow the omission: MAX_CACHE_DURATION is a MAY there, and
   FETCH_OK has no properties block. From draft 16, a relay MUST include all
   Extension Headers / Properties associated with a track in FETCH_OK (d16
@@ -40,6 +40,9 @@ opts out with INCLUDE_PROPERTIES = 0. Other fetch-only readers still need it.
 - Test per draft range: FETCH_OK round-trips the properties SUBSCRIBE_OK would
   carry, a standalone FETCH's objects arrive stamped, and
   INCLUDE_PROPERTIES = 0 empties the block.
+
+Decided 2026-10-08: #4974 (fetch without SUBSCRIBE) lands first, since both
+change how a fetch-only reader learns the track's properties.
 
 Public API: none. Wire: FETCH_OK gains its properties on drafts that define
 the block. Interop: run `just test interop --all`.
