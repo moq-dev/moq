@@ -36,9 +36,14 @@ skipping inside the Nix shell.
   tests are the same kind. Those also need
   the Vulkan loader to find the host NVIDIA ICD: point it at the ICD manifest
   and expose the driver libraries it names, or keep them in their own recipe.
-- [One external GPU image](/quest/m2/gpu-surface.md) adds `just rs gpu`,
-  which detects the host's GPU vendors and runs each one's ignored tests.
-  `just rs nvidia` is its NVIDIA branch, not a second detector.
+- `just rs gpu` (added by #4975) detects the host's GPU vendors and runs
+  each one's ignored tests. `just rs nvidia` is its NVIDIA branch, not a
+  second detector.
+- The selection includes the `vulkan_cuda_` external-image tests in
+  `rs/moq-video/src/frame/cuda_test.rs`, which have never run on hardware.
+  `vulkan_cuda_auto_external_encode` must pass its per-plane pixel checks
+  against the CPU reference for both renditions, RGBA and BGRA, through
+  NVENC and CUDA external-image import (the verification #4975 deferred here).
 - Nightly: a job in `.github/workflows/nightly.yml` runs `nix develop
   --command just rs nvidia` on the self-hosted runner, a recipe and not a
   script path, like every other workflow step. A self-hosted runner on a public repository must
@@ -56,4 +61,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Video hardware validation](/quest/m3/video-hardware.md) - hardware paths nothing runs yet
-- [One external GPU image](/quest/m2/gpu-surface.md) - the vendor-detecting `just rs gpu` recipe
