@@ -21,6 +21,9 @@ Decided (2026-10-02): one PR for both languages. Both model quests have
 landed (#4822). Shipping one language first would break Rust-JS interop on
 lite-07-wip in between.
 
+Decided 2026-10-08: [Rust untimed default](/quest/m1/rust-untimed-default.md)
+lands first, since both edit the same Timescale defaults.
+
 Draft work:
 
 - The draft describes only the current wire. Add the lite-07 encoding, the
@@ -37,6 +40,6 @@ JS-to-Rust on lite-07. lite-06 still receives a timestamp. Run
 
 Public API: none. Wire: lite-07-wip only, which is unpublished.
 
-## Related
+## Required
 
 - [Rust untimed default](/quest/m1/rust-untimed-default.md) - touches the same Timescale defaults in `rs/moq-net` and lands first; this rebases onto it

@@ -29,9 +29,10 @@ that ACKs every PING), and the iroh backend honors `quic.keep_alive`.
   Set the PING keep-alive too, for dead peers. Apply both to the HTTPS
   listener and the `[internal]` listener, which also gets the HTTP/1 header
   timer.
-- iroh (`rs/moq-tokio/src/iroh.rs`): set iroh 1.3's
-  `keep_alive_interval` from `quic.keep_alive`, and fix the docs that say iroh
-  has no knob (`rs/moq-tokio/src/quic.rs`, `doc/bin/relay/config.md`).
+- iroh (`rs/moq-tokio/src/iroh.rs`): set `keep_alive_interval` from
+  `quic.keep_alive` (the locked iroh 1.2 already has it), and fix the docs
+  that say iroh has no knob (`quic.rs`, `iroh.rs`, and
+  `doc/bin/relay/config.md`).
 - Tests on a paused clock where the runtime allows: a stalled io_uring
   handshake closes at the deadline, and an HTTP/2 client that ACKs PINGs but
   never sends a request, or trickles one request's headers, is dropped at the

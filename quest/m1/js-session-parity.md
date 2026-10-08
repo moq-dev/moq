@@ -2,7 +2,7 @@
 
 ## Goal
 
-Three Rust moq-net session behaviors hold in `@moq/net` too, so a JS peer or
+Two Rust moq-net session behaviors hold in `@moq/net` too, so a JS peer or
 relay behaves like a Rust one.
 
 ## Plan
@@ -15,12 +15,12 @@ relay behaves like a Rust one.
   wait for missing groups below a declared end until the tail settles, mirror
   the hold. JS readers still end at the end with groups missing
   (`doc/lib/js/net.md`).
-- Resolved epoch (#4904 and #4967, landed): Rust `broadcast::Info::epoch`
-  carries the epoch of the route a request resolved through. Check that JS
-  (`broadcast.Consumer.epoch`) and the bindings (moq-ffi) surface the same
-  value.
 
 Test each against the Rust behavior, with mocked time.
+
+Decided 2026-10-08: the resolved-epoch check is done for JS
+(`broadcast.Consumer.epoch` mirrors `broadcast::Info::epoch`), and the
+bindings' epoch surface is [Bindings](/quest/m0/broadcast-epoch/bindings.md)'s.
 
 ## Related
 

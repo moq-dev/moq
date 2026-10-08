@@ -12,8 +12,9 @@ and per node like the existing counters.
 - Read both from [stats totals and prefix
   tracks](/quest/m0/broadcast-epoch/stats-split.md), which lands first and
   retires the `publisher.json` rows they sit on today (decided in the
-  2026-10-06 audit); #4133 rebases them onto the egress side of its per-group
-  totals and prefix tracks. `lag` is a cumulative byte count per bucket keyed
+  2026-10-06 audit); [viewer lag histogram](/quest/m1/qos/lag-histogram.md)
+  lands them on the egress side of its per-group totals and prefix tracks
+  (decided 2026-10-08). `lag` is a cumulative byte count per bucket keyed
   by its upper edge (`"50ms"` to `"5s"`, then `"inf"`, empty buckets
   omitted); `dropped` is `{ duration, bytes, groups }` with the duration in
   fractional milliseconds. `doc/concept/stats.md` documents them. Diff two
@@ -33,4 +34,5 @@ Public API: none. Wire: none.
 
 ## Required
 
+- [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the `lag` histogram and `dropped` counters the dashboard reads
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the totals and prefix tracks the dashboard reads lag from
