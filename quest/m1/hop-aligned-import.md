@@ -22,7 +22,10 @@ fed one encoded stream. RTMP and SRT imports, the WHIP listener, and
 `ts --program all` are out: they mint an epoch per ingest connection
 (#4962), so two of them never share one. The WHEP pull and archive replay
 are out too (each pull's RTP session and each replay is its own instance),
-and so is capture: two encoders never align.
+and so is capture: two encoders never align. Since the CLI still accepts
+`--epoch` for `rtc --connect`, make it refuse one (`takes_epoch` false, as
+[Replay catalog](/quest/m1/archive/replay-catalog.md) does for archive), with
+a regression test.
 
 - A group's sequence derives from its keyframe's media timestamp (PTS in TS),
   not a per-process counter. Decide how both processes agree across a
