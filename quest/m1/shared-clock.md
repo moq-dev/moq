@@ -133,7 +133,8 @@ Guidance:
 - Test: a TS import carrying a `splice_insert` joins a clock already in use. In
   its TS export, `pts_time + pts_adjustment` lands on the exported video PTS of
   the splice point, and the section's CRC verifies.
-- Test: start a synthetic capture, then import an fMP4 starting at PTS 0. Both
+- Test: the first data-track test also runs with a synthetic capture taking
+  the clock in place of the data track, importing an fMP4 at PTS 0: both
   tracks advance from the capture's timeline with no rewind. Also cover the
   reverse order: an importer first on a default clock keeps its PTS verbatim.
   A passthrough fragment whose `tfdt` disagrees with its frame timestamp
@@ -153,4 +154,3 @@ Wire: none.
 ## Related
 
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - supplies the input-derived anchor through this quest's API
-- [Audio capture time](/quest/m2/audio-capture-time.md) - maps audio's capture timeline onto the broadcast clock once per open

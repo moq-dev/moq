@@ -26,6 +26,7 @@ mod key;
 mod limits;
 mod name;
 mod protect;
+mod terminal;
 mod window;
 
 pub use credential::Credential;

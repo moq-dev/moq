@@ -19,7 +19,7 @@ pub mod vp9;
 mod bitstream_test;
 
 use bytes::Bytes;
-use hang::catalog::VideoConfig;
+use hang::catalog::{AudioConfig, VideoConfig};
 
 use crate::Result;
 
@@ -44,12 +44,6 @@ pub struct Frame {
 pub trait Bridge: Send {
 	fn push(&mut self, frame: Frame) -> Result<()>;
 
-	/// Re-evaluate stall from source silence. Video bridges mark a quiet
-	/// rendition stalled; audio is a no-op.
-	fn tick(&mut self) -> Result<()> {
-		Ok(())
-	}
-
 	/// Abort the published track with `err` so subscribers see the real cause
 	/// (the peer disconnected, an ICE failure) rather than a bare `Error::Dropped`.
 	///
@@ -65,9 +59,6 @@ pub(crate) trait DeferredImport: Send + Sized {
 	/// Decode one complete codec frame.
 	fn decode(&mut self, frame: Bytes, pts: moq_net::Timestamp) -> moq_mux::Result<()>;
 
-	/// Re-evaluate stall from source silence.
-	fn tick(&mut self) -> moq_mux::Result<()>;
-
 	/// Abort the active media track.
 	fn abort(self, err: moq_net::Error);
 }
@@ -79,10 +70,6 @@ impl DeferredImport for moq_mux::codec::vp8::Import {
 
 	fn decode(&mut self, frame: Bytes, pts: moq_net::Timestamp) -> moq_mux::Result<()> {
 		moq_mux::codec::vp8::Import::decode(self, frame, Some(pts))
-	}
-
-	fn tick(&mut self) -> moq_mux::Result<()> {
-		moq_mux::codec::vp8::Import::tick(self)
 	}
 
 	fn abort(self, err: moq_net::Error) {
@@ -97,10 +84,6 @@ impl DeferredImport for moq_mux::codec::vp9::Import {
 
 	fn decode(&mut self, frame: Bytes, pts: moq_net::Timestamp) -> moq_mux::Result<()> {
 		moq_mux::codec::vp9::Import::decode(self, frame, Some(pts))
-	}
-
-	fn tick(&mut self) -> moq_mux::Result<()> {
-		moq_mux::codec::vp9::Import::tick(self)
 	}
 
 	fn abort(self, err: moq_net::Error) {
@@ -163,15 +146,6 @@ impl<I: DeferredImport> DeferredVideo<I> {
 		import.decode(frame, pts).map_err(Into::into)
 	}
 
-	/// Re-evaluate stall from source silence once the importer exists.
-	pub fn tick(&mut self) -> Result<()> {
-		if let DeferredState::Active(import) = &mut self.state {
-			import.tick().map_err(Into::into)
-		} else {
-			Ok(())
-		}
-	}
-
 	/// Abort the media track in either lifecycle state.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.state {
@@ -224,14 +198,14 @@ enum TrackConvert {
 }
 
 impl Track {
-	/// Audio track for an Opus rendition, from a subscribed `track`.
-	pub fn opus(track: moq_net::track::Subscriber) -> Self {
-		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+	/// Audio track for an Opus rendition, from a subscribed `track` read in `config`'s container.
+	pub fn opus(track: moq_net::track::Subscriber, config: &AudioConfig) -> Result<Self> {
+		let container: moq_mux::catalog::hang::Container = config.try_into()?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
-		Self {
+		Ok(Self {
 			consumer,
 			convert: TrackConvert::Passthrough,
-		}
+		})
 	}
 
 	/// Video track from a subscribed `track` consumer. Codec inferred from

@@ -133,6 +133,9 @@ pub struct Fetch<'a> {
 	/// that ends in Timed-Out gaps we cannot write, so the request is refused rather than
 	/// left to wait without it. Never encoded; we send no fill timeout.
 	pub fill_timeout: bool,
+	/// Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES,
+	/// draft-20+). Always `true` before draft-20, which has no way to opt out.
+	pub properties_wanted: bool,
 }
 
 impl Message for Fetch<'_> {
@@ -174,10 +177,13 @@ impl Message for Fetch<'_> {
 				};
 				encode_namespace(w, namespace)?;
 				w.string(track)?;
+				// INCLUDE_PROPERTIES defaults to 1, so only the opt-out is worth bytes.
+				let include_properties = (!self.properties_wanted).then_some(false);
 				encode_params!(w, version,
 					0x20 => self.subscriber_priority,
 					0x21 => *filter,
 					0x22 => group_order,
+					0x35 => include_properties,
 				);
 			}
 		}
@@ -190,92 +196,95 @@ impl Message for Fetch<'_> {
 			let _required_request_id_delta = buf.varint()?;
 		}
 
-		// The token is ignored: the session's grant is what authorizes the request, and
-		// INCLUDE_PROPERTIES only shapes a FETCH_OK we don't send on draft-20.
-		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout) = match version {
-			Version::Draft14 => {
-				let subscriber_priority = buf.u8()?;
-				let group_order = GroupOrder::decode(buf, version)?;
-				let fetch_type = FetchType::decode(buf, version)?;
-				Parameters::skip(buf)?;
-				(fetch_type, Some(subscriber_priority), Some(group_order), false, false)
-			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
-				let fetch_type = FetchType::decode(buf, version)?;
-				decode_params!(buf, version,
-					0x03 => _authorization_token: Vec<Opaque>,
-					0x0A => fill_timeout: Option<u64>,
-					0x20 => subscriber_priority: Option<u8>,
-					0x22 => group_order: Option<GroupOrder>,
-					0x25 => subgroup_filter: Vec<Opaque>,
-					0x26 => object_id_filter: Vec<Opaque>,
-					0x27 => priority_filter: Vec<Opaque>,
-					0x28 => object_property_filter: Vec<Opaque>,
-				);
-				let range_filters = [
-					subgroup_filter,
-					object_id_filter,
-					priority_filter,
-					object_property_filter,
-				]
-				.iter()
-				.any(|filter| !filter.is_empty());
-
-				// An unknown message parameter is a protocol violation, so each stays rejected
-				// on the drafts that predate it: FILL_TIMEOUT arrived in draft-18.
-				let has_fill_timeout = !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17);
-				if (fill_timeout.is_some() && !has_fill_timeout) || (range_filters && !has_range_filters(version)) {
-					return Err(DecodeError::InvalidValue);
+		// The token is ignored: the session's grant is what authorizes the request.
+		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout, properties_wanted) =
+			match version {
+				Version::Draft14 => {
+					let subscriber_priority = buf.u8()?;
+					let group_order = GroupOrder::decode(buf, version)?;
+					let fetch_type = FetchType::decode(buf, version)?;
+					Parameters::skip(buf)?;
+					(
+						fetch_type,
+						Some(subscriber_priority),
+						Some(group_order),
+						false,
+						false,
+						true,
+					)
 				}
+				Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
+					let fetch_type = FetchType::decode(buf, version)?;
+					decode_params!(buf, version,
+						0x03 => _authorization_token: Vec<Opaque>,
+						0x0A => fill_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
+						0x20 => subscriber_priority: Option<u8>,
+						0x22 => group_order: Option<GroupOrder>,
+						0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
+						0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
+						0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
+						0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
+					);
+					let range_filters = [
+						subgroup_filter,
+						object_id_filter,
+						priority_filter,
+						object_property_filter,
+					]
+					.iter()
+					.any(|filter| !filter.is_empty());
 
-				(
-					fetch_type,
-					subscriber_priority,
-					group_order,
-					range_filters,
-					fill_timeout.is_some(),
-				)
-			}
-			// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
-			_ => {
-				let namespace = decode_namespace(buf)?;
-				let track = Cow::Owned(buf.string()?);
-				decode_params!(buf, version,
-					0x03 => _authorization_token: Vec<Opaque>,
-					0x0A => fill_timeout: Option<u64>,
-					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter: Option<Filter>,
-					0x22 => group_order: Option<GroupOrder>,
-					0x25 => subgroup_filter: Vec<Opaque>,
-					0x26 => object_id_filter: Vec<Opaque>,
-					0x27 => priority_filter: Vec<Opaque>,
-					0x28 => object_property_filter: Vec<Opaque>,
-					0x35 => _include_properties: Option<bool>,
-				);
-				let range_filters = [
-					subgroup_filter,
-					object_id_filter,
-					priority_filter,
-					object_property_filter,
-				]
-				.iter()
-				.any(|filter| !filter.is_empty());
+					(
+						fetch_type,
+						subscriber_priority,
+						group_order,
+						range_filters,
+						fill_timeout.is_some(),
+						true,
+					)
+				}
+				// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
+				_ => {
+					let namespace = decode_namespace(buf)?;
+					let track = Cow::Owned(buf.string()?);
+					decode_params!(buf, version,
+						0x03 => _authorization_token: Vec<Opaque>,
+						0x0A => fill_timeout: Option<u64>,
+						0x20 => subscriber_priority: Option<u8>,
+						0x21 => filter: Option<Filter>,
+						0x22 => group_order: Option<GroupOrder>,
+						0x25 => subgroup_filter: Vec<Opaque>,
+						0x26 => object_id_filter: Vec<Opaque>,
+						0x27 => priority_filter: Vec<Opaque>,
+						0x28 => object_property_filter: Vec<Opaque>,
+						0x35 => include_properties: Option<bool>,
+					);
+					let range_filters = [
+						subgroup_filter,
+						object_id_filter,
+						priority_filter,
+						object_property_filter,
+					]
+					.iter()
+					.any(|filter| !filter.is_empty());
 
-				let fetch_type = FetchType::Filtered {
-					namespace,
-					track,
-					// An absent LOCATION_FILTER fetches the whole track.
-					filter: filter.unwrap_or(Filter::Unfiltered),
-				};
-				(
-					fetch_type,
-					subscriber_priority,
-					group_order,
-					range_filters,
-					fill_timeout.is_some(),
-				)
-			}
-		};
+					let fetch_type = FetchType::Filtered {
+						namespace,
+						track,
+						// An absent LOCATION_FILTER fetches the whole track.
+						filter: filter.unwrap_or(Filter::Unfiltered),
+					};
+					(
+						fetch_type,
+						subscriber_priority,
+						group_order,
+						range_filters,
+						fill_timeout.is_some(),
+						// Defaults to 1, so an absent parameter means the requester wants them.
+						include_properties.unwrap_or(true),
+					)
+				}
+			};
 
 		Ok(Self {
 			request_id,
@@ -285,6 +294,7 @@ impl Message for Fetch<'_> {
 			fetch_type,
 			range_filters,
 			fill_timeout,
+			properties_wanted,
 		})
 	}
 }
@@ -358,14 +368,15 @@ impl Message for FetchOk {
 			_ => {
 				let end_of_track = buf.bool()?;
 				let end_location = Location::decode(buf, version)?;
-				// GROUP_ORDER isn't legal here, but keep accepting it so a peer that still sends
-				// it doesn't have its session torn down over a hint.
+				// MAX_CACHE_DURATION and GROUP_ORDER are legal on FETCH_OK only in draft-15.
+				// Draft-16 still knows GROUP_ORDER, so one here is ignored. From draft-17
+				// it closes the session.
 				decode_params!(buf, version,
-					0x04 => max_cache_duration: Option<u64>,
-					0x22 => group_order: Option<GroupOrder>,
+					0x04 => max_cache_duration: Option<u64> where version == Version::Draft15,
+					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15,
 				);
-				// The timescale is read but not surfaced yet: a fetched object without an
-				// interpretable timestamp is stamped on arrival.
+				// The timescale is read but not surfaced yet: a fetched object without its
+				// own units arrives untimed.
 				let mut properties = super::Properties::decode(buf, version)?;
 				if version == Version::Draft15 {
 					properties.max_cache_duration = max_cache_duration.map(std::time::Duration::from_millis);
@@ -594,7 +605,7 @@ impl Encode<Version> for FetchObject {
 }
 
 impl Decode<Version> for FetchObject {
-	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let flags = buf.varint()?;
 
 		// Anything at or above 128 is a named value rather than a set of flags, and only
@@ -637,7 +648,11 @@ impl Decode<Version> for FetchObject {
 		};
 
 		let properties = match flags & flag::PROPERTIES != 0 {
-			true => Some(buf.bytes()?.to_vec()),
+			true => {
+				let super::group::ObjectExtensionsLength(size) =
+					super::group::ObjectExtensionsLength::decode(buf, version)?;
+				Some(buf.slice(size)?.to_vec())
+			}
 			false => None,
 		};
 
@@ -681,6 +696,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -704,6 +720,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -745,6 +762,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft16);
@@ -768,6 +786,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -845,6 +864,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -924,6 +944,7 @@ mod tests {
 			assert_eq!(fetch.group_order, GroupOrder::Ascending);
 			assert!(fetch.range_filters, "{version}");
 			assert!(fetch.fill_timeout, "{version}");
+			assert!(!fetch.properties_wanted, "{version}");
 			assert_eq!(
 				fetch.fetch_type,
 				FetchType::Filtered {
@@ -954,6 +975,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		#[rustfmt::skip]
@@ -964,6 +986,21 @@ mod tests {
 		]].concat();
 		assert_eq!(encode_message(&fetch, Version::Draft20), expected);
 		assert_eq!(decode_message::<Fetch>(&expected, Version::Draft20).unwrap(), fetch);
+
+		// Only the opt-out is written, as a uint8 with no Length.
+		let opted_out = Fetch {
+			properties_wanted: false,
+			..fetch.clone()
+		};
+		#[rustfmt::skip]
+		let expected = [FETCH_HEAD, &[
+			0x03, // Number of Parameters
+			0x20, 0x80, // SUBSCRIBER_PRIORITY = 128
+			0x02, 0x02, // GROUP_ORDER (0x22) = Descending
+			0x13, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
+		]].concat();
+		assert_eq!(encode_message(&opted_out, Version::Draft20), expected);
+		assert_eq!(decode_message::<Fetch>(&expected, Version::Draft20).unwrap(), opted_out);
 
 		// The tagged forms have no spelling from draft-20 on, and this one none before it.
 		let mut buf = Vec::new();
@@ -1025,6 +1062,22 @@ mod object_tests {
 		assert!(!bytes.has_remaining(), "the object header is fully consumed");
 
 		(buf.to_vec(), decoded)
+	}
+
+	/// A fetch stream is read until a whole object header has arrived, so a properties
+	/// length the peer declares is refused at its prefix rather than buffered.
+	#[test]
+	fn oversized_properties_are_refused_at_the_prefix() {
+		let mut wire = Vec::new();
+		Encoder::new(&mut wire, VERSION.into())
+			.varint(flag::PROPERTIES)
+			.unwrap();
+		Encoder::new(&mut wire, VERSION.into())
+			.varint((super::super::group::MAX_OBJECT_EXTENSIONS + 1) as u64)
+			.unwrap();
+
+		let err = FetchObject::decode_slice(&wire, VERSION).unwrap_err();
+		assert!(matches!(err, DecodeError::MessageTooLarge { .. }), "{err:?}");
 	}
 
 	/// The first Object carries absolute IDs and a priority, because "same as the prior

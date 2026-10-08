@@ -19,6 +19,12 @@ codes, cancellation, and clean stream finish. Match the existing Rust response
 contract, including saved object prefixes. Unsupported versions or request
 forms must receive the protocol's explicit refusal rather than hang.
 
+Datagrams are never fetchable (#4982): Rust answers an IETF FETCH that
+reaches a datagram with DOES_NOT_EXIST; match it. Decided 2026-10-08: JS adds
+no `NotFetchable` code, since nothing would send it. Only lite-07 has the
+code, and lite-07 drops FETCH for [ranges](/quest/m1/subscribe-ranges/lite.md);
+lite-05 and lite-06 answer `NotFound`.
+
 Verify with an in-memory application responder: a browser publisher serves a
 native IETF subscriber after a group is evicted or was never cached. Run the
 supported-draft matrix and `just test interop --all` through CI.

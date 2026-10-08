@@ -7,41 +7,23 @@ description: JSON over MoQ tracks, as snapshots, streams, or a sliding window
 
 [![npm](https://img.shields.io/npm/v/@moq/json)](https://www.npmjs.com/package/@moq/json)
 
-JSON over [`@moq/net`](/lib/js/net) tracks, in three modes:
+JSON over [`@moq/net`](/lib/js/net) tracks, in three modes. Snapshot and stream
+are the catalog modes on the [hang](/concept/hang#data-tracks) page. Window is
+a third framing for a raw track: both ends opt into it, and a generic catalog
+reader will not pick it up.
 
-- **Snapshot**: lossy latest-value, with RFC 7396 merge-patch deltas.
-- **Stream**: lossless append-log in a single group.
-- **Window**: a bounded run of records a reader can join at any point.
+- **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error.
+- **Stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
+- **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice.
 
-On Snapshot and Stream, `Config` is the codec options. `Producer.Config` /
-`Consumer.Config` add the track. Compression is a shared `"none" | "deflate"`
-enum, not a boolean: both sides set the same field. `Stream.Config` also
-accepts a `schema` for record validation on encode and decode. A delta without
-a snapshot raises `MissingSnapshot`; an uncommitted compressed stream frame
-raises `Desync`. Unexpected frame read errors propagate to the caller. Window still uses
-`ProducerConfig` / `ConsumerConfig` and a boolean `compression` flag.
+Both sides choose the same compression, `"none"` or `"deflate"`. A value is
+stamped when written, unless you pass its capture time, so the track must
+declare a timescale.
 
-```ts
-import { Snapshot } from "@moq/json";
-
-const producer = new Snapshot.Producer({ track, compression: "deflate" });
-producer.update({ hello: "world" });
-
-const consumer = new Snapshot.Consumer({ track: track.subscribe(), compression: "deflate" });
-for await (const value of consumer) {
-    console.log(value);
-}
-```
-
-A value is stamped when written, unless you pass its capture time:
-`producer.update(value, at)`.
-
-A Stream rides one group, so the whole log shares `@moq/net`'s group budget:
-32 MiB of payload and 8192 records. An `append` that might not fit throws
-`GroupTooLarge` before it is encoded and leaves the log intact, compressed or
-not. With `"deflate"` the check counts the raw JSON plus DEFLATE's worst-case
-overhead. Once the budget is spent every `append` throws; start a new track to
-keep going. Any other failed append aborts the track, so readers see the error
-rather than a log that looks complete.
+A stream rides one group, so the whole log shares `@moq/net`'s group budget:
+32 MiB of payload and 8192 records. An append that might not fit is refused
+before anything is written and leaves the log intact. Once the budget is spent,
+start a new track. Any other failed append aborts the track, so readers see
+the error rather than a log that looks complete.
 
 The Rust twin is [`moq-json`](/lib/rs/moq-json).

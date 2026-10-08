@@ -1,12 +1,14 @@
-import { race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
+import type { Drain } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import type * as Epoch from "../epoch.ts";
 import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type OpenOptions, type Reader, Stream } from "../stream.ts";
@@ -24,7 +26,6 @@ import {
 	decodeAnnounceBroadcastMaybe,
 } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
-import * as DatagramStream from "./datagram_stream.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
 import { sendOrder } from "./priority.ts";
@@ -58,6 +59,11 @@ import {
 // (Chrome ~100) and we open with waitUntilAvailable, so past the cap the open blocks
 // until the peer frees a slot. The timeout turns a stall into a clear error.
 export const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
+
+// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
+// candidate outranks it, while the route stays selectable as the last path. Matches Rust
+// Cost::DRAIN: cost is the whole mechanism, not a separate state.
+const DRAIN_COST: Cost = 2n ** 62n - 1n;
 
 // The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
 function supportsTrackStream(version: Version): boolean {
@@ -143,10 +149,6 @@ export class Subscriber {
 	// once and asks for it on every request, so a later epoch never feeds an older handle.
 	#epochs = new Map<Path.Valid, Epoch.Valid>();
 
-	// A random Hop ID of this connection's own, written as the first hop of any chain that
-	// names no publisher, so a publisher that reconnects reads as a new one.
-	#stamp: Hop;
-
 	// Dedup in-flight one-shot fetches, keyed by [broadcast, track, sequence]. Concurrent (or
 	// repeat, while still open) fetchGroup() calls for the same group share one FETCH stream and
 	// each get an independent mirror; the entry is evicted once the group closes.
@@ -159,6 +161,9 @@ export class Subscriber {
 	// stream on the peer having advertised Probe >= Report.
 	#peerSetup?: Signal<Setup | undefined>;
 
+	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
+	#goaway?: GetPromise<Drain>;
+
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
 	/**
@@ -168,6 +173,7 @@ export class Subscriber {
 	 * @param origin - Hop id shared with the Publisher
 	 * @param probe - Optional sink for the peer's PROBE estimates
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
+	 * @param goaway - Settles when the peer sends GOAWAY
 	 *
 	 * @internal
 	 */
@@ -177,13 +183,26 @@ export class Subscriber {
 		hop: Hop,
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
+		goaway?: GetPromise<Drain>,
 	) {
 		this.#quic = quic;
 		this.version = version;
 		this.hop = hop;
-		this.#stamp = randomHop();
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
+		this.#goaway = goaway;
+	}
+
+	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
+	// session's route outranks this one.
+	#goingAway(): boolean {
+		return this.#goaway?.peek() !== undefined;
+	}
+
+	// What a route costs once the peer has asked us to leave. A later announce on a
+	// draining session must not win selection, however cheap the path it advertises.
+	#cost(cost?: Cost): Cost {
+		return this.#goingAway() ? DRAIN_COST : (cost ?? Cost.zero);
 	}
 
 	/**
@@ -229,6 +248,7 @@ export class Subscriber {
 			return;
 		}
 
+		let stopDrain: Dispose | undefined;
 		try {
 			// Send the announce interest.
 			await stream.writer.u53(StreamId.Announce);
@@ -271,13 +291,13 @@ export class Subscriber {
 					// they go on record and obey the same one-per-path rule: the initial set
 					// naming a path twice is the same violation as two ANNOUNCE_STARTs for it,
 					// and the record is what catches either. Draft01/02 carry no hop ids and no
-					// ANNOUNCE_OK, so this connection's stamp is the first hop.
+					// ANNOUNCE_OK, so nothing names the publisher.
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						const route = { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
+						const route = { hops: [UNKNOWN_HOP], cost: this.#cost() };
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { live, route, captures });
@@ -291,6 +311,22 @@ export class Subscriber {
 					// Draft03+: no AnnounceInit, initial state comes via Announce messages.
 					break;
 			}
+
+			// A draining peer usually stops announcing, so reprice from the GOAWAY itself.
+			// Waiting for another message would leave the route primary until the session
+			// closed. Idempotent: an unchanged cost emits nothing. A GOAWAY that already
+			// arrived needs no listener, since `#cost()` priced every route above.
+			const drainAdvertised = () => {
+				if (announced.closed.peek() !== undefined) return;
+				for (const [path, ad] of advertised) {
+					if (!ad.live) continue;
+					const route = { ...ad.route, cost: DRAIN_COST };
+					if (routesEqual(ad.route, route)) continue;
+					advertised.set(path, { ...ad, route });
+					announced.append({ prefix: path, captures: ad.captures, kind: "update", route });
+				}
+			};
+			stopDrain = this.#goaway?.changed(() => drainAdvertised());
 
 			// Lite06+: announce ids. Each received `active` implicitly assigns the next
 			// per-stream ordinal; `endedId`/`restart` reference it, and lite-07 bases copy
@@ -413,18 +449,15 @@ export class Subscriber {
 					continue;
 				}
 
-				// The first hop is the original publisher; an empty chain means the peer itself
-				// originated it. One that names nobody (lite-01..03, or a peer reporting 0)
-				// gets this connection's stamp in front of its 0.
-				const fullHops = stampHops(
+				const fullHops =
 					hops !== undefined && responderOrigin !== undefined
 						? [...hops, responderOrigin]
-						: [...(hops ?? [])],
-					this.#stamp,
-				);
+						: [...(hops ?? [])];
+				// A received empty list is the anonymous mark, not a local announcement.
+				if (fullHops.length === 0) fullHops.push(UNKNOWN_HOP);
 				// Appending a withheld AnnounceOk(0) onto a 32-entry list is the same
 				// drop Rust's Hops::push makes: do not expose an overlong chain.
-				if (fullHops === undefined || fullHops.length > MAX_HOPS) {
+				if (fullHops.length > MAX_HOPS) {
 					console.debug(`announced: broadcast=${path} dropped (hop chain at MAX_HOPS)`);
 					advertised.set(path, {
 						live: false,
@@ -433,7 +466,7 @@ export class Subscriber {
 					});
 					continue;
 				}
-				const route: Route = { epoch, hops: fullHops, cost: cost ?? Cost.zero };
+				const route: Route = { epoch, hops: fullHops, cost: this.#cost(cost) };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });
@@ -477,6 +510,9 @@ export class Subscriber {
 			if (e instanceof ProtocolViolation) {
 				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: closeReason(reason(e)) });
 			}
+		} finally {
+			// Releases this interest's routes on a session that never drains.
+			stopDrain?.();
 		}
 	}
 
@@ -661,7 +697,7 @@ export class Subscriber {
 			producer = request.accept(this.#toModelInfo(info));
 			timescale.set(info.timescale);
 		} else {
-			// Older drafts negotiate nothing per-track: verbatim frames, no timescale.
+			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
 			producer = request.accept();
 			timescale.set(0);
 			drainOk = true;
@@ -1225,6 +1261,9 @@ export class Subscriber {
 			const probe = await this.#peerProbeLevel(this.#peerSetup);
 			if (probe < ProbeLevel.Report) return;
 		}
+
+		// A session that is going away has no use for a new estimate.
+		if (this.#goingAway()) return;
 
 		// Probe is best-effort: any failure (stream reset by peer, missing peer support,
 		// transport hiccup) MUST NOT tear down the connection. On error, drop the

@@ -14,7 +14,7 @@ browser can decode it directly. The spec is
 broadcasts live at `<opaque>`, derived from the credential and a semantic name
 such as `foo.hang`, and the [epoch](/concept/moq-lite#publisher-epochs) on
 their route identifies each publisher run. The path exposes no format or protection marker; the
-payloads follow [moq-e2ee](/draft/moq-e2ee).
+payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
 
 ## Catalog
 
@@ -56,7 +56,7 @@ A few things the catalog can express beyond decoder config:
 - **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected.
 - **Jitter.** A rendition can say how far its frames fell behind the media clock before the publisher flushed them, in whole milliseconds rounded up. Encoders report the spread of lateness above each rendition's own recent minimum, so a constant encoder delay is not jitter; container imports estimate batch spans without counting ingest delay. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Delay.** A rendition can also say how far its frames reach the transport behind the broadcast's earliest rendition, measured the same way from each rendition's minimum lateness, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
-- **Stalled renditions.** A publisher can flag a rendition as temporarily bad so players prefer another one without the track disappearing. First-party video publishers set this flag after more than three frame intervals of source silence or encoding lag while subscribed, and clear it after three on-time completed frames or when idle. Browser and native capture poll while waiting; FLV and MPEG-TS importers observe video silence as container data arrives. The shared detector is `hang::catalog::stalled::Detector` in Rust and `Catalog.Stalled.Detector` in JavaScript. It is a playback diagnostic, not an authorization or routing signal.
+- **Disabled renditions.** An audio or video rendition with `enabled: false` has no frames coming, and a player must not select it. Pausing a rendition in `@moq/publish` keeps it in the catalog this way rather than removing it, so a mute is a one-field update; a disabled video rendition encodes one black keyframe first, so a player that predates the field shows black instead of a frozen picture. The field is written only when false. The older video `stalled` field is no longer written, and readers ignore it.
 - **Archive.** A broadcast may advertise an `archive` entry mapping each track, the catalog included, to its own timeline track (a small index of the track's spans: timing plus group and frame positions) and, if recorded, the replay MoQ path, object-store URL, and format version. Every track is cut by one rule, at group boundaries between 2s and 10s (a zero minimum for sparse data such as the catalog), and tracks commit and expire independently. The timelines are what let the [HLS gateway](/bin/hls) build playlists without subscribing to media.
 - **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and the archive index share one fixed epoch after timescale conversion. It is independent of `archive`, so a live-only publisher can expose wall-clock timing without creating a timeline.
 - **Extensions.** The root is a loose object. Applications add their own sections (`scte35`, for example) next to the ones hang defines, optionally naming a track that carries the data. Every library exposes a way to write your section without clobbering the built-in ones, and readers ignore what they don't know.
@@ -103,6 +103,10 @@ document would silently discard everything but the last payload:
 - `snapshot` is lossy. Each group supersedes the previous one, so a consumer reads only the newest. A JSON track may follow the first frame with merge-patch deltas.
 - `stream` is an ordered log: one payload per frame, all in a single group that is never rolled. Retention is still bounded by the group cache, and a consumer that falls behind fails the read rather than silently resuming mid-log.
 
+A sliding window, a bounded log a reader can join in the middle, is a framing
+in [`moq-json`](/lib/rs/moq-json) rather than a catalog mode. Both ends opt
+into it on a raw track.
+
 The rest is descriptive: `compression` (`deflate`, the same group-scoped
 `deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
 one, `bitrate`, `jitter`, and `delay` with the same meaning as for media, plus
@@ -111,13 +115,9 @@ only from payloads stamped with their capture time on the broadcast clock. A
 consumer that doesn't recognize a `mode` or `compression` ignores that track and
 round-trips it verbatim.
 
-In Rust the catalog owns the lifetime: `catalog.json_stream(track, config)` (or
-`json_snapshot` / `binary_snapshot` / `binary_stream`) writes the entry and
-retracts it when the producer drops. Read the config from `catalog.json.tracks`
-or `catalog.binary.tracks`, then pair its name and config with
-`moq_mux::catalog::Entry::new` to subscribe. In C, `moq_publish_json_*` and
-`moq_publish_binary_*` do the same, retracting on `_finish`. In the browser, read the same map,
-subscribe by name, and hand the track to `@moq/json` or `@moq/flate`.
+The catalog entry lives as long as its producer: dropping it retracts the
+track. [`moq-json`](/lib/rs/moq-json) and [`moq-flate`](/lib/rs/moq-flate) (and
+their TypeScript twins) are what read and write the payloads.
 
 An application with its own per-track fields can list a data track in its own
 root section instead, nesting the JSON or binary config in a `config` field
@@ -153,12 +153,31 @@ on data tracks remain data, including empty text cues.
 A video group is a GoP: it begins with a keyframe and holds the frames that
 depend on it. That alignment is what makes MoQ's congestion behavior safe. A
 relay can drop a whole group, a viewer can join at any group boundary, and the
-decoder never sees a frame whose reference is missing. Audio groups are
-independent too and typically hold about a second.
+decoder never sees a frame whose reference is missing. Audio frames are
+independent, so an audio group can end at any frame; the first-party encoders
+put one packet in each unless told otherwise.
 
 The `description` field carries out-of-band codec setup (an `avcC` box for
 H.264). When it is absent, the parameter sets ride inline before each keyframe,
-which is what `avc3`/`hev1` tracks do. Decoders should handle both.
+which is what `avc3`/`hev1` tracks do. Decoders should handle both. CMAF is the
+exception: its samples are always length-prefixed, so an `avc3`/`hev1` CMAF
+track keeps the configuration record as its `description` for the NAL length
+size, even when the parameter sets ride in the samples.
+
+## Encryption
+
+[moq-e2ee](/draft/moq-e2ee) encrypts groups, datagrams, and track names so a
+relay forwards ciphertext and never sees a content key. The application
+distributes the credential on its own channel. Each publisher run binds that
+credential to its [epoch](/concept/moq-lite#publisher-epochs), which derives
+the track names and keys for that run alone. A restart under a fresh epoch
+shares no names or keys with the previous run. Never share or reuse an epoch
+under one credential, whether for a replica or a later run: two instances on
+one epoch derive the same keys from the same group sequences and repeat
+AES-GCM nonces. The broadcast path is an opaque name
+derived from the credential and a semantic name such as `foo.hang`; it carries
+no format marker. `moq-e2ee` is the Rust implementation. Relays need no
+configuration to carry it.
 
 ## Your own format
 

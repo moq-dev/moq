@@ -401,6 +401,13 @@ impl Publish {
 		Ok(())
 	}
 
+	/// The raw track producer behind a handle, for tests that publish what the C API
+	/// can't express (an untimed frame).
+	#[cfg(test)]
+	pub(crate) fn track_producer(&mut self, track: Id) -> Option<&mut moq_net::track::Producer> {
+		self.tracks.get_mut(track)
+	}
+
 	/// A watch-only handle to a raw track's subscriber demand.
 	pub fn track_demand(&self, track: Id) -> Result<moq_net::track::Demand, Error> {
 		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.demand())

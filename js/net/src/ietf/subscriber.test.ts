@@ -6,17 +6,20 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
-import { type GroupFlags, Group as GroupMessage } from "./object.ts";
+import { ObjectDatagram } from "./datagram.ts";
+import { encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
+import type { Properties } from "./properties.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
-import { ALPN, Version } from "./version.ts";
+import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_19;
 
@@ -60,6 +63,82 @@ test("every peer is asked", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 
 	const subscriber = new Subscriber({ session });
+	subscriber.announced();
+
+	expect(await nextStream(pair.client)).toBeDefined();
+});
+
+/**
+ * Draft-16 is the first that allows a zero-field track namespace. Asking a foreign peer
+ * (one that declared no MoQ Solicit) for one earlier is a protocol violation, so an
+ * unscoped subscriber sends nothing and still takes an unsolicited announcement.
+ */
+test.each([
+	["draft-14", Version.DRAFT_14, ALPN.DRAFT_14],
+	["draft-15", Version.DRAFT_15, ALPN.DRAFT_15],
+] as const)("%s does not ask a foreign peer for the empty namespace", async (_name, version, alpn) => {
+	const pair = createMockTransportPair(alpn);
+	const session = new NativeSession(pair.server, version, true);
+	const subscriber = new Subscriber({ session });
+	const announced = subscriber.announced();
+
+	expect(await nextStream(pair.client)).toBeUndefined();
+
+	const stream = await Stream.open(pair.server, { version });
+	void subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("surprise") }),
+		stream,
+	);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("surprise"), kind: "start" });
+	announced.close();
+});
+
+/** With no request stream to end it, the unasked reader ends with the session, from either side. */
+test.each([
+	["local", "server"],
+	["remote", "client"],
+] as const)("an unasked draft-14 reader ends on a %s close", async (_name, side) => {
+	const pair = createMockTransportPair(ALPN.DRAFT_14);
+	const session = new NativeSession(pair.server, Version.DRAFT_14, true);
+	const subscriber = new Subscriber({ session, quic: pair.server });
+	const announced = subscriber.announced();
+
+	pair[side].close();
+
+	expect(await announced.next()).toBeUndefined();
+});
+
+/** A peer that declared MoQ Solicit is ours: it only tells when asked, so it still is. */
+test.each([
+	["draft-14", Version.DRAFT_14, ALPN.DRAFT_14],
+	["draft-15", Version.DRAFT_15, ALPN.DRAFT_15],
+] as const)("%s still asks a soliciting peer for the empty namespace", async (_name, version, alpn) => {
+	const pair = createMockTransportPair(alpn);
+	const session = new NativeSession(pair.server, version, true);
+	const subscriber = new Subscriber({ session, solicit: true });
+
+	subscriber.announced();
+
+	expect(await nextStream(pair.client)).toBeDefined();
+});
+
+/** A named prefix is still legal on the drafts that reject the empty one. */
+test("draft-14 still asks for a named prefix", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_14);
+	const session = new NativeSession(pair.server, Version.DRAFT_14, true);
+	const subscriber = new Subscriber({ session });
+
+	subscriber.announced(Path.Pattern.subtree(Path.from("cam")));
+
+	expect(await nextStream(pair.client)).toBeDefined();
+});
+
+/** The empty prefix is the "every namespace" request from draft-16 on. */
+test("draft-16 still asks for the empty namespace", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const session = new NativeSession(pair.server, Version.DRAFT_16, true);
+	const subscriber = new Subscriber({ session });
+
 	subscriber.announced();
 
 	expect(await nextStream(pair.client)).toBeDefined();
@@ -116,30 +195,21 @@ test("an unsolicited announcement lands", async () => {
 });
 
 /**
- * A session without the Cluster extension names no publisher, so each connection stamps its
- * own random Hop ID in front of a 0: a publisher that reconnects reads as a new one, and the 0
- * keeps it ranked below identified routes.
+ * A session without the Cluster extension names no publisher, so its advertisement carries
+ * only the anonymous mark: identity is the epoch's job, and nothing goes in front of the 0.
  */
-test("an advertisement with no path is stamped per connection", async () => {
-	const stamp = async () => {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
-		const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
-		const announced = subscriber.announced();
-		expect(await nextStream(pair.client)).toBeDefined();
+test("an advertisement with no path is anonymous", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	const announced = subscriber.announced();
+	expect(await nextStream(pair.client)).toBeDefined();
 
-		const stream = await Stream.open(pair.server, { version: VERSION });
-		void subscriber.runPublishNamespace(
-			new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("legacy") }),
-			stream,
-		);
-		const hops = (await announced.next())?.route.hops ?? [];
-		expect(hops).toHaveLength(2);
-		expect(hops[0]).not.toBe(UNKNOWN_HOP);
-		expect(hops[1]).toBe(UNKNOWN_HOP);
-		return hops[0];
-	};
-
-	expect(await stamp()).not.toBe(await stamp());
+	const stream = await Stream.open(pair.server, { version: VERSION });
+	void subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("legacy") }),
+		stream,
+	);
+	expect((await announced.next())?.route.hops).toEqual([UNKNOWN_HOP]);
 });
 
 /**
@@ -444,14 +514,14 @@ test("a repeated NAMESPACE reprices in place", async () => {
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "start",
-		route: { hops: [PEER], cost: { warm: 4n, cold: 4n } },
+		route: { hops: [PEER], cost: 4n },
 	});
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 0n });
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "update",
-		route: { hops: [PEER], cost: { warm: 0n, cold: 0n } },
+		route: { hops: [PEER], cost: 0n },
 	});
 });
 
@@ -631,7 +701,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "start",
-		route: { hops: [PEER], cost: { warm: 4n, cold: 4n } },
+		route: { hops: [PEER], cost: 4n },
 	});
 
 	const peer = await nextStream(pair.client);
@@ -646,7 +716,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "update",
-		route: { hops: [PEER], cost: { warm: 0n, cold: 0n } },
+		route: { hops: [PEER], cost: 0n },
 	});
 
 	// Still announced: the stream ending is what retracts it.
@@ -873,23 +943,90 @@ function encodeObjects(deltas: number[]): Uint8Array {
  * A subscriber with one track subscribed and answered, which is what registers {@link ALIAS}
  * and lets a group stream naming it be handled.
  */
-async function subscribeTrack(): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const session = new NativeSession(pair.server, VERSION, true);
+async function subscribeTrack({
+	version = VERSION,
+	properties = {},
+}: {
+	version?: IetfVersion;
+	properties?: Properties;
+} = {}): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
+	const pair = createMockTransportPair(version === Version.DRAFT_16 ? ALPN.DRAFT_16 : ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
+	peer.reader.version = version;
+	peer.writer.version = version;
 
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, VERSION);
+	const request = await Subscribe.decode(peer.reader, version);
 	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS, properties }).encode(peer.writer, version);
 
 	return { subscriber, track };
 }
+
+/** One object carrying `properties` as its raw extension bytes, then a one-byte payload. */
+function encodeStamped(properties: number[]): Uint8Array {
+	// Every field here is under 64, so each is a one-byte varint.
+	return new Uint8Array([0, properties.length, ...properties, 1, 42]);
+}
+
+/** A group stream header whose objects carry extensions. */
+function stampedGroup(groupId: number): GroupMessage {
+	return new GroupMessage({
+		trackAlias: ALIAS,
+		groupId,
+		subGroupId: 0,
+		publisherPriority: 0,
+		flags: { ...groupFlags(true), hasExtensions: true },
+	});
+}
+
+test("a track without TIMESCALE arrives untimed, even if an object carries a Timestamp", async () => {
+	const { subscriber, track } = await subscribeTrack();
+	expect((await track.info()).timescale).toBeUndefined();
+
+	// Property 0x10 (Timestamp) = 5, with no units to read it in.
+	await subscriber.handleGroup(stampedGroup(0), new Reader(undefined, encodeStamped([0x10, 5]), VERSION));
+	const group = await track.ordered().nextGroup();
+	const frame = await group?.readFrame();
+	expect(frame?.payload).toEqual(new Uint8Array([42]));
+	expect(frame?.timestamp).toBeUndefined();
+	track.close();
+});
+
+test("an object-scope Timescale is never applied", async () => {
+	const { subscriber, track } = await subscribeTrack({ properties: { timescale: Timescale.MICRO } });
+	expect((await track.info()).timescale).toBe(Timescale.MICRO);
+
+	// Property 0x08 (Timescale) = 1 per second, then 0x10 (Timestamp) = 5 as a type delta of 8.
+	await subscriber.handleGroup(stampedGroup(0), new Reader(undefined, encodeStamped([0x08, 1, 0x08, 5]), VERSION));
+	const group = await track.ordered().nextGroup();
+	const frame = await group?.readFrame();
+	expect(frame?.timestamp?.scale).toBe(Timescale.MICRO);
+	expect(frame?.timestamp?.value).toBe(5);
+	track.close();
+});
+
+test("an object without a Timestamp on a TIMESCALE track is malformed", async () => {
+	const { subscriber, track } = await subscribeTrack({ properties: { timescale: Timescale.MICRO } });
+	const reader = new Reader(undefined, encodeStamped([]), VERSION);
+	const stop = spyOn(reader, "stop");
+
+	await subscriber.handleGroup(stampedGroup(0), reader);
+
+	expect(stop).toHaveBeenCalledTimes(1);
+	const err = stop.mock.calls[0][0];
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
+	// The track can't be trusted past it, so it ends rather than skipping one group.
+	expect(track.closed.peek()).toBe(err as StreamError);
+	stop.mockRestore();
+});
 
 test("older peer without priority property inherits wire priority 128", async () => {
 	const { subscriber, track } = await subscribeTrack();
@@ -1211,6 +1348,101 @@ test("a group served from partway through is dropped", async () => {
 });
 
 /**
+ * The first Object ID is absolute whatever FIRST_OBJECT says, and IDs start at 0, so a
+ * draft-18 stream that leaves the bit clear and starts at object 0 is the whole group.
+ * The publisher is out of spec on the bit, not missing a head.
+ */
+test("a clear FIRST_OBJECT at object 0 is the whole group", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	const flags = groupFlags(false);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags }),
+		new Reader(undefined, encodeObjects([0, 0]), VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	expect(group?.sequence).toBe(3);
+	if (!group) return;
+	expect(await group.readString()).toBe("object 0");
+	expect(group.frameCount).toBe(2);
+
+	track.close();
+});
+
+/**
+ * A clear FIRST_OBJECT whose first ID is not 0 still has a hole at the front, so the
+ * stream is dropped and the track resumes at the next group.
+ */
+test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	const flags = groupFlags(false);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags }),
+		new Reader(undefined, encodeObjects([3]), VERSION),
+	);
+
+	const whole = groupFlags(true);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([0]), VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	expect(group?.sequence).toBe(4);
+
+	track.close();
+});
+
+/**
+ * Drafts 14-17 have no FIRST_OBJECT bit, so a subgroup that starts at the live edge
+ * arrives with `firstObject` forced on and a non-zero first delta. That stream is the
+ * in-progress group: drop it, keep the subscription, and deliver the next group, which
+ * starts at object 0. A gap after an object was delivered still fails that group.
+ */
+test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", async () => {
+	const version = Version.DRAFT_16;
+	const { subscriber, track } = await subscribeTrack({ version });
+
+	// The header cannot say otherwise on this draft: decode reports firstObject.
+	const partial = new GroupMessage({
+		trackAlias: ALIAS,
+		groupId: 3,
+		subGroupId: 0,
+		publisherPriority: 0,
+		flags: groupFlags(true),
+	});
+	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
+	expect(track.latest()).toBeUndefined();
+	expect(track.closed.peek()).toBeUndefined();
+
+	const whole = groupFlags(true);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([0, 0]), version),
+	);
+
+	const ordered = track.ordered();
+	const group = await ordered.nextGroup();
+	expect(group?.sequence).toBe(4);
+	expect(await group?.readString()).toBe("object 0");
+
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 5, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([0, 5]), version),
+	);
+	const gapped = await ordered.nextGroup();
+	expect(gapped?.sequence).toBe(5);
+	expect(await gapped?.readString()).toBe("object 0");
+	await expect(gapped?.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
+	expect(track.closed.peek()).toBeUndefined();
+
+	ordered.close();
+	track.close();
+});
+
+/**
  * FIRST_OBJECT is the publisher's claim, and the object ids are what actually happened. A
  * peer that sets the bit and then starts at object 5 is contradicting itself, so the group
  * is aborted rather than delivered with a hole the header said was not there.
@@ -1390,4 +1622,62 @@ test("object extension limit accepts 64 KiB and stops one byte over before readi
 			track.close();
 		}
 	}
+});
+
+/**
+ * An OBJECT_DATAGRAM at object 0 is a datagram at its Group ID; anything the model cannot
+ * carry is dropped like a lost datagram, and a malformed one ends the session.
+ */
+test("an object datagram is a datagram group", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), quic: pair.server });
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, VERSION);
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({
+		requestId: request.requestId,
+		trackAlias: ALIAS,
+		properties: { timescale: Timescale.MILLI },
+	}).encode(peer.writer, VERSION);
+	await track.info();
+
+	const receiving = subscriber.runDatagrams();
+	const writer = pair.client.datagrams.writable.getWriter();
+	const send = (fields: Partial<ConstructorParameters<typeof ObjectDatagram>[0]>) =>
+		writer.write(
+			new ObjectDatagram({
+				trackAlias: ALIAS,
+				groupId: 4,
+				endOfGroup: true,
+				body: { payload: new TextEncoder().encode("no") },
+				...fields,
+			}).encode(VERSION),
+		);
+
+	// Past object 0, an unbound alias, a status other than Normal, and no Timestamp on a timed track.
+	await send({ objectId: 1 });
+	await send({ trackAlias: ALIAS + 1n });
+	await send({ endOfGroup: false, body: { status: 3 } });
+	await send({ groupId: 5, objectId: 0 });
+	const properties = await encodeObjectExtensions(Timestamp.fromMillis(1234), Timescale.MILLI, VERSION);
+	await send({ groupId: 9, objectId: 0, publisherPriority: 7, properties, body: { payload: Uint8Array.of(1) } });
+
+	const datagram = await track.recvDatagram();
+	expect(datagram?.sequence).toBe(9);
+	expect(datagram?.payload).toEqual(Uint8Array.of(1));
+	expect(datagram?.timestamp?.as(Timescale.MILLI)).toBe(1234);
+
+	// A status cannot end the group.
+	await writer.write(Uint8Array.of(0x22, Number(ALIAS), 4, 0, 0));
+	expect(
+		await receiving.then(
+			() => undefined,
+			(err: unknown) => err,
+		),
+	).toBeInstanceOf(ProtocolViolation);
+	track.close();
 });

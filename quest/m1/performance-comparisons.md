@@ -8,7 +8,7 @@ estimate and preserved evidence, so a small reported speedup can be evaluated.
 ## Plan
 
 `bench/run.sh --runtime` already repeats rounds (`MOQ_BENCH_RUNTIME_ROUNDS`,
-default 3) and reports the median (`bench/run.sh:15`, `:322`), but the
+default 3) and reports the median (`aggregate_runtime` in `bench/run.sh`), but the
 `just bench BASE` comparison still runs each relay workload once as base then
 current, without alternating execution order. `cleanup` deletes the run
 directory, including Criterion estimates, load/host JSONL, relay logs, and
@@ -41,5 +41,5 @@ rather than creating another benchmark runner.
 
 ## Related
 
-- [Windowed latency](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - owns histogram/window semantics
-- [Relay profiling](/quest/m1/performance-profiles.md) - shares workload and artifact conventions
+- [Mergeable bench buckets](/quest/m1/bench-buckets.md) - owns histogram/window semantics
+- [Relay profiling](/quest/m1/perf/lock-profile.md) - shares workload and artifact conventions

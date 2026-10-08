@@ -28,12 +28,17 @@ The route layer of [Cluster routing](/quest/m1/cluster-routing/README.md)
 (ROUTE_START/UPDATE/END, path-less ANNOUNCE, the hop list dropped) lands in
 lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
-(moq.pro#2210) has to plan for a lite-07 without hop lists.
+(under Related) has to plan for a lite-07 without hop lists. Only
+[Routes and announces](/quest/m1/cluster-routing/routes.md) gates the cut,
+not the rest of the cluster-routing line (decided 2026-10-08).
+
+Decided 2026-10-08: Restart and AUTH join Required, since both change the
+lite-07 wire. SUBSCRIBE_OK carrying live media time was dropped: no reader
+was named, and `set_live` covers it.
 
 The cut:
 
-- Every quest under Required has landed, including the cache bug that only
-  bites once lite-07 ships.
+- Every quest under Required has landed.
 - The identifier becomes `moq-lite-07` in `rs/moq-net` and `js/net`, in the
   draft (whose text already names the rename), and at every site spelling
   the wip ALPN: `rs/moq-tokio/src/connect.rs` and `listen.rs`,
@@ -67,13 +72,14 @@ is published; older versions are unchanged.
 
 ## Required
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - lite-07 loses NO_CAPACITY and stamping
+- [lite-07 Live flag](/quest/m1/lite-live.md) - SUBSCRIBE carries `Live` apart from its floor
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - lite-07 carries the `Restart` announce
+- [AUTH on the wip lite version](/quest/m1/auth/wip-version.md) - lite-07 carries the Auth Stream and UNAUTHORIZED
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
-- [Live media time](/quest/m1/subscribe-live-time.md) - SUBSCRIBE_OK carries the publisher's live media time
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
-- [One route cost](/quest/m1/route-cost.md) - ANNOUNCE carries one cost
+- [Claim-served epochs](/quest/m1/claim-epochs.md) - TRACK_INFO carries the epoch of the instance that answered
 
 ## Related
 

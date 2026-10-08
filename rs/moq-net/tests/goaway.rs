@@ -310,20 +310,16 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 	.expect("test timed out (likely a mock deadlock)");
 }
 
-/// After a received GOAWAY, new subscriptions are rejected with `GoingAway`
-/// while an existing subscription keeps delivering groups.
-#[moq_net_sim::test]
-async fn goaway_gates_new_subscribes_moq_lite_04() {
+/// After a received GOAWAY, a new subscription still opens on the draining
+/// session, which is the only route, while an existing one keeps delivering.
+async fn goaway_keeps_new_subscribes(version: Version) {
 	moq_net_sim::timeout(TEST_TIMEOUT, async {
-		let version: Version = "moq-lite-04".parse().unwrap();
-
 		// Server publishes a broadcast with one live track.
 		let pub_origin = produce_origin(Hop::random());
 		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
 		let track = broadcast.create_track("video", None).expect("create track");
-		// A second track with content ready, so the gated subscribe below would
-		// deliver immediately if it reached the wire.
+		// A second track with content ready for the subscribe opened after the GOAWAY.
 		let audio = broadcast.create_track("audio", None).expect("create track");
 		let mut audio_group = audio.append_group().expect("append group");
 		audio_group
@@ -342,7 +338,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		// Subscribe BEFORE the GOAWAY and receive a first group.
 		let sub = sub_origin.consume();
 		sub.routed("test").await.expect("route announced");
-		let bc = sub.request_broadcast("test").await.expect("broadcast resolves");
+		let bc = sub.request_broadcast("test", None).await.expect("broadcast resolves");
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut group = track.append_group().expect("append group");
@@ -367,22 +363,21 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		client.draining().recv().await.expect("goaway");
 		assert!(client.draining().peek().is_some());
 
-		// A NEW subscription must not reach the wire: the upstream open is gated
-		// with GoingAway. The rejection can surface three ways: at subscribe (a
-		// gated request), through the track (lite-04 has no TRACK_INFO, so the
-		// request is accepted and the copy aborts at the gated SUBSCRIBE open,
-		// which the origin treats as a refusal and aborts the logical track), or
-		// as a stall (nothing within a generous bound). Any OTHER error, and any
-		// delivered group, fails the test.
-		match bc.track("audio").unwrap().subscribe(None).await {
-			Err(moq_net::Error::GoingAway) => {}
-			Err(other) => panic!("unexpected error gating a post-GOAWAY subscribe: {other}"),
-			Ok(mut gated) => match moq_net_sim::timeout(Duration::from_millis(500), gated.recv_group()).await {
-				Err(_) | Ok(Err(moq_net::Error::GoingAway)) => {}
-				Ok(Err(other)) => panic!("unexpected error gating a post-GOAWAY subscribe: {other}"),
-				Ok(Ok(_)) => panic!("new subscribe after GOAWAY must not deliver"),
-			},
-		}
+		// A NEW subscription opens on the draining session rather than failing:
+		// with no replacement route yet, it is still the best path.
+		let mut late = bc
+			.track("audio")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe after GOAWAY");
+		let mut group_sub = late
+			.recv_group()
+			.await
+			.expect("recv_group")
+			.expect("track closed prematurely");
+		let frame = group_sub.read_frame().await.expect("read frame").expect("frame");
+		assert_eq!(&frame.payload[..], b"audio");
 
 		// The EXISTING subscription keeps flowing.
 		let mut group = track.append_group().expect("append group");
@@ -405,6 +400,21 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 	})
 	.await
 	.expect("test timed out (likely a mock deadlock)");
+}
+
+#[moq_net_sim::test]
+async fn goaway_keeps_new_subscribes_moq_lite_04() {
+	goaway_keeps_new_subscribes("moq-lite-04".parse().unwrap()).await;
+}
+
+#[moq_net_sim::test]
+async fn goaway_keeps_new_subscribes_moq_lite_05() {
+	goaway_keeps_new_subscribes("moq-lite-05".parse().unwrap()).await;
+}
+
+#[moq_net_sim::test]
+async fn goaway_keeps_new_subscribes_moq_transport_19() {
+	goaway_keeps_new_subscribes("moq-transport-19".parse().unwrap()).await;
 }
 
 /// A GOAWAY costs the peer's routes at [`Cost::DRAIN`] so the origin stops

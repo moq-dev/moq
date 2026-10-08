@@ -1,3 +1,4 @@
+import { ProtocolViolation } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Cluster from "./cluster.ts";
@@ -68,36 +69,54 @@ export class SubscribeNamespace {
 		}
 		const requestId = await r.u62();
 		const namespace = await Namespace.decode(r);
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "subscribe-namespace");
 
 		return new SubscribeNamespace({ namespace, requestId, hidden: params.hidden });
 	}
 }
 
+/**
+ * What a draft-16/17 SUBSCRIBE_NAMESPACE asks for (d16 §9.25, d17 §9.20).
+ *
+ * Draft-14/15 have no field and only ever ask for namespaces. Draft-18 dropped it
+ * when SUBSCRIBE_TRACKS took over the PUBLISH half.
+ */
+export const SubscribeOptions = {
+	/** PUBLISH for each matching track. */
+	PUBLISH: 0x00,
+	/** NAMESPACE for each matching namespace. */
+	NAMESPACE: 0x01,
+	/** Both PUBLISH and NAMESPACE. */
+	BOTH: 0x02,
+} as const;
+
+/** One of the {@link SubscribeOptions} values. */
+export type SubscribeOptions = (typeof SubscribeOptions)[keyof typeof SubscribeOptions];
+
 // SUBSCRIBE_NAMESPACE message for draft-14 through draft-17 (type 0x11).
 //
 // In v16 this moves from the control stream to its own bidi stream. Draft-16/17
-// carry a Subscribe Options field (NAMESPACE vs TRACKS); draft-17 additionally
-// prefixes a Required Request ID delta (removed in draft-18 per #1615).
-// Draft-18+ uses SubscribeNamespace.
+// carry SubscribeOptions; draft-17 additionally prefixes a Required Request ID
+// delta (removed in draft-18 per #1615). Draft-18+ uses SubscribeNamespace.
 export class SubscribeNamespaceLegacy {
 	static id = 0x11;
 
 	namespace: Path.Valid;
 	requestId: bigint;
-	subscribeOptions: number; // v16/v17: default 0x01 (NAMESPACE only)
+	/** Encoded on v16/v17 only; earlier drafts always mean NAMESPACE. */
+	subscribeOptions: SubscribeOptions;
 	/** MoQ Hidden: see {@link SubscribeNamespace.hidden}. */
 	hidden: boolean;
 
 	constructor({
 		namespace,
 		requestId,
-		subscribeOptions = 1,
+		subscribeOptions = SubscribeOptions.NAMESPACE,
 		hidden = false,
 	}: {
 		namespace: Path.Valid;
 		requestId: bigint;
-		subscribeOptions?: number;
+		subscribeOptions?: SubscribeOptions;
 		hidden?: boolean;
 	}) {
 		this.namespace = namespace;
@@ -140,11 +159,14 @@ export class SubscribeNamespaceLegacy {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
 		const namespace = await Namespace.decode(r);
-		let subscribeOptions = 1;
+		let subscribeOptions: SubscribeOptions = SubscribeOptions.NAMESPACE;
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
-			subscribeOptions = await r.u53();
+			// Full width, so a value past 2^53 is still a protocol violation.
+			const raw = await r.u62();
+			if (raw > BigInt(SubscribeOptions.BOTH)) throw new ProtocolViolation(`invalid Subscribe Options: ${raw}`);
+			subscribeOptions = Number(raw) as SubscribeOptions;
 		}
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "subscribe-namespace");
 
 		return new SubscribeNamespaceLegacy({ namespace, requestId, subscribeOptions, hidden: params.hidden });
 	}
@@ -296,7 +318,7 @@ export class SubscribeNamespaceEntry {
 		const suffix = await Namespace.decode(r);
 		if (!negotiated) return new SubscribeNamespaceEntry({ suffix });
 
-		return new SubscribeNamespaceEntry({ suffix, cluster: await Cluster.decodeParams(r, version) });
+		return new SubscribeNamespaceEntry({ suffix, cluster: await Cluster.decodeParams(r, version, "namespace") });
 	}
 }
 

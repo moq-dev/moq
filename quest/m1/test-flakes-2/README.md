@@ -24,13 +24,16 @@ Rules every child keeps:
   clock, make the timers mockable or move the test off real sockets.
 
 This README's own work, after the children: run `just check --all` several
-times on a loaded machine, as the first round did.
+times on a loaded machine, as the first round did. moq-tokio's
+`a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
+known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Subscription cut by disconnect](/quest/m1/test-flakes-2/subscription-cut.md) - a publisher disconnect never ends a subscription clean
-- [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - `just test media` late join stays within one GOP, or the regression is fixed
+- [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - a late joiner shows video promptly and catches up to live, and the check asserts that under load
 - [Import catalog finish](/quest/m1/test-flakes-2/import-catalog-finish.md) - `moq-cli`'s subprocess EOF catalog-finish test holds up under load with event-based fixture coordination
 - [Relay restart rebind](/quest/m1/test-flakes-2/relay-restart-rebind.md) - the crash drill restarts on its original UDP address under concurrent load
+- [Impaired handshake](/quest/m1/test-flakes-2/impaired-handshake.md) - the impaired cluster drills' clients never time out while connecting
+- [Media audio tone](/quest/m1/media-audio-tone.md) - the `just test media` audio-tone check passes under load, fixed at its cause

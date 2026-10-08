@@ -76,7 +76,7 @@ for (const touched of ["covering", "single"] as const) {
 					announce(session.streams[0], path, cost, "update");
 				}
 				await flush();
-				if (table.peek().get(path)?.cost.warm !== cost) throw new Error("re-price did not land");
+				if (table.peek().get(path)?.cost !== cost) throw new Error("re-price did not land");
 				checksum += table.peek().size;
 			}
 			const elapsed = performance.now() - start;

@@ -71,6 +71,7 @@ const frames: { timestamp: bigint; payload: Uint8Array }[] = [];
 for (;;) {
 	const frame = await g.decodeMaybe(decode);
 	if (!frame) break;
+	if (!frame.timestamp) throw new Error("a lite-05+ frame decoded without its timestamp");
 	frames.push({ timestamp: BigInt(frame.timestamp.value), payload: frame.payload });
 }
 const zigzag = (d: bigint) => (d << 1n) ^ (d >> 63n);

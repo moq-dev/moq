@@ -14,20 +14,22 @@ Swift, Kotlin, Go, Dart). Not libmoq, which the
 Decided (2026-10-01), reversing the 2026-09-30 "timestamp required" plan: the
 timestamp is optional end to end, on the wire and in every API, and absent
 means untimed. A library never substitutes now, wall clock, or arrival time.
-How absence travels through the model and over the wire is
-[moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) and
+How absence travels through the model and over the wire is the untimed model
+([#4822](https://github.com/moq-dev/moq/pull/4822)) and
 [lite-07 encodes an absent timestamp](/quest/m1/lite-untimed.md); this quest
 removes every place that fills one in.
 
 Today `Timed.at: None` means "stamp when written": moq-json and moq-flate
 fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and moq-mux's
 data producers fill the broadcast clock's `now()`. The FFI raw
-`MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` default to 0.
+`MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` are optional, but a
+raw track published through moq-ffi is always timed, and the Python and
+Swift wrappers default them to 0.
 
 - `moq_net::Timed` drops its unused clock parameter `T` (decided 2026-10-06:
   here rather than in #4822, which is already large). That's a breaking
   change and gets an upgrade note. Timedness is per track
-  ([untimed model](/quest/m1/untimed-model.md), decided 2026-10-05), so an
+  (the untimed model, [#4822](https://github.com/moq-dev/moq/pull/4822), decided 2026-10-05), so an
   untimed payload belongs on an untimed track, and one appended to a timed
   track is refused. The json/flate consumers return the same type
   (see [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md)).
@@ -41,10 +43,14 @@ data producers fill the broadcast clock's `now()`. The FFI raw
   chat, examples) pass their clock's now explicitly.
 - moq-ffi: data producers take an optional timestamp in microseconds on the
   broadcast clock, unchecked, as Rust does. moq-ffi exposes the broadcast
-  clock's `now()` so callers have a value to stamp with. The raw frame and
-  datagram records' `timestamp_us` is already optional after
-  [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md); publishing one without it
-  goes out untimed instead of at `default = 0`.
+  clock's `now()` so callers have a value to stamp with.
+  Decided 2026-10-08, replacing the 2026-10-07 rule that a raw track
+  published through moq-ffi is always timed: `MoqTrackInfo`'s null
+  `timescale` means untimed when publishing, as it already does on a
+  received track. A received info then round-trips, and an untimed raw track
+  needs no API of its own. A timed raw track names its timescale, and a
+  write that doesn't match the track's timedness is refused. The wrappers'
+  `= 0` defaults go with it.
 - Go (`go/wrapper/moq`) and Python (`py/moq-rs`) wrap only the JSON
   producers; [#4137](https://github.com/moq-dev/moq/pull/4137) added
   `publish_binary_snapshot` / `publish_binary_stream` (now
@@ -59,7 +65,7 @@ with the untimed implementation quests.
 
 ## Required
 
-- [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the model must hold an untimed payload before producers stop filling in now; until lite-07 encodes absence, a lite encoder writes its send time, as producers effectively do today
+- [An undeclared Rust timescale means untimed](/quest/m1/rust-untimed-default.md) - each track declares its timescale first, so a publisher that stops stamping writes onto a track that already says whether it is timed
 
 ## Related
 

@@ -15,8 +15,8 @@ public typealias MediaFrame = MoqFFI.MoqMediaFrame
 /// The JSON manifest describing a broadcast's tracks: video and audio
 /// renditions, display geometry, and untyped application sections.
 public typealias Catalog = MoqFFI.MoqCatalog
-/// A video rendition in the catalog: codec, dimensions, bitrate, temporary
-/// avoidance recommendation, framerate, and container.
+/// A video rendition in the catalog: codec, dimensions, bitrate, whether it is
+/// enabled, framerate, and container.
 public typealias Video = MoqFFI.MoqVideo
 /// Caller-provided catalog fields for a video track.
 public typealias VideoHint = MoqFFI.MoqVideoHint
@@ -30,7 +30,7 @@ public typealias ContainerFormat = MoqFFI.MoqContainerFormat
 /// that property from the next catalog snapshot.
 public typealias VideoProperties = MoqFFI.MoqVideoProperties
 /// An audio rendition in the catalog: codec, sample rate, channel count,
-/// bitrate, and container.
+/// bitrate, whether it is enabled, and container.
 public typealias Audio = MoqFFI.MoqAudio
 /// One raw-audio frame: PCM samples in the configured layout plus a
 /// presentation timestamp.
@@ -76,8 +76,7 @@ public typealias Container = MoqFFI.MoqContainer
 /// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
 public typealias Datagram = MoqFFI.MoqDatagram
 /// A path-prefix route: the prefix it covers, relay hop ids (oldest first),
-/// and the advertised costs: warm `cost`, lower wins, plus undiscounted `cold`
-/// (`nil` means the same as `cost`).
+/// and its static production and link cost, lower wins.
 public typealias Route = MoqFFI.MoqRoute
 /// A route over a prefix: the origin-relative `prefix`, what each filter
 /// wildcard matched (`captures`, `nil` for a partial overlap), and the `route`

@@ -15,7 +15,7 @@
  * only, where SETUP is a Key-Value-Pair block.
  *
  * A broadcast we produce carries a single-entry HOP_PATH and a cost of 0, and a route we
- * forward carries its own hop chain and warm cost with our id appended. What we get out of
+ * forward carries its own hop chain and static cost with our id appended. What we get out of
  * declaring is also the other direction. A relay that knows our Hop ID withholds the advertisements that already flowed
  * through us, so publishing a broadcast no longer announces it back to us, which is what
  * moq-lite has always done with its own hop chain.
@@ -204,7 +204,8 @@ function encodeHops(hops: Hop[]): Uint8Array {
 }
 
 /**
- * Read the parameters a negotiated session puts on every advertisement.
+ * Read the parameters a negotiated session puts on every advertisement, checked against
+ * the list of the message that carries them (PUBLISH_NAMESPACE also allows a token).
  *
  * The parameter block is mandatory there, so a message that ends before it (the base form)
  * or one whose block does not parse is the peer's violation, same as a block that parses but
@@ -212,10 +213,14 @@ function encodeHops(hops: Hop[]): Uint8Array {
  *
  * @internal
  */
-export async function decodeParams(r: Reader, version: IetfVersion): Promise<Advert> {
+export async function decodeParams(
+	r: Reader,
+	version: IetfVersion,
+	message: "namespace" | "publish-namespace",
+): Promise<Advert> {
 	let params: Parameters;
 	try {
-		params = await Parameters.decode(r, version);
+		params = await Parameters.decode(r, version, message);
 	} catch (err) {
 		throw new ProtocolViolation(reason(err), { cause: err });
 	}

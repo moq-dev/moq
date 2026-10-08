@@ -3,8 +3,9 @@
 ## Goal
 
 A `js/net` track subscription survives its broadcast's route swapping to
-another provider, such as a relay migration after a GOAWAY, and resumes from
-the new provider at the first frame it has not delivered. A viewer at the live
+another provider with the same epoch, such as a relay migration after a
+GOAWAY, and resumes from the new provider at the first frame it has not
+delivered. A viewer at the live
 edge with no latency budget never loses a group across the swap, and never
 has to notice the swap to keep reading.
 
@@ -38,6 +39,12 @@ settle along the way:
   at its own live edge.
 - Failover compatibility: Rust refuses to resume onto a source whose track
   properties differ (timescale, retention, priority, order). Match it.
+- Resume only between routes with the same epoch. Any other swap is a new
+  broadcast that announce consumers see as a `Restart`, and players follow
+  it with a fresh subscription. A route without an epoch never resumes, as
+  in Rust, so `drain.ts`'s publisher mints an epoch, and the
+  [transport upgrade](/quest/m1/transport-upgrade/js.md) test publishes
+  under one too.
 - `js/watch` and `js/hang` consumers that re-subscribe on `active` changes.
   Check whether they still need to.
 - Giving up a resumed group no route continues. Mirror Rust's rule from
@@ -49,5 +56,13 @@ Add unit coverage at the origin level against stand-in sessions, then flip
 `test/drain` to zero budget (drop the resubscribe loop in `drain.ts` and the
 budget note in its README).
 
+Decided 2026-10-08: Restart and One max_age meaning land first, so this
+mirrors their final shape instead of chasing it.
+
 Public API: likely a behavior change to `Origin.Requesting.active` and track
 subscriptions across a swap. Report it in the PR.
+
+## Required
+
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - the announce event a swap to another epoch produces instead of a handover
+- [One max_age meaning](/quest/m1/cache-max-age.md) - the rule that gives up a resumed group no route continues

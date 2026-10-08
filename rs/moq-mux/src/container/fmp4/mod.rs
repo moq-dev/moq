@@ -458,7 +458,7 @@ fn encode(group: &mut moq_net::group::Producer, frames: &[Frame], info: Fragment
 	// fragment's earliest presentation time so a relay can order it.
 	let mut writer = group.create_frame(moq_net::frame::Info {
 		size: bytes.len() as u64,
-		timestamp: frames[0].timestamp,
+		timestamp: Some(frames[0].timestamp),
 	})?;
 	writer.write(bytes)?;
 	writer.finish()?;

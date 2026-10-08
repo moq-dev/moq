@@ -1,44 +1,36 @@
-# [M] Audio publishers can pack several frames per group
+# [S] Audio groups span at least 20 ms by default
 
 ## Goal
 
-`@moq/publish` and `moq-audio` take a minimum audio group duration, so a
-relay pays one stream and one group's bookkeeping per N frames instead of per
-20 ms frame. The default stays 0, today's one frame per group.
+An audio publisher that never sets a group duration emits at most about 50
+groups per second, whatever its codec frame size. Today every producer
+defaults `group_duration` to zero, a group per packet, so the go interop
+client's 2.5 ms Opus frames mint about 400 groups/s, each a QUIC stream and a
+serve.
 
 ## Plan
 
-`js/publish/src/audio/encoder.ts` writes each frame as its own group, and
-`rs/moq-audio/src/encode/producer.rs` cuts after every packet. The reporter
-measured relay CPU and memory scaling with audio groups (about 50 per second
-per track per subscriber).
+Decided 2026-10-08 in a `/quest-plan` interview (paper trail in the PR that
+added this quest):
 
-Decided (2026-10-04):
+- `moq_audio::encode::Options::group_duration` defaults to 20 ms
+  (`rs/moq-audio/src/encode/producer.rs`, documented today as "Defaults to
+  zero, a group per packet"). 20 ms frames behave as today; smaller frames
+  share a group up to 20 ms, so the 10 ms low-latency Opus preset now pairs
+  packets.
+- Every producer follows it: moq-ffi `encode_audio`, moq-c, moq-boy, and the
+  CLI through `Options::default()`; JS publish's `groupDuration`
+  (`js/publish/src/audio/encoder.ts`); and the GStreamer sink, which today
+  cuts after every audio packet (`rs/moq-gst/src/sink/pad.rs`). Rejected:
+  only the FFI sets it, and keeping zero.
+- Docs: `doc/lib/rs/moq-audio.md` and the JS publish docs drop "a group per
+  packet" as the default.
+- Test: a 2.5 ms Opus encode yields groups of at least 20 ms in Rust and JS,
+  and the gst sink's grouping test.
 
-- `groupDuration?: Time.Milli` on Audio.Encoder props and `group_duration` on
-  moq-audio's encode `Options`, for Opus, AAC, and PCM alike. The frame that
-  reaches the minimum closes its group; the next frame opens a new one.
-- Minimum only. A maximum adds nothing until there is an opportunistic cut
-  point (silence, a video group start).
-- Default 0. A caller raises it, for example when its viewers already buffer
-  for jitter. A longer Opus `frameDuration` (60 ms) is the no-code
-  alternative; document both.
-- JS builds on the shared `Container.Legacy.Producer` that
-  `js/publish/src/audio/encoder.ts` already writes through.
-- Measure relay cost and loss concealment at 0, 100, and 200 ms with the
-  existing relay bench, and record the numbers here. Longer groups also make
-  a viewer's group skipping coarser; note it in the docs.
-
-Follow-up decision after the measurement: whether the minimum should be
-derived from a viewer latency or jitter hint instead of set by hand. Grouping
-adds no delay normally, since frames forward within a group, and costs
-head-of-line blocking only on loss, which a buffer an RTT deep absorbs.
-
-## Closes
-
-- [#4784](https://github.com/moq-dev/moq/issues/4784) - close this issue when the quest finishes
+Public API: a changed default in moq-audio and `@moq/publish`. Wire: none.
 
 ## Related
 
-- [Group cost](/quest/m1/perf/group-cost.md) - makes each group cheaper at the relay
-- [Watch jitter target](/quest/m0/audio-jitter-target/watch.md) - lists a group per audio frame as a suspect
+- [Serve budget](/quest/m0/serve-budget.md) - bounds the serve loop whatever the group rate
+- [FFI codec namespaces](/quest/m1/ffi-shape/codec.md) - owns the FFI encoder's frame duration default, a separate knob

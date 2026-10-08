@@ -32,10 +32,19 @@ Decided 2026-10-07, re-planning the external
   `js/net/src/stream.ts`) stays the default for `Stream.open` and
   `Writer.open`, which SETUP, probe, and group streams inherit. Request sites
   opt out of it, and their setup timer (`SUBSCRIBE_SETUP_TIMEOUT_MS` in lite,
-  `SUBSCRIBE_OK_TIMEOUT_MS` in IETF, PUBLISH_NAMESPACE's own) covers the
+  `SUBSCRIBE_OK_TIMEOUT_MS` in IETF, and PUBLISH_NAMESPACE's
+  `ADVERTISE_TIMEOUT_MS`, which moves from 5 s to the shared 10 s) covers the
   create as well as the answer.
-- PUBLISH_NAMESPACE is in scope with no retry: drop the IETF publisher's loop
-  that re-offers a failed advertisement.
+- PUBLISH_NAMESPACE is in scope with no retry: both loops that advertise
+  through `#advertise` (`runPublishNamespaces` and the draft-14/15 solicited
+  `#runSubscribeNamespace`, `js/net/src/ietf/publisher.ts`) stop re-offering
+  after either failure above. Both failures return `"dropped"` today, the
+  answer that keeps the backoff running, so they need their own terminal
+  answer. The namespace then stays unadvertised through that peer until it is
+  republished or the session reconnects. Each loop still re-offers when the
+  peer's REQUEST_ERROR names a retry interval, and keeps its backoff for a
+  draft-14/15 refusal, which can't carry one (decided 2026-10-07 from review:
+  the peer asked for those). Test both loops.
 - The credit error is local, with no wire code. Propose its name in the PR;
   it is a new public `@moq/net` error.
 - `@moq/watch` keeps ending a track on either failure. Rejected: #4999's
@@ -62,4 +71,3 @@ Public API: one new error. Wire: none.
 
 - [Rust request credit](/quest/m1/rs-request-credit.md) - the same rule in moq-net
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - the WebSocket fallback stops queueing over-limit creates
-- [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - adds a check at every open site this touches

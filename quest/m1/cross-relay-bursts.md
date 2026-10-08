@@ -30,8 +30,16 @@ used and against `main`:
   `rs/moq-relay/tests/drills.rs::bursts_cross_a_cluster` (bursts of 30
   across two clustered relays, every hop with 5% loss, delay, a 100 kbit/s
   bottleneck that each burst overflows, and 16-stream QUIC credit): every
-  group arrives within about 3.5 s, and the occasional live `Old` reset is recovered by FETCH. Several
+  group arrives within about 3.5 s, and the occasional live `Old` reset is
+  usually recovered by FETCH. Not always: on `main` at `fe0113ff2`, 1 of 40
+  runs lost group 89 to a live `Old` reset whose FETCH was also refused `old`
+  (seed 11025055814286623932). Several
   30 s timers of that era have since been removed or shortened (#4606, #4741).
+  That drill uses a lite peer link; over a `moq-transport-19` peer link, a
+  related refusal reproduces every run: FETCHes answered `old` for groups the
+  origin still holds. Both, the lite seed included, belong to
+  [Cross-relay FETCH serves held groups](/quest/m1/ietf-peer-fetch-old.md),
+  widened to any peer link (decided 2026-10-08).
 - **Queueing.** FETCHes beyond a session's stream credit wait for it, one
   cross-relay round trip per slot, so with tight credit a gap's FETCH can
   outlast a 2 s deadline without being lost.
@@ -45,3 +53,4 @@ used and against `main`:
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - owns the stale and flapping announcements from the same report
+- [Cross-relay FETCH serves held groups](/quest/m1/ietf-peer-fetch-old.md) - owns the FETCH refused `old` over either peer link, with this quest's lite seed

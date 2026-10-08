@@ -28,6 +28,10 @@ Decided 2026-10-06:
 
 Where:
 
+- Rust: `rs/moq-net/src/ietf/version.rs`'s
+  `draft21_and_draft22_match_draft20_on_the_wire` pins draft-22 to draft-20's
+  bytes and calls draft-22 editorial; narrow it to draft-21 (or exclude
+  LOCATION_FILTER) and fix the comment.
 - Rust: `rs/moq-net/src/ietf/filter.rs`, `Param for Filter` and the
   FILL_PARAMETERS scope in `Param for Fill`. Every 0x21 use goes through
   `Param for Filter`.
@@ -49,8 +53,12 @@ that Draft22 must leave, and `subscribe.rs`; JS `ietf.test.ts`,
 `filter.test.ts`).
 `test/interop` cannot catch this, since every client shares the codec.
 
+#5028 (merged) reworked the same 0x21 handling in `parameters.ts`,
+`fetch.rs`, and `subscribe.rs`; build on its per-draft decode.
+
 Public API: none. Wire: moqt-22 LOCATION_FILTER changes to the draft's form.
 
 ## Closes
 
 - [#4847](https://github.com/moq-dev/moq/issues/4847) - draft-22 LOCATION_FILTER should drop the Length and carry the Location Filter Type
+

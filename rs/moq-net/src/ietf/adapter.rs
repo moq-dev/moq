@@ -12,7 +12,7 @@ use crate::{
 	ietf::{self, RequestId},
 };
 
-use super::{Control, Message, Version};
+use super::{Control, Message, Version, control::RequestPermit};
 
 // === Message Queues ===
 
@@ -120,6 +120,9 @@ pub struct VirtualRecvStream {
 	/// The request this stream serves, known up front when the peer opened it and
 	/// filled in by the first write when we did.
 	request_id: Arc<Mutex<Option<RequestId>>>,
+	/// Holds the peer's request open against our MAX_REQUEST_ID window until the
+	/// handler drops this stream. Only on a stream the peer opened.
+	_permit: Option<RequestPermit>,
 }
 
 impl VirtualRecvStream {
@@ -131,6 +134,7 @@ impl VirtualRecvStream {
 			park: kio::Park::default(),
 			shared: Arc::downgrade(&shared),
 			request_id,
+			_permit: None,
 		}
 	}
 
@@ -664,14 +668,20 @@ impl Shared {
 	}
 
 	/// Register the peer's new request and queue its stream for accept_bi.
-	fn open_incoming(self: &Arc<Self>, request_id: RequestId, raw: Bytes) -> Result<(), Error> {
+	fn open_incoming(
+		self: &Arc<Self>,
+		request_id: RequestId,
+		raw: Bytes,
+		permit: Option<RequestPermit>,
+	) -> Result<(), Error> {
 		let follow = Queue::new();
-		let recv = VirtualRecvStream::new(
+		let mut recv = VirtualRecvStream::new(
 			raw,
 			follow.clone(),
 			Arc::clone(self),
 			Arc::new(Mutex::new(Some(request_id))),
 		);
+		recv._permit = permit;
 		let send = VirtualSendStream::new(self.control.clone());
 		self.streams.lock().unwrap().insert(request_id, follow.writer());
 		if !self.incoming.push((send, recv)) {
@@ -749,6 +759,10 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 				if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
 					return Poll::Ready(res);
 				}
+				// Queued before the write drains, so a grant goes out in the same turn.
+				while let Poll::Ready(max) = self.control.poll_grant(waiter) {
+					self.send_max_request_id(max);
+				}
 				if let Poll::Ready(res) = waiter.poll_future(write.as_mut()) {
 					return Poll::Ready(res);
 				}
@@ -796,6 +810,22 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		}
 	}
 
+	/// Queue a MAX_REQUEST_ID granting the peer room up to `max`.
+	fn send_max_request_id(&self, max: RequestId) {
+		let mut raw = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut raw, self.version.into());
+		let msg = ietf::MaxRequestId { request_id: max };
+		if let Err(err) = w
+			.varint(ietf::MaxRequestId::ID)
+			.and_then(|()| crate::coding::Encode::encode(&msg, &mut w, self.version))
+		{
+			tracing::warn!(%err, "failed to encode MAX_REQUEST_ID");
+			return;
+		}
+		// A closed control stream means the session is ending; there is no one to grant.
+		let _ = self.shared.control.push(raw.into());
+	}
+
 	/// Writer task: drains the queue and writes to the control stream.
 	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
 		while let Some(msg) = self.shared.control.pop().await {
@@ -824,8 +854,17 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 
 			// Classify and route
 			match classify(type_id, &body, self.version, &self.shared.namespaces)? {
-				Route::NewRequest(request_id) => self.shared.open_incoming(request_id, raw)?,
-				Route::Response(request_id) | Route::FollowUp(request_id) => self.shared.push(request_id, raw),
+				Route::NewRequest(request_id) => {
+					let permit = self.control.accept(request_id)?;
+					self.shared.open_incoming(request_id, raw, permit)?
+				}
+				Route::Response(request_id) => self.shared.push(request_id, raw),
+				Route::FollowUp { own, target } => {
+					// SUBSCRIBE_UPDATE takes a request ID of its own (draft-14 section 9.1),
+					// done as soon as it is delivered, so it is granted straight back.
+					drop(self.control.accept(own)?);
+					self.shared.push(target, raw)
+				}
 				Route::CloseStream(request_id) => self.shared.close(request_id, raw),
 				Route::MaxRequestId(max) => self.control.max_request_id(max),
 				Route::Ignore => {}
@@ -922,6 +961,14 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 			}
 			_ => Err(Error::UnexpectedMessage),
 		},
+		// TRACK_STATUS_OK and TRACK_STATUS_ERROR (v14 only): the one answer the request gets.
+		ietf::TrackStatusOk::ID_14 | ietf::TRACK_STATUS_ERROR_14 => match version {
+			Version::Draft14 => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::CloseStream(id))
+			}
+			_ => Err(Error::UnexpectedMessage),
+		},
 		// PublishOk (0x1E)
 		ietf::PublishOk::ID => {
 			let id = decode_response_request_id(body, version)?;
@@ -970,10 +1017,11 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 			_ => Err(Error::UnexpectedMessage),
 		},
 
-		// Follow-up messages: route to existing stream
+		// Follow-up messages: route to the request being updated, not the update's own id.
 		ietf::SubscribeUpdate::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::FollowUp(id))
+			let own = decode_request_id(body, version)?;
+			let target = decode_update_target(body, version)?;
+			Ok(Route::FollowUp { own, target })
 		}
 
 		// Close stream messages
@@ -1033,7 +1081,9 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 			let id = decode_request_id(body, version)?;
 			Ok(Route::MaxRequestId(id))
 		}
-		ietf::RequestsBlocked::ID => Err(Error::UnexpectedMessage),
+		// The peer reached the MAX_REQUEST_ID we advertised and waits for a grant, which
+		// follows on its own as its requests close.
+		ietf::RequestsBlocked::ID => Ok(Route::Ignore),
 
 		// Terminal
 		ietf::GoAway::ID => Ok(Route::GoAway),
@@ -1147,7 +1197,11 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 enum Route {
 	NewRequest(RequestId),
 	Response(RequestId),
-	FollowUp(RequestId),
+	/// An update: its own request ID counts against the window, and it goes to `target`.
+	FollowUp {
+		own: RequestId,
+		target: RequestId,
+	},
 	CloseStream(RequestId),
 	MaxRequestId(RequestId),
 	/// Nothing to route: the message named a request that is already gone.
@@ -1169,6 +1223,22 @@ fn encode_raw(type_id: u64, body: &Bytes, version: Version) -> Bytes {
 fn decode_request_id(body: &Bytes, version: Version) -> Result<RequestId, Error> {
 	let (request_id, _) = RequestId::decode_slice(body, version)?;
 	Ok(request_id)
+}
+
+/// The request a SUBSCRIBE_UPDATE or REQUEST_UPDATE applies to.
+///
+/// Drafts 14 and 15 name it in Subscription Request ID, and draft 16 in Existing
+/// Request ID. Both are the second field; the first is the update's own new
+/// Request ID. Later drafts send updates on the request's own stream, not here.
+fn decode_update_target(body: &Bytes, version: Version) -> Result<RequestId, Error> {
+	match version {
+		Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+			let mut r = Decoder::new(body, version.into());
+			let _own = RequestId::decode(&mut r, version)?;
+			Ok(RequestId::decode(&mut r, version)?)
+		}
+		_ => Err(Error::UnexpectedMessage),
+	}
 }
 
 /// Decode request_id for response messages that have Option<RequestId> in v14-16.
@@ -1260,11 +1330,50 @@ mod tests {
 		assert!(matches!(route, Route::CloseStream(RequestId(99))));
 	}
 
-	#[test]
-	fn test_classify_subscribe_update_followup() {
-		let body = make_body_with_request_id(10, Version::Draft15);
-		let route = classify_msg(Version::Draft15, ietf::SubscribeUpdate::ID, &body).unwrap();
-		assert!(matches!(route, Route::FollowUp(RequestId(10))));
+	/// Drafts 14 and 15 name the subscription in the second field; draft 16 names
+	/// the existing request there. The first field is the update's own Request ID,
+	/// so a body that carries only that ID cannot tell the two apart.
+	#[moq_net_sim::test]
+	async fn test_subscribe_update_reaches_its_target() {
+		let update_id = RequestId(10);
+		let target_id = RequestId(4);
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let update = ietf::SubscribeUpdate {
+				request_id: update_id,
+				subscription_request_id: Some(target_id),
+				start_location: ietf::Location { group: 1, object: 2 },
+				end_group: 100,
+				subscriber_priority: 200,
+				forward: false,
+			};
+			let body = encode_body(&update, version);
+			let raw = encode_raw(ietf::SubscribeUpdate::ID, &body, version);
+			let Route::FollowUp { own, target: routed } =
+				classify_msg(version, ietf::SubscribeUpdate::ID, &body).unwrap()
+			else {
+				panic!("{version} did not route the update as a follow-up");
+			};
+			assert_eq!(own, update_id, "{version}");
+
+			let shared = Arc::new(Shared::default());
+			shared
+				.open_incoming(target_id, Bytes::from_static(b"request"), None)
+				.unwrap();
+			let (_, mut recv) = shared.incoming.pop().await.unwrap();
+			assert_eq!(
+				recv.read_chunk(usize::MAX).await.unwrap(),
+				Some(Bytes::from_static(b"request"))
+			);
+
+			assert_eq!(routed, target_id, "{version}: update {update_id} routed to {routed}");
+			shared.push(routed, raw.clone());
+			assert_eq!(
+				recv.read_chunk(usize::MAX).await.unwrap(),
+				Some(raw),
+				"{version}: update {update_id} did not reach {target_id}"
+			);
+		}
 	}
 
 	#[test]
@@ -1440,7 +1549,9 @@ mod tests {
 		)
 		.unwrap();
 		assert!(matches!(route, Route::NewRequest(id) if id == request_id));
-		shared.open_incoming(request_id, encode_msg(&msg, version)).unwrap();
+		shared
+			.open_incoming(request_id, encode_msg(&msg, version), None)
+			.unwrap();
 
 		let (_, mut recv) = shared.incoming.pop().await.unwrap();
 
@@ -1712,11 +1823,110 @@ mod tests {
 		}
 	}
 
+	/// A peer's control stream carrying a bare SUBSCRIBE for each request ID: the
+	/// adapter routes on the ID alone, so the rest of the body is never read.
+	async fn windowed(
+		window: u64,
+		ids: &[u64],
+		then: &[u8],
+	) -> (
+		ControlStreamAdapter<crate::lite::test_transport::ScriptedSession>,
+		Reader<crate::lite::test_transport::ScriptedRecv, Version>,
+		Writer<crate::lite::test_transport::SinkSend, Version>,
+		crate::lite::test_transport::Log,
+	) {
+		use crate::lite::test_transport::{Log, ScriptedSession, SinkSend};
+		use crate::transport::poll::Session as _;
+
+		const VERSION: Version = Version::Draft14;
+		let mut script = Vec::new();
+		for id in ids {
+			let body = make_body_with_request_id(*id, VERSION);
+			script.extend_from_slice(&encode_raw(ietf::Subscribe::ID, &body, VERSION));
+		}
+		script.extend_from_slice(then);
+		let mut session = ScriptedSession::new(script);
+		let (_, recv) = session.open_bi().await.unwrap();
+		// We are the server, so the client's request IDs are even.
+		let control = Control::new(None, false).with_window(window, false);
+		let adapter = ControlStreamAdapter::new(session, control, VERSION);
+		let log = Log::default();
+		let writer = Writer::new(SinkSend::new(log.clone()), VERSION);
+		(adapter, Reader::new(recv, VERSION), writer, log)
+	}
+
+	/// A request ID at the MAX_REQUEST_ID we advertised closes the session with the
+	/// draft's TOO_MANY_REQUESTS, before the request is queued.
+	#[moq_net_sim::test]
+	async fn a_request_past_the_window_closes_the_session() {
+		let (adapter, reader, writer, _) = windowed(1, &[0, 2], &[]).await;
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let err = adapter.run(reader, writer, goaway).await.unwrap_err();
+		assert!(
+			matches!(err, Error::Session(crate::SessionError::TooManyRequests)),
+			"{err:?}"
+		);
+	}
+
+	/// An update's own request ID counts against the window, not the subscription it targets.
+	#[moq_net_sim::test]
+	async fn an_update_past_the_window_closes_the_session() {
+		const VERSION: Version = Version::Draft14;
+		let update = ietf::SubscribeUpdate {
+			request_id: RequestId(4),
+			subscription_request_id: Some(RequestId(0)),
+			start_location: ietf::Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: 1,
+			forward: true,
+		};
+		let update = encode_raw(ietf::SubscribeUpdate::ID, &encode_body(&update, VERSION), VERSION);
+		// The target is in the window and the update's own ID is past it.
+		let (adapter, reader, writer, _) = windowed(2, &[0], &update).await;
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let err = adapter.run(reader, writer, goaway).await.unwrap_err();
+		assert!(
+			matches!(err, Error::Session(crate::SessionError::TooManyRequests)),
+			"{err:?}"
+		);
+	}
+
+	/// Requests that end are granted back with MAX_REQUEST_ID, once half the window has.
+	#[moq_net_sim::test]
+	async fn retired_requests_are_granted_back() {
+		use crate::transport::poll::Session as _;
+
+		const VERSION: Version = Version::Draft14;
+		let (mut adapter, reader, writer, log) = windowed(2, &[0, 2], &[]).await;
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let runner = adapter.clone();
+		let mut run = std::pin::pin!(runner.run(reader, writer, goaway));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		let first = adapter.accept_bi().await.unwrap();
+		let _second = adapter.accept_bi().await.unwrap();
+		assert!(log.writes.lock().unwrap().is_empty(), "nothing has ended yet");
+
+		drop(first);
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		let mut expected = Vec::new();
+		crate::coding::Encoder::new(&mut expected, VERSION.into())
+			.varint(ietf::MaxRequestId::ID)
+			.unwrap();
+		ietf::MaxRequestId {
+			request_id: RequestId(6),
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut expected, VERSION.into()), VERSION)
+		.unwrap();
+		assert_eq!(*log.writes.lock().unwrap(), expected.to_vec());
+	}
+
 	#[test]
 	fn queued_incoming_stream_does_not_keep_shared_alive() {
 		let shared = Arc::new(Shared::default());
 		let weak = Arc::downgrade(&shared);
-		shared.open_incoming(RequestId(7), Bytes::new()).unwrap();
+		shared.open_incoming(RequestId(7), Bytes::new(), None).unwrap();
 		drop(shared);
 		assert!(weak.upgrade().is_none());
 	}

@@ -8,7 +8,7 @@ End-to-end encryption for [Media over QUIC](https://moq.dev) groups, datagrams,
 and track names. Profile `moq-e2ee-00` from
 [draft-lcurley-moq-e2ee](https://datatracker.ietf.org/doc/draft-lcurley-moq-e2ee/).
 
-Relays forward ciphertext. Content keys never enter `moq-net`. The TypeScript twin is `@moq/e2ee`.
+Relays forward ciphertext. Content keys never enter `moq-net`.
 
 ```bash
 cargo add moq-e2ee

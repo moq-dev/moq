@@ -1,3 +1,4 @@
+import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -19,6 +20,9 @@ export const SetupOption = {
 	/** HIDDEN, from the MoQ Hidden extension. See `hidden.ts`. */
 	Hidden: 0x40b5cn,
 } as const;
+
+// Unknown SETUP options may repeat, including GREASE (draft-21 section 9.1).
+const KNOWN_SETUP_OPTIONS: readonly bigint[] = Object.values(SetupOption);
 
 /// Setup Options — used in SETUP messages.
 ///
@@ -139,13 +143,13 @@ export class SetupOptions {
 				i++;
 
 				if (id % 2n === 0n) {
-					if (params.vars.has(id)) {
+					if (KNOWN_SETUP_OPTIONS.includes(id) && params.vars.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();
 					params.setVarint(id, varint);
 				} else {
-					if (params.bytes.has(id)) {
+					if (KNOWN_SETUP_OPTIONS.includes(id) && params.bytes.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const size = await r.u53();
@@ -168,13 +172,13 @@ export class SetupOptions {
 				}
 
 				if (id % 2n === 0n) {
-					if (params.vars.has(id)) {
+					if (KNOWN_SETUP_OPTIONS.includes(id) && params.vars.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();
 					params.setVarint(id, varint);
 				} else {
-					if (params.bytes.has(id)) {
+					if (KNOWN_SETUP_OPTIONS.includes(id) && params.bytes.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const size = await r.u53();
@@ -222,6 +226,126 @@ const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 const MSG_PARAM_FILL_PARAMETERS = 0x23n;
 /// HOP_PATH, from the MoQ Cluster extension. See `cluster.ts`.
 const MSG_PARAM_HOP_PATH = 0x40b57n;
+/// ACTIVE_COUNT, from the MoQ Active Count extension.
+const MSG_PARAM_ACTIVE_COUNT = 0x40b66n;
+
+/// Message parameter ids defined in draft-16. A known id on the wrong message is ignored.
+const DRAFT16_MESSAGE_PARAMS: readonly bigint[] = [0x02n, 0x03n, 0x08n, 0x09n, 0x10n, 0x20n, 0x21n, 0x22n, 0x32n];
+
+/** Which control message the parameter block belongs to. Omitted keeps the unfiltered decode. */
+type ControlMessage =
+	| "subscribe"
+	| "subscribe-ok"
+	| "subscribe-update"
+	| "subscribe-namespace"
+	| "publish"
+	| "publish-namespace"
+	| "fetch"
+	| "request-ok"
+	| "request-update"
+	| "namespace";
+
+function draft20(version: IetfVersion): boolean {
+	return version >= Version.DRAFT_20;
+}
+
+/** True when this draft's definition of `message` includes `id`. */
+function allows(message: ControlMessage, version: IetfVersion, id: bigint): boolean {
+	const d15 = version === Version.DRAFT_15;
+	const d16 = version === Version.DRAFT_16;
+	const d17 = version === Version.DRAFT_17;
+	const from16 = version >= Version.DRAFT_16;
+	const from17 = version >= Version.DRAFT_17;
+	const from18 = version >= Version.DRAFT_18;
+	const from19 = version >= Version.DRAFT_19;
+	const legacyForward = d15 || d16 || d17;
+	const auth = id === MSG_PARAM_AUTHORIZATION_TOKEN;
+	const forward = id === MSG_PARAM_FORWARD;
+	const priority = id === MSG_PARAM_SUBSCRIBER_PRIORITY;
+	const filter = id === MSG_PARAM_SUBSCRIPTION_FILTER;
+	const order = id === MSG_PARAM_GROUP_ORDER;
+	const expires = id === MSG_PARAM_EXPIRES;
+	const largest = id === MSG_PARAM_LARGEST_OBJECT;
+	const objectTimeout = id === MSG_PARAM_DELIVERY_TIMEOUT;
+	const subgroupTimeout = id === MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT && from18;
+	const range = id >= 0x25n && id <= 0x28n && from19;
+	const trackRange = id === MSG_PARAM_TRACK_PROPERTY_FILTER && from19;
+	const fill = id === MSG_PARAM_FILL_PARAMETERS && draft20(version);
+	const include = id === MSG_PARAM_INCLUDE_PROPERTIES && draft20(version);
+	const newGroup = id === MSG_PARAM_NEW_GROUP_REQUEST && from16;
+
+	switch (message) {
+		case "subscribe":
+			return (
+				objectTimeout ||
+				auth ||
+				(id === MSG_PARAM_MAX_CACHE_DURATION && from17) ||
+				subgroupTimeout ||
+				forward ||
+				priority ||
+				filter ||
+				order ||
+				fill ||
+				range ||
+				newGroup ||
+				include
+			);
+		case "subscribe-ok":
+			return (id === MSG_PARAM_MAX_CACHE_DURATION && d15) || expires || largest || (order && d15);
+		case "subscribe-update":
+		case "request-update":
+			return (
+				objectTimeout ||
+				auth ||
+				subgroupTimeout ||
+				forward ||
+				priority ||
+				filter ||
+				fill ||
+				range ||
+				trackRange ||
+				newGroup
+			);
+		case "subscribe-namespace":
+			return auth || (forward && legacyForward) || id === MSG_PARAM_HIDDEN;
+		case "publish":
+			return (
+				(objectTimeout && (d15 || draft20(version))) ||
+				auth ||
+				(subgroupTimeout && draft20(version)) ||
+				expires ||
+				largest ||
+				forward ||
+				(priority && draft20(version)) ||
+				(filter && draft20(version)) ||
+				(order && (d15 || draft20(version)))
+			);
+		case "publish-namespace":
+			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
+		case "fetch":
+			return (
+				auth ||
+				(id === MSG_PARAM_FILL_TIMEOUT && from18) ||
+				priority ||
+				(filter && draft20(version)) ||
+				order ||
+				range ||
+				include
+			);
+		case "request-ok":
+			return expires || largest || id === MSG_PARAM_ACTIVE_COUNT;
+		case "namespace":
+			return id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
+	}
+}
+
+async function skipKvp(r: Reader, id: bigint): Promise<void> {
+	if (id % 2n === 0n) {
+		await r.u62();
+	} else {
+		await r.read(await r.u53());
+	}
+}
 
 /// The object Range Filters (draft-19): SUBGROUP, OBJECTID, PRIORITY and OBJECT_PROPERTY.
 /// Each is length prefixed whatever the parity of its id.
@@ -250,6 +374,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_EXPIRES:
 		case MSG_PARAM_ROUTE_COST:
 		case MSG_PARAM_HIDDEN:
+		case MSG_PARAM_ACTIVE_COUNT:
 			return "varint";
 		case MSG_PARAM_PUBLISHER_PRIORITY:
 		case MSG_PARAM_SUBSCRIBER_PRIORITY:
@@ -570,7 +695,16 @@ export class Parameters {
 		}
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<Parameters> {
+	/**
+	 * Decode a parameter block.
+	 *
+	 * `message`, when set, is the allow-list for that control message. A parameter the
+	 * draft defines for a different message is ignored through draft-16 and closes the
+	 * session from draft-17 on. An id the draft does not define at all closes from
+	 * draft-16 on. Draft-14 and draft-15 ignore anything the message does not list.
+	 * Omitting `message` keeps the previous decode, which stores every id.
+	 */
+	static async decode(r: Reader, version: IetfVersion, message?: ControlMessage): Promise<Parameters> {
 		const count = await r.u53();
 		const params = new Parameters();
 
@@ -587,12 +721,29 @@ export class Parameters {
 				prevType = id;
 			}
 
+			if (message !== undefined && !allows(message, version, id)) {
+				// Draft-17 on has no length on a parameter value, so an unlisted id cannot be skipped.
+				const ignore =
+					version === Version.DRAFT_14 ||
+					version === Version.DRAFT_15 ||
+					(version === Version.DRAFT_16 && DRAFT16_MESSAGE_PARAMS.includes(id));
+				if (!ignore) {
+					throw new ProtocolViolation(`message parameter ${id} is not defined for ${message}`);
+				}
+				await skipKvp(r, id);
+				continue;
+			}
+
 			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 				if (id % 2n === 0n) {
 					if (params.vars.has(id)) {
 						throw new Error(`duplicate message parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();
+					// A bool is a varint here. Only 0 and 1 are legal once the message lists it.
+					if (message !== undefined && id === MSG_PARAM_FORWARD && varint !== 0n && varint !== 1n) {
+						throw new ProtocolViolation(`invalid message parameter value: ${id}`);
+					}
 					params.vars.set(id, varint);
 				} else {
 					const size = await r.u53();
@@ -628,12 +779,22 @@ export class Parameters {
 				case "varint":
 					params.vars.set(id, await r.u62());
 					break;
-				case "uint8":
-					params.vars.set(id, BigInt(await r.u8()));
+				case "uint8": {
+					const value = await r.u8();
+					if (id === MSG_PARAM_GROUP_ORDER && value !== 1 && value !== 2) {
+						throw new ProtocolViolation(`invalid group order: ${value}`);
+					}
+					params.vars.set(id, BigInt(value));
 					break;
-				case "bool":
-					params.vars.set(id, (await r.bool()) ? 1n : 0n);
+				}
+				case "bool": {
+					const value = await r.u8();
+					if (value !== 0 && value !== 1) {
+						throw new ProtocolViolation(`invalid message parameter value: ${id}`);
+					}
+					params.vars.set(id, BigInt(value));
 					break;
+				}
 				case "location": {
 					// Two bare varints from draft-17 on; see the matching comment in encode.
 					const groupId = await r.u62();

@@ -20,6 +20,7 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 ### Epoch and identity
 
 - Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>` with the epoch on its route, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. The epoch is the shared [`Epoch`](/doc/concept/moq-lite.md#publisher-epochs) primitive. Subscribers resolve `<opaque>` and take the epoch from its route, where the newest wins; on a wire without route epochs the application supplies it.
+- An encrypting publisher refuses a shared or explicit epoch (maintainer, 2026-10-08). A redundant pair under one `moq --epoch`, or the same-epoch importers of [Same-epoch importers](/quest/m1/hop-aligned-import.md), would derive the same keys and repeat every nonce. Both cores produce only under an epoch they minted themselves; consuming still binds a discovered one. Rejected: a per-instance salt. State the rule in the draft's epoch section.
 - The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance. Plaintext broadcasts adopt the same epoch by default through [broadcast epochs](/quest/m0/broadcast-epoch/README.md).
 - Nothing in the path says the bytes are encrypted. The format after decryption (`meeting.hang`) is inside the opaque name; a plaintext player, exporter, or matcher that opens a protected broadcast finds no catalog it can read and fails with its usual typed refusal, the same as for any format it does not support.
 - One 32-byte secret authorizes the whole broadcast; HKDF-SHA-256 derives separate AES-128-GCM keys for each physical track and for grouped-frame versus datagram domains. A grouped frame uses the 96-bit nonce `uint64_be(group) || uint32_be(frame)`; a datagram uses its sequence with frame zero under the datagram domain. Empty AAD: every immutable end-to-end field is in the HKDF info or the nonce.
@@ -31,7 +32,7 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 The Rust and TypeScript cores expose the same surface, and nothing else:
 
 - `Credential { context, kid, secret }` accepts the application-owned secret. The application generates and distributes it over its authenticated channel; the library does not mint a secret it cannot return. `credential.path(semantic)` derives the epoch-free opaque broadcast name. Credential is cheap to clone, never serializes the secret, and redacts it from `Debug`.
-- `credential.generation(epoch)` binds a discovered or minted epoch. `Generation` owns `name(semantic)` for opaque track names, `produce(track)` and `consume(track)` for protected `moq-net` tracks, and `Epoch::mint()` returns a fresh UUIDv7. Clones share publisher claims so reopening a track cannot reset its nonce counters.
+- A core produces only under an epoch it minted itself (decided 2026-10-08). Only the credential mints a producing generation, and that call takes no epoch: it mints a fresh UUIDv7 and returns a generation owning `epoch()` for the route, `name(semantic)` for opaque track names, and `produce(track)` for protected `moq-net` tracks. A discovered epoch binds a consume-only generation with `name(semantic)` and `consume(track)`. The two are separate types, so producing under a discovered or shared epoch does not compile; [Rust protected publisher seams](/quest/m1/e2ee/rust-publish.md) owns the Rust change and proposes the names. Clones of a producing generation share publisher claims so reopening a track cannot reset its nonce counters.
 - `track::Producer` appends groups and datagrams and allocates identities; `track::Consumer` yields groups and datagram events. `group::Producer` and `group::Consumer` wrap the whole group lifecycle so every AEAD call has the canonical physical name and transport identity.
 - Errors are the draft's typed codes plus the transport's. Nothing catalog-, hang-, or MSF-shaped lives here: a catalog is a track under a derived name, and compression is the catalog owner's job.
 - Stateless `seal`/`open` primitives with caller-chosen identities, HKDF labels and info builders, raw key bytes, and process-global claims are not public. The vectors are tested inside each core.
@@ -40,11 +41,10 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 - Deterministic secret-derived physical names hide catalog, codec, role, quality, timeline, and custom-track semantics. Authorized clients derive the encrypted catalog track name, then learn the remaining opaque names from its decrypted contents. Every catalog representation is encrypted; Rust publishers must not emit a plaintext MSF catalog.
 - A platform that forwards and meters protected bytes must never preview, record, archive, transmux, transcode, transcribe, compose, or inspect them, rejecting those paths before opening a processing session or writing product state. Applications needing those operations terminate E2EE outside the platform. A platform classifies protected broadcasts by its own credential or product state, never by name; the moq.pro (downstream) exclusion classifier and dashboard work stay downstream.
-- The first proof covers browser TypeScript and native Rust publication and playback in both directions, with grouped audio and video over both moq-lite and MoQ Transport. Shared vectors cover groups and moq-lite datagrams; JavaScript has no MoQ Transport datagram delivery yet.
+- The first proof covers browser TypeScript and native Rust publication and playback in both directions, with grouped audio and video over both moq-lite and MoQ Transport. Shared vectors cover groups and moq-lite datagrams. JavaScript has no MoQ Transport datagram delivery until [#4979](https://github.com/moq-dev/moq/pull/4979) (open) lands; once it does, the proof covers MoQ Transport datagrams too.
 
 ## Required
 
-- [Receive failure](/quest/m1/e2ee/receiver-failure.md) - a bad grouped frame wakes and terminates every pending read
 - [TypeScript E2EE core](/quest/m1/e2ee/typescript.md) - the `@moq/e2ee` package
   mirroring the Rust surface, with WebCrypto in a serial pump
 - [Rust protected publisher seams](/quest/m1/e2ee/rust-publish.md) - Rust media
@@ -68,3 +68,4 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 ## Related
 
 - [archive](/quest/m1/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
+- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the shared-epoch redundancy an encrypting publisher refuses

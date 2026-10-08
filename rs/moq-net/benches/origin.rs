@@ -12,14 +12,17 @@
 //! An equal-cost pool is swept the same way, over its members and the paths it
 //! already serves.
 //!
+//! A route swap on one front is swept over its tracks and the copies each track
+//! still holds from earlier routes.
+//!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
 use std::task::Poll;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio, origin};
+use moq_net::{Epoch, Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio, origin, track};
 
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
@@ -228,55 +231,57 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 /// honor each cursor's scope rather than reuse one global winner.
 fn bench_reprice_duplicate(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/reprice_duplicate");
-	for (duplicates, subscribers) in CONTENDED {
-		let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s"));
-		group.bench_function(id, |b| {
-			let (producer, _driver) = origin::Producer::new(origin::Config::default());
-			let _routes: Vec<_> = (1..=duplicates)
-				.map(|peer| {
-					producer
-						.scope(
-							"",
-							&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
-						)
-						.unwrap()
-						.dynamic(PATH, peer_route(peer as u64, INCUMBENT_COST))
-						.unwrap()
-				})
-				.collect();
-			let challenger = duplicates as u64 + 1;
-			let route = producer
-				.dynamic(PATH, peer_route(challenger, INCUMBENT_COST + 1))
-				.unwrap();
-			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
-				.map(|peer| {
-					producer
-						.consume()
-						.scope(
-							"",
-							&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", peer % 2)).unwrap()),
-						)
-						.unwrap()
-						.with_hidden(true)
-						.announced()
-				})
-				.collect();
-			for cursor in &mut cursors {
-				while cursor.next().now_or_never().flatten().is_some() {}
-			}
-			b.iter(|| {
-				for cost in [INCUMBENT_COST - 1, INCUMBENT_COST + 1] {
-					route.update(peer_route(challenger, cost)).unwrap();
-					for cursor in &mut cursors {
-						let event = cursor.next().now_or_never().flatten().expect("winner changed");
-						let moq_net::announce::Event::Update(update) = event else {
-							panic!("expected an update: got {event:?}");
-						};
-						assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(INCUMBENT_COST)));
-					}
+	for incumbent_cost in [INCUMBENT_COST, origin::Cost::MAX.value() - 1] {
+		for (duplicates, subscribers) in CONTENDED {
+			let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s_cost{incumbent_cost}"));
+			group.bench_function(id, |b| {
+				let (producer, _driver) = origin::Producer::new(origin::Config::default());
+				let _routes: Vec<_> = (1..=duplicates)
+					.map(|peer| {
+						producer
+							.scope(
+								"",
+								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
+							)
+							.unwrap()
+							.dynamic(PATH, peer_route(peer as u64, incumbent_cost))
+							.unwrap()
+					})
+					.collect();
+				let challenger = duplicates as u64 + 1;
+				let route = producer
+					.dynamic(PATH, peer_route(challenger, incumbent_cost + 1))
+					.unwrap();
+				let mut cursors: Vec<announce::Consumer> = (0..subscribers)
+					.map(|peer| {
+						producer
+							.consume()
+							.scope(
+								"",
+								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", peer % 2)).unwrap()),
+							)
+							.unwrap()
+							.with_hidden(true)
+							.announced()
+					})
+					.collect();
+				for cursor in &mut cursors {
+					while cursor.next().now_or_never().flatten().is_some() {}
 				}
+				b.iter(|| {
+					for cost in [incumbent_cost - 1, incumbent_cost + 1] {
+						route.update(peer_route(challenger, cost)).unwrap();
+						for cursor in &mut cursors {
+							let event = cursor.next().now_or_never().flatten().expect("winner changed");
+							let moq_net::announce::Event::Update(update) = event else {
+								panic!("expected an update: got {event:?}");
+							};
+							assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(incumbent_cost)));
+						}
+					}
+				});
 			});
-		});
+		}
 	}
 	group.finish();
 }
@@ -308,7 +313,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 			// Served but never answered: every request under it parks a front.
 			let _served = producer.dynamic("room", origin::Route::default()).unwrap();
 			let _requests: Vec<_> = (0..fronts)
-				.map(|i| consumer.request_broadcast(format!("room/{i}")))
+				.map(|i| consumer.request_broadcast(format!("room/{i}"), None))
 				.collect();
 			let waiter = kio::Waiter::noop();
 			// Run each front once so it parks on its upstream request.
@@ -402,7 +407,7 @@ fn bench_request(c: &mut Criterion) {
 		let waiter = kio::Waiter::noop();
 		group.bench_function(BenchmarkId::new("local", publishers), |b| {
 			b.iter(|| {
-				let pending = fleet.consumer.request_broadcast("room/0");
+				let pending = fleet.consumer.request_broadcast("room/0", None);
 				// The front's driver resolves the first request; later ones join it.
 				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 				pending
@@ -415,7 +420,7 @@ fn bench_request(c: &mut Criterion) {
 			b.iter(|| {
 				let result = fleet
 					.consumer
-					.request_broadcast("room/missing")
+					.request_broadcast("room/missing", None)
 					.now_or_never()
 					.expect("fails synchronously");
 				assert!(matches!(result, Err(moq_net::Error::Unroutable)));
@@ -453,7 +458,7 @@ fn pool(members: usize, paths: usize) -> Pool {
 	let waiter = kio::Waiter::noop();
 
 	let requests: Vec<_> = (0..paths)
-		.map(|i| consumer.request_broadcast(format!("pool/job-{i}")))
+		.map(|i| consumer.request_broadcast(format!("pool/job-{i}"), None))
 		.collect();
 	driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 	let mut producers = Vec::with_capacity(paths);
@@ -546,7 +551,7 @@ fn bench_handoff(c: &mut Criterion) {
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
 						first.finish().unwrap();
 
-						let resolved = consumer.request_broadcast("room/live").await.unwrap();
+						let resolved = consumer.request_broadcast("room/live", None).await.unwrap();
 						let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 						subscription.recv_group().await.unwrap().expect("first group");
 
@@ -601,7 +606,7 @@ fn bench_relay(c: &mut Criterion) {
 				.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
 				.collect();
 			let mut subscriptions = runtime.block_on(async {
-				let resolved = producer.consume().request_broadcast("room/live").await.unwrap();
+				let resolved = producer.consume().request_broadcast("room/live", None).await.unwrap();
 				let mut subscriptions = Vec::new();
 				for i in 0..tracks {
 					let track = resolved.track(&format!("{i}")).unwrap();
@@ -658,7 +663,7 @@ fn bench_parked(c: &mut Criterion) {
 					.collect();
 				let _writers: Vec<_> = sources.iter().map(|source| source.append_group().unwrap()).collect();
 				let (subscriptions, mut groups) = runtime.block_on(async {
-					let resolved = producer.consume().request_broadcast("room/live").await.unwrap();
+					let resolved = producer.consume().request_broadcast("room/live", None).await.unwrap();
 					let mut subscriptions = Vec::new();
 					let mut groups = Vec::new();
 					for i in 0..tracks {
@@ -684,6 +689,155 @@ fn bench_parked(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(tracks, copies)` for [`bench_copy_walk`]: tracks one front is serving, and
+/// route copies each of those tracks still holds when the route swaps.
+///
+/// The single-copy points from 32 to 128 tracks show the per-track slope alone.
+const COPY_WALK: [(usize, usize); 8] = [(1, 1), (1, 32), (32, 1), (64, 1), (128, 1), (8, 32), (32, 8), (64, 16)];
+
+const COPY_PATH: &str = "room/live";
+
+/// How long a splice may take before the bench treats it as stuck.
+const COPY_WAIT: Duration = Duration::from_secs(5);
+
+/// One generation at [`COPY_PATH`], held so its copies stay subscribed.
+struct Generation {
+	broadcast: broadcast::Producer,
+	tracks: Vec<track::Producer>,
+}
+
+impl Generation {
+	/// Create a hidden generation and leave a finished group on every track, so a
+	/// reader that does look has something to resume.
+	fn build(producer: &origin::Producer, tracks: usize) -> Self {
+		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
+		let mut held = Vec::with_capacity(tracks);
+		for i in 0..tracks {
+			let track = broadcast.create_track(format!("{i}"), None).unwrap();
+			let mut written = track.append_group().unwrap();
+			written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
+			written.finish().unwrap();
+			held.push(track);
+		}
+		Self {
+			broadcast,
+			tracks: held,
+		}
+	}
+
+	/// Route the front to this generation without waiting.
+	fn route(&self, epoch: &Epoch) {
+		self.broadcast
+			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.unwrap();
+	}
+
+	/// Route the front to this generation and wait until every track is spliced.
+	///
+	/// The wait ends on demand, which flips when the front subscribes the new
+	/// copy, before its splice. That bounds the splice only on a current-thread
+	/// runtime, where every local query is ready within the front poll that
+	/// splices it.
+	async fn announce(&self, epoch: &Epoch) {
+		self.route(epoch);
+		for track in &self.tracks {
+			tokio::time::timeout(COPY_WAIT, track.demand().used())
+				.await
+				.expect("route swap did not splice")
+				.expect("replacement track closed");
+		}
+	}
+}
+
+/// A front serving [`COPY_PATH`], with `copies` route copies on each of its tracks.
+struct CopyWalk {
+	epoch: Epoch,
+	_producer: origin::Producer,
+	_subscribers: Vec<track::Subscriber>,
+	generations: Vec<Generation>,
+	/// The generation the timed swap announces, built during setup.
+	next: Option<Generation>,
+}
+
+/// Build a front with `copies` already spliced onto each track.
+///
+/// Subscribers are never polled. A poll drops a replaced copy once its groups
+/// are delivered, and this measures the walk over the copies a swap still has.
+/// The same is why every generation is kept: dropping one ends its copy.
+async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
+	assert!(copies >= 1, "a front holds at least the serving copy");
+	let (producer, driver) = origin::Producer::new(origin::Config::default());
+	tokio::spawn(moq_net::time::run(driver));
+	let epoch = Epoch::mint();
+	let first = Generation::build(&producer, tracks);
+	first.route(&epoch);
+	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH, None))
+		.await
+		.expect("front did not resolve")
+		.expect("front refused");
+	let mut subscribers = Vec::with_capacity(tracks);
+	for i in 0..tracks {
+		let track = resolved.track(&format!("{i}")).unwrap();
+		let subscriber = tokio::time::timeout(COPY_WAIT, track.subscribe(None))
+			.await
+			.expect("track did not splice")
+			.expect("subscribe failed");
+		subscribers.push(subscriber);
+	}
+	let mut generations = Vec::with_capacity(copies + 1);
+	generations.push(first);
+	for _ in 1..copies {
+		let generation = Generation::build(&producer, tracks);
+		generation.announce(&epoch).await;
+		generations.push(generation);
+	}
+	CopyWalk {
+		next: Some(Generation::build(&producer, tracks)),
+		epoch,
+		_producer: producer,
+		_subscribers: subscribers,
+		generations,
+	}
+}
+
+impl CopyWalk {
+	/// Swap in the prebuilt newer route at the same epoch.
+	///
+	/// A local track's info is already known, so the front subscribes, walks
+	/// every track, and each reader walks its copies in one driver turn.
+	async fn swap(&mut self) {
+		let generation = self.next.take().expect("one swap per setup");
+		generation.announce(&self.epoch).await;
+		self.generations.push(generation);
+	}
+}
+
+/// A route swap on one front. Setup holds `copies` per track and builds the
+/// next generation, untimed; the announce and splice are timed. Warm-up sizes
+/// the iteration count from wall time, which includes that setup, so a large
+/// front does not multiply it by a fast routine.
+///
+/// The runtime must stay current-thread; see [`Generation::announce`].
+fn bench_copy_walk(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/copy_walk");
+	group.sample_size(10);
+	for (tracks, copies) in COPY_WALK {
+		group.throughput(Throughput::Elements(tracks as u64));
+		group.bench_function(BenchmarkId::from_parameter(format!("{tracks}t_{copies}c")), |b| {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			b.iter_batched_ref(
+				|| runtime.block_on(copy_walk(tracks, copies)),
+				|rig| runtime.block_on(rig.swap()),
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_announce,
@@ -698,6 +852,7 @@ criterion_group!(
 	bench_pool_churn,
 	bench_handoff,
 	bench_relay,
-	bench_parked
+	bench_parked,
+	bench_copy_walk
 );
 criterion_main!(benches);

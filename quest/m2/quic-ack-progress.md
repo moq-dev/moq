@@ -10,8 +10,10 @@ peer's reported ACK delay. Nothing MoQ builds on top needs private state.
 
 The work lives in `moq-quic`, in-tree after [the fork](/quest/m1/quic/fork/README.md).
 
-noq-proto (and so quinn-proto; check on the fork) already tracks everything needed in `SendBuffer`: the acknowledged
-range set, `fully_acked_offset()`, and the unacked length. `Connection` also
+`moq-quic`'s `SendBuffer` (`connection/send_buffer.rs`) already tracks most
+of what is needed: the acknowledged range set (`acks`), the write offset, the
+unacked length, and `is_fully_acked`; the contiguous acknowledged prefix
+follows from them. `Connection` also
 computes the peer's `ack_delay` per ACK frame when it updates the RTT
 estimator. Expose that state through the public `SendStream` handle without
 copying it:

@@ -115,7 +115,7 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 /** A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts. */
 typealias MediaFrame = uniffi.moq.MoqMediaFrame
-/** The catalog description of a video track, including whether the publisher recommends temporarily avoiding it. */
+/** The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming). */
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
 typealias VideoHint = uniffi.moq.MoqVideoHint
@@ -133,11 +133,11 @@ typealias AudioInit = uniffi.moq.MoqAudioInit
 typealias VideoInit = uniffi.moq.MoqVideoInit
 /** A container format and its leading bytes. */
 typealias ContainerInit = uniffi.moq.MoqContainerInit
-/** The catalog description of an audio track: codec, sample rate, channels, and container. */
+/** The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container. */
 typealias Audio = uniffi.moq.MoqAudio
 /** A width and height pair, in pixels. */
 typealias Dimensions = uniffi.moq.MoqDimensions
-/** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and advertised costs (warm cost, lower wins, plus undiscounted cold defaulting to cost). */
+/** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and static production and link cost (lower wins). */
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, group ordering, and range. */
 typealias Subscription = uniffi.moq.MoqSubscription

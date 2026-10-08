@@ -10,6 +10,7 @@
 mod export;
 mod import;
 mod split;
+mod sps;
 
 pub use export::*;
 pub use import::*;
@@ -17,6 +18,7 @@ pub use split::*;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
+use sps::Sps;
 
 /// Wrap one hvc1 (length-prefixed NALU) access unit as a single
 /// [`Frame`](crate::container::Frame), with the keyframe flag set when it
@@ -197,20 +199,19 @@ impl Hvcc {
 pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	let params = Hvcc::parse(hvcc)?;
 	let sps_nal = params.sps.first().ok_or(Error::MissingSps)?;
-	let sps = SpsNALUnit::parse(&mut &sps_nal[..]).map_err(|_| Error::SpsParse)?;
-	let profile = &sps.rbsp.profile_tier_level.general_profile;
+	let sps = Sps::parse(sps_nal)?.head;
 
 	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
 		in_band: false,
-		profile_space: profile.profile_space,
-		profile_idc: profile.profile_idc,
-		profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
-		tier_flag: profile.tier_flag,
-		level_idc: profile.level_idc.ok_or(Error::MissingLevelIdc)?,
-		constraint_flags: pack_constraint_flags(profile),
+		profile_space: sps.profile_space,
+		profile_idc: sps.profile_idc,
+		profile_compatibility_flags: sps.profile_compatibility_flags,
+		tier_flag: sps.tier_flag,
+		level_idc: sps.level_idc,
+		constraint_flags: sps.constraint_flags,
 	});
-	config.coded_width = Some(sps.rbsp.cropped_width() as u32);
-	config.coded_height = Some(sps.rbsp.cropped_height() as u32);
+	config.coded_width = Some(sps.width);
+	config.coded_height = Some(sps.height);
 	config.description = Some(Bytes::copy_from_slice(hvcc));
 	Ok(config)
 }
@@ -228,6 +229,31 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 	Some(crate::codec::video::Reorder {
 		depth: u32::try_from(depth).ok()?,
 		period: sps_period(&sps.rbsp),
+	})
+}
+
+/// The HRD an SPS NAL unit's VUI declares at its highest sub-layer, when it carries one: the
+/// NAL HRD's last schedule, or the VCL HRD's when that is all there is.
+pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
+	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
+	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
+	let hrd = sps
+		.rbsp
+		.vui_parameters
+		.as_ref()?
+		.vui_timing_info
+		.as_ref()?
+		.hrd_parameters
+		.as_ref()?;
+	let layer = hrd.sub_layers.get(highest).or(hrd.sub_layers.last())?;
+	// The NAL HRD's schedules come first when both are present.
+	let schedules = usize::try_from(layer.cpb_cnt_minus1).ok()? + 1;
+	let last = layer.sub_layer_parameters.get(..schedules)?.last()?;
+	let bit_rate_scale = u32::from(hrd.common_inf.bit_rate_scale?);
+	let cpb_size_scale = u32::from(hrd.common_inf.cpb_size_scale?);
+	Some(crate::codec::video::Hrd {
+		bit_rate: (u64::from(last.bit_rate_value_minus1) + 1) << (6 + bit_rate_scale),
+		cpb_size: (u64::from(last.cpb_size_value_minus1) + 1) << (4 + cpb_size_scale),
 	})
 }
 
@@ -520,12 +546,8 @@ pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Byt
 		}
 	}
 
-	let sps = SpsNALUnit::parse(&mut &first_sps[..]).map_err(|_| Error::SpsParse)?;
-	let profile = &sps.rbsp.profile_tier_level.general_profile;
-	let level_idc = profile.level_idc.ok_or(Error::MissingLevelIdc)?;
-	let constraint_flags = pack_constraint_flags(profile);
-	let compat = profile.profile_compatibility_flag.bits().to_be_bytes();
-	let num_temporal_layers = sps.rbsp.sps_max_sub_layers_minus1 + 1;
+	let sps = Sps::parse(first_sps)?.head;
+	let num_temporal_layers = sps.max_sub_layers_minus1 + 1;
 
 	let params_len: usize = vps_nals
 		.iter()
@@ -535,17 +557,17 @@ pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Byt
 		.sum();
 	let mut out = BytesMut::with_capacity(23 + 3 * 3 + params_len);
 	out.put_u8(1); // configurationVersion
-	out.put_u8(((profile.profile_space & 0x3) << 6) | ((profile.tier_flag as u8) << 5) | (profile.profile_idc & 0x1f));
-	out.put_slice(&compat);
-	out.put_slice(&constraint_flags);
-	out.put_u8(level_idc);
+	out.put_u8(((sps.profile_space & 0x3) << 6) | ((sps.tier_flag as u8) << 5) | (sps.profile_idc & 0x1f));
+	out.put_slice(&sps.profile_compatibility_flags);
+	out.put_slice(&sps.constraint_flags);
+	out.put_u8(sps.level_idc);
 	out.put_u16(0xf000); // min_spatial_segmentation_idc unknown
 	out.put_u8(0xfc); // parallelismType mixed
-	out.put_u8(0xfc | (sps.rbsp.chroma_format_idc & 0x3));
-	out.put_u8(0xf8 | (sps.rbsp.bit_depth_luma_minus8 & 0x7));
-	out.put_u8(0xf8 | (sps.rbsp.bit_depth_chroma_minus8 & 0x7));
+	out.put_u8(0xfc | (sps.chroma_format_idc & 0x3));
+	out.put_u8(0xf8 | (sps.bit_depth_luma_minus8 & 0x7));
+	out.put_u8(0xf8 | (sps.bit_depth_chroma_minus8 & 0x7));
 	out.put_u16(0); // avgFrameRate unspecified
-	out.put_u8(((num_temporal_layers & 0x7) << 3) | ((sps.rbsp.sps_temporal_id_nesting_flag as u8) << 2) | 0x3);
+	out.put_u8(((num_temporal_layers & 0x7) << 3) | ((sps.temporal_id_nesting_flag as u8) << 2) | 0x3);
 	out.put_u8(3); // numOfArrays (VPS, SPS, PPS)
 
 	for (nal_type, nals) in [
@@ -634,8 +656,8 @@ pub(crate) fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] 
 	flags
 }
 
-/// Real parameter sets from a single-frame x265 encode (1280x720, Main profile),
-/// for tests that need an SPS that scuffle_h265 can actually parse.
+/// Real parameter sets, mostly from a single-frame x265 encode (1280x720, Main profile),
+/// for tests that need an SPS rather than hand-built bytes.
 #[cfg(test)]
 pub(crate) mod fixtures {
 	use bytes::Bytes;
@@ -656,6 +678,16 @@ pub(crate) mod fixtures {
 		0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x3c,
 		0xa0, 0x20, 0x81, 0x05, 0x96, 0x56, 0x59, 0x24, 0xca, 0xf0, 0x16, 0x80, 0x80, 0x00, 0x00, 0x03, 0x00, 0x80,
 		0x00, 0x00, 0x0c, 0xb0, 0x0a, 0x48, 0x2f, 0x00, 0x07, 0xa1, 0x20, 0x00, 0xf4, 0x24, 0x40,
+	];
+
+	/// SPS from a Viewtron IP-PTZ-440 (1920x1080 Main@L5.0, 10 fps). Its VUI sets
+	/// `colour_description_present_flag` with `colour_primaries`, `transfer_characteristics`
+	/// and `matrix_coeffs` all 0 on a 4:2:0 stream. ITU-T H.265 E.3.1 forbids `matrix_coeffs`
+	/// 0 there, so scuffle_h265 refuses the SPS; libavcodec and GStreamer accept it.
+	pub(crate) const SPS_ZERO_COLOUR: &[u8] = &[
+		0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+		0x96, 0xa0, 0x03, 0xc0, 0x80, 0x11, 0x07, 0xcb, 0x8a, 0xad, 0x3b, 0xa2, 0x4b, 0xb9, 0x08, 0x00, 0x00, 0x03,
+		0x00, 0x20, 0x05, 0x26, 0x5c, 0x00, 0x33, 0x7f, 0x98, 0x01,
 	];
 
 	/// An hvcC record built from the real parameter sets (4-byte NALU lengths).
@@ -787,6 +819,45 @@ mod tests {
 		assert_eq!(params[0].as_ref(), vps);
 		assert_eq!(params[1].as_ref(), sps);
 		assert_eq!(params[2].as_ref(), pps);
+	}
+
+	/// hev1: an inline SPS whose VUI carries zeroed colour fields on 4:2:0 still configures the
+	/// rendition from the fields before the VUI.
+	#[test]
+	fn hev1_config_tolerates_zeroed_colour_description() {
+		let mut annexb = Vec::new();
+		for nal in [fixtures::VPS, fixtures::SPS_ZERO_COLOUR, fixtures::PPS] {
+			annexb.extend_from_slice(&[0, 0, 0, 1]);
+			annexb.extend_from_slice(nal);
+		}
+		let config = config(&annexb).expect("the SPS head is well-formed");
+		let hang::catalog::VideoCodec::H265(h265) = &config.codec else {
+			panic!("expected H.265 codec")
+		};
+		assert!(h265.in_band);
+		assert_eq!(h265.to_string(), "hev1.1.6.L150");
+		assert_eq!((config.coded_width, config.coded_height), (Some(1920), Some(1080)));
+	}
+
+	/// hvc1: the same SPS builds an hvcC and resolves an out-of-band config. The record header
+	/// matches, byte for byte, the one GStreamer's h265parse builds from this SPS.
+	#[test]
+	fn hvcc_tolerates_zeroed_colour_description() {
+		let hvcc = build_hvcc(
+			&[Bytes::from_static(fixtures::VPS)],
+			&[Bytes::from_static(fixtures::SPS_ZERO_COLOUR)],
+			&[Bytes::from_static(fixtures::PPS)],
+		)
+		.expect("the SPS head is well-formed");
+		assert_eq!(
+			&hvcc[..23],
+			&[
+				0x01, 0x01, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x96, 0xf0, 0x00, 0xfc, 0xfd,
+				0xf8, 0xf8, 0x00, 0x00, 0x0f, 0x03,
+			]
+		);
+		let config = config_from_hvcc(&hvcc).unwrap();
+		assert_eq!((config.coded_width, config.coded_height), (Some(1920), Some(1080)));
 	}
 
 	/// The SPS and catalog paths keep `profile_compatibility_flags` as raw

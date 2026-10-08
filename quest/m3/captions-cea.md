@@ -28,3 +28,7 @@ Parse at import from the inline SEI. The separation study kept H.264 and HEVC
 SEI in the video access unit, so this parser walks that access unit. There is
 no sidecar and no strip step. Leave the SEI in place after the cues are
 published, so a decoder that reads captions from the bitstream still can.
+
+## Related
+
+- [Fail loud on dropped timed metadata](/quest/m1/drop-loud.md) - counts the FLV and emsg metadata import drops today; captions are kept in the SEI, not dropped

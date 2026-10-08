@@ -9,7 +9,7 @@ the peer goes away, with no visible interruption.
 
 ## Plan
 
-`hang-watch` and `hang-publish` gain a `p2p` attribute that constructs
+`moq-watch` and `moq-publish` gain a `p2p` attribute that constructs
 `Peers` on the shared connection's origin with the demo's ICE servers and a
 `max` from the page; `demo/web` exposes the toggle. The route pick is the
 origin's, under the rule from [Direct peers win](/quest/m3/p2p/cost-scopes.md):

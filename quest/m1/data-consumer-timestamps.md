@@ -13,8 +13,8 @@ Requested by an external consumer (OneTooMany, Discord), who translates
 MAVLink into application telemetry and must keep its timestamps to stay in
 sync with video.
 
-Every `moq_net::Frame` has a timestamp, but the consumers decode only
-`frame.payload` and drop it: `moq_mux::{json,binary}::Consumer::next` and the
+Every `moq_net::Frame` carries an optional timestamp (`None` when untimed,
+since #4822), but the consumers decode only `frame.payload` and drop it: `moq_mux::{json,binary}::Consumer::next` and the
 moq-json and moq-flate snapshot and stream consumers they wrap. Each snapshot
 state carries the timestamp of the frame that produced it.
 
@@ -22,8 +22,7 @@ Decided: `next()` and `poll_next()` return `Timed<T>`, the type the producers
 take in [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md).
 `at` is the frame's media timestamp on the track's timescale, and `None` for
 an untimed frame: absence survives the wire rather than becoming arrival
-time (decided 2026-10-01, see
-[moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md)). A republisher passes `at` straight to a moq-mux data producer.
+time (decided 2026-10-01, landed in [#4822](https://github.com/moq-dev/moq/pull/4822)). A republisher passes `at` straight to a moq-mux data producer.
 
 Decided (2026-10-01): snapshot consumers get two reads, both returning
 `Timed<T>`. Today the moq-json snapshot consumer applies every buffered delta
@@ -48,4 +47,3 @@ Public API: breaking. Wire: none.
 ## Required
 
 - [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - gives `Timed.at` its untimed meaning, the type this returns
-- [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the model must carry an absent timestamp to consumers

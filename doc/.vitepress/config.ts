@@ -22,9 +22,9 @@ export default defineConfig({
 				content: "Real-time latency at massive scale",
 			},
 		],
-		["meta", { property: "og:image", content: "https://doc.moq.dev/icon.png" }],
-		["meta", { property: "og:image:width", content: "163" }],
-		["meta", { property: "og:image:height", content: "150" }],
+		["meta", { property: "og:image", content: "https://doc.moq.dev/og.png" }],
+		["meta", { property: "og:image:width", content: "2400" }],
+		["meta", { property: "og:image:height", content: "1350" }],
 		["meta", { property: "og:url", content: "https://doc.moq.dev" }],
 		["meta", { property: "og:site_name", content: "Media over QUIC" }],
 		["meta", { name: "twitter:card", content: "summary_large_image" }],
@@ -36,7 +36,7 @@ export default defineConfig({
 				content: "Real-time latency at massive scale",
 			},
 		],
-		["meta", { name: "twitter:image", content: "https://doc.moq.dev/icon.png" }],
+		["meta", { name: "twitter:image", content: "https://doc.moq.dev/og.png" }],
 		["meta", { name: "theme-color", content: "#0f172a" }],
 	],
 
@@ -262,6 +262,9 @@ export default defineConfig({
 			}),
 		],
 	},
+
+	// Agent instructions, not a page.
+	srcExclude: ["AGENTS.md"],
 
 	ignoreDeadLinks: [
 		// Localhost URLs are intentional for development examples and aren't

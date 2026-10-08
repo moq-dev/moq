@@ -327,7 +327,7 @@ mod tests {
 		}
 	}
 
-	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_HOP"];
+	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_EPOCH"];
 
 	/// A known sequence prints its frames back to back, the same bytes as `/fetch`.
 	#[tokio::test(start_paused = true)]

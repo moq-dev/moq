@@ -4,6 +4,7 @@
  * @module
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import type * as Epoch from "./epoch.ts";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { Route } from "./hop.ts";
@@ -11,7 +12,7 @@ import { hooks, type TrackSequence } from "./internal.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
-import { registerWire, trackOf, type Broadcast as Wire } from "./wire.ts";
+import { registerWire, trackOf } from "./wire.ts";
 
 /** The origin callback a created broadcast uses to advertise its exact path. @internal */
 export interface Announcer {
@@ -26,6 +27,19 @@ export interface Announcer {
 let attachAnnouncer: (producer: Producer, announcer: Announcer) => void;
 let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
+// Info lookups pending on a requested track. Each is demand, as a pending track request is in Rust,
+// though nobody subscribes.
+class Lookups {
+	pending = 0;
+	// Re-evaluates the track's demand at once; set by watchDemand.
+	changed = () => {};
+
+	add(delta: number): void {
+		this.pending += delta;
+		this.changed();
+	}
+}
+
 /** Reactive backing state shared by broadcast producers and consumers. */
 class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
@@ -34,8 +48,9 @@ class BroadcastState {
 	// The tracks the application inserted. A finished one stays and keeps serving its cache; only an
 	// abort or removeTrack drops it, the way only a dropped producer leaves a Rust broadcast.
 	tracks = new Map<string, track.Producer>();
-	// Upstream subscriptions a consumer opened, shared by repeat subscribes until they close.
-	upstream = new Map<string, track.Producer>();
+	// The on-demand producer for each name, shared by every subscription and info lookup until it closes.
+	requests = new Map<string, track.Producer>();
+	lookups = new WeakMap<track.Producer, Lookups>();
 	// Whether something answers on-demand track requests: a wire layer's consumed broadcast, or a
 	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Dynamic`;
 	// without one, a track nobody publishes is `NotFound` rather than a request nobody will answer.
@@ -51,8 +66,8 @@ class BroadcastState {
 }
 
 // Each track updates the aggregate on an edge, so a demand change touches only its track.
-// A `pinned` track counts as demand until it closes, subscribed or not.
-function watchDemand(state: BroadcastState, producer: track.Producer, pinned = false): void {
+// A track counts as demand while any `lookups` are pending, subscribed or not.
+function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: Lookups): void {
 	if (state.demands.has(producer)) return;
 	const demand = producer.demand();
 	// A closed track is never demand, and its close already fired, so nothing would dispose a watcher.
@@ -60,13 +75,16 @@ function watchDemand(state: BroadcastState, producer: track.Producer, pinned = f
 	let active = false;
 	const update = () => {
 		const used =
-			state.closed.peek() === undefined && demand.closed.peek() === undefined && (pinned || demand.used.peek());
+			state.closed.peek() === undefined &&
+			demand.closed.peek() === undefined &&
+			((lookups?.pending ?? 0) > 0 || demand.used.peek());
 		if (active === used) return;
 		state.active += used ? 1 : -1;
 		active = used;
 		state.used.set(state.active > 0);
 	};
 	const disposeUsed = demand.used.subscribe(update);
+	if (lookups) lookups.changed = update;
 	const disposeClosed = demand.closed.subscribe(() => {
 		if (demand.closed.peek() === undefined) return;
 		cleanup();
@@ -132,82 +150,68 @@ function lookup(state: BroadcastState, name: string): track.Producer | undefined
 		state.tracks.delete(name);
 	}
 
-	const upstream = state.upstream.get(name);
-	if (upstream) {
-		if (upstream.closed.peek() === undefined) return upstream;
-		state.upstream.delete(name);
+	const requested = state.requests.get(name);
+	if (requested) {
+		if (requested.closed.peek() === undefined) return requested;
+		state.requests.delete(name);
 	}
 
 	return undefined;
 }
 
-// `register` is set on the subscribing (consumer) side: the fresh producer is cached in
-// `state.upstream` so repeat subscriptions to the same track fan out from one upstream subscription
-// instead of opening a new one, mirroring the Rust `broadcast::Consumer::track` weak-dedup. The
-// consumer wire watches the producer's demand ({@link track.Demand.used}) and tears the upstream
-// down once its last subscriber leaves, closing the producer, which evicts the cache entry below.
-// The publishing side leaves `register` false, so a dynamic serve stays one request per peer
-// subscription.
-function subscribe(
-	state: BroadcastState,
-	name: string,
-	options: track.Subscription = {},
-	register = false,
-): track.Subscriber {
+// The producer serving `name`, or a new one with a request queued for it.
+//
+// A broadcast has one logical track per name, mirroring the Rust `broadcast::Consumer::track`
+// weak-dedup: a requested producer is cached in `state.requests` so every subscription and info
+// lookup fans out from one request instead of opening another. Whoever serves it closes it once
+// unused (the consuming wire tears the upstream down when its last subscriber leaves), which evicts
+// the entry so a later subscribe requests the track again, continuing its sequences.
+function logical(state: BroadcastState, name: string): { producer: track.Producer; requested: boolean } {
 	if (state.closed.peek() !== undefined) {
 		throw new Error("broadcast is closed");
 	}
 
 	const existing = lookup(state, name);
-	if (existing) return existing.subscribe(options);
+	if (existing) return { producer: existing, requested: false };
 
 	const producer = new track.Producer(name);
 	if (!state.served) {
-		// Answer through the subscriber rather than throwing, so a peer's subscribe is refused with
+		// Answer through the track rather than throwing, so a peer's subscribe is refused with
 		// the code instead of an unhandled error.
 		producer.close(new NotFound(`track ${name}`));
-		return producer.subscribe(options);
+		return { producer, requested: false };
 	}
 
-	watchDemand(state, producer);
-	const subscriber = producer.subscribe(options);
-
-	if (register) {
-		state.upstream.set(name, producer);
-		// Drop the cache entry once the upstream closes (the wire tears it down when its last
-		// subscriber leaves), so a later subscribe re-opens it.
-		void producer.closed.then(() => {
-			if (state.upstream.get(name) === producer) state.upstream.delete(name);
-		});
-	}
+	const lookups = new Lookups();
+	state.lookups.set(producer, lookups);
+	watchDemand(state, producer, lookups);
+	state.requests.set(name, producer);
+	void producer.closed.then(() => {
+		if (state.requests.get(name) === producer) state.requests.delete(name);
+	});
 
 	state.requested.mutate((requested) => {
 		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences, pending: state.pending }));
 	});
 
-	return subscriber;
+	return { producer, requested: true };
+}
+
+function subscribe(state: BroadcastState, name: string, options: track.Subscription = {}): track.Subscriber {
+	return logical(state, name).producer.subscribe(options);
 }
 
 async function resolveTrackInfo(state: BroadcastState, name: string): Promise<track.Info> {
-	const existing = lookup(state, name);
-	if (existing) return existing.info();
-
-	if (state.closed.peek() !== undefined) {
-		return Promise.reject(new Error("broadcast is closed"));
-	}
-	if (!state.served) return Promise.reject(new NotFound(`track ${name}`));
-
-	// A pending query is demand, as a pending track request is in Rust, though nobody subscribes.
-	const producer = new track.Producer(name);
-	watchDemand(state, producer, true);
-	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences, pending: state.pending }));
-	});
-
+	const { producer, requested } = logical(state, name);
+	const lookups = state.lookups.get(producer);
+	lookups?.add(1);
 	try {
 		return await producer.info();
 	} finally {
-		producer.close();
+		lookups?.add(-1);
+		// A finished lookup is no demand: let go of a request it opened that nobody subscribed to
+		// meanwhile.
+		if (requested && !producer.demand().used.peek()) producer.close();
 	}
 }
 
@@ -286,7 +290,12 @@ export class Producer {
 	#path = Path.empty();
 
 	constructor() {
-		registerWire(this, this.#wire(false));
+		registerWire(this, {
+			subscribe: (name, options) => subscribe(this.#state, name, options),
+			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
+			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
+			requested: () => requested(this.#state),
+		});
 	}
 
 	static {
@@ -323,8 +332,9 @@ export class Producer {
 			throw new Error("broadcast is closed");
 		}
 
-		const existing = this.#state.tracks.get(track.name);
-		if (existing && existing.closed.peek() === undefined) {
+		// One logical track per name: an open inserted track or a live request already serves it.
+		const live = [this.#state.tracks.get(track.name), this.#state.requests.get(track.name)];
+		if (live.some((existing) => existing && existing.closed.peek() === undefined)) {
 			throw new Error(`duplicate track: ${track.name}`);
 		}
 
@@ -359,15 +369,6 @@ export class Producer {
 		return trackOf(name, this);
 	}
 
-	#wire(register: boolean): Wire {
-		return {
-			subscribe: (name, options) => subscribe(this.#state, name, options, register),
-			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
-			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
-			requested: () => requested(this.#state),
-		};
-	}
-
 	/** The route this broadcast is announced with, or undefined while it is not announced. */
 	get route(): Route | undefined {
 		return this.#announcer?.route();
@@ -386,7 +387,7 @@ export class Producer {
 	 * origin, or if the broadcast is already closed.
 	 */
 	announce(
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): void {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
@@ -415,6 +416,7 @@ export class Producer {
 interface Shared {
 	state: BroadcastState;
 	path: Path.Valid;
+	epoch?: Epoch.Valid;
 }
 
 // Constructs a Consumer from within this module without exposing a public constructor
@@ -432,6 +434,7 @@ let makeConsumer: (shared: Shared) => Consumer;
 export class Consumer {
 	#state: BroadcastState;
 	#path: Path.Valid;
+	#epoch?: Epoch.Valid;
 
 	// Guards against a double close() on this handle over-decrementing the consumer count.
 	#closed = false;
@@ -439,6 +442,7 @@ export class Consumer {
 	protected constructor(shared?: never);
 	protected constructor(shared?: Shared) {
 		this.#path = shared?.path ?? Path.empty();
+		this.#epoch = shared?.epoch;
 		if (shared) {
 			this.#state = shared.state;
 		} else {
@@ -448,7 +452,7 @@ export class Consumer {
 		}
 		this.#state.consumers++;
 		registerWire(this, {
-			subscribe: (name, options) => subscribe(this.#state, name, options, true),
+			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
@@ -460,6 +464,9 @@ export class Consumer {
 		hooks.stampPath = (target, path) => {
 			if (target instanceof Consumer) target.#path = path;
 			else stampProducer(target, path);
+		};
+		hooks.stampEpoch = (target, epoch) => {
+			target.#epoch = epoch;
 		};
 	}
 
@@ -473,6 +480,17 @@ export class Consumer {
 	 */
 	get path(): Path.Valid {
 		return this.#path;
+	}
+
+	/**
+	 * The publisher epoch of the route an origin resolved this handle through, if it has one.
+	 *
+	 * An origin stamps it with each request's result, so it names the publisher
+	 * instance actually serving this handle even when the request named none. `undefined` for a
+	 * route without an epoch or a handle not handed out by an origin.
+	 */
+	get epoch(): Epoch.Valid | undefined {
+		return this.#epoch;
 	}
 
 	/**
@@ -501,7 +519,7 @@ export class Consumer {
 	// Hand this consumer's backing state and path to a clone. Opaque (`never`) so the state type
 	// stays unexported; a subclass passes it straight back into its own `super(...)`.
 	protected shareState(): never {
-		return { state: this.#state, path: this.#path } satisfies Shared as never;
+		return { state: this.#state, path: this.#path, epoch: this.#epoch } satisfies Shared as never;
 	}
 
 	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */

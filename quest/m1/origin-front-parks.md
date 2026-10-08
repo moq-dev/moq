@@ -20,27 +20,19 @@ parking, while `routed_broadcast` stays registered until its route completes.
 The front ends only once every parked requester has been handled, so one
 requester's disposition never ends another's wait.
 
-Worth confirming before building it: that the retry loop costs something. A
-benchmark swept over requesters and route-table churn would show whether the
-re-mint is a real slope or noise, and it is the same benchmark that would
-show the replacement is cheaper.
+Decided 2026-10-08: benchmark first. Land a benchmark swept over requesters
+and route-table churn, and build the parked front only if the re-mint shows
+as a real slope; the same benchmark then shows the replacement is cheaper. A
+measured no-win deletes this quest. The `origin/viewer_*` benches do not
+cover the retry loop.
 
-Also reclaim the filtered front a peer session leaves behind (folded in
-2026-10-05). #4922 keyed fronts by `Horizon::effective`, so viewers share the
-plain front, but a hop that appears in a covering route chain still gets its
-own filtered front, and that front lives as long as the route. A peer that
-both publishes and subscribes, or reconnects with a fresh hop, leaves one
-behind per peer session. #4922 scoped it out because it scales with peer
-sessions, not viewers. Test that the front count returns to the plain front
-after the peer session closes. If this quest moves to m2, split this leftover
-into its own m1 quest: it is a leak, not a question of whether the retry loop
-costs anything.
+The filtered front a peer session leaves behind, folded in here on
+2026-10-05, moved to [Idle fronts](/quest/m0/idle-fronts.md) on 2026-10-07:
+it ends once unread like any other front.
 
 Public API: no signature change expected. `routed_broadcast` and
 `request_broadcast` keep their contracts; only where the waiting happens
 changes.
 
-Decided in the 2026-09-30 audit: this may move to m2 if that benchmark shows
-the retry loop's re-mint is noise. Fronts are now keyed by effective exclusion
-(`Horizon::effective`), so viewers share them; the `origin/viewer_*` benches
-do not cover the retry loop.
+Fronts are keyed by effective exclusion (`Horizon::effective`), so viewers
+share them.

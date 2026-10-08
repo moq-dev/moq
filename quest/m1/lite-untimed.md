@@ -9,23 +9,20 @@ peers. Covers `rs/moq-net`, `js/net` and `drafts/draft-lcurley-moq-lite.md`.
 
 ## Plan
 
-Decided (2026-10-05, maintainer): timedness is per track ([untimed
-model](/quest/m1/untimed-model.md)), and an untimed track sends no
+Decided (2026-10-05, maintainer): timedness is per track (the untimed
+model, [#4822](https://github.com/moq-dev/moq/pull/4822)), and an untimed track sends no
 TIMESCALE and no Timestamp. On lite-07 that likely means an optional
 Timescale in TRACK_INFO and no Timestamp fields on an untimed track. The
-per-frame shift below was planned for an absent timestamp inside a timed
-track, which no longer exists (settled 2026-10-06: a mismatched frame is
-refused), so re-plan the encoding on that shape and drop the shift if
-nothing needs it.
+2026-10-01 shift-by-one (0 means an absent timestamp) is dropped: it served an
+absent timestamp inside a timed track, which no longer exists (settled
+2026-10-06: a mismatched frame is refused).
 
-Decided (2026-10-01, maintainer): shift the FRAME Timestamp Delta and the
-DATAGRAM Timestamp by one, so 0 means absent. An absent frame doesn't move
-the delta baseline. Rejected: a bare 0 as a sentinel, which collides with a
-real pts of 0.
-
-Decided (2026-10-02): one PR for both languages, after both
-model quests. Shipping one language first would break Rust-JS interop on
+Decided (2026-10-02): one PR for both languages. Both model quests have
+landed (#4822). Shipping one language first would break Rust-JS interop on
 lite-07-wip in between.
+
+Decided 2026-10-08: [Rust untimed default](/quest/m1/rust-untimed-default.md)
+lands first, since both edit the same Timescale defaults.
 
 Draft work:
 
@@ -36,11 +33,6 @@ Draft work:
   valid", and expiration's "reach" (the first frame timestamp of the next
   group) for an untimed group.
 - Check how a lite track that has no timescale says so on lite-07.
-- lite-07 varints carry the full 64 bits, so the shift can't represent the
-  top value: a DATAGRAM Timestamp of 2^64-1, or a delta whose zigzag
-  encoding is 2^64-1. Wrapping would turn either into the absence marker.
-  Recommended: the encoder refuses those values and the draft says so,
-  rather than widening the encoding for timestamps no real track reaches.
 
 Test: an untimed frame and an untimed datagram round-trip Rust-to-JS and
 JS-to-Rust on lite-07. lite-06 still receives a timestamp. Run
@@ -50,5 +42,4 @@ Public API: none. Wire: lite-07-wip only, which is unpublished.
 
 ## Required
 
-- [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the Rust model must hold an absent timestamp before the wire can carry one
-- [@moq/net carries untimed frames faithfully](/quest/m1/js-untimed-model.md) - the same for JS
+- [Rust untimed default](/quest/m1/rust-untimed-default.md) - touches the same Timescale defaults in `rs/moq-net` and lands first; this rebases onto it

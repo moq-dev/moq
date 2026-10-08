@@ -174,3 +174,109 @@ fn lite_varint_interop() {
 		}
 	}
 }
+
+#[derive(serde::Deserialize)]
+struct DatagramEcho {
+	echoes: Vec<Vec<u8>>,
+	/// The Timestamp each datagram's Properties carry, in milliseconds, if any.
+	timestamps: Vec<Option<u64>>,
+	/// The OBJECT_DATAGRAM the JS publisher sends for the first datagram's fields.
+	published: Vec<u8>,
+}
+
+/// OBJECT_DATAGRAM on every draft, both ways: JS decodes what Rust encodes, including the
+/// Timestamp, and re-encodes it byte for byte; Rust decodes what the JS publisher writes.
+#[test]
+#[ignore = "requires Bun; run by just test interop"]
+fn ietf_datagram_interop() {
+	use crate::coding::Decode;
+	use crate::{Timescale, Timestamp};
+
+	let all = [
+		ietf::Version::Draft14,
+		ietf::Version::Draft15,
+		ietf::Version::Draft16,
+		ietf::Version::Draft17,
+		ietf::Version::Draft18,
+		ietf::Version::Draft19,
+		ietf::Version::Draft20,
+		ietf::Version::Draft21,
+		ietf::Version::Draft22,
+	];
+	for (draft, version) in (14..).zip(all) {
+		let legacy = matches!(
+			version,
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
+		);
+		let mut properties = Vec::new();
+		let mut w = Encoder::new(&mut properties, version.into());
+		ietf::encode_object_time(&mut w, Timestamp::from_millis(1234).unwrap(), Timescale::MILLI, version).unwrap();
+
+		// What a publisher sends: Object 0, explicit priority, ending its group, stamped.
+		let mut datagrams = vec![ietf::ObjectDatagram {
+			track_alias: 3,
+			group_id: 42,
+			object_id: None,
+			publisher_priority: Some(7),
+			end_of_group: true,
+			properties: Some(properties.clone()),
+			body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"hello")),
+		}];
+		datagrams.push(ietf::ObjectDatagram {
+			track_alias: 1,
+			group_id: 2,
+			object_id: Some(0),
+			publisher_priority: Some(128),
+			end_of_group: false,
+			properties: None,
+			body: ietf::DatagramBody::Status(0),
+		});
+		if version != ietf::Version::Draft14 {
+			datagrams.push(ietf::ObjectDatagram {
+				track_alias: (1 << 40) + 1,
+				group_id: (1 << 50) + 1,
+				object_id: Some(1 << 20),
+				publisher_priority: None,
+				end_of_group: true,
+				properties: None,
+				body: ietf::DatagramBody::Payload(bytes::Bytes::new()),
+			});
+		}
+		if legacy {
+			datagrams.push(ietf::ObjectDatagram {
+				track_alias: 1,
+				group_id: 2,
+				object_id: Some(0),
+				publisher_priority: Some(0),
+				end_of_group: false,
+				properties: Some(properties.clone()),
+				body: ietf::DatagramBody::Status(3),
+			});
+		}
+		let encoded: Vec<Vec<u8>> = datagrams
+			.iter()
+			.map(|datagram| datagram.encode_bytes(version).unwrap().to_vec())
+			.collect();
+
+		let input = serde_json::json!({ "draft": draft, "datagrams": encoded });
+		let echo: DatagramEcho =
+			serde_json::from_slice(&bun("ietf-datagram.ts", input)).expect("JS returned its encodings");
+
+		assert_eq!(echo.echoes, encoded, "{version}: JS re-encoded differently");
+		let expected: Vec<Option<u64>> = datagrams
+			.iter()
+			.map(|datagram| datagram.properties.as_ref().map(|_| 1234))
+			.collect();
+		assert_eq!(echo.timestamps, expected, "{version}: JS decoded different timestamps");
+
+		let (published, used) = ietf::ObjectDatagram::decode_slice(&echo.published, version).unwrap();
+		assert_eq!(used, echo.published.len(), "{version}: a datagram runs to its end");
+		assert_eq!(published, datagrams[0], "{version}: the JS publisher's datagram");
+		let Some(properties) = &published.properties else {
+			panic!("{version}: the JS publisher sent no Timestamp");
+		};
+		let mut r = Decoder::new(properties, version.into());
+		let timestamp = ietf::decode_object_time(&mut r, Timescale::MILLI, version).unwrap();
+		assert_eq!(timestamp.map(|t| t.as_millis()), Some(1234), "{version}: Timestamp");
+	}
+}
