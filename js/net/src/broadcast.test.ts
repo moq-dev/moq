@@ -121,6 +121,27 @@ test("publishing-side subscriptions coalesce onto one request", async () => {
 	broadcast.close();
 });
 
+test("an info lookup joining a subscription's request stays demand after the subscriber leaves", async () => {
+	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
+	const pulled = wireOf(broadcast).requested();
+	const subscriber = broadcast.track("media").subscribe();
+	const info = broadcast.track("media").info();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+
+	// Flush every pending notification, so only the lookup is left holding demand.
+	subscriber.close();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(request.demand().used.peek()).toBe(false);
+	expect(demand.used.peek()).toBe(true);
+
+	request.accept({ timescale: Timescale.MILLI });
+	await info;
+	await demand.unused();
+	broadcast.close();
+});
+
 test("an info lookup releases a request nobody subscribed to", async () => {
 	const broadcast = new BroadcastProducer();
 	const pulled = wireOf(broadcast).requested();

@@ -723,7 +723,10 @@ async fn producer_replaced(version: &str) {
 	group.finish().unwrap();
 
 	settle().await;
-	assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
+	assert!(
+		matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+		"{version}: trailing delivery, or the subscription ended"
+	);
 	drop((second, broadcast));
 }
 

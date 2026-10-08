@@ -27,6 +27,19 @@ export interface Announcer {
 let attachAnnouncer: (producer: Producer, announcer: Announcer) => void;
 let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
+// Info lookups pending on a requested track. Each is demand, as a pending track request is in Rust,
+// though nobody subscribes.
+class Lookups {
+	pending = 0;
+	// Re-evaluates the track's demand at once; set by watchDemand.
+	changed = () => {};
+
+	add(delta: number): void {
+		this.pending += delta;
+		this.changed();
+	}
+}
+
 /** Reactive backing state shared by broadcast producers and consumers. */
 class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
@@ -37,6 +50,7 @@ class BroadcastState {
 	tracks = new Map<string, track.Producer>();
 	// The on-demand producer for each name, shared by every subscription and info lookup until it closes.
 	requests = new Map<string, track.Producer>();
+	lookups = new WeakMap<track.Producer, Lookups>();
 	// Whether something answers on-demand track requests: a wire layer's consumed broadcast, or a
 	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Dynamic`;
 	// without one, a track nobody publishes is `NotFound` rather than a request nobody will answer.
@@ -52,8 +66,8 @@ class BroadcastState {
 }
 
 // Each track updates the aggregate on an edge, so a demand change touches only its track.
-// A track counts as demand while `pinned` is set, subscribed or not.
-function watchDemand(state: BroadcastState, producer: track.Producer, pinned?: Getter<boolean>): void {
+// A track counts as demand while any `lookups` are pending, subscribed or not.
+function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: Lookups): void {
 	if (state.demands.has(producer)) return;
 	const demand = producer.demand();
 	// A closed track is never demand, and its close already fired, so nothing would dispose a watcher.
@@ -63,21 +77,20 @@ function watchDemand(state: BroadcastState, producer: track.Producer, pinned?: G
 		const used =
 			state.closed.peek() === undefined &&
 			demand.closed.peek() === undefined &&
-			(pinned?.peek() || demand.used.peek());
+			((lookups?.pending ?? 0) > 0 || demand.used.peek());
 		if (active === used) return;
 		state.active += used ? 1 : -1;
 		active = used;
 		state.used.set(state.active > 0);
 	};
 	const disposeUsed = demand.used.subscribe(update);
-	const disposePinned = pinned?.subscribe(update);
+	if (lookups) lookups.changed = update;
 	const disposeClosed = demand.closed.subscribe(() => {
 		if (demand.closed.peek() === undefined) return;
 		cleanup();
 	});
 	const cleanup = () => {
 		disposeUsed();
-		disposePinned?.();
 		disposeClosed();
 		if (active) {
 			state.active--;
@@ -152,13 +165,8 @@ function lookup(state: BroadcastState, name: string): track.Producer | undefined
 // weak-dedup: a requested producer is cached in `state.requests` so every subscription and info
 // lookup fans out from one request instead of opening another. Whoever serves it closes it once
 // unused (the consuming wire tears the upstream down when its last subscriber leaves), which evicts
-// the entry so a later subscribe requests the track again, continuing its sequences. A new request
-// counts as demand while `pinned` is set.
-function logical(
-	state: BroadcastState,
-	name: string,
-	pinned?: Getter<boolean>,
-): { producer: track.Producer; requested: boolean } {
+// the entry so a later subscribe requests the track again, continuing its sequences.
+function logical(state: BroadcastState, name: string): { producer: track.Producer; requested: boolean } {
 	if (state.closed.peek() !== undefined) {
 		throw new Error("broadcast is closed");
 	}
@@ -174,7 +182,9 @@ function logical(
 		return { producer, requested: false };
 	}
 
-	watchDemand(state, producer, pinned);
+	const lookups = new Lookups();
+	state.lookups.set(producer, lookups);
+	watchDemand(state, producer, lookups);
 	state.requests.set(name, producer);
 	void producer.closed.then(() => {
 		if (state.requests.get(name) === producer) state.requests.delete(name);
@@ -192,13 +202,13 @@ function subscribe(state: BroadcastState, name: string, options: track.Subscript
 }
 
 async function resolveTrackInfo(state: BroadcastState, name: string): Promise<track.Info> {
-	// A pending query is demand, as a pending track request is in Rust, though nobody subscribes.
-	const pending = new Signal(true);
-	const { producer, requested } = logical(state, name, pending);
+	const { producer, requested } = logical(state, name);
+	const lookups = state.lookups.get(producer);
+	lookups?.add(1);
 	try {
 		return await producer.info();
 	} finally {
-		pending.set(false);
+		lookups?.add(-1);
 		// A finished lookup is no demand: let go of a request it opened that nobody subscribed to
 		// meanwhile.
 		if (requested && !producer.demand().used.peek()) producer.close();
