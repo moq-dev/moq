@@ -635,41 +635,46 @@ for (const [name, protocol, version] of [
 	["draft-21", Ietf.ALPN.DRAFT_21, undefined],
 	["draft-22", Ietf.ALPN.DRAFT_22, undefined],
 ] as const) {
-	test(`integration: ietf ${name} delivers datagrams`, async () => {
-		const enc = new TextEncoder();
-		const dec = new TextDecoder();
-		const pair = createMockTransportPair(protocol);
-		const origin = new OriginProducer();
+	for (const timed of [true, false]) {
+		test(`integration: ietf ${name} delivers ${timed ? "timed" : "untimed"} datagrams`, async () => {
+			const enc = new TextEncoder();
+			const dec = new TextDecoder();
+			const pair = createMockTransportPair(protocol);
+			const origin = new OriginProducer();
 
-		const [client, server] = await Promise.all([
-			connect(url, { transport: pair.client }),
-			accept(pair.server, url, { version, publish: origin.consume() }),
-		]);
+			const [client, server] = await Promise.all([
+				connect(url, { transport: pair.client }),
+				accept(pair.server, url, { version, publish: origin.consume() }),
+			]);
 
-		const broadcast = publish(origin, Path.from("test"));
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const broadcast = publish(origin, Path.from("test"));
+			const producer = broadcast.createTrack("video", timed ? { timescale: Timescale.MILLI } : {});
 
-		const remote = wireOf(client).consume(Path.from("test"));
-		const track = remote.track("video").subscribe().ordered();
-		const datagrams = remote.track("video").subscribe();
+			const remote = wireOf(client).consume(Path.from("test"));
+			const track = remote.track("video").subscribe().ordered();
+			const datagrams = remote.track("video").subscribe();
 
-		// A group first, so the subscription is serving and its alias is bound on both ends.
-		producer.writeString("group");
-		expect(await track.readString()).toBe("group");
+			// A group first, so the subscription is serving and its alias is bound on both ends.
+			producer.writeFrame({ payload: enc.encode("group"), timestamp: timed ? Timestamp.now() : undefined });
+			expect(await track.readString()).toBe("group");
 
-		producer.insertDatagram(7, Timestamp.fromMillis(1234), enc.encode("dgram"));
-		const datagram = await withTimeout(datagrams.recvDatagram(), 1000, "no datagram arrived");
-		expect(datagram?.sequence).toBe(7);
-		expect(dec.decode(datagram?.payload)).toBe("dgram");
-		// Drafts 14-16 cannot declare TIMESCALE, so their datagrams arrive untimed.
-		if (["draft-14", "draft-15", "draft-16"].includes(name)) expect(datagram?.timestamp).toBeUndefined();
-		else expect(datagram?.timestamp?.as(Timescale.MILLI)).toBe(1234);
+			producer.insertDatagram(7, timed ? Timestamp.fromMillis(1234) : undefined, enc.encode("dgram"));
+			const datagram = await withTimeout(datagrams.recvDatagram(), 1000, "no datagram arrived");
+			expect(datagram?.sequence).toBe(7);
+			expect(dec.decode(datagram?.payload)).toBe("dgram");
+			// Drafts 14-16 cannot declare TIMESCALE, so their datagrams arrive untimed.
+			if (timed && !["draft-14", "draft-15", "draft-16"].includes(name)) {
+				expect(datagram?.timestamp?.as(Timescale.MILLI)).toBe(1234);
+			} else {
+				expect(datagram?.timestamp).toBeUndefined();
+			}
 
-		broadcast.close();
-		remote.close();
-		client.abort();
-		server.abort();
-	});
+			broadcast.close();
+			remote.close();
+			client.abort();
+			server.abort();
+		});
+	}
 }
 
 test("integration: lite draft-05 missing datagram reader does not close streams", async () => {
