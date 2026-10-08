@@ -1,10 +1,16 @@
 //! A subscription survives its route changing, end to end over real sessions.
 //!
 //! A publisher `P` is pulled by two relays `A` and `B`, both of which re-advertise
-//! it to the subscribing relay `R`. A path is one broadcast whoever serves it, so `R`
-//! may resume a subscription served through one onto the other. The reader on `R`
-//! must see every frame exactly once, in order, whether the route changes between
-//! groups or in the middle of one, and however it changes.
+//! it to the subscribing relay `R`. Both routes carry `P`'s epoch, so `R` may resume
+//! a subscription served through one onto the other. The reader on `R` must see
+//! every frame exactly once, in order, whether the route changes between groups or
+//! in the middle of one, and however it changes.
+//!
+//! Older wire versions cannot carry the epoch, so `R` cannot tell the two routes
+//! serve the same bytes: its subscription stays on its route and ends with it.
+//!
+//! Two publishers sharing one explicit epoch, a redundant pair, are one source the
+//! same way.
 
 mod support;
 
@@ -35,6 +41,11 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 
 fn payload(group: u64, frame: u64) -> Vec<u8> {
 	format!("{group}.{frame}").into_bytes()
+}
+
+/// [`payload`], prefixed with the publisher that wrote it.
+fn tagged(name: &str, group: u64, frame: u64) -> Vec<u8> {
+	format!("{name}:{group}.{frame}").into_bytes()
 }
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
@@ -88,7 +99,9 @@ impl Topology {
 
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast
+			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a).await;
 		let p_to_b = link(version, &publisher, &relay_b).await;
@@ -96,8 +109,8 @@ impl Topology {
 
 		let consumer = subscriber.consume();
 		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live").await.unwrap();
-		let prefs = track::Subscription::default().with_max_age(Duration::from_secs(60));
+		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
 		let topology = Self {
@@ -147,8 +160,11 @@ impl Topology {
 	}
 }
 
+/// A frame as the reader saw it: its group, then its timestamp and payload.
+type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
+
 /// Read every group in full, reporting each frame as it arrives.
-fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<(u64, moq_net::Result<Vec<u8>>)> {
+fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 	let (tx, rx) = mpsc::unbounded();
 	moq_net_sim::spawn(async move {
 		loop {
@@ -163,7 +179,8 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<(u64, moq_net::Re
 			loop {
 				match group.read_frame().await {
 					Ok(Some(frame)) => {
-						if tx.unbounded_send((group.sequence, Ok(frame.payload.to_vec()))).is_err() {
+						let frame = (frame.timestamp, frame.payload.to_vec());
+						if tx.unbounded_send((group.sequence, Ok(frame))).is_err() {
 							return;
 						}
 					}
@@ -180,12 +197,19 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<(u64, moq_net::Re
 }
 
 /// Wait for the next frame the reader reports, failing on an error or a hang.
-async fn next(rx: &mut mpsc::UnboundedReceiver<(u64, moq_net::Result<Vec<u8>>)>) -> (u64, Vec<u8>) {
+async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Vec<u8>) {
+	let (group, _, payload) = next_timed(rx).await;
+	(group, payload)
+}
+
+/// [`next`], keeping the frame's timestamp.
+async fn next_timed(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
 	let (group, frame) = moq_net_sim::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 		.expect("reader ended");
-	(group, frame.unwrap_or_else(|err| panic!("group {group} failed: {err}")))
+	let (timestamp, payload) = frame.unwrap_or_else(|err| panic!("group {group} failed: {err}"));
+	(group, timestamp, payload)
 }
 
 async fn route_change(version: &str, trigger: Trigger, position: Position) {
@@ -284,6 +308,37 @@ async fn route_flaps(version: &str) {
 	assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
 }
 
+/// A wire without epochs: the subscription stays on `A` while `B` stands by, and
+/// ends when `A`'s route goes instead of resuming through `B`.
+async fn route_dies_without_an_epoch(version: &str, trigger: Trigger) {
+	let version: Version = version.parse().unwrap();
+	let (mut topology, sub) = Topology::new(version).await;
+	let mut rx = read(sub);
+	topology.standby().await;
+
+	let mut group = topology.track.append_group().unwrap();
+	for frame in 0..FRAMES {
+		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
+		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
+	}
+	group.finish().unwrap();
+
+	topology.trigger(trigger).await;
+	let mut group = topology.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
+	settle().await;
+	match moq_net_sim::timeout(Duration::from_secs(10), rx.next())
+		.await
+		.expect("reader hung")
+	{
+		None | Some((_, Err(_))) => {}
+		Some((group, Ok((_, frame)))) => panic!(
+			"{version} {trigger:?}: resumed through another route at {group}:{}",
+			String::from_utf8_lossy(&frame)
+		),
+	}
+}
+
 macro_rules! route_change_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
@@ -333,6 +388,43 @@ macro_rules! route_change_tests {
 
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
+}
+
+macro_rules! pinned_tests {
+	($($name:ident: $version:literal,)*) => {
+		$(
+			mod $name {
+				use super::*;
+
+				async fn run(trigger: Trigger) {
+					moq_net_sim::timeout(TEST_TIMEOUT, route_dies_without_an_epoch($version, trigger))
+						.await
+						.expect("timed out");
+				}
+
+				#[moq_net_sim::test]
+				async fn disconnect_ends_the_subscription() {
+					run(Trigger::Disconnect).await;
+				}
+
+				#[moq_net_sim::test]
+				async fn unannounce_ends_the_subscription() {
+					run(Trigger::Unannounce).await;
+				}
+
+				/// A better route without an epoch does not move the subscription either.
+				#[moq_net_sim::test]
+				async fn better_route_keeps_the_incumbent() {
+					moq_net_sim::timeout(TEST_TIMEOUT, route_change($version, Trigger::BetterRoute, Position::MidGroup))
+						.await
+						.expect("timed out");
+				}
+			}
+		)*
+	};
+}
+
+pinned_tests! {
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
@@ -344,7 +436,7 @@ route_change_tests! {
 /// partway through group 1: `A` has handed on (1, 0) and (1, 1) while `P` has already
 /// moved on to group 2. `B` (warmed by another reader on `W`) holds everything, so `R`
 /// resumes there from (1, 2).
-async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, moq_net::Result<Vec<u8>>)> {
+async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<Delivery> {
 	async fn lagged(version: Version, from: &origin::Producer, to: &origin::Producer, lag: Duration) -> MockPair {
 		let mut options = MockConnectOptions::new(version);
 		options.server_publish = Some(from.consume());
@@ -355,8 +447,8 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
 		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live").await.unwrap();
-		let preferences = track::Subscription::default().with_max_age(Duration::from_secs(60));
+		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let preferences = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
 	fn write(group: &mut moq_net::group::Producer, sequence: u64, frame: u64) {
@@ -373,7 +465,9 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 	);
 	let broadcast = p.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast
+		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.unwrap();
 	let p_a = lagged(version, &p, &a, Duration::from_millis(300)).await;
 	let p_b = lagged(version, &p, &b, Duration::ZERO).await;
 	let a_r = lagged(version, &a, &r, Duration::ZERO).await;
@@ -418,28 +512,13 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 /// arrive in order.
 #[moq_net_sim::test]
 async fn lite_resumes_after_a_lagging_route_dies() {
-	for version in ["moq-lite-05", "moq-lite-06"] {
-		let version: Version = version.parse().unwrap();
-		let mut rx = lagging_route_dies(version).await;
-		assert_eq!(next(&mut rx).await, (1, payload(1, 2)), "{version}");
-		assert_eq!(next(&mut rx).await, (1, payload(1, 3)), "{version}");
-		assert_eq!(next(&mut rx).await, (2, payload(2, 0)), "{version}");
-	}
-}
-
-/// Before draft 20 the resume rides a joining FETCH from group 1 through Largest, which
-/// a moq-rs publisher refuses for spanning several groups, so the subscription joins
-/// live instead. The rest of group 1 is still fetched on its own.
-#[moq_net_sim::test]
-async fn an_older_ietf_draft_still_resumes_the_open_group() {
-	let version: Version = "moq-transport-19".parse().unwrap();
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let mut rx = lagging_route_dies(version).await;
 	assert_eq!(next(&mut rx).await, (1, payload(1, 2)));
 	assert_eq!(next(&mut rx).await, (1, payload(1, 3)));
+	assert_eq!(next(&mut rx).await, (2, payload(2, 0)));
 }
 
-/// moq-transport 22 is left out: its relay fills a group's missing frames with a FETCH,
-/// which draft 20+ does not serve yet (see `quest/m1/ietf-fetch-location.md`).
 macro_rules! route_flap_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
@@ -455,9 +534,130 @@ macro_rules! route_flap_tests {
 
 route_flap_tests! {
 	flaps_lite_07: "moq-lite-07-wip",
-	flaps_lite_06: "moq-lite-06",
-	flaps_lite_05: "moq-lite-05",
-	flaps_lite_04: "moq-lite-04",
-	flaps_ietf_19: "moq-transport-19",
-	flaps_ietf_22: "moq-transport-22",
+}
+
+/// How the incumbent of a redundant pair goes away.
+#[derive(Clone, Copy, Debug)]
+enum Loss {
+	/// Its session to `R` dies abruptly.
+	Unreachable,
+	/// It ends the broadcast, while its session to `R` stays up.
+	Ends,
+}
+
+/// One publisher of a redundant pair, writing its own copy of `live`.
+struct Replica {
+	/// Tags its payloads, so the reader shows which replica served each frame.
+	name: &'static str,
+	origin: origin::Producer,
+	broadcast: broadcast::Producer,
+	track: track::Producer,
+	group: Option<moq_net::group::Producer>,
+	link: Option<MockPair>,
+}
+
+/// A redundant pair: `P1` and `P2` publish `live` under one explicit epoch and write
+/// the same frames, tagged with their name. `R` reads through `P1`, priced below `P2`
+/// so it starts there, until `P1` goes mid-group. `R` resumes on `P2` from the first frame its reader
+/// lacks: every frame once, in order, and no timestamp ever rewinds.
+async fn redundant_pair_fails_over(version: &str, loss: Loss) {
+	let version: Version = version.parse().unwrap();
+	let epoch = moq_net::Epoch::mint();
+	let subscriber = produce_origin(4);
+	let mut replicas = Vec::new();
+	for (name, hop, cost) in [("P1", 1, 1), ("P2", 2, 5)] {
+		let publisher = produce_origin(hop);
+		let broadcast = publisher.create_broadcast("live").unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		broadcast
+			.announce(origin::Route::default().with_epoch(epoch.clone()).with_cost(cost))
+			.unwrap();
+		let link = link(version, &publisher, &subscriber).await;
+		replicas.push(Replica {
+			name,
+			origin: publisher,
+			broadcast,
+			track,
+			group: None,
+			link: Some(link),
+		});
+	}
+	settle().await;
+
+	let consumer = subscriber.consume();
+	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
+
+	let mut expected = Vec::new();
+	let mut seen = Vec::new();
+	let mut kept = None;
+	for sequence in 0..3 {
+		for replica in &mut replicas {
+			replica.group = Some(replica.track.append_group().unwrap());
+		}
+		for frame in 0..FRAMES {
+			if sequence == 1 && frame == FRAMES / 2 {
+				let Replica {
+					origin,
+					broadcast,
+					link,
+					..
+				} = replicas.remove(0);
+				let link = link.unwrap();
+				match loss {
+					Loss::Unreachable => {
+						link.server.abort(Error::Cancel);
+						link.client.abort(Error::Cancel);
+					}
+					// Keep the session and its origin up: only the broadcast, its track, and its open group go.
+					Loss::Ends => kept = Some((link, origin)),
+				}
+				drop(broadcast);
+				settle().await;
+			}
+			let timestamp = Timestamp::from_micros(1_000_000 + sequence * 100_000 + frame * 1_000).unwrap();
+			for replica in &mut replicas {
+				let group = replica.group.as_mut().unwrap();
+				group
+					.write_frame(timestamp, tagged(replica.name, sequence, frame))
+					.unwrap();
+			}
+			// The cheapest replica still up serves it.
+			expected.push((sequence, tagged(replicas[0].name, sequence, frame)));
+			seen.push(next_timed(&mut rx).await);
+		}
+		for replica in &mut replicas {
+			replica.group.take().unwrap().finish().unwrap();
+		}
+	}
+
+	let frames: Vec<_> = seen.iter().map(|(group, _, frame)| (*group, frame.clone())).collect();
+	assert_eq!(frames, expected, "{version} {loss:?}");
+	for pair in seen.windows(2) {
+		assert!(
+			pair[0].1.expect("timed") < pair[1].1.expect("timed"),
+			"{version} {loss:?}: timestamp rewound at {pair:?}"
+		);
+	}
+	settle().await;
+	assert!(rx.try_recv().is_err(), "{version} {loss:?}: trailing delivery");
+	drop(kept);
+}
+
+#[moq_net_sim::test]
+async fn redundant_pair_fails_over_when_unreachable() {
+	moq_net_sim::timeout(
+		TEST_TIMEOUT,
+		redundant_pair_fails_over("moq-lite-07-wip", Loss::Unreachable),
+	)
+	.await
+	.expect("timed out");
+}
+
+#[moq_net_sim::test]
+async fn redundant_pair_fails_over_when_the_incumbent_ends() {
+	moq_net_sim::timeout(TEST_TIMEOUT, redundant_pair_fails_over("moq-lite-07-wip", Loss::Ends))
+		.await
+		.expect("timed out");
 }

@@ -46,7 +46,3 @@ Final lag sample (#4451) changed the same sampler; keep any weight this
 quest defers in its drop-time sample.
 
 Public API: none. Wire: none, only the histogram's values change.
-
-## Related
-
-- [Final lag sample](/quest/m1/qos/final-lag-sample.md) - the drop-time sample on the same sampler

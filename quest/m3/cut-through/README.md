@@ -46,15 +46,16 @@ Decided 2026-09-30:
   received and the per-session pre-allocation `Budget` (`model/frame.rs`)
   does not apply. The group cache already charges each frame by bytes written
   (#4609), so several in-flight frames charge only what has arrived.
-- `web-transport-trait` gains an unordered chunk read and an offset write whose
-  defaults report unsupported, and moq-net falls back to ordered I/O. Only the
+- moq-net's `transport::poll` traits gain an unordered chunk read and an
+  offset write whose defaults report unsupported, and moq-net falls back to
+  ordered I/O. Only the
   `moq-quic` backends implement them; browsers, qmux, and iroh keep the defaults.
   Additive, so it lands on `main`.
 - Always on wherever both of the relay's streams support it. No config knob.
 - The relay's own egress is `moq-quic` for every native and browser viewer, so browser
   viewers benefit too; only the relay's side needs the feature.
 
-Public API: additive `web-transport-trait` methods; the loss-delay counter on
+Public API: additive `transport::poll` methods in moq-net; the loss-delay counter on
 `moq-stats` ingress rows. Wire: none for MoQ; the counter is a `moq-stats`
 field.
 
@@ -69,7 +70,7 @@ stats field, which its quest documents inline.
 - [Bench](/quest/m3/cut-through/bench.md) - a lossy relay hop swept over loss, frame size, and egress headroom, measuring the post-hole drain time, with a go or no-go verdict
 - [Offset writes in moq-quic](/quest/m3/cut-through/quic.md) - send streams accept writes past a gap and send them right away
 - [Frame ranges](/quest/m3/cut-through/frames.md) - frames fill out of order, several at once per group, and a reader sees each range as it lands
-- [Transport trait](/quest/m3/cut-through/transport.md) - `web-transport-trait` carries unordered reads and offset writes, implemented for `moq-quic`
+- [Transport trait](/quest/m3/cut-through/transport.md) - moq-net's `transport::poll` carries unordered reads and offset writes, implemented for `moq-quic`
 - [Relay cut-through](/quest/m3/cut-through/relay.md) - lite and IETF group streams read out of order and write each range at its output offset
 
 ## Related

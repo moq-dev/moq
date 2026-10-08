@@ -12,7 +12,7 @@ async fn release(unannounce: bool, settle: bool) {
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.publish("a/b", moq_net::origin::Route::default()).unwrap();
 	let track = broadcast.create_track("t", None).unwrap();
-	let consumer = origin.consume().request_broadcast("a/b").await.unwrap();
+	let consumer = origin.consume().request_broadcast("a/b", None).await.unwrap();
 	let sub = consumer.track("t").unwrap().subscribe(None).await.unwrap();
 	track.demand().used().await.unwrap();
 

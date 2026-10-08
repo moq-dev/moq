@@ -155,7 +155,7 @@ impl VirtualRecvStream {
 	}
 }
 
-impl web_transport_trait::poll::RecvStream for VirtualRecvStream {
+impl crate::transport::poll::RecvStream for VirtualRecvStream {
 	type Error = crate::Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -358,7 +358,7 @@ impl VirtualSendStream {
 	}
 }
 
-impl web_transport_trait::poll::SendStream for VirtualSendStream {
+impl crate::transport::poll::SendStream for VirtualSendStream {
 	type Error = crate::Error;
 
 	fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -400,7 +400,7 @@ pub enum AdapterSend<S: crate::transport::poll::Session> {
 	Virtual(VirtualSendStream),
 }
 
-impl<S: crate::transport::poll::Session> web_transport_trait::poll::SendStream for AdapterSend<S> {
+impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
 	type Error = crate::Error;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -451,7 +451,7 @@ pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Virtual(VirtualRecvStream),
 }
 
-impl<S: crate::transport::poll::Session> web_transport_trait::poll::RecvStream for AdapterRecv<S> {
+impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
 	type Error = crate::Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -970,9 +970,9 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 			_ => Err(Error::UnexpectedMessage),
 		},
 
-		// Follow-up messages: route to existing stream
+		// Follow-up messages: route to the request being updated, not the update's own id.
 		ietf::SubscribeUpdate::ID => {
-			let id = decode_request_id(body, version)?;
+			let id = decode_update_target(body, version)?;
 			Ok(Route::FollowUp(id))
 		}
 
@@ -1058,7 +1058,7 @@ fn lookup_namespace_request_id(
 	Ok(namespaces.get(direction, &ns))
 }
 
-impl<S: crate::transport::poll::Session> web_transport_trait::poll::Session for ControlStreamAdapter<S> {
+impl<S: crate::transport::poll::Session> crate::transport::poll::Session for ControlStreamAdapter<S> {
 	type SendStream = AdapterSend<S>;
 	type RecvStream = AdapterRecv<S>;
 	type Error = crate::Error;
@@ -1136,7 +1136,7 @@ impl<S: crate::transport::poll::Session> web_transport_trait::poll::Session for 
 		self.inner.poll_closed(cx).map(|_| crate::Error::Closed)
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
+	fn stats(&self) -> impl crate::transport::Stats {
 		self.inner.stats()
 	}
 }
@@ -1169,6 +1169,22 @@ fn encode_raw(type_id: u64, body: &Bytes, version: Version) -> Bytes {
 fn decode_request_id(body: &Bytes, version: Version) -> Result<RequestId, Error> {
 	let (request_id, _) = RequestId::decode_slice(body, version)?;
 	Ok(request_id)
+}
+
+/// The request a SUBSCRIBE_UPDATE or REQUEST_UPDATE applies to.
+///
+/// Drafts 14 and 15 name it in Subscription Request ID, and draft 16 in Existing
+/// Request ID. Both are the second field; the first is the update's own new
+/// Request ID. Later drafts send updates on the request's own stream, not here.
+fn decode_update_target(body: &Bytes, version: Version) -> Result<RequestId, Error> {
+	match version {
+		Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+			let mut r = Decoder::new(body, version.into());
+			let _own = RequestId::decode(&mut r, version)?;
+			Ok(RequestId::decode(&mut r, version)?)
+		}
+		_ => Err(Error::UnexpectedMessage),
+	}
 }
 
 /// Decode request_id for response messages that have Option<RequestId> in v14-16.
@@ -1260,11 +1276,45 @@ mod tests {
 		assert!(matches!(route, Route::CloseStream(RequestId(99))));
 	}
 
-	#[test]
-	fn test_classify_subscribe_update_followup() {
-		let body = make_body_with_request_id(10, Version::Draft15);
-		let route = classify_msg(Version::Draft15, ietf::SubscribeUpdate::ID, &body).unwrap();
-		assert!(matches!(route, Route::FollowUp(RequestId(10))));
+	/// Drafts 14 and 15 name the subscription in the second field; draft 16 names
+	/// the existing request there. The first field is the update's own Request ID,
+	/// so a body that carries only that ID cannot tell the two apart.
+	#[moq_net_sim::test]
+	async fn test_subscribe_update_reaches_its_target() {
+		let update_id = RequestId(10);
+		let target_id = RequestId(4);
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let update = ietf::SubscribeUpdate {
+				request_id: update_id,
+				subscription_request_id: Some(target_id),
+				start_location: ietf::Location { group: 1, object: 2 },
+				end_group: 100,
+				subscriber_priority: 200,
+				forward: false,
+			};
+			let body = encode_body(&update, version);
+			let raw = encode_raw(ietf::SubscribeUpdate::ID, &body, version);
+			let Route::FollowUp(routed) = classify_msg(version, ietf::SubscribeUpdate::ID, &body).unwrap() else {
+				panic!("{version} did not route the update as a follow-up");
+			};
+
+			let shared = Arc::new(Shared::default());
+			shared.open_incoming(target_id, Bytes::from_static(b"request")).unwrap();
+			let (_, mut recv) = shared.incoming.pop().await.unwrap();
+			assert_eq!(
+				recv.read_chunk(usize::MAX).await.unwrap(),
+				Some(Bytes::from_static(b"request"))
+			);
+
+			assert_eq!(routed, target_id, "{version}: update {update_id} routed to {routed}");
+			shared.push(routed, raw.clone());
+			assert_eq!(
+				recv.read_chunk(usize::MAX).await.unwrap(),
+				Some(raw),
+				"{version}: update {update_id} did not reach {target_id}"
+			);
+		}
 	}
 
 	#[test]

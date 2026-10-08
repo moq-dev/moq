@@ -1,4 +1,6 @@
-use std::task::Poll;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use base64::Engine;
@@ -278,7 +280,7 @@ fn test_generation() -> Generation {
 }
 
 fn subscribe_all() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60))
+	moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60))
 }
 
 fn net_track(name: &Name) -> moq_net::track::Producer {
@@ -339,15 +341,10 @@ fn datagram_ciphertext(generation: &Generation, name: &Name, sequence: u64, plai
 }
 
 #[test]
-fn path_joins_epoch() {
-	let cred = test_credential();
-	let epoch = Epoch::mint();
-	let path = cred.path("meeting.hang").unwrap();
+fn path_is_opaque() {
+	let path = test_credential().path("meeting.hang").unwrap();
 	assert_eq!(path.as_str().len(), 22);
-	let full = path.join_epoch(Some(&epoch));
-	let (opaque, parsed) = full.split_epoch();
-	assert_eq!(opaque, path);
-	assert_eq!(parsed.unwrap(), epoch);
+	assert!(!path.as_str().contains("meeting"));
 }
 
 #[test]
@@ -378,7 +375,7 @@ fn datagram_roundtrip() {
 	match recv_datagram(&mut pair.consumer) {
 		Event::Datagram(d) => {
 			assert_eq!(d.sequence, 0);
-			assert_eq!(d.timestamp, ms(5));
+			assert_eq!(d.timestamp, Some(ms(5)));
 			assert_eq!(&d.plaintext[..], b"opus");
 		}
 		other => panic!("{other:?}"),
@@ -598,6 +595,184 @@ fn grouped_authentication_ends_track() {
 	);
 }
 
+/// Wakes when a parked read is notified. One flag per parked task, so a sibling
+/// that happens to be polled again cannot hide a missing wake.
+struct WakeFlag(AtomicBool);
+
+impl Wake for WakeFlag {
+	fn wake(self: Arc<Self>) {
+		self.0.store(true, Ordering::SeqCst);
+	}
+}
+
+struct Parked {
+	flag: Arc<WakeFlag>,
+	waker: Waker,
+	park: kio::Park,
+}
+
+impl Parked {
+	fn new() -> Self {
+		let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+		let waker = Waker::from(Arc::clone(&flag));
+		Self {
+			flag,
+			waker,
+			park: kio::Park::default(),
+		}
+	}
+
+	fn poll<T>(&mut self, poll: impl FnOnce(&kio::Waiter) -> Poll<T>) -> Poll<T> {
+		let cx = Context::from_waker(&self.waker);
+		let waiter = self.park.hold(&cx);
+		poll(waiter)
+	}
+
+	fn woken(&self) -> bool {
+		self.flag.0.load(Ordering::SeqCst)
+	}
+}
+
+#[test]
+fn grouped_failure_wakes_pending_reads_and_releases_demand() {
+	let mut pair = pair("video");
+	let demand = pair.net.demand();
+	assert!(demand.is_used());
+
+	// One authentic frame, then silence. The group and the track stay open.
+	let name: Name = pair.net.name().parse().unwrap();
+	let key = pair.generation.key_bytes(&name, Domain::Group).unwrap();
+	let mut open = pair.net.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	let open_demand = open.demand();
+	open.write_frame(ms(1), protect(&key, 0, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap())
+		.unwrap();
+
+	let mut payload = protect(&key, 1, 0, b"nope", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
+	payload[0] ^= 1;
+	let mut bad = pair.net.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+	let bad_demand = bad.demand();
+	bad.write_frame(ms(2), payload).unwrap();
+
+	let mut good = recv_group(&mut pair.consumer);
+	assert_eq!(read_frame(&mut good).plaintext, &b"ok"[..]);
+	let mut forged = recv_group(&mut pair.consumer);
+	assert!(bad_demand.is_used());
+
+	// Sibling frame, next group, and datagram reads are already parked. Nothing
+	// further is published.
+	let mut frame = Parked::new();
+	assert!(matches!(
+		frame.poll(|waiter| good.poll_read_frame(waiter)),
+		Poll::Pending
+	));
+	let mut track = Parked::new();
+	assert!(matches!(
+		track.poll(|waiter| pair.consumer.poll_recv_group(waiter)),
+		Poll::Pending
+	));
+	assert!(matches!(
+		track.poll(|waiter| pair.consumer.poll_recv_datagram(waiter)),
+		Poll::Pending
+	));
+
+	assert_eq!(
+		forged
+			.poll_read_frame(&kio::Waiter::noop())
+			.map(|r| r.unwrap_err().to_string()),
+		Poll::Ready("authentication".to_string())
+	);
+
+	assert!(frame.woken(), "parked frame read was not woken");
+	assert!(track.woken(), "parked group and datagram reads were not woken");
+	assert!(
+		!demand.is_used(),
+		"track demand stayed live after authentication failure"
+	);
+	assert!(!bad_demand.is_used(), "failed group demand stayed live");
+	assert!(!pair.net.is_closed(), "publisher must stay open");
+
+	assert_eq!(
+		frame
+			.poll(|waiter| good.poll_read_frame(waiter))
+			.map(|r| r.unwrap_err().to_string()),
+		Poll::Ready("authentication".to_string())
+	);
+	assert!(
+		!open_demand.is_used(),
+		"sibling group demand stayed live after its woken read"
+	);
+	assert_eq!(
+		track
+			.poll(|waiter| pair.consumer.poll_recv_group(waiter))
+			.map(|r| r.unwrap_err().to_string()),
+		Poll::Ready("authentication".to_string())
+	);
+	assert_eq!(
+		track
+			.poll(|waiter| pair.consumer.poll_recv_datagram(waiter))
+			.map(|r| r.unwrap_err().to_string()),
+		Poll::Ready("authentication".to_string())
+	);
+
+	// The handles that observed the failure are still held.
+	drop(good);
+	drop(forged);
+	drop(open);
+}
+
+#[test]
+fn dropping_track_releases_demand_while_group_is_held() {
+	let mut pair = pair("video");
+	let demand = pair.net.demand();
+	let mut open = pair.producer.append_group().unwrap();
+	open.write_frame(ms(1), b"ok").unwrap();
+
+	let mut group = recv_group(&mut pair.consumer);
+	drop(pair.consumer);
+	assert!(!demand.is_used(), "a held group kept the track subscription");
+
+	// The held group is not failed by the unsubscribe.
+	assert_eq!(read_frame(&mut group).plaintext, &b"ok"[..]);
+	open.write_frame(ms(2), b"next").unwrap();
+	assert_eq!(read_frame(&mut group).plaintext, &b"next"[..]);
+}
+
+#[test]
+fn bad_datagram_stays_an_event_and_keeps_demand() {
+	let mut pair = pair("audio");
+	let demand = pair.net.demand();
+	let mut open = pair.producer.append_group().unwrap();
+	open.write_frame(ms(1), b"ok").unwrap();
+
+	let name: Name = pair.net.name().parse().unwrap();
+	let mut forged = datagram_ciphertext(&pair.generation, &name, 0, b"nope").to_vec();
+	forged[0] ^= 1;
+	pair.net.insert_datagram(0, ms(2), forged).unwrap();
+
+	let mut good = recv_group(&mut pair.consumer);
+	assert_eq!(read_frame(&mut good).plaintext, &b"ok"[..]);
+	let mut frame = Parked::new();
+	assert!(matches!(
+		frame.poll(|waiter| good.poll_read_frame(waiter)),
+		Poll::Pending
+	));
+
+	assert_eq!(recv_datagram(&mut pair.consumer), Event::Authentication { sequence: 0 });
+	assert!(!frame.woken(), "a bad datagram must not wake grouped reads");
+	assert!(matches!(
+		frame.poll(|waiter| good.poll_read_frame(waiter)),
+		Poll::Pending
+	));
+	assert!(demand.is_used());
+
+	pair.producer.insert_datagram(1, ms(3), b"next").unwrap();
+	match recv_datagram(&mut pair.consumer) {
+		Event::Datagram(d) => assert_eq!(&d.plaintext[..], b"next"),
+		other => panic!("{other:?}"),
+	}
+	assert!(demand.is_used());
+}
+
 #[test]
 fn bad_datagram_is_event() {
 	let mut pair = pair("audio");
@@ -714,7 +889,7 @@ fn failed_group_write_does_not_burn_nonce() {
 
 #[test]
 fn resumed_group_opens_at_transport_index() {
-	use std::sync::{Arc, Mutex, atomic::AtomicBool};
+	use std::sync::{Arc, Mutex};
 
 	let generation = test_generation();
 	let name = generation.name("video").unwrap();
@@ -733,6 +908,6 @@ fn resumed_group_opens_at_transport_index() {
 	};
 	net_group.skip_to(1);
 	let key = Arc::new(Mutex::new(generation.key(&name, Domain::Group).unwrap()));
-	let mut group = group::Consumer::new(net_group, key, Arc::new(AtomicBool::new(false)));
+	let mut group = group::Consumer::new(net_group, key, crate::terminal::Terminal::new(None));
 	assert_eq!(read_frame(&mut group).plaintext, &b"one"[..]);
 }
