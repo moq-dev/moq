@@ -152,6 +152,14 @@ impl InBandCodec {
 			Self::H265 => (nal[0] >> 1) & 0x3f,
 		}
 	}
+
+	/// A coded slice, so the access unit is a picture.
+	fn is_vcl(self, nal: &[u8]) -> bool {
+		match self {
+			Self::H264 => (1..=5).contains(&self.nal_type(nal)),
+			Self::H265 => self.nal_type(nal) < 32,
+		}
+	}
 }
 
 /// Length-prefixes Annex-B access units with their parameter sets kept in the
@@ -159,7 +167,9 @@ impl InBandCodec {
 ///
 /// A keyframe is the only place a receiver can join, so it always carries every
 /// parameter-set type, in dependency order (VPS, SPS, PPS) right after any access
-/// unit delimiter. A type the access unit omitted is the last one seen.
+/// unit delimiter. A type the access unit omitted is the last one seen. A type it
+/// carried replaces every cached set of that type, so a source that spreads several
+/// PPS ids across access units keeps only the last.
 pub(crate) struct InBand {
 	codec: InBandCodec,
 	/// The active sets of each type, in [`InBandCodec::parameter_sets`] order.
@@ -174,8 +184,8 @@ impl InBand {
 		}
 	}
 
-	/// Returns `None` for an access unit that carried only parameter sets, which
-	/// are kept for the next keyframe instead.
+	/// Returns `None` for an access unit with no coded slice, as `Avc1` and `Hvc1`
+	/// do; its parameter sets are kept for the next keyframe.
 	pub fn transform(&mut self, payload: Bytes, keyframe: bool) -> Result<Option<Bytes>> {
 		let codec = self.codec;
 		let kinds = codec.parameter_sets();
@@ -203,7 +213,7 @@ impl InBand {
 				*active = set;
 			}
 		}
-		if nals.iter().all(|nal| kind(nal).is_some()) {
+		if !nals.iter().any(|nal| codec.is_vcl(nal)) {
 			return Ok(None);
 		}
 
@@ -860,6 +870,7 @@ mod tests {
 		let delta = &[0x61, 0xe0, 0x12][..];
 
 		let mut tx = InBand::new(InBandCodec::H264);
+		assert!(tx.transform(annexb(&[aud, sps, pps]), true).unwrap().is_none());
 		let full = tx.transform(annexb(&[sps, pps, idr]), true).unwrap().unwrap();
 		assert_eq!(full.as_ref(), length_prefixed(&[sps, pps, idr]));
 
@@ -887,9 +898,10 @@ mod tests {
 		let sei = &[0x4e, 0x01, 0x05][..];
 		let sps2 = &[0x42, 0x01, 0x01, 0x61][..];
 
-		// Parameter sets alone are kept for the next keyframe.
+		// An access unit with no slice is not a sample; its sets wait for the next keyframe.
 		let mut tx = InBand::new(InBandCodec::H265);
 		assert!(tx.transform(annexb(&[vps, sps, pps]), true).unwrap().is_none());
+		assert!(tx.transform(annexb(&[sei]), true).unwrap().is_none());
 		let bare = tx.transform(annexb(&[idr]), true).unwrap().unwrap();
 		assert_eq!(bare.as_ref(), length_prefixed(&[vps, sps, pps, idr]));
 
