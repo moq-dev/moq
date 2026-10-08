@@ -95,7 +95,6 @@ published version in place, so AUTH and its stream code land in
 ## Required
 
 - [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
-- [AUTH on the wip version](/quest/m1/auth/wip-version.md) - lite AUTH and UNAUTHORIZED move from lite-06 to `moq-lite-07-wip`, so no published version changes in place
 - [Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md) - a lite acceptor answers AUTH_ERROR NOT_SUPPORTED after a grant too, with a lite session code for `Error::Unsupported`
 - [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
 - [Malformed grant](/quest/m1/auth/malformed-grant.md) - a malformed or
@@ -112,9 +111,6 @@ published version in place, so AUTH and its stream code land in
 - [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - an
   auth decider sees `webtransport` for a WebTransport session and `quic` only
   for native QUIC
-- [Typed refusal reason](/quest/m1/auth/refusal-reason.md) - an auth
-  server's 403 names the reason (including `expired`) and the root and tier,
-  so the relay's session outcomes count and attribute refusals
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave

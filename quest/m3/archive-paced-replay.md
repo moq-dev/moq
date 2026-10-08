@@ -12,6 +12,10 @@ who joins late joins mid-replay.
 
 - Today `moq_archive::Reader` publishes only the timeline track live and serves
   media groups on FETCH through `broadcast::Dynamic`, so a subscriber sees none.
+  [Replay catalog](/quest/m1/archive/replay-catalog.md) adds the recorded
+  catalog live too.
+- The catalog stays at its live edge, unpaced, as replay catalog publishes
+  it; pacing covers the media tracks only.
 - One clock per import, not per subscriber. It starts at the earliest recorded
   timestamp across the selected tracks and every track paces against it, so
   tracks stay in sync and every viewer sees the same moment.
@@ -27,3 +31,7 @@ who joins late joins mid-replay.
   current group, and that two tracks stay aligned.
 - Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer; FETCH replay
   already serves DVR and HLS.
+
+## Required
+
+- [Replay catalog](/quest/m1/archive/replay-catalog.md) - publishes the recorded catalog live, which a live player needs before any paced media

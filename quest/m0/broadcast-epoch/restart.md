@@ -171,12 +171,13 @@ the downstream relay gets a `Restart` of `pool` (END then START on lite-06), dro
 the nested paths, and the next subscribes reach the right workers, the moved
 path on its new worker and the rest on theirs. Run `just drafts check` and `just test interop --all`.
 
-Docs: open PR #5033 rewrites the publisher-restart docs to match today's
-hard switch; land it first, then update `doc/concept/moq-lite.md` (publisher
-epochs), the `doc/lib/{rs,js}` announce sections, and the gateway and
-cluster pages under `doc/bin` wherever they still describe the hard switch
-(a reconnect replacing the stale viewer, stale subscriptions ending with
-`Unroutable`, a flapping lite-07 link cutting viewers).
+Docs: #5033 (merged) rewrote the publisher-restart docs to match today's
+hard switch. Update `doc/concept/moq-lite.md` (publisher epochs), the
+`doc/lib/{rs,js}` announce sections, and every page that still describes the
+hard switch (a reconnect replacing the stale viewer, stale subscriptions
+ending with `Unroutable`, a flapping lite-07 link cutting viewers):
+`doc/bin/rtmp.md`, `doc/bin/srt.md`, `doc/bin/cli.md`, and
+`doc/setup/upgrade.md`.
 
 Public API: breaking, a new `AnnounceEvent::Restart` variant (Rust) and
 `"restart"` kind (JS). Wire: a new lite-07 announce message; older versions

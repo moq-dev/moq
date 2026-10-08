@@ -8,9 +8,8 @@ and any hard session limit, memory used and available, and engine
 utilization. It also reports device health (whether the device is usable,
 lost, or reset) and the GPU model, which moq.pro's admission keys its
 per-model limits on. The same API works on NVIDIA, AMD, and Intel, keyed by
-the device's render node `dev_t`, the identity
-`Surface::Vulkan` carries, so a caller writes no
-vendor code. A value a driver cannot provide is absent, never guessed.
+the device identity `Surface::Vulkan` carries (`frame::vulkan::Device`), so a
+caller writes no vendor code. A value a driver cannot provide is absent, never guessed.
 
 Not here: admission policy, thresholds, frame-lateness tracking, or draining.
 Those are the caller's.
@@ -28,7 +27,11 @@ adopt this instead.
 Decided 2026-10-05: one device identity everywhere, the render node's
 `dev_t`, shared with [VA-API import](/quest/m2/vaapi-vulkan-import.md).
 NVIDIA's device UUID maps to its node through `VK_EXT_physical_device_drm`.
-The external GPU surface (#4975) carries that identity.
+The external GPU surface (#4975) carries that identity as
+`frame::vulkan::Device { device_uuid, driver_uuid, render_node: Option<u64> }`.
+`render_node` is absent when the exporter has no DRM render node; key such a
+device by its `device_uuid`, which every Vulkan device has, so a report never
+merges two devices or drops one.
 
 Guidance, to be settled while building:
 

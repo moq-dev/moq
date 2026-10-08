@@ -100,9 +100,8 @@ fixture with the PCR on its audio PID starts groups at video random access
 points only. PCR discovery finds a PCR PID that differs from the PMT PID, with
 the PMT section split across packets. Two exporters fed the same objects with
 different arrival skew emit identical bytes; when only one misses a deadline,
-its output is the other's less that object's packets. A flagged backward PCR
-discontinuity publishes two broadcasts, and the same rewind unflagged errors.
-A dropped object is counted, and the rest still go out on time. Rerun the
+its output is the other's less that object's packets. A backward PCR
+errors, flagged or not. A dropped object is counted, and the rest still go out on time. Rerun the
 #4613 netem rig (10% loss, 120 s) against it.
 
 Lands in two PRs (decided 2026-10-08): #5003 is the import half and the

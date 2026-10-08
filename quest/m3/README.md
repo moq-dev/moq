@@ -26,13 +26,13 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Catalog colour model](/quest/m3/color-catalog.md) - the catalog describes a rendition's colour and HDR properties once a renderer consumes them
 - [#2147](/quest/m3/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - NVIDIA Main10 encode, once a 10-bit source exists in the pipeline
 - [Embedded video](/quest/m3/video-embedded.md) - verify a Pi 4/5 presents through the existing Vulkan and CPU paths, adding EGL import only if that fails
-- [Multi-plane PipeWire cameras](/quest/m3/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane capture, if the hardware pass finds one
+- [Multi-plane PipeWire cameras](/quest/m3/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane capture
 - [Video codec coverage](/quest/m3/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps once a consumer asks
 - [A physical-NIC peer for the zero-copy sweep](/quest/m3/zero-copy-peer.md) - the rig the zero-copy sweep runs on
 - [#3201: moq-uring: use SENDMSG_ZC for large UDP GSO trains](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - complete the prerequisite issue first
 - [#3204](/quest/m3/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
 - [Stream sessions on the ring](/quest/m3/uring-tcp/README.md) - WebSocket and HTTP on the io_uring workers, gated on the ablation; no fleet asks for ring TCP yet
-- [#3202](/quest/m3/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: fixed-file slots for worker UDP sockets, if the ablation measures a win
+- [#3202](/quest/m3/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: fixed-file slots for worker UDP sockets, if its own benchmark measures a win
 - [#3129](/quest/m3/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring writes the WebTransport stream header at open and settles the open contract, once a caller hits it
 - [QUIC receive timestamps](/quest/m3/quic-gcc.md) - a spike measuring receive timestamps in ACKs on native and relay-to-relay egress; delay-based control only if it justifies one
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement, if the ECN measurement says marks survive
@@ -43,7 +43,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
-- [moq-transport cluster peers](/quest/m3/ietf-cluster-peers.md) - an extended cluster draft lets moq-transport relays peer again, once a moq-transport relay operator asks
+- [moq-transport cluster peers](/quest/m3/ietf-cluster-peers.md) - the cluster draft carries the route layer, so moq-transport relays peer again, once a moq-transport relay operator asks
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment that makes the exemption dead code
 - [Drop the hidden cluster exemption](/quest/m3/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
 - [Robot teleoperation primitive](/quest/m3/teleop-robot.md) - a `moq-robot` crate for video down and control up, once a robotics consumer appears
@@ -66,7 +66,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Paced replay](/quest/m3/archive-paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   reads its viewers' feedback and adapts its bitrate
-- [Closure counters](/quest/m3/closure-counters.md) - a departed node's return never regresses the closure counters a consumer already saw
+- [Closure counters](/quest/m3/closure-counters.md) - document and pin that a same-epoch rejoin within the grace may regress the closure counters retire advanced
 - [Interop runner withdraws before disconnecting](/quest/m3/interop-runner-approval.md) - condition: the maintainer approves posting and a released moq-tokio and @moq/net carry close() withdrawals
 - [Safari ships the WebKit 319818 fix](/quest/m3/webkit-319818.md) - the Safari release the gate admits
 - [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed

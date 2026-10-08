@@ -10,19 +10,27 @@ stay small so one client cannot reserve a relay's memory.
 
 ## Plan
 
-noq-proto already exposes runtime `Connection::set_max_concurrent_streams`,
-`set_receive_window`, and `set_send_window`; a raise queues `MAX_STREAMS` and
-`MAX_DATA` on the next packet, and a shrink is a debt paid as the peer
-consumes credit. Nothing MoQ builds on top needs a fork change.
+The in-tree `moq-quic` `Connection` (`rs/moq-quic/src/connection/mod.rs`)
+already exposes runtime `set_max_concurrent_streams`, `set_receive_window`,
+and `set_send_window`; a raise queues `MAX_STREAMS` and `MAX_DATA` on the next
+packet, and a shrink is a debt paid as the peer consumes credit. The core
+needs no change; the work waits only for
+[the fork switch](/quest/m1/quic/fork/README.md), so moq-tokio and moq-uring
+run on `moq-quic` instead of `moq-noq`.
 
-- `web-transport-moq` (and the trait, with an unsupported default for the
-  browser) exposes a `set_limits(Limits)` on the session, `Limits` carrying
-  the three values.
-- moq-tokio's `[quic]` section gains a `peer` sub-table with the same three
-  window fields plus `max_streams`, defaulting to an order of magnitude above
-  the client defaults. `moq-relay` applies it once SETUP identifies the
-  session as a cluster peer (the cluster extension's role, not the peer's
-  address), on the io_uring workers too.
+Decided 2026-10-08: [relay session limits](/quest/m1/relay-session-limits.md)
+lands first and introduces the relay's peer config surface (classifying a
+session as a cluster peer, and a peer table); this quest extends that
+surface with the QUIC values rather than adding its own.
+
+- moq-net's transport trait gains `set_limits(Limits)` on the session,
+  `Limits` carrying the three values, implemented by the moq-tokio and
+  moq-uring adapters over `moq-quic` after the fork switch; every other
+  backend, the browser included, reports it unsupported.
+- The peer table gains the same three window fields plus `max_streams`,
+  defaulting to an order of magnitude above the client defaults. `moq-relay`
+  applies it once a session is classified as a cluster peer, on the io_uring
+  workers too.
 - Refuse a `peer` value below the client default rather than silently
   shrinking.
 
@@ -32,4 +40,8 @@ viewer session does not; the io_uring path applies the same values; a
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
+- [Hard fork](/quest/m1/quic/fork/README.md) - moq-tokio and moq-uring run on `moq-quic`, whose setters this calls
+
+## Related
+
+- [Relay session limits](/quest/m1/relay-session-limits.md) - introduces the peer classification and config table this extends

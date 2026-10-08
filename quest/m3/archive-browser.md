@@ -18,7 +18,7 @@ the object keys, envelope bytes, `.info` property values, and timeline
 discovery the Rust writer uses, per the
 [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), without
 inferring catalog-to-group applicability.
-[Catalog track identity](/quest/m2/catalog-tracks.md) addresses that separately.
+[Catalog track identity](/quest/m1/catalog-tracks.md) addresses that separately.
 
 Use [JS ranges](/quest/m1/subscribe-ranges/js.md)'s on-demand range requests to
 answer cache misses from memory or OPFS after relay eviction. This quest owns

@@ -41,6 +41,7 @@ ships in no package.
 
 ## Required
 
+- [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - owns the transmit contract zero-copy sends build on
 - [A physical-NIC peer for the zero-copy sweep](/quest/m3/zero-copy-peer.md) - loopback only measures the forced copy
 
 ## Closes

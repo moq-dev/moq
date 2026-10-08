@@ -15,6 +15,12 @@ get loose limits. The relay knows
 which sessions are peers, so it picks the limit per session. Propose the flag
 and TOML names in the PR.
 
+Decided 2026-10-08: this quest lands before
+[peer limits](/quest/m1/quic/peer-limits.md) and introduces the peer config
+surface both use: how the relay classifies a session as a cluster peer, and a
+peer table holding the request limits. Peer limits adds its QUIC values to
+that table.
+
 Past a cap the session closes with TOO_MANY_REQUESTS, so until cluster peers
 get higher caps (or none), a link carrying more than 10,000 subscriptions
 closes and flaps on reconnect. This does not gate a release (decided
@@ -25,3 +31,7 @@ Sync table.
 
 Public API: a relay config field and flag, and a new error kind in moq-ffi
 and the bindings. Wire: none.
+
+## Related
+
+- [Peer limits](/quest/m1/quic/peer-limits.md) - extends the peer table with QUIC stream and data limits

@@ -29,8 +29,15 @@ them there. Once a `tls://` listener verifies the certificate, this quest lifts
 that refusal for a server with a `tls://` listener and updates the refusal's
 test.
 
+Decided 2026-10-08: request the certificate optionally, never require it,
+and only on the moq-ALPN TLS config, so once
+[the TCP acceptor](/quest/m2/one-port/tcp-demux.md) shares the port with
+HTTP and RTMPS, those clients are never asked for one. Whichever lands second
+keeps both working.
+
 Public API: relay config may gain a listener option. Wire: none.
 
 ## Related
 
+- [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - carries `tls://` on the shared TCP port, where the certificate request stays on the moq ALPN
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - moves qmux in-tree; if it lands first, the peer-certificate accessor lands here instead of upstream

@@ -3,7 +3,7 @@
 ## Goal
 
 On draft-18 and draft-21, `rs/moq-net` and `js/net` answer these requests
-the way the drafts say, without closing the session. Each answer uses the
+the way the drafts say, without closing the session unless noted. Each answer uses the
 draft's code, or an existing code where the exact one costs more than it
 is worth and the fallback is recorded in `doc/concept/standard.md`:
 
@@ -31,6 +31,12 @@ is worth and the fallback is recorded in `doc/concept/standard.md`:
   on REQUEST_UPDATE are accepted and ignored, as SUBSCRIBE already does
   (`ietf/subscribe.rs`). Today `ietf/request_stream.rs` decodes both and
   marks the update unsupported.
+- **REQUEST_UPDATE on a SUBSCRIBE_NAMESPACE stream** is read, so its
+  TRACK_NAMESPACE_PREFIX applies (a #5028 follow-up).
+- **TRACK_PROPERTY_FILTER on a subscription's REQUEST_UPDATE** closes the
+  session with PROTOCOL_VIOLATION instead of answering REQUEST_ERROR:
+  draft-19 allows it only on SUBSCRIBE_TRACKS and its updates (a #5028
+  follow-up).
 
 ## Plan
 
@@ -41,9 +47,11 @@ Decided with the maintainer on 2026-10-04 and 2026-10-05:
   SUBGROUP_DELIVERY_TIMEOUT never drop an object or reset a subgroup: they
   would need wall-clock delivery deadlines, and moq-net's latency
   enforcement is presentation time only (#2890). The rendezvous wait is
-  capped at 0. Each deviation gets a line under
-  "moq-transport" in `doc/concept/standard.md`, so the next validator run
-  has a reason to point at.
+  capped at 0. Each deviation gets a line in the "Deliberate deviations"
+  subsection of `doc/concept/standard.md`, so the next validator run has a
+  reason to point at. Drop the hard-coded count from that subsection's
+  intro, and update the "Refused, not fatal" bullet above it for the
+  answers this quest changes.
 - **Exact codes when cheap.** INVALID_FILTER becomes a request code. Where
   one costs more than it is worth, the fallback in the Goal applies.
 - **TIMEOUT, not a timer.** The 0 cap means nothing waits, so no request is

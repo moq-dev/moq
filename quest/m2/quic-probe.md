@@ -52,6 +52,6 @@ retain the baseline and record why before exposing an ineffective option.
 
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side, which requires this
 - [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
-- [GCC egress experiment](/quest/m3/quic-gcc.md) - delay control changes what headroom means
+- [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures forward delay, which a later delay-based controller would read headroom from
 - [noq#811](https://github.com/n0-computer/noq/issues/811) - probing while app-limited, proposed to n0
 - [noq#476](https://github.com/n0-computer/noq/issues/476) - the earlier bitrate-probing ask

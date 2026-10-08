@@ -10,7 +10,8 @@ instead of guessing or reparsing the bitstream.
 ## Plan
 
 Deferred to m2 in the 2026-09-30 audit: no renderer consumes colour today, so
-the model waits for one. Encoder colour correctness stays in m1 as
+the model waits for one. Decided 2026-10-08: moved to m3; no renderer
+consumes colour. Encoder colour correctness stays in m1 as
 [Encoder colour](/quest/m1/color-model.md).
 
 `rs/hang/src/catalog/video/mod.rs` has carried a bare `// TODO color space` since

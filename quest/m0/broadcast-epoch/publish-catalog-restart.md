@@ -22,11 +22,15 @@ re-announce. `js/publish/src/broadcast.ts` mints the epoch once and keeps the
 publisher across unannounce and announce on purpose, which points at
 continuing the sequence.
 
-#4929 (merged) made an on-demand producer continue a name's sequences
-across replacements in both languages, but JS `createTrack` and
-`insertTrack` still start at 0 (`doc/lib/js/net.md`). If this reproduces,
-consider fixing it there, in `@moq/net`'s `createTrack`, so every JS
-publisher continues the sequence, rather than in `@moq/publish` alone.
+Decided 2026-10-08: the `@moq/net` fix belongs to
+[JS track takeover](/quest/m0/js-track-takeover.md), so every JS publisher
+continues a name's sequences; this quest does not fix `createTrack` itself.
+Re-run the test once it lands and fix `@moq/publish` only if it still
+restarts.
 
 Public API: none expected. Wire: none.
+
+## Required
+
+- [JS track takeover](/quest/m0/js-track-takeover.md) - JS `createTrack` and `insertTrack` continue a name's sequences, which fixes the restart at its source
 

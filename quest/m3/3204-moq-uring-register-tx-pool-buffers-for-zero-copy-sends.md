@@ -40,6 +40,7 @@ experiment it builds on moved to m3 too.
 
 ## Required
 
+- [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - owns the transmit contract; this quest owns registering its buffers
 - [#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - the zero-copy send experiment this extends
 
 ## Closes

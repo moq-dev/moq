@@ -3,8 +3,10 @@
 ## Goal
 
 `moq-quic`'s sans-IO boundary lets moq-uring receive from the kernel's
-buffer ring and transmit into registered buffers, with no copy between the
-kernel and the crypto. The API may break; it is in-tree.
+buffer ring and transmit into caller-owned buffers, with no copy between the
+kernel and the crypto. This quest owns the transmit contract; registering
+those buffers with the ring is
+[#3204](/quest/m3/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md)'s. The API may break; it is in-tree.
 
 ## Plan
 
@@ -18,13 +20,17 @@ Candidates, to be ranked by the profile:
 - `Endpoint::handle` accepts a foreign-owned buffer (a buffer-ring slot), and
   stream frames keep references to it instead of requiring an owned
   `BytesMut`.
-- `poll_transmit` writes into a caller slice or registered buffer as a
-  contract, not by relying on `Vec` capacity.
+- `poll_transmit` writes into a caller-owned slice as a contract, not by
+  relying on `Vec` capacity.
 - One `handle` call takes a whole GRO batch.
 
-Registered TX buffers ([#3204](/quest/m3/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md))
-and `SENDMSG_ZC` ([#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md))
-build on the transmit contract. Report relay CPU per Gbps before and after on
+Decided 2026-10-08: `SENDMSG_ZC`
+([#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md))
+and registered TX buffers
+([#3204](/quest/m3/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md))
+Require this quest and build on its transmit contract, so the contract is
+settled once; registering buffers stays with #3204, which measures whether
+it pays. Report relay CPU per Gbps before and after on
 the same workloads.
 
 ## Related

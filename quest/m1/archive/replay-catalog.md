@@ -9,10 +9,10 @@ its recorded catalog live, stamped with the recording's `store` and `version`,
 so an exporter in history mode treats its timeline as durable and lists past
 `--window`. A `--follow` replay grows like an event playlist.
 
-A track's definition never changes for its name
-([Catalog track identity](/quest/m2/catalog-tracks.md)), so the newest
-recorded catalog describes every group of the tracks it lists; nothing here
-picks a catalog per group.
+[Catalog track identity](/quest/m1/catalog-tracks.md) guarantees a track's
+identity never changes for its name, and resolution changes in band below
+its ceilings, so the newest recorded catalog describes every group of the
+tracks it lists; nothing here picks a catalog per group.
 
 ## Plan
 
@@ -69,4 +69,5 @@ loudly on a recording with no catalog.
 
 ## Required
 
+- [Catalog track identity](/quest/m1/catalog-tracks.md) - the guarantee that one recorded catalog describes every group
 - [History from the start](/quest/m1/archive/replay-history.md) - history mode lists a recording from its start, which "lists the whole recording" needs

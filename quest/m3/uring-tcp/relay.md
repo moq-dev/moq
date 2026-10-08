@@ -10,7 +10,8 @@ then pinned to one thread for its whole life, exactly like a QUIC one.
 
 `uring::Workers::bind` (`rs/moq-relay/src/uring.rs`) ignores `listen`'s
 `tcp`/`unix` listeners and points the operator at a separate `init_streams`
-tokio server; the only thing it refuses is `tls.generate`. Replace the silent skip with real support: each
+tokio server; it refuses only settings a worker cannot serve
+(`tls.generate`, `lb_id`, several certificates). Replace the silent skip with real support: each
 worker binds its own listener in the reuseport group and runs the router from
 [stream](/quest/m3/uring-tcp/stream.md) on it.
 

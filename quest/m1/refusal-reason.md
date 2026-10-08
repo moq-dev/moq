@@ -12,6 +12,9 @@ refusal to that root and tier.
 
 ## Plan
 
+Decided 2026-10-08: moved out of the auth line to m1, since it extends
+session outcomes and the HTTP auth contract, not in-band AUTH.
+
 Decided 2026-10-08 (split from [Session outcomes](/quest/m1/session-outcomes.md)):
 
 - **Why.** `TokenExpired` is raised only in moq-auth's key check

@@ -21,8 +21,8 @@ Implement in the fork.
 - On loss detection, before queueing a retransmission for a stream with a
   deadline, estimate the arrival instant as now plus the forward one-way
   delay. Start with `min_rtt / 2`, corrected by the peer's reported ACK delay;
-  the [GCC experiment](/quest/m3/quic-gcc.md)'s receive timestamps replace that
-  guess with a measured forward delay. If the estimate is past the deadline,
+  the [receive-timestamps spike](/quest/m3/quic-gcc.md) measures whether
+  receive timestamps should replace that guess with a measured forward delay. If the estimate is past the deadline,
   reset the stream with a dedicated error code and drop its retransmit ranges,
   including bytes already lost, so flow control is returned in one step.
 - Proactive tail-loss probe: when the newest in-flight packet carries deadline
@@ -57,8 +57,8 @@ Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
 
 ## Related
 
-- [QUIC GCC](/quest/m3/quic-gcc.md) - its receive timestamps give a measured
-  forward delay that replaces the half-RTT estimate
+- [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures whether
+  receive timestamps give a forward delay worth replacing the half-RTT estimate
 - [ACK hook](/quest/m2/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`
 - [Discover media headroom](/quest/m2/quic-probe.md) - can reuse
   retransmission machinery if redundant capacity probes prove worthwhile

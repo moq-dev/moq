@@ -8,7 +8,7 @@ refused, by reason, and how many ended abnormally, by kind: idle timeout,
 transport error, application error, or token expired. A dashboard computes an
 error rate from the stats feed alone, with no log scraping. Refusals count
 unattributed, on the default tier, until
-[Typed refusal reason](/quest/m1/auth/refusal-reason.md) adds `expired` and
+[Typed refusal reason](/quest/m1/refusal-reason.md) adds `expired` and
 attributes a refusal to the root and tier the auth server resolved.
 
 ## Plan
@@ -28,7 +28,7 @@ rolling out browser playback wants an error rate it cannot see client-side):
   on first sight and following stats-split's linger and epoch; a project's
   group never sees it. Sessions admitted under the empty root (public rules)
   share that group. `expired` and per-root attribution need the decider to
-  say so, which [Typed refusal reason](/quest/m1/auth/refusal-reason.md) adds.
+  say so, which [Typed refusal reason](/quest/m1/refusal-reason.md) adds.
 - **Ends are classified from a typed close kind, not a string.** A peer's
   application close is already typed (`Error::from_transport` decodes it into
   `Error::Session`), but `moq_net::Error::Transport(String)` still flattens
@@ -65,7 +65,7 @@ rolling out browser playback wants an error rate it cannot see client-side):
 
 - [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - the
   same consumer's per-transport session split
-- [Typed refusal reason](/quest/m1/auth/refusal-reason.md) - adds `expired`
+- [Typed refusal reason](/quest/m1/refusal-reason.md) - adds `expired`
   and per-root, per-tier refusal attribution on top of these counters
 - [Own the QUIC stack](/quest/m1/quic/README.md) - where a typed close kind
   is natural once `moq-quic` owns the connection
