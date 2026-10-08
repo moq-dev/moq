@@ -19,6 +19,8 @@ who joins late joins mid-replay.
   state that applied then. Left at its final live edge, a recording that ends
   muted (`enabled: false`) or removes a rendition hides the earlier video,
   since watch filters disabled renditions before subscribing. Test both.
+  At equal recorded timestamps the catalog goes first, so a media group never
+  arrives before the catalog update that lists it.
 - One clock per import, not per subscriber. It starts at the earliest recorded
   timestamp across the selected tracks and every track paces against it, so
   tracks stay in sync and every viewer sees the same moment.

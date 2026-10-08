@@ -11,8 +11,16 @@ so an exporter in history mode treats its timeline as durable and lists past
 
 [Catalog track identity](/quest/m1/catalog-tracks.md) guarantees a track's
 identity never changes for its name, and resolution changes in band below
-its ceilings, so the newest recorded catalog describes every group of the
-tracks it lists; nothing here picks a catalog per group.
+its ceilings, so one catalog describes every group of the tracks it lists;
+nothing here picks a catalog per group.
+
+Decided 2026-10-08 (review): the catalog at the live edge is the union of
+every rendition recorded, so a rendition removed mid-recording stays
+discoverable; one no longer live is listed with `enabled: false`. VOD
+consumers (HLS archive mode, DVR) list a rendition that has recorded media
+regardless of `enabled`; live watch keeps filtering disabled ones. Paced
+replay (m3) replays the catalog history instead. Test a rendition removed
+before the recording ends.
 
 ## Plan
 
@@ -21,9 +29,8 @@ is FETCH-only, so a SUBSCRIBE to it on the replay broadcast never sees a group
 and `moq-hls` never finds the `archive` entry. The HLS archive tests work around
 this by hand-building a catalog.
 
-- Republish each recorded catalog group live in its timeline's order, so the newest
-  one is at the live edge and a `--follow` replay picks up catalogs recorded
-  after it opened.
+- Republish the recorded catalog live as that union, updated in timeline
+  order so a `--follow` replay picks up renditions recorded after it opened.
 - Stamp `store` with the URL passed to `import archive`, and `version` with the
   recording format. Refuse a URL carrying userinfo and strip its query so
   credentials never land in a catalog, and let the importer opt out of

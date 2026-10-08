@@ -34,6 +34,17 @@ relies on it. Reasons:
   NAL length size, which is framing, not resolution.
 - Ceilings let a decoder be configured once for the largest picture, so a
   smaller one never needs a catalog update.
+- Decided 2026-10-08 (review): `bitrate` and `framerate` stay ceilings too.
+  An encoding publisher declares them from its encoder config. An importer
+  that cannot know them up front (moq-mux's estimator raises a running max
+  today, `rs/moq-mux/src/catalog/estimate.rs`, and detected dimensions
+  replace hints in `catalog/tracks.rs`) declares each once, from source
+  metadata or its first estimate window or keyframe, and never rewrites it.
+  A source that later exceeds a declared `bitrate` or `framerate` is counted
+  in stats, not republished, since neither configures a decoder; exceeding
+  the coded size mints a new identity. Migrate the estimator, the importers,
+  and the HLS consumer accordingly, and test an import whose estimate rises
+  after the first window.
 - A change to codec or description, or past a ceiling, mints a new rendition
   name through a [catalog rendition ID](/quest/m1/catalog-track-id.md) when
   the catalog can keep both, or a new
