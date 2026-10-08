@@ -5,13 +5,11 @@ description: TOML reference for moq-relay
 
 # Configuration
 
-`moq-relay relay.toml`. Every key is also a CLI flag and environment variable.
-Most names join the section and key: `listen.tls.cert` is
-`--listen-tls-cert` / `MOQ_LISTEN_TLS_CERT`. The `listen.bind` key deliberately
-uses the shorter `--listen` / `MOQ_LISTEN` spelling.
-Precedence is CLI > env > file > defaults: a flag or environment variable that
-was actually supplied overrides the file, and a file key that was actually
-written (an empty list, a `false` boolean) overrides the built-in default.
+`moq-relay relay.toml`. Every key is also a CLI flag and environment variable
+that joins the section and key: `listen.tls.cert` is `--listen-tls-cert` /
+`MOQ_LISTEN_TLS_CERT`. The exception is `listen.bind`, spelled `--listen` /
+`MOQ_LISTEN`. Precedence is CLI, then env, then file, then defaults.
+`moq-relay --help` lists every flag.
 
 ## \[listen]
 
@@ -36,13 +34,9 @@ bind = "/run/moq/internal.sock"
 allow.uid = [1001]
 ```
 
-`timeout` bounds how long an accepted connection has to finish its handshake:
-the QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, through the
-relay accepting the session. After that it is an ordinary session. A peer that
-connects and never speaks is closed instead of being held open by keep-alives,
-with the MoQ timeout code once its transport is up. The `[web]` listeners apply it to reading HTTP request
-headers and, for the WebSocket fallback, to the SETUP after the upgrade. The
-`io_uring` workers do not apply it yet.
+`timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
+that connects and never speaks is closed instead of held open by keep-alives.
+The `io_uring` workers do not apply it.
 
 A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, and `lb_id` (or `load_balancer`), which
@@ -68,27 +62,16 @@ send_window = 33554432               # Unacknowledged outgoing data. Omit for th
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
 
-The native QUIC stack uses BBRv3 for delay-based congestion control. Iroh also
-uses noq and the same congestion controller.
-
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
-QUIC uses the smaller of the two endpoints' values
-([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),
-so this also bounds the clients and peers on the other end. Keep `keep_alive`
-under a third of it, so a quiet connection that loses one ping still pings
-again before the deadline.
+QUIC uses the smaller of the two endpoints' values, so this also bounds the
+other end. Keep `keep_alive` under a third of it.
 
-Raise the receive windows when a fat, long path idles below the link rate: a
-window under the bandwidth-delay product stalls the sender waiting for credit.
-`receive_window` bounds how much unread data one peer can make the relay buffer
-across all of its streams; the transport's own default is unlimited, so it
-defaults to 64 MiB, enough for a relay-to-relay session to carry several Gbps at
-a 100 ms RTT.
-Keep `stream_receive_window` well under `receive_window` so one slow group
-cannot starve the connection. `send_window` caps unacknowledged outgoing data
-whatever the peer allows, bounding the transport send buffer. A zero window is refused, and the receive windows must fit a QUIC
-varint since they ride on the wire as transport parameters.
+Raise the receive windows when a fat, long path idles below the link rate. The
+64 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
+how much unread data one peer can make the relay buffer. Keep
+`stream_receive_window` well under it so one slow group cannot starve the
+connection.
 
 ## \[runtime]
 
@@ -105,22 +88,12 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. The group shares one port, including an ephemeral (zero) port, which is
-resolved once and joined by every worker. Use an explicit port unless
-something reads the bound address at startup. `workers` needs the `noq`
-feature and real certificate files rather than `tls.generate`. A build without
-QUIC rejects `workers` instead of
-ignoring it. An embedding process leaves this group inside `Relay::run`;
-taking the sockets out and driving them yourself is how a later library
-update can drop QUIC while still compiling. `io_uring` additionally needs Linux 6.12+, the `io-uring` cargo
-feature, and exactly one certificate read at startup; it serves moq-lite only,
-and refuses to start anywhere it cannot deliver. `[quic]` applies either way,
-except that `mtu_discovery` (its datagram path sends a fixed payload) is refused
-under `io_uring` rather than quietly ignored. Each worker reports its own counters at
-[`/metrics`](/bin/relay/http#get-metrics). The kernel charges each worker's
-ring (~56 KiB, plus a page per socket) to `RLIMIT_MEMLOCK`, a budget shared by
-every io\_uring the user runs; raise it (`LimitMEMLOCK=` under systemd) if
-workers fail to start with a message naming that limit.
+worker. `workers` needs the `noq` feature and real certificate files rather
+than `tls.generate`. `io_uring` additionally needs Linux 6.12+, the `io-uring`
+cargo feature, and exactly one certificate; it serves moq-lite only, and
+refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
+start rather than being ignored. If io\_uring workers fail to start naming
+`RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 
 ## \[web]
 
@@ -187,15 +160,10 @@ goaway.handover = "10s"              # Cap on how long the drained upstream keep
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
-onto the host we already dialed, so a peer moves us between ports and schemes;
-`follow` also lets it choose the host, which means trusting it not to point us
-into the local network, since a name it controls resolves wherever it likes;
-`ignore` keeps the current address list. An empty URI also keeps it, including
-caller-configured fallbacks; an accepted redirect replaces the list with the
-peer's URI. A malformed or refused redirect ends the connection with an error
-rather than redialing the old address or a fallback, and so does one leaving
-the host a `tls.fingerprint` pin verifies. `handover` is a cap: a shorter deadline on
-the received GOAWAY wins, a longer one does not extend it.
+onto the host already dialed, so a peer can move us between ports and schemes;
+`follow` also lets it choose the host, which trusts it not to point us into
+the local network; `ignore` keeps the current address. `handover` caps how long
+the old connection keeps serving after a GOAWAY.
 
 ## \[cache]
 
@@ -206,21 +174,10 @@ headroom = "2GiB"                    # Or: keep this much system memory free and
 duration = "30s"                     # Cap how long a non-latest group is kept, whatever the publisher asked.
 ```
 
-`duration` defaults to 30s and bounds memory by age, where `capacity` bounds it
-by bytes. The latest group of every track is always kept. The two reclaim
-differently: the byte budget is repaid as tracks write, so it caps what *active*
-publishers build up, while `duration` sweeps on a wall-clock cadence, so a
-publisher that stalls but stays connected still has its idle groups reclaimed
-(an open one included, and a subscriber parked inside it is told rather than
-waiting forever).
-
-`headroom` starts a background task that re-samples system memory every few
-seconds and resizes the pool. Embedders calling `cache::Config::init` directly
-should know that the task is owned by the `cache::Pool` it resizes, not by the
-`cache::Cache` struct or the `Relay`: it stops on its next tick once the last `Pool`
-clone drops. Handing the `cache::Cache` to `cluster::Cluster::new` therefore moves the
-task's lifetime onto the cluster, and keeping a `Pool` clone of your own keeps
-the task running for as long as you hold it.
+`capacity` is a byte target, repaid as active publishers write. `duration`
+(30s by default) bounds memory by age, and sweeps on a timer, so a publisher
+that stalls but stays connected still has its idle groups reclaimed. The latest
+group of every track is always kept, even past `capacity`.
 
 ## \[stats]
 
@@ -234,16 +191,13 @@ depth = 1                            # Also bucket by the first N path segments 
 linger = "5m"                        # Keep an empty group's broadcast announced this long. Default.
 ```
 
-Each node publishes `publisher.json`, `subscriber.json`, and `sessions.json`
-tracks (plus compressed `.json.z` twins) of cumulative counters per broadcast
-and auth root, split by a **tier** label chosen by the auth server's grant or
-`--cluster-tier`, which is what makes billing per customer or per region
-possible. Each run, and each group returning after its linger, announces under
-a fresh [epoch](/concept/moq-lite#publisher-epochs) on its route, so a restart
-is a new broadcast at the same path. Each `sessions.json` row also carries
-`announces_peak` and `subscriptions_peak`: the most any one session under that
-root held against the per-session limits, past which a session is closed with
-`TOO_MANY_REQUESTS`. [Stats](/concept/stats) describes the paths, tracks, and
+Each node publishes its traffic and session counters as MoQ tracks, split by a
+**tier** label from the auth server's grant (`--cluster-tier` for links this
+relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
+Each run, and each group returning after its linger, announces under a fresh
+[epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
+the same path. Session rows report how close sessions come to the per-session
+limits, past which one is closed with `TOO_MANY_REQUESTS`. [Stats](/concept/stats) describes the paths, tracks, and
 encodings; read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
@@ -264,20 +218,12 @@ drain_timeout = "10s"                # Top-level key, as --drain-timeout / MOQ_D
 ```
 
 The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
-asking it to reconnect, and is force-closed if it is still connected when the
-window ends. A session that connects during the drain, such as a client with a
-cached DNS answer, is sent a GOAWAY immediately, with only the time left in
-the window. The relay exits as soon as every session has left, when the window
-ends, or immediately on a second signal. `0` skips the GOAWAY and closes every
-session at once.
-
-The exit is logged with how long the drain took, as either
-`drain complete: every session left` or `drain deadline force-closed sessions`
-with the number `forced`. A session still in its handshake when the last one
-leaves is not waited for.
-Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
-closed when the window ends. An embedder can take over the signals and start
-the drain itself; see [Embed](/bin/relay/#embed).
+asking it to reconnect elsewhere, including any that connect during the drain,
+and is force-closed if it is still connected when the window ends. The relay
+exits as soon as every session has left, when the window ends, or immediately
+on a second signal. `0` skips the GOAWAY. Only moq-lite-04+ and moq-transport
+clients act on a GOAWAY; older ones are closed when the window ends. An
+embedder can take over the signals; see [Embed](/bin/relay/#embed).
 
 ## \[log]
 
@@ -286,19 +232,11 @@ the drain itself; see [Embed](/bin/relay/#embed).
 level = "info"                       # RUST_LOG overrides this.
 ```
 
-At `info` the relay logs one `listening` record for the `[listen]` QUIC socket
-and each public `[web]` listener as it binds. Each record carries the bound
-address and a `kind` naming the listener:
+At `info` the relay logs a `listening` record with the bound address for each
+QUIC and public `[web]` listener, so a port of `0` reports the port the OS
+picked.
 
 ```
 INFO listening addr=[::]:4443 kind=quic
 INFO listening addr=[::]:4443 kind=http
-INFO listening addr=[::]:8443 kind=https
 ```
-
-For these listeners, `addr` is the address the socket bound, not the one
-configured, so a `listen` port of `0` reports the port the OS picked. That is
-the only way to learn it from outside the process, and the QUIC and TCP ports
-are chosen independently.
-A relay with no `[listen]` UDP socket logs `listening (stream transports only)`
-instead of the `quic` line.

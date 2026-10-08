@@ -263,6 +263,9 @@ export default defineConfig({
 		],
 	},
 
+	// Agent instructions, not a page.
+	srcExclude: ["AGENTS.md"],
+
 	ignoreDeadLinks: [
 		// Localhost URLs are intentional for development examples and aren't
 		// reachable at build time (e.g. the relay on :4443, the dev server on :5173).

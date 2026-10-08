@@ -29,56 +29,30 @@ in sync at the latency you ask for.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
-| `paused`, `muted`, `volume` | The usual player controls, mirrored as reactive properties. |
-| `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames actually arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint frames as they decode with no pacing at all. |
-| `buffer` | Future-dated media held beyond the live edge before playback skips ahead, e.g. `"30s"`. Defaults to none. |
-| `captions` | The caption track to show, or absent for off. `el.text.out.available` lists the renditions for a picker. |
-| `visible` | Only subscribe to video while the element is on screen: a margin (`"20%"` default, `"200px"`), `"always"`, or `"never"`. |
-| `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can be mounted before the stream exists. |
-| `catalog-format` | `hang` (default, from the `.hang` suffix), `hangz` (compressed), `msf`, or `manual` to supply the catalog yourself. |
+| `paused`, `muted`, `volume` | The usual player controls. |
+| `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
+| `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
+| `captions` | The caption track to show. |
+| `visible` | Only download video while the element is on screen (or near it). |
+| `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can mount before the stream exists. |
+| `catalog-format` | `hang`, `hangz`, `msf`, or `manual`; detected from the name by default. |
 
-A volume change ramps over `el.emitter.fade`, 200ms by default; 0 steps at
-once.
-
-Video holds its last picture while paused, out of view, or waiting for a
-resumed rendition's first frame. Its reported timestamp stays with that picture.
-Going offline or closing the player clears it.
-
+Every attribute is also a reactive property. The
+[README](https://www.npmjs.com/package/@moq/watch) lists types and defaults.
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
-buffering indicator, an unsupported-codec warning, and a stats panel.
-`<moq-watch-support>` shows what the browser can play.
+buffering indicator, and a stats panel.
 
-`el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. It is
-`error` when the origin refuses the broadcast, such as a `dynamic()` handler
-rejecting the request, and `el.broadcast.out.error` then holds the refusal's
-`Error`; the overlay shows its message in place of the offline notice. A
-refusal is final: only a new `name`, a new origin, a changed `announced`, or
-re-enabling asks again, which clears both back to `offline`.
+`el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. On
+`error` the origin refused the broadcast, `el.broadcast.out.error` says why,
+and the player does not ask again until it is pointed elsewhere or re-enabled.
 
 ## Binding from a framework
 
-`import "@moq/watch/element"` registers `<moq-watch>` while the module
-evaluates, so a browser-only entrypoint that imports it before mounting gets an
-upgraded element. `el.broadcast`, `el.video`, `el.audio`, `el.sync`, and
-`el.signals` are assigned by the constructor and readable right away.
-
-Defer the import and that guarantee goes with it. A dynamic `import()` inside
-`onMount`, one behind a `browser` guard, or a `<script>` that loads after the
-markup all leave the tag unregistered until they land, and an element of an
-unregistered tag is a plain `HTMLElement`. A framework binding
-(Svelte's `bind:this`, React's `ref`) hands you that un-upgraded node, where
-every property reads `undefined`:
-
-```ts
-// TypeError: el.broadcast is undefined
-el.broadcast.out.catalog.subscribe(handler);
-```
-
-The browser upgrades the same node once the definition arrives, applying the
-attributes it already has. Use a static import in browser-only entrypoints.
-For SSR applications, run the following in a client-side mount hook, after
-the node exists. The element module needs browser globals and must not be
-imported during server rendering. Start the import before waiting for registration:
+`import "@moq/watch/element"` registers `<moq-watch>` when the module
+evaluates. Until then the tag is a plain `HTMLElement`, so a framework ref
+(Svelte's `bind:this`, React's `ref`) to it reads `undefined` for
+`el.broadcast` and friends. Import the element statically in browser-only
+entrypoints. With SSR, import it in a client-side mount hook and wait:
 
 ```ts
 await import("@moq/watch/element");
@@ -128,21 +102,8 @@ const dispose = el.signals.run((effect) => {
 });
 ```
 
-Call `dispose()` from your framework's unmount cleanup when this subscription
-is no longer needed. Removing the element disables playback but keeps its
-effects open so the same node can reconnect. Its audio graph is released and
-rebuilt on return; pausing or muting keeps the graph warm.
-
-The effect re-runs whenever the catalog or the active broadcast changes, so a
-reconnect resubscribes on its own. A publisher that rewrites its catalog often
-(a live encoder tweak) re-runs it too; memoize the track name with
-`effect.computed` when that matters, as the
-[watch demo](https://github.com/moq-dev/moq/blob/main/demo/web/src/index.ts)
-does.
-
-`el.catalog` is the same value read once, without subscribing. Reach the rest
-of the pipeline through `el.broadcast`, `el.video`, `el.audio`, and
-`el.signals`.
+Call `dispose()` on unmount. The effect re-runs when the catalog or the
+active broadcast changes, so a reconnect resubscribes on its own.
 
 ## Without the element
 
@@ -165,10 +126,8 @@ const player = new Watch.Player({
 ```
 
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
-to change later, such as `muted` or `delay`. `Player` owns the same pipeline as
-`<moq-watch>`; `Watch.Broadcast`, `Sync`, and the per-track components remain
-available for custom composition. Load the element from a CDN
-(`https://esm.sh/@moq/watch/element`) for a no-build embed.
+to change later, such as `muted` or `delay`. `Player` is the pipeline inside
+`<moq-watch>`; its parts are exported for custom composition.
 
 ## Buffered playback
 
@@ -181,17 +140,17 @@ response emitted in one burst with future timestamps, wants the opposite. Set
 <moq-watch url="..." name="bot/tts.hang" delay="100ms" buffer="30s"></moq-watch>
 ```
 
-Durations need a unit; a bare number is rejected. Only the delay is held as
-decoded PCM; the buffer stays as encoded frames with backpressure on the
-decoder, so a large one is cheap. `el.reset()` flushes and re-anchors at the
+Durations need a unit; a bare number is rejected. Audio holds the buffer as
+encoded frames, so a large one is cheap; video waits as decoded pictures, which
+hold decoder memory, so a long video buffer is not. `el.reset()` flushes and re-anchors at the
 next frame, which is how a producer interrupts an utterance.
 
 ## Strict CSP
 
-The audio worklet loads from a `blob:` URL by default, so it needs no hosted
-files but a CSP must allow `blob:` in `script-src`. For a CSP that refuses
-`blob:`, copy `node_modules/@moq/watch/assets/*` into a directory your origin
-serves, and point the package at it before playback starts:
+The audio worklet loads from a `blob:` URL by default, so a CSP must allow
+`blob:` in `script-src`. Otherwise, copy `node_modules/@moq/watch/assets/*`
+into a directory your origin serves and point the package at it before
+playback starts:
 
 ```ts
 import * as Watch from "@moq/watch";
