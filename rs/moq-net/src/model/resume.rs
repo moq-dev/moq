@@ -287,8 +287,11 @@ impl Copy {
 			let mut sub = ready!(pending.poll_ok(waiter))?;
 			sub.raise_start_to(groups.0);
 			sub.end_at(groups.1);
+			// Only a copy that still serves weighs lag; see `Reader::sync`.
+			if self.until.is_none() {
+				sub.watch(&self.frontier);
+			}
 			self.sub = Sub::Ready(sub);
-			self.watch();
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
 		Poll::Ready(Ok(sub))
@@ -297,25 +300,6 @@ impl Copy {
 	/// Whether this copy is still needed: it serves, or a group read from it is still out.
 	fn needed(&self, serving: bool) -> bool {
 		serving || (self.done.is_none() && Arc::strong_count(&self.lease) > 1)
-	}
-
-	/// Weigh this copy's track while the reader can still take groups from it: all of
-	/// it while it serves, then only the groups up to `until`. `Reader::let_go` stops
-	/// that once the copy is dropped. A pending subscription is watched once it answers.
-	fn watch(&mut self) {
-		if let Sub::Ready(sub) = &mut self.sub {
-			sub.watch(&self.frontier);
-			if let Some(until) = self.until {
-				sub.cap(&self.frontier, until);
-			}
-		}
-	}
-
-	/// Stop weighing this copy. A pending subscription was never watched.
-	fn unwatch(&mut self) {
-		if let Sub::Ready(sub) = &mut self.sub {
-			sub.unwatch(&self.frontier);
-		}
 	}
 }
 
@@ -386,24 +370,29 @@ impl Subscriber {
 		self.reader().latest()
 	}
 
-	/// Report every copy still held to `frontier`, a replaced one only up to the group
-	/// its switch capped it at.
+	/// Report the serving copy's track, now and after every switch, to `frontier`.
 	pub(crate) fn watch(&mut self, frontier: &stats::Frontier) {
 		let mut reader = self.reader();
 		reader.frontier = frontier.clone();
 		for copy in &mut reader.copies {
 			copy.frontier = frontier.clone();
-			copy.watch();
+			if copy.until.is_none()
+				&& let Sub::Ready(sub) = &mut copy.sub
+			{
+				sub.watch(frontier);
+			}
 		}
 	}
 
-	/// Stop reporting every copy's track to `frontier`.
+	/// Stop reporting any copy's track to `frontier`, now or after a switch.
 	pub(crate) fn unwatch(&mut self, frontier: &stats::Frontier) {
 		let mut reader = self.reader();
 		reader.frontier = stats::Frontier::default();
 		for copy in &mut reader.copies {
 			copy.frontier = stats::Frontier::default();
-			if let Sub::Ready(sub) = &mut copy.sub {
+			if copy.until.is_none()
+				&& let Sub::Ready(sub) = &mut copy.sub
+			{
 				sub.unwatch(frontier);
 			}
 		}
@@ -491,13 +480,18 @@ impl Reader {
 		if self.copies.last().is_some_and(|copy| copy.generation == generation) {
 			return;
 		}
-		// The replaced copies finish the groups they had when replaced, and nothing newer,
-		// so only those groups keep weighing lag.
+		// The replaced copies finish the groups they had when replaced, and nothing newer.
 		for copy in &mut self.copies {
 			if copy.until.is_none() {
 				copy.until = Some(self.newest.max(copy.track.latest()));
 				copy.update(&self.mirrored);
-				copy.watch();
+				// A replaced route's copy may live on; what it produces from now on never
+				// reaches this reader, so it stops weighing lag. Frames still written into a
+				// group the reader holds from it go unweighed too: an approximation that
+				// keeps per-group accounting off the frame path.
+				if let Sub::Ready(sub) = &mut copy.sub {
+					sub.unwatch(&copy.frontier);
+				}
 			}
 		}
 		let floor = self.newest.map(Position::group);
@@ -531,30 +525,21 @@ impl Reader {
 			if copy.needed(Some(copy.generation) == serving) {
 				return true;
 			}
-			let keep = if copy.done.is_some() {
-				false
-			} else {
-				let until = copy.until;
-				match copy.poll_ready(groups, &kio::Waiter::noop()) {
-					Poll::Ready(Ok(sub)) => {
-						// Inspect without moving either cursor: a later group poll still chooses its
-						// order and applies the current bounds and drift budget. Ignore the local
-						// cap here, since unread groups become eligible again when it rises.
-						sub.has_unread_group(&track::Unread {
-							start: groups.0.max(ordered.map_or(0, |last| last.saturating_add(1))),
-							end: until.and_then(|until| until.map_or(Some(0), |last| last.checked_add(1))),
-							delivered,
-						})
-					}
-					_ => false,
-				}
-			};
-			// Unwatched on every retire, not only when a switch caps the copy. While the
-			// copy stays, the reader can still take what it already had.
-			if !keep {
-				copy.unwatch();
+			if copy.done.is_some() {
+				return false;
 			}
-			keep
+			let until = copy.until;
+			let Poll::Ready(Ok(sub)) = copy.poll_ready(groups, &kio::Waiter::noop()) else {
+				return false;
+			};
+			// Inspect without moving either cursor: a later group poll still chooses its
+			// order and applies the current bounds and drift budget. Ignore the local
+			// cap here, since unread groups become eligible again when it rises.
+			sub.has_unread_group(&track::Unread {
+				start: groups.0.max(ordered.map_or(0, |last| last.saturating_add(1))),
+				end: until.and_then(|until| until.map_or(Some(0), |last| last.checked_add(1))),
+				delivered,
+			})
 		});
 	}
 
@@ -1351,7 +1336,7 @@ mod test {
 		assert_eq!(lag().total(), 6);
 	}
 
-	/// A copy replaced before it produces is unwatched when it is dropped, so what
+	/// A copy replaced before it produces is unwatched at the switch, so what
 	/// that track writes afterwards does not move the histogram.
 	#[test]
 	fn lag_ignores_a_track_replaced_before_its_first_frame() {
@@ -1392,11 +1377,11 @@ mod test {
 		assert_eq!(weight(), 4);
 	}
 
-	/// A replaced copy weighs the groups it had at the switch while one is still out,
-	/// frames written into them included. Its later groups never reach this reader, and
-	/// nothing it writes after the copy is dropped counts.
+	/// A replaced copy stops counting at the switch, even while a group read from it is
+	/// still out: frames written into that group afterwards go unweighed, as do its
+	/// later groups. What it produced before the switch still counts, at its edge.
 	#[test]
-	fn lag_weighs_a_replaced_copy_up_to_its_cap() {
+	fn lag_stops_weighing_a_replaced_copy_at_the_switch() {
 		let registry = stats::Registry::new(stats::Config::new());
 		let session = registry.tier(stats::Tier::default()).session("root");
 		let lag = || {
@@ -1428,29 +1413,24 @@ mod test {
 		let held = recv(&mut sub);
 		assert_eq!(lag().total(), 2);
 
-		let b = copy();
-		routes.serve(b.consume());
-		// Let the reader notice the switch while the group is still out.
+		// Written before the switch but not sampled yet: recorded at A's edge, 300ms in.
+		a0.write_frame(ts(300), b"bb").unwrap();
+		routes.serve(copy().consume());
 		assert!(sub.recv_group().now_or_never().is_none());
-		// A/0 is capped in and still read; A/1 is past the cap, so neither its bytes nor
-		// its edge count: the frame in A/0 is weighed 300ms behind, not 500ms.
-		a0.write_frame(ts(300), b"cc").unwrap();
-		write(&a, 1, b"bbbb");
-		let while_held = lag();
-		assert_eq!(while_held.total(), 4);
-		assert_eq!(while_held.buckets()[3], 2);
+		let switched = lag();
+		assert_eq!(switched.total(), 4);
+		assert_eq!(switched.buckets()[3], 2);
 
-		drop(held);
-		drain(&mut sub);
-		a0.write_frame(ts(400), b"dddd").unwrap();
-		write(&a, 2, b"eeeeee");
+		a0.write_frame(ts(400), b"cccc").unwrap();
+		write(&a, 1, b"dddddd");
 		assert_eq!(lag().total(), 4);
+		drop(held);
 	}
 
-	/// Readers capped at the same group share one count, and each still weighs every
-	/// frame written into it.
+	/// A route that comes back while a group from its old copy is still out is weighed
+	/// again, and dropping the old copy does not silence it.
 	#[test]
-	fn lag_weighs_a_shared_cap_once_per_reader() {
+	fn lag_weighs_a_route_that_comes_back() {
 		let registry = stats::Registry::new(stats::Config::new());
 		let session = registry.tier(stats::Tier::default()).session("root");
 		let weight = || {
@@ -1458,36 +1438,40 @@ mod test {
 			registry.report(&mut report);
 			report.traffic[0].publisher.lag.total()
 		};
+		let write = |track: &track::Producer, sequence: u64, payload: &[u8]| {
+			let mut group = track.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(sequence * 500), payload).unwrap();
+			group.finish().unwrap();
+		};
+		let drain = |sub: &mut track::Subscriber| while sub.recv_group().now_or_never().is_some() {};
 
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let subscribe = || {
-			logical
-				.consume()
-				.with_stats(session.egress("demo"))
-				.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)))
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-		};
-		let mut first = subscribe();
-		let mut second = subscribe();
-		// Polling resolves each copy's subscription, which names its track to the frontier.
-		assert!(first.recv_group().now_or_never().is_none());
-		assert!(second.recv_group().now_or_never().is_none());
-		let mut a0 = a.create_group(group::Info { sequence: 0 }).unwrap();
-		a0.write_frame(ts(0), b"aa").unwrap();
-		let _first = recv(&mut first);
-		let _second = recv(&mut second);
-		assert_eq!(weight(), 4);
+		let mut sub = logical
+			.consume()
+			.with_stats(session.egress("demo"))
+			.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		drain(&mut sub);
+		write(&a, 0, b"aa");
+		let held = recv(&mut sub);
+		assert_eq!(weight(), 2);
 
 		routes.serve(copy().consume());
-		assert!(first.recv_group().now_or_never().is_none());
-		assert!(second.recv_group().now_or_never().is_none());
-		a0.write_frame(ts(100), b"cc").unwrap();
-		assert_eq!(weight(), 8);
+		drain(&mut sub);
+		routes.serve(a.consume());
+		drain(&mut sub);
+		write(&a, 1, b"bbbb");
+		assert_eq!(weight(), 6);
+
+		drop(held);
+		drain(&mut sub);
+		write(&a, 2, b"cccccc");
+		assert_eq!(weight(), 12);
 	}
 
 	#[test]

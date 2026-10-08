@@ -125,7 +125,7 @@ use std::{
 	fmt,
 	sync::{
 		Arc, Mutex, Weak,
-		atomic::{AtomicBool, AtomicU64, Ordering},
+		atomic::{AtomicU64, Ordering},
 	},
 	time::Duration,
 };
@@ -1775,60 +1775,6 @@ fn media_time(timestamp: Timestamp) -> Duration {
 /// frame write, whether or not the track is tagged, since its readers may be.
 #[derive(Default, Debug)]
 pub(crate) struct Production {
-	tally: Tally,
-	// The groups up to each cap a switch put on this track, since later ones never
-	// reach those readers. One per distinct cap, shared by every reader capped there.
-	shares: Mutex<Vec<Weak<Share>>>,
-	// Whether `shares` may be non-empty, so a track nobody capped skips the lock.
-	shared: AtomicBool,
-}
-
-impl Production {
-	/// Record one frame of `bytes` at `timestamp` in group `sequence`.
-	pub(crate) fn record(&self, sequence: u64, timestamp: Timestamp, bytes: u64) {
-		// Shares before the track: a frame racing a new cap may go uncounted, but is
-		// never counted twice. See `Frontier::cap`.
-		if self.shared.load(Ordering::Acquire) {
-			let mut shares = self.shares.lock().expect("stats production poisoned");
-			shares.retain(|share| {
-				let Some(share) = share.upgrade() else { return false };
-				if share.cap.is_some_and(|cap| sequence <= cap) {
-					share.tally.record(timestamp, bytes);
-				}
-				true
-			});
-			self.shared.store(!shares.is_empty(), Ordering::Release);
-		}
-		self.tally.record(timestamp, bytes);
-	}
-
-	/// What this track produces from now on in groups up to `cap` (`None` for none).
-	fn share(&self, cap: Option<u64>) -> Arc<Share> {
-		let mut shares = self.shares.lock().expect("stats production poisoned");
-		if let Some(share) = shares.iter().filter_map(Weak::upgrade).find(|share| share.cap == cap) {
-			return share;
-		}
-		// Every group produced so far is up to the cap, so the edges carry over.
-		let tally = Tally::default();
-		tally.first.store(self.tally.first.load(Ordering::Relaxed), Ordering::Relaxed);
-		tally.newest.store(self.tally.newest.load(Ordering::Relaxed), Ordering::Relaxed);
-		let share = Arc::new(Share { cap, tally });
-		shares.push(Arc::downgrade(&share));
-		self.shared.store(true, Ordering::Release);
-		share
-	}
-}
-
-/// The part of a track its capped readers can still receive: its groups up to `cap`.
-#[derive(Debug)]
-struct Share {
-	cap: Option<u64>,
-	tally: Tally,
-}
-
-/// Frames produced: their payload bytes and the media-time edges they span.
-#[derive(Default, Debug)]
-struct Tally {
 	// Media-time nanoseconds plus one, so zero means nothing produced yet.
 	first: AtomicU64,
 	newest: AtomicU64,
@@ -1836,8 +1782,9 @@ struct Tally {
 	bytes: AtomicU64,
 }
 
-impl Tally {
-	fn record(&self, timestamp: Timestamp, bytes: u64) {
+impl Production {
+	/// Record one frame of `bytes` at `timestamp`.
+	pub(crate) fn record(&self, timestamp: Timestamp, bytes: u64) {
 		let at = u64::try_from(media_time(timestamp).as_nanos())
 			.unwrap_or(u64::MAX)
 			.saturating_add(1);
@@ -1875,8 +1822,7 @@ struct FrontierState {
 	advanced: Instant,
 	/// When a sample first found the subscription behind since `advanced`.
 	behind: Option<Instant>,
-	/// The tracks feeding the subscription: its own, or the route copies it still
-	/// reads, a replaced one only up to the group its switch capped it at.
+	/// The tracks feeding the subscription: its own, or the serving route's copy.
 	sources: Vec<Source>,
 	/// Retired sources. Each keeps the bytes produced since its last sample and the
 	/// edge those bytes are weighed at, so a sample can record them before a
@@ -1899,32 +1845,7 @@ struct Source {
 	// Strong, so the bytes a track produced before it died are still read, however
 	// its last handles and this frontier's last reference race to drop.
 	production: Arc<Production>,
-	// Set once a switch caps the track: only the groups this reader can still receive.
-	share: Option<Arc<Share>>,
 	sampled: u64,
-}
-
-impl Source {
-	/// What this source counts: the whole track, or its capped share.
-	fn tally(&self) -> &Tally {
-		self.share.as_ref().map_or(&self.production.tally, |share| &share.tally)
-	}
-
-	/// The bytes counted since the last sample, at the edge they reached.
-	fn fold(&self) -> Option<Folded> {
-		let tally = self.tally();
-		// Acquire pairs with `Tally::record`, so the edge covers these bytes.
-		let bytes = tally.bytes.load(Ordering::Acquire);
-		let weight = bytes.saturating_sub(self.sampled);
-		if weight == 0 {
-			return None;
-		}
-		Some(Folded {
-			weight,
-			newest: Tally::load(&tally.newest)?,
-			first: Tally::load(&tally.first)?,
-		})
-	}
 }
 
 impl Frontier {
@@ -1958,46 +1879,18 @@ impl Frontier {
 			return;
 		}
 		if state.acked.is_none() {
-			state.acked = Tally::load(&production.tally.newest);
+			state.acked = Production::load(&production.newest);
 		}
 		state.sources.push(Source {
 			track: Arc::downgrade(track),
 			production: production.clone(),
-			share: None,
-			sampled: production.tally.bytes.load(Ordering::Relaxed),
+			sampled: production.bytes.load(Ordering::Relaxed),
 		});
 	}
 
-	/// Count only `track`'s groups up to `cap` (`None` for none) from now on: a switch
-	/// replaced its route, so its later groups never reach this subscription. Frames
-	/// still written into the earlier groups keep counting. A no-op once capped.
-	pub(crate) fn cap(&self, track: &Arc<cache::Track>, cap: Option<u64>) {
-		let Some(inner) = &self.0 else { return };
-		let mut state = inner.state.lock().expect("stats frontier poisoned");
-		let production = track.production();
-		let Some(source) = state
-			.sources
-			.iter_mut()
-			.find(|source| Arc::ptr_eq(&source.production, production))
-		else {
-			return;
-		};
-		if source.share.is_some() {
-			return;
-		}
-		// What is still unsampled all came from groups up to the cap: fold it at the
-		// track's edge. The track is read before the share, and a frame records into the
-		// share before the track, so one racing the cap is never counted twice.
-		let folded = source.fold();
-		let share = production.share(cap);
-		source.sampled = share.tally.bytes.load(Ordering::Acquire);
-		source.share = Some(share);
-		state.folded.extend(folded);
-	}
-
 	/// Remove a track that no longer feeds this subscription, such as a route's copy
-	/// dropped once the reader is done with it. Bytes it already produced stay, at
-	/// the edge it had; anything it produces afterwards does not.
+	/// replaced by a switch. Bytes it already produced stay, at the edge it had;
+	/// anything it produces afterwards does not.
 	pub(crate) fn unwatch(&self, track: &Arc<cache::Track>) {
 		let Some(inner) = &self.0 else { return };
 		let mut state = inner.state.lock().expect("stats frontier poisoned");
@@ -2007,7 +1900,15 @@ impl Frontier {
 			if !Arc::ptr_eq(&source.production, production) {
 				return true;
 			}
-			folded.extend(source.fold());
+			// Acquire pairs with `Production::record`, so the edge covers these bytes.
+			let bytes = production.bytes.load(Ordering::Acquire);
+			let weight = bytes.saturating_sub(source.sampled);
+			if weight > 0
+				&& let Some(newest) = Production::load(&production.newest)
+				&& let Some(first) = Production::load(&production.first)
+			{
+				folded.push(Folded { weight, newest, first });
+			}
 			false
 		});
 		state.folded.extend(folded);
@@ -2069,15 +1970,15 @@ impl FrontierInner {
 			// Checked before reading: every writer holds the track, so a dead one has
 			// already recorded everything it ever will, and this read is its last.
 			let live = source.track.strong_count() > 0;
-			let tally = source.tally();
-			// Acquire pairs with `Tally::record`: the edges read below cover these bytes.
-			let bytes = tally.bytes.load(Ordering::Acquire);
-			newest = newest.max(Tally::load(&tally.newest));
-			if let Some(at) = Tally::load(&tally.first) {
-				first = Some(first.map_or(at, |first| first.min(at)));
-			}
+			let production = &source.production;
+			// Acquire pairs with `Production::record`: the edges read below cover these bytes.
+			let bytes = production.bytes.load(Ordering::Acquire);
 			weight += bytes.saturating_sub(source.sampled);
 			source.sampled = bytes;
+			newest = newest.max(Production::load(&production.newest));
+			if let Some(at) = Production::load(&production.first) {
+				first = Some(first.map_or(at, |first| first.min(at)));
+			}
 			live
 		});
 
