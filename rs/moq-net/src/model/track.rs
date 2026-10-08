@@ -4051,6 +4051,16 @@ impl Subscriber {
 		}
 	}
 
+	/// Report only this cursor's groups up to `cap` (`None` for none) to `frontier`
+	/// from now on, as a replaced route's copy. A front's logical track is never a
+	/// route's copy, so it is simply unwatched.
+	pub(crate) fn cap(&mut self, frontier: &stats::Frontier, cap: Option<u64>) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => frontier.cap(&cursor.state.read().cache, cap),
+			Inner::Resume(resume, _) => resume.unwatch(frontier),
+		}
+	}
+
 	/// Stop reporting the tracks feeding this cursor to `frontier`.
 	pub(crate) fn unwatch(&mut self, frontier: &stats::Frontier) {
 		match &mut self.inner {
