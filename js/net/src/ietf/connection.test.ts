@@ -371,78 +371,90 @@ test("truncated uni stream before SETUP is skipped", async () => {
 	expect(early.length).toBe(0);
 });
 
-/** Draft-16 carries SUBSCRIBE_NAMESPACE on its own stream, so the control adapter never sees the id. */
-test("draft-16 subscribe namespace past the request window closes the session", async () => {
-	const logged = spyOn(console, "error").mockImplementation(() => undefined);
-	const version = Version.DRAFT_16;
-	const pair = createMockTransportPair(ALPN.DRAFT_16);
-	const control = await Stream.open(pair.server, { version });
-	const connection = new Connection({
-		url: new URL("https://example.com"),
-		quic: pair.server,
-		control,
-		maxRequestId: 100n,
-		version,
-		client: false,
+// A PUBLISH-only request is refused, but it still spends an id and must give it back.
+for (const [name, options] of [
+	["namespaces", SubscribeOptions.NAMESPACE],
+	["publish only", SubscribeOptions.PUBLISH],
+] as const) {
+	/** Draft-16 carries SUBSCRIBE_NAMESPACE on its own stream, so the control adapter never sees the id. */
+	test(`draft-16 subscribe namespace for ${name} past the request window closes the session`, async () => {
+		const logged = spyOn(console, "error").mockImplementation(() => undefined);
+		const version = Version.DRAFT_16;
+		const pair = createMockTransportPair(ALPN.DRAFT_16);
+		const control = await Stream.open(pair.server, { version });
+		const connection = new Connection({
+			url: new URL("https://example.com"),
+			quic: pair.server,
+			control,
+			maxRequestId: 100n,
+			version,
+			client: false,
+		});
+
+		try {
+			const stream = await Stream.open(pair.client, { version });
+			await stream.writer.u53(SubscribeNamespaceLegacy.id);
+			await new SubscribeNamespaceLegacy({
+				requestId: initialMaxRequestId(true),
+				namespace: Path.from("room"),
+				subscribeOptions: options,
+			}).encode(stream.writer, version);
+
+			const info = await pair.client.closed;
+			expect(info.closeCode).toBe(SessionCode.TooManyRequests);
+			expect(logged).not.toHaveBeenCalled();
+		} finally {
+			logged.mockRestore();
+			connection.abort();
+		}
 	});
 
-	try {
-		const stream = await Stream.open(pair.client, { version });
-		await stream.writer.u53(SubscribeNamespaceLegacy.id);
-		await new SubscribeNamespaceLegacy({
-			requestId: initialMaxRequestId(true),
-			namespace: Path.from("room"),
-		}).encode(stream.writer, version);
+	/** Ending that stream has to grant another id, or the next namespace request stalls at the same ceiling. */
+	test(`draft-16 subscribe namespace for ${name} grants another request id when it ends`, async () => {
+		const logged = spyOn(console, "error").mockImplementation(() => undefined);
+		const version = Version.DRAFT_16;
+		const pair = createMockTransportPair(ALPN.DRAFT_16);
+		const control = await Stream.open(pair.server, { version });
+		const connection = new Connection({
+			url: new URL("https://example.com"),
+			quic: pair.server,
+			control,
+			maxRequestId: 100n,
+			version,
+			client: false,
+			requestWindow: 1n,
+		});
+		const peerControl = await Stream.accept(pair.client, version);
+		if (!peerControl) throw new Error("no control stream");
 
-		const info = await pair.client.closed;
-		expect(info.closeCode).toBe(SessionCode.TooManyRequests);
-		expect(logged).not.toHaveBeenCalled();
-	} finally {
-		logged.mockRestore();
-		connection.abort();
-	}
-});
+		try {
+			const stream = await Stream.open(pair.client, { version });
+			await stream.writer.u53(SubscribeNamespaceLegacy.id);
+			await new SubscribeNamespaceLegacy({
+				requestId: 0n,
+				namespace: Path.from("room"),
+				subscribeOptions: options,
+			}).encode(stream.writer, version);
 
-/** Ending that stream has to grant another id, or the next namespace request stalls at the same ceiling. */
-test("draft-16 subscribe namespace grants another request id when it ends", async () => {
-	const logged = spyOn(console, "error").mockImplementation(() => undefined);
-	const version = Version.DRAFT_16;
-	const pair = createMockTransportPair(ALPN.DRAFT_16);
-	const control = await Stream.open(pair.server, { version });
-	const connection = new Connection({
-		url: new URL("https://example.com"),
-		quic: pair.server,
-		control,
-		maxRequestId: 100n,
-		version,
-		client: false,
-		requestWindow: 1n,
+			if (options === SubscribeOptions.PUBLISH) {
+				expect(await stream.reader.u53()).toBe(RequestError.id);
+				expect((await RequestError.decode(stream.reader, version)).requestId).toBe(0n);
+			} else {
+				expect(await stream.reader.u53()).toBe(RequestOk.id);
+				expect((await RequestOk.decode(stream.reader, version)).requestId).toBe(0n);
+			}
+			stream.close();
+
+			expect(await peerControl.reader.u53()).toBe(MaxRequestId.id);
+			const grant = await MaxRequestId.decode(peerControl.reader, version);
+			expect(grant.requestId).toBe(initialMaxRequestId(true, 1n) + 2n);
+			expect(logged).not.toHaveBeenCalled();
+		} finally {
+			logged.mockRestore();
+			connection.abort();
+		}
 	});
-	const peerControl = await Stream.accept(pair.client, version);
-	if (!peerControl) throw new Error("no control stream");
-
-	try {
-		const stream = await Stream.open(pair.client, { version });
-		await stream.writer.u53(SubscribeNamespaceLegacy.id);
-		await new SubscribeNamespaceLegacy({
-			requestId: 0n,
-			namespace: Path.from("room"),
-		}).encode(stream.writer, version);
-
-		expect(await stream.reader.u53()).toBe(RequestOk.id);
-		const ok = await RequestOk.decode(stream.reader, version);
-		expect(ok.requestId).toBe(0n);
-		stream.close();
-
-		expect(await peerControl.reader.u53()).toBe(MaxRequestId.id);
-		const grant = await MaxRequestId.decode(peerControl.reader, version);
-		expect(grant.requestId).toBe(initialMaxRequestId(true, 1n) + 2n);
-		expect(logged).not.toHaveBeenCalled();
-	} finally {
-		logged.mockRestore();
-		connection.abort();
-	}
-});
+}
 
 for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],

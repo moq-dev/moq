@@ -287,24 +287,25 @@ export class Connection implements Established {
 			}
 			case BigInt(SubscribeNamespaceLegacy.id): {
 				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
-				if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
-					await this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream);
-					break;
-				}
-				const msg = new SubscribeNamespace({
-					requestId: legacy.requestId,
-					namespace: legacy.namespace,
-					hidden: legacy.hidden,
-				});
 				// Draft-16 carries this on its own stream, so the control adapter never sees the ID.
-				// Draft-14 and 15 already admitted it off the control stream.
+				// Draft-14 and 15 already admitted it off the control stream. A refused request
+				// still spends its ID, so it is admitted and released like any other.
 				const adapter =
 					this.#session instanceof ControlStreamAdapter && this.#session.version === Version.DRAFT_16
 						? this.#session
 						: undefined;
 				if (adapter) adapter.admitRequest(legacy.requestId);
 				try {
-					await this.#publisher.runSubscribeNamespace(msg, stream);
+					if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
+						await this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream);
+					} else {
+						const msg = new SubscribeNamespace({
+							requestId: legacy.requestId,
+							namespace: legacy.namespace,
+							hidden: legacy.hidden,
+						});
+						await this.#publisher.runSubscribeNamespace(msg, stream);
+					}
 				} finally {
 					adapter?.releaseRequest(legacy.requestId);
 				}
