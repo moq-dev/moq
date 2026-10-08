@@ -37,6 +37,7 @@ import {
 	type SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
+	SubscribeNamespaceError,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
 import type { TrackStatusRequest } from "./track.ts";
@@ -910,9 +911,7 @@ export class Publisher {
 			const visible = (covered: Path.Valid) => !this.#hidden || msg.hidden || !hiddenBelow(prefix, covered);
 			const carries = (covered: Path.Valid) =>
 				visible(covered) &&
-				(legacy
-					? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered))
-					: true);
+				(legacy ? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)) : true);
 
 			// Inline entries always land, and the receiver treats a repeated NAMESPACE as a
 			// replacement, so repricing one is just sending it again, a new original
@@ -1366,6 +1365,21 @@ export class Publisher {
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
 		// TRACK_STATUS_ERROR is 0x0f on draft-14.
 		await this.#refuseUnsupported(stream, msg.requestId, "track_status", 0x0f, "TRACK_STATUS is not supported");
+	}
+
+	/**
+	 * Refuses a draft-16/17 SUBSCRIBE_NAMESPACE that asks for PUBLISH alone: we never send PUBLISH.
+	 *
+	 * @internal
+	 */
+	async refuseSubscribeNamespace(requestId: bigint, stream: Stream) {
+		await this.#refuseUnsupported(
+			stream,
+			requestId,
+			"subscribe_namespace",
+			SubscribeNamespaceError.id,
+			"SUBSCRIBE_NAMESPACE for PUBLISH is not supported",
+		);
 	}
 
 	/**

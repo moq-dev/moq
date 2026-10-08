@@ -517,21 +517,33 @@ where
 				.maybe_boxed()
 			}
 			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
-			// to the same request_id + namespace; the legacy Subscribe Options field
-			// is ignored (moq-lite never subscribes to tracks).
+			// to the same request_id + namespace. We never send PUBLISH, so a legacy
+			// request for PUBLISH alone is refused, and one for both gets only NAMESPACE.
 			ietf::SubscribeNamespace::ID | ietf::SubscribeNamespaceLegacy::ID => {
-				let msg = if id == ietf::SubscribeNamespace::ID {
-					ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?
+				let (msg, options) = if id == ietf::SubscribeNamespace::ID {
+					let msg = ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?;
+					(msg, ietf::SubscribeOptions::Namespace)
 				} else {
 					let legacy = ietf::SubscribeNamespaceLegacy::decode_msg(&mut data, this.version)?;
-					ietf::SubscribeNamespace {
+					let msg = ietf::SubscribeNamespace {
 						request_id: legacy.request_id,
 						namespace: legacy.namespace,
 						hidden: legacy.hidden,
-					}
+					};
+					(msg, legacy.subscribe_options)
 				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
+				}
+				if options == ietf::SubscribeOptions::Publish {
+					let request_id = msg.request_id;
+					return Ok(async move {
+						let reason = "SUBSCRIBE_NAMESPACE for PUBLISH is not supported";
+						if let Err(err) = this.reject_namespace_request(stream, Some(request_id), reason).await {
+							tracing::debug!(%err, "subscribe_namespace refusal failed");
+						}
+					}
+					.maybe_boxed());
 				}
 				tracing::debug!(message = ?msg, "received subscribe_namespace");
 				async move {
@@ -551,7 +563,8 @@ where
 				) =>
 			{
 				async move {
-					if let Err(err) = this.reject_subscribe_tracks(stream).await {
+					let reason = "SUBSCRIBE_TRACKS is not supported";
+					if let Err(err) = this.reject_namespace_request(stream, None, reason).await {
 						tracing::debug!(%err, "subscribe_tracks refusal failed");
 					}
 				}
@@ -1623,14 +1636,21 @@ where
 		Ok(())
 	}
 
-	async fn reject_subscribe_tracks(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+	/// Refuse a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS that asks for PUBLISH, which we
+	/// never send. Only draft-16 replies carry the Request ID; draft-17+ replies never do.
+	async fn reject_namespace_request(
+		&self,
+		mut stream: Stream<S, Version>,
+		request_id: Option<RequestId>,
+		reason: &str,
+	) -> Result<(), Error> {
 		stream.writer.varint(ietf::RequestError::ID).await?;
 		stream
 			.writer
 			.encode(&ietf::RequestError {
-				request_id: None,
+				request_id: request_id.filter(|_| self.version == Version::Draft16),
 				error_code: request::to_code(&Error::Unsupported, request::Kind::SubscribeNamespace, self.version),
-				reason_phrase: "SUBSCRIBE_TRACKS is not supported".into(),
+				reason_phrase: reason.into(),
 				retry_interval: 0,
 			})
 			.await?;
@@ -3874,6 +3894,96 @@ mod serve_tests {
 					"{version}: {label}"
 				);
 			}
+		}
+	}
+
+	/// A draft-16/17 SUBSCRIBE_NAMESPACE gets NAMESPACE whenever it asks for namespaces,
+	/// and one asking for PUBLISH alone is refused, since we never send PUBLISH. Draft-18
+	/// has no Subscribe Options and always asks for namespaces.
+	#[moq_net_sim::test]
+	async fn subscribe_namespace_honors_subscribe_options() {
+		use ietf::SubscribeOptions::{Both, Namespace, Publish};
+
+		for (version, options, namespaces) in [
+			(Version::Draft16, Some(Publish), false),
+			(Version::Draft16, Some(Namespace), true),
+			(Version::Draft16, Some(Both), true),
+			(Version::Draft17, Some(Publish), false),
+			(Version::Draft17, Some(Namespace), true),
+			(Version::Draft17, Some(Both), true),
+			(Version::Draft18, None, true),
+		] {
+			let h = serve(version);
+			settle().await;
+
+			let mut body = Vec::new();
+			let mut w = Encoder::new(&mut body, version.into());
+			let id = match options {
+				Some(subscribe_options) => {
+					ietf::SubscribeNamespaceLegacy {
+						request_id: RequestId(REQUEST_ID),
+						namespace: crate::Path::new(""),
+						subscribe_options,
+						hidden: false,
+					}
+					.encode_msg(&mut w, version)
+					.unwrap();
+					ietf::SubscribeNamespaceLegacy::ID
+				}
+				None => {
+					ietf::SubscribeNamespace {
+						request_id: RequestId(REQUEST_ID),
+						namespace: crate::Path::new(""),
+						hidden: false,
+					}
+					.encode_msg(&mut w, version)
+					.unwrap();
+					ietf::SubscribeNamespace::ID
+				}
+			};
+
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let mark = h.log.writes.lock().unwrap().len();
+			let task = h
+				.publisher
+				.clone()
+				.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream)
+				.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"));
+			let mut task = std::pin::pin!(task);
+			let mut done = false;
+			for _ in 0..100 {
+				done = futures::poll!(task.as_mut()).is_ready();
+				if done || occurrences(&h.log, b"room") > 0 {
+					break;
+				}
+				settle().await;
+			}
+
+			let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
+			let mut buf = Decoder::new(&wire, version.into());
+			let label = format!("{version} {options:?}");
+			if namespaces {
+				assert!(!done, "{label}: the subscription ended");
+				assert_eq!(buf.varint().unwrap(), ietf::RequestOk::ID, "{label}");
+				ietf::RequestOk::decode(&mut buf, version).unwrap();
+				assert_eq!(buf.varint().unwrap(), ietf::Namespace::ID, "{label}");
+				assert_eq!(
+					ietf::Namespace::decode(&mut buf, version).unwrap().suffix.as_str(),
+					"room",
+					"{label}"
+				);
+			} else {
+				assert!(done, "{label}: the refusal did not finish");
+				assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{label}");
+				let err = ietf::RequestError::decode(&mut buf, version).unwrap();
+				assert_eq!(err.error_code, 0x3, "{label}: NOT_SUPPORTED");
+				assert_eq!(
+					err.request_id,
+					(version == Version::Draft16).then_some(RequestId(REQUEST_ID)),
+					"{label}"
+				);
+			}
+			assert!(buf.is_empty(), "{label}: trailing bytes");
 		}
 	}
 

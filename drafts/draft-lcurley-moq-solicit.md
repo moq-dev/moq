@@ -103,9 +103,8 @@ This is a MUST NOT rather than a SHOULD NOT because the receiver enforces it. A 
 A relay is the expected user of this declaration, as is any endpoint that asks for what it wants.
 So is an endpoint that only publishes, which cannot subscribe to anything and therefore has no use for an advertisement of any kind.
 
-An endpoint SHOULD NOT advertise the same namespace both ways on one session.
-Whichever arrives second replaces the source the first attached, which at best wastes a stream and at worst leaves the receiver holding two independent advertisements it must reconcile.
-Because this declaration decides which of the two an endpoint uses, honoring it also settles that question for the whole session.
+An endpoint that did not declare 1 can hear a namespace both ways: unsolicited, and in answer to its own SUBSCRIBE_NAMESPACE.
+Both report the same namespace, so the receiver treats them as one advertisement, not two sources.
 
 
 # Enforcement {#enforcement}

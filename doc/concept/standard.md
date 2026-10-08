@@ -143,6 +143,8 @@ knowing when pointing another implementation at ours: we announce every
 namespace we can offer unsolicited *and* ask for every prefix we may discover;
 set the solicit `SETUP` option to make us wait to be asked. A peer that does not
 set that option still gets each match as a `NAMESPACE` on its `SUBSCRIBE_NAMESPACE`
-stream on draft-16 and later, so it hears the namespace twice. Single-track
+stream on draft-16 and later, so it hears the namespace twice. We never send
+`PUBLISH`: on drafts 16 and 17 a `SUBSCRIBE_NAMESPACE` asking only for `PUBLISH`
+is refused, and one asking for both gets only `NAMESPACE`. Single-track
 `PUBLISH` offers are declined; announce a namespace and serve the resulting
 `SUBSCRIBE`s instead.

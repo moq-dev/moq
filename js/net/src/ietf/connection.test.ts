@@ -2,13 +2,21 @@ import { expect, spyOn, test } from "bun:test";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Producer as OriginProducer } from "../origin.ts";
+import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Connection } from "./connection.ts";
 import { Group } from "./object.ts";
 import { SetupOption, SetupOptions } from "./parameters.ts";
-import { RequestError } from "./request.ts";
+import { RequestError, RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
-import { SUBSCRIBE_TRACKS_ID } from "./subscribe_namespace.ts";
+import {
+	SUBSCRIBE_TRACKS_ID,
+	SubscribeNamespace,
+	SubscribeNamespaceEntry,
+	SubscribeNamespaceLegacy,
+	SubscribeOptions,
+} from "./subscribe_namespace.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const PADDING = 0x132b3e28n;
@@ -145,6 +153,101 @@ test("SUBSCRIBE_TRACKS refuses only its request", async () => {
 			expect(refused.reasonPhrase).toBe("SUBSCRIBE_TRACKS is not supported");
 		}
 	} finally {
+		connection.abort();
+	}
+});
+
+/**
+ * A draft-16/17 SUBSCRIBE_NAMESPACE gets NAMESPACE whenever it asks for namespaces, and one
+ * asking for PUBLISH alone is refused, since we never send PUBLISH. Draft-18 has no
+ * Subscribe Options and always asks for namespaces.
+ */
+for (const [version, alpn, options, namespaces] of [
+	[Version.DRAFT_16, ALPN.DRAFT_16, SubscribeOptions.PUBLISH, false],
+	[Version.DRAFT_16, ALPN.DRAFT_16, SubscribeOptions.NAMESPACE, true],
+	[Version.DRAFT_16, ALPN.DRAFT_16, SubscribeOptions.BOTH, true],
+	[Version.DRAFT_17, ALPN.DRAFT_17, SubscribeOptions.PUBLISH, false],
+	[Version.DRAFT_17, ALPN.DRAFT_17, SubscribeOptions.NAMESPACE, true],
+	[Version.DRAFT_17, ALPN.DRAFT_17, SubscribeOptions.BOTH, true],
+	[Version.DRAFT_18, ALPN.DRAFT_18, undefined, true],
+] as const) {
+	test(`${alpn} SUBSCRIBE_NAMESPACE with Subscribe Options ${options ?? "absent"}`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.server, { version });
+		const origin = new OriginProducer();
+		origin.createBroadcast(Path.from("room")).announce();
+		const connection = new Connection({
+			url: new URL("https://example.com"),
+			quic: pair.server,
+			control,
+			maxRequestId: 100n,
+			version,
+			client: false,
+			publish: origin.consume(),
+			solicit: true,
+		});
+
+		try {
+			const stream = await Stream.open(pair.client, { version });
+			if (options === undefined) {
+				await stream.writer.u53(SubscribeNamespace.id);
+				await new SubscribeNamespace({ namespace: Path.empty(), requestId: 1n }).encode(stream.writer, version);
+			} else {
+				await stream.writer.u53(SubscribeNamespaceLegacy.id);
+				await new SubscribeNamespaceLegacy({
+					namespace: Path.empty(),
+					requestId: 1n,
+					subscribeOptions: options,
+				}).encode(stream.writer, version);
+			}
+
+			if (namespaces) {
+				expect(await stream.reader.u53()).toBe(RequestOk.id);
+				await RequestOk.decode(stream.reader, version);
+				expect(await stream.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+				expect((await SubscribeNamespaceEntry.decode(stream.reader, version)).suffix).toBe(Path.from("room"));
+			} else {
+				expect(await stream.reader.u53()).toBe(RequestError.id);
+				const refused = await RequestError.decode(stream.reader, version);
+				expect(refused.errorCode).toBe(0x3);
+				expect(refused.requestId).toBe(version === Version.DRAFT_16 ? 1n : undefined);
+				expect(await stream.reader.done()).toBe(true);
+			}
+		} finally {
+			connection.abort();
+			origin.close();
+		}
+	});
+}
+
+/** Subscribe Options above 0x02 are malformed and close the session. */
+test("an unknown Subscribe Options value closes the session", async () => {
+	const logged = spyOn(console, "error").mockImplementation(() => void 0);
+	const version = Version.DRAFT_17;
+	const pair = createMockTransportPair(ALPN.DRAFT_17);
+	const control = await Stream.open(pair.server, { version });
+	const connection = new Connection({
+		url: new URL("https://example.com"),
+		quic: pair.server,
+		control,
+		maxRequestId: 100n,
+		version,
+		client: false,
+	});
+
+	try {
+		const stream = await Stream.open(pair.client, { version });
+		await stream.writer.u53(SubscribeNamespaceLegacy.id);
+		await new SubscribeNamespaceLegacy({
+			namespace: Path.empty(),
+			requestId: 1n,
+			subscribeOptions: 3 as SubscribeOptions,
+		}).encode(stream.writer, version);
+
+		const info = await pair.client.closed;
+		expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
+	} finally {
+		logged.mockRestore();
 		connection.abort();
 	}
 });

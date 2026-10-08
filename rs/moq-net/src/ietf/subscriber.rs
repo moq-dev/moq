@@ -862,7 +862,7 @@ where
 				let msg = ietf::SubscribeNamespaceLegacy {
 					request_id,
 					namespace: prefix.clone(),
-					subscribe_options: 0x01, // NAMESPACE only
+					subscribe_options: ietf::SubscribeOptions::Namespace,
 					hidden,
 				};
 				stream.writer.varint(ietf::SubscribeNamespaceLegacy::ID).await?;
