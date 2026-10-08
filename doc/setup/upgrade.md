@@ -70,6 +70,14 @@ These land with the next breaking release, not the 2026-09-23 train.
   `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
   `MOQ_CLUSTER_LINGER` are no longer read, so drop them from the environment.
   In Rust, `cluster::Config` has no `mesh` or `linger` field.
+- **Settings no listener reads stop startup.** A stream-only relay or `moq`
+  listener (TCP or Unix, no `--listen`) refuses the QUIC-only
+  `--listen-preferred-v4`/`-v6`, `--listen-quic-lb-id`, and pinned `tls.peers`,
+  and a `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp-tls`
+  serves it. `--listen-unix-allow-*` needs `--listen-unix-bind`, and
+  `web.https.cert`, `key`, and `root` need `web.https.listen`. `moq` without a
+  listener refuses `--listen-*` and `--auth-*` flags. Each used to be ignored;
+  drop it, or add the listener it configures.
 - **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
   `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
   instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
@@ -155,6 +163,41 @@ These land with the next breaking release, not the 2026-09-23 train.
   (`source.catalog(format)`) and narrow it with `catalog::Stream::select`
   before constructing the export. `moq export flv` still applies the same
   rendition flags.
+- **A track is timed or untimed, and nothing fills in a timestamp on
+  receive.** An untimed track (no timescale) arrives untimed, except over
+  moq-lite 05 and later, which can't encode absence yet and carry a send time
+  instead; see [untimed tracks](/concept/moq-lite#subscriptions). A write whose
+  timedness doesn't match its track fails with `TimestampMismatch`.
+  - moq-net: `track::Info.timescale` is `Option<Timescale>`, `None` for an
+    untimed track (`with_timescale` takes `impl Into<Option<_>>`), and
+    `group::{Producer,Consumer}::timescale()` return `Option<Timescale>`.
+    `Frame.timestamp`, `frame::Info.timestamp`, and `Datagram.timestamp` are
+    `Option<Timestamp>`. The `write_frame`, `append_datagram`, and
+    `insert_datagram` calls take `impl Into<Option<Timestamp>>`, so passing a
+    `Timestamp` still compiles.
+  - moq-e2ee: `Frame` and `Datagram` timestamps are optional, and its writers
+    take `impl Into<Option<Timestamp>>`.
+  - moq-archive: recording an untimed track fails with `Error::Untimed`, so
+    `moq export archive` over moq-lite before 05 or moq-transport drafts
+    14–16 now fails instead of recording arrival times.
+  - moq-ffi: `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` are
+    optional, null on a frame read from an untimed track, and default to null.
+    A raw track you publish is timed, so a raw write without one now fails
+    with `TimestampMismatch` instead of going out at 0.
+    `MoqMediaProducer::write_frame` without one used to pass a PTS of 0; it
+    now passes none, so the importer derives the time itself (elapsed since
+    its first frame) or refuses a codec that needs one (avc1, hvc1).
+    `MoqTrackInfo.timescale` is null on a received untimed track. In Go,
+    `Frame.TimestampUs` and `Datagram.TimestampUs` are `*uint64`; in Kotlin
+    and Dart, `Frame.timestamp` and `Datagram.timestamp` are nullable.
+  - libmoq: `moq_frame` and `moq_datagram` gain `timestamp_present`, which
+    changes their size, so recompile against the new `moq.h`.
+  - Receivers: tracks from moq-lite before 05, and moq-transport tracks
+    without `TIMESCALE` (every track on drafts 14–16), arrive untimed instead
+    of stamped with their arrival time; an object-scope Timescale is ignored.
+    On a moq-transport track with `TIMESCALE`, an object without a Timestamp
+    is malformed. A new subscriber with no start on an untimed track starts at
+    the latest group.
 
 ## Wire
 

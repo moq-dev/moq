@@ -646,7 +646,7 @@ impl<S: Stream> Publish<S> {
 			.map_err(|e| anyhow::anyhow!("rtmp accept publish: {e:?}"))?;
 		self.work.extend(results);
 
-		tracing::info!(peer = %self.peer, %path, "rtmp publish accepted");
+		tracing::info!(peer = %self.peer, %path, epoch = %publisher.epoch, "rtmp publish accepted");
 
 		let result = pump(
 			&mut self.stream,
@@ -1393,13 +1393,17 @@ struct Publisher {
 	// A clone of the importer's producer, so an end can close the broadcast
 	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
+	// This connection's publisher instance, so an encoder reconnecting under the
+	// same key replaces this broadcast at once instead of resuming into it.
+	epoch: moq_net::Epoch,
 }
 
 impl Publisher {
-	/// Open a broadcast at `path` and prime the importer with the FLV file
-	/// header, so subsequent tags decode against an initialized demuxer.
+	/// Open a broadcast at `path` under a fresh epoch and prime the importer with
+	/// the FLV file header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
-		let mut broadcast = origin.publish(path, moq_net::origin::Route::default())?;
+		let epoch = moq_net::Epoch::mint();
+		let mut broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
@@ -1410,6 +1414,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			broadcast: handle,
+			epoch,
 		})
 	}
 
@@ -2123,6 +2128,65 @@ mod tests {
 		};
 		publish.reject("test rejection").await.unwrap();
 		client.abort();
+	}
+
+	/// An encoder reconnecting under the same key while its stale connection is still
+	/// open replaces the stale broadcast at once: each connection is its own epoch, so
+	/// viewers re-request instead of stalling on the old one.
+	#[tokio::test]
+	async fn a_reconnect_replaces_the_stale_publish() {
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let server_task = tokio::spawn(async move {
+			while let Some(request) = server.accept().await {
+				let Request::Publish(publish) = request else {
+					panic!("expected a publish request");
+				};
+				let origin = origin.clone();
+				tokio::spawn(async move { publish.accept(&origin, "live/cam0").await });
+			}
+		});
+
+		let stale_client = tokio::spawn(async move {
+			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
+		});
+		tokio::time::timeout(Duration::from_secs(5), consumer.routed("live/cam0"))
+			.await
+			.expect("stale publish timed out")
+			.unwrap();
+		let stale = consumer.request_broadcast("live/cam0").await.unwrap();
+		let mut catalog = stale
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+
+		let fresh_client = tokio::spawn(async move {
+			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
+		});
+		let ended = tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				match catalog.recv_group().await {
+					Ok(Some(_)) => continue,
+					Ok(None) => panic!("the stale broadcast ended cleanly"),
+					Err(err) => return err,
+				}
+			}
+		})
+		.await
+		.expect("the stale viewer stalled");
+		assert!(matches!(ended, moq_net::Error::Unroutable), "{ended:?}");
+		assert!(!stale_client.is_finished(), "the stale connection is still open");
+
+		let fresh = consumer.request_broadcast("live/cam0").await.unwrap();
+		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected publish");
+
+		stale_client.abort();
+		fresh_client.abort();
+		server_task.abort();
 	}
 
 	/// The connect `_result` should advertise the enhanced-RTMP codecs we ingest
