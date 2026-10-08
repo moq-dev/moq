@@ -1767,6 +1767,45 @@ mod tests {
 		.unwrap();
 	}
 
+	// An H.265 camera whose SPS VUI zeroes the colour fields on 4:2:0 (`matrix_coeffs` 0, which
+	// ITU-T H.265 E.3.1 forbids there; a Viewtron IP-PTZ-440 sends it) still resolves its rendition
+	// instead of failing the pad with "h265: failed to parse SPS NAL unit".
+	#[test]
+	fn h265_with_zeroed_vui_colour_resolves_the_rendition() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let caps = gst::Caps::builder("video/x-h265")
+			.field("stream-format", "byte-stream")
+			.field("alignment", "au")
+			.build();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&caps, Some("camera")));
+		pad.observe_segment(time_segment());
+		let vps: &[u8] = &[
+			0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+			0x03, 0x00, 0x5d, 0x95, 0x98, 0x09,
+		];
+		let sps: &[u8] = &[
+			0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+			0x96, 0xa0, 0x03, 0xc0, 0x80, 0x11, 0x07, 0xcb, 0x8a, 0xad, 0x3b, 0xa2, 0x4b, 0xb9, 0x08, 0x00, 0x00, 0x03,
+			0x00, 0x20, 0x05, 0x26, 0x5c, 0x00, 0x33, 0x7f, 0x98, 0x01,
+		];
+		let pps: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x62, 0x40];
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa];
+		let mut au = Vec::new();
+		for nal in [vps, sps, pps, idr] {
+			au.extend_from_slice(&[0, 0, 0, 1]);
+			au.extend_from_slice(nal);
+		}
+		let outcome = pad
+			.push_buffer(Bytes::from(au), Some(gst::ClockTime::ZERO), None, None, Instant::now())
+			.unwrap();
+		assert_eq!(outcome, PushOutcome::Published);
+		assert!(!pad.is_failed());
+		let config = catalog.snapshot().video.renditions.get("camera").cloned().unwrap();
+		assert_eq!((config.coded_width, config.coded_height), (Some(1920), Some(1080)));
+	}
+
 	// A real IDR AU emits a frame to the published track (not just a rendition off the SPS).
 	#[tokio::test]
 	async fn frame_through_h264_emits_a_frame() {

@@ -229,7 +229,7 @@ function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): numb
 }
 
 /** Orders two routes by preference: the newest epoch with none last, then identified before
- * anonymous, then lower warm cost, then lower cold cost. */
+ * anonymous, then lower static cost. */
 function compareRoutes(a: Route, b: Route): number {
 	if (a.epoch !== b.epoch) {
 		// An older epoch is a publisher that was replaced.
@@ -239,8 +239,7 @@ function compareRoutes(a: Route, b: Route): number {
 	}
 	const anonymous = Number(isAnonymous(a)) - Number(isAnonymous(b));
 	if (anonymous !== 0) return anonymous;
-	if (a.cost.warm !== b.cost.warm) return a.cost.warm < b.cost.warm ? -1 : 1;
-	if (a.cost.cold !== b.cost.cold) return a.cost.cold < b.cost.cold ? -1 : 1;
+	if (a.cost !== b.cost) return a.cost < b.cost ? -1 : 1;
 	return 0;
 }
 
@@ -287,9 +286,12 @@ function unroutable(): StreamError {
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
 class ServeState {
 	readonly root: Path.Valid;
+	/** False when a session announced the route: it may serve that session's broadcast. */
+	readonly originated: boolean;
 
-	constructor(root: Path.Valid) {
+	constructor(root: Path.Valid, originated: boolean) {
 		this.root = root;
+		this.originated = originated;
 	}
 
 	queue = new Signal<Request[]>([]);
@@ -689,7 +691,7 @@ export interface Table {
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
 	dynamic(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint },
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] },
 	): Dynamic;
 }
 
@@ -856,7 +858,7 @@ export class Producer implements Table {
 	 */
 	dynamic(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), true);
 	}
@@ -869,14 +871,14 @@ export class Producer implements Table {
 	 */
 	#receive(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), false);
 	}
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
-		const server = new ServeState(this.#scope.root);
+		const server = new ServeState(this.#scope.root, originated);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
 			identity: {},
@@ -1629,7 +1631,7 @@ export class Dynamic {
 	 * The route is taken as given, epoch included: another epoch (or none) names another
 	 * publisher instance, so re-price from the current one, `update({ ...dynamic.route, cost })`.
 	 */
-	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint }): void {
+	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] }): void {
 		if (this.#closed) throw new Error("dynamic is closed");
 		const next = Route.normalize(route);
 		const previous = this.#entry.route.peek().epoch;
@@ -1711,9 +1713,18 @@ export class Request {
 	 *
 	 * The caller keeps producing into `broadcast`; repeat requests for the path share
 	 * it for as long as it stays live.
+	 *
+	 * A JS app does not proxy: a broadcast a session delivered would go out labeled with
+	 * this origin's hop. To serve upstream content, copy its tracks into a broadcast you
+	 * produce and accept that.
+	 *
+	 * @throws Error when handed a broadcast a session delivered. The request stays open.
 	 */
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) return;
+		if (this.#server.originated && !(source instanceof broadcast.Producer) && wireOf(source).fromSession) {
+			throw new Error("origin cannot serve a broadcast it did not produce");
+		}
 		this.#done = true;
 		const front = source instanceof broadcast.Producer ? source.consume() : source;
 		this.#server.accept(this, front);

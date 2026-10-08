@@ -4,6 +4,7 @@
  * @module
  */
 
+import { ProtocolViolation } from "../error.ts";
 import type { Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -363,6 +364,9 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		}
 		if (framing === "byte") {
 			if (rest.length < 1) throw new Error("truncated value inside FILL_PARAMETERS");
+			if (key === 0x22n && rest[0] !== 1 && rest[0] !== 2) {
+				throw new ProtocolViolation(`invalid group order: ${rest[0]}`);
+			}
 			rest = rest.slice(1);
 			continue;
 		}

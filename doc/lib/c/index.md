@@ -10,8 +10,8 @@ description: moq-c, the stable C ABI over the Rust core
 `moq-c` exposes MoQ to C, C++, and any language with a C FFI through a
 stable ABI: a generated `moq.h`, a static `libmoq.a` that links the whole Rust
 runtime in, and a pkg-config file for its native link dependencies. The
-[OBS plugin](/bin/obs) is built on it. It was published as `libmoq` through
-0.6; the header and library file names did not change.
+[OBS plugin](/bin/obs) is built on it. Releases through 0.6 were named
+`libmoq`.
 
 ## Install
 
@@ -30,29 +30,11 @@ With CMake, point `CMAKE_PREFIX_PATH` at the extracted archive, then
 `find_package(moq-c)` and link `moq::c`.
 
 From source, `add_subdirectory(rs/moq-c)` in CMake gives the same `moq::c`
-target. A bare `cargo build --release -p moq-c` writes `target/release/libmoq.a`,
-and `moq.h` lands in the build script's `OUT_DIR` under `include/`, a hashed
-path that `--message-format=json` reports as `out_dir`. It writes no `moq-c.pc`;
-`nix build .#moq-c` produces the same install layout as the release tarball,
-pkg-config file included.
+target, and `nix build .#moq-c` produces the release layout. A bare
+`cargo build -p moq-c` leaves `moq.h` in a hashed `OUT_DIR` and writes no
+pkg-config file.
 
-## Shape of the API
-
-- **Handles and callbacks.** Every object is an integer handle; every async result arrives on a required `moq_status_callback` with a `void *user_data`. A status `> 0` is a live result, `0` a clean close, `< 0` an error, and the last two are terminal: moq-c never touches `user_data` again, so free it there. `*_cancel` only requests shutdown; the terminal callback still fires.
-- **Errors.** Negative return codes named by `MOQ_ERROR_*` in `moq.h`, with `moq_error()` giving the reason for the last failure on the calling thread. Auth rejections (401, 403) have their own codes so you don't retry them. A protocol failure also fills `moq_error_protocol()` with the session or stream scope, the verbatim wire code, and a known kind; do not parse `moq_error()` for that.
-- **Threading.** Any function from any thread. Raw publish calls block until the codec takes the frame, which paces a publisher.
-- **Connection health.** `moq_session_stats()` reports available metrics with per-field validity flags. `moq_session_snapshot()` samples those metrics and the negotiated draft name together from the same connection. Its protocol string is backed by static storage. Both return an offline error between reconnects and leave the destination untouched. `moq_session_bandwidth()` mints an allocator over the send estimate; `moq_bandwidth_reserve` claims a share for an app-owned track, and `moq_encode_video` / `moq_encode_audio` take the same handle so the built-in video encoder follows the grant.
-- **Raw playback.** Raw audio and video consumers start at the newest cached group when opened, so rebuilding a live decoder skips the retained backlog.
-- **Raw audio encode.** `moq_audio_encoder_output.codec` names the codec: `"opus"`, `"pcm"`, or `"aac"`. `frame_duration_us` sets the Opus frame length: 2500, 5000, 10000, 20000, 40000, or 60000, with 0 meaning the codec's default (20 ms for Opus, 1024 samples for AAC). AAC-LC encodes through the platform's encoder, so a host without one refuses it.
-- **Audio channel layouts.** A `channels` count also names the speaker layout, by the WAVE convention: 1 is mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved front left, front right, center, LFE, back, then side. `moq_decode_audio` remixes to the count you ask for; past 8 channels the samples pass through but can't be remixed.
-- **Raw decode output.** `moq_video_decoder_output` selects the decoded CPU pixel format (`MOQ_VIDEO_PIXEL_FORMAT_I420` or `_RGBA`) and target size (`width`/`height`, both zero for native; otherwise even and non-zero). Unknown formats and invalid sizes fail `moq_decode_video` before subscribing.
-- **Decoded frames.** Each frame id owns its decoded picture until `moq_decode_video_frame_free`, including after `moq_decode_video_cancel` and the terminal callback. The first `moq_decode_video_frame` call converts it to the requested layout and size; its `data` pointer then stays put until the id is freed. A conversion failure returns a negative code for that frame only. Free frames promptly: held frames hold decoder buffers, and a decoder whose buffers are all held stalls.
-- **Encoded video metadata.** `moq_video_init.hint` is a zero-initialized `moq_video_hint` with `has_*` flags for coded dimensions, bitrate (bits per second), frame rate, and latency preference. Hints seed a video codec track's catalog; detected dimensions take precedence.
-- **Client config.** A zeroed `moq_client_config` means the defaults for every knob, which is what lets a new one be appended without disturbing callers. Fields cover protocol (`versions`), TLS (`tls_fingerprints`, `tls_roots`, `tls_cert`/`_key`, `tls_host_name`), transport (`bind`, `connect_timeout_us`, `failover_delay_us`/`resolution_delay_us` for Happy Eyeballs, `websocket_enabled`/`_delay_us`), and tuning (reconnect backoff, `quic_*`). Every duration is in microseconds. A knob whose default isn't zero carries a `has_*` flag, so setting `backoff_timeout_us = 0` needs `has_backoff_timeout = true` to mean "retry forever" rather than "use the default". `moq_client_defaults()` reports what a NULL config dials with.
-- **Server.** `moq_server_listen` binds before it returns (a bad address or certificate fails there) and hands each incoming session to `on_request` as a request handle. Read `moq_session_request_path` and `_query` to route and authenticate, then `moq_session_request_accept` (a session handle, with origins like `moq_session_connect`) or `moq_session_request_reject` with an HTTP-style code (401 and 403 become the protocol's unauthorized close). An accepted session reports `1` once SETUP completes and never reconnects. `moq_server_addr` reports an ephemeral port and `moq_server_fingerprints` the hashes a client pins for a `tls_generate` certificate. `moq_server_close` stops listening; its terminal callback fires once the sockets are released.
-- **Demand.** A watcher on a published track (`moq_publish_track_demand`, `moq_publish_media_demand`, `moq_encode_video_demand`, `moq_encode_audio_demand`) calls `on_demand` with `MOQ_DEMAND_USED` or `MOQ_DEMAND_UNUSED` right away and again on every change, so an encoder on a battery-powered device runs only while someone is watching. The first call is the current state, so a track that went unused before the watcher existed still reports it. `moq_publish_demand_cancel` stops it; the terminal callback still fires. A container has no single demand and is refused. Demand follows the last real subscriber: an origin that served the track drops its source copy on the unused edge, so a cache linger never delays it. Only a relay keeps what it already delivered warm for 30 seconds, and a returning subscriber is served that cache only once the publisher confirms it is still current.
-- **Requests.** `moq_publish_dynamic` serves subscriptions to tracks the broadcast never declared: each arrives as a request handle, read its name with `moq_track_request_name`, then `moq_track_request_accept` (a raw track handle), `moq_track_request_video` / `_audio` (the media handle `moq_publish_video` / `_audio` return), or `moq_track_request_abort` with an application code the subscriber sees. Without a live handler an unknown name is refused. `moq_publish_track_dynamic` does the same for fetches of groups a track no longer has cached, delivered as `moq_group_request_*` (`sequence`, `priority`, `frame_start`); `moq_group_request_accept` starts the producer at `frame_start` so written frames keep their group indices. Register it with `moq_track_request_dynamic` before accepting a track that was itself requested by a fetch, so that pending group survives the transition. Both handlers stop with `moq_publish_dynamic_cancel`.
-- **Everything the bindings can do** ([list](/lib/#what-every-binding-can-do)): media publish and consume with the catalog managed for you, raw pixels and PCM with the codec inside (`moq_encode_video`, `moq_encode_audio`, and the `moq_decode_*` mirrors), raw tracks with timestamps and datagrams (one read from an untimed track has `timestamp_present` false), JSON and binary data tracks (snapshot or stream, each advertised in the catalog for as long as it lives), group fetch, catalog sections, shared video properties, and whether a video rendition is enabled (`moq_consume_video_enabled`). The three advertising operations are `moq_origin_create_broadcast` (unannounced producer, invisible to everyone), `moq_publish_announce` / `moq_publish_unannounce` (exact-path advertisement), `moq_publish_close` (ends the broadcast for good and releases its handle), and `moq_origin_dynamic` (a claim over a path prefix and everything beneath it; `""` for everything). A route is a capability, not an inventory. `moq_origin_announced` takes a `moq_announce_config` (NULL or zeroed for everything): a literal prefix and an optional relative pattern filter; each `moq_announce_event` has a `kind` (`MOQ_ANNOUNCE_KIND_START`, `_UPDATE`, or `_END`); `prefix` stays relative to the origin, while `captures` reports what each wildcard matched when `has_captures` is true. Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts); set `hidden` or name the dot segment in `prefix` to list them.
+## Connect
 
 ```c
 moq_client_config config;
@@ -67,31 +49,22 @@ if (session < 0)
     return fail(moq_error());
 ```
 
-For a locally encoded media track, call `moq_publish_media_flush(media, timestamp_us)` after `moq_publish_media_frame` with the same broadcast-clock PTS. The monotonic handoff time is sampled inside moq-c. Do not call it for file, pipe, or network imports; those remain clock-free. Invalid handles and unrepresentable timestamps return a negative error code.
+## Things to know
 
-Call `moq_publish_media_discontinuity(media)` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a video track, resume with a keyframe: a delta frame before it fails.
+The rest of the [shared feature list](/lib/#what-every-binding-can-do) is
+here, from media publish and consume to raw pixels and PCM with the codec
+inside. The header is the reference: each function carries a doc comment.
 
-## Connection stats
+- **Handles and callbacks.** Every object is an integer handle, and every async result arrives on a `moq_status_callback` with your `void *user_data`. A status `> 0` is a live result, `0` a clean close, and `< 0` an error. The last two are terminal: moq-c never touches `user_data` again, so free it there. `*_close` and `*_cancel` only request shutdown; the terminal callback still fires.
+- **Errors.** Negative return codes are named by `MOQ_ERROR_*`, and `moq_error()` gives the reason on the calling thread. Auth rejections have their own codes so you don't retry them. For the peer's protocol code use `moq_error_protocol()`; do not parse `moq_error()`.
+- **Threading.** Call any function from any thread. Raw publish calls block until the codec takes the frame, which paces a publisher.
+- **Zeroed config is the default.** A zeroed `moq_client_config` means the default for every field, so new fields don't break callers. A field whose default isn't zero has a `has_*` flag: `backoff_timeout_us = 0` means "retry forever" only with `has_backoff_timeout = true`.
+- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `moq_publish_media_cut`: after every frame, or at a segment cadence to align with video.
+- **Live encoder timing.** After writing a frame you encoded yourself, call `moq_publish_media_flush` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `moq_publish_media_discontinuity`, then keep timestamps moving forward and resume video on a keyframe.
+- **Decoded frames hold decoder buffers.** Free each frame id with `moq_decode_video_frame_free` promptly, or the decoder stalls.
+- **Stats.** `moq_session_stats()` fills `moq_connection_stats` with `rtt_us`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). Each has a `<field>_valid` flag, false when the transport does not report it, which is not the same as zero.
 
-Every field in `moq_connection_stats` carries a matching `<field>_valid` flag,
-`false` when the transport backend does not report it (a `false` flag is not the
-same as zero). Native QUIC reports every metric; the browser WebTransport
-reports few or none.
+## Reference
 
-| Field | Unit | Meaning |
-| --- | --- | --- |
-| `rtt_us` | microseconds | Smoothed round-trip time. |
-| `estimated_send_rate_bps` | bits per second | Send bandwidth from the congestion controller. |
-| `estimated_recv_rate_bps` | bits per second | Receive bandwidth from MoQ PROBE. |
-| `bytes_sent` | bytes | Total sent, including retransmissions and overhead. |
-| `bytes_received` | bytes | Total received, including duplicates and overhead. |
-| `bytes_lost` | bytes | Total lost, detected via retransmission or acknowledgement. |
-| `packets_sent` | datagrams | Total datagrams sent. |
-| `packets_received` | datagrams | Total datagrams received. |
-| `packets_lost` | datagrams | Total datagrams detected as lost. |
-
-The header is the reference; each function carries a doc comment. Source and
-a worked example: [`rs/moq-c`](https://github.com/moq-dev/moq/tree/main/rs/moq-c),
-API docs on [docs.rs/moq-c](https://docs.rs/moq-c).
-
-Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+- API reference: [docs.rs/moq-c](https://docs.rs/moq-c)
+- Source and a worked example: [`rs/moq-c`](https://github.com/moq-dev/moq/tree/main/rs/moq-c)

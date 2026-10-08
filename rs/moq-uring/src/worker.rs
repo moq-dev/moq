@@ -1371,6 +1371,8 @@ mod tests {
 		assert_eq!(metrics.snapshot().timers_active(), 0);
 	}
 
+	/// A remote wake has to find the worker parked, then kick the futex. The park
+	/// word is that observation: a sleep would pass or fail with the load.
 	#[test]
 	fn remote_wake_unparks() {
 		let metrics = Metrics::default();
@@ -1379,21 +1381,40 @@ mod tests {
 			..Default::default()
 		};
 		let Some(mut worker) = worker_with(config) else { return };
+		let unpark = worker.shared.unpark.clone();
 		let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<std::task::Waker>));
 
 		let thread_flag = flag.clone();
-		let waker_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<std::task::Waker>));
 		let thread_slot = waker_slot.clone();
+		let thread_metrics = metrics.clone();
 		let thread = std::thread::spawn(move || {
-			// Wait until the worker has parked on the future below.
-			std::thread::sleep(Duration::from_millis(50));
-			thread_flag.store(true, Ordering::Release);
-			if let Some(waker) = thread_slot.lock().unwrap().take() {
+			loop {
+				while unpark.word.load(Ordering::Acquire) != PARKED {
+					std::hint::spin_loop();
+				}
+				// Park stores the waker first. Cloning leaves it in place so a
+				// lost race can try again with whatever the next poll stored.
+				let Some(waker) = thread_slot.lock().unwrap().clone() else {
+					continue;
+				};
+				let wakes = thread_metrics.snapshot().wakes;
 				waker.wake();
+				// EINTR can end the park between the load and this wake. Only a
+				// wake that found the word parked counts.
+				if thread_metrics.snapshot().wakes == wakes {
+					continue;
+				}
+				thread_flag.store(true, Ordering::Release);
+				// The poll after the futex wake may have run before the flag and
+				// parked again. Waking whatever it stored lets it observe the flag.
+				if let Some(waker) = thread_slot.lock().unwrap().take() {
+					waker.wake();
+				}
+				break;
 			}
 		});
 
-		let start = Instant::now();
 		worker
 			.block_on(std::future::poll_fn(move |cx| {
 				if flag.load(Ordering::Acquire) {
@@ -1403,10 +1424,11 @@ mod tests {
 				Poll::Pending
 			}))
 			.unwrap();
-		assert!(start.elapsed() >= Duration::from_millis(50));
 		thread.join().unwrap();
+		let snap = metrics.snapshot();
+		assert!(snap.parks > 0, "the worker never parked: {snap:?}");
 		// The futex syscall the wake had to make is the expensive half, and the
 		// only counter written from off the worker's thread.
-		assert!(metrics.snapshot().wakes > 0, "the remote wake went unreported");
+		assert!(snap.wakes > 0, "the remote wake went unreported: {snap:?}");
 	}
 }

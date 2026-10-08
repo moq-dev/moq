@@ -70,8 +70,8 @@ Decided (2026-10-01), from a discussion with t0ms:
 - A multiplex is paced on one PCR PID: the `PCR_PID` in the PMT of the PAT's
   first program, or `--pcr-pid`. Every byte stays in order behind it. Programs
   on independent clocks are out of scope.
-- The export reuses the [fixed-delay release](/quest/m1/tstd/delay.md)
-  stage, keyed on each object's PCR time instead of a DTS, which also
+- The export reuses the TS export's jitter buffer (`rs/moq-mux/src/jitter.rs`,
+  #4645), keyed on each object's PCR time instead of a DTS, which also
   spreads each object's bytes at the PCR-implied rate. It must pace on the
   source's PCR, not on arrival: a pacer that re-clocks on arrival moves the
   PCR-to-PTS offset over a long capture and fails the decoder buffers, even
@@ -119,10 +119,8 @@ hang catalog gains an `m2ts` root section; additive.
 ## Required
 
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - the restart-under-a-new-epoch path a backward PCR discontinuity reuses
-- [Fixed-delay release](/quest/m1/tstd/delay.md) - the release stage this reuses, with its clock recovery (#4645)
 
 ## Related
 
 - [TS hitless](/quest/m2/ts-hitless.md) - the demultiplexed lane's 2022-7 legs and the `--sync` anchor
 - [MSFTS convergence](/quest/m2/msfts-convergence.md) - the ES-level side of the same mapping
-- [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - the remux's equivalent of pacing on the source PCR

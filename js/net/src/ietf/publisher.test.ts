@@ -1438,18 +1438,18 @@ test("an unanswered update drops the request and re-offers the namespace fresh",
 });
 
 /**
- * MoQ Cluster carries the warm cost only, and nothing at all without it, so a route change
+ * MoQ Cluster carries one static cost, and nothing at all without it, so a route change
  * the peer cannot see must not withdraw and advertise the namespace again.
  */
 test.each([
-	["a cold-only re-price with Cluster", HopSchema.parse(9n)],
+	["an unchanged price with Cluster", HopSchema.parse(9n)],
 	["any re-price without Cluster", undefined],
 ])("%s sends nothing", async (_, peer) => {
 	const self: Hop = HopSchema.parse(7n);
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
 	const broadcast = origin.createBroadcast(Path.from("mine"));
-	broadcast.announce({ cost: { warm: 4n, cold: 4n } });
+	broadcast.announce({ cost: 4n });
 	void pub.runPublishNamespaces();
 
 	const stream = await nextStream(pair.client);
@@ -1459,7 +1459,7 @@ test.each([
 	expect(msg.trackNamespace).toBe(Path.from("mine"));
 	await acceptPublishNamespace(stream);
 
-	broadcast.announce({ cost: { warm: peer === undefined ? 8n : 4n, cold: 9n } });
+	broadcast.announce({ cost: peer === undefined ? 8n : 4n });
 	expect(await nextStream(pair.client)).toBeUndefined();
 
 	origin.close();
@@ -2314,6 +2314,50 @@ test("draft-20: PUBLISH_DONE waits for a queued group and counts every stream", 
 	} finally {
 		fx.close();
 		client.close();
+	}
+});
+
+/**
+ * A peer that did not send SOLICIT still gets NAMESPACE on its SUBSCRIBE_NAMESPACE
+ * stream on draft-16 and later: one for a match that already exists, one announced
+ * after, then NAMESPACE_DONE when that announcement ends.
+ */
+test.each([
+	["draft-16", Version.DRAFT_16],
+	["draft-18", Version.DRAFT_18],
+] as const)("a non-SOLICIT %s SUBSCRIBE_NAMESPACE carries NAMESPACE then NAMESPACE_DONE", async (_, version) => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, version, true);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: false, session });
+	const early = publish(origin, Path.from("early-cam"));
+
+	const subscription = await Stream.open(pair.client, { version });
+	const accepted = await Stream.accept(pair.server, version);
+	if (!accepted) throw new Error("missing subscription");
+	const run = pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 1n, namespace: Path.empty() }), accepted);
+
+	try {
+		expect(await subscription.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(subscription.reader, version);
+
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+		expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(
+			Path.from("early-cam"),
+		);
+
+		publish(origin, Path.from("late-cam"));
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+		expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(Path.from("late-cam"));
+
+		early.close();
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntryDone.id);
+		expect((await SubscribeNamespaceEntryDone.decode(subscription.reader, version)).suffix).toBe(
+			Path.from("early-cam"),
+		);
+	} finally {
+		subscription.close();
+		origin.close();
+		await run;
 	}
 });
 
