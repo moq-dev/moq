@@ -46,6 +46,10 @@ added this quest):
   `Tasks`' one-snapshot rule (`a_self_waking_task_yields_to_the_owner`), and
   the owner returns to its runtime after the pass. Work per turn scales with
   the children that were ready, so a busy fan-out session is not throttled.
+  If [Run to quiescence](/quest/m1/perf/uring-quiescence.md) lets a turn run
+  several passes, each pass refills every child it polls, so a turn is
+  bounded by passes times ready children times the budget, and the owner
+  returns only after the last pass.
   Rejected: one budget shared by the whole runtime task (tokio's model),
   which caps a session with many subscriptions at one budget per turn.
 - Refill mirrors tokio: `kio::coop::budget(f)` sets a fresh budget and
