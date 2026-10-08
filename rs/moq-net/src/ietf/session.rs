@@ -1263,7 +1263,7 @@ mod tests {
 		let msg = ietf::SubscribeNamespaceLegacy {
 			request_id: RequestId(0),
 			namespace: crate::Path::new(namespace),
-			subscribe_options: 0x01,
+			subscribe_options: ietf::SubscribeOptions::Namespace,
 			hidden: false,
 		};
 		writer.varint(ietf::SubscribeNamespaceLegacy::ID).await.unwrap();
@@ -1297,6 +1297,7 @@ mod tests {
 			session,
 			setup: Some(setup),
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: None,
 			subscribe: Some(subscribe),
