@@ -32,7 +32,8 @@ peers hear each namespace twice. Carry Subscribe Options through dispatch:
 We send no PUBLISH for a namespace subscription, so decide how the track half
 is answered. For 0x00 (tracks only), refusing is the recommendation, since it
 fails loud. For 0x02, the recommendation is to answer with namespaces only,
-since refusing would drop the NAMESPACE it asked for.
+since refusing would drop the NAMESPACE it asked for. A value above 0x02 is
+malformed and refused.
 Rejected: stopping unsolicited pushes on d16+ (a peer that never subscribes
 would learn nothing), and filling only on d18+ (two behaviours for one
 message).
@@ -52,7 +53,7 @@ hears each namespace twice.
 
 Test: a non-SOLICIT d16 and d18 peer's SUBSCRIBE_NAMESPACE receives
 NAMESPACE for an existing match and for one announced later, then
-NAMESPACE_DONE when it ends. On d16, options 0x00, 0x01 and 0x02 each get
-the chosen behaviour, in both languages.
+NAMESPACE_DONE when it ends. On d16, options 0x00, 0x01, 0x02 and 0x03 each
+get the chosen behaviour, in both languages.
 
 Public API: none. Wire: moq-transport replies move closer to the drafts.

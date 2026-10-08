@@ -22,20 +22,24 @@ cache holds; d14 to d17 state no rule, so follow the same one there.
   (`rs/moq-net/src/ietf/publisher.rs`, around lines 664 and 717), which is
   `None` until a group is cached, so `(Filter::NextObject, None)` becomes
   `Joined::Empty`.
-- The subscriber only calls `track.start_at(largest.group)`
-  (`rs/moq-net/src/ietf/subscriber.rs`, around line 2013) with its
-  upstream's Largest, and does not record the object.
-
-- The model's `largest()` derives from the newest cached group, so it
-  drops back once that group is evicted, and the upstream's Largest is kept
-  only as `live_floor` (`rs/moq-net/src/model/track.rs`).
+- The subscriber passes its upstream's Largest only to
+  `track.start_at(largest.group)` and its held subscription state
+  (`rs/moq-net/src/ietf/subscriber.rs`, around line 2013), and does not
+  record the object. `live_floor` (`model/track.rs`) is a cache-validity
+  group floor, not the upstream's Largest.
+- The latest group is protected from eviction while the track has a
+  producer, but `live_edge` falls back through the cache when the newest
+  group has no object yet. An empty newer group demotes the last
+  object-bearing group, which can then expire, losing its Location.
 
 Decided 2026-10-07: carry the upstream's Largest into the model, and keep a
-high-watermark of the largest object received that cache eviction does not
-lower, so the publisher reports the maximum of the two. Serve the joining
-FETCH through the existing one-group upstream fill. Rejected: leaving INVALID_RANGE, which is compliant
-but loses late joiners' first group head. This reports state learned from
-the upstream; nothing waits on a peer.
+high-watermark of the largest object received that expiry does not lower,
+so the publisher reports the maximum of the two. Serve the joining FETCH
+through the existing one-group upstream fill. Rejected: leaving
+INVALID_RANGE, which is compliant but loses late joiners' first group head.
+This reports state learned from the upstream; nothing waits on a peer. The
+same Largest goes out wherever the draft asks for it (SUBSCRIBE_OK, and on
+d18+ an inbound PUBLISH and REQUEST_UPDATE_OK).
 
 Scrutinize the model change: keep any new track state crate-private unless a
 consumer needs it.
@@ -44,8 +48,9 @@ Test: through a cold relay, a d16 subscriber with a relative joining FETCH
 (start 0) receives the current group from object 0, and its SUBSCRIBE_OK
 carries the upstream's Largest. On d18 and d19, a relay whose cached
 objects are behind the upstream's Largest reports the upstream's, and one
-whose cache is ahead reports its own, and still reports it after that
-group is evicted.
+whose cache is ahead reports its own. Regression for the high-watermark:
+create an empty newer group, expire the older object-bearing group it
+demoted, and SUBSCRIBE_OK still reports that group's received Location.
 
 Public API: none expected. Wire: none new.
 
