@@ -61,6 +61,8 @@ struct FetchedGroup {
 	frames: Vec<frame::Frame>,
 	/// The group ended within the range, so every frame it will ever hold was read.
 	complete: bool,
+	/// The track's timescale, or `None` for an untimed track.
+	timescale: Option<Timescale>,
 }
 
 impl FetchPrior {
@@ -117,6 +119,7 @@ async fn read_fetch(
 		first,
 		frames,
 		complete,
+		timescale: group.timescale(),
 	})
 }
 
@@ -686,9 +689,11 @@ where
 			let _ = track.update(subscription);
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			// Drafts 14-16 never write that property, so their objects stay unstamped.
+			// An untimed track declares none, and its objects carry no Timestamp.
 			let timescale = msg
 				.properties_wanted
 				.then(|| track.info().timescale)
+				.flatten()
 				.filter(|_| ietf::Properties::sends_timescale(self.version));
 
 			// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
@@ -850,8 +855,15 @@ where
 				}
 				if !*finished {
 					if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-						if stream.reader.poll_closed(&mut cx).is_ready() {
-							return Poll::Ready(Err(Error::Cancel));
+						use super::request_stream::{FollowUp, Update};
+						match stream.reader.poll_decode_maybe::<FollowUp>(&mut cx) {
+							Poll::Ready(Ok(Some(FollowUp::Update(body)))) => {
+								return Poll::Ready(Update::decode_legacy(&body, self.version).map(Some));
+							}
+							// UNSUBSCRIBE, or the control stream going away.
+							Poll::Ready(Ok(Some(FollowUp::End) | None)) => return Poll::Ready(Err(Error::Cancel)),
+							Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+							Poll::Pending => {}
 						}
 					} else {
 						match stream
@@ -890,15 +902,23 @@ where
 				Err(Error::Cancel) => return None,
 				Err(err) => return Some((Err(err), filled.unwrap_or(false))),
 				Ok(Some(update)) => {
+					// Draft 14 answers no update. Drafts 15 and 16 answer on the control
+					// stream, naming the update's own Request ID; later drafts name none.
+					let answer = self.version != Version::Draft14;
+					let answer_id =
+						matches!(self.version, Version::Draft15 | Version::Draft16).then_some(update.request_id);
 					if update.unsupported {
-						let result = self
-							.write_subscribe_error(
+						let result = if answer {
+							self.write_subscribe_error(
 								&mut stream.writer,
-								serve.request_id,
+								update.request_id,
 								&Error::Unsupported,
 								"REQUEST_UPDATE parameters not supported",
 							)
-							.await;
+							.await
+						} else {
+							Ok(())
+						};
 						return Some((result.and(Err(Error::Unsupported)), filled.unwrap_or(false)));
 					}
 					if let Some(priority) = update.priority {
@@ -908,17 +928,18 @@ where
 							return Some((Err(err), filled.unwrap_or(false)));
 						}
 					}
-					if let Err(err) = async {
-						stream.writer.varint(ietf::RequestOk::ID).await?;
-						stream
-							.writer
-							.encode(&ietf::RequestOk {
-								request_id: None,
-								active: None,
-							})
-							.await
-					}
-					.await
+					if answer
+						&& let Err(err) = async {
+							stream.writer.varint(ietf::RequestOk::ID).await?;
+							stream
+								.writer
+								.encode(&ietf::RequestOk {
+									request_id: answer_id,
+									active: None,
+								})
+								.await
+						}
+						.await
 					{
 						return Some((Err(err), filled.unwrap_or(false)));
 					}
@@ -1209,7 +1230,7 @@ where
 		sequence: u64,
 		object: u64,
 		prior: FetchPrior,
-		timestamp: Timestamp,
+		timestamp: Option<Timestamp>,
 		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
@@ -1219,6 +1240,8 @@ where
 		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
 		let properties = match timescale {
 			Some(timescale) => {
+				// Every frame on a timed track is timed (see `track::Info::timescale`).
+				let timestamp = timestamp.ok_or(Error::TimestampMismatch)?;
 				let mut properties = Vec::new();
 				ietf::encode_object_time(
 					&mut Encoder::new(&mut properties, version.into()),
@@ -1372,8 +1395,7 @@ where
 					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 				};
 
-				// No SUBSCRIBE declared a timescale for this request, so its objects go
-				// out unstamped.
+				// The track's timescale is only known once its group is read, below.
 				(track, start, end, None, false)
 			}
 			FetchType::RelativeJoining {
@@ -1455,6 +1477,15 @@ where
 			Some(Ok(group)) => group,
 			Some(Err(err)) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 			None => return Ok(()),
+		};
+
+		// A standalone FETCH keeps each object's Timestamp, in the track's own units, as a
+		// subscriber learned them from SUBSCRIBE_OK. FETCH_OK doesn't declare them yet.
+		let timescale = match joined {
+			true => timescale,
+			false => group
+				.timescale
+				.filter(|_| ietf::Properties::sends_timescale(self.version)),
 		};
 
 		let (end_location, end_of_track) = if joined {
@@ -2627,9 +2658,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			let sequence = datagram.sequence;
 			let properties = match self.timescale {
 				Some(timescale) => {
+					// Every datagram on a timed track is timed (see `track::Info::timescale`).
+					let Some(timestamp) = datagram.timestamp else {
+						continue;
+					};
 					let mut properties = Vec::new();
 					let mut w = Encoder::new(&mut properties, self.version.into());
-					if ietf::encode_object_time(&mut w, datagram.timestamp, timescale, self.version).is_err() {
+					if ietf::encode_object_time(&mut w, timestamp, timescale, self.version).is_err() {
 						continue;
 					}
 					Some(properties)
@@ -2956,7 +2991,7 @@ fn buffer_object_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	delta: u64,
 	has_extensions: bool,
-	timestamp: Timestamp,
+	timestamp: Option<Timestamp>,
 	size: u64,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -2964,7 +2999,9 @@ fn buffer_object_info<W: crate::transport::poll::SendStream>(
 	writer.buffer_varint(delta)?;
 
 	if let Some(timescale) = timescale.filter(|_| has_extensions) {
-		// Per-object extension headers carry the frame's presentation timestamp.
+		// Per-object extension headers carry the frame's presentation timestamp, which
+		// every frame on a timed track has (see `track::Info::timescale`).
+		let timestamp = timestamp.ok_or(Error::TimestampMismatch)?;
 		let mut ext = Vec::new();
 		ietf::encode_object_time(
 			&mut Encoder::new(&mut ext, version.into()),
@@ -3275,7 +3312,7 @@ mod group_priority_test {
 		let mut old = track.append_group().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
-				timestamp: crate::Timestamp::ZERO,
+				timestamp: Some(crate::Timestamp::ZERO),
 				size: 2,
 			})
 			.unwrap();
@@ -3569,6 +3606,118 @@ mod serve_tests {
 			.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
 			.await;
 		assert!(matches!(served, Some((Err(Error::Unsupported), false))), "{served:?}");
+	}
+
+	/// A draft 14-16 update framed as the adapter routes it onto its subscription.
+	///
+	/// Drafts 15 and 16 carry only SUBSCRIBER_PRIORITY and FORWARD here, since the codec's
+	/// own encoding always adds a Subscription Filter, which this publisher refuses.
+	fn legacy_update(version: Version, priority: u8, forward: bool) -> Vec<u8> {
+		const UPDATE_ID: u8 = 10;
+		let body = match version {
+			Version::Draft14 => {
+				let mut body = Vec::new();
+				ietf::SubscribeUpdate {
+					request_id: RequestId(UPDATE_ID.into()),
+					subscription_request_id: Some(RequestId(0)),
+					start_location: Location { group: 0, object: 0 },
+					end_group: 0,
+					subscriber_priority: priority,
+					forward,
+				}
+				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+				.unwrap();
+				body
+			}
+			// Draft 16 delta-encodes keys: SUBSCRIBER_PRIORITY (0x20) follows FORWARD (0x10).
+			Version::Draft16 => vec![UPDATE_ID, 0, 2, 0x10, forward as u8, 0x10, priority],
+			_ => vec![UPDATE_ID, 0, 2, 0x10, forward as u8, 0x20, priority],
+		};
+		let mut frame = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
+		frame.extend(body);
+		frame
+	}
+
+	/// Drafts 14-16 deliver an update on the subscription's own virtual stream. It
+	/// reprices the subscription, which keeps serving and owes no PUBLISH_DONE, and only
+	/// UNSUBSCRIBE ends it.
+	#[moq_net_sim::test]
+	async fn legacy_subscription_update_keeps_the_subscription() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let h = serve(version);
+			let mut session = ScriptedSession::new(legacy_update(version, 10, true));
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let mut run =
+				std::pin::pin!(
+					h.publisher
+						.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+				);
+			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
+			assert_eq!(h.track.subscription().unwrap().priority, 245, "{version}");
+
+			// Drafts 15 and 16 answer with REQUEST_OK naming the update; draft 14 answers nothing.
+			let answered = occurrences(&session.log, &[ietf::RequestOk::ID as u8, 0, 2, 10, 0]);
+			assert_eq!(answered, usize::from(version != Version::Draft14), "{version}");
+
+			let mut unsubscribe = vec![ietf::Unsubscribe::ID as u8];
+			ietf::Unsubscribe {
+				request_id: RequestId(0),
+			}
+			.encode(&mut Encoder::new(&mut unsubscribe, version.into()), version)
+			.unwrap();
+			session.push(&unsubscribe);
+			assert!(
+				matches!(futures::poll!(run.as_mut()), Poll::Ready(None)),
+				"{version}: UNSUBSCRIBE cancels"
+			);
+		}
+	}
+
+	/// A draft 14-16 update this publisher cannot apply ends the subscription with
+	/// UPDATE_FAILED, after a REQUEST_ERROR naming the update on drafts 15 and 16.
+	#[moq_net_sim::test]
+	async fn unsupported_legacy_update_fails_the_subscription() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let h = serve(version);
+			let mut session = ScriptedSession::new(legacy_update(version, 10, false));
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let served = h
+				.publisher
+				.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+				.await;
+			assert!(
+				matches!(served, Some((Err(Error::Unsupported), false))),
+				"{version}: {served:?}"
+			);
+			// The answer is all that was written: [type, length (2), Request ID, ...].
+			let written = session.log.writes.lock().unwrap().clone();
+			match version {
+				Version::Draft14 => assert!(written.is_empty(), "{version}: {written:?}"),
+				_ => assert_eq!(
+					(written[0], written[3]),
+					(ietf::RequestError::ID as u8, 10),
+					"{version}: {written:?}"
+				),
+			}
+		}
 	}
 
 	#[moq_net_sim::test]
@@ -4834,6 +4983,34 @@ mod serve_tests {
 					fetch_refusal(buf, version),
 					does_not_exist(version),
 					"{version}: group {missing}"
+				);
+			}
+		}
+	}
+
+	/// A datagram group is never fetchable: a FETCH for one is refused like a group that
+	/// does not exist, newest or not, and opens no fetch stream for its payload.
+	#[moq_net_sim::test]
+	async fn a_standalone_fetch_of_a_datagram_group_is_refused() {
+		for version in FETCH_DRAFTS {
+			for newest in [true, false] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 2, None);
+				let sequence = h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
+				if !newest {
+					h.track.append_group().unwrap().finish().unwrap();
+				}
+				settle().await;
+
+				let location = Location {
+					group: sequence,
+					object: 0,
+				};
+				let buf = standalone_fetch(&h, location, location, GroupOrder::Ascending).await;
+				assert_eq!(
+					fetch_refusal(buf, version),
+					does_not_exist(version),
+					"{version}: newest={newest}"
 				);
 			}
 		}
