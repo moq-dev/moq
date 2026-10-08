@@ -233,7 +233,8 @@ The RTMP, SRT, and WHIP ingests mint one per connection instead, and
 `import ts --program all` one per program.
 
 Epochs cross a connection only on moq-lite 07, which is opt-in. There, a
-restarted process takes the name at once: subscriptions to the old run end with
+restarted process takes the name at once, as long as its host's clock is not
+behind the old run's: subscriptions to the old run end with
 `Unroutable`, and a viewer's next subscribe reaches the new run instead of
 waiting for its group numbers to catch up. On older versions and moq-transport
 the relay sees no epoch and keeps a subscription on the route it first resolved

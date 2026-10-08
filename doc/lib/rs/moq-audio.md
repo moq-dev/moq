@@ -33,7 +33,8 @@ reported, and retrying them would only add latency. Voice activity is read off t
 stream, so a call UI needs no second detector. Echo cancellation pairs one
 playback engine with one live microphone. A microphone buffer is stamped at
 the capture instant of its first sample, so it lines up with video acquired
-then.
+then: up to 10 ms later with echo cancellation on, and at the read time on a
+host with no usable capture timestamp.
 
 ```bash
 cargo add moq-audio --features playback
