@@ -65,7 +65,7 @@ test("frames split at every byte keep their payloads and timestamps", async () =
 		const frame = await consumer.readFrame();
 		ts += delta;
 		expect(frame?.payload).toEqual(new Uint8Array(payload));
-		expect(frame?.timestamp.value).toBe(ts);
+		expect(frame?.timestamp?.value).toBe(ts);
 	}
 	expect(await consumer.readFrame()).toBeUndefined();
 });

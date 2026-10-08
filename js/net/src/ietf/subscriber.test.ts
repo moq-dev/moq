@@ -6,11 +6,13 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
+import type { Properties } from "./properties.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
@@ -873,9 +875,13 @@ function encodeObjects(deltas: number[]): Uint8Array {
  * A subscriber with one track subscribed and answered, which is what registers {@link ALIAS}
  * and lets a group stream naming it be handled.
  */
-async function subscribeTrack(
-	version: IetfVersion = VERSION,
-): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
+async function subscribeTrack({
+	version = VERSION,
+	properties = {},
+}: {
+	version?: IetfVersion;
+	properties?: Properties;
+} = {}): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
 	const pair = createMockTransportPair(version === Version.DRAFT_16 ? ALPN.DRAFT_16 : ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
@@ -890,10 +896,69 @@ async function subscribeTrack(
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
 	const request = await Subscribe.decode(peer.reader, version);
 	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS, properties }).encode(peer.writer, version);
 
 	return { subscriber, track };
 }
+
+/** One object carrying `properties` as its raw extension bytes, then a one-byte payload. */
+function encodeStamped(properties: number[]): Uint8Array {
+	// Every field here is under 64, so each is a one-byte varint.
+	return new Uint8Array([0, properties.length, ...properties, 1, 42]);
+}
+
+/** A group stream header whose objects carry extensions. */
+function stampedGroup(groupId: number): GroupMessage {
+	return new GroupMessage({
+		trackAlias: ALIAS,
+		groupId,
+		subGroupId: 0,
+		publisherPriority: 0,
+		flags: { ...groupFlags(true), hasExtensions: true },
+	});
+}
+
+test("a track without TIMESCALE arrives untimed, even if an object carries a Timestamp", async () => {
+	const { subscriber, track } = await subscribeTrack();
+	expect((await track.info()).timescale).toBeUndefined();
+
+	// Property 0x10 (Timestamp) = 5, with no units to read it in.
+	await subscriber.handleGroup(stampedGroup(0), new Reader(undefined, encodeStamped([0x10, 5]), VERSION));
+	const group = await track.ordered().nextGroup();
+	const frame = await group?.readFrame();
+	expect(frame?.payload).toEqual(new Uint8Array([42]));
+	expect(frame?.timestamp).toBeUndefined();
+	track.close();
+});
+
+test("an object-scope Timescale is never applied", async () => {
+	const { subscriber, track } = await subscribeTrack({ properties: { timescale: Timescale.MICRO } });
+	expect((await track.info()).timescale).toBe(Timescale.MICRO);
+
+	// Property 0x08 (Timescale) = 1 per second, then 0x10 (Timestamp) = 5 as a type delta of 8.
+	await subscriber.handleGroup(stampedGroup(0), new Reader(undefined, encodeStamped([0x08, 1, 0x08, 5]), VERSION));
+	const group = await track.ordered().nextGroup();
+	const frame = await group?.readFrame();
+	expect(frame?.timestamp?.scale).toBe(Timescale.MICRO);
+	expect(frame?.timestamp?.value).toBe(5);
+	track.close();
+});
+
+test("an object without a Timestamp on a TIMESCALE track is malformed", async () => {
+	const { subscriber, track } = await subscribeTrack({ properties: { timescale: Timescale.MICRO } });
+	const reader = new Reader(undefined, encodeStamped([]), VERSION);
+	const stop = spyOn(reader, "stop");
+
+	await subscriber.handleGroup(stampedGroup(0), reader);
+
+	expect(stop).toHaveBeenCalledTimes(1);
+	const err = stop.mock.calls[0][0];
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
+	// The track can't be trusted past it, so it ends rather than skipping one group.
+	expect(track.closed.peek()).toBe(err as StreamError);
+	stop.mockRestore();
+});
 
 test("older peer without priority property inherits wire priority 128", async () => {
 	const { subscriber, track } = await subscribeTrack();
@@ -1222,7 +1287,7 @@ test("a group served from partway through is dropped", async () => {
  */
 test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", async () => {
 	const version = Version.DRAFT_16;
-	const { subscriber, track } = await subscribeTrack(version);
+	const { subscriber, track } = await subscribeTrack({ version });
 
 	// The header cannot say otherwise on this draft: decode reports firstObject.
 	const partial = new GroupMessage({

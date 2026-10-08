@@ -82,6 +82,10 @@ pub enum Error {
 	#[error("track already enrolled: {0}")]
 	Enrolled(String),
 
+	/// The track is untimed, and a recording needs a timestamp on every frame.
+	#[error("untimed track: {0}")]
+	Untimed(String),
+
 	/// The source broadcast or one of its tracks failed.
 	#[error("source: {0}")]
 	Source(String),
