@@ -15,13 +15,9 @@ Two binaries and two plugins ship prebuilt:
 | OBS plugin | | [OBS Studio](/bin/obs) output and source |
 
 Package names match the executables everywhere except crates.io, where the
-crate is `moq-cli`. Existing Homebrew
-installs migrate through formula renames; apt upgrades use transitional
-packages, and dnf replaces the old packages. The `moqdev/moq-cli` Docker image
-and the `#moq-cli` flake package stop at 0.12.2 and now exit with an error
-naming `moqdev/moq` and `#moq`.
-
-Use `moq auth` for keys and tokens; installing `moq` includes it.
+crate is `moq-cli`. The CLI was once packaged as `moq-cli`; that Docker image
+and flake output stop at 0.12.2, so switch to `moqdev/moq` and `#moq`.
+`moq auth` mints keys and tokens, so installing `moq` covers that too.
 
 ## macOS and Linux
 

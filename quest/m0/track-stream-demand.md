@@ -41,10 +41,9 @@ Decisions (2026-10-07):
   parks the track and drops its copy at once, letting go upstream. Waiting for
   the first response costs one stream held for about a round trip.
 - A held TRACK stream is demand without a subscription, so it counts against
-  the per-session subscription cap from
-  [Request caps](/quest/m0/request-caps.md); a peer can't hold more interest
-  than it could by subscribing. A held TRACK and the SUBSCRIBE for the same
-  track on the same session share one slot: the SUBSCRIBE takes over the
+  the per-session subscription cap (`session::Limits`, from #4820); a peer
+  can't hold more interest than it could by subscribing. A held TRACK and the
+  SUBSCRIBE for the same track on the same session share one slot: the SUBSCRIBE takes over the
   TRACK's reservation instead of needing a second, so a session at the cap
   can still turn its held TRACKs into subscriptions (decided 2026-10-08 from
   review).
@@ -60,15 +59,11 @@ stays subscribed, on lite-05, 06, and 07, direct and through one relay. It
 fails on `main` today. The relay case controls the ordering so the
 downstream TRACK FIN is handled before its SUBSCRIBE. A boundary test fills
 the per-session subscription cap with held TRACK streams, turns each into a
-live SUBSCRIBE with no `unused` edge, and checks that one more TRACK is
-refused. JS counterparts for the JS side.
+live SUBSCRIBE with no `unused` edge, and checks that one more TRACK closes
+the session with TOO_MANY_REQUESTS. JS counterparts for the JS side.
 
 Public API: none. Wire: semantics only (holding the TRACK stream open), no new
 fields.
-
-## Required
-
-- [Request caps](/quest/m0/request-caps.md) - the per-session subscription cap a held TRACK stream counts against
 
 ## Related
 

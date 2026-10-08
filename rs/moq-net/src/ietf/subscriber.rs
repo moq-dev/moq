@@ -13,7 +13,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-use super::{Message, Version, cluster, error::request, peer};
+use super::{Message, Version, cluster, error::request, group::ObjectExtensionsLength, peer};
 use crate::tail::{Reading, Settle, Tail};
 
 use kio::Lock;
@@ -538,6 +538,9 @@ struct BroadcastState {
 	// One minted source per requested path under the namespace, each closed
 	// when its guard drops.
 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
+
+	// Counts this namespace against the session's announce cap until it is retracted.
+	_slot: crate::session::Slot,
 }
 
 /// What one advertisement said, once its parameters are resolved against the session.
@@ -576,11 +579,15 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
-	// Set once the peer sends a GOAWAY; new SUBSCRIBEs are then rejected with
-	// Error::GoingAway (the peer told us to stop opening streams).
+	// Set once the peer sends a GOAWAY; this session's routes then cost
+	// Cost::DRAIN, so a replacement session outranks it. Requests keep opening,
+	// deliberately past draft-19 section 10.4's SHOULD NOT: refusing them would
+	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
 	// What this session may allocate up front for objects still arriving.
 	frames: frame::Budget,
+	// Namespaces the peer may have announced at once (`session::Limits::announces`).
+	pub(super) announces: crate::session::Slots,
 }
 
 /// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
@@ -592,7 +599,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 /// subscriber asks for its scope and mounts the replies under the root.
 ///
 /// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
-/// which costs one stream.
+/// which costs one stream. [`Subscriber::run_subscribe_namespace`] holds back the empty
+/// prefix from a foreign draft-14/15 peer.
 pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<PathOwned> {
 	crate::model::interest_prefixes(&origin.allowed())
 }
@@ -661,6 +669,7 @@ where
 			version,
 			going_away,
 			frames: Default::default(),
+			announces: Default::default(),
 		}
 	}
 
@@ -732,8 +741,7 @@ where
 		crate::origin::Route::default()
 			.with_hops(hops)
 			.with_via(self.via(peer))
-			// A peer with no Cluster extension advertises no cost at all, so its cold
-			// path is unknown rather than free.
+			// A peer without Cluster contributes only the arriving link price.
 			.with_cost(crate::origin::Cost::UNKNOWN.charged(cluster::link_cost(self.cost, peer)))
 	}
 
@@ -836,18 +844,24 @@ where
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
 	) -> Result<(), Error> {
-		// A peer that sent GOAWAY told us to stop opening requests on this session,
-		// announce-interest included (draft-19 sect 10.4).
-		if self.going_away.is_set() {
-			return Err(Error::GoingAway);
-		}
-
 		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
 		// peer into the origin and each local reader opts in on its own. The parameter
 		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
 		// to say whether it does (MoQ Hidden).
 		let declared = self.peer_setup.get().await;
 		let hidden = declared.hidden;
+
+		// Draft-16 is the first to allow a zero-field namespace, so the empty prefix is a
+		// protocol violation on draft-14/15. A peer that never declared MoQ Solicit is not
+		// ours: it may enforce that, and it tells us unasked anyway. One that declared it
+		// accepts the empty prefix and only tells when asked, so it still gets one.
+		if prefix.is_empty()
+			&& declared.solicit.is_none()
+			&& matches!(self.version, Version::Draft14 | Version::Draft15)
+		{
+			tracing::debug!(version = ?self.version, "not asking a foreign peer for the empty namespace");
+			return Ok(());
+		}
 
 		let request_id = self.control.next_request_id(&self.runtime).await?;
 
@@ -858,7 +872,7 @@ where
 				let msg = ietf::SubscribeNamespaceLegacy {
 					request_id,
 					namespace: prefix.clone(),
-					subscribe_options: 0x01, // NAMESPACE only
+					subscribe_options: ietf::SubscribeOptions::Namespace,
 					hidden,
 				};
 				stream.writer.varint(ietf::SubscribeNamespaceLegacy::ID).await?;
@@ -1531,6 +1545,12 @@ where
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
+				// A peer past its limits loses the session, not just this namespace.
+				let slot = self.announces.acquire().inspect_err(|err| {
+					self.session
+						.clone()
+						.close(crate::SessionError::from(err).to_code(), "too many announcements");
+				})?;
 				// Propagates Error::Unauthorized if the namespace is out of scope.
 				let dynamic = self.origin.dynamic(&path, route.clone())?;
 
@@ -1539,6 +1559,7 @@ where
 					dynamic,
 					count: 1,
 					sources: HashMap::new(),
+					_slot: slot,
 				});
 
 				tracing::debug!(route = %self.origin.absolute(&path), "announce");
@@ -1731,11 +1752,6 @@ where
 	) {
 		// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model request
 		// pending until its immutable track metadata is known.
-		if self.going_away.is_set() {
-			request.reject(Error::GoingAway);
-			return;
-		}
-
 		let track_name = request.name().to_owned();
 		// Group FETCHes for cache misses: standalone, so they outlive each subscription.
 		let mut group_fetches = TaskSet::owned();
@@ -2786,25 +2802,6 @@ const END_OF_GROUP: u64 = 0x3;
 /// Object status: no object at or past this location exists (every implemented draft).
 const END_OF_TRACK: u64 = 0x4;
 
-// Implementation limit for object extension blocks, independent of the IETF draft.
-const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
-
-#[derive(Debug)]
-struct ObjectExtensionsLength(usize);
-
-impl Decode<Version> for ObjectExtensionsLength {
-	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
-		let size = usize::try_from(buf.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
-		if size > MAX_OBJECT_EXTENSIONS {
-			return Err(DecodeError::MessageTooLarge {
-				size,
-				max: MAX_OBJECT_EXTENSIONS,
-			});
-		}
-		Ok(Self(size))
-	}
-}
-
 /// The start of a subgroup stream's first object, peeked before its group is created.
 #[derive(Debug, Clone, Copy)]
 struct FirstObject {
@@ -3427,10 +3424,6 @@ where
 	) {
 		let sequence = request.sequence();
 		let start = request.frame_start();
-		if self.going_away.is_set() {
-			request.reject(Error::GoingAway);
-			return;
-		}
 		// Our FETCH still encodes the Fetch Type field that draft-20 removed.
 		if Filter::is_draft20(self.version) {
 			request.reject(Error::Unsupported);
@@ -3826,8 +3819,7 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 		let subgroup = stream.varint().await?;
 		let object = stream.varint().await?;
 		let _priority = stream.read_exact(1).await?;
-		let size = usize::try_from(stream.varint().await?)
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		let ObjectExtensionsLength(size) = stream.decode().await?;
 		let properties = stream.read_exact(size).await?.to_vec();
 		return Ok(Some(FetchedObject {
 			group: Some(group),
@@ -4124,6 +4116,39 @@ mod tests {
 		} else {
 			assert!(matches!(result, Err(Error::ProtocolViolation)));
 		}
+	}
+
+	/// Draft-14 frames a fetch object's properties with a bare length, which is refused at
+	/// the prefix rather than buffered while the peer trickles the rest in.
+	#[moq_net_sim::test]
+	async fn draft14_fetch_properties_are_capped() {
+		use crate::lite::test_transport::ScriptedSession;
+		use crate::transport::poll::Session as _;
+		use futures::FutureExt as _;
+
+		const VERSION: Version = Version::Draft14;
+		let mut wire = Vec::new();
+		for field in [0u64, 0, 0] {
+			crate::coding::Encoder::new(&mut wire, VERSION.into())
+				.varint(field)
+				.unwrap();
+		}
+		wire.push(0);
+		crate::coding::Encoder::new(&mut wire, VERSION.into())
+			.varint((super::super::group::MAX_OBJECT_EXTENSIONS + 1) as u64)
+			.unwrap();
+
+		let mut session = ScriptedSession::new(wire);
+		let (_, recv) = session.open_bi().await.unwrap();
+		let mut reader = Reader::new(recv, VERSION);
+		let result = decode_fetch_object(&mut reader, VERSION, true)
+			.now_or_never()
+			.expect("refused at the prefix, not parked on the body");
+		assert!(
+			matches!(result, Err(Error::Decode(DecodeError::MessageTooLarge { .. }))),
+			"{:?}",
+			result.err()
+		);
 	}
 
 	fn fin_responses(clean: bool) -> Vec<u8> {
@@ -5383,6 +5408,57 @@ mod tests {
 		assert!(!table.map.contains_key(&0), "the oldest tombstone is forgotten first");
 	}
 
+	/// A namespace past the session's cap closes the session with TOO_MANY_REQUESTS, a
+	/// repeat of a held namespace costs nothing, and a retraction frees its slot.
+	#[moq_net_sim::test]
+	async fn namespaces_past_the_cap_close_the_session() {
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let log = session.log.clone();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session,
+			origin,
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			Version::Draft14,
+			tasks,
+			Default::default(),
+		);
+		subscriber.announces = crate::session::Slots::new(1);
+
+		let advert = |subscriber: &Subscriber<_>| subscriber.route(None, &cluster::Peer::default()).expect("route");
+		let a = crate::Path::new("a").to_owned();
+		let b = crate::Path::new("b").to_owned();
+		let (first, repeat, over, last) = (
+			advert(&subscriber),
+			advert(&subscriber),
+			advert(&subscriber),
+			advert(&subscriber),
+		);
+		subscriber.start_announce(a.clone(), first).unwrap();
+		subscriber.start_announce(a.clone(), repeat).unwrap();
+		assert!(matches!(
+			subscriber.start_announce(b.clone(), over),
+			Err(Error::TooManyRequests)
+		));
+		assert_eq!(
+			log.closes(),
+			vec![(
+				crate::SessionError::TooManyRequests.to_code(),
+				"too many announcements".to_string()
+			)]
+		);
+
+		subscriber.stop_announce(a.clone()).unwrap();
+		subscriber.stop_announce(a).unwrap();
+		subscriber.start_announce(b, last).unwrap();
+	}
+
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
 	/// anonymous (hop 0). An identity assigned via `Client::with_peer_hop` is
 	/// stored as `via` for split-horizon and never written into the chain.
@@ -5591,7 +5667,8 @@ mod tests {
 
 		let advertised = subscriber.route(Some(&advert), &peer).expect("route");
 		assert_eq!(
-			advertised.route.cost.warm, 7,
+			advertised.route.cost.value(),
+			7,
 			"the link's price is added to the advertised cost"
 		);
 		assert_eq!(advertised.route.hops, hop_path(&[7, 9]).hops().clone());
@@ -5604,7 +5681,7 @@ mod tests {
 		let route = routed_now(&consumer, "room/host").expect("routed");
 		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
 		assert_eq!(hops, vec![7, 9]);
-		assert_eq!(route.cost.warm, 7);
+		assert_eq!(route.cost.value(), 7);
 	}
 
 	/// An advertisement whose path already contains our own Hop ID looped back:
@@ -5644,14 +5721,14 @@ mod tests {
 			hops: hop_path(&[7, 9]),
 			cost: 2,
 		};
-		assert_eq!(subscriber.route(Some(&advert), &peer).unwrap().route.cost.warm, 3);
+		assert_eq!(subscriber.route(Some(&advert), &peer).unwrap().route.cost.value(), 3);
 
 		// Zero is meaningful and distinct from absent: a free link adds nothing.
 		let free = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(0),
 		};
-		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost.warm, 2);
+		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost.value(), 2);
 	}
 
 	/// A namespace stream that ends with advertisements still live detaches them, so
@@ -5776,14 +5853,14 @@ mod tests {
 				futures::poll!(run.as_mut()).is_pending(),
 				"the stream stays open through a repeat"
 			);
-			if routed_now(&consumer, "x.hang").is_some_and(|route| route.cost.warm == 0) {
+			if routed_now(&consumer, "x.hang").is_some_and(|route| route.cost.value() == 0) {
 				break;
 			}
 			settle().await;
 		}
 
 		let route = routed_now(&consumer, "x.hang").expect("still routed");
-		assert_eq!(route.cost.warm, 0, "the repeat repriced the route");
+		assert_eq!(route.cost.value(), 0, "the repeat repriced the route");
 	}
 
 	/// The peer explicitly retracting a namespace ends the broadcast immediately: it
@@ -6015,7 +6092,7 @@ mod tests {
 
 		// Nothing priced this direction, so it ranks by hop count.
 		assert_eq!(
-			unpriced.route(None, &peer).unwrap().route.cost.warm,
+			unpriced.route(None, &peer).unwrap().route.cost.value(),
 			cluster::DEFAULT_COST
 		);
 
@@ -6024,12 +6101,12 @@ mod tests {
 			hop: None,
 			cost: Some(4),
 		};
-		assert_eq!(unpriced.route(None, &priced_peer).unwrap().route.cost.warm, 4);
+		assert_eq!(unpriced.route(None, &priced_peer).unwrap().route.cost.value(), 4);
 
 		// Local policy still wins over what the peer declared.
 		let (mut priced, _origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		priced.cost = Some(6);
-		assert_eq!(priced.route(None, &priced_peer).unwrap().route.cost.warm, 6);
+		assert_eq!(priced.route(None, &priced_peer).unwrap().route.cost.value(), 6);
 	}
 
 	/// An update replaces the advertisement in place: the route moves, the refcount does
@@ -6059,7 +6136,7 @@ mod tests {
 		let route = routed_now(&consumer, "room/host").expect("routed");
 		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
 		assert_eq!(hops, vec![7, 11]);
-		assert_eq!(route.cost.warm, 2);
+		assert_eq!(route.cost.value(), 2);
 
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
 		// refcount, this would leave the route stranded.
@@ -6108,11 +6185,8 @@ mod tests {
 		let route = routed_now(&consumer, "room/host").expect("still routed");
 		assert_eq!(
 			route.cost,
-			crate::origin::Cost {
-				warm: 1,
-				..crate::origin::Cost::UNKNOWN
-			},
-			"the repriced warm cost arrives; the Cluster extension has nowhere to carry a cold cost, so it stays unknown rather than reading as the publisher's own zero"
+			crate::origin::Cost::new(1),
+			"the repriced static cost arrives"
 		);
 
 		// One advertisement, so one unannounce detaches it.
@@ -6472,7 +6546,7 @@ mod tests {
 		let (mut subscriber, consumer, mut stream, driver) = update_harness(self_origin, &peer, &held, script).await;
 		std::mem::forget(driver);
 		let log = subscriber.session.log.clone();
-		assert_eq!(routed_now(&consumer, "room/host").expect("routed").cost.warm, 4);
+		assert_eq!(routed_now(&consumer, "room/host").expect("routed").cost.value(), 4);
 
 		let path = crate::Path::new("room/host").to_owned();
 		let mut attached = true;
@@ -6491,7 +6565,7 @@ mod tests {
 		}
 
 		let route = routed_now(&consumer, "room/host").expect("still routed");
-		assert_eq!(route.cost.warm, 0, "the explicit 0 replaced the held cost");
+		assert_eq!(route.cost.value(), 0, "the explicit 0 replaced the held cost");
 		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
 		assert_eq!(hops, vec![7, 9], "the omitted path kept its value");
 		assert!(attached, "a repricing is not a retraction");

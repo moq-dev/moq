@@ -286,6 +286,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x6   | KEY_VALUE_FORMATTING_ERROR | A key-value pair was malformed, or repeated more than allowed. |
 | ------- | ------------- | ----------- |
+|  0x7   | TOO_MANY_REQUESTS | The peer held more announcements or subscriptions than the endpoint allows. |
+| ------- | ------------- | ----------- |
 |  0x10  | GOAWAY_TIMEOUT | The peer did not close within the GOAWAY drain deadline. |
 | ------- | ------------- | ----------- |
 |  0x11  | CONTROL_MESSAGE_TIMEOUT | The peer took too long to respond to a control message. |
@@ -408,7 +410,7 @@ Hiding is a convenience for discovery, not access control: a publisher MAY treat
 SUBSCRIBE, FETCH, and TRACK resolve a hidden path exactly as any other.
 
 #### Routing {#routing}
-Each advertisement carries the path of Hop IDs it traversed and an accumulated Warm and Cold Route Cost (see [ANNOUNCE_START](#announce-start)), which relays use to build a loop-free mesh.
+Each advertisement carries the path of Hop IDs it traversed and an accumulated Route Cost (see [ANNOUNCE_START](#announce-start)), which relays use to build a loop-free mesh.
 
 A receiver MUST discard an announcement whose reconstructed path contains its own Hop ID: it has looped back, so forwarding it would extend the loop and subscribing through it would route the receiver back to itself.
 This is the only loop defense moq-lite requires, and it catches loops of any length.
@@ -425,7 +427,7 @@ The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last quali
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
 
-When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then the newest Epoch, ranking a route without one last, then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, then toward the lowest Spread Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then the newest Epoch, ranking a route without one last, then a path that contains no 0 Hop ID over one that does, then the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path, then toward the lowest Spread Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
 The Spread Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by each Hop ID of the route's path, oldest first, as 8 little-endian bytes.
 It is keyed on the requested path rather than the route's prefix, so equal-cost advertisers of one prefix share its paths instead of the first one taking them all, while one path resolves to the same advertiser on every relay that holds the same routes.
@@ -522,7 +524,9 @@ Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session sh
 
 The sender sends a GOAWAY message containing an optional new session URI.
 If the URI is non-empty, the peer SHOULD establish a new session at the provided URI and migrate any active subscriptions.
-The peer MUST NOT open new streams on the current session after receiving a GOAWAY.
+After receiving a GOAWAY, the peer MAY keep opening requests on the current session until it has moved to a replacement session.
+The sender SHOULD keep answering them until the session ends, and MAY reset one with GOING_AWAY.
+The recipient SHOULD treat that reset as a route failure and retry the request on the replacement session or another route.
 
 The sender closes the stream (FIN) when it is ready to terminate the session.
 The peer SHOULD close all streams and the session after migrating or when it no longer needs the session.
@@ -707,6 +711,7 @@ Most messages are prefixed with a variable-length integer indicating the number 
 This length field does not include the length of the varint length itself.
 
 An implementation SHOULD close the connection with a PROTOCOL_VIOLATION if it receives a message with an unexpected length.
+Except in FRAME, a Message Length over 65,535 bytes is unexpected: a sender MUST NOT exceed it, and a receiver MAY reject it based on the length prefix alone.
 The version and extensions should be used to support new fields, not the message length.
 
 ## STREAM_TYPE {#stream_type}
@@ -741,7 +746,7 @@ Setup Parameter {
 }
 ~~~
 
-The Message Length MUST NOT exceed 65,536 bytes; a receiver MUST treat a longer SETUP as a protocol violation and MAY reject it based on the length prefix alone.
+SETUP follows the [Message Length](#message-length) cap; a receiver MUST treat a longer SETUP as a protocol violation.
 
 **Parameter Count**:
 The number of Setup Parameters that follow.
@@ -816,10 +821,10 @@ The role is a hint that only ever narrows the session: a server MUST still enfor
 Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
 
 ### Cost Parameter {#cost-parameter}
-The Cost Parameter declares what subscribing from this endpoint costs: a receiver adds the value the sender declared to both Route Costs of every announcement that sender forwards (see [Routing](#routing)).
+The Cost Parameter declares what subscribing from this endpoint costs: a receiver adds the value the sender declared to the Route Cost of every announcement that sender forwards (see [Routing](#routing)).
 
-The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Costs.
-An absent parameter means the default cost of 1, under which the accumulated Route Costs equal the hop count and routing degenerates to shortest-path.
+The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Cost.
+An absent parameter means the default cost of 1, under which the accumulated Route Cost equals the hop count and routing degenerates to shortest-path.
 A value of 0 is meaningful and distinct from absent: it makes that direction free, e.g. between two relays in the same datacenter.
 
 Both endpoints send it and the two values need not match: the parameter prices the sender's own egress. A relay MUST NOT forward it.
@@ -898,8 +903,7 @@ ANNOUNCE_START Message {
   Route Prefix Suffix (s),
   Epoch (b),
   Hops (..),
-  Warm Route Cost (i),
-  Cold Route Cost (i),
+  Route Cost (i),
 }
 
 Hops {
@@ -948,13 +952,13 @@ An identity a receiver assigned that upstream is local selection state and MUST 
 A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in the resolved list.
 Duplicate values of 0 are not a violation, since 0 identifies nothing and any number of hops may be unknown.
 
-**Warm Route Cost** and **Cold Route Cost**:
-What subscribing to content under this route costs, in units chosen by the deployment.
-This document defines no rule that prices the two apart: the original publisher seeds both with its production cost (0 for content it is already producing, larger for content it would have to start producing on demand, e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it), and a forwarding relay adds the cost the upstream peer declared (see [Cost Parameter](#cost-parameter)) to both, saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
-The two fields exist for extensions that price a cached copy below the accumulated value: such a discount applies to the Warm cost only, which is what route selection minimizes, while the Cold cost keeps ranking the undiscounted path and breaks a Warm tie (see [Routing](#routing)).
-Saturation MUST cap each sum at the largest value a variable-length integer can carry, since the sums are re-encoded when forwarded: a peer may legally advertise that largest value, and a wider ceiling would leave the relay unable to encode what it just computed.
+**Route Cost**:
+The static production and link price, in units chosen by the deployment.
+The publisher seeds its production cost (0 for content it already produces, larger for a standby that starts work on demand). Each forwarding relay adds the upstream peer's declared link cost (see [Cost Parameter](#cost-parameter)).
+Each sum MUST saturate at 2^62-1, so it remains forwardable to a lite-06 peer.
+A peer whose wire carries no route cost contributes 0 before the arriving link's price is added.
 
-A relay whose wire cannot express a Cold cost (an endpoint bridging from another protocol, or a peer that predates this field) advertises nothing, and a receiver SHOULD treat the missing value as the saturation ceiling rather than as 0: an unknown path ranks last instead of impersonating the publisher's own.
+lite-06 carries Warm and Cold Route Cost fields. A receiver MUST read Warm as Route Cost and ignore Cold. A sender MUST write Route Cost as Warm and 2^62-1 as Cold.
 
 
 ## ANNOUNCE_END {#announce-end}
@@ -992,8 +996,7 @@ ANNOUNCE_UPDATE Message {
   Message Length (i)
   Announce ID (i),
   Hops (..),
-  Warm Route Cost (i),
-  Cold Route Cost (i),
+  Route Cost (i),
 }
 ~~~
 
@@ -1004,7 +1007,7 @@ Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 Referencing an id that was never assigned, or one already retired by an ANNOUNCE_END, is a protocol violation.
 
-**Hops**, **Warm Route Cost**, and **Cold Route Cost**:
+**Hops** and **Route Cost**:
 As defined for [ANNOUNCE_START](#announce-start).
 `Hop Base` may name this advertisement itself, which resolves against the list being replaced.
 An update whose only change is a Route Cost is valid: it is how a relay re-prices a route without disturbing it.
@@ -1388,6 +1391,8 @@ The `Message Length` describes the payload size on the wire.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - A refusal is not retried at another route of the same prefix either.
+- A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
+- Replaced Warm and Cold Route Cost with one static Route Cost in moq-lite-07-wip; lite-06 retains both fields, reading Warm and writing Cold at saturation.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
 - Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path and ends subscriptions to the older one. Replaces the first-hop identity.
@@ -1401,7 +1406,8 @@ The `Message Length` describes the payload size on the wire.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
-- Capped the SETUP Message Length at 65,536 bytes.
+- Capped the Message Length of every message except FRAME at 65,535 bytes.
+- Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
 
 ## moq-lite-06
 
@@ -1576,7 +1582,7 @@ GOAWAY carries an optional New Session URI that asks the peer to reconnect elsew
 Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [Routing](#routing)). The Hop ID announcement filter (see [Hop Parameter](#hop-parameter)) exists for loop avoidance, not access control: a subscriber cannot verify that a publisher honored it, so it MUST NOT be relied upon to hide a broadcast from a peer that declared its Hop ID.
 
 ## Resource Exhaustion
-A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad routes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad route invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its route before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
+A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad routes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups; an endpoint whose peer goes past its bound on subscriptions or announcements SHOULD close the session with TOO_MANY_REQUESTS, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad route invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its route before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
 
 ## Datagram Injection
 Datagrams are routed to a subscription solely by Subscribe ID and carry no per-group authentication beyond that of the QUIC connection. On an unmodified QUIC/WebTransport connection this is sufficient, since datagrams are protected by the transport. A subscriber MUST silently drop any datagram with an unknown Subscribe ID and MUST deduplicate against groups received on streams (see [Datagrams](#datagrams)).
