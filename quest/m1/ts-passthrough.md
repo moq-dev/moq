@@ -105,9 +105,9 @@ points only. PCR discovery finds a PCR PID that differs from the PMT PID, with
 the PMT section split across packets. Two exporters fed the same objects with
 different arrival skew emit identical bytes; when only one misses a deadline,
 its output is the other's less that object's packets. A flagged backward PCR
-discontinuity publishes two broadcasts, and the same rewind unflagged errors. A dropped object is
-counted, and the rest still go out on time. Rerun the #4613 netem rig (10%
-loss, 120 s) against it.
+discontinuity publishes two broadcasts, and the same rewind unflagged errors.
+A dropped object is counted, and the rest still go out on time. Rerun the
+#4613 netem rig (10% loss, 120 s) against it.
 
 Update `doc/bin/cli.md` for both flags, `doc/concept` for the section, and
 the draft's comparison section to say this repository now publishes both
