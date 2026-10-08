@@ -86,6 +86,10 @@ Public API: none. Wire: none (ordering only; the draft already permits it).
 Decided 2026-10-08: pipelining is ordering-only, so it neither waits on nor
 blocks the Related quests below; whichever lands second rebases.
 
+## Required
+
+- [Bare track handles are lazy](/quest/m1/pipeline-requests/lazy-handles.md) - demand comes only from queries and subscriptions, so it lands first
+
 ## Related
 
 - [Pipelined first FETCH](/quest/m1/pipeline-requests/fetch.md) - the same change for fetch-only readers

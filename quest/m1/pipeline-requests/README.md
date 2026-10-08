@@ -12,7 +12,8 @@ them serially keep working unchanged.
 ## Plan
 
 Decided 2026-10-08 in a `/quest-plan` interview: the extra round trip is not
-worth keeping, for SUBSCRIBE and FETCH alike. Shared rules for both children:
+worth keeping, for SUBSCRIBE and FETCH alike. Shared rules for the SUBSCRIBE
+and FETCH children:
 
 - Streamed data that arrives before the info stays unread in QUIC until the
   info lands. Datagrams can't wait unread, so they are dropped until then.
@@ -24,5 +25,6 @@ and two relay hops, before and after the line.
 
 ## Required
 
+- [Bare track handles are lazy](/quest/m1/pipeline-requests/lazy-handles.md) - a bare Rust `track::Consumer` sends nothing and counts as no demand until it queries or subscribes, like JS
 - [SUBSCRIBE goes out with TRACK](/quest/m1/pipeline-requests/subscribe.md) - subscribers open TRACK and SUBSCRIBE together in Rust and JS
 - [Pipelined first FETCH](/quest/m1/pipeline-requests/fetch.md) - a fetch-only reader's first FETCH goes out with the info request, on lite and moq-transport
