@@ -1544,7 +1544,12 @@ where
 		let past_largest = largest.is_some_and(|largest| largest.is_none_or(|object| start.object > object));
 		if draft20 && past_largest {
 			return self
-				.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "start past Largest Object")
+				.reject_fetch(
+					stream,
+					msg.request_id,
+					&Error::InvalidRange,
+					"start past Largest Object",
+				)
 				.await;
 		}
 
@@ -5205,7 +5210,14 @@ mod serve_tests {
 				let (ok, objects) = fetch_answer(buf, version);
 				assert_eq!(objects, Vec::new(), "{version} end={end}");
 				if Filter::is_draft20(version) {
-					assert_eq!(ok.end_location, Location { group: 2, object: covered }, "{version}");
+					assert_eq!(
+						ok.end_location,
+						Location {
+							group: 2,
+							object: covered
+						},
+						"{version}"
+					);
 				}
 			}
 		}
@@ -5282,7 +5294,11 @@ mod serve_tests {
 					),
 					_ => {
 						let (ok, objects) = fetch_answer(buf, version);
-						assert_eq!(ok.end_location, Location { group: 4, object: 5 }, "{version} {largest:?}");
+						assert_eq!(
+							ok.end_location,
+							Location { group: 4, object: 5 },
+							"{version} {largest:?}"
+						);
 						assert_eq!(objects, Vec::new(), "{version} {largest:?}");
 					}
 				}
@@ -5340,7 +5356,10 @@ mod serve_tests {
 				let (ok, objects) = fetch_answer(buf, version);
 				assert_eq!(
 					ok.end_location,
-					Location { group, object: reported },
+					Location {
+						group,
+						object: reported
+					},
 					"{version} group {group} {largest:?}"
 				);
 				assert_eq!(ok.end_of_track, matches!(largest, Largest::Finished), "{version}");
