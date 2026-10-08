@@ -3,14 +3,18 @@
 ## Goal
 
 A fetch-only reader's first FETCH goes upstream together with the request for
-the track's info, on moq-lite and moq-transport, removing a round trip per hop.
-The fetched group is still handed out only once that route's info is known
-and passes the origin's consistency check.
+the track's info, on moq-lite and moq-transport, at every hop, removing a
+round trip per hop. The fetched group is still handed out only once that
+route's info is known and passes the origin's consistency check. Peers that
+send them serially keep working unchanged.
 
 ## Plan
 
 Decided 2026-10-07, while landing #4974 (fetch-only IETF demand), which keeps
-a sequential TRACK_STATUS before the first FETCH.
+a sequential TRACK_STATUS before the first FETCH. Moved from m2 into
+[Pipelined requests](/quest/m1/pipeline-requests/README.md) on 2026-10-08:
+the maintainer called the extra round trip not worth keeping, for FETCH as
+for SUBSCRIBE, without waiting on a latency measurement.
 
 Why the round trip exists (facts, 2026-10-07): nothing in a FETCH request
 needs the info. Two serial gates do:
@@ -33,17 +37,27 @@ What needs the info is decoding the response and approving the group, so:
   info is in flight (a staged generation), resolving only once that copy is
   spliced. On a refused or mismatched info, or a detach, drop the pending
   fetch and re-issue on the next route, as failover already does. Never hand
-  out a group before the info check passes.
+  out a group before the info check passes. This gate is FETCH's alone:
+  subscription demand already reaches a copy before it is spliced.
 - lite: register the fetch handler up front and run FETCH alongside
   TRACK_INFO, leaving the response unread in the QUIC stream until the info
   lands (which also covers lite-07 untimed framing). On a failed TRACK_INFO,
   reject the fetch and reset the stream.
 - moq-transport: send TRACK_STATUS alongside the FETCH and take timestamps'
-  units from it (or FETCH_OK properties where present).
+  units from it (or FETCH_OK properties where present). Draft-17's
+  TRACK_STATUS answer carries no properties, so draft-17 keeps #4974's
+  fallback and is not pipelined.
+
+The line's shared decisions apply: early response data stays unread in QUIC,
+a failed info fails the fetch, and legacy serial peers keep working.
 
 Tests: a fetch-only reader's FETCH is on the wire before the info answer; a
 refused info drops the fetch and retries the next route; a group is never
-released before its route's info passes. Measure the first-fetch latency
-before and after.
+released before its route's info passes; a serial peer against a pipelining
+one and the reverse. Measure the first-fetch latency before and after.
 
 Public API: none. Wire: none (ordering only).
+
+## Related
+
+- [Pipelined SUBSCRIBE](/quest/m1/pipeline-requests/subscribe.md) - the same change for subscriptions
