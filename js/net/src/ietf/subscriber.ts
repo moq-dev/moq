@@ -156,6 +156,10 @@ export class Subscriber {
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
 
+	// What the peer's SETUP declared about being solicited (MoQ Solicit), `undefined`
+	// when it declared nothing.
+	#solicit?: boolean;
+
 	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
 	#goaway?: GetPromise<Drain>;
 
@@ -174,6 +178,7 @@ export class Subscriber {
 		quic,
 		cluster,
 		hidden = false,
+		solicit,
 		goaway,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
@@ -184,6 +189,8 @@ export class Subscriber {
 		cluster?: Cluster.Hops;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** What the peer's SETUP declared about being solicited (MoQ Solicit). */
+		solicit?: boolean;
 		/** Settles when the peer sends GOAWAY. */
 		goaway?: GetPromise<Drain>;
 	}) {
@@ -191,6 +198,7 @@ export class Subscriber {
 		this.#quic = quic;
 		this.#cluster = cluster;
 		this.#hidden = hidden;
+		this.#solicit = solicit;
 		this.#goaway = goaway;
 		// A draining peer usually stops publishing namespaces, so reprice from the signal
 		// itself. Waiting for another message would leave the route primary until close.
@@ -242,7 +250,9 @@ export class Subscriber {
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
-	 * that only answers are both discovered.
+	 * that only answers are both discovered. A draft-14 or draft-15 peer that declared no
+	 * MoQ Solicit is not asked for the empty prefix, so an unscoped subscriber only hears
+	 * what that peer tells.
 	 *
 	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
@@ -351,6 +361,20 @@ export class Subscriber {
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
 		const version = this.#session.version;
+
+		// A zero-field track namespace was a protocol violation until draft-16 allowed
+		// it. A peer that never declared MoQ Solicit is not ours: it may enforce that, and
+		// it tells us unasked anyway, so send nothing and stay registered for its
+		// unsolicited PUBLISH_NAMESPACE. Returning would drop this consumer before one
+		// could land. A peer that declared Solicit only tells when asked, so it still is.
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
+		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
+			// No request stream ends this wait, so the session's end has to.
+			const ends: PromiseLike<unknown>[] = [announced.closed];
+			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
+			await Promise.race(ends);
+			return;
+		}
 
 		// Suffixes live on this stream, so a repeat is recognized as an update to the
 		// advertisement rather than a second one, which would leak the count.

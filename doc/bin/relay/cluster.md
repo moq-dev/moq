@@ -16,6 +16,12 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
 on moq-transport 17+.
 
+moq-transport drafts 14 and 15 cannot ask for every broadcast, since an empty
+namespace prefix is illegal before draft 16. On such a link to a peer without
+the MoQ Solicit extension, such as moxygen, the relay does not ask for the
+whole namespace and learns only what the peer announces unasked. moxygen
+announces nothing unasked on draft 14, so that link discovers no broadcasts.
+
 When a moq-lite-04 or later peer withdraws its last advertisement for a broadcast, a relay
 drops every other route to it that passed through that peer, since each was
 relayed from what the peer just withdrew, rather than falling back to them one

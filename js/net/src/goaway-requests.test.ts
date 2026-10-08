@@ -253,7 +253,8 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 			close() {},
 		};
 
-		const subscriber = new Subscriber({ session, goaway });
+		// A soliciting peer, so draft-14 still asks it for the empty namespace.
+		const subscriber = new Subscriber({ session, goaway, solicit: true });
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await track.closed;
 		expect(opened).toBe(true);

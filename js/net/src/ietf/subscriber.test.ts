@@ -68,6 +68,82 @@ test("every peer is asked", async () => {
 });
 
 /**
+ * Draft-16 is the first that allows a zero-field track namespace. Asking a foreign peer
+ * (one that declared no MoQ Solicit) for one earlier is a protocol violation, so an
+ * unscoped subscriber sends nothing and still takes an unsolicited announcement.
+ */
+test.each([
+	["draft-14", Version.DRAFT_14, ALPN.DRAFT_14],
+	["draft-15", Version.DRAFT_15, ALPN.DRAFT_15],
+] as const)("%s does not ask a foreign peer for the empty namespace", async (_name, version, alpn) => {
+	const pair = createMockTransportPair(alpn);
+	const session = new NativeSession(pair.server, version, true);
+	const subscriber = new Subscriber({ session });
+	const announced = subscriber.announced();
+
+	expect(await nextStream(pair.client)).toBeUndefined();
+
+	const stream = await Stream.open(pair.server, { version });
+	void subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("surprise") }),
+		stream,
+	);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("surprise"), kind: "start" });
+	announced.close();
+});
+
+/** With no request stream to end it, the unasked reader ends with the session, from either side. */
+test.each([
+	["local", "server"],
+	["remote", "client"],
+] as const)("an unasked draft-14 reader ends on a %s close", async (_name, side) => {
+	const pair = createMockTransportPair(ALPN.DRAFT_14);
+	const session = new NativeSession(pair.server, Version.DRAFT_14, true);
+	const subscriber = new Subscriber({ session, quic: pair.server });
+	const announced = subscriber.announced();
+
+	pair[side].close();
+
+	expect(await announced.next()).toBeUndefined();
+});
+
+/** A peer that declared MoQ Solicit is ours: it only tells when asked, so it still is. */
+test.each([
+	["draft-14", Version.DRAFT_14, ALPN.DRAFT_14],
+	["draft-15", Version.DRAFT_15, ALPN.DRAFT_15],
+] as const)("%s still asks a soliciting peer for the empty namespace", async (_name, version, alpn) => {
+	const pair = createMockTransportPair(alpn);
+	const session = new NativeSession(pair.server, version, true);
+	const subscriber = new Subscriber({ session, solicit: true });
+
+	subscriber.announced();
+
+	expect(await nextStream(pair.client)).toBeDefined();
+});
+
+/** A named prefix is still legal on the drafts that reject the empty one. */
+test("draft-14 still asks for a named prefix", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_14);
+	const session = new NativeSession(pair.server, Version.DRAFT_14, true);
+	const subscriber = new Subscriber({ session });
+
+	subscriber.announced(Path.Pattern.subtree(Path.from("cam")));
+
+	expect(await nextStream(pair.client)).toBeDefined();
+});
+
+/** The empty prefix is the "every namespace" request from draft-16 on. */
+test("draft-16 still asks for the empty namespace", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const session = new NativeSession(pair.server, Version.DRAFT_16, true);
+	const subscriber = new Subscriber({ session });
+
+	subscriber.announced();
+
+	expect(await nextStream(pair.client)).toBeDefined();
+});
+
+/**
  * The other half of discovery: a peer that tells us unasked. Asking must not make us deaf
  * to a PUBLISH_NAMESPACE that arrives on its own stream instead.
  */
