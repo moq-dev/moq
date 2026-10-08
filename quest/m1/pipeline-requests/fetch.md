@@ -62,3 +62,5 @@ Public API: none. Wire: none (ordering only).
 ## Related
 
 - [Pipelined SUBSCRIBE](/quest/m1/pipeline-requests/subscribe.md) - the same change for subscriptions
+- [FETCH_OK properties](/quest/m1/fetch-ok-properties.md) - fills the FETCH_OK properties this reads where present
+- [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - adjacent code in `ietf/subscriber.rs` and `model/origin.rs`; this lands first and ranges rebases

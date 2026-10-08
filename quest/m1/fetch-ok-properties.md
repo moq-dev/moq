@@ -27,11 +27,11 @@ opts out with INCLUDE_PROPERTIES = 0. Other fetch-only readers still need it.
   legal to remove the property."). [#4822](https://github.com/moq-dev/moq/pull/4822) makes the standalone FETCH keep
   each object's Timestamp in the track's units, since a subscribed relay
   treats a timed track's object without one as malformed. What's left here is
-  FETCH_OK declaring the track's TIMESCALE, so a fetch-only reader is timed
-  exactly when the track is, as the untimed model requires. Today our
-  subscriber takes the units only from SUBSCRIBE_OK, and a fetch-only reader
-  is untimed. Rejected: omitting timescale from FETCH_OK and leaving
-  fetch-only readers untimed.
+  FETCH_OK declaring the track's TIMESCALE, so a third-party fetch-only reader
+  is timed exactly when the track is, as the untimed model requires. Since
+  #4974 our own subscriber learns it from SUBSCRIBE_OK or TRACK_STATUS_OK.
+  Rejected: omitting timescale from FETCH_OK and leaving those readers
+  untimed.
 - Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20, once
   [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) serves draft-20 FETCH at
   all (today our publisher refuses every one). It defaults to sending the
@@ -41,9 +41,6 @@ opts out with INCLUDE_PROPERTIES = 0. Other fetch-only readers still need it.
   carry, a standalone FETCH's objects arrive stamped, and
   INCLUDE_PROPERTIES = 0 empties the block.
 
-Decided 2026-10-08: #4974 (fetch without SUBSCRIBE) lands first, since both
-change how a fetch-only reader learns the track's properties.
-
 Public API: none. Wire: FETCH_OK gains its properties on drafts that define
 the block. Interop: run `just test interop --all`.
 
@@ -51,3 +48,6 @@ the block. Interop: run `just test interop --all`.
 
 - [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - draft-20 FETCH is served at all, and edits the same `run_fetch_stream`
 
+## Related
+
+- [Pipelined first FETCH](/quest/m1/pipeline-requests/fetch.md) - takes a track's units from FETCH_OK properties where present

@@ -51,8 +51,10 @@ Decisions (2026-10-07):
   TRACK's reservation instead of needing a second, so a session at the cap
   can still turn its held TRACKs into subscriptions (decided 2026-10-08 from
   review).
-- Not pipelining TRACK and SUBSCRIBE, which the draft already allows: it
-  still races, and every hop would have to buffer frames until TRACK_INFO.
+- Not pipelined here; see
+  [SUBSCRIBE goes out with TRACK](/quest/m1/pipeline-requests/subscribe.md),
+  which builds on this hold. Decided 2026-10-08: the round trip is not worth
+  keeping, and early groups stay unread in QUIC rather than buffered.
 - Consumers never debounce demand; the docs promise clean edges.
 - JS query lifetime (folded in from the JS probe-lifetime quest, 2026-10-08:
   the same publisher plumbing). Rust's query is a consumer of the track state

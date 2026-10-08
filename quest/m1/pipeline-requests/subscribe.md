@@ -43,7 +43,11 @@ Decisions:
   keeping the subscription and learning the info another way.
 - Drop the Rust `max_age_bound()` clamp (`model/track.rs`): SUBSCRIBE carries
   the subscriber's own max age and the publisher enforces its own. Rejected:
-  a SUBSCRIBE_UPDATE once TRACK_INFO lands.
+  a SUBSCRIBE_UPDATE once TRACK_INFO lands. Decided 2026-10-08: this agrees
+  with [One max_age meaning](/quest/m1/cache-max-age.md). Both budgets apply
+  one staleness rule, so a group is stale under the smaller budget exactly
+  when it is stale under either. Only the aggregate's clamp goes; the
+  publisher's read-path clamp (`poll_drift`) is how it enforces its own.
 - Publishers send a track's TRACK_INFO at a higher stream priority than that
   track's groups, in Rust and JS, as the draft's SHOULD asks, so the unread
   wait stays one round trip.
@@ -60,7 +64,16 @@ outranks the track's groups. Measure time to first frame across one and two
 relay hops before and after.
 
 Public API: none. Wire: none (ordering only; the draft already permits it).
+Decided 2026-10-08: pipelining is ordering-only, so it neither waits on nor
+blocks the Related quests below; whichever lands second rebases.
+
+## Required
+
+- [TRACK stream demand](/quest/m0/track-stream-demand.md) - the held TRACK stream this keeps (#5053)
 
 ## Related
 
 - [Pipelined first FETCH](/quest/m1/pipeline-requests/fetch.md) - the same change for fetch-only readers
+- [lite-07 Live flag](/quest/m1/lite-live.md) - reshapes the same SUBSCRIBE fields
+- [One max_age meaning](/quest/m1/cache-max-age.md) - the staleness rule that makes the dropped clamp redundant
+- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - replaces the SUBSCRIBE floor with ranges
