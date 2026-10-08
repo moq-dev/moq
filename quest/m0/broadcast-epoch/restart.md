@@ -90,7 +90,7 @@ Decided in planning (2026-10-07, from #4970's review):
   instead of treating every epochless `Update` as a restart, so a re-price
   that keeps its winner, or a same-epoch failover, no longer restarts
   playback. An epochless drain onto a different entry still does.
-  `moqsrc` (planned in #4960) switches on `Restart` too. On lite-06 and
+  [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) switches on `Restart` too. On lite-06 and
   moq-transport, a pair not coalesced reaches players as `End` then
   `Start`: a stop, then a fresh play.
 - **Rejected** (in #5013): `@moq/watch` resubscribing on `Internal` or
