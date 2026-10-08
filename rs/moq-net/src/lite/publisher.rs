@@ -67,6 +67,9 @@ struct Shared<S: crate::transport::poll::Session> {
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
 	subscriptions: crate::session::Slots,
+	// The send time an untimed track's frames carry, since no lite version can mark them
+	// untimed yet (see `wire_timestamp`).
+	runtime: crate::time::Clock,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -171,6 +174,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				goaway: config.goaway,
 				owed: AtomicUsize::new(0),
 				subscriptions: config.subscriptions,
+				runtime: config.runtime.clone(),
 			}),
 			runtime: config.runtime,
 			accept,
@@ -1219,13 +1223,13 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let info = ready!(self.querying.poll_ok(waiter))?;
 
-		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where every
-		// track is timed, so the model's timescale and retention bound go on the wire
-		// verbatim.
+		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where the
+		// timescale is mandatory. An untimed track declares the default, the scale its
+		// frames' send times go out at (see `wire_timestamp`).
 		writer.buffer(&lite::TrackInfo {
 			priority: info.priority,
 			max_age: info.max_age,
-			timescale: info.timescale,
+			timescale: info.timescale.unwrap_or_default(),
 		})?;
 		Poll::Ready(Ok(ControlFlow::Break(())))
 	}
@@ -1323,7 +1327,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					// "don't emit the prefix" (the frames still carry timestamps in the
 					// model, just not on this wire).
 					let timescale = if shared.version.has_track_stream() {
-						Some(track.info().timescale)
+						Some(track.info().timescale.unwrap_or_default())
 					} else {
 						None
 					};
@@ -1357,6 +1361,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						track_priority_seen: msg.priority,
 						version: shared.version,
 						timescale,
+						runtime: shared.runtime.clone(),
 						opens: Default::default(),
 					};
 
@@ -1471,7 +1476,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					// FETCH is gated to lite-05+, which learned the track timescale via
 					// TRACK_INFO.
 					let timescale = if shared.version.has_track_stream() {
-						Some(group.timescale())
+						Some(group.timescale().unwrap_or_default())
 					} else {
 						None
 					};
@@ -1516,6 +1521,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 								batched.payload.len() as u64,
 								*timescale,
 								prev_ts,
+								&shared.runtime,
 							)?;
 							let payload = std::mem::take(&mut batched.payload);
 							if !payload.is_empty() {
@@ -1535,7 +1541,14 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 							}
 							match ready!(group.poll_next_frame(waiter))? {
 								Some(next) => {
-									buffer_frame_info(writer, next.timestamp, next.size, *timescale, prev_ts)?;
+									buffer_frame_info(
+										writer,
+										next.timestamp,
+										next.size,
+										*timescale,
+										prev_ts,
+										&shared.runtime,
+									)?;
 									*frame = Some(next);
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
@@ -2050,21 +2063,41 @@ mod announce_test {
 /// (catalogs, control channels, IETF transport).
 ///
 /// `prev_ts` carries the running baseline, so the first frame deltas against 0. The
-/// model layer (`group::Producer::create_frame`) already converted the timestamp
-/// into the track timescale, so its raw value goes straight onto the wire. Mirrors
-/// the decode in the subscriber's `run_group`.
+/// model layer (`group::Producer::create_frame`) already converted a timed frame into
+/// the track timescale, so its raw value goes straight onto the wire. Mirrors the
+/// decode in the subscriber's `run_group`.
 fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
-	timestamp: crate::Timestamp,
+	timestamp: Option<crate::Timestamp>,
 	size: u64,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
+	runtime: &crate::time::Clock,
 ) -> Result<(), Error> {
-	if timescale.is_some() {
-		buffer_zigzag_delta(writer, timestamp.value(), prev_ts)?;
+	if let Some(timescale) = timescale {
+		buffer_zigzag_delta(writer, wire_timestamp(timestamp, timescale, runtime)?, prev_ts)?;
 	}
 	writer.buffer_varint(size)?;
 	Ok(())
+}
+
+/// A frame or datagram timestamp as its raw value at the wire `timescale`.
+///
+/// No lite version encodes an absent timestamp yet, so a payload on an untimed track
+/// carries its send time on `runtime` instead, at the default scale its TRACK_INFO
+/// declares. A timed payload is already at the track's timescale.
+fn wire_timestamp(
+	timestamp: Option<crate::Timestamp>,
+	timescale: crate::Timescale,
+	runtime: &crate::time::Clock,
+) -> Result<u64, Error> {
+	match timestamp {
+		Some(timestamp) => Ok(timestamp.value()),
+		None => crate::Timestamp::from(runtime.now())
+			.convert(timescale)
+			.map(|now| now.value())
+			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded)),
+	}
 }
 
 /// Buffer `curr` as a zigzag-mapped varint delta against `*prev`, then advance
@@ -2266,6 +2299,8 @@ struct Subscription<S: crate::transport::poll::Session> {
 	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
 	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
 	timescale: Option<crate::Timescale>,
+	/// The clock an untimed track's send times are read from.
+	runtime: crate::time::Clock,
 	/// The group streams this subscription opened, shared by every group it serves.
 	opens: Arc<Opens>,
 }
@@ -2286,11 +2321,15 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
 	fn serve_datagram(&mut self, datagram: crate::Datagram) {
+		// Datagrams are lite-05+, which always declares a timescale in TRACK_INFO.
+		let Ok(timestamp) = wire_timestamp(datagram.timestamp, self.timescale.unwrap_or_default(), &self.runtime)
+		else {
+			return;
+		};
 		let body = lite::Datagram {
 			subscribe: self.id,
 			sequence: datagram.sequence,
-			// Already at the track timescale (normalized by the model producer).
-			timestamp: datagram.timestamp.value(),
+			timestamp,
 			payload: datagram.payload,
 		};
 		// has_datagrams is checked before this runs, so encoding never hits the version guard.
@@ -2812,6 +2851,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									batched.payload.len() as u64,
 									self.ctx.timescale,
 									&mut self.prev_ts,
+									&self.ctx.runtime,
 								);
 								if let Err(err) = buffered {
 									break 'serve Err(err);
@@ -2841,6 +2881,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 											next.size,
 											self.ctx.timescale,
 											&mut self.prev_ts,
+											&self.ctx.runtime,
 										);
 										if let Err(err) = buffered {
 											break 'serve Err(err);
@@ -3050,6 +3091,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3089,6 +3131,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3132,6 +3175,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3140,7 +3184,7 @@ mod serve_group_test {
 		let mut old = track.append_group().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
-				timestamp: Timestamp::ZERO,
+				timestamp: Some(Timestamp::ZERO),
 				size: 2,
 			})
 			.unwrap();
@@ -3193,6 +3237,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3263,6 +3308,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3305,6 +3351,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3346,6 +3393,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
@@ -3390,6 +3438,7 @@ mod serve_group_test {
 			track_priority_seen: 0,
 			version: Version::Lite07,
 			timescale: Some(crate::Timescale::default()),
+			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 		let bounds = Bounds {
@@ -3459,6 +3508,7 @@ mod serve_group_test {
 				track_priority_seen: 0,
 				version: Version::Lite07,
 				timescale: Some(crate::Timescale::default()),
+				runtime: crate::time::Clock::sim(),
 				opens: opens.clone(),
 			};
 			let bounds = Bounds {

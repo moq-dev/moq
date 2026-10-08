@@ -364,8 +364,8 @@ impl Message for FetchOk {
 					0x04 => max_cache_duration: Option<u64>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
-				// The timescale is read but not surfaced yet: a fetched object without an
-				// interpretable timestamp is stamped on arrival.
+				// The timescale is read but not surfaced yet: a fetched object without its
+				// own units arrives untimed.
 				let mut properties = super::Properties::decode(buf, version)?;
 				if version == Version::Draft15 {
 					properties.max_cache_duration = max_cache_duration.map(std::time::Duration::from_millis);

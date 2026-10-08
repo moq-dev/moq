@@ -179,7 +179,8 @@ pub enum StreamError {
 	#[error("group too large")]
 	GroupTooLarge,
 
-	/// A frame's timestamp doesn't match its track's negotiated timescale.
+	/// A frame's timestamp doesn't match its track: missing on a timed track, present on
+	/// an untimed one, or out of range for the track's timescale.
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 
@@ -416,9 +417,8 @@ pub enum Error {
 	#[error("frame already open")]
 	FrameOpen,
 
-	/// A frame's timestamp doesn't match its track's negotiated timescale: it's
-	/// missing on a timed track, present on an untimed track, or carries a
-	/// different scale than the track advertised.
+	/// A frame's timestamp doesn't match its track: it's missing on a timed track,
+	/// present on an untimed track, or out of range for the track's timescale.
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 

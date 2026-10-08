@@ -408,7 +408,10 @@ mod tests {
 			let mut group = audio.fetch_group(sequence, None).await.unwrap();
 			for offset in [0, 500] {
 				let frame = group.read_frame().await.unwrap().expect("a frame");
-				assert_eq!(frame.timestamp.as_millis(), u128::from(sequence * 1000 + offset));
+				assert_eq!(
+					frame.timestamp.unwrap().as_millis(),
+					u128::from(sequence * 1000 + offset)
+				);
 				assert_eq!(frame.payload, format!("{sequence}+{offset}"));
 			}
 			assert!(group.read_frame().await.unwrap().is_none());

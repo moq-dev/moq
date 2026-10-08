@@ -326,9 +326,16 @@ class DecoderTrack {
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<Container.BufferedRanges>([]);
 
-	// The last discontinuity count seen from the container consumer; doubles as a generation
-	// so in-flight decodes from before a rewind can be dropped on output.
+	// The last discontinuity count seen from the container consumer. An output callback
+	// captures it when the frame comes out, so a picture already parked in sync.wait
+	// can be dropped after the playhead moves.
 	#discontinuity = 0;
+
+	// Codec description from the last configure, reused after a playhead reset.
+	#description?: Uint8Array;
+
+	// The playhead moved and the next decoded frame decides whether the decoder resets.
+	#resetPending = false;
 
 	#signals = new Effect();
 
@@ -355,8 +362,8 @@ class DecoderTrack {
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				try {
-					// The generation this frame was decoded in. If a rewind bumps it while we wait
-					// below, this frame belongs to the reneged timeline and must be dropped.
+					// The generation this frame was decoded in. If the playhead bumps while we wait
+					// below, this frame belongs to the previous generation and must be dropped.
 					const generation = this.#discontinuity;
 
 					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -366,9 +373,9 @@ class DecoderTrack {
 					}
 
 					// `received()` runs at submit, so a frame is anchored by the time it decodes.
-					// Reaching here unanchored means a rewind reset the clock after this frame's
+					// Reaching here unanchored means a reset cleared the clock after this frame's
 					// received(), so it predates the current timeline. Drop it: painting it would
-					// set `timestamp` from the old timeline and late-reject the whole rewind.
+					// set `timestamp` from the old timeline and late-reject what follows.
 					if (this.sync.out.reference.peek() === undefined) return;
 
 					if (this.frame.peek() === undefined) {
@@ -379,7 +386,7 @@ class DecoderTrack {
 					// Returns immediately when the latency is "instant".
 					const ok = await effect.race(this.sync.wait(timestamp).then(() => true));
 					if (!ok) return;
-					if (generation !== this.#discontinuity) return; // a rewind happened while waiting
+					if (generation !== this.#discontinuity) return; // the playhead moved while waiting
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -440,15 +447,8 @@ class DecoderTrack {
 		// Publish the arrival estimate for the "auto" target.
 		effect.run((inner) => this.spread.set(inner.get(consumer.spread)));
 
-		decoder.configure({
-			codec: this.config.codec,
-			description: this.config.description ? Util.Hex.toBytes(this.config.description) : undefined,
-			displayAspectWidth: this.config.displayAspectWidth,
-			displayAspectHeight: this.config.displayAspectHeight,
-			optimizeForLatency: this.config.optimizeForLatency,
-			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
-			flip: false,
-		});
+		this.#description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
+		this.#configure(decoder);
 
 		let previous: Time.Micro | undefined;
 		let latest: number | undefined;
@@ -458,7 +458,7 @@ class DecoderTrack {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
-				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
+				// Playhead moved: re-anchor before decoding further.
 				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
 				const { frame } = next;
@@ -496,6 +496,7 @@ class DecoderTrack {
 				previous = frame.timestamp;
 
 				latest = next.group;
+				this.#resetAtKeyframe(decoder, frame.keyframe);
 				decoder.decode(chunk);
 			}
 		});
@@ -526,15 +527,8 @@ class DecoderTrack {
 		effect.run((inner) => this.spread.set(inner.get(consumer.spread)));
 
 		// Configure decoder with description from catalog
-		decoder.configure({
-			codec: this.config.codec,
-			description,
-			displayAspectWidth: this.config.displayAspectWidth,
-			displayAspectHeight: this.config.displayAspectHeight,
-			optimizeForLatency: this.config.optimizeForLatency,
-			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
-			flip: false,
-		});
+		this.#description = description;
+		this.#configure(decoder);
 
 		let previous: Time.Micro | undefined;
 		let latest: number | undefined;
@@ -544,7 +538,7 @@ class DecoderTrack {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
-				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
+				// Playhead moved: re-anchor before decoding further.
 				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
 				const { frame } = next;
@@ -574,6 +568,7 @@ class DecoderTrack {
 
 				if (decoder.state === "closed") break;
 				latest = next.group;
+				this.#resetAtKeyframe(decoder, frame.keyframe);
 				decoder.decode(
 					new EncodedVideoChunk({
 						type: frame.keyframe ? "key" : "delta",
@@ -585,20 +580,46 @@ class DecoderTrack {
 		});
 	}
 
-	// React to the container consumer's discontinuity counter. On a change the publisher has
-	// rewound the timeline, so drop what's queued downstream and re-anchor the shared clock
-	// before the new utterance. Clearing `timestamp` is load-bearing: otherwise its stale high
-	// value would late-reject the rewound (lower-timestamp) frames at the output guard. Bumping
-	// the generation drops in-flight decodes on output. The held frame is left in place so the
-	// last picture shows until the new keyframe renders, instead of flashing empty. Returns true
-	// if a rewind was handled.
+	// The container bumped its playhead (a marker, a hole, or a latency skip). Re-anchor and
+	// let the next decoded frame decide the decoder reset (see #resetAtKeyframe). Clearing
+	// `timestamp` keeps a stale high value from late-rejecting the following frames, which may
+	// overlap the previous group's tail. The held picture stays until the new keyframe renders.
+	// Returns true when a new generation was handled.
 	#onDiscontinuity(count: number): boolean {
 		if (count === this.#discontinuity) return false;
 		this.#discontinuity = count;
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
 		this.sync.reset();
+		this.#resetPending = true;
 		return true;
+	}
+
+	// Call before each decode. After a playhead bump, a keyframe starts a new timeline, so drop
+	// the pictures still queued in the decoder: one from later in a group that restarts would
+	// otherwise come out above the new keyframe and late-reject it. A delta continues a group the
+	// bump interrupted (a stale marker or a max-delay hole), so it keeps the decoder's references;
+	// a reset would make WebCodecs require a key chunk and throw. `reset()` cannot cancel an
+	// output callback that already holds a frame; the generation it captured rejects that one.
+	#resetAtKeyframe(decoder: VideoDecoder, keyframe: boolean): void {
+		if (!this.#resetPending) return;
+		this.#resetPending = false;
+		// A closed decoder throws on reset.
+		if (!keyframe || decoder.state === "closed") return;
+		decoder.reset();
+		this.#configure(decoder);
+	}
+
+	#configure(decoder: VideoDecoder): void {
+		decoder.configure({
+			codec: this.config.codec,
+			description: this.#description,
+			displayAspectWidth: this.config.displayAspectWidth,
+			displayAspectHeight: this.config.displayAspectHeight,
+			optimizeForLatency: this.config.optimizeForLatency,
+			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
+			flip: false,
+		});
 	}
 
 	// Add a range to the decode buffer (decoded, waiting to render)
