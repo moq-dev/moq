@@ -249,6 +249,14 @@ connect_api = "https://api.example.com/cluster/peers"
 node = "https://us-west.example.com/"
 ```
 
+HTTPS peer-list fetches present the same client certificate as cluster dials,
+but authenticate the API with system roots and the hostname in its URL.
+Mesh roots, fingerprints, insecure mode, and the mesh hostname override do not
+apply to the API. For a private API, set `cluster.connect_api_tls_root` to PEM
+paths (or repeat `--cluster-connect-api-tls-root`); these replace system trust
+for API fetches only. Malformed roots fail startup, and files reload for new
+connections when rotated.
+
 ## Identity
 
 Each relay has a Hop ID: the value it adds to a route's hop list for loop
