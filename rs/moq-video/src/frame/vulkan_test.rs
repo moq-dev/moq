@@ -16,7 +16,7 @@ async fn vulkan_cuda_slot_reuse_and_teardown() {
 	let mut producer = Producer::new(Size::new(64, 32)).expect("NVIDIA Vulkan device required by opted-in test");
 
 	let importer = super::super::cuda_vulkan::Importer::new(0).expect("CUDA importer");
-	let image = producer.contract(Channels::Rgba);
+	let image = producer.contract(Format::Rgba8);
 	let (released, release) = tokio::sync::oneshot::channel();
 	let owner = Owner(Some(released));
 	let mut slot = Slot::new(producer.export(), image, owner).expect("import Vulkan image into CUDA");
@@ -305,7 +305,7 @@ impl Producer {
 		})
 	}
 
-	pub(crate) fn contract(&self, channels: Channels) -> Image {
+	pub(crate) fn contract(&self, format: Format) -> Image {
 		Image {
 			device: Device {
 				device_uuid: self.uuid,
@@ -317,7 +317,7 @@ impl Producer {
 			},
 			size: self.size,
 			allocation_size: self.allocation_size,
-			channels,
+			format,
 		}
 	}
 
@@ -343,7 +343,12 @@ impl Producer {
 				.expect("export Vulkan timeline semaphore")
 		};
 		// SAFETY: Vulkan returned fresh owned opaque fds to the caller.
-		unsafe { Handles::new(OwnedFd::from_raw_fd(memory), OwnedFd::from_raw_fd(timeline)) }
+		unsafe {
+			Handles {
+				memory: OwnedFd::from_raw_fd(memory),
+				timeline: OwnedFd::from_raw_fd(timeline),
+			}
+		}
 	}
 
 	/// Clear the whole image to a color derived from `identity`.

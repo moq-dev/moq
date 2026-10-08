@@ -282,27 +282,18 @@ impl DmaBuf {
 	/// Clones share the descriptor and guard; exports duplicate the FD as needed.
 	/// External buffers refuse CPU download, including linear allocations.
 	pub fn new<T: Send + Sync + 'static>(fd: OwnedFd, layout: DmaBufLayout, owner: T) -> Result<Self, Error> {
-		Self::adopt(
-			layout.format,
-			layout.modifier,
-			layout.size.width,
-			layout.size.height,
-			layout.planes,
-			layout.color,
-			Arc::new(ExternalDmaBuf { fd, _owner: owner }),
-		)
+		Self::adopt(layout, Arc::new(ExternalDmaBuf { fd, _owner: owner }))
 	}
 
-	pub(crate) fn adopt(
-		format: DrmFormat,
-		modifier: u64,
-		width: u32,
-		height: u32,
-		planes: Vec<DmaBufPlane>,
-		color: Option<Color>,
-		inner: Arc<dyn DmaBufFrame>,
-	) -> Result<Self, Error> {
-		Size::new(width, height).validate("DMA-BUF")?;
+	pub(crate) fn adopt(layout: DmaBufLayout, inner: Arc<dyn DmaBufFrame>) -> Result<Self, Error> {
+		let DmaBufLayout {
+			format,
+			modifier,
+			size,
+			planes,
+			color,
+		} = layout;
+		size.validate("DMA-BUF")?;
 		if planes.is_empty() || planes.len() > 4 || planes.iter().any(|plane| plane.stride == 0) {
 			return Err(Error::Unsupported(
 				"DMA-BUF requires one to four planes with non-zero strides".into(),
@@ -311,8 +302,8 @@ impl DmaBuf {
 		Ok(Self {
 			format,
 			modifier,
-			width,
-			height,
+			width: size.width,
+			height: size.height,
 			planes,
 			color,
 			inner,

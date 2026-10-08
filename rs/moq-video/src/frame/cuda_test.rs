@@ -3,12 +3,12 @@ use std::time::Duration;
 
 use super::*;
 use crate::frame::vulkan::tests::Producer;
-use crate::frame::vulkan::{Channels, Slot as VulkanSlot, Timeline};
+use crate::frame::vulkan::{Format, Slot as VulkanSlot, Timeline};
 use crate::{Frame as VideoFrame, Surface};
 
 /// A gradient with structure on both axes, so a pitch, plane, or channel-order
-/// bug moves the picture. Bytes are in `channels` order with alpha 255.
-fn gradient(size: Size, channels: Channels, shift: usize) -> Vec<u8> {
+/// bug moves the picture. Bytes are in `format` order with alpha 255.
+fn gradient(size: Size, format: Format, shift: usize) -> Vec<u8> {
 	let (w, h) = (size.width as usize, size.height as usize);
 	let mut pixels = vec![0u8; w * h * 4];
 	for y in 0..h {
@@ -19,9 +19,9 @@ fn gradient(size: Size, channels: Channels, shift: usize) -> Vec<u8> {
 				((x + y + shift) * 255 / (w + h)) as u8,
 			);
 			let i = (y * w + x) * 4;
-			pixels[i..i + 4].copy_from_slice(&match channels {
-				Channels::Rgba => [r, g, b, 255],
-				Channels::Bgra => [b, g, r, 255],
+			pixels[i..i + 4].copy_from_slice(&match format {
+				Format::Rgba8 => [r, g, b, 255],
+				Format::Bgra8 => [b, g, r, 255],
 			});
 		}
 	}
@@ -123,9 +123,9 @@ async fn vulkan_cuda_convert_resize_encode() {
 	assert_eq!(converter.color(), color);
 
 	// Round one, RGBA: conversion, resize, and the pool bound.
-	let image = producer.contract(Channels::Rgba);
+	let image = producer.contract(Format::Rgba8);
 	let slot = VulkanSlot::new(producer.export(), image, ()).expect("import RGBA image");
-	let rgba = gradient(size, Channels::Rgba, 0);
+	let rgba = gradient(size, Format::Rgba8, 0);
 	let expected = reference(&rgba, size, color);
 	producer.upload(&rgba, None, 1);
 	let (frame, completion) = slot.publish(Timeline::new(1, 2).unwrap()).unwrap();
@@ -202,7 +202,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 
 	// Round two, BGRA: the same picture in the other channel order converts to
 	// the same samples, and both renditions encode through NVENC in place.
-	let image = producer.contract(Channels::Bgra);
+	let image = producer.contract(Format::Bgra8);
 	let mut slot = VulkanSlot::new(producer.export(), image, ()).expect("import BGRA image");
 	let mut hd = nvenc(size, color);
 	let mut sd_encoder = nvenc(sd, color);
@@ -218,7 +218,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 
 	for i in 0..8u64 {
 		let ready = 2 * i + 3;
-		let bgra = gradient(size, Channels::Bgra, i as usize * 4);
+		let bgra = gradient(size, Format::Bgra8, i as usize * 4);
 		producer.upload(&bgra, Some(ready - 1), ready);
 		let (frame, completion) = slot.publish(Timeline::new(ready, ready + 1).unwrap()).unwrap();
 
@@ -228,7 +228,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 			.convert(&frame)
 			.expect("convert BGRA");
 		if i == 0 {
-			let rgba = gradient(size, Channels::Rgba, 0);
+			let rgba = gradient(size, Format::Rgba8, 0);
 			let actual = converted.download_i420().unwrap();
 			let reference = reference(&rgba, size, color);
 			assert_eq!(actual.y(), reference.y(), "BGRA luma differs from RGBA");
@@ -260,7 +260,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 		}
 		for out in decoder.decode(packets[0].payload.clone(), timestamp, i == 0).unwrap() {
 			decoded = Some(out.surface.to_i420().unwrap().into_owned());
-			expected = Some(reference(&gradient(size, Channels::Rgba, i as usize * 4), size, color));
+			expected = Some(reference(&gradient(size, Format::Rgba8, i as usize * 4), size, color));
 		}
 
 		let packets = sd_encoder
@@ -364,7 +364,7 @@ async fn vulkan_cuda_three_view_workload() {
 
 	// One picture per tick phase, so the encoders see real motion instead of a
 	// frozen frame no P-slice has to code.
-	let pictures: Vec<Vec<u8>> = (0..8).map(|i| gradient(size, Channels::Rgba, i * 37)).collect();
+	let pictures: Vec<Vec<u8>> = (0..8).map(|i| gradient(size, Format::Rgba8, i * 37)).collect();
 
 	// Two live buffers per view (the converted frame and its scaled copy) plus
 	// one of slack, the sizing the `Converter` docs recommend.
@@ -373,7 +373,7 @@ async fn vulkan_cuda_three_view_workload() {
 	let mut views = Vec::new();
 	for _ in 0..VIEWS {
 		let mut producer = Producer::new(size).expect("no Vulkan NVIDIA device: this opt-in test needs one");
-		let image = producer.contract(Channels::Rgba);
+		let image = producer.contract(Format::Rgba8);
 		let slot = VulkanSlot::new(producer.export(), image, ()).expect("import view");
 		producer.upload(&pictures[0], None, 1);
 		views.push((producer, Some(slot), nvenc(size, color), nvenc(sd, color), 1u64));
@@ -484,7 +484,7 @@ const ROUNDTRIP_TOLERANCE: u64 = 8;
 
 /// The CPU reference for an RGBA gradient at `shift`, converted and then scaled to `output`.
 fn expected(size: Size, shift: usize, color: Color, output: Size) -> I420 {
-	let full = reference(&gradient(size, Channels::Rgba, shift), size, color);
+	let full = reference(&gradient(size, Format::Rgba8, shift), size, color);
 	if output == size {
 		full
 	} else {
@@ -534,7 +534,7 @@ async fn vulkan_cuda_auto_external_encode() {
 	let size = Size::new(320, 192);
 	let color = Color::Bt709Limited;
 	let mut producer = Producer::new(size).expect("NVIDIA Vulkan device required by opted-in test");
-	let device = producer.contract(Channels::Rgba).device;
+	let device = producer.contract(Format::Rgba8).device;
 	let decode = crate::decode::Config {
 		kind: crate::decode::Kind::Software,
 		..crate::decode::Config::new()
@@ -555,13 +555,13 @@ async fn vulkan_cuda_auto_external_encode() {
 	}
 
 	let mut capture = 0u64;
-	for channels in [Channels::Rgba, Channels::Bgra] {
-		let mut slot = VulkanSlot::new(producer.export(), producer.contract(channels), ()).unwrap();
+	for format in [Format::Rgba8, Format::Bgra8] {
+		let mut slot = VulkanSlot::new(producer.export(), producer.contract(format), ()).unwrap();
 		for _ in 0..3 {
 			let ready = capture * 2 + 1;
 			let shift = capture_shift(size, capture);
 			producer.upload(
-				&gradient(size, channels, shift),
+				&gradient(size, format, shift),
 				(capture > 0).then_some(ready - 1),
 				ready,
 			);
@@ -593,10 +593,10 @@ async fn vulkan_cuda_auto_external_encode() {
 					("v", actual.v(), expected.v()),
 				] {
 					let error = mae(actual, expected);
-					eprintln!("{channels:?} {output} capture {capture} {plane} mae={error}");
+					eprintln!("{format:?} {output} capture {capture} {plane} mae={error}");
 					assert!(
 						error < ROUNDTRIP_TOLERANCE,
-						"{channels:?} {output} capture {capture}: decoded {plane} differs from the reference by {error}"
+						"{format:?} {output} capture {capture}: decoded {plane} differs from the reference by {error}"
 					);
 				}
 			}

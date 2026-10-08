@@ -26,7 +26,7 @@ use moq_vaapi::dmabuf::{DmaBuf as VaapiDmaBuf, Plane};
 use moq_vaapi::vpp::Processor;
 use moq_vaapi::{Matrix, VA_FOURCC_NV12};
 
-use super::{DmaBuf, DmaBufExport, DmaBufFrame, DmaBufPlane, DrmFormat, I420};
+use super::{DmaBuf, DmaBufExport, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFormat, I420};
 use crate::{Color, Error, Size};
 
 /// Environment variable naming the render node, such as `/dev/dri/renderD129`, that [`device`] returns.
@@ -260,12 +260,13 @@ pub(crate) fn adopt(frame: ExportedFrame, color: Option<Color>) -> anyhow::Resul
 	let modifier = object.drm_format_modifier;
 
 	DmaBuf::adopt(
-		DrmFormat::NV12,
-		modifier,
-		width,
-		height,
-		planes,
-		color,
+		DmaBufLayout {
+			format: DrmFormat::NV12,
+			modifier,
+			size: Size::new(width, height),
+			planes,
+			color,
+		},
 		Arc::new(Exported {
 			frame: Mutex::new(frame),
 			color,
@@ -350,7 +351,7 @@ pub(crate) mod testing {
 
 	use moq_vaapi::{Display, Image, Surface as VaSurface, UsageHint, VA_FOURCC_BGRX, VA_RT_FORMAT_RGB32};
 
-	use super::super::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420};
+	use super::super::{DmaBuf, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFormat, I420};
 	use crate::{Error, Size};
 
 	/// A driver surface exported as a DMA-BUF, standing in for a PipeWire buffer.
@@ -391,12 +392,13 @@ pub(crate) mod testing {
 		let fd = OwnedFd::from(std::fs::File::open("/dev/null").expect("open /dev/null"));
 		let (width, height) = (pixels.width(), pixels.height());
 		DmaBuf::adopt(
-			DrmFormat::NV12,
-			0x00ff_ffff_ffff_fffe,
-			width,
-			height,
-			vec![DmaBufPlane::new(0, width), DmaBufPlane::new(width * height, width)],
-			None,
+			DmaBufLayout {
+				format: DrmFormat::NV12,
+				modifier: 0x00ff_ffff_ffff_fffe,
+				size: Size::new(width, height),
+				planes: vec![DmaBufPlane::new(0, width), DmaBufPlane::new(width * height, width)],
+				color: None,
+			},
 			Arc::new(Unimportable { fd, pixels }),
 		)
 		.expect("a valid description")
@@ -447,12 +449,13 @@ pub(crate) mod testing {
 		let plane = DmaBufPlane::new(layer.offset[0], layer.pitch[0]);
 		let object = exported.objects.remove(0);
 		DmaBuf::adopt(
-			DrmFormat::XRGB8888,
-			object.drm_format_modifier,
-			width,
-			height,
-			vec![plane],
-			None,
+			DmaBufLayout {
+				format: DrmFormat::XRGB8888,
+				modifier: object.drm_format_modifier,
+				size,
+				planes: vec![plane],
+				color: None,
+			},
 			Arc::new(Allocated {
 				_surface: surface,
 				fd: object.fd,

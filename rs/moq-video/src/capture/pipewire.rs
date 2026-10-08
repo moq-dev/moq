@@ -41,7 +41,7 @@ use super::channel::FrameChannel;
 use super::mode::Request;
 use super::pump::Geometry;
 use super::{Config, Stream};
-use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
+use crate::frame::{DmaBuf, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
 use crate::{Color, Error, Size};
 
 const DEFAULT_FRAMERATE: u32 = 30;
@@ -1117,7 +1117,16 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						modifier,
 						color,
 					});
-					match DmaBuf::adopt(format, modifier, layout.width, layout.height, planes, color, inner) {
+					match DmaBuf::adopt(
+						DmaBufLayout {
+							format,
+							modifier,
+							size: Size::new(layout.width, layout.height),
+							planes,
+							color,
+						},
+						inner,
+					) {
 						Ok(frame) => {
 							chan.push(Surface::DmaBuf(frame.clone()));
 							// Only the pacing timer reads `last`. A camera must not
@@ -2088,12 +2097,13 @@ mod tests {
 			color: Some(Color::Bt709Full),
 		});
 		let frame = DmaBuf::adopt(
-			DrmFormat::NV12,
-			0,
-			2,
-			2,
-			vec![DmaBufPlane::new(0, 2), DmaBufPlane::new(4, 2)],
-			Some(Color::Bt709Full),
+			DmaBufLayout {
+				format: DrmFormat::NV12,
+				modifier: 0,
+				size: Size::new(2, 2),
+				planes: vec![DmaBufPlane::new(0, 2), DmaBufPlane::new(4, 2)],
+				color: Some(Color::Bt709Full),
+			},
 			inner,
 		)
 		.expect("DMA-BUF");

@@ -65,27 +65,22 @@ pub struct Handles {
 }
 
 impl Handles {
-	/// Group the exported memory and timeline semaphore handles for an image.
-	pub fn new(memory: OwnedFd, timeline: OwnedFd) -> Self {
-		Self { memory, timeline }
-	}
-
 	#[cfg_attr(not(feature = "nvidia"), allow(dead_code))]
 	fn try_clone(&self) -> Result<Self, Error> {
-		Ok(Self::new(
-			self.memory.try_clone().map_err(|e| Error::Codec(e.into()))?,
-			self.timeline.try_clone().map_err(|e| Error::Codec(e.into()))?,
-		))
+		Ok(Self {
+			memory: self.memory.try_clone().map_err(|e| Error::Codec(e.into()))?,
+			timeline: self.timeline.try_clone().map_err(|e| Error::Codec(e.into()))?,
+		})
 	}
 }
 
-/// The byte order of an image's four 8-bit channels.
+/// The Vulkan format of an image's packed pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Channels {
+pub enum Format {
 	/// `VK_FORMAT_R8G8B8A8_UNORM`.
-	Rgba,
+	Rgba8,
 	/// `VK_FORMAT_B8G8R8A8_UNORM`.
-	Bgra,
+	Bgra8,
 }
 
 /// An external dedicated Vulkan image, in `GENERAL` layout while being read.
@@ -94,7 +89,7 @@ pub enum Channels {
 /// no create flags, exclusive sharing, and usage `TRANSFER_DST | SAMPLED |
 /// STORAGE`. It binds dedicated memory at offset zero. `OpaqueFd` images use
 /// optimal tiling; `DmaBuf` images use DRM modifier tiling with explicit memory
-/// planes. The channel order names the exact UNORM format. Importers recreate
+/// planes. [`Format`] names the exact UNORM format. Importers recreate
 /// this contract, including usage, rather than infer image creation parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image {
@@ -106,8 +101,8 @@ pub struct Image {
 	pub size: Size,
 	/// Complete allocation size, rather than the number of visible pixel bytes.
 	pub allocation_size: u64,
-	/// Packed 8-bit channel order.
-	pub channels: Channels,
+	/// Packed pixel format.
+	pub format: Format,
 }
 
 impl Image {
@@ -214,10 +209,12 @@ impl<T: Send + Sync + 'static> Slot<T> {
 
 	/// Publish after queueing the ready signal, returning a completion handle.
 	///
-	/// A frame that no backend reads fails completion and releases its slot.
-	/// It cannot be recycled because no consumer signalled its timeline. The
-	/// guard must safely finish or cancel queued producer writes before teardown,
-	/// as required by [`Slot::new`].
+	/// Publish only what you will encode. A frame that no backend reads (one a
+	/// publisher drops under backpressure, say) fails completion and loses its
+	/// slot for good: no consumer signalled its timeline, so the producer must
+	/// export a new slot to replace it. Drop excess captures before publishing
+	/// instead. The guard must safely finish or cancel queued producer writes
+	/// before teardown, as required by [`Slot::new`].
 	pub fn publish(self, timeline: Timeline) -> Result<(Frame, Completion<T>), PublishError<T>> {
 		if timeline.complete <= timeline.ready || timeline.ready <= self.last_complete {
 			return Err(PublishError::new(
@@ -285,9 +282,9 @@ impl Frame {
 	pub fn image(&self) -> &Image {
 		&self.inner.allocation.image
 	}
-	/// Packed channel order.
-	pub fn channels(&self) -> Channels {
-		self.image().channels
+	/// Packed pixel format.
+	pub fn format(&self) -> Format {
+		self.image().format
 	}
 
 	#[cfg(feature = "nvidia")]
@@ -466,13 +463,21 @@ mod unit_tests {
 			memory: Memory::OpaqueFd { memory_type: 1 },
 			size: Size::new(4, 2),
 			allocation_size: 4096,
-			channels: Channels::Rgba,
+			format: Format::Rgba8,
 		}
 	}
 
 	fn slot() -> Slot<()> {
 		let (memory, timeline) = UnixStream::pair().unwrap();
-		Slot::new(Handles::new(memory.into(), timeline.into()), image(), ()).unwrap()
+		Slot::new(
+			Handles {
+				memory: memory.into(),
+				timeline: timeline.into(),
+			},
+			image(),
+			(),
+		)
+		.unwrap()
 	}
 
 	#[test]
@@ -544,7 +549,10 @@ mod unit_tests {
 		let released = Arc::new(AtomicUsize::new(0));
 		let (memory, timeline) = UnixStream::pair().unwrap();
 		let slot = Slot::new(
-			Handles::new(memory.into(), timeline.into()),
+			Handles {
+				memory: memory.into(),
+				timeline: timeline.into(),
+			},
 			image(),
 			Guard(released.clone()),
 		)

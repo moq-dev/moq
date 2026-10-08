@@ -504,7 +504,7 @@ impl Slot {
 
 		let dst = Frame::pooled(self.reservation, size, Some(self.color))?;
 		let weights = self.color.coefficients();
-		let bgra = u32::from(frame.channels() == vulkan::Channels::Bgra);
+		let bgra = u32::from(frame.format() == vulkan::Format::Bgra8);
 		let stream = frame.cuda_stream();
 
 		// One thread per 2x2 block: the kernel writes four luma samples and one

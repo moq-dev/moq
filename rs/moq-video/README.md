@@ -161,9 +161,10 @@ NV12 conversion per capture and color space, and scales each rendition on the
 GPU. Pin `Config::color` when renditions cross the SD/HD color-inference boundary.
 
 `Slot::publish` consumes the producer slot and `Completion::wait` returns it
-only after the last reader finishes its GPU work. An unconsumed or failed frame
-fails completion and releases its slot instead of recycling an unsignalled
-timeline. Non-exportable application images need a GPU copy into an exportable
+only after the last reader finishes its GPU work. Publish only what you will
+encode: an unconsumed or failed frame fails completion and loses its slot for
+good, since nothing signalled its timeline, so drop excess captures before
+publishing. Non-exportable application images need a GPU copy into an exportable
 slot. External Vulkan images have no CPU mapping or download fallback.
 
 External DMA-BUF producers use `DmaBuf::new` with an owned FD, `DmaBufLayout`,

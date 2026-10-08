@@ -1594,7 +1594,7 @@ mod tests {
 #[cfg(all(test, target_os = "linux"))]
 mod external_tests {
 	use super::*;
-	use crate::frame::vulkan::{Channels, Device, Handles, Image, Memory, Slot, Timeline};
+	use crate::frame::vulkan::{Device, Format, Handles, Image, Memory, Slot, Timeline};
 	use std::os::unix::net::UnixStream;
 
 	fn device() -> Device {
@@ -1630,13 +1630,16 @@ mod external_tests {
 		let mut encoder = Encoder::new(&config).unwrap();
 		let (memory, timeline) = UnixStream::pair().unwrap();
 		let slot = Slot::new(
-			Handles::new(memory.into(), timeline.into()),
+			Handles {
+				memory: memory.into(),
+				timeline: timeline.into(),
+			},
 			Image {
 				device: device(),
 				memory: Memory::OpaqueFd { memory_type: 0 },
 				size: config.size(),
 				allocation_size: 4096,
-				channels: Channels::Rgba,
+				format: Format::Rgba8,
 			},
 			(),
 		)

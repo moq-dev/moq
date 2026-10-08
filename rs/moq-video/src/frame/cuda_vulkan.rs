@@ -1,5 +1,5 @@
 //! CUDA imports and completion for neutral external Vulkan slots.
-use super::vulkan::{self, Channels, Handles, Image, uuid};
+use super::vulkan::{self, Format, Handles, Image, uuid};
 use crate::{Error, Size};
 use cudarc::driver::sys;
 use cudarc::driver::{CudaContext, CudaStream};
@@ -115,9 +115,9 @@ impl Frame {
 		self.imported.image.size
 	}
 
-	/// The channel order the producer declared when importing the image.
-	pub(crate) fn channels(&self) -> Channels {
-		self.imported.image.channels
+	/// The pixel format the producer declared when importing the image.
+	pub(crate) fn format(&self) -> Format {
+		self.imported.image.format
 	}
 
 	/// The level-0 array behind the surface, for the tests' readback only.
