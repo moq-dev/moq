@@ -229,7 +229,7 @@ function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): numb
 }
 
 /** Orders two routes by preference: the newest epoch with none last, then identified before
- * anonymous, then lower warm cost, then lower cold cost. */
+ * anonymous, then lower static cost. */
 function compareRoutes(a: Route, b: Route): number {
 	if (a.epoch !== b.epoch) {
 		// An older epoch is a publisher that was replaced.
@@ -239,8 +239,7 @@ function compareRoutes(a: Route, b: Route): number {
 	}
 	const anonymous = Number(isAnonymous(a)) - Number(isAnonymous(b));
 	if (anonymous !== 0) return anonymous;
-	if (a.cost.warm !== b.cost.warm) return a.cost.warm < b.cost.warm ? -1 : 1;
-	if (a.cost.cold !== b.cost.cold) return a.cost.cold < b.cost.cold ? -1 : 1;
+	if (a.cost !== b.cost) return a.cost < b.cost ? -1 : 1;
 	return 0;
 }
 
@@ -692,7 +691,7 @@ export interface Table {
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
 	dynamic(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint },
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] },
 	): Dynamic;
 }
 
@@ -859,7 +858,7 @@ export class Producer implements Table {
 	 */
 	dynamic(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), true);
 	}
@@ -872,7 +871,7 @@ export class Producer implements Table {
 	 */
 	#receive(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), false);
 	}
@@ -1632,7 +1631,7 @@ export class Dynamic {
 	 * The route is taken as given, epoch included: another epoch (or none) names another
 	 * publisher instance, so re-price from the current one, `update({ ...dynamic.route, cost })`.
 	 */
-	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint }): void {
+	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] }): void {
 		if (this.#closed) throw new Error("dynamic is closed");
 		const next = Route.normalize(route);
 		const previous = this.#entry.route.peek().epoch;

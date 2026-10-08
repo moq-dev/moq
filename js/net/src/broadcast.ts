@@ -387,7 +387,7 @@ export class Producer {
 	 * origin, or if the broadcast is already closed.
 	 */
 	announce(
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): void {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");

@@ -4,6 +4,25 @@ import { Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
+/**
+ * Requests a draft-14 to -16 peer may hold open at once.
+ *
+ * Sized like moq-net's window: twice its default 100,000 announce and 10,000
+ * subscription caps. Draft-17 dropped MAX_REQUEST_ID. Grants are batched per
+ * half window, so only about half of it is guaranteed to a peer holding requests open.
+ */
+export const REQUEST_WINDOW = 220_000n;
+
+/**
+ * The SETUP MAX_REQUEST_ID that first admits `window` requests from the peer.
+ *
+ * It is exclusive (the draft's "maximum request ID plus 1"), and the peer uses
+ * only its own parity: even IDs are the client's, odd the server's.
+ */
+export function initialMaxRequestId(peerClient: boolean, window: bigint = REQUEST_WINDOW): bigint {
+	return window * 2n + (peerClient ? 0n : 1n);
+}
+
 export class MaxRequestId {
 	static id = 0x15;
 
