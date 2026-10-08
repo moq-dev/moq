@@ -8,14 +8,13 @@ then pinned to one thread for its whole life, exactly like a QUIC one.
 
 ## Plan
 
-`uring::Workers::bind` ignores `listen`'s `tcp`/`unix` listeners and points
-the operator at a separate `init_streams` tokio server
-(rs/moq-relay/src/uring.rs:116-120); the only thing it refuses is
-`tls.generate` (:126-128). Replace the silent skip with real support: each
+`uring::Workers::bind` (`rs/moq-relay/src/uring.rs`) ignores `listen`'s
+`tcp`/`unix` listeners and points the operator at a separate `init_streams`
+tokio server; the only thing it refuses is `tls.generate`. Replace the silent skip with real support: each
 worker binds its own listener in the reuseport group and runs the router from
 [stream](/quest/m2/uring-tcp/stream.md) on it.
 
-The split of work stays what `uring.rs` already documents (:10-15): the worker
+The split of work stays what the `uring.rs` module docs already describe: the worker
 owns everything transport-shaped, while authentication and session
 supervision run on the shared tokio runtime that owns the HTTP client, the
 timers, and the origins. A qmux session handle is `Send + Sync` however its

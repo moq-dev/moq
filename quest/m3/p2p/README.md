@@ -45,10 +45,12 @@ a peer that dies, drains, or was never reachable leaves the relay route as
 the best remaining one and the subscription moves back. That is the whole
 fallback story; nothing TURN-shaped is built.
 
-A relay that also answers STUN on its QUIC port
-([one port](/quest/m2/one-port/README.md)) is the lowest-RTT STUN server a
-client can name, but this line takes ICE servers from the application and
-works with any.
+A relay that also answers STUN on its QUIC port is the lowest-RTT STUN
+server a client can name, but this line takes ICE servers from the
+application and works with any. Decided 2026-10-08: the public STUN
+responder moved out of the [one-port](/quest/m2/one-port/README.md) UDP
+demux into this line, since P2P is its only consumer; plan it as a child
+once the harness shows the relay's STUN beats the application's servers.
 
 ### Policy is the application's
 
@@ -77,22 +79,16 @@ message-based, so `max_record_size` defaults to 16 KiB and never exceeds the
 negotiated `maxMessageSize` (256 KiB in Chrome).
 
 The cost is head-of-line blocking: one lost chunk stalls every stream until
-SCTP retransmits it. qmux frames already carry stream offsets, so the
-follow-up is a qmux transport parameter that permits reordering plus receiver
-reassembly. [qmux on the QUIC core](/quest/m2/quic-qmux.md) provides that
-reassembly for the Rust qmux only, so [unordered qmux](/quest/m3/p2p/unordered.md)
-covers native pairs, and a pair with a browser stays ordered (decided
-2026-10-06). Both sides advertise that capability in the roster before the
-channel is created so it can run `ordered: false`; a loss then stalls only
-the stream it hit. `RTCDataChannel.ordered` cannot change after the
-channel exists, so the first qmux record is too late to choose. The
-[harness](/quest/m3/p2p/harness.md) supplies the numbers that decide when
-that follow-up is worth it.
+SCTP retransmits it. Decided 2026-10-08: the channel is always ordered, and
+unordered qmux was dropped. Receiver reassembly would exist only in the Rust
+qmux, so it could cover native pairs alone, and a native pair already
+prefers iroh, whose QUIC streams are independent. The
+[harness](/quest/m3/p2p/harness.md) reports the stall so the cost stays
+visible.
 
 Channel-per-stream is not planned. moq opens a stream per group, so it churns
 against Chrome's 1024-id cap and its close-event id reclaim, needs DCEP per
-channel, and has no reset code without a side channel. Unordered qmux gives
-the same independence without fighting the browser.
+channel, and has no reset code without a side channel.
 
 ### Routes and migration
 
@@ -135,7 +131,6 @@ WASM build, so the browser side stays TypeScript.
 - [Direct peers win](/quest/m3/p2p/cost-scopes.md) - a direct link wins only when the peer is the origin or a routing node, by link costs the node sets itself
 - [Watch opts in](/quest/m3/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the cheapest route
 - [Harness](/quest/m3/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
-- [Unordered qmux](/quest/m3/p2p/unordered.md) - between native peers, qmux tolerates reordering so the data channel runs unordered and a loss stalls one stream
 
 ## Related
 

@@ -8,6 +8,9 @@ assumed.
 
 ## Plan
 
+Decided 2026-10-08: parked in m3 with [robot](/quest/m2/teleop/robot.md),
+which it builds on.
+
 `moq-boy` merges every viewer's input, which is right for crowd control and
 wrong for a vehicle. Arbitration is the part of a teleoperation stack that
 cannot be lifted from it: one controller is active, the others are read-only,

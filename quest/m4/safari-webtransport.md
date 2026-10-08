@@ -20,11 +20,20 @@ this.
   Safari for macOS and on Chrome, Firefox and Edge for iOS, with desktop Chrome
   and Firefox as controls.
 - Update `doc/lib/js/index.md`.
+- The gate needs the Safari version, and the iOS or iPadOS WebKit version
+  for the iOS browsers, out of the user-agent check. If
+  [JS bundle trims](/quest/m1/js-bundle-trims.md) has replaced bowser in the
+  same file by then, its check exposes that version rather than a yes/no
+  WebKit flag (decided 2026-10-08).
 
 ## Required
 
-- [Safari ships the WebKit 319818 fix](/quest/m4/webkit-319818.md) - the release to gate on
+- [Safari ships the WebKit 319818 fix](/quest/m3/webkit-319818.md) - the release to gate on
 
 ## Closes
 
 - [#2388](https://github.com/moq-dev/moq/issues/2388) - close this issue when the quest finishes
+
+## Related
+
+- [JS bundle trims](/quest/m1/js-bundle-trims.md) - replaces bowser in the same `browser.ts` user-agent check

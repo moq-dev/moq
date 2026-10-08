@@ -10,6 +10,9 @@ and MAVProxy connect unchanged.
 
 Parked in m3 until a real ArduPilot user or partner asks (2026-09-30 audit).
 
+Decided 2026-10-08: the lossy class is a snapshot track per key with a
+bounded key set, since one snapshot track carries only one latest value.
+
 ### Shape
 
 A library crate reached through `moq-cli`, the way `moq-srt` and `moq-rtmp`
@@ -56,6 +59,13 @@ delivers latest-value:
   under msgid 0; keying on msgid alone lets them overwrite each other. Decide
   explicitly what to do about instances distinguished only inside a payload,
   which the msgid-only rule cannot see.
+- **One snapshot track per key.** A `moq_flate::snapshot` track holds one
+  latest value, so per-key latest-value means a track per
+  `(sysid, compid, msgid)`, named from the key and advertised in the catalog
+  as it appears. That state grows with whatever the flight-controller link
+  emits, so bound it: cap the number of keys (or derive the set from the
+  config table) and fail loud past the cap rather than creating tracks
+  without limit.
 
 Not `moq_json::snapshot`: a MAVLink frame is not JSON, and its default batches
 up to `MAX_DELTA_FRAMES` merge patches into one ordered group, so an earlier

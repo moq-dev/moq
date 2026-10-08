@@ -3,8 +3,7 @@
 ## Goal
 
 Identify which missing decoder/backend coverage serves actual consumers after
-the existing platform and NVIDIA work, without adding mandatory build costs or
-blocking 0.1.
+the existing platform and NVIDIA work, without adding mandatory build costs.
 
 ## Plan
 
@@ -27,6 +26,8 @@ drain/color/timestamp proof, and a CI or explicit hardware validation lane.
 Use the settled Frame/output/codec extension points; no parallel surface API.
 
 Public API and wire: no changes during this study.
+
+Decided 2026-10-08: moved to m3. No consumer has asked for a missing codec.
 
 ## Related
 

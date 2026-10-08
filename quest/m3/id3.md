@@ -40,3 +40,7 @@ generic.
 ## Required
 
 - [fMP4 emsg](/quest/m3/emsg.md) - settles the shared timed-metadata contract this builds on, which needs maintainer agreement first
+
+## Related
+
+- [Fail loud on dropped timed metadata](/quest/m1/drop-loud.md) - counts and warns on what import drops until this carriage lands

@@ -11,7 +11,7 @@ who joins late joins mid-replay.
 ## Plan
 
 - Today `moq_archive::Reader` publishes only the timeline track live and serves
-  media groups on FETCH through `track::Dynamic`, so a subscriber sees none.
+  media groups on FETCH through `broadcast::Dynamic`, so a subscriber sees none.
 - One clock per import, not per subscriber. It starts at the earliest recorded
   timestamp across the selected tracks and every track paces against it, so
   tracks stay in sync and every viewer sees the same moment.

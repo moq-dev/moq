@@ -13,8 +13,13 @@ partner shows up.
 Decided in the 2026-09-30 audit: the ROS 2 bridge was deleted, cross-track
 correlation folded into [robot](/quest/m2/teleop/robot.md), V4L2-M2M encoding
 folded into [CLI packaging](/quest/m1/cli-packaging.md), and the MAVLink
-bridge, SITL proof, and browser package moved to m3. Kyber is a competitor
-with proprietary framing, not a transport we replace.
+bridge and SITL proof moved to m3. Kyber is a competitor with proprietary
+framing, not a transport we replace.
+
+Decided 2026-10-08: the robot primitive and operator arbitration are parked in
+m3 until a teleoperation consumer needs them, so the line's m2 work is the
+use-case docs. The browser package was deleted; its shared schema folds into
+the [SITL proof](/quest/m3/teleop-proof.md).
 
 ## Plan
 
@@ -84,17 +89,17 @@ stating plainly because it is what a builder is comparing against.
 
 ## Required
 
-- [Robot teleoperation primitive](/quest/m2/teleop/robot.md) - a `moq-robot`
-  crate carrying the track shapes and discovery every teleoperated machine
-  needs; gates the rest
-- [Operator arbitration](/quest/m2/teleop/arbitration.md) - exactly one
-  controller commands a vehicle at a time, with explicit handoff and a stated
-  authorization boundary
 - [Teleoperation use-case docs](/quest/m2/teleop/docs.md) - `doc/concept/use-case/`
   gains a teleoperation page, with a runnable non-media example beside it
 
 ## Related
 
+- [Robot teleoperation primitive](/quest/m2/teleop/robot.md) - a `moq-robot`
+  crate carrying the track shapes and discovery every teleoperated machine
+  needs, parked in m3
+- [Operator arbitration](/quest/m2/teleop/arbitration.md) - exactly one
+  controller commands a vehicle at a time, with explicit handoff and a stated
+  authorization boundary, parked in m3
 - [e2ee](/quest/m1/e2ee/README.md) - the answer for a protected control link
 - [Media stats](/quest/m1/stats/schema.md) - publisher-reported stats
   on a catalog-announced track (moq#2734); teleop's latency instrumentation
@@ -107,7 +112,3 @@ stating plainly because it is what a builder is comparing against.
   parked until a real ArduPilot user or partner
 - [SITL proof and browser ground station](/quest/m3/teleop-proof.md) - ArduPilot
   SITL flown from a browser, parked with the bridge
-- [Browser teleoperation package](/quest/m3/teleop-browser-package.md) -
-  `@moq/robot` mirroring the Rust crate, parked with the bridge
-- [Text availability](/quest/m3/text-schema.md) - a text track publishes its
-  own availability index instead of copying the media timeline

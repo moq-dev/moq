@@ -8,6 +8,10 @@ the gate for the rest of the questline.
 
 ## Plan
 
+Decided 2026-10-08: parked in m3. No teleoperation consumer needs the crate
+yet; OneTooMany's telemetry need is [data sync](/quest/m2/watch-data-sync.md),
+not this primitive.
+
 ### Direction
 
 The operator publishes and the robot subscribes. The robot serves its own
@@ -52,7 +56,7 @@ The framing is where the guarantee lives, not the subscription flags:
   on it would not be reliable, which is why the reliable class is a single
   group instead.
 - What makes the lossy class lossy on the wire is the publisher's
-  `Info::max_age`: `evict_expired` aborts an aged-out group with `Error::Old`
+  `Info::max_age`: `evict_expired_scan` aborts an aged-out group with `Error::Old`
   (`rs/moq-net/src/model/track.rs`), and an abort resets the QUIC stream, so
   stale bytes stop being retransmitted.
 - A subscriber cannot weaken either class. `clamp_combined`
