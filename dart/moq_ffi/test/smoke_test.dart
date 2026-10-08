@@ -40,7 +40,9 @@ void main() {
     final nextGroup = consumer.nextGroup();
 
     final producer = track.appendGroup();
-    producer.writeFrame(frame: MoqFrame(payload: utf8.encode('dart')));
+    producer.writeFrame(
+      frame: MoqFrame(payload: utf8.encode('dart'), timestampUs: 0),
+    );
     producer.finish();
 
     final group = await nextGroup;

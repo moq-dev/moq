@@ -44,7 +44,6 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Required
 
-- [Receive failure](/quest/m1/e2ee/receiver-failure.md) - a bad grouped frame wakes and terminates every pending read
 - [TypeScript E2EE core](/quest/m1/e2ee/typescript.md) - the `@moq/e2ee` package
   mirroring the Rust surface, with WebCrypto in a serial pump
 - [Rust protected publisher seams](/quest/m1/e2ee/rust-publish.md) - Rust media

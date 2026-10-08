@@ -9,6 +9,12 @@ the AudioContext clock while video paces against a wall clock anchored at the
 earliest arrival, so a ring that re-buffers or skips drifts against video until
 the next re-anchor.
 
+Acceptance includes the 2026-10-07 audit's skip case: a video-only latency
+skip (`js/watch/src/video/decoder.ts`, `sync.reset()` on a video
+discontinuity) must not move audio's timeline. Today it re-anchors the shared
+`Sync` while the audio ring stays on the old one. Folded in here rather than
+fixed separately, since audio driving the clock removes the shared anchor.
+
 ## Plan
 
 Moved from m0 to m1 in the 2026-09-30 audit: it waits on the whole jitter

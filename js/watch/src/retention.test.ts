@@ -80,7 +80,7 @@ test("waits on a stable clock leave nothing behind", async () => {
 test("a long subscription through the player path leaves nothing behind", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
 	// A tiny publisher window, so the track's own replay cache stays flat too.
-	const track = broadcast.createTrack("audio", { maxAge: Time.Milli(1) });
+	const track = broadcast.createTrack("audio", { timescale: Time.Timescale.MILLI, maxAge: Time.Milli(1) });
 	const format = new Container.Legacy.Format("audio");
 	const producer = new Container.Legacy.Producer(track, format);
 

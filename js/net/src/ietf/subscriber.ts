@@ -13,12 +13,12 @@ import {
 	sessionCause,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Cursor, type Reader, type Stream, UnexpectedEnd } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, type Timescale, Timestamp } from "../time.ts";
+import { Milli, type Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
@@ -26,7 +26,7 @@ import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
 import { requestReason, toRequestCode } from "./error.ts";
-import { Frame, type Group as GroupMessage } from "./object.ts";
+import { Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -123,16 +123,12 @@ export class Subscriber {
 	#aliases = new TrackAliases<Subscription>();
 
 	// Units for each track's object Timestamps, from the TIMESCALE Track Property in
-	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so the publisher
-	// opted out of timestamps and its frames are stamped on arrival instead.
+	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so its frames
+	// arrive untimed.
 	#timescales = new Map<bigint, Timescale>();
 
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
-
-	// A random Hop ID of this connection's own, written as the first hop of any path that
-	// names no publisher, so a publisher that reconnects reads as a new one.
-	#stamp = randomHop();
 
 	// Paths with a legacy PUBLISH_NAMESPACE request in flight, reserved synchronously.
 	// The count below is only taken once the OK is written, and two requests that both
@@ -197,16 +193,10 @@ export class Subscriber {
 		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
 	}
 
-	/**
-	 * The route an advertisement carries; one without a path is free. A path that names no
-	 * publisher, or none at all, gets this connection's stamp in front of a 0.
-	 */
+	/** The route an advertisement carries; one without a path is anonymous and free. */
 	#route(advert: Cluster.Advert | undefined): Route {
-		if (advert === undefined) return { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
-		// A full chain, or a stamp colliding with an entry (a 1-in-2^53 draw), keeps the
-		// path as sent.
-		const hops = stampHops(advert.hops, this.#stamp) ?? [...advert.hops];
-		return { hops, cost: { warm: advert.cost, cold: advert.cost } };
+		if (advert === undefined) return { hops: [UNKNOWN_HOP], cost: Cost.zero };
+		return { hops: advert.hops, cost: { warm: advert.cost, cold: advert.cost } };
 	}
 
 	/**
@@ -807,6 +797,9 @@ export class Subscriber {
 			throw new RangeError("max cache duration exceeds safe milliseconds");
 		}
 		request.accept({
+			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
+			// and the track must not claim one when served onward.
+			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
@@ -1080,8 +1073,12 @@ export class Subscriber {
 			// through the group. The first Object ID is absolute either way, and IDs start
 			// at 0, so a clear bit on object 0 is still the whole group. Any other first ID,
 			// or a stream with no object, has a hole at the front: drop it and pick up at
-			// the next group. `Frame.decode` still holds every later object to incrementing
-			// by 1, whatever the header said.
+			// the next group.
+			//
+			// Drafts before the bit cannot say this in the header. A non-zero delta on the
+			// first object is the same hole, and the catch below drops that stream too. A
+			// later gap, or a header that claimed the group starts at object 0, still fails
+			// it: `Frame.decode` refuses every non-zero delta.
 			if (!group.flags.firstObject) {
 				let id: bigint | undefined;
 				try {
@@ -1100,7 +1097,8 @@ export class Subscriber {
 			// header priority inherits it (draft-21 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
-			const decode = (c: Cursor) => Frame.decode(c, group.flags, this.#timescales.get(group.trackAlias));
+			const timescale = this.#timescales.get(group.trackAlias);
+			const decode = (c: Cursor) => Frame.decode(c, group.flags, timescale);
 			for (;;) {
 				// Every object already buffered is written without an await, so the reader wakes
 				// once per batch rather than once per object. Only the group's own stream ends it:
@@ -1128,15 +1126,31 @@ export class Subscriber {
 				}
 				if (frame.payload === undefined) break;
 
-				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp ?? Timestamp.now() });
+				// A track that declared TIMESCALE stamps every object, so one without a Timestamp is
+				// malformed rather than something to invent a time for.
+				if (timescale !== undefined && frame.timestamp === undefined) {
+					throw new StreamError(StreamCode.MalformedTrack, {
+						message: `object without a Timestamp on a track with TIMESCALE: group=${group.groupId}`,
+					});
+				}
+				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
 			}
 
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
-			if (e instanceof ProtocolViolation) {
-				// The publisher broke the track's end, which no later group can repair.
+			// The producer is still unopened only when the first object failed. On a draft
+			// with no FIRST_OBJECT bit, that non-zero delta is a headless group: drop the
+			// stream and leave the subscription up for the next group. Delivering the
+			// object would renumber a P-frame as the keyframe the group opens with.
+			if (producer === undefined && e instanceof ObjectIdGap && !hasFirstObjectBit(this.#session.version)) {
+				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+				stream.stop(new Error("a group must start at object 0"));
+				return;
+			}
+			if (e instanceof ProtocolViolation || (e instanceof StreamError && e.code === StreamCode.MalformedTrack)) {
+				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);
 				track.close(e);
 			} else {
