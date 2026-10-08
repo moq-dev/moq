@@ -1112,8 +1112,15 @@ impl TrackState {
 		slot.pending = false;
 		self.arrival.push_back((sequence, slot.stamp));
 		// A group reset before its first frame shows nothing of the route's feed.
-		if !slot.group.is_aborted() {
-			self.landed(sequence);
+		if slot.group.is_aborted() {
+			return;
+		}
+		let latest = slot.group.latest();
+		self.landed(sequence);
+		// Its frames presented while hidden, so a read woken by them may have judged the
+		// older edge and parked again: present them once more now that they count.
+		if let Some(latest) = latest {
+			self.cache.wakes().presented(latest);
 		}
 	}
 
@@ -6322,6 +6329,49 @@ mod test {
 			woken.load(Ordering::SeqCst),
 			"the replacement's first frame bounds the reach"
 		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// A received group's frames present while it is hidden, so a parked read they wake
+	/// still sees the older edge and parks again. Revealing the group has to wake it once
+	/// more, though the read sits below the group's nearest shown predecessor.
+	#[test]
+	fn revealing_a_presented_group_wakes_a_read_it_expires() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		append_at(&mut producer, 1000); // the successor bounds the head's reach
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0);
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		let mut received = producer.receive_group(group::Info { sequence: 2 }).unwrap();
+		received
+			.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		woken.store(false, Ordering::SeqCst);
+		assert!(
+			next.as_mut().poll(&mut cx).is_pending(),
+			"the hidden group moves no edge"
+		);
+
+		producer.reveal_group(&received);
+		assert!(woken.load(Ordering::SeqCst), "the reveal wakes the expired read");
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}
