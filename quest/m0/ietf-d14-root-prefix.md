@@ -27,10 +27,12 @@ affected pair and scoped links already work. Rejected: subscribing per
 prefix on demand when a local subscriber misses, and routing unknown
 SUBSCRIBEs upstream; both need a hook on origin misses.
 
-Where it lives: `subscribe_prefixes` (`rs/moq-net/src/ietf/subscriber.rs`,
-around line 600) returns `interest_prefixes(origin.allowed())`, which is
-`[""]` for an unscoped origin. `run_subscribe_namespace` (around line 861)
-sends it. Log at debug when the root is skipped. The note belongs in
+In flight as [#5018](https://github.com/moq-dev/moq/pull/5018), which also
+covers draft-15 peers.
+
+Where it lives: `subscribe_prefixes` (`rs/moq-net/src/ietf/subscriber.rs`)
+returns `interest_prefixes(origin.allowed())`, which is `[""]` for an
+unscoped origin. `run_subscribe_namespace` sends it. Log at debug when the root is skipped. The note belongs in
 `doc/bin/relay/cluster.md`.
 
 Test: a d14 session with an unscoped origin sends no SUBSCRIBE_NAMESPACE,

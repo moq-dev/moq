@@ -71,7 +71,7 @@ prefix. A new group whose first timestamp precedes the recorded end fails the
 recording instead of overlapping media time. A DVR deletes unreferenced objects and unneeded timeline
 objects one grace period after recovery.
 `moq_archive::Reader` (`rs/moq-archive/src/reader/mod.rs`) replays every timeline
-onto a supplied `broadcast::Producer` and serves FETCH through `track::Dynamic`
+onto a supplied `broadcast::Producer` and serves FETCH through `broadcast::Dynamic`
 with a byte-bounded object LRU, stitching a group split across records and
 growing a group whose records do not reach its end yet. `Reader::refresh`
 follows by listing each timeline's keys after its cursor; `Reader::finish`
@@ -111,13 +111,13 @@ work landed in #4034 and its children are this line's own):
   The target comes from each timeline's declared duration, which replaces the
   broadcast-wide `durationMax` (09-29 planning).
 
-For triage, not blocking: two Codex P2s arrived after #4280 merged and are
-unanswered. A timeline record whose `sequence` differs from its window index
-is passed through unvalidated
-([review](https://github.com/moq-dev/moq/pull/4280#pullrequestreview-5332725290)),
-and `Timelines::track` re-enrolling a name while its old `Recorder` is alive
-leaves two handles on one segmenter
-([r4117516035](https://github.com/moq-dev/moq/pull/4280#discussion_r4117516035)).
+This README owns one small fix (triaged 2026-10-08): `moq-mux`'s
+`timeline::Consumer` passes a record whose `sequence` differs from its window
+index through unvalidated
+([review](https://github.com/moq-dev/moq/pull/4280#pullrequestreview-5332725290));
+refuse it as malformed, as `timeline::Producer::resume` already does. The
+other #4280 Codex finding is fixed: `Timelines::track` refuses a name that is
+still recording.
 
 ### Format
 
@@ -172,5 +172,5 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Related
 
-- [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
+- [Catalog track identity](/quest/m2/catalog-tracks.md) - a track's definition never changes for its name, so any recorded catalog describes every group of the tracks it lists
 - [e2ee](/quest/m1/e2ee/README.md) - protected broadcasts are excluded initially

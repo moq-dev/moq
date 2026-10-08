@@ -30,8 +30,8 @@ Decided 2026-10-07: audit every message against every draft rather than
 patch FORWARD alone, since the report's EXPIRES case (fixed in #4195) and
 this one are the same class.
 
-Where it lives: the `decode_params!` macro (`rs/moq-net/src/ietf/parameters.rs`,
-around line 473) returns `InvalidValue` for any key outside a message's list.
+Where it lives: the `decode_params!` macro (`rs/moq-net/src/ietf/parameters.rs`)
+returns `InvalidValue` for any key outside a message's list.
 Its call sites are in `fetch.rs`, `publish_namespace.rs`, `publish.rs`,
 `subscribe_namespace.rs`, `request_stream.rs`, `request.rs` and
 `subscribe.rs`. `Parameters::skip` ignores unknown keys, but only d14
@@ -45,8 +45,8 @@ it only sets FORWARD on the PUBLISH messages it triggers, and we send none
 for that subscription (Subscribe Options 0x01).
 
 Coordinate with [moq-transport request codes](/quest/m2/ietf-request-codes.md),
-which accepts the delivery-timeout parameters on REQUEST_UPDATE; whichever
-lands second drops the overlap.
+which accepts the delivery-timeout parameters on REQUEST_UPDATE; it lands
+after this and drops the overlap.
 
 Tests: one codec test per gap the audit finds, plus one per rule above
 (unknown and misplaced, on each side of the d16 and d17 boundaries). Mirror
@@ -58,3 +58,4 @@ Public API: none. Wire: none new; decoding moves closer to the drafts.
 ## Related
 
 - [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - owns the other session-closing cases
+- [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - touches the same 0x21 parameter and `fetch.rs`/`subscribe.rs` decodes; it rebases onto this

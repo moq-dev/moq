@@ -57,6 +57,8 @@ grant; `Options::bandwidth` documents that
   reservation before video sees a bit and audio is squeezed only once the link
   cannot carry audio alone. Worth doing for that tail, not worth blocking on.
 
+Decided 2026-10-08: moved to m2, since that tail is the only gain.
+
 Tests: retain the shared `Control` tests; an Opus Producer whose
 grant drops below its configured bitrate reports the lower `bitrate()` after
 one policy step, holds it on a `None` grant, and ramps back when the grant

@@ -105,8 +105,8 @@ published version in place, so AUTH and its stream code land in
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
-  TOKEN` on a moq-transport request authorizes that request when the session
-  grant does not, and REQUEST_UPDATE refreshes it
+  TOKEN` on a moq-transport request decodes by the draft's rules, closing the
+  session on the forms the draft forbids
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every

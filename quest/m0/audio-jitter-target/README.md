@@ -25,7 +25,9 @@ its conformance corpus, `js/watch` `Sync` holds the deepest track's target in
 `"auto"`, and `moq play --delay` defaults to `auto`. Both are the default for
 every viewer, so `"auto"` shipped ahead of the Chrome and Safari proof the
 Watch quest still owes; the maintainer accepted that, and the re-measured
-replay budgets, on 2026-10-04.
+replay budgets, on 2026-10-04. Decided 2026-10-08: the line no longer gates
+the release and moves to m1, since the defaults are on and only the manual
+browser proof is left.
 
 What the line still owes once Watch lands: its recorded trace replayed through
 the native decode path too, asserting the same target series the browser's

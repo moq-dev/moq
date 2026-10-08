@@ -37,6 +37,11 @@ Decided (maintainer, 2026-09-30):
 - Callers: `moq import ts` (`rs/moq-cli`) and `moq-srt`'s `Publisher`, single
   program and `Program::All`.
 
+Decided 2026-10-08: when the operator gave `--epoch`, a flagged rewind is
+fatal like an unsignalled one, so the supervisor restarts the process and
+both hosts of a redundant pair keep the operator's epoch. A fresh epoch per
+rewind would split the pair.
+
 Tests: a fixture with a flagged rewind publishes two broadcasts, the second
 starting at the rewound PTS; the same rewind unflagged still errors; one SRT
 connection carries both epochs. Update `doc/bin/cli.md` and `doc/bin/srt.md`.
@@ -51,3 +56,4 @@ and `restart` is new. Wire: none.
 ## Related
 
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - the announce event viewers follow onto the new epoch
+- [#5003](https://github.com/moq-dev/moq/pull/5003) - `import ts --passthrough`, which waits on this quest's `decode` change

@@ -16,7 +16,7 @@ since two epochs may carry the same content; a handler that wants fresh
 content under the new epoch closes its old broadcast itself.
 
 Non-goals: the epoch a claim-served answer carries
-([#5010](https://github.com/moq-dev/moq/pull/5010)'s claim-epochs plan), and
+([Claim-served epochs](/quest/m0/broadcast-epoch/claim-epochs.md)), and
 same-epoch repricing, which keeps every handle and stays an `Update`.
 
 ## Plan
