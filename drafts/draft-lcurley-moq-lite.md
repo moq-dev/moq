@@ -1406,7 +1406,6 @@ The `Message Length` describes the payload size on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
-- A relay puts a random Hop ID, picked per session, in front of an announcement whose reconstructed path starts with 0, and writes that stamp followed by 0 for an empty path.
 
 ## moq-lite-06
 
