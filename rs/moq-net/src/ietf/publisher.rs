@@ -523,21 +523,33 @@ where
 				.maybe_boxed()
 			}
 			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
-			// to the same request_id + namespace; the legacy Subscribe Options field
-			// is ignored (moq-lite never subscribes to tracks).
+			// to the same request_id + namespace. We never send PUBLISH, so a legacy
+			// request for PUBLISH alone is refused, and one for both gets only NAMESPACE.
 			ietf::SubscribeNamespace::ID | ietf::SubscribeNamespaceLegacy::ID => {
-				let msg = if id == ietf::SubscribeNamespace::ID {
-					ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?
+				let (msg, options) = if id == ietf::SubscribeNamespace::ID {
+					let msg = ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?;
+					(msg, ietf::SubscribeOptions::Namespace)
 				} else {
 					let legacy = ietf::SubscribeNamespaceLegacy::decode_msg(&mut data, this.version)?;
-					ietf::SubscribeNamespace {
+					let msg = ietf::SubscribeNamespace {
 						request_id: legacy.request_id,
 						namespace: legacy.namespace,
 						hidden: legacy.hidden,
-					}
+					};
+					(msg, legacy.subscribe_options)
 				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
+				}
+				if options == ietf::SubscribeOptions::Publish {
+					let request_id = msg.request_id;
+					return Ok(async move {
+						let reason = "SUBSCRIBE_NAMESPACE for PUBLISH is not supported";
+						if let Err(err) = this.reject_namespace_request(stream, Some(request_id), reason).await {
+							tracing::debug!(%err, "subscribe_namespace refusal failed");
+						}
+					}
+					.maybe_boxed());
 				}
 				tracing::debug!(message = ?msg, "received subscribe_namespace");
 				async move {
@@ -557,7 +569,8 @@ where
 				) =>
 			{
 				async move {
-					if let Err(err) = this.reject_subscribe_tracks(stream).await {
+					let reason = "SUBSCRIBE_TRACKS is not supported";
+					if let Err(err) = this.reject_namespace_request(stream, None, reason).await {
 						tracing::debug!(%err, "subscribe_tracks refusal failed");
 					}
 				}
@@ -1667,14 +1680,21 @@ where
 		Ok(())
 	}
 
-	async fn reject_subscribe_tracks(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+	/// Refuse a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS that asks for PUBLISH, which we
+	/// never send. Only draft-16 replies carry the Request ID; draft-17+ replies never do.
+	async fn reject_namespace_request(
+		&self,
+		mut stream: Stream<S, Version>,
+		request_id: Option<RequestId>,
+		reason: &str,
+	) -> Result<(), Error> {
 		stream.writer.varint(ietf::RequestError::ID).await?;
 		stream
 			.writer
 			.encode(&ietf::RequestError {
-				request_id: None,
+				request_id: request_id.filter(|_| self.version == Version::Draft16),
 				error_code: request::to_code(&Error::Unsupported, request::Kind::SubscribeNamespace, self.version),
-				reason_phrase: "SUBSCRIBE_TRACKS is not supported".into(),
+				reason_phrase: reason.into(),
 				retry_interval: 0,
 			})
 			.await?;
@@ -2151,10 +2171,10 @@ where
 	/// expecting a publisher to announce itself, so the default has to be to announce. A
 	/// peer that would rather ask says so with the MoQ Solicit extension
 	/// ([`solicit`](super::solicit)),
-	/// and then this loop does nothing and
-	/// [`Self::run_subscribe_namespace_stream`] carries the advertisements instead.
-	/// Exactly one of the two is live, which is what keeps the peer from hearing a
-	/// namespace twice.
+	/// and then this loop does nothing.
+	/// On draft-16 and later [`Self::run_subscribe_namespace_stream`] also carries every
+	/// match, so a peer that did not ask hears each namespace both ways. A NAMESPACE is
+	/// discovery only, not a second route.
 	pub async fn run_publish_namespaces(self) -> Result<(), Error> {
 		if self.requires_solicitation().await {
 			return Ok(());
@@ -2179,8 +2199,10 @@ where
 	///
 	/// All the announce state is local to this task (mirroring `lite::Publisher`'s
 	/// announce handling): whatever this subscription advertised is withdrawn
-	/// when its stream ends. It only advertises anything when the peer asked to be told
-	/// on request; otherwise [`Self::run_publish_namespaces`] has already said it all.
+	/// when its stream ends. On draft-16 and later every match is a NAMESPACE on
+	/// this stream, whatever the peer's SETUP said. Draft-14 and 15 predate that
+	/// message and still answer with PUBLISH_NAMESPACE only for what
+	/// [`Self::run_publish_namespaces`] does not already say.
 	async fn run_subscribe_namespace_stream(
 		self,
 		mut stream: Stream<S, Version>,
@@ -2220,15 +2242,19 @@ where
 		// origin that already opted in (the caller's choice for this peer) keeps them.
 		let origin = origin.discovery(!declared.hidden || msg.hidden || self.origin.includes_hidden());
 
-		// Unless the peer asked to be told only on request, it has already heard what an
-		// unsolicited PUBLISH_NAMESPACE can say. Repeating it here would leave it holding
-		// two sources for one namespace, so this stream carries only what that loop hid
-		// from the empty prefix and this request may see, and otherwise simply stays open
-		// until the peer is done with it.
-		let origin = match declared.solicit.unwrap_or(false) {
-			true => origin,
-			false if !declared.hidden || self.origin.includes_hidden() => origin.empty(),
-			false => origin.beyond(&self.origin.clone().discovery(false)),
+		// Draft-16 and later always fill this stream. A NAMESPACE is discovery, not a
+		// route, so a peer that also hears the unsolicited PUBLISH_NAMESPACE still gets
+		// the match here. Draft-14 and 15 answer with PUBLISH_NAMESPACE and only say
+		// what that loop does not already say: everything when the peer asked to be
+		// told on request, otherwise the hidden remainder.
+		let origin = if matches!(self.version, Version::Draft14 | Version::Draft15) {
+			match declared.solicit.unwrap_or(false) {
+				true => origin,
+				false if !declared.hidden || self.origin.includes_hidden() => origin.empty(),
+				false => origin.beyond(&self.origin.clone().discovery(false)),
+			}
+		} else {
+			origin
 		};
 
 		let mut announced = origin.announced();
@@ -4060,6 +4086,117 @@ mod serve_tests {
 		}
 	}
 
+	/// A draft-16/17 SUBSCRIBE_NAMESPACE gets NAMESPACE whenever it asks for namespaces,
+	/// and one asking for PUBLISH alone is refused, since we never send PUBLISH. Draft-18
+	/// has no Subscribe Options and always asks for namespaces.
+	#[moq_net_sim::test]
+	async fn subscribe_namespace_honors_subscribe_options() {
+		use ietf::SubscribeOptions::{Both, Namespace, Publish};
+
+		for (version, options, namespaces) in [
+			(Version::Draft16, Some(Publish), false),
+			(Version::Draft16, Some(Namespace), true),
+			(Version::Draft16, Some(Both), true),
+			(Version::Draft17, Some(Publish), false),
+			(Version::Draft17, Some(Namespace), true),
+			(Version::Draft17, Some(Both), true),
+			(Version::Draft18, None, true),
+		] {
+			let h = serve(version);
+			settle().await;
+
+			let mut body = Vec::new();
+			let mut w = Encoder::new(&mut body, version.into());
+			let id = match options {
+				Some(subscribe_options) => {
+					ietf::SubscribeNamespaceLegacy {
+						request_id: RequestId(REQUEST_ID),
+						namespace: crate::Path::new(""),
+						subscribe_options,
+						hidden: false,
+					}
+					.encode_msg(&mut w, version)
+					.unwrap();
+					ietf::SubscribeNamespaceLegacy::ID
+				}
+				None => {
+					ietf::SubscribeNamespace {
+						request_id: RequestId(REQUEST_ID),
+						namespace: crate::Path::new(""),
+						hidden: false,
+					}
+					.encode_msg(&mut w, version)
+					.unwrap();
+					ietf::SubscribeNamespace::ID
+				}
+			};
+
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let mark = h.log.writes.lock().unwrap().len();
+			let task = h
+				.publisher
+				.clone()
+				.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream)
+				.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"));
+			let mut task = std::pin::pin!(task);
+			let mut done = false;
+			for _ in 0..100 {
+				done = futures::poll!(task.as_mut()).is_ready();
+				if done || occurrences(&h.log, b"room") > 0 {
+					break;
+				}
+				settle().await;
+			}
+
+			let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
+			let mut buf = Decoder::new(&wire, version.into());
+			let label = format!("{version} {options:?}");
+			if namespaces {
+				assert!(!done, "{label}: the subscription ended");
+				assert_eq!(buf.varint().unwrap(), ietf::RequestOk::ID, "{label}");
+				ietf::RequestOk::decode(&mut buf, version).unwrap();
+				assert_eq!(buf.varint().unwrap(), ietf::Namespace::ID, "{label}");
+				assert_eq!(
+					ietf::Namespace::decode(&mut buf, version).unwrap().suffix.as_str(),
+					"room",
+					"{label}"
+				);
+			} else {
+				assert!(done, "{label}: the refusal did not finish");
+				assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{label}");
+				let err = ietf::RequestError::decode(&mut buf, version).unwrap();
+				assert_eq!(err.error_code, 0x3, "{label}: NOT_SUPPORTED");
+				assert_eq!(
+					err.request_id,
+					(version == Version::Draft16).then_some(RequestId(REQUEST_ID)),
+					"{label}"
+				);
+			}
+			assert!(buf.is_empty(), "{label}: trailing bytes");
+		}
+
+		// Undefined Subscribe Options close the session: dispatch returns an error.
+		#[rustfmt::skip]
+		let cases: [(Version, &[u8]); 2] = [
+			// Request ID, empty namespace, Subscribe Options 0x03, no parameters.
+			(Version::Draft16, &[0x2B, 0x00, 0x03, 0x00]),
+			// Draft-17 adds the Required Request ID delta after the Request ID.
+			(Version::Draft17, &[0x2B, 0x00, 0x00, 0x03, 0x00]),
+		];
+		for (version, body) in cases {
+			let h = serve(version);
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let body = ietf::Body(bytes::Bytes::copy_from_slice(body));
+			assert!(
+				h.publisher
+					.clone()
+					.handle_stream(ietf::SubscribeNamespaceLegacy::ID, body, stream)
+					.is_err(),
+				"{version}: Subscribe Options 0x03 kept the session open"
+			);
+		}
+	}
+
 	/// The draft's canonical current-group join: a Next Object subscription plus a
 	/// StartGroup=1 fill. The published head arrives exactly once, on a fetch stream,
 	/// and the subscription starts past the snapshot, so nothing is duplicated and
@@ -5177,6 +5314,7 @@ mod serve_tests {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::coding::Decode;
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
@@ -5188,6 +5326,30 @@ mod tests {
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();
 		writes.windows(needle.len()).filter(|window| *window == needle).count()
+	}
+
+	/// NAMESPACE and NAMESPACE_DONE suffixes on a SUBSCRIBE_NAMESPACE stream, in order.
+	fn namespace_events(bytes: &[u8], version: Version) -> Vec<(u64, String)> {
+		let mut dec = crate::coding::Decoder::new(bytes, version.into());
+		let mut out = Vec::new();
+		while !dec.is_empty() {
+			let id = dec.varint().expect("message type");
+			match id {
+				ietf::RequestOk::ID => {
+					ietf::RequestOk::decode(&mut dec, version).expect("request ok");
+				}
+				ietf::Namespace::ID => {
+					let msg = ietf::Namespace::decode(&mut dec, version).expect("namespace");
+					out.push((id, msg.suffix.as_str().to_owned()));
+				}
+				ietf::NamespaceDone::ID => {
+					let msg = ietf::NamespaceDone::decode(&mut dec, version).expect("namespace done");
+					out.push((id, msg.suffix.as_str().to_owned()));
+				}
+				other => panic!("unexpected message {other:#x}"),
+			}
+		}
+		out
 	}
 
 	/// A SETUP slot already filled with what the peer declared. The announce loops block
@@ -5964,13 +6126,14 @@ mod tests {
 	}
 
 	/// A hidden namespace reaches only a subscription that opted in or named its dot
-	/// segment. With the unsolicited loop live, the subscription stream carries just
-	/// what that loop hid, so nothing is advertised twice.
+	/// segment. On draft-16 and later the subscription also repeats every visible
+	/// namespace the unsolicited loop already sent. A NAMESPACE is discovery, not
+	/// a second route.
 	#[moq_net_sim::test]
 	async fn hidden_namespaces_need_an_opt_in() {
 		for (solicit, prefix, hidden, cam, stats) in [
-			(Some(false), "", false, 1, 0),
-			(Some(false), "", true, 1, 1),
+			(Some(false), "", false, 2, 0),
+			(Some(false), "", true, 2, 1),
 			(Some(false), ".stats", false, 1, 1),
 			(Some(true), "", false, 1, 0),
 			(Some(true), "", true, 1, 1),
@@ -6012,7 +6175,20 @@ mod tests {
 								scoped,
 							})
 							.await;
-							let expected = usize::from(!declared || hidden || prefix == ".stats");
+							// Visible on the subscription: not filtered, opted in, or the prefix
+							// names the dot segment. The unsolicited loop sends a dot namespace
+							// only when the peer did not declare MoQ Hidden. Draft-14/15 keep
+							// the two paths disjoint; draft-16 and later fill the stream too.
+							let on_stream = !declared || hidden || prefix == ".stats";
+							let unsolicited = solicit != Some(true) && !declared;
+							let legacy = matches!(version, Version::Draft14 | Version::Draft15);
+							let inline = if legacy {
+								(solicit == Some(true) && on_stream)
+									|| (solicit != Some(true) && declared && (hidden || prefix == ".stats"))
+							} else {
+								on_stream
+							};
+							let expected = usize::from(inline) + usize::from(unsolicited);
 							assert_eq!(
 								occurrences(&log, b"node"),
 								expected,
@@ -6025,20 +6201,121 @@ mod tests {
 		}
 	}
 
-	/// The regression that made announces solicited in the first place: a namespace sent
-	/// as both PUBLISH_NAMESPACE and NAMESPACE leaves the peer holding two sources for
-	/// one broadcast, and whichever arrives second replaces the one the first attached.
-	/// The peer's SETUP picks which loop carries it, so the other stays quiet and the
-	/// namespace goes out exactly once either way.
+	/// On draft-16 and later a peer that did not ask to be solicited hears each
+	/// namespace twice: an unsolicited PUBLISH_NAMESPACE and a NAMESPACE on the
+	/// SUBSCRIBE_NAMESPACE stream. Those are two discoveries of one namespace, not
+	/// two routes. A peer that asked to be solicited hears it only on the stream.
+	/// Draft-14 and 15 still answer a non-solicit peer only with PUBLISH_NAMESPACE.
 	#[moq_net_sim::test]
-	async fn each_namespace_is_advertised_exactly_once() {
-		let (unsolicited, streams) = advertise_both_ways(Some(false)).await;
-		assert_eq!(unsolicited, 1, "a peer that required nothing is told once");
-		assert_eq!(streams, 2, "on its own PUBLISH_NAMESPACE request");
+	async fn a_non_solicit_peer_hears_a_namespace_both_ways() {
+		let (times, streams) = advertise_both_ways(Some(false)).await;
+		assert_eq!(times, 2, "PUBLISH_NAMESPACE and NAMESPACE");
+		assert_eq!(streams, 2, "the subscription plus one PUBLISH_NAMESPACE request");
 
-		let (solicited, streams) = advertise_both_ways(Some(true)).await;
-		assert_eq!(solicited, 1, "a peer that asked to be told on request is told once");
+		let (once, streams) = advertise_both_ways(Some(true)).await;
+		assert_eq!(once, 1, "a peer that asked to be told on request is told once");
 		assert_eq!(streams, 1, "inline on the SUBSCRIBE_NAMESPACE stream it asked on");
+
+		for version in [Version::Draft14, Version::Draft15] {
+			let log = advertise_with_hidden(Discovery {
+				version,
+				solicit: Some(false),
+				..Discovery::default()
+			})
+			.await;
+			assert_eq!(
+				occurrences(&log, b"cam"),
+				1,
+				"{version:?} still answers only with PUBLISH_NAMESPACE"
+			);
+		}
+	}
+
+	/// A peer that did not send SOLICIT still gets NAMESPACE on its SUBSCRIBE_NAMESPACE
+	/// stream on draft-16 and later: one for a match that already exists, one announced
+	/// after, then NAMESPACE_DONE when that announcement ends.
+	#[moq_net_sim::test]
+	async fn a_non_solicit_subscribe_namespace_carries_namespace() {
+		for version in [Version::Draft16, Version::Draft18] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let early = origin.announce("early-cam", crate::origin::Route::default()).unwrap();
+			settle().await;
+
+			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
+			let log = session.log.clone();
+
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+
+			let publisher = Publisher::new(
+				crate::time::Clock::sim(),
+				session.clone(),
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				peer_setup,
+				version,
+			);
+
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let msg = ietf::SubscribeNamespace {
+				request_id: RequestId(1),
+				namespace: crate::Path::new(""),
+				hidden: false,
+			};
+			let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
+
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if occurrences(&log, b"early-cam") >= 1 {
+					break;
+				}
+				settle().await;
+			}
+			let bytes = log.writes.lock().unwrap().clone();
+			assert_eq!(
+				namespace_events(&bytes, version),
+				vec![(ietf::Namespace::ID, "early-cam".to_owned())],
+				"{version:?}: existing match",
+			);
+
+			let _late = origin.announce("late-cam", crate::origin::Route::default()).unwrap();
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if occurrences(&log, b"late-cam") >= 1 {
+					break;
+				}
+				settle().await;
+			}
+			let bytes = log.writes.lock().unwrap().clone();
+			assert_eq!(
+				namespace_events(&bytes, version),
+				vec![
+					(ietf::Namespace::ID, "early-cam".to_owned()),
+					(ietf::Namespace::ID, "late-cam".to_owned()),
+				],
+				"{version:?}: announced later",
+			);
+
+			drop(early);
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if occurrences(&log, b"early-cam") >= 2 {
+					break;
+				}
+				settle().await;
+			}
+			let bytes = log.writes.lock().unwrap().clone();
+			assert_eq!(
+				namespace_events(&bytes, version),
+				vec![
+					(ietf::Namespace::ID, "early-cam".to_owned()),
+					(ietf::Namespace::ID, "late-cam".to_owned()),
+					(ietf::NamespaceDone::ID, "early-cam".to_owned()),
+				],
+				"{version:?}: NAMESPACE_DONE when it ends",
+			);
+		}
 	}
 
 	/// A peer out of stream credit parks the open. That must not wedge the loop, because

@@ -88,18 +88,51 @@ impl Message for SubscribeNamespace<'_> {
 	}
 }
 
+/// What a draft-16/17 SUBSCRIBE_NAMESPACE asks for (d16 §9.25, d17 §9.20).
+///
+/// Draft-14/15 have no field and only ever ask for namespaces. Draft-18 dropped it
+/// when SUBSCRIBE_TRACKS took over the PUBLISH half.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscribeOptions {
+	/// PUBLISH for each matching track (0x00).
+	Publish,
+	/// NAMESPACE for each matching namespace (0x01).
+	Namespace,
+	/// Both PUBLISH and NAMESPACE (0x02).
+	Both,
+}
+
+impl SubscribeOptions {
+	fn encode(self, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
+		w.varint(match self {
+			Self::Publish => 0x00u64,
+			Self::Namespace => 0x01,
+			Self::Both => 0x02,
+		})
+	}
+
+	fn decode(r: &mut Decoder<'_>) -> Result<Self, DecodeError> {
+		match r.varint()? {
+			0x00 => Ok(Self::Publish),
+			0x01 => Ok(Self::Namespace),
+			0x02 => Ok(Self::Both),
+			_ => Err(DecodeError::InvalidValue),
+		}
+	}
+}
+
 /// SUBSCRIBE_NAMESPACE message for draft-14 through draft-17 (type 0x11).
 ///
 /// In v16 this moves from the control stream to its own bidirectional stream.
-/// Draft-16/17 carry a Subscribe Options field (NAMESPACE vs TRACKS); draft-17
-/// additionally prefixes a Required Request ID delta (removed in draft-18 per
-/// #1615). Draft-18+ uses [`SubscribeNamespace`].
+/// Draft-16/17 carry [`SubscribeOptions`]; draft-17 additionally prefixes a
+/// Required Request ID delta (removed in draft-18 per #1615). Draft-18+ uses
+/// [`SubscribeNamespace`].
 #[derive(Clone, Debug)]
 pub struct SubscribeNamespaceLegacy<'a> {
 	pub request_id: RequestId,
 	pub namespace: Path<'a>,
-	/// v16/v17: Subscribe Options (default 0x01 = NAMESPACE only).
-	pub subscribe_options: u64,
+	/// Encoded on v16/v17 only; earlier drafts always mean [`SubscribeOptions::Namespace`].
+	pub subscribe_options: SubscribeOptions,
 	/// MoQ Hidden: see [`SubscribeNamespace::hidden`].
 	pub hidden: bool,
 }
@@ -117,7 +150,7 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 		}
 		encode_namespace(w, &self.namespace)?;
 		if matches!(version, Version::Draft16 | Version::Draft17) {
-			w.varint(self.subscribe_options)?;
+			self.subscribe_options.encode(w)?;
 		}
 		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden));
 		Ok(())
@@ -133,8 +166,8 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 		}
 		let namespace = decode_namespace(r)?;
 		let subscribe_options = match version {
-			Version::Draft16 | Version::Draft17 => r.varint()?,
-			_ => 0x01,
+			Version::Draft16 | Version::Draft17 => SubscribeOptions::decode(r)?,
+			_ => SubscribeOptions::Namespace,
 		};
 
 		// The token is ignored: the session's grant is what authorizes the request.
@@ -461,7 +494,7 @@ mod tests {
 		let legacy = SubscribeNamespaceLegacy {
 			request_id: RequestId(0),
 			namespace: Path::default(),
-			subscribe_options: 0x01,
+			subscribe_options: SubscribeOptions::Namespace,
 			hidden: false,
 		};
 		assert!(body(&legacy, Version::Draft17).len() > body(&modern, Version::Draft18).len());
@@ -502,7 +535,7 @@ mod tests {
 				let msg = SubscribeNamespaceLegacy {
 					request_id: RequestId(4),
 					namespace: Path::new("example"),
-					subscribe_options: 0x01,
+					subscribe_options: SubscribeOptions::Namespace,
 					hidden,
 				};
 				let mut buf = bytes::Bytes::from(body(&msg, version));
@@ -516,19 +549,37 @@ mod tests {
 	#[test]
 	fn legacy_round_trips() {
 		for version in [Version::Draft16, Version::Draft17] {
-			let msg = SubscribeNamespaceLegacy {
-				request_id: RequestId(4),
-				namespace: Path::new("example/meeting"),
-				subscribe_options: 0x01,
-				hidden: false,
-			};
-			let mut buf = bytes::Bytes::from(body(&msg, version));
-			let decoded = crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg).unwrap();
-			assert!(buf.is_empty(), "trailing bytes for {version:?}");
-			assert_eq!(decoded.request_id, RequestId(4));
-			assert_eq!(decoded.namespace.as_str(), "example/meeting");
-			assert_eq!(decoded.subscribe_options, 0x01);
+			for options in [
+				SubscribeOptions::Publish,
+				SubscribeOptions::Namespace,
+				SubscribeOptions::Both,
+			] {
+				let msg = SubscribeNamespaceLegacy {
+					request_id: RequestId(4),
+					namespace: Path::new("example/meeting"),
+					subscribe_options: options,
+					hidden: false,
+				};
+				let mut buf = bytes::Bytes::from(body(&msg, version));
+				let decoded =
+					crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg).unwrap();
+				assert!(buf.is_empty(), "trailing bytes for {version:?}");
+				assert_eq!(decoded.request_id, RequestId(4));
+				assert_eq!(decoded.namespace.as_str(), "example/meeting");
+				assert_eq!(decoded.subscribe_options, options);
+			}
 		}
+	}
+
+	/// The drafts define only 0x00 through 0x02, so we refuse any other value as a protocol violation.
+	#[test]
+	fn legacy_rejects_unknown_subscribe_options() {
+		// Request ID, empty namespace, Subscribe Options 0x03, no parameters.
+		let mut buf = bytes::Bytes::from(vec![0x00, 0x00, 0x03, 0x00]);
+		assert!(matches!(
+			crate::coding::decode_buf(&mut buf, Version::Draft16, SubscribeNamespaceLegacy::decode_msg),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 
 	#[test]
