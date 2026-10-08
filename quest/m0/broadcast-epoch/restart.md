@@ -50,8 +50,9 @@ Decided in planning (2026-10-07, from #4970's review):
   the same path, and newest-wins would churn every viewer on each worker
   restart. `route_order` already breaks a full tie (same hop chain, so the
   same hash) by the newest announcement, so a restart on the old session's
-  chain wins at once. Without an epoch, a restart on a different chain (say,
-  through another relay) that loses the hash to its lingering old session
+  chain wins at once. Without an epoch, a restart on a different chain of
+  the same length and cost (say, a single hop to another origin) that loses
+  the hash to its lingering old session
   wins, and sends `Restart`, only once that session closes (idle timeout)
   and its route is withdrawn.
 - **Sticky subscriptions (reverses the 2026-10-06 hard switch).** A newer
@@ -60,9 +61,10 @@ Decided in planning (2026-10-07, from #4970's review):
   subscribers until its route goes. A relay keeps its upstream subscription
   on the old route while any downstream still holds it. JS `route()`
   (`js/net/src/origin.ts`) closes the old front when it swaps to a better
-  entry, so it changes too. Update the epoch tests from #4942 and #4962's
-  three gateway tests that assert `Unroutable` (`a_reconnect_replaces_the_stale_*`
-  in `moq-rtmp` `server.rs`, `moq-srt` `ts.rs`, and `moq-rtc` `whip.rs`): the
+  entry, so it changes too. Update the epoch tests from #4942 and the three
+  gateway tests that assert `Unroutable` (`a_reconnect_replaces_the_stale_*`
+  in `moq-rtmp` `server.rs`, `moq-srt` `ts.rs`, and `moq-rtc`
+  `server/whip.rs`): the
   stale viewer keeps receiving, and a fresh request reaches the reconnect.
 - **No pinned joins.** `Consumer::request` joins an existing front only while
   the route it resolved through still wins. Since #4942 an epochless front
@@ -110,20 +112,21 @@ and moq-transport, coalescing depends on read timing, so those tests accept
 announces, while the incumbent's subscriptions continue) and
 `identical_reannounce_is_invisible` (`origin.rs`) for routes without an
 epoch. `route_dies_without_an_epoch` keeps its expectation, but its
-`standby()` prices `B` strictly worse so it doesn't win before the trigger,
-and a re-request then lands on `B`. Add a regression case where an
-epochless replacement at equal cost, on a different hop chain chosen to lose
-the hash, competes with the lingering old route: no `Restart` and new
-requests stay on the old route until it is
+`standby()` prices `B` strictly worse so it doesn't win before the trigger
+(check its other callers in `route_change.rs`), and a re-request then lands
+on `B`. Add a regression case where an epochless replacement at equal cost
+and chain length, on a different hop chain whose hash is the larger one (the
+pinned `pool/job-0` pair in `origin.rs` has one), competes with the lingering
+old route: no `Restart` and new requests stay on the old route until it is
 withdrawn, then `Restart` and a re-request lands on the replacement. Run
-`just drafts check` and
-`just test interop --all`.
+`just drafts check` and `just test interop --all`.
 
 Docs: update `doc/concept/moq-lite.md` (publisher epochs) and
 `doc/lib/{rs,js}` announce sections inline, plus `doc/bin/rtmp.md`,
 `doc/bin/srt.md`, `doc/bin/rtc.md`, and `doc/bin/relay/cluster.md`, which
-(after #4962) describe the hard switch: a reconnect "replaces it at once" and
-stale subscriptions end with `Unroutable`.
+describe the hard switch: a reconnect "replaces it at once", stale
+subscriptions end with `Unroutable` (`rtmp.md`, `srt.md`), and a flapping
+moq-lite 07 link "cuts the viewers" (`cluster.md`).
 
 Public API: breaking, a new `AnnounceEvent::Restart` variant (Rust) and
 `"restart"` kind (JS). Wire: a new lite-07 announce message; older versions
