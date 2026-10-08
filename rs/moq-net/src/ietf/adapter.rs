@@ -922,6 +922,14 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 			}
 			_ => Err(Error::UnexpectedMessage),
 		},
+		// TRACK_STATUS_OK and TRACK_STATUS_ERROR (v14 only): the one answer the request gets.
+		ietf::TrackStatusOk::ID_14 | ietf::TRACK_STATUS_ERROR_14 => match version {
+			Version::Draft14 => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::CloseStream(id))
+			}
+			_ => Err(Error::UnexpectedMessage),
+		},
 		// PublishOk (0x1E)
 		ietf::PublishOk::ID => {
 			let id = decode_response_request_id(body, version)?;

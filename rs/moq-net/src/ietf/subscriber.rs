@@ -444,6 +444,17 @@ impl Target {
 	}
 }
 
+/// The model's info for a track the publisher described (SUBSCRIBE_OK or TRACK_STATUS_OK).
+///
+/// The copy keeps microsecond timestamps whatever units the publisher declared: each
+/// object converts on receipt.
+fn accepted_info(max_age: Option<std::time::Duration>, priority: Option<u8>) -> track::Info {
+	track::Info::default()
+		.with_timescale(Timescale::MICRO)
+		.with_max_age(max_age)
+		.with_priority(super::priority::from_wire(priority.unwrap_or(128)))
+}
+
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
 struct Idle {
 	track: track::Producer,
@@ -1735,7 +1746,25 @@ where
 		let track_name = request.name().to_owned();
 		// Group FETCHes for cache misses: standalone, so they outlive each subscription.
 		let mut group_fetches = TaskSet::owned();
-		let mut target = Target::Request(request);
+
+		// Demand with nobody subscribing (fetches, or a TRACK_STATUS downstream) learns the
+		// track from TRACK_STATUS rather than a SUBSCRIBE: a finished track refuses one, and
+		// one made only to learn the track races the fetches it was for.
+		let mut target = match request.subscription() {
+			Some(_) => Target::Request(request),
+			None => {
+				let Some(idle) = self.track_status(&broadcast_path, &track_name, request).await else {
+					return;
+				};
+				let Some(next) = self
+					.linger(&broadcast_path, &track_name, idle, &mut group_fetches)
+					.await
+				else {
+					return;
+				};
+				Target::Resume(next)
+			}
+		};
 		loop {
 			let Some(idle) = self
 				.subscribe_once(&broadcast_path, &track_name, target, &mut group_fetches)
@@ -1822,10 +1851,27 @@ where
 		// Write Subscribe message. The aggregate is read now: a subscriber can join while
 		// the request ID and stream were awaited, and nothing updates the priority after.
 		let priority = target.subscription().map(|s| s.priority).unwrap_or(0);
-		if let Err(err) = self
-			.write_subscribe(&mut stream, request_id, broadcast_path, track_name, priority, join)
-			.await
-		{
+		let written = async {
+			stream.writer.varint(ietf::Subscribe::ID).await?;
+			stream
+				.writer
+				.encode(&ietf::Subscribe {
+					request_id,
+					track_namespace: broadcast_path.to_owned(),
+					track_name: track_name.into(),
+					subscriber_priority: super::priority::to_wire(priority),
+					group_order: GroupOrder::Descending,
+					filter: join.filter,
+					fill: join.fill,
+					// A resumed copy already knows the track, from the answer that accepted it.
+					properties_wanted: matches!(target, Target::Request(_)),
+					forward: true,
+					range_filters: false,
+				})
+				.await
+		}
+		.await;
+		if let Err(err) = written {
 			tracing::debug!(%err, "failed to write subscribe");
 			self.remove_subscribe(request_id);
 			target.fail(err);
@@ -1971,10 +2017,11 @@ where
 			priority,
 			largest,
 		} = accepted;
-		let info = track::Info::default()
-			.with_timescale(Timescale::MICRO)
-			.with_max_age(max_age)
-			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
+		let info = accepted_info(max_age, priority);
+		// A resumed copy opts out of the properties from draft-20, so it keeps the units it
+		// learned. Before that the answer still declares them, and may be the first to: draft-17's
+		// TRACK_STATUS_OK has no properties block.
+		let timescale = timescale.or(resumed.as_ref().and_then(|idle| idle.timescale));
 		// The copy already holds the track: it is current again up to the answer's Largest
 		// Location once the join's head lands or a newer group does, since leaving cut the
 		// group it was in.
@@ -2346,34 +2393,6 @@ where
 		Ok(())
 	}
 
-	async fn write_subscribe(
-		&self,
-		stream: &mut Stream<S, Version>,
-		request_id: RequestId,
-		broadcast: &Path<'_>,
-		track_name: &str,
-		priority: u8,
-		join: Join,
-	) -> Result<(), Error> {
-		stream.writer.varint(ietf::Subscribe::ID).await?;
-		stream
-			.writer
-			.encode(&ietf::Subscribe {
-				request_id,
-				track_namespace: broadcast.to_owned(),
-				track_name: track_name.into(),
-				subscriber_priority: super::priority::to_wire(priority),
-				group_order: GroupOrder::Descending,
-				filter: join.filter,
-				fill: join.fill,
-				properties_wanted: true,
-				forward: true,
-				range_filters: false,
-			})
-			.await?;
-		Ok(())
-	}
-
 	/// Send the joining FETCH that follows a pre-draft-20 SUBSCRIBE, and keep reading its
 	/// answer until the subscription ends.
 	///
@@ -2445,6 +2464,7 @@ where
 					fetch_type,
 					range_filters: false,
 					fill_timeout: false,
+					properties_wanted: true,
 				})
 				.await?;
 			Ok::<(), Error>(())
@@ -2542,6 +2562,127 @@ where
 			}
 			_ => Err(Error::UnexpectedMessage),
 		}
+	}
+
+	/// Learn a track nobody subscribes to from TRACK_STATUS, and accept it as a copy with no
+	/// subscription, which [`Self::linger`] serves fetches from and subscribes once someone
+	/// does. `None` once the request was refused or abandoned: a publisher that refuses
+	/// TRACK_STATUS refuses the fetch-only request too.
+	async fn track_status(
+		&mut self,
+		broadcast_path: &Path<'_>,
+		track_name: &str,
+		request: track::Request,
+	) -> Option<Idle> {
+		let request_id = match self.control.next_request_id(&self.runtime).await {
+			Ok(id) => id,
+			Err(err) => {
+				request.reject(err);
+				return None;
+			}
+		};
+		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
+			Ok(stream) => stream,
+			Err(err) => {
+				request.reject(err);
+				return None;
+			}
+		};
+		let written = async {
+			stream.writer.varint(ietf::TrackStatus::ID).await?;
+			stream
+				.writer
+				.encode(&ietf::TrackStatus {
+					request_id,
+					track_namespace: broadcast_path.to_owned(),
+					track_name: track_name.into(),
+					properties_wanted: true,
+				})
+				.await
+		}
+		.await;
+		if let Err(err) = written {
+			request.reject(err);
+			return None;
+		}
+
+		// Nobody wanting the track any more ends the wait on a peer that may never answer,
+		// and the session ending fails it with the session's reason.
+		let demand = request.demand();
+		let mut closed = self.session.clone();
+		let response = {
+			let mut response = std::pin::pin!(self.read_track_status_response(&mut stream));
+			loop {
+				let res = kio::wait(|waiter| {
+					// An answer that already arrived wins over abandonment.
+					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+						return Poll::Ready(Some(res));
+					}
+					if let Poll::Ready(err) = closed.poll_closed(&mut waiter.context()) {
+						return Poll::Ready(Some(Err(Error::from_transport(err))));
+					}
+					demand.poll_unused(waiter).map(|_| None)
+				})
+				.await;
+				match res {
+					Some(res) => break Some(res),
+					None if request.reject_unused(Error::Cancel) => break None,
+					// Demand returned in the gap.
+					None => continue,
+				}
+			}
+		};
+
+		let Some(response) = response else {
+			stream.reader.abort(&Error::Cancel);
+			stream.writer.abort(&Error::Cancel);
+			return None;
+		};
+		// The publisher has read the request, since it answered, and FINs after its answer:
+		// FIN our side too and let the stream drop.
+		let _ = stream.writer.finish();
+		let ok = match response {
+			Ok(ok) => ok,
+			Err(err) => {
+				tracing::debug!(%err, broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status refused");
+				request.reject(err);
+				return None;
+			}
+		};
+
+		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
+		let dynamic = request.dynamic();
+		let mut track = request.accept(accepted_info(ok.properties.max_cache_duration, ok.properties.priority));
+		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
+		track.set_idle();
+		Some(Idle {
+			demand: track.demand(),
+			track,
+			dynamic,
+			timescale: ok.properties.timescale,
+		})
+	}
+
+	/// Read the answer to a TRACK_STATUS: TRACK_STATUS_OK, or the publisher's refusal as an
+	/// error.
+	async fn read_track_status_response(&self, stream: &mut Stream<S, Version>) -> Result<ietf::TrackStatusOk, Error> {
+		let type_id = stream.reader.varint().await?;
+		let body: ietf::Body = stream.reader.decode().await?;
+		let mut data = body.decoder(self.version);
+
+		let code = match type_id {
+			id if id == ietf::TrackStatusOk::id(self.version) => {
+				return Ok(ietf::TrackStatusOk::decode_msg(&mut data, self.version)?);
+			}
+			ietf::TRACK_STATUS_ERROR_14 if self.version == Version::Draft14 => {
+				ietf::SubscribeError::decode_msg(&mut data, self.version)?.error_code
+			}
+			ietf::RequestError::ID if self.version != Version::Draft14 => {
+				ietf::RequestError::decode_msg(&mut data, self.version)?.error_code
+			}
+			_ => return Err(Error::UnexpectedMessage),
+		};
+		Err(request::from_code(code, request::Kind::TrackStatus, self.version))
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
@@ -3446,6 +3587,9 @@ where
 					fetch_type,
 					range_filters: false,
 					fill_timeout: false,
+					// The copy learned the track before any fetch, from SUBSCRIBE_OK or
+					// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
+					properties_wanted: false,
 				})
 				.await?;
 			Ok::<_, Error>(())
@@ -3513,15 +3657,10 @@ where
 		// the stream owes every object up to it. One past the group covers it whole.
 		let end = (end.group == sequence).then_some(end.object);
 
-		// Only a track nothing has subscribed to yet takes this info, as SUBSCRIBE_OK would
-		// have set it. FETCH_OK carries the same Track Properties, so the retention window
-		// comes from it.
-		let info = track::Info::default()
-			.with_timescale(Timescale::MICRO)
-			.with_max_age(ok.properties.max_cache_duration);
 		// Joined fetches still count until they pick the accepted group up from the cache.
 		let joined = request.result.clone();
-		let mut producer = match request.accept(info) {
+		// The track was accepted before any fetch was asked, so it keeps that info.
+		let mut producer = match request.accept(None) {
 			Ok(producer) => producer,
 			// Already served by a concurrent fetch, or the track closed.
 			Err(err) => {
@@ -5235,6 +5374,117 @@ mod tests {
 
 		serving.abort();
 		outstanding
+	}
+
+	/// A copy that already knows its track, here from TRACK_STATUS_OK, opts out of the
+	/// properties when a subscriber returns, and keeps the units it learned rather than
+	/// taking the empty block the opted-out SUBSCRIBE_OK carries. On draft-17, where
+	/// TRACK_STATUS_OK has no properties block and SUBSCRIBE cannot opt out, the copy takes
+	/// the units SUBSCRIBE_OK declares.
+	#[moq_net_sim::test]
+	async fn a_resumed_subscribe_opts_out_of_known_properties() {
+		use crate::coding::Encode as _;
+		fn message<M: Message>(id: u64, msg: &M, version: Version) -> Vec<u8> {
+			let mut buf = Vec::new();
+			crate::coding::Encoder::new(&mut buf, version.into())
+				.varint(id)
+				.unwrap();
+			msg.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
+			buf
+		}
+
+		let declared = Timescale::new(90_000).unwrap();
+		for version in [Version::Draft17, Version::Draft20, Version::Draft22] {
+			let opts_out = ietf::Filter::is_draft20(version);
+			let declares = |yes: bool| ietf::Properties {
+				timescale: yes.then_some(declared),
+				..Default::default()
+			};
+			let status_ok = message(
+				ietf::TrackStatusOk::ID,
+				&ietf::TrackStatusOk {
+					request_id: None,
+					largest: None,
+					properties: declares(opts_out),
+				},
+				version,
+			);
+			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![
+				status_ok,
+				// Empty when opted out. Draft-17 cannot opt out, so it declares the units.
+				message(
+					ietf::SubscribeOk::ID,
+					&ietf::SubscribeOk {
+						request_id: None,
+						track_alias: 7,
+						largest: None,
+						properties: declares(!opts_out),
+					},
+					version,
+				),
+			]);
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let mut subscriber = Subscriber::new(
+				crate::time::Clock::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			);
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			// Demand with nobody subscribing learns the track from TRACK_STATUS.
+			let mut query = std::pin::pin!(track.query());
+			assert!(futures::poll!(query.as_mut()).is_pending());
+			let request = dynamic.requested_track().await.expect("no track requested");
+
+			let probe = subscriber.clone();
+			let serving = moq_net_sim::spawn(async move {
+				subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			});
+			settle().await;
+			let _subscription = track.subscribe(None);
+			settle().await;
+
+			let writes = log.writes.lock().unwrap().clone();
+			let mut buf = Decoder::new(&writes, version.into());
+			let mut subscribes = Vec::new();
+			while !buf.is_empty() {
+				let type_id = buf.varint().unwrap();
+				let size = buf.u16().unwrap();
+				let mut body = Decoder::new(buf.slice(size as usize).unwrap(), version.into());
+				if type_id == ietf::Subscribe::ID {
+					subscribes.push(ietf::Subscribe::decode_msg(&mut body, version).unwrap());
+				}
+			}
+			assert_eq!(subscribes.len(), 1, "{version}: the returning subscriber subscribes");
+			assert_eq!(
+				subscribes[0].properties_wanted, !opts_out,
+				"{version}: TRACK_STATUS_OK already gave the properties"
+			);
+
+			let timescale = probe
+				.state
+				.lock()
+				.subscribes
+				.values()
+				.next()
+				.expect("the subscription is registered")
+				.timescale;
+			assert_eq!(timescale, Some(declared), "{version}: the copy keeps the units it learned");
+			serving.abort();
+		}
 	}
 
 	/// The publisher opens no fetch stream for an empty range, so a fill against a track
@@ -8760,70 +9010,6 @@ mod joining_fetch_tests {
 			.await;
 
 		assert!(fetch.await.is_err(), "the accepted group was aborted");
-	}
-
-	/// A group FETCH for a track nothing subscribed to takes its retention window from
-	/// FETCH_OK's properties, as a subscription would from SUBSCRIBE_OK's.
-	#[moq_net_sim::test]
-	async fn a_group_fetch_takes_fetch_ok_max_age() {
-		const GROUP: u64 = 4;
-		const MAX_AGE: Duration = Duration::from_secs(12);
-
-		for version in [Version::Draft17, Version::Draft19] {
-			let ok = message_bytes(
-				ietf::FetchOk::ID,
-				&ietf::FetchOk {
-					request_id: None,
-					group_order: GroupOrder::Ascending,
-					end_of_track: false,
-					end_location: ietf::Location {
-						group: GROUP + 1,
-						object: 0,
-					},
-					properties: ietf::Properties {
-						max_cache_duration: Some(MAX_AGE),
-						..Default::default()
-					},
-				},
-				version,
-			);
-
-			let session = ScriptedSession::per_stream_reset(vec![ok]);
-			let (tasks, _task_set) = crate::util::TaskSet::new();
-			let subscriber = Subscriber::new(
-				crate::time::Clock::sim(),
-				session.clone(),
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-				Control::new(None, false),
-				None,
-				peer::PeerSetup::default(),
-				crate::Hop::new(1).unwrap(),
-				None,
-				version,
-				tasks,
-				Default::default(),
-			);
-
-			// A track the publisher has not accepted, so the fetch supplies its info.
-			let broadcast = crate::broadcast::Info::new().produce();
-			let reserved = broadcast.reserve_track("video").unwrap();
-			let dynamic = reserved.dynamic();
-			let track = broadcast.consume().track("video").unwrap();
-			let mut fetch = std::pin::pin!(track.fetch_group(GROUP, None));
-			assert!(futures::poll!(fetch.as_mut()).is_pending());
-			let request = dynamic.requested_group().await.expect("no group requested");
-
-			subscriber
-				.clone()
-				.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
-				.await;
-
-			let info = moq_net_sim::timeout(Duration::from_secs(1), track.query())
-				.await
-				.expect("the fetch installed the track info")
-				.expect("info");
-			assert_eq!(info.max_age, Some(MAX_AGE), "{version}");
-		}
 	}
 
 	/// A cache miss for a group's tail asks upstream from the frame the reader wants and

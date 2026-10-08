@@ -37,6 +37,25 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	}
 }
 
+/// The Track Properties an answer describing the track carries: SUBSCRIBE_OK and
+/// TRACK_STATUS_OK. Empty when the requester opted out with INCLUDE_PROPERTIES=0, which
+/// keeps the block present but empty.
+///
+/// Declaring the timescale is what opts the track into timestamps; every object Timestamp
+/// is in these units. We serve the newest group first, matching moq-lite. A draft without
+/// room for a property drops it on encode.
+fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
+	if !wanted {
+		return ietf::Properties::default();
+	}
+	ietf::Properties {
+		max_cache_duration: info.max_age,
+		timescale: Some(info.timescale),
+		priority: Some(super::priority::to_wire(info.priority)),
+		group_order: Some(GroupOrder::Descending),
+	}
+}
+
 enum FillStep {
 	Batch,
 	Partial(frame::Consumer),
@@ -562,9 +581,10 @@ where
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
+				tracing::debug!(message = ?msg, "received track_status");
 				async move {
-					if let Err(err) = this.reject_track_status(stream, msg.request_id).await {
-						tracing::debug!(%err, "track status refusal failed");
+					if let Err(err) = this.run_track_status_stream(stream, msg).await {
+						tracing::debug!(%err, "track_status stream error");
 					}
 				}
 				.maybe_boxed()
@@ -671,12 +691,11 @@ where
 				None => track::Position::after_group(end.group),
 			});
 			let _ = track.update(subscription);
-			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
-			// Drafts 14-16 never write that property, so their objects stay unstamped.
-			let timescale = msg
-				.properties_wanted
-				.then(|| track.info().timescale)
-				.filter(|_| ietf::Properties::sends_timescale(self.version));
+			// A Timestamp goes out wherever the draft can declare its units. A subscriber that
+			// opted out of this SUBSCRIBE_OK's properties learns them from TRACK_STATUS, so
+			// the opt-out strips nothing from the objects. Drafts 14-16 never write TIMESCALE,
+			// so their objects stay unstamped.
+			let timescale = ietf::Properties::sends_timescale(self.version).then_some(track.info().timescale);
 
 			// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
 			// the same boundary used by the subscription so the two streams never overlap.
@@ -715,21 +734,7 @@ where
 					track_alias: request_id.0,
 					// The subscription floor and FETCH/FILL cap use this same snapshot.
 					largest: edge.largest,
-					properties: match msg.properties_wanted {
-						// Declaring the timescale is what opts the track into timestamps; every
-						// object Timestamp below is in these units. `timescale` is None when this
-						// version cannot send TIMESCALE. We serve the newest group first,
-						// matching moq-lite.
-						true => ietf::Properties {
-							max_cache_duration: track.info().max_age,
-							timescale,
-							priority: Some(super::priority::to_wire(track.info().priority)),
-							group_order: Some(GroupOrder::Descending),
-						},
-						// INCLUDE_PROPERTIES=0. The field stays present but empty, which also
-						// means the track opts out of timestamps for this subscriber.
-						false => ietf::Properties::default(),
-					},
+					properties: track_properties(track.info(), msg.properties_wanted),
 				})
 				.await?;
 
@@ -1638,16 +1643,87 @@ where
 		Ok(Err(refusal))
 	}
 
-	async fn reject_track_status(&self, mut stream: Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
-		let error_code = request::to_code(&Error::Unsupported, request::Kind::TrackStatus, self.version);
+	/// Answer a TRACK_STATUS with what a SUBSCRIBE_OK for the track would carry, without
+	/// subscribing.
+	///
+	/// The track resolves as it would for a SUBSCRIBE, so a relay asks its upstream for a
+	/// track it does not hold yet and the answer waits on that. The Largest Location is
+	/// whatever the cache holds now: nothing waits for a fresher one.
+	async fn run_track_status_stream(
+		self,
+		mut stream: Stream<S, Version>,
+		msg: ietf::TrackStatus<'_>,
+	) -> Result<(), Error> {
+		let request_id = msg.request_id;
+		let broadcast = match self
+			.serving_origin()
+			.await
+			.request_broadcast(&msg.track_namespace)
+			.await
+		{
+			Ok(broadcast) => broadcast,
+			Err(err) => return self.reject_track_status(stream, request_id, &err).await,
+		};
+		let track = match broadcast.track(&msg.track_name) {
+			Ok(track) => track,
+			Err(err) => return self.reject_track_status(stream, request_id, &err).await,
+		};
+
+		// The requester abandoning the request is owed nothing.
+		let info = {
+			let query = track.query();
+			let mut finished = false;
+			kio::wait(|waiter| {
+				let mut cx = waiter.context();
+				if super::request_stream::poll_cancel(&mut stream, &mut finished, self.version, &mut cx).is_ready() {
+					return Poll::Ready(None);
+				}
+				query.poll_ok(waiter).map(Some)
+			})
+			.await
+		};
+		let info = match info {
+			Some(Ok(info)) => info,
+			Some(Err(err)) => return self.reject_track_status(stream, request_id, &err).await,
+			None => return Ok(()),
+		};
+
+		stream.writer.varint(ietf::TrackStatusOk::id(self.version)).await?;
+		stream
+			.writer
+			.encode(&ietf::TrackStatusOk {
+				request_id: match self.version {
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(request_id),
+					_ => None,
+				},
+				largest: live_edge(&track).largest,
+				properties: track_properties(&info, msg.properties_wanted),
+			})
+			.await?;
+
+		// The answer is all this stream carries. See [`Self::reject_subscribe`] for why the
+		// close is not optional.
+		let _ = stream.writer.close().await;
+		Ok(())
+	}
+
+	async fn reject_track_status(
+		&self,
+		mut stream: Stream<S, Version>,
+		request_id: RequestId,
+		err: &Error,
+	) -> Result<(), Error> {
+		let error_code = request::to_code(err, request::Kind::TrackStatus, self.version);
+		let reason_phrase = err.to_string().into();
 		if self.version == Version::Draft14 {
-			stream.writer.varint(0x0fu64).await?; // TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body.
+			// TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body.
+			stream.writer.varint(ietf::TRACK_STATUS_ERROR_14).await?;
 			stream
 				.writer
 				.encode(&ietf::SubscribeError {
 					request_id,
 					error_code,
-					reason_phrase: "TRACK_STATUS is not supported".into(),
+					reason_phrase,
 				})
 				.await?;
 		} else {
@@ -1657,7 +1733,7 @@ where
 				.encode(&ietf::RequestError {
 					request_id: matches!(self.version, Version::Draft15 | Version::Draft16).then_some(request_id),
 					error_code,
-					reason_phrase: "TRACK_STATUS is not supported".into(),
+					reason_phrase,
 					retry_interval: 0,
 				})
 				.await?;
@@ -3510,6 +3586,7 @@ mod serve_tests {
 				},
 				range_filters: false,
 				fill_timeout: false,
+				properties_wanted: true,
 			}
 			.encode_msg(&mut Encoder::new(&mut fetch_body, version.into()), version)
 			.unwrap();
@@ -3732,68 +3809,125 @@ mod serve_tests {
 		}
 	}
 
-	/// TRACK_STATUS is recognized but not implemented, and must get a complete refusal.
+	const ALL_VERSIONS: [Version; 9] = [
+		Version::Draft14,
+		Version::Draft15,
+		Version::Draft16,
+		Version::Draft17,
+		Version::Draft18,
+		Version::Draft19,
+		Version::Draft20,
+		Version::Draft21,
+		Version::Draft22,
+	];
+
+	fn track_status(namespace: &str, wanted: bool, version: Version) -> Vec<u8> {
+		let msg = ietf::TrackStatus {
+			request_id: RequestId(REQUEST_ID),
+			track_namespace: crate::Path::new(namespace),
+			track_name: "video".into(),
+			properties_wanted: wanted,
+		};
+		let mut body = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+			.unwrap();
+		body
+	}
+
+	/// TRACK_STATUS gets what a SUBSCRIBE_OK would carry, as far as each draft's answer has
+	/// room, without subscribing to the track. INCLUDE_PROPERTIES=0 empties the properties.
 	#[moq_net_sim::test]
-	async fn track_status_is_refused_on_every_draft() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
-			let h = serve(version);
-			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-			let msg = ietf::TrackStatus {
-				request_id: RequestId(REQUEST_ID),
-				track_namespace: crate::Path::new("live"),
-				track_name: "video".into(),
+	async fn track_status_is_answered_on_every_draft() {
+		for version in ALL_VERSIONS {
+			for wanted in [true, false] {
+				let h = serve(version);
+				let mut group = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+				group.write_frame(timestamp(), b"a".as_slice()).unwrap();
+				group.write_frame(timestamp(), b"b".as_slice()).unwrap();
+				moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				let mark = h.log.writes.lock().unwrap().len();
+				let body = track_status("room", wanted, version);
+				h.publisher
+					.clone()
+					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.unwrap()
+					.await;
+				assert!(h.log.resets().is_empty(), "{version}: the answer was reset");
+				assert!(h.track.subscription().is_none(), "{version}: TRACK_STATUS subscribed");
+
+				let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
+				let mut buf = Decoder::new(&wire, version.into());
+				assert_eq!(buf.varint().unwrap(), ietf::TrackStatusOk::id(version), "{version}");
+				let ok = ietf::TrackStatusOk::decode(&mut buf, version).unwrap();
+				assert!(buf.is_empty(), "{version}: trailing bytes");
+
+				let expected = match version {
+					// GROUP_ORDER is a field on draft-14 and a parameter on draft-15.
+					Version::Draft14 | Version::Draft15 => ietf::Properties {
+						group_order: Some(GroupOrder::Descending),
+						..Default::default()
+					},
+					Version::Draft16 | Version::Draft17 => ietf::Properties::default(),
+					// Only draft-20 can carry the opt-out.
+					_ if !wanted && Filter::is_draft20(version) => ietf::Properties::default(),
+					_ => track_properties(&track::Info::default(), true),
+				};
+				assert_eq!(
+					ok,
+					ietf::TrackStatusOk {
+						request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+							.then_some(RequestId(REQUEST_ID)),
+						largest: Some(Location { group: 4, object: 1 }),
+						properties: expected,
+					},
+					"{version} wanted={wanted}"
+				);
+			}
+		}
+	}
+
+	/// A TRACK_STATUS for a broadcast we do not serve is refused as a SUBSCRIBE would be.
+	#[moq_net_sim::test]
+	async fn track_status_for_a_missing_broadcast_is_refused() {
+		for version in ALL_VERSIONS {
+			let code = refusal(version, ietf::TrackStatus::ID, track_status("absent", true, version)).await;
+			let expected = match version {
+				Version::Draft14 => 0x4,
+				_ => 0x10,
 			};
-			let mut body = Vec::new();
-			msg.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
-				.unwrap();
-			let mark = h.log.writes.lock().unwrap().len();
-			h.publisher
-				.clone()
-				.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
-				.unwrap()
-				.await;
-			let actual = h.log.writes.lock().unwrap()[mark..].to_vec();
-			let expected = {
-				let log = crate::lite::test_transport::Log::default();
-				let mut writer =
-					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
-				if version == Version::Draft14 {
-					writer.varint(0x0fu64).await.unwrap();
-					writer
-						.encode(&ietf::SubscribeError {
-							request_id: RequestId(REQUEST_ID),
-							error_code: 0x3,
-							reason_phrase: "TRACK_STATUS is not supported".into(),
-						})
-						.await
-						.unwrap();
-				} else {
-					writer.varint(ietf::RequestError::ID).await.unwrap();
-					writer
-						.encode(&ietf::RequestError {
-							request_id: matches!(version, Version::Draft15 | Version::Draft16)
-								.then_some(RequestId(REQUEST_ID)),
-							error_code: 0x3,
-							reason_phrase: "TRACK_STATUS is not supported".into(),
-							retry_interval: 0,
-						})
-						.await
-						.unwrap();
-				}
-				log.writes.lock().unwrap().clone()
-			};
-			assert_eq!(actual, expected, "{version}: wrong TRACK_STATUS refusal bytes");
-			assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
+			assert_eq!(code, expected, "{version}");
+		}
+	}
+
+	/// Opting out of SUBSCRIBE_OK's properties does not strip the objects' timestamps:
+	/// their units come from TRACK_STATUS instead.
+	#[moq_net_sim::test]
+	async fn the_properties_opt_out_keeps_object_timestamps() {
+		let version = Version::Draft20;
+		let stamp = crate::Timestamp::from_millis(123_456).unwrap();
+		let mut properties = Vec::new();
+		ietf::encode_object_time(
+			&mut Encoder::new(&mut properties, version.into()),
+			stamp,
+			track::Info::default().timescale,
+			version,
+		)
+		.unwrap();
+
+		for wanted in [true, false] {
+			let mut h = serve(version);
+			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			group.write_frame(stamp, b"stamped".as_slice()).unwrap();
+			group.finish().unwrap();
+
+			let mut msg = subscribe(Filter::Unfiltered, None);
+			msg.properties_wanted = wanted;
+			run_live(&mut h, msg).await;
+
+			assert_eq!(occurrences(&h.log, b"stamped"), 1, "wanted={wanted}");
+			assert_eq!(occurrences(&h.log, &properties), 1, "wanted={wanted}: object unstamped");
 		}
 	}
 
@@ -3864,7 +3998,7 @@ mod serve_tests {
 		];
 
 		#[rustfmt::skip]
-		let cases: [(&str, u64, &[u8]); 3] = [
+		let cases: [(&str, u64, &[u8]); 2] = [
 			("SUBSCRIBE with a Range Filter", ietf::Subscribe::ID, &[
 				0x02, // Number of Parameters
 				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
@@ -3875,11 +4009,6 @@ mod serve_tests {
 				0x0A, 0x00, // FILL_TIMEOUT = 0
 				0x17, 0x01, 0x01, // LOCATION_FILTER (0x21): from one group back
 				0x14, 0x01, // INCLUDE_PROPERTIES (0x35) = 1
-			]),
-			("TRACK_STATUS with parameters", ietf::TrackStatus::ID, &[
-				0x02, // Number of Parameters
-				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
-				0x32, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
 			]),
 		];
 
@@ -4090,6 +4219,7 @@ mod serve_tests {
 					},
 					range_filters: false,
 					fill_timeout: false,
+					properties_wanted: true,
 				},
 			)
 			.await?;
@@ -4588,6 +4718,7 @@ mod serve_tests {
 					fetch_type,
 					range_filters: false,
 					fill_timeout: false,
+					properties_wanted: true,
 				},
 			)
 			.await
@@ -4911,6 +5042,7 @@ mod serve_tests {
 							fetch_type,
 							range_filters: false,
 							fill_timeout: false,
+							properties_wanted: true,
 						},
 					)
 					.await
@@ -4954,6 +5086,7 @@ mod serve_tests {
 					},
 					range_filters: false,
 					fill_timeout: false,
+					properties_wanted: true,
 				},
 			)
 			.await
@@ -6747,6 +6880,7 @@ mod tests {
 					fetch_type,
 					range_filters: false,
 					fill_timeout: false,
+					properties_wanted: true,
 				},
 			)
 			.await

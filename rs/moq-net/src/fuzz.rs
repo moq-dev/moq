@@ -878,6 +878,7 @@ pub fn seeds() -> Vec<Seed> {
 				fetch_type,
 				range_filters: false,
 				fill_timeout: false,
+				properties_wanted: true,
 			};
 			fetch.encode_bytes(*version).ok()
 		}) else {
