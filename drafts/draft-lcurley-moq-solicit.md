@@ -104,7 +104,7 @@ A relay is the expected user of this declaration, as is any endpoint that asks f
 So is an endpoint that only publishes, which cannot subscribe to anything and therefore has no use for an advertisement of any kind.
 
 An endpoint that did not declare 1 can hear a namespace both ways: unsolicited, and in answer to its own SUBSCRIBE_NAMESPACE.
-Both report the same namespace, so the receiver treats them as one advertisement, not two sources.
+Both report the same namespace, so the receiver holds one advertisement, not two sources, until both are withdrawn.
 
 
 # Enforcement {#enforcement}
@@ -161,7 +161,7 @@ This document defines only the values 0 and 1; a later extension that needs to s
 
 ## Since draft-lcurley-moq-solicit-00 (in progress)
 
-- A namespace heard both unsolicited and in answer to SUBSCRIBE_NAMESPACE is one advertisement, replacing the advice not to advertise it both ways.
+- A namespace heard both unsolicited and in answer to SUBSCRIBE_NAMESPACE is one advertisement until both are withdrawn, replacing the advice not to advertise it both ways.
 
 # Acknowledgments
 {:numbered="false"}

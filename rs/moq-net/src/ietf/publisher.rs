@@ -4134,6 +4134,27 @@ mod serve_tests {
 			}
 			assert!(buf.is_empty(), "{label}: trailing bytes");
 		}
+
+		// Undefined Subscribe Options close the session: dispatch returns an error.
+		#[rustfmt::skip]
+		let cases: [(Version, &[u8]); 2] = [
+			// Request ID, empty namespace, Subscribe Options 0x03, no parameters.
+			(Version::Draft16, &[0x2B, 0x00, 0x03, 0x00]),
+			// Draft-17 adds the Required Request ID delta after the Request ID.
+			(Version::Draft17, &[0x2B, 0x00, 0x00, 0x03, 0x00]),
+		];
+		for (version, body) in cases {
+			let h = serve(version);
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let body = ietf::Body(bytes::Bytes::copy_from_slice(body));
+			assert!(
+				h.publisher
+					.clone()
+					.handle_stream(ietf::SubscribeNamespaceLegacy::ID, body, stream)
+					.is_err(),
+				"{version}: Subscribe Options 0x03 kept the session open"
+			);
+		}
 	}
 
 	/// The draft's canonical current-group join: a Next Object subscription plus a

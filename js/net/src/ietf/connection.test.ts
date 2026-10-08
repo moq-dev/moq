@@ -222,7 +222,7 @@ for (const [version, alpn, options, namespaces] of [
 	});
 }
 
-/** Subscribe Options above 0x02 are malformed and close the session, even past 2^53. */
+/** The drafts define only 0x00 through 0x02; any other value closes the session, even past 2^53. */
 for (const [version, alpn] of [
 	[Version.DRAFT_16, ALPN.DRAFT_16],
 	[Version.DRAFT_17, ALPN.DRAFT_17],

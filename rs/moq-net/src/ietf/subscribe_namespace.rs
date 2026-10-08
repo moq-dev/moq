@@ -571,7 +571,7 @@ mod tests {
 		}
 	}
 
-	/// Subscribe Options above 0x02 are malformed (d16 §9.25).
+	/// The drafts define only 0x00 through 0x02, so we refuse any other value as a protocol violation.
 	#[test]
 	fn legacy_rejects_unknown_subscribe_options() {
 		// Request ID, empty namespace, Subscribe Options 0x03, no parameters.
