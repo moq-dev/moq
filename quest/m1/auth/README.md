@@ -109,6 +109,9 @@ published version in place, so AUTH and its stream code land in
   grant does not, and REQUEST_UPDATE refreshes it
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
+- [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - an
+  auth decider sees `webtransport` for a WebTransport session and `quic` only
+  for native QUIC
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
