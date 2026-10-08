@@ -18,9 +18,15 @@ Decided 2026-10-08 (review): the catalog at the live edge is the union of
 every rendition recorded, so a rendition removed mid-recording stays
 discoverable; one no longer live is listed with `enabled: false`. VOD
 consumers (HLS archive mode, DVR) list a rendition that has recorded media
-regardless of `enabled`; live watch keeps filtering disabled ones. Paced
+regardless of `enabled`; live watch keeps filtering disabled ones. HLS
+segments every playlist from one reference rendition (`reference()` in
+`rs/moq-hls/src/export/mod.rs`), so when the reference's recording ends
+while another continues, archive mode advances the reference to the
+continuing one without dropping earlier rows, or the union stalls the
+playlist at the old rendition's end. Paced
 replay (m3) replays the catalog history instead. Test a rendition removed
-before the recording ends.
+before the recording ends, including the reference while another
+continues: both the first segment and the tail stay listed.
 
 ## Plan
 

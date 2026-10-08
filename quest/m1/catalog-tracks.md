@@ -5,12 +5,14 @@
 A track's catalog identity never changes for its name, so live and recorded
 playback never guess which configuration applies to a group. Identity is the
 codec and its description, plus anything else a decoder must be configured
-with (audio sample rate and channel count). `codedWidth`, `codedHeight`,
-`bitrate`, and `framerate` are ceilings fixed when the track is created:
-resolution changes in band below them, and the codec string advertises the
-level the ceiling needs. A change to identity, or past a ceiling, publishes a
-new rendition name or a new broadcast epoch instead of mutating the track.
-Live state (`enabled`, the jitter and delay figures, `warmup`) changes freely
+with (audio sample rate and channel count). `codedWidth` and `codedHeight`
+are ceilings fixed when the track is created: resolution changes in band
+below them, and the codec string advertises the level the ceiling needs.
+`bitrate` and `framerate` are the maximum so far, which only rises. A change
+to identity, or past the coded size, publishes a new rendition name or a new
+broadcast epoch instead of mutating the track. Live state (`enabled`, the
+jitter and delay figures, `warmup`, a rise in `bitrate` or `framerate`)
+changes freely
 under the same name, as do the broadcast-level display properties
 (`display`, `rotation`, `flip`), which describe presentation, not decoding.
 
@@ -34,17 +36,18 @@ relies on it. Reasons:
   NAL length size, which is framing, not resolution.
 - Ceilings let a decoder be configured once for the largest picture, so a
   smaller one never needs a catalog update.
-- Decided 2026-10-08 (review): `bitrate` and `framerate` stay ceilings too.
-  An encoding publisher declares them from its encoder config. An importer
-  that cannot know them up front (moq-mux's estimator raises a running max
-  today, `rs/moq-mux/src/catalog/estimate.rs`, and detected dimensions
-  replace hints in `catalog/tracks.rs`) declares each once, from source
-  metadata or its first estimate window or keyframe, and never rewrites it.
-  A source that later exceeds a declared `bitrate` or `framerate` is counted
-  in stats, not republished, since neither configures a decoder; exceeding
-  the coded size mints a new identity. Migrate the estimator, the importers,
-  and the HLS consumer accordingly, and test an import whose estimate rises
-  after the first window.
+- Decided 2026-10-08 (review): `bitrate` and `framerate` are monotone
+  maxima. An encoding publisher declares its configured cap. An importer
+  that cannot know them up front may only raise them, as moq-mux's
+  estimator's running max does today (`rs/moq-mux/src/catalog/estimate.rs`),
+  and a rise is a live-state update, never a new identity, since neither
+  configures a decoder. Updates stay rare because the maximum converges.
+  Watch's selection (`js/watch/src/video/source.ts`) and HLS `BANDWIDTH`
+  read the current value, so a quiet start never understates a rendition
+  for good. An importer fills unknown coded dimensions once from the first
+  keyframe (`catalog/tracks.rs`); growth past them mints a new identity.
+  Test: a quiet-start import that rises to a sustained 5 Mb/s reselects a
+  0.5 Mb/s rung on a 2 Mb/s connection.
 - A change to codec or description, or past a ceiling, mints a new rendition
   name through a [catalog rendition ID](/quest/m1/catalog-track-id.md) when
   the catalog can keep both, or a new
