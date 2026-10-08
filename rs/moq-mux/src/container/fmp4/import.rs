@@ -928,7 +928,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let fragment_len = fragment_bytes.len();
 			let mut frame = g.create_frame(moq_net::frame::Info {
 				size: fragment_bytes.len() as u64,
-				timestamp,
+				timestamp: Some(timestamp),
 			})?;
 			frame.write(fragment_bytes)?;
 			frame.finish()?;

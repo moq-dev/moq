@@ -38,7 +38,10 @@ groups it has open, overlapping the new one. A group neither route delivers is
 dropped once the readers' max delay has passed it. A route through the subscribing peer
 itself is never used. A publisher whose groups restart, such as an encoder
 restarting from group 0, publishes under a new epoch, which replaces the old
-broadcast instead of resuming it. A route without an epoch, including every
+broadcast instead of resuming it. RTMP, SRT, and WHIP ingest mint one per
+connection, so an encoder reconnecting to the same path replaces its stale
+connection at once. Epochs order by their creation time, so a reconnect to a
+different gateway assumes the two gateways' clocks roughly agree. A route without an epoch, including every
 route on moq-lite 06 and older or moq-transport, keeps its subscriptions until it
 goes. Seamless failover needs both: a publisher that announces an epoch, and
 moq-lite 07 on every link the route crosses, since epochs travel on nothing

@@ -9,7 +9,7 @@ import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
-import { Milli, Timescale } from "../time.ts";
+import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
@@ -49,6 +49,22 @@ const PROBE_RTT_DELTA = 0.25;
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
+}
+
+/**
+ * The timescale TRACK_INFO declares for a track. Lite05+ requires one, so an untimed track
+ * declares milliseconds, the scale its frames' send times go out at.
+ */
+function wireTimescale(info: track.Info): Timescale {
+	return info.timescale ?? Timescale.MILLI;
+}
+
+/**
+ * A frame or datagram timestamp as its raw value at the wire `timescale`. No lite version
+ * encodes an absent timestamp yet, so an untimed payload carries its send time instead.
+ */
+function wireTime(timestamp: Timestamp | undefined, timescale: Timescale): number {
+	return Math.round((timestamp ?? Timestamp.now()).as(timescale));
 }
 
 /**
@@ -622,7 +638,7 @@ export class Publisher {
 				// (accept never called, track closed) as an error here, which resets the
 				// stream.
 				const info = await track.info();
-				timescale = info.timescale;
+				timescale = wireTimescale(info);
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
@@ -1012,7 +1028,7 @@ export class Publisher {
 				maxAge: info.maxAge,
 				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
 				// `#serveGroup` emits each frame converted to it.
-				timescale: info.timescale,
+				timescale: wireTimescale(info),
 			});
 		})();
 
@@ -1041,7 +1057,7 @@ export class Publisher {
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
-				const ts = Math.round(datagram.timestamp.as(timescale));
+				const ts = wireTime(datagram.timestamp, timescale);
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
@@ -1080,7 +1096,7 @@ export class Publisher {
 			const frame = await race([group.readFrame(), stream.closed]);
 			if (!frame) break;
 
-			const ts = BigInt(Math.round(frame.timestamp.as(timescale)));
+			const ts = BigInt(wireTime(frame.timestamp, timescale));
 			await stream.u62(zigzag(ts - prevTs));
 			prevTs = ts;
 
@@ -1170,7 +1186,7 @@ export class Publisher {
 
 					if (timestamps) {
 						// Convert each frame to the track's advertised timescale.
-						const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
+						const ts = BigInt(wireTime(read.frame.timestamp, timescale));
 						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
 						prevTs = ts;
 					}
