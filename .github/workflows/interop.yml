@@ -128,6 +128,24 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
+      # so the export has to spread it over the slots before its DTS and still keep
+      # the constant-rate schedule.
+      - name: TS keyframe bursts
+        run: nix develop --command just test ts --bitrate 2000000
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # 1080p video filling a broadcast-sized 9 Mbit CPB, at the default delay: the
+      # source sends pictures most of a second ahead of their decode time, and the
+      # export has to as well without overflowing the receiver's buffers.
+      - name: TS broadcast-sized CPB
+        run: nix develop --command just test ts --hrd
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       # The same round-trip over an open-GOP clip: every leading picture after a
       # recovery point must come back, in decode order.
       - name: TS open GOP

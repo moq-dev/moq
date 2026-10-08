@@ -20,10 +20,11 @@ index 8a0259fec..92febbcdf 100644
  	// Lite06+: announce ids. Each received `active` implicitly assigns the next
  	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
  	// path, and lite-07 bases name it too. Tracked even for announces we drop
-@@ -1233,5 +1234,5 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
+@@ -1373,6 +1374,6 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
+ 					let run = PrefixRun {
  						responder_origin,
  						link_cost,
--						announced: Announced::default(),
-+						announced: std::mem::ManuallyDrop::new(Announced::default()),
+-						announced: Announced::new(self.subscriber.announces.clone()),
++						announced: std::mem::ManuallyDrop::new(Announced::new(self.subscriber.announces.clone())),
  						decoder: lite::AnnounceDecoder::default(),
- 					};
+ 						landing,

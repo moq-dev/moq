@@ -16,11 +16,7 @@ not per viewer, so a single session can amplify it by naming paths.
 
 - Decide the bound (per route, per session, or both) and what a refusal looks
   like on each wire version; reuse the refusal shapes
-  [Request caps](/quest/m0/request-caps.md) settles.
+  that request caps (#4820) settled.
 - Cover it with a test that requests many distinct covered paths and checks
   the front count stays bounded, and extend the origin benchmark with a
   distinct-path axis.
-
-## Required
-
-- [Request caps](/quest/m0/request-caps.md) - settles the refusal shapes reused here

@@ -317,7 +317,7 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	session: S,
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Consumer,
-	control: Control,
+	pub(super) control: Control,
 	// Our own Hop ID, stamped onto every advertisement we forward. Taken from the
 	// origin we consume so it matches the local relay identity across every session,
 	// which is what makes cross-session loop detection work.
@@ -334,6 +334,8 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	version: Version,
 	// Dispatched finite serves, including those not yet polled.
 	pub(super) owed: Arc<AtomicUsize>,
+	// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
+	pub(super) subscriptions: crate::session::Slots,
 }
 
 struct Serve(Arc<AtomicUsize>);
@@ -399,6 +401,7 @@ where
 			joins: Default::default(),
 			version,
 			owed: Default::default(),
+			subscriptions: Default::default(),
 		}
 	}
 
@@ -610,6 +613,16 @@ where
 					.reject_subscribe(stream, request_id, &Error::Unsupported, "range filters not supported")
 					.await;
 			}
+			// Held for the life of the subscription. A peer past its limits loses the session.
+			let _slot = match self.subscriptions.acquire() {
+				Ok(slot) => slot,
+				Err(err) => {
+					self.session
+						.clone()
+						.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
+					return Err(err);
+				}
+			};
 
 			// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
 			// the model, through the tagged `origin::Consumer` the broadcast resolves from.
@@ -3930,6 +3943,33 @@ mod serve_tests {
 				assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID);
 				ietf::RequestError::decode(&mut buf, version).unwrap().error_code
 			}
+		}
+	}
+
+	/// A SUBSCRIBE past the session's cap closes the session with TOO_MANY_REQUESTS.
+	#[moq_net_sim::test]
+	async fn subscriptions_past_the_cap_close_the_session() {
+		for version in [Version::Draft14, Version::Draft16, Version::Draft20] {
+			let mut h = serve(version);
+			h.publisher.subscriptions = crate::session::Slots::new(0);
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let mut body = Vec::new();
+			subscribe(Filter::NextObject, None)
+				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+				.unwrap();
+			h.publisher
+				.clone()
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
+				.unwrap_or_else(|e| panic!("{version}: the request was not started: {e}"))
+				.await;
+			assert_eq!(
+				h.log.closes(),
+				vec![(
+					crate::SessionError::TooManyRequests.to_code(),
+					"too many subscriptions".to_string()
+				)],
+				"{version}"
+			);
 		}
 	}
 

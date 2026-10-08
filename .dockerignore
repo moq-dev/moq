@@ -1,0 +1,5 @@
+# Not inputs to the nix build. Sending them only bloats the context.
+.git
+.worktrees
+target
+result
