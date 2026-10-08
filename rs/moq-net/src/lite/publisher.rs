@@ -51,8 +51,8 @@ struct Shared<S: crate::transport::poll::Session> {
 	// peer from a source whose chain excludes them, keeping the data plane on
 	// the same split-horizon rule as the announces we send them.
 	peer_setup: super::PeerSetup,
-	// The identity assigned to the peer by the caller (`Client::with_peer_hop`, or
-	// the per-session default a server hands every request), standing in wherever the
+	// The identity assigned to the peer (a fresh per-session id, or one the caller
+	// pinned with `with_peer_hop`), standing in wherever the
 	// peer declines to declare one. Backs both the announce filter and the serving
 	// origin, so a peer that names itself nowhere on the wire is still split-horizoned.
 	peer_hop: Option<Hop>,
@@ -543,8 +543,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 					// The identity whose routes we filter out. Lite-04/05 carry it per
 					// announce stream; lite-06+ reads the session-wide SETUP Hop
 					// parameter, the same identity the subscribe path excludes. A peer that
-					// declares nothing falls back to the identity the caller assigned it
-					// (`with_peer_hop`), if any.
+					// declares nothing falls back to the identity the session assigned it.
 					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
 					if self.shared.version.has_exclude_hop() {
 						let exclude_hop = match interest.exclude_hop {

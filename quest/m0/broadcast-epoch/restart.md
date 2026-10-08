@@ -25,6 +25,24 @@ decide. A copy resumes or splices only across routes with an
 identical epoch, so the old copy's cached groups never reach a subscriber of
 the new source.
 
+Relays keep caching between subscriptions: a `Restart` is the cache
+invalidation. It unsets the relay's copy for that path, so the next
+subscription goes upstream to the new route (maintainer, 2026-10-08: "a
+Restart unsets the cache; the next subscription goes upstream to the new
+route").
+
+`Restart` is route-level only, on every version, lite-07 included
+(maintainer, 2026-10-08: "Restart is route-level only; nested broadcasts
+under the longest-matching route restart"). A `Restart` names a route, the
+announced path or prefix, as ANNOUNCE does. A subscriber applies it to every
+broadcast whose longest matching route is that one: it unsets each cached
+copy, and the next subscribe re-resolves upstream. Under a prefix pool the
+advertised winner is ranked by the prefix while requests are ranked by the
+requested path, so a path can move to another worker while the prefix's
+winner stays. The relay sends that as a `Restart` of the prefix route (such
+as `pool`), and every nested broadcast under it re-resolves; a viewer whose
+path kept its worker just resubscribes to the same source.
+
 ## Plan
 
 Decided in planning (2026-10-07, from #4970's review):
@@ -88,7 +106,8 @@ Decided in planning (2026-10-07, from #4970's review):
   relay retires that copy for new requests and opens a fresh one, never
   joining or resuming into the old copy.
 - **Wire.** lite-07 (`moq-lite-07-wip`) gains an explicit restart message on
-  the announce stream. Older lite versions and moq-transport send
+  the announce stream, naming a route like ANNOUNCE does, never a nested
+  path. Older lite versions and moq-transport send
   `ANNOUNCE_END` then `ANNOUNCE_START` for a source change, a new rule for a
   relay's winner moving between entries (the draft only says so for a
   publisher replacing its own epoch), and a receiver delivers an end and
@@ -101,8 +120,8 @@ Decided in planning (2026-10-07, from #4970's review):
   lite-07 changelog's "ends subscriptions to the older one". The rule that a
   subscription between routes without an Epoch "stays on its route and ends
   with it" holds as written.
-- **Players** follow `Restart` in [Apps](/quest/m0/broadcast-epoch/apps.md);
-  `moqsrc` (planned in #4960) switches on it too. On lite-06 and
+- **Players** follow `Restart` in [Apps](/quest/m0/broadcast-epoch/apps.md),
+  and [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) switches on it too. On lite-06 and
   moq-transport, a pair not coalesced reaches players as `End` then
   `Start`: a stop, then a fresh play.
 - **Every Rust consumer** of announce events handles `Restart` in the same
@@ -140,8 +159,12 @@ old route: no `Restart` and new requests stay on the old route until it is
 withdrawn, then `Restart` and a re-request lands on the replacement. With
 mocked time, a lite-06 relay chain where an epochless publisher restarts: the
 downstream relay's cached groups from the old instance never reach a new
-subscriber mixed with the new instance's groups. Run `just drafts check` and
-`just test interop --all`.
+subscriber mixed with the new instance's groups. With mocked time, on lite-06
+and lite-07, a prefix pool of epoch-less workers announced as `pool` behind
+two relays, where one path's winner changes under an unchanged prefix winner:
+the downstream relay gets a `Restart` of `pool`, drops its cached copies of
+the nested paths, and the next subscribes reach the right workers, the moved
+path on its new worker and the rest on theirs. Run `just drafts check` and `just test interop --all`.
 
 Docs: update `doc/concept/moq-lite.md` (publisher epochs) and
 `doc/lib/{rs,js}` announce sections inline, plus `doc/bin/rtmp.md`,

@@ -25,6 +25,9 @@ Routing: Wildcard landed in #4403, so a service claims the prefix it could
 serve instead of enumerating broadcasts. Serving the relay's ingested-only
 view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
 edge, which embeds moq-relay; it moved there on 2026-09-28.
+Pools of claim workers (transcoders) also need the relay to forget a front
+nobody reads, and demand that doesn't flap on a viewer's first subscribe
+(both found 2026-10-07).
 
 Interop: Fastly's moq-relay-interop report (run of 2026-09-23, build
 7ee2b02) was triaged against `main` on 2026-10-07. Its SETUP, UNSUBSCRIBE
@@ -53,13 +56,15 @@ a published `@moq/watch` break.
 - [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - moqt-22 LOCATION_FILTER carries its type instead of a Length in Rust and JS, so a draft-22 peer reads our Next Object correctly
 - [moq-transport parameters per draft](/quest/m0/ietf-params-per-draft.md) - every control message accepts exactly the parameters its draft allows, so moqx's draft-16 SUBSCRIBE_NAMESPACE with FORWARD stops failing
 - [NAMESPACE on the stream](/quest/m0/ietf-namespace-stream.md) - every draft-16+ SUBSCRIBE_NAMESPACE stream carries NAMESPACE for each match, whatever the peer's SETUP options
-- [Dialed split horizon](/quest/m0/dial-split-horizon.md) - a session moq-net dials gets a per-connection hop, so routes never echo back to the peer they came from
 - [No empty d14 prefix](/quest/m0/ietf-d14-root-prefix.md) - draft-14 never sends SUBSCRIBE_NAMESPACE with an empty prefix, and the docs say to scope a d14 link to moxygen
 - [End of Track Location](/quest/m0/ietf-end-of-track-location.md) - a relay forwards END_OF_TRACK at its upstream's Location, on the last group's stream, instead of re-sending it at the next group's object 0
 - [End of Group status](/quest/m0/ietf-end-of-group-status.md) - an End of Group status on a stream whose header already marks the group's end is accepted, so imquic's last object per group arrives
 - [Subgroup at object 0](/quest/m0/ietf-first-object-zero.md) - a draft-18 subgroup with FIRST_OBJECT clear that starts at object 0 is read whole
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [Prefix route fronts](/quest/m0/prefix-route-fronts.md) - a prefix route cannot be made to mint one front per requested path
+- [TRACK stream demand](/quest/m0/track-stream-demand.md) - a lite-05+ subscribe shows the publisher one `used` edge, not a flap between TRACK and SUBSCRIBE
+- [Idle fronts](/quest/m0/idle-fronts.md) - a front nobody has read for the linger ends with its per-path state, so a standing claim stops accumulating fronts and sources
+- [Upstream position regression](/quest/m0/largest-regression.md) - a relay copy that sees upstream's largest group go backwards ends instead of serving the old instance's cache
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription

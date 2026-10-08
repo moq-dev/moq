@@ -74,6 +74,7 @@ is published; older versions are unchanged.
 - [Live media time](/quest/m1/subscribe-live-time.md) - SUBSCRIBE_OK carries the publisher's live media time
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
 - [One route cost](/quest/m1/route-cost.md) - ANNOUNCE carries one cost
+- [Claim-served epochs](/quest/m0/broadcast-epoch/claim-epochs.md) - TRACK_INFO carries the epoch of the instance that answered
 
 ## Related
 

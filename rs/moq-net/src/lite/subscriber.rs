@@ -60,13 +60,11 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// carry real hop ids on the wire (Lite01/02/03), and for a peer that reports
 	// 0 in AnnounceOk. Lite03 placeholders stay 0 and count as anonymous.
 	//
-	// This is the peer's assigned identity (`peer_hop`) when the caller gave
-	// it one. Otherwise it is `Hop::UNKNOWN` (0), the reserved "no identity" value.
-	//
-	// Assigning one is the caller's call, not this layer's: a server gives every
-	// accepted session a fresh id so its routes are at least distinguishable from
-	// another session's, while a client only assigns one it knows out of band. The
-	// assigned id stays local and is never written into a hop chain.
+	// This is the peer's assigned identity (`peer_hop`): a fresh id per dialed or
+	// accepted session, so its routes are distinguishable from another session's,
+	// unless the caller pinned a stable one with `with_peer_hop`. Without one it is
+	// `Hop::UNKNOWN` (0), the reserved "no identity" value. The assigned id stays
+	// local and is never written into a hop chain.
 	session_origin: crate::Hop,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	/// Why this session ended, once it has. A track still waiting on TRACK_INFO is
