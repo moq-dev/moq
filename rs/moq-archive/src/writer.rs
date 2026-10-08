@@ -153,15 +153,15 @@ impl<S: ObjectStore> Writer<S> {
 	/// Start a recording under `store`'s prefix, reading tracks from `source`, or resume the one
 	/// already there.
 	///
-	/// Resuming replays each track's retained timeline, and a re-enrolled track continues at its
-	/// next record, refusing anything at or before the end of its newest committed one. A source
-	/// whose group sequences restarted therefore needs a new prefix. Objects a crash left before
-	/// their commit are deleted now, since the resumed records reuse their keys. A DVR also
-	/// deletes, one grace period after recovery, every object its retained records do not
+	/// Resuming replays each track's retained timeline, and a re-enrolled track continues after
+	/// its newest committed record, skipping what the source replays from before it. A source
+	/// announced under another epoch than the recording is a restart: enrolling its tracks fails
+	/// with [`Error::EpochMismatch`], and the caller starts a new prefix. Objects a crash left
+	/// before their commit are deleted now, since the resumed records reuse their keys. A DVR
+	/// also deletes, one grace period after recovery, every object its retained records do not
 	/// reference, such as interrupted expirations, and every timeline object older than the
-	/// checkpoint it recovered from. The writer must own the prefix exclusively.
-	/// Fails, deleting nothing, when the recording cannot be listed or a timeline cannot be
-	/// replayed.
+	/// checkpoint it recovered from. The writer must own the prefix exclusively. Fails, deleting
+	/// nothing, when the recording cannot be listed or a timeline cannot be replayed.
 	pub async fn new(store: Store<S>, source: broadcast::Consumer, config: Config) -> Result<Self> {
 		let recovery = recover(&store, config.retention.is_some()).await?;
 		for key in &recovery.uncommitted {
@@ -205,10 +205,11 @@ impl<S: ObjectStore> Writer<S> {
 	///
 	/// Then flush each track's final record and finish its timeline. Fails when a timeline cannot
 	/// be committed or stored: the recording stops at each track's last durable timeline object.
-	/// Also fails when an enrolled track delivers a frame the recording cannot represent, but only
-	/// after stopping every track and committing what each already reported, so the recording
-	/// stays readable up to the bad frame. Returns the source's error, after finishing, when the
-	/// broadcast aborted.
+	/// Also fails when an enrolled track delivers a frame the recording cannot represent, but
+	/// only after stopping every track and committing what each already reported, so the
+	/// recording stays readable up to the bad frame. That includes a resumed track whose first
+	/// new group starts before the recorded end, the one restart a source without an epoch
+	/// shows. Returns the source's error, after finishing, when the broadcast aborted.
 	pub async fn run(self) -> Result<()> {
 		let Self {
 			control,
@@ -394,7 +395,8 @@ impl<S: ObjectStore> Control<S> {
 			.info()
 			.timescale
 			.ok_or_else(|| Error::Untimed(name.to_string()))?;
-		let info = Info::new(subscriber.info().priority, timescale.as_u64())?;
+		let info =
+			Info::new(subscriber.info().priority, timescale.as_u64())?.with_epoch(shared.source.info().epoch.clone());
 		shared.store.put_info(name, &info).await?;
 
 		let timeline = hang::timeline::default_name(name);
@@ -419,13 +421,22 @@ impl<S: ObjectStore> Control<S> {
 		shared.store.put_info(&timeline, &info).await?;
 
 		let resume = shared.recovered.lock().unwrap().remove(name);
-		let (output, segmenter, window, checkpoints, offset, floor) = match resume {
+		let (output, segmenter, window, checkpoints, offset, floor, recorded) = match resume {
 			Some(resume) => {
 				let floor = resume.floor();
+				let recorded = recorded_end(&resume, timescale)?;
 				let output = timeline::Producer::resume(output, &resume.checkpoint).map_err(timeline_error)?;
 				let segmenter = Segmenter::new(config).with_sequence(resume.checkpoint.range.end);
 				let window = resume.checkpoint.records.into();
-				(output, segmenter, window, resume.checkpoints, resume.sequence, floor)
+				(
+					output,
+					segmenter,
+					window,
+					resume.checkpoints,
+					resume.sequence,
+					floor,
+					recorded,
+				)
 			}
 			None => (
 				timeline::Producer::new(output),
@@ -433,6 +444,7 @@ impl<S: ObjectStore> Control<S> {
 				VecDeque::new(),
 				VecDeque::new(),
 				0,
+				None,
 				None,
 			),
 		};
@@ -444,7 +456,8 @@ impl<S: ObjectStore> Control<S> {
 			segmenter,
 			floor,
 			largest: None,
-			reported: None,
+			// A new group must not start before the recorded end, or it would overlap it.
+			reported: recorded,
 			accepted: BTreeMap::new(),
 			frames: VecDeque::new(),
 			records: VecDeque::new(),
@@ -493,6 +506,7 @@ struct Track<S> {
 	/// The newest accepted group; later groups must exceed it.
 	largest: Option<u64>,
 	/// The first-frame timestamp of the newest reported group; later groups must not precede it.
+	/// A resumed track starts at the recorded end.
 	reported: Option<u64>,
 	/// Accepted groups in sequence order. Reported front first, so a later group's frames wait
 	/// for every earlier accepted group to finish.
@@ -971,6 +985,16 @@ fn source_error(err: moq_net::Error) -> Error {
 
 fn malformed(track: &str, sequence: u64, err: impl std::fmt::Display) -> Error {
 	Error::Source(format!("track {track} group {sequence}: {err}"))
+}
+
+/// The content time the newest committed record reached, in `timescale`.
+fn recorded_end(resume: &Resume, timescale: Timescale) -> Result<Option<u64>> {
+	let Some(record) = resume.checkpoint.records.last() else {
+		return Ok(None);
+	};
+	let millis = record.pts.checked_add(record.duration).ok_or(Error::Overflow)?;
+	let end = Timestamp::new(millis, TIMESCALE).map_err(|_| Error::Id(millis))?;
+	Ok(Some(end.convert(timescale).map_err(|_| Error::Overflow)?.value()))
 }
 
 #[cfg(test)]
@@ -1612,6 +1636,24 @@ mod tests {
 	/// Record `video` groups `sequences`, one per second, until the source ends.
 	async fn record<S: ObjectStore + Clone>(store: &Store<S>, config: Config, sequences: std::ops::Range<u64>) {
 		let source = broadcast::Info::new().produce();
+		record_into(store, config, source, sequences).await
+	}
+
+	/// [`record`] from a source announced under `epoch`.
+	async fn record_from<S: ObjectStore + Clone>(
+		store: &Store<S>,
+		epoch: Option<moq_net::Epoch>,
+		sequences: std::ops::Range<u64>,
+	) {
+		record_into(store, Config::default(), source(epoch), sequences).await
+	}
+
+	async fn record_into<S: ObjectStore + Clone>(
+		store: &Store<S>,
+		config: Config,
+		source: broadcast::Producer,
+		sequences: std::ops::Range<u64>,
+	) {
 		let video = track(&source, "video");
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
 		writer.control().track("video", media()).await.unwrap();
@@ -1621,6 +1663,17 @@ mod tests {
 		video.finish().unwrap();
 		source.close();
 		writer.run().await.unwrap();
+	}
+
+	/// A source broadcast resolved through a route with `epoch`.
+	fn source(epoch: Option<moq_net::Epoch>) -> broadcast::Producer {
+		let mut info = broadcast::Info::new();
+		info.epoch = epoch;
+		info.produce()
+	}
+
+	fn epoch(n: u8) -> moq_net::Epoch {
+		format!("01900000-0000-7000-8000-0000000000{n:02x}").parse().unwrap()
 	}
 
 	fn orphan(sequence: u64) -> Object {
@@ -1652,6 +1705,112 @@ mod tests {
 			numbers.extend(object.groups.iter().map(|group| group.sequence));
 		}
 		assert!(numbers.windows(2).all(|pair| pair[0] < pair[1]), "{numbers:?}");
+	}
+
+	/// The group sequence continued, but content time jumped back before the recorded end.
+	#[tokio::test]
+	async fn a_backward_timestamp_is_refused() {
+		let store = Store::new(InMemory::new(), "rec");
+		record(&store, Config::default(), 0..3).await;
+
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		writer.control().track("video", media()).await.unwrap();
+		// Group 3 is the next one. Its timestamp is behind the last frame, at 2500.
+		group(&video, 3, &[500]);
+		video.finish().unwrap();
+		source.close();
+
+		assert_eq!(
+			writer.run().await,
+			Err(Error::Source("track video group 3: timestamp 500 precedes 2500".into()))
+		);
+		let records = window(&store, "video").await;
+		assert_eq!(
+			groups(&records),
+			(0..3).map(|sequence| (sequence, sequence)).collect::<Vec<_>>()
+		);
+		check_objects(&store, "video", &records).await;
+	}
+
+	/// A source announced under another epoch restarted, whatever its groups say: enrolling it
+	/// fails and nothing more is recorded.
+	#[tokio::test]
+	async fn another_epoch_is_refused() {
+		let store = Store::new(InMemory::new(), "rec");
+		record_from(&store, Some(epoch(1)), 0..3).await;
+
+		for other in [Some(epoch(2)), None] {
+			let source = source(other.clone());
+			let _video = track(&source, "video");
+			let writer = Writer::new(store.clone(), source.consume(), Config::default())
+				.await
+				.unwrap();
+			assert_eq!(
+				writer.control().track("video", media()).await,
+				Err(Error::EpochMismatch {
+					existing: Some(epoch(1)),
+					intended: other,
+				})
+			);
+		}
+
+		// And a recording without an epoch refuses a source with one.
+		let plain = Store::new(InMemory::new(), "plain");
+		record(&plain, Config::default(), 0..3).await;
+		let source = source(Some(epoch(1)));
+		let _video = track(&source, "video");
+		let writer = Writer::new(plain.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		assert_eq!(
+			writer.control().track("video", media()).await,
+			Err(Error::EpochMismatch {
+				existing: None,
+				intended: Some(epoch(1)),
+			})
+		);
+
+		let records = window(&store, "video").await;
+		assert_eq!(groups(&records), (0..3).map(|s| (s, s)).collect::<Vec<_>>());
+	}
+
+	/// The same epoch resumes, skipping the groups its cache replays.
+	#[tokio::test]
+	async fn the_same_epoch_resumes() {
+		let store = Store::new(InMemory::new(), "rec");
+		record_from(&store, Some(epoch(1)), 0..3).await;
+		record_from(&store, Some(epoch(1)), 0..6).await;
+
+		let records = window(&store, "video").await;
+		assert_eq!(groups(&records), (0..6).map(|s| (s, s)).collect::<Vec<_>>());
+		check_objects(&store, "video", &records).await;
+		assert_eq!(store.get_info("video").await.unwrap().epoch, Some(epoch(1)));
+	}
+
+	/// A source that jumped forward, in both group sequence and content time, keeps recording.
+	#[tokio::test]
+	async fn a_forward_restart_keeps_recording() {
+		let store = Store::new(InMemory::new(), "rec");
+		record(&store, Config::default(), 0..3).await;
+
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		writer.control().track("video", media()).await.unwrap();
+		group(&video, 10, &[10_000, 10_500]);
+		video.finish().unwrap();
+		source.close();
+		writer.run().await.unwrap();
+
+		let records = window(&store, "video").await;
+		assert_eq!(groups(&records), vec![(0, 0), (1, 1), (2, 2), (10, 10)]);
+		check_objects(&store, "video", &records).await;
 	}
 
 	#[tokio::test]

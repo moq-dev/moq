@@ -394,13 +394,13 @@ impl Publish {
 		})
 	}
 
-	/// Advertise the broadcast's path, now that the catalog tracks are in place.
-	pub fn announce(&self) -> anyhow::Result<()> {
+	/// Advertise the broadcast's path under `epoch`, now that the catalog tracks are in place.
+	pub fn announce(&self, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 		let Some(broadcast) = &self.broadcast else {
 			return Ok(());
 		};
 		broadcast
-			.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
+			.announce(moq_net::origin::Route::default().with_epoch(epoch))
 			.context("failed to announce broadcast")
 	}
 

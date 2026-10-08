@@ -4912,6 +4912,34 @@ mod serve_tests {
 		}
 	}
 
+	/// A datagram group is never fetchable: a FETCH for one is refused like a group that
+	/// does not exist, newest or not, and opens no fetch stream for its payload.
+	#[moq_net_sim::test]
+	async fn a_standalone_fetch_of_a_datagram_group_is_refused() {
+		for version in FETCH_DRAFTS {
+			for newest in [true, false] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 2, None);
+				let sequence = h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
+				if !newest {
+					h.track.append_group().unwrap().finish().unwrap();
+				}
+				settle().await;
+
+				let location = Location {
+					group: sequence,
+					object: 0,
+				};
+				let buf = standalone_fetch(&h, location, location, GroupOrder::Ascending).await;
+				assert_eq!(
+					fetch_refusal(buf, version),
+					does_not_exist(version),
+					"{version}: newest={newest}"
+				);
+			}
+		}
+	}
+
 	/// A joining FETCH reaching back before the subscription's group is refused, like any
 	/// FETCH touching several groups.
 	#[moq_net_sim::test]

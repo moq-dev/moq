@@ -100,8 +100,7 @@ through, which is how forwarding loops are caught, and a cost, which is how a
 subscriber picks among several routes to the same broadcast. A route may also
 carry a [publisher epoch](#publisher-epochs), which says which routes serve the
 same bytes. A hop of 0 is
-the anonymous mark and travels the chain unchanged; when it is the first hop, a
-relay puts a random ID, fresh per connection, in front of it. A route that passed through an
+the anonymous mark and travels the chain unchanged. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
 the costs say; among anonymous routes, cost keeps ordering.
 
@@ -384,6 +383,12 @@ Since moq-lite 05, a publisher can send a tiny single-frame group as a QUIC
 datagram: unreliable, unordered, under about 1200 bytes, and never
 retransmitted. It suits real-time audio and sensor data. There is no stream
 fallback, so a datagram that doesn't fit isn't delivered that way.
+
+Nothing caches a datagram. A subscription gets the ones inside its group
+range, and a new one may get the few still in the publisher's short send
+buffer, but `FETCH` never returns one. A publisher that knows the sequence was
+a datagram refuses with `NOT_FETCHABLE` (moq-lite-07), otherwise with
+`NOT_FOUND`. Use a group for anything a late joiner needs.
 
 ## What moq-lite leaves out
 

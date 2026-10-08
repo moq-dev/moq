@@ -31,7 +31,6 @@ Public API: breaking. Wire: none.
 ## Required
 
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - adds `Timed<T>` to `@moq/net`
-- [@moq/net carries untimed frames faithfully](/quest/m1/js-untimed-model.md) - js/net stops filling arrival time, so `at` can be absent
 
 ## Related
 

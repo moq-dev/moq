@@ -7,7 +7,7 @@ import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { TAIL_GRACE_MS, Tail } from "./tail.ts";
-import { Milli } from "./time.ts";
+import { Milli, Timescale } from "./time.ts";
 import type { Ordered } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -26,7 +26,7 @@ async function session(protocol: string) {
 	]);
 	const broadcast = origin.createBroadcast(Path.from("test"));
 	broadcast.announce();
-	const video = broadcast.createTrack("video");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote.track("video").subscribe({ maxDelay: MAX_DELAY }).ordered();
 

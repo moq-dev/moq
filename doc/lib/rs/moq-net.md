@@ -17,7 +17,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
 - **Broadcasts** are created unannounced and invisible to everyone, then announced as an exact route, or served below a prefix with `dynamic`. A consumer of the same origin sees exactly what a peer sees. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
-- **Epochs** identify publisher instances with a canonical UUIDv7 carried on each route (`Route::epoch`): the newest wins a path, and only routes with the same epoch resume a subscription; see [publisher epochs](/concept/moq-lite#publisher-epochs).
+- **Epochs** identify publisher instances with a canonical UUIDv7 carried on each route (`Route::epoch`): the newest wins a path, and only routes with the same epoch resume a subscription. A resolved `broadcast::Consumer` names the epoch it came through in `info().epoch`; see [publisher epochs](/concept/moq-lite#publisher-epochs).
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
 - **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale, or none for an untimed track whose frames carry no timestamp. Subscribers set their own priority and max delay and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.

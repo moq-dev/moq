@@ -260,6 +260,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	return {
 		decoder,
 		enabled,
+		catalog,
 		submitted,
 		outputs,
 		get resets() {
@@ -296,6 +297,24 @@ it("promoting from no active track holds its picture and timestamp until a frame
 		expect(playback.decoder.out.frame.peek()).toBe(held);
 		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
 		expect((held as unknown as Picture).closed).toBe(false);
+	} finally {
+		playback.close();
+	}
+});
+
+it("clears the picture once no rendition is selectable", async () => {
+	const playback = await guardedPlayback("legacy", [sample(10, 1000)]);
+	try {
+		const held = playback.decoder.out.frame.peek();
+		expect(held).toBeDefined();
+
+		const video = playback.catalog.peek().video?.renditions.video;
+		if (!video) throw new Error("missing rendition");
+		playback.catalog.set({ video: { renditions: { video: { ...video, enabled: false } } } });
+		await microtasks();
+		expect(playback.decoder.out.frame.peek()).toBeUndefined();
+		expect(playback.decoder.out.timestamp.peek()).toBeUndefined();
+		expect((held as unknown as Picture).closed).toBe(true);
 	} finally {
 		playback.close();
 	}

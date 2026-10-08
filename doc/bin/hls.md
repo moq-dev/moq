@@ -59,12 +59,30 @@ from the replayed timelines alone, and a segment GETs only its rendition's
 stored objects, so switching renditions never downloads both. An
 inline-parameter-set codec with no catalog `description` is the exception:
 the first playlist render GETs one keyframe group to build the init segment,
-then caches it. Out-of-band configs need no media GET. When the catalog's
-`archive` entry names a `store` and no `replay` path, its spans are durable on
-this broadcast, so the playlists list the whole retained timeline and only the
-recording's own retention trims them; DASH `timeShiftBufferDepth` is the listed
-span. The playlist ends with `EXT-X-ENDLIST` only once the reader's caller
+then caches it. Out-of-band configs need no media GET. A recording's playlists
+list the same capped window as a live broadcast. A library embedder can set
+`export::Config::history` to list past it instead: when the catalog's `archive`
+entry names a `store` and no `replay` path, its spans are durable on this
+broadcast, so only the recording's own retention trims the playlists and DASH
+`timeShiftBufferDepth` is the listed span. The listing starts at the records
+the timeline restates when the exporter joins (at most 256 from a `moq-mux`
+publisher). The playlist ends with `EXT-X-ENDLIST` only once the reader's caller
 declares the recording finished; the store holds no completion marker.
+
+A viewer joining a days-old broadcast costs what the window lists, not the
+broadcast's age: the exporter reads only the records its timeline restates on
+join, never the whole history. The window lists at most 256
+segments however short they are, so every edge shows the same
+`EXT-X-MEDIA-SEQUENCE`. Below that cap the window never evicts its newest
+segment that starts on a video sync point, so a GOP longer than `--window`
+stretches the window to that one GOP rather than leave nothing a player can
+start at. A rendition with no media for a span lists that span as
+a duration-preserving `EXT-X-GAP` and goes on listing after it. The master
+playlist advertises a video rendition only once a listed segment starts at a
+group start that is a sync point, so an early master may list audio alone, and
+answers 404 while no rendition can start. Once advertised, a rendition stays in
+the master for the rest of the publisher run, even if a GOP longer than 256
+records evicts its sync segment.
 
 The init URL carries a hash of its bytes, so a reconfigured rendition gets a
 new one. An embedder of the library can also label the publisher's run with
@@ -72,7 +90,7 @@ new one. An embedder of the library can also label the publisher's run with
 (`seg/{generation}.{reference}.{segment}.m4s`), since a restarted publisher reuses segment
 numbers for different media.
 
-`--window` sets the live playlist duration (default 16 s) and caps segment
+`--window` sets the playlist duration (default 16 s) and caps segment
 `Cache-Control: max-age` for every broadcast,
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers.
