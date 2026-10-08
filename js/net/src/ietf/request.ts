@@ -105,7 +105,7 @@ export class RequestOk {
 			version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
 				? await r.u62()
 				: undefined;
-		const parameters = await Parameters.decode(r, version);
+		const parameters = await Parameters.decode(r, version, "request-ok");
 		await Properties.decode(r, version);
 		return new RequestOk({ requestId, parameters });
 	}

@@ -297,8 +297,9 @@ keyframe. The output's PCR follows the source's clock within what ISO/IEC
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for a restarted publisher instead, and marks the break in the stream
-(PCR discontinuity, PAT/PMT re-sent). Only `ts` can mark a restart, so the
-other formats refuse `--linger`.
+(PCR discontinuity, PAT/PMT re-sent). An export that fails while the broadcast
+stays up, such as on a codec TS cannot carry, exits 1 without lingering. Only
+`ts` can mark a restart, so the other formats refuse `--linger`.
 
 ## Debugging
 

@@ -330,36 +330,26 @@ impl Message for Publish<'_> {
 				})
 			}
 			_ => {
-				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
-				// peer that still sends it doesn't have its session torn down over a hint.
+				// GROUP_ORDER is legal on PUBLISH in draft-15 and again from draft-20, when
+				// the subscription parameters moved here. Draft-16 still knows the id, so one
+				// on this message is ignored. Draft-17 through draft-19 close the session.
 				//
-				// Draft-20 moved the subscription parameters into PUBLISH, so they have to
-				// parse here even though reverse publishing is unsupported: an unlisted
-				// parameter fails the whole message, which would kill the session instead of
-				// letting the request reach its NOT_SUPPORTED response.
+				// The draft-20 parameters have to parse even though reverse publishing is
+				// unsupported: an unlisted parameter fails the whole message, which would
+				// kill the session instead of letting the request reach NOT_SUPPORTED.
+				// OBJECT_DELIVERY_TIMEOUT is also legal in draft-15. The values are dropped.
 				decode_params!(r, version,
-					0x02 => object_delivery_timeout: Option<u64>,
+					0x02 => _object_delivery_timeout: Option<u64> where version == Version::Draft15 || Filter::is_draft20(version),
 					0x03 => _authorization_token: Vec<super::Opaque>,
-					0x06 => subgroup_delivery_timeout: Option<u64>,
+					0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft20(version),
 					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
 					0x10 => forward: Option<bool>,
-					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter: Option<Filter>,
-					0x22 => group_order: Option<GroupOrder>,
+					0x20 => _subscriber_priority: Option<u8> where Filter::is_draft20(version),
+					0x21 => _filter: Option<Filter> where Filter::is_draft20(version),
+					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15 || Filter::is_draft20(version),
 				);
 
-				// The values are dropped: we refuse the PUBLISH itself, so the subscription
-				// settings it proposes never take effect. They still have to be consumed.
-				let subscription_params = [
-					object_delivery_timeout.is_some(),
-					subgroup_delivery_timeout.is_some(),
-					subscriber_priority.is_some(),
-					filter.is_some(),
-				];
-				if subscription_params.contains(&true) && !Filter::is_draft20(version) {
-					return Err(DecodeError::InvalidValue);
-				}
 				let mut properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
 
@@ -416,11 +406,18 @@ impl Message for PublishOk {
 			// PUBLISH and REQUEST_UPDATE now, so a PUBLISH_OK carries none of them.
 			_ if Filter::is_draft20(version) => encode_params!(w, version,),
 			_ => {
+				// GROUP_ORDER left PUBLISH_OK in draft-19. Sending it there is a parameter
+				// on the wrong message, which closes the session.
+				let group_order = matches!(
+					version,
+					Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
+				)
+				.then_some(self.group_order);
 				encode_params!(w, version,
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
-					0x22 => self.group_order,
+					0x22 => group_order,
 				);
 			}
 		}
@@ -454,13 +451,20 @@ impl Message for PublishOk {
 				})
 			}
 			_ => {
-				// EXPIRES is ignored, as in SUBSCRIBE_OK.
+				// EXPIRES is ignored, as in SUBSCRIBE_OK. Delivery timeouts and
+				// NEW_GROUP_REQUEST are legal on the drafts that list them and dropped:
+				// nothing here acts on a publisher's timeout. Draft-20 moved the
+				// subscription parameters off PUBLISH_OK, and draft-19 already dropped
+				// GROUP_ORDER.
 				decode_params!(r, version,
+					0x02 => _delivery_timeout: Option<u64> where !Filter::is_draft20(version),
+					0x06 => _subgroup_delivery_timeout: Option<u64> where matches!(version, Version::Draft18 | Version::Draft19),
 					0x08 => _expires: Option<u64>,
-					0x10 => forward: Option<bool>,
-					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter: Option<Filter>,
-					0x22 => group_order: Option<GroupOrder>,
+					0x10 => forward: Option<bool> where !Filter::is_draft20(version),
+					0x20 => subscriber_priority: Option<u8> where !Filter::is_draft20(version),
+					0x21 => filter: Option<Filter> where !Filter::is_draft20(version),
+					0x22 => group_order: Option<GroupOrder> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18),
+					0x32 => _new_group_request: Option<u64> where matches!(version, Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19),
 				);
 
 				let forward = forward.unwrap_or(true);
@@ -696,6 +700,58 @@ mod tests {
 		assert_eq!(decoded.request_id, None);
 		assert!(decoded.forward);
 		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	fn publish_with_param(version: Version, key: u64, value: u64) -> Vec<u8> {
+		let mut buf = Vec::new();
+		let w = &mut Encoder::new(&mut buf, version.into());
+		RequestId(1).encode(w, version).unwrap();
+		if version == Version::Draft17 {
+			w.varint(0).unwrap();
+		}
+		encode_namespace(w, &Path::new("t")).unwrap();
+		w.string("v").unwrap();
+		w.varint(1).unwrap();
+		w.varint(1).unwrap();
+		w.varint(key).unwrap();
+		w.varint(value).unwrap();
+		buf
+	}
+
+	fn publish_ok_with_param(version: Version, key: u64, value: u64) -> Vec<u8> {
+		let mut buf = Vec::new();
+		let w = &mut Encoder::new(&mut buf, version.into());
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+			RequestId(1).encode(w, version).unwrap();
+		}
+		w.varint(1).unwrap();
+		w.varint(key).unwrap();
+		w.varint(value).unwrap();
+		buf
+	}
+
+	/// SUBSCRIBER_PRIORITY is known in draft-16 but not defined for PUBLISH until draft-20.
+	/// OBJECT_DELIVERY_TIMEOUT is legal on PUBLISH again from draft-20.
+	#[test]
+	fn publish_parameters_follow_the_draft() {
+		decode_message::<Publish>(&publish_with_param(Version::Draft16, 0x20, 1), Version::Draft16)
+			.expect("draft-16 ignores SUBSCRIBER_PRIORITY");
+		assert!(decode_message::<Publish>(&publish_with_param(Version::Draft18, 0x20, 1), Version::Draft18).is_err());
+		decode_message::<Publish>(&publish_with_param(Version::Draft20, 0x02, 1), Version::Draft20)
+			.expect("draft-20 accepts OBJECT_DELIVERY_TIMEOUT");
+	}
+
+	/// PUBLISH_OK carries the delivery timeout through draft-19, and NEW_GROUP_REQUEST from
+	/// draft-16 through draft-19. Draft-20 no longer carries FORWARD.
+	#[test]
+	fn publish_ok_parameters_follow_the_draft() {
+		decode_message::<PublishOk>(&publish_ok_with_param(Version::Draft19, 0x02, 1), Version::Draft19)
+			.expect("draft-19 accepts DELIVERY_TIMEOUT");
+		decode_message::<PublishOk>(&publish_ok_with_param(Version::Draft16, 0x32, 1), Version::Draft16)
+			.expect("draft-16 accepts NEW_GROUP_REQUEST");
+		assert!(
+			decode_message::<PublishOk>(&publish_ok_with_param(Version::Draft20, 0x10, 0), Version::Draft20).is_err()
+		);
 	}
 
 	#[test]
