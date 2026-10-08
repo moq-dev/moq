@@ -159,8 +159,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 
 		const update = await announced.next();
 		expect(update?.kind).toBe("update");
-		expect(update?.route.cost.warm).toBe(DRAIN);
-		expect(update?.route.cost.cold).toBe(DRAIN);
+		expect(update?.route.cost).toBe(DRAIN);
 		// Still the only route, so the subscription already open keeps its front.
 		expect(request.active.peek()).toBe(front);
 
@@ -181,7 +180,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		// A new announce-interest opens too, and sees the route at the drain cost.
 		const interest = client.announced();
 		const drained = await interest.next();
-		expect(drained?.route.cost.warm).toBe(DRAIN);
+		expect(drained?.route.cost).toBe(DRAIN);
 		interest.close();
 
 		expect(pair.client.sendStreams.bidi.length).toBeGreaterThan(opened);
@@ -254,7 +253,8 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 			close() {},
 		};
 
-		const subscriber = new Subscriber({ session, goaway });
+		// A soliciting peer, so draft-14 still asks it for the empty namespace.
+		const subscriber = new Subscriber({ session, goaway, solicit: true });
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 		await track.closed;
 		expect(opened).toBe(true);

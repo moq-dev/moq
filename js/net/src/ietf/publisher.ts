@@ -57,17 +57,17 @@ function clusterFor(base: Cluster.Advert | undefined, route: Route): Cluster.Adv
 	const self = base.hops.at(-1);
 	if (self === undefined) return undefined;
 	const hops = route.hops.at(-1) === self ? [...route.hops] : [...route.hops, self];
-	return { hops, cost: route.cost.warm };
+	return { hops, cost: route.cost };
 }
 
 /**
  * What it takes to move the peer from `held` to `next`.
  *
- * - `"same"`: the peer would decode the same advertisement. The cold cost, and the whole
- *   route without Cluster, never reach the wire, so a change there sends nothing.
+ * - `"same"`: the peer would decode the same advertisement. The route without Cluster
+ *   never reaches the wire, so a change there sends nothing.
  * - `"restart"`: nothing is held, nothing is wanted, or a different broadcast, which is
  *   withdrawn and advertised again.
- * - Otherwise the same broadcast at a new hop chain or warm cost: the cluster parameters
+ * - Otherwise the same broadcast at a new hop chain or static cost: the cluster parameters
  *   the peer holds and the ones it should, for the target to update.
  */
 function change(

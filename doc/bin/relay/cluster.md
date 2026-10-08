@@ -16,6 +16,12 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
 on moq-transport 17+.
 
+moq-transport drafts 14 and 15 cannot ask for every broadcast, since an empty
+namespace prefix is illegal before draft 16. On such a link to a peer without
+the MoQ Solicit extension, such as moxygen, the relay does not ask for the
+whole namespace and learns only what the peer announces unasked. moxygen
+announces nothing unasked on draft 14, so that link discovers no broadcasts.
+
 When a moq-lite-04 or later peer withdraws its last advertisement for a broadcast, a relay
 drops every other route to it that passed through that peer, since each was
 relayed from what the peer just withdrew, rather than falling back to them one
@@ -190,12 +196,9 @@ a standby transcoder pool seeds a high cost and drops it once it's working, and
 a relay receiving a GOAWAY re-prices every route learned from that peer to the
 maximum so new subscriptions go elsewhere while existing ones finish.
 
-moq-lite-06 announcements carry two prices, *warm* and *cold*. Both accumulate
-identically today, so routing runs on link costs alone; the split reserves room
-for a warm-copy discount, letting a relay advertise its cached copy cheaper on
-the warm side while the cold price still says who sits closest to the publisher.
-moq-transport has nowhere to carry the cold price, so a route learned from it
-ranks with an unknown (worst-case) one.
+Routes carry one static price: the publisher's production cost plus the configured link costs. A live publisher seeds 0; a standby uses a higher price than any live route it competes with. Caching does not change the route price.
+
+moq-lite-07-wip carries that one cost. For lite-06 compatibility, the relay reads Warm as the cost, ignores Cold, and writes Cold at the saturation ceiling. A protocol without a route cost adds only the local link price.
 
 ## LAN discovery
 
@@ -248,6 +251,14 @@ changed URLs redialed. A bad fetch keeps the last good list.
 connect_api = "https://api.example.com/cluster/peers"
 node = "https://us-west.example.com/"
 ```
+
+HTTPS peer-list fetches present the same client certificate as cluster dials,
+but authenticate the API with system roots and the hostname in its URL.
+Mesh roots, fingerprints, insecure mode, and the mesh hostname override do not
+apply to the API. For a private API, set `cluster.connect_api_tls_root` to PEM
+paths (or repeat `--cluster-connect-api-tls-root`); these replace system trust
+for API fetches only. Malformed roots fail startup, and files reload for new
+connections when rotated.
 
 ## Identity
 
