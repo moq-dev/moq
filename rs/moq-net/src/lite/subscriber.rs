@@ -38,8 +38,8 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
-	/// Set once the peer sends a GOAWAY; new request streams are then rejected
-	/// with [`Error::GoingAway`] (the peer told us to stop asking).
+	/// Set once the peer sends a GOAWAY; this session's routes then cost
+	/// [`crate::origin::Cost::DRAIN`], so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 }
 
@@ -136,15 +136,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// The recorded session end, or [`Error::Dropped`] when nothing recorded one.
 	fn end_reason(&self) -> Error {
 		self.ended.lock().clone().unwrap_or(Error::Dropped)
-	}
-
-	/// Reject a new request once the peer has sent a GOAWAY: it told us to stop
-	/// opening streams on this session (existing subscriptions keep flowing).
-	fn check_going_away(&self) -> Result<(), Error> {
-		if self.going_away.is_set() {
-			return Err(Error::GoingAway);
-		}
-		Ok(())
 	}
 
 	/// What pulling content across this session's link costs, added to the route cost
@@ -478,11 +469,13 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		if let Ok(mut tail) = entry.tail.write() {
 			tail.account(dg.sequence..dg.sequence.saturating_add(1), self.runtime.now());
 		}
-		// A datagram says where the live feed is as well as a group does.
-		if !entry.producer.is_live() {
+		// A datagram says where the live feed is as well as a group does. Inserted first, so
+		// the copy goes live with it already showing.
+		let live = entry.producer.is_live();
+		entry.producer.insert_datagram(dg.sequence, timestamp, dg.payload)?;
+		if !live {
 			entry.producer.set_live(Some(Position::group(dg.sequence)));
 		}
-		entry.producer.insert_datagram(dg.sequence, timestamp, dg.payload)?;
 		Ok(())
 	}
 
@@ -796,6 +789,8 @@ enum GroupRecvState {
 		group: crate::recv::Group,
 		track: track::Producer,
 		ingest: FrameIngest,
+		/// Whether readers see the group yet; see [`track::Producer::receive_group`].
+		shown: bool,
 		_reading: Reading,
 	},
 	Done,
@@ -823,19 +818,21 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// The subscription's end waits until this stream is read.
 						let reading = Reading::open(&entry.tail, Some(hdr.sequence), self.subscriber.runtime.now());
 
+						let group_info = group::Info { sequence: hdr.sequence };
+						// Stats (groups/frames/bytes) are counted in the model as the group
+						// is written, through the tagged `track::Producer`. Withheld from
+						// readers until its first frame lands.
+						let received = entry.producer.receive_group(group_info);
 						// A route's first group says where its live feed is, when its answer did
 						// not: even one the cache already holds, as an idle copy asked from its
-						// head gets back.
+						// head gets back. The copy goes live once the cache shows that group.
 						if !entry.producer.is_live() {
 							entry.producer.set_live(Some(Position {
 								group: hdr.sequence,
 								frame: hdr.frame_start,
 							}));
 						}
-						let group_info = group::Info { sequence: hdr.sequence };
-						// Stats (groups/frames/bytes) are counted in the model as the group
-						// is written, through the tagged `track::Producer`.
-						let mut group = match entry.producer.create_group(group_info) {
+						let mut group = match received {
 							Ok(group) => group,
 							// The group is at or past the end the publisher declared, which no
 							// later stream can repair. Before lite-05 only a local finish sets
@@ -869,11 +866,16 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						group: crate::recv::Group::new(group),
 						track,
 						ingest: FrameIngest::new(&self.subscriber, timescale),
+						shown: false,
 						_reading: reading,
 					};
 				}
 				GroupRecvState::Serve {
-					group, track, ingest, ..
+					group,
+					track,
+					ingest,
+					shown,
+					..
 				} => {
 					// The track or group dying cancels the stream; the peer's own close
 					// arrives through the ingest's reads.
@@ -884,7 +886,13 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						if let Poll::Ready(err) = group.poll_closed(waiter) {
 							break 'serve Err(err);
 						}
-						match ingest.poll(&mut self.reader, group, waiter) {
+						let res = ingest.poll(&mut self.reader, group, waiter);
+						// Shown once its first frame opens, even mid-payload.
+						if !*shown && group.is_started() {
+							track.reveal_group(group);
+							*shown = true;
+						}
+						match res {
 							Poll::Ready(res) => break 'serve res,
 							Poll::Pending => return Poll::Pending,
 						}
@@ -894,27 +902,35 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					// short drops into an already-aborted group instead of reporting a loss.
 					let GroupRecvState::Serve {
 						group,
+						track,
 						ingest: _ingest,
+						shown,
 						_reading,
-						..
 					} = std::mem::replace(&mut self.state, GroupRecvState::Done)
 					else {
 						unreachable!()
 					};
-					match res {
+					// A group that ended without a frame shows once it settles.
+					let handle = (!shown).then(|| (*group).clone());
+					let res = match res {
 						Ok(()) => {
 							let _ = group.finish();
+							Ok(())
 						}
 						Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 							let _ = group.abort(err);
+							Ok(())
 						}
 						Err(err) => {
 							tracing::debug!(%err, group = %group.sequence, "group error");
 							let _ = group.abort(err.clone());
-							return Poll::Ready(Err(err));
+							Err(err)
 						}
+					};
+					if let Some(handle) = handle {
+						track.reveal_group(&handle);
 					}
-					return Poll::Ready(Ok(()));
+					return Poll::Ready(res);
 				}
 				GroupRecvState::Done => return Poll::Ready(Ok(())),
 			}
@@ -1170,8 +1186,8 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 		loop {
 			match &mut self.state {
 				ProbeState::Open => {
-					// After a GOAWAY the peer must not see new streams. Probe is
-					// best-effort; skip it rather than erroring.
+					// Probe is best-effort telemetry; a session that is going away
+					// has no use for a new estimate, so skip it rather than erroring.
 					if self.subscriber.going_away.is_set() {
 						return Poll::Ready(Ok(()));
 					}
@@ -1262,8 +1278,6 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 		loop {
 			match &mut self.state {
 				PrefixState::Open => {
-					// A peer that sent GOAWAY told us to stop opening streams on this session.
-					self.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(
 						&mut self.subscriber.session,
 						self.subscriber.version,
@@ -3849,8 +3863,6 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 		loop {
 			match &mut self.state {
 				EstablishState::Open => {
-					// A peer that sent GOAWAY told us to stop opening streams.
-					self.serve.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,
@@ -4095,7 +4107,6 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 		loop {
 			match &mut self.state {
 				TrackInfoState::Open => {
-					serve.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(&mut self.session, serve.subscriber.version, &mut cx))?;
 					stream.writer.buffer(&lite::ControlType::Track)?;
 					stream.writer.buffer(&lite::Track {
@@ -4557,13 +4568,6 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 			match &mut self.state {
 				FetchRunState::Open { request } => {
-					// A peer that sent GOAWAY told us to stop opening streams on this session.
-					if self.serve.subscriber.going_away.is_set() {
-						request.take().expect("request pending").reject(Error::GoingAway);
-						self.state = FetchRunState::Done;
-						return Poll::Ready(());
-					}
-
 					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,

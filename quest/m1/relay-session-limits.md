@@ -15,10 +15,10 @@ get loose limits. The relay knows
 which sessions are peers, so it picks the limit per session. Propose the flag
 and TOML names in the PR.
 
-This gates the next release (decided 2026-10-08). Past a cap the session
-closes with TOO_MANY_REQUESTS, so until cluster peers get higher caps (or
-none), a link carrying more than 10,000 subscriptions closes and flaps on
-reconnect.
+Past a cap the session closes with TOO_MANY_REQUESTS, so until cluster peers
+get higher caps (or none), a link carrying more than 10,000 subscriptions
+closes and flaps on reconnect. This does not gate a release (decided
+2026-10-08).
 
 Add the error kind to `rs/moq-ffi` and every wrapper per the Cross-Package
 Sync table.

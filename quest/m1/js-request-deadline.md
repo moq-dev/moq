@@ -71,4 +71,3 @@ Public API: one new error. Wire: none.
 
 - [Rust request credit](/quest/m1/rs-request-credit.md) - the same rule in moq-net
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - the WebSocket fallback stops queueing over-limit creates
-- [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - adds a check at every open site this touches
