@@ -212,27 +212,8 @@ impl Import {
 			// A pre-keyframe delta has no group to anchor it: the producer returns
 			// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
 			self.track.write(frame)?;
-			let demand = self.track.demand().is_used();
-			self.catalog.on_frame(&mut self.track, demand)?;
 		}
 		Ok(())
-	}
-
-	/// Re-evaluate stall from source silence.
-	pub fn tick(&mut self) -> crate::Result<()> {
-		let demand = self.track.demand().is_used();
-		self.catalog.tick(&mut self.track, demand)
-	}
-
-	/// The source is gone; this rendition is never stalled while idle.
-	pub fn idle(&mut self) -> crate::Result<()> {
-		self.catalog.idle(&mut self.track)
-	}
-
-	/// Record the encode duration before publishing its frames so the catalog can report a stall.
-	pub fn observe_lag(&mut self, lag: std::time::Duration) -> crate::Result<()> {
-		let demand = self.track.demand().is_used();
-		self.catalog.observe_lag(&mut self.track, demand, lag)
 	}
 
 	/// Publish split frames, resolving the config from the first keyframe's inline

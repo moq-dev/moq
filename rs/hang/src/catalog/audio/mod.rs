@@ -103,6 +103,14 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
+	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
+	/// must not select it. Only written when false.
+	#[serde(
+		default = "crate::catalog::enabled_default",
+		skip_serializing_if = "crate::catalog::enabled_skip"
+	)]
+	pub enabled: bool,
+
 	// Some codecs include a description so the decoder can be initialized without extra data.
 	// If not provided, there may be in-band metadata (marginally higher overhead).
 	#[serde(default)]
@@ -157,6 +165,7 @@ impl AudioConfig {
 			sample_rate,
 			channel_count,
 			bitrate: None,
+			enabled: true,
 			description: None,
 			container: Container::default(),
 			jitter: None,
@@ -178,5 +187,17 @@ mod test {
 		assert_eq!(encoded["label"], "English");
 		let decoded: AudioConfig = serde_json::from_value(encoded).expect("failed to decode");
 		assert_eq!(decoded.label.as_deref(), Some("English"));
+	}
+
+	#[test]
+	fn enabled_is_written_only_when_false() {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		assert!(serde_json::to_value(&config).unwrap().get("enabled").is_none());
+
+		config.enabled = false;
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert_eq!(encoded["enabled"], false);
+		let decoded: AudioConfig = serde_json::from_value(encoded).expect("failed to decode");
+		assert!(!decoded.enabled);
 	}
 }

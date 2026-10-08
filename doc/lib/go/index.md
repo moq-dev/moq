@@ -62,7 +62,8 @@ for event, err := range announced.All(ctx) {
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 broadcast, _ := client.CreateBroadcast("my-stream.hang")
 audio, _ := broadcast.PublishAudio(moq.AudioFormatOpus, opusInit)
-_ = audio.WriteFrame(moq.Frame{Payload: packet, TimestampUs: 20_000})
+pts := uint64(20_000)
+_ = audio.WriteFrame(moq.Frame{Payload: packet, TimestampUs: &pts})
 
 track := "camera"
 video, _ := broadcast.EncodeVideo(
@@ -180,5 +181,7 @@ available, which is not the same as zero.
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+A raw `Frame` or `Datagram` has a nil `TimestampUs` when it was read from an untimed track; see [untimed tracks](/concept/moq-lite#subscriptions). A raw track you publish is always timed.
 
 `session.Shutdown(ctx)` drains finished tracks and returns a delivery error if the one-second deadline expires. Cancelling the context aborts immediately. `client.Close()` waits for shutdown and returns the same error; `session.Cancel(code)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

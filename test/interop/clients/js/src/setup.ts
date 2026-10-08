@@ -69,6 +69,8 @@ if (role === "publish") {
 			fixture?.close();
 			fixture = new Fixture(host, url, broadcast, fault);
 		},
+		disableVideo: () => fixture?.setVideo(false),
+		enableVideo: () => fixture?.setVideo(true),
 	});
 } else if (role === "subscribe") {
 	await customElements.whenDefined("moq-watch");
