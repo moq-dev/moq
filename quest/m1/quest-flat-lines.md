@@ -57,8 +57,7 @@ Remaining:
 
 - Land each line's umbrella PR with `/quest-complete`, then delete its branch:
   #4403 wildcard, #4034 archive, #4039 auth, #4079 cpp, #4519 ffi-shape,
-  #4080 obs-moq-video, #4133 qos (held until
-  [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed), #4437 rs2ts,
+  #4080 obs-moq-video, #4133 qos, #4437 rs2ts,
   #4653 test-flakes-2, #4180 transport-upgrade, #4640 tstd. #4162
   (audio-jitter-target) landed, and #4438 folded into rs2ts.
 - Fold #4255 (archive/track-timeline) into the archive branch before #4034

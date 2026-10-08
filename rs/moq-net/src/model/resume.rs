@@ -486,7 +486,9 @@ impl Reader {
 				copy.until = Some(self.newest.max(copy.track.latest()));
 				copy.update(&self.mirrored);
 				// A replaced route's copy may live on; what it produces from now on never
-				// reaches this reader, so it stops weighing lag.
+				// reaches this reader, so it stops weighing lag. Frames still written into a
+				// group the reader holds from it go unweighed too: an approximation that
+				// keeps per-group accounting off the frame path.
 				if let Sub::Ready(sub) = &mut copy.sub {
 					sub.unwatch(&copy.frontier);
 				}
@@ -1286,6 +1288,60 @@ mod test {
 	fn lag_weighs_the_serving_copy() {
 		let registry = stats::Registry::new(stats::Config::new());
 		let session = registry.tier(stats::Tier::default()).session("root");
+		let lag = || {
+			let mut report = stats::Report::default();
+			registry.report(&mut report);
+			report.traffic[0].publisher.lag
+		};
+		let write = |track: &track::Producer, sequence: u64, payload: &[u8]| {
+			let mut group = track.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(sequence * 500), payload).unwrap();
+			group.finish().unwrap();
+		};
+		let drain = |sub: &mut track::Subscriber| while sub.recv_group().now_or_never().is_some() {};
+
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.with_stats(session.egress("demo"))
+			.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		// Polling resolves the copy's subscription, which names its track to the frontier.
+		drain(&mut sub);
+		write(&a, 0, b"a0");
+		assert_eq!(lag().total(), 2);
+
+		// Produced before the switch but not sampled yet: still this reader's media.
+		write(&a, 1, b"a1");
+		let b = copy();
+		routes.serve(b.consume());
+		// Retire A before B has a frame. Those bytes are recorded now, at A's edge
+		// (500ms behind the frame the subscription opened on), not dropped and not
+		// held for B's lag.
+		drain(&mut sub);
+		let pending = lag();
+		assert_eq!(pending.total(), 4);
+		assert_eq!(pending.buckets()[4], 2);
+
+		write(&b, 2, b"b2");
+		assert_eq!(lag().total(), 6);
+
+		// The replaced route keeps publishing: not this reader's media.
+		write(&a, 3, b"a3");
+		assert_eq!(lag().total(), 6);
+	}
+
+	/// A copy replaced before it produces is unwatched at the switch, so what
+	/// that track writes afterwards does not move the histogram.
+	#[test]
+	fn lag_ignores_a_track_replaced_before_its_first_frame() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
 		let weight = || {
 			let mut report = stats::Report::default();
 			registry.report(&mut report);
@@ -1309,22 +1365,113 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		// Polling resolves the copy's subscription, which names its track to the frontier.
 		drain(&mut sub);
-		write(&a, 0, b"a0");
-		assert_eq!(weight(), 2);
 
-		// Produced before the switch but not sampled yet: still this reader's media.
-		write(&a, 1, b"a1");
 		let b = copy();
 		routes.serve(b.consume());
 		drain(&mut sub);
-		write(&b, 2, b"b2");
+		write(&a, 0, b"retired-later");
+		assert_eq!(weight(), 0);
+
+		write(&b, 1, b"live");
+		assert_eq!(weight(), 4);
+	}
+
+	/// A replaced copy stops counting at the switch, even while a group read from it is
+	/// still out: frames written into that group afterwards go unweighed, as do its
+	/// later groups. What it produced before the switch still counts, at its edge.
+	#[test]
+	fn lag_stops_weighing_a_replaced_copy_at_the_switch() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
+		let lag = || {
+			let mut report = stats::Report::default();
+			registry.report(&mut report);
+			report.traffic[0].publisher.lag
+		};
+		let write = |track: &track::Producer, sequence: u64, payload: &[u8]| {
+			let mut group = track.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(sequence * 500), payload).unwrap();
+			group.finish().unwrap();
+		};
+		let drain = |sub: &mut track::Subscriber| while sub.recv_group().now_or_never().is_some() {};
+
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.with_stats(session.egress("demo"))
+			.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		drain(&mut sub);
+		let mut a0 = a.create_group(group::Info { sequence: 0 }).unwrap();
+		a0.write_frame(ts(0), b"aa").unwrap();
+		let held = recv(&mut sub);
+		assert_eq!(lag().total(), 2);
+
+		// Written before the switch but not sampled yet: recorded at A's edge, 300ms in.
+		a0.write_frame(ts(300), b"bb").unwrap();
+		routes.serve(copy().consume());
+		assert!(sub.recv_group().now_or_never().is_none());
+		let switched = lag();
+		assert_eq!(switched.total(), 4);
+		assert_eq!(switched.buckets()[3], 2);
+
+		a0.write_frame(ts(400), b"cccc").unwrap();
+		write(&a, 1, b"dddddd");
+		assert_eq!(lag().total(), 4);
+		drop(held);
+	}
+
+	/// A route that comes back while a group from its old copy is still out is weighed
+	/// again, and dropping the old copy does not silence it.
+	#[test]
+	fn lag_weighs_a_route_that_comes_back() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
+		let weight = || {
+			let mut report = stats::Report::default();
+			registry.report(&mut report);
+			report.traffic[0].publisher.lag.total()
+		};
+		let write = |track: &track::Producer, sequence: u64, payload: &[u8]| {
+			let mut group = track.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(sequence * 500), payload).unwrap();
+			group.finish().unwrap();
+		};
+		let drain = |sub: &mut track::Subscriber| while sub.recv_group().now_or_never().is_some() {};
+
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.with_stats(session.egress("demo"))
+			.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		drain(&mut sub);
+		write(&a, 0, b"aa");
+		let held = recv(&mut sub);
+		assert_eq!(weight(), 2);
+
+		routes.serve(copy().consume());
+		drain(&mut sub);
+		routes.serve(a.consume());
+		drain(&mut sub);
+		write(&a, 1, b"bbbb");
 		assert_eq!(weight(), 6);
 
-		// The replaced route keeps publishing: not this reader's media.
-		write(&a, 3, b"a3");
-		assert_eq!(weight(), 6);
+		drop(held);
+		drain(&mut sub);
+		write(&a, 2, b"cccccc");
+		assert_eq!(weight(), 12);
 	}
 
 	#[test]

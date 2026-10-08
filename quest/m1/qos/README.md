@@ -44,9 +44,6 @@ on `main`.
 
 ## Required
 
-- [Lag across a splice](/quest/m1/qos/lag-splice.md) - a route switch
-  neither loses pending lag weight nor keeps weighing a segment replaced
-  before its first frame; the line does not land until it is fixed
 - [Lag dashboard](/quest/m1/qos/lag-dashboard.md) - the demo stats
   dashboard shows viewer lag percentiles and dropped media
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - per
