@@ -118,3 +118,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [moq-transport request codes](/quest/m2/ietf-request-codes.md) - Range Filters (INVALID_FILTER), reserved namespaces, and RENDEZVOUS_TIMEOUT get the draft's answer, or a recorded fallback code, and the deliberate deviations are documented
 - [Leftover worklet types](/quest/m2/worklet-leftovers.md) - `@moq/hang` drops its unused `@types/audioworklet` dependency, and moq-boy stops including the shared worklet declaration
 - [Native enabled](/quest/m2/native-enabled.md) - native players and the ffi/C paths never select a disabled rendition
+- [JS audio ranking](/quest/m2/js-audio-ranked.md) - @moq/hang and HLS rank audio renditions like Rust
+- [ts::Export catalog stream](/quest/m2/ts-export-catalog.md) - TS export takes (source, catalog) like the other exporters
+- [C backend copy](/quest/m2/c-backend-copy.md) - one payload copy out of the C backend, benchmarked
+- [Load-balancer refusals](/quest/m2/listener-lb-refusals.md) - refuse ignored or conflicting QUIC load-balancer settings
