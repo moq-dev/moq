@@ -13,9 +13,9 @@ Found (2026-10-01) in #4647: a group FETCH with no
 prior SUBSCRIBE_OK now reads its max age from FETCH_OK, but our publisher
 sends an empty block.
 
-- `rs/moq-net/src/ietf/publisher.rs` sends FETCH_OK with
-  `properties: Default::default()`. SUBSCRIBE_OK fills them in the block near
-  `publisher.rs:655`. Share that code so the two can't diverge.
+- `run_fetch_stream` (`rs/moq-net/src/ietf/publisher.rs`) sends FETCH_OK
+  with `properties: Default::default()`. `run_subscribe_stream` fills them in
+  its `ietf::SubscribeOk` encode. Share that code so the two can't diverge.
 - Our group-fetch accept path reads only the max age from FETCH_OK and
   hardcodes a microsecond timescale. Apply the same properties SUBSCRIBE_OK
   does (timescale, priority, group order) there too.
@@ -43,13 +43,15 @@ sends an empty block.
   carry, a standalone FETCH's objects arrive stamped, and
   INCLUDE_PROPERTIES = 0 empties the block.
 
+Decided 2026-10-08: [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md)
+lands first, since both change how a fetch-only reader learns the track's
+properties.
+
 Public API: none. Wire: FETCH_OK gains its properties on drafts that define
 the block. Interop: run `just test interop --all`.
 
 ## Required
 
+- [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - lands first ([#4974](https://github.com/moq-dev/moq/pull/4974)); it asks TRACK_STATUS for the same properties when a publisher omits them
 - [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - draft-20 FETCH is served at all, and edits the same `run_fetch_stream`
 
-## Related
-
-- [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - asks TRACK_STATUS for the same properties when a publisher omits them

@@ -90,6 +90,9 @@ One route cost lands on its own (`--hop` was replaced by `--epoch` in #4969). De
 path plus its [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs) is
 a source's identity, whoever serves it.
 Anything specific to moq.pro's deployment is planned in moq.pro.
+Decided 2026-10-08: [Link quality](/quest/m1/cluster-routing/link-quality.md)
+is Related, not Required, and moves to m2; measured cost is opt-in and the
+line ships on static costs.
 
 ### Simulator findings
 
@@ -134,10 +137,10 @@ Once every child has landed:
 - [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md) - an endpoint holds sessions to several CDNs, uses its preferred one, and fails over to the next
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - moq.pro's simulator compares the route layer with path vector before the wire is written
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - ROUTE per origin node and path-less ANNOUNCE on one stream, loop-free by Babel feasibility
-- [Link quality](/quest/m1/cluster-routing/link-quality.md) - a radio link's cost follows its measured quality without flapping routes
 
 ## Related
 
+- [Link quality](/quest/m1/cluster-routing/link-quality.md) - a radio link's cost follows its measured quality without flapping routes; not a blocker, since static costs are the default
 - [P2P](/quest/m3/p2p/README.md) - browser and native peers that become routing nodes over this layer
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static cost
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch

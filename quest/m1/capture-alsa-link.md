@@ -27,7 +27,17 @@ comments that call libasound a build-time link.
 Verify by building in the Nix shell, then running the shipped binary on a
 host without libasound: it starts, lists devices, and captures where a
 backend exists. Inspect the binary to prove no load-time requirement on
-libasound. The PR 3850 capture gate keeps the coverage.
+libasound. The PR 3850 capture gate keeps the coverage until the last step.
+
+Last step, folded in from the deleted capture-default quest (decided
+2026-10-08): once libasound loads at runtime, turn `capture` on by default in
+moq-video and moq-audio, keeping the flag so a minimal build can opt out, and
+delete the separate capture gate (`just rs capture`, `just rs capture-test`,
+and the capture branches in `sh/rs/select.sh`) since default `just check` then
+covers it. Keep the platform jobs. Update the Cargo feature comments and
+`doc/` wherever capture is described as opt-in. Verify that a
+`default-features = false` consumer (for example
+`cargo tree -p moq-ffi -e features`) pulls no capture dependency.
 
 ## Required
 

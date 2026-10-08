@@ -27,3 +27,8 @@ Decided (2026-10-04), carried over from the export track-set work:
 Today a returning Annex-B rendition is compared by its avcC/hvcC, SPS bytes
 included; with in-band parameter sets the comparison covers only the
 catalog-derived record, so an encoder that restarts with a new SPS can return.
+
+## Related
+
+- [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - #4826 edits the same fMP4 code; whichever lands second rebases, with no forced order
+- [Finish in-band CMAF parameter sets](/quest/m1/cmaf-inline-followups.md) - the readers that must handle the avc3/hev1 tracks this writes

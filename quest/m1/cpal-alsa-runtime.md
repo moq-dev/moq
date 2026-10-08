@@ -19,6 +19,12 @@ diwic/alsa-sys if the loading lives there). Posting there needs maintainer
 approval, which is pending: on 2026-10-06 the maintainer chose not to post
 yet. Once the release is out, delete this quest.
 
+Decided 2026-10-08: the capture chain (this quest,
+[capture-alsa-link](/quest/m1/capture-alsa-link.md), and
+[Ship capture and playback](/quest/m1/cli-packaging.md)) moves to m2 and parks
+until cpal ships runtime ALSA loading. Nothing is posted upstream and no fork
+is taken meanwhile.
+
 ## Plan
 
 State as of 2026-10-05: cpal 0.18.2 (pinned here) and cpal master (0.19.0)

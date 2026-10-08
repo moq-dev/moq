@@ -8,7 +8,9 @@ waiting out the linger (`rs/moq-cli/src/subscribe.rs`).
 
 ## Plan
 
-Reported by t0ms while grading #4645, who offered to do the CLI side.
+Reported by t0ms while grading #4645, who offered to do the CLI side. In
+progress as [#4947](https://github.com/moq-dev/moq/pull/4947) on a non-quest
+branch (`cli/linger-export-failure`).
 
 The error alone can't tell the cases apart: a publisher drop or SIGKILL
 usually surfaces as a track `Err` too, and that must keep lingering (see the
@@ -26,4 +28,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [#4645 report](https://github.com/moq-dev/moq/pull/4645#issuecomment-6013366214) - the motivating `missed a decode deadline` failure exists only on #4645's branch
+- [#4645 report](https://github.com/moq-dev/moq/pull/4645#issuecomment-6013366214) - the motivating `missed a decode deadline` failure

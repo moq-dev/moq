@@ -51,9 +51,8 @@ libpipewire-0.3 to load, the same load-time requirement
 Decided in the 2026-09-30 audit: the v4l2 encode quest folded in here, since
 its remaining work was one release feature flag and a doc note.
 
-Decided in the 2026-10-06 audit: this does not wait on
-[Capture by default](/quest/m1/capture-default.md). moq-cli's `capture`
-feature enables `moq-video/capture` and `moq-audio/capture` explicitly, so
+Decided in the 2026-10-06 audit: this does not wait on the library
+`capture` defaults. moq-cli's `capture` feature enables `moq-video/capture` and `moq-audio/capture` explicitly, so
 making it default-on does not depend on the library defaults.
 
 ## Required

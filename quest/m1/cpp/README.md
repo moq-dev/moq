@@ -44,9 +44,9 @@ on a future under `__cpp_impl_coroutine`, `std::expected` under
 Distribution is a release tarball with a CMake package config and pkg-config
 file (mirroring `moq-c.yml`), so consumers never need a Rust toolchain or the
 bindgen fork. Decided in the 2026-09-30 audit: this line promises the tarball
-only. A [vcpkg registry](/quest/m2/cpp-vcpkg.md) (m2) and a
-[Conan remote](/quest/m3/cpp-conan.md) (m3) fetch the same tarball later and
-stay deferred.
+only. A [vcpkg registry](/quest/m2/cpp-vcpkg.md) and a
+[Conan remote](/quest/m3/cpp-conan.md) fetch the same tarball later and stay
+deferred.
 
 Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 
