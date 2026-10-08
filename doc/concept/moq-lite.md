@@ -92,7 +92,7 @@ flapping moq-lite 07 link cuts viewers that resolved through the older link.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
 RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
-passing the same `moq --epoch`. See [Clustering](/bin/relay/cluster) for how a
+passing the same `moq --epoch`, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
 relay uses this.
 
 ### Hidden broadcasts
