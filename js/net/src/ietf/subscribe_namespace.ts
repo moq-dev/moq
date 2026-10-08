@@ -69,7 +69,7 @@ export class SubscribeNamespace {
 		}
 		const requestId = await r.u62();
 		const namespace = await Namespace.decode(r);
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "subscribe-namespace");
 
 		return new SubscribeNamespace({ namespace, requestId, hidden: params.hidden });
 	}
@@ -166,7 +166,7 @@ export class SubscribeNamespaceLegacy {
 			if (raw > BigInt(SubscribeOptions.BOTH)) throw new ProtocolViolation(`invalid Subscribe Options: ${raw}`);
 			subscribeOptions = Number(raw) as SubscribeOptions;
 		}
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "subscribe-namespace");
 
 		return new SubscribeNamespaceLegacy({ namespace, requestId, subscribeOptions, hidden: params.hidden });
 	}
@@ -318,7 +318,7 @@ export class SubscribeNamespaceEntry {
 		const suffix = await Namespace.decode(r);
 		if (!negotiated) return new SubscribeNamespaceEntry({ suffix });
 
-		return new SubscribeNamespaceEntry({ suffix, cluster: await Cluster.decodeParams(r, version) });
+		return new SubscribeNamespaceEntry({ suffix, cluster: await Cluster.decodeParams(r, version, "namespace") });
 	}
 }
 

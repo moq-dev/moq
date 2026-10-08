@@ -415,6 +415,43 @@ impl Param for Opaque {
 	}
 }
 
+/// Message parameter ids defined in draft-16. Sorted for `binary_search`.
+///
+/// A known id on a message that does not list it is ignored. An id outside this set
+/// is unknown and closes the session.
+const DRAFT16_MESSAGE_PARAMS: &[u64] = &[0x02, 0x03, 0x08, 0x09, 0x10, 0x20, 0x21, 0x22, 0x32];
+
+fn skip_kvp(r: &mut Decoder<'_>, key: u64) -> Result<(), DecodeError> {
+	if key.is_multiple_of(2) {
+		r.varint()?;
+	} else {
+		let value = r.bytes()?;
+		if value.len() > MAX_KVP_VALUE_LEN {
+			return Err(DecodeError::BoundsExceeded);
+		}
+	}
+	Ok(())
+}
+
+/// Consumes a parameter the message does not list, when that draft says to ignore it.
+///
+/// Draft-14 and draft-15 ignore an unrecognized parameter, including one defined for a
+/// different message. Draft-16 ignores a known parameter on the wrong message and closes
+/// on an unknown id. From draft-17 on both close the session, and a parameter value has
+/// no length to skip by, so this returns false and the caller fails the message.
+pub(crate) fn skip_unlisted(r: &mut Decoder<'_>, version: Version, key: u64) -> Result<bool, DecodeError> {
+	let ignore = match version {
+		Version::Draft14 | Version::Draft15 => true,
+		Version::Draft16 => DRAFT16_MESSAGE_PARAMS.binary_search(&key).is_ok(),
+		_ => false,
+	};
+	if !ignore {
+		return Ok(false);
+	}
+	skip_kvp(r, key)?;
+	Ok(true)
+}
+
 /// Encode message parameters with compile-time sorted keys.
 ///
 /// Keys must be listed in ascending order (enforced at compile time).
@@ -472,7 +509,10 @@ macro_rules! encode_params {
 /// optional parameters (defaults to `None` when absent) and bare types like `u8`
 /// for parameters where `T::default()` is an acceptable fallback.
 ///
-/// Unknown parameters cause `DecodeError::InvalidValue`.
+/// A `where` gate takes the key off the list on versions where the expression is false.
+/// What remains unlisted is ignored on draft-14 and draft-15, ignored on draft-16 when
+/// the id is a message parameter of that draft used on the wrong message, and a
+/// `DecodeError::InvalidValue` otherwise (unknown id, or any unlisted id from draft-17 on).
 /// Duplicate parameters cause `DecodeError::Duplicate`, unless the type allows a repeat
 /// (see [`Param::param_repeat`]), such as `Vec<T>`.
 ///
@@ -485,7 +525,7 @@ macro_rules! encode_params {
 /// let subscriber_priority = subscriber_priority.unwrap_or(128);
 /// ```
 macro_rules! decode_params {
-	($r:expr, $version:expr, $($key:expr => $name:ident: $ty:ty),* $(,)?) => {
+	($r:expr, $version:expr, $($key:expr => $name:ident: $ty:ty $(where $gate:expr)?),* $(,)?) => {
 		#[allow(unused)]
 		const _: () = {
 			let _keys: &[u64] = &[$($key),*];
@@ -519,8 +559,10 @@ macro_rules! decode_params {
 
 				// An if-chain rather than a `match`, so a key can be a named constant:
 				// the macro captures it as an expression, which is not a legal pattern.
+				// A false `where` gate falls through, so the draft's ignore-or-close rule applies
+				// instead of validating a value the message is not allowed to carry.
 				$(
-					if _key == $key {
+					if _key == $key $( && ($gate) )? {
 						let _value = <$ty as $crate::ietf::Param>::param_decode($r, _version)?;
 						$name = Some(match $name.take() {
 							None => _value,
@@ -529,6 +571,9 @@ macro_rules! decode_params {
 						continue;
 					}
 				)*
+				if $crate::ietf::parameters::skip_unlisted($r, _version, _key)? {
+					continue;
+				}
 				return Err($crate::coding::DecodeError::InvalidValue);
 			}
 		}
@@ -1053,7 +1098,8 @@ mod tests {
 
 	#[test]
 	fn test_param_unknown_rejected() {
-		// Manually encode one param at key 0x10, try to decode expecting key 0x20
+		// 0x3E is not a message parameter in any of these drafts. Draft-14 and draft-15
+		// ignore it. Draft-16 on closes the session.
 		for version in [
 			Version::Draft14,
 			Version::Draft15,
@@ -1064,19 +1110,54 @@ mod tests {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, version.into());
 			w.varint(1).unwrap();
-			w.varint(0x10u64).unwrap();
-			true.param_encode(&mut w, version).unwrap();
+			w.varint(0x3Eu64).unwrap();
+			1u64.param_encode(&mut w, version).unwrap();
 
 			let mut bytes = Decoder::new(&buf, version.into());
-			let result: Result<(), DecodeError> = (|| {
+			let result: Result<Option<u8>, DecodeError> = (|| {
 				decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
-				let _ = val;
-				Ok(())
+				Ok(val)
 			})();
-			assert!(
-				matches!(result, Err(DecodeError::InvalidValue)),
-				"expected InvalidValue for unknown param in {version}"
-			);
+			match version {
+				Version::Draft14 | Version::Draft15 => {
+					assert_eq!(result.unwrap(), None, "{version} ignores an unrecognized parameter");
+					assert!(bytes.is_empty(), "{version}");
+				}
+				_ => assert!(
+					matches!(result, Err(DecodeError::InvalidValue)),
+					"expected InvalidValue for unknown param in {version}"
+				),
+			}
+		}
+	}
+
+	/// EXPIRES (0x08) is a draft-16 message parameter, but not for a message whose list is
+	/// only SUBSCRIBER_PRIORITY. Draft-16 ignores it and still reads the parameter after it.
+	/// Draft-18 closes the session on the same bytes.
+	#[test]
+	fn known_param_on_the_wrong_message() {
+		for version in [Version::Draft16, Version::Draft18] {
+			let mut buf = Vec::new();
+			let mut w = Encoder::new(&mut buf, version.into());
+			w.varint(2).unwrap();
+			w.varint(0x08u64).unwrap();
+			5u64.param_encode(&mut w, version).unwrap();
+			w.varint(0x18u64).unwrap(); // delta from 0x08 to 0x20
+			7u8.param_encode(&mut w, version).unwrap();
+
+			let mut bytes = Decoder::new(&buf, version.into());
+			let result: Result<Option<u8>, DecodeError> = (|| {
+				decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
+				Ok(val)
+			})();
+			match version {
+				Version::Draft16 => {
+					assert_eq!(result.unwrap(), Some(7));
+					assert!(bytes.is_empty());
+				}
+				Version::Draft18 => assert!(matches!(result, Err(DecodeError::InvalidValue))),
+				_ => unreachable!(),
+			}
 		}
 	}
 

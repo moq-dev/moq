@@ -54,10 +54,8 @@ a published `@moq/watch` break.
 
 - [Held group wakes](/quest/m0/held-group-wakes.md) - a group held across a route switch is woken when its successor's first timestamp or abort makes it stale, not at the next unrelated append
 - [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - moqt-22 LOCATION_FILTER carries its type instead of a Length in Rust and JS, so a draft-22 peer reads our Next Object correctly
-- [moq-transport parameters per draft](/quest/m0/ietf-params-per-draft.md) - every control message accepts exactly the parameters its draft allows, so moqx's draft-16 SUBSCRIBE_NAMESPACE with FORWARD stops failing
 - [End of Track Location](/quest/m0/ietf-end-of-track-location.md) - a relay forwards END_OF_TRACK at its upstream's Location, on the last group's stream, instead of re-sending it at the next group's object 0
 - [End of Group status](/quest/m0/ietf-end-of-group-status.md) - an End of Group status on a stream whose header already marks the group's end is accepted, so imquic's last object per group arrives
-- [Subgroup at object 0](/quest/m0/ietf-first-object-zero.md) - a draft-18 subgroup with FIRST_OBJECT clear that starts at object 0 is read whole
 - [Prefix route fronts](/quest/m0/prefix-route-fronts.md) - a prefix route cannot be made to mint one front per requested path
 - [TRACK stream demand](/quest/m0/track-stream-demand.md) - a lite-05+ subscribe shows the publisher one `used` edge, not a flap between TRACK and SUBSCRIBE
 - [Idle fronts](/quest/m0/idle-fronts.md) - a front nobody has read for the linger ends with its per-path state, so a standing claim stops accumulating fronts and sources

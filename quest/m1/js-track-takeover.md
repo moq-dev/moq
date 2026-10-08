@@ -24,7 +24,3 @@ takeover, explicit sequence advancement, replacement continuity, and bounded
 name admission. Update the JS net docs for the behavior change.
 
 Public API: behavior change in `@moq/net` only. Wire: none.
-
-## Required
-
-- [Dynamic track identity](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - #4929 provides coalesced requests and the shared sequence namespace

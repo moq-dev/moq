@@ -118,6 +118,11 @@ export class TrackAliases<T> {
 		}
 	}
 
+	/** The alias's binding right now, without waiting for one. */
+	peek(alias: bigint): T | undefined {
+		return this.#active.get(alias)?.value;
+	}
+
 	/**
 	 * Establishes an alias and releases any data streams waiting for it.
 	 *
