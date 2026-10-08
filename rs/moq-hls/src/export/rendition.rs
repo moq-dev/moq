@@ -416,7 +416,7 @@ impl Rendition {
 		let starts = self.is(reference) && row.starts_sync();
 		let resets = self.live.push(row, window);
 		if starts {
-			self.run.lock().expect("run lock poisoned").startable = Some(resets);
+			self.latch(resets);
 		}
 		self.trim();
 	}
@@ -687,8 +687,15 @@ impl Rendition {
 			return Poll::Pending;
 		};
 		// Tagged with the scanned window, so a clear racing this store leaves it stale.
-		self.run.lock().expect("run lock poisoned").startable = Some(resets);
+		self.latch(resets);
 		Poll::Ready(())
+	}
+
+	/// Record a start listed in window `resets`. Resets only grow, so a delayed latch for an
+	/// older window never replaces a newer one.
+	fn latch(&self, resets: u64) {
+		let mut run = self.run.lock().expect("run lock poisoned");
+		run.startable = run.startable.max(Some(resets));
 	}
 
 	/// This rendition's DASH representation: its master-level metadata plus its track's
