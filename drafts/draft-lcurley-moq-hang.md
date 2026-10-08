@@ -773,7 +773,7 @@ The final record of an ended track has no successor; its `duration` runs to the 
 
 ## Derived Formats {#timeline-derived}
 Segmented formats such as HLS and DASH need one segment numbering across renditions, which per-track timelines do not provide on their own.
-An edge deriving one takes the segment boundaries from a reference rendition's records, the first video rendition by name with a timeline, or the first such audio rendition when there is none, and numbers the segments by that rendition's record `sequence`, so every edge and every reload agree.
+An edge deriving one chooses the first video rendition by name with a timeline, or the first such audio rendition when there is none, and keeps a video choice while that rendition stays in the catalog; an audio choice yields to the first video rendition with a timeline once there is one. Segment boundaries come from its records, numbered by record `sequence`.
 Another video rendition snaps each boundary to its nearest record that starts a group on a keyframe; a segment with no such record nearby has no content on that rendition (a gap; HLS `EXT-X-GAP`).
 Other renditions take the frames whose timestamps fall inside each segment's span.
 A publisher wanting such an export SHOULD start video groups at the same timestamps across renditions.
@@ -1074,6 +1074,7 @@ This document has no IANA actions.
 - One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.
 - Described deriving HLS and DASH at the edge from a reference rendition's records.
+- An edge keeps its derived-format video reference rendition while that rendition stays in the catalog; an audio reference yields once video has a timeline.
 - Added an optional `epoch` to `.info`: the source route's Epoch, compared on resume so a restarted source fails enrollment.
 
 ## moq-hang-03
