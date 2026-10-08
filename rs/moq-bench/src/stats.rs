@@ -78,10 +78,11 @@ impl Stats {
 	/// Periodically log totals plus the throughput since the previous report.
 	///
 	/// With an `output` file, each report also appends one JSON line of the
-	/// cumulative counters, timestamped so it can be joined against the host
-	/// sampler's records (see `moq-bench-host`). Returns only on a failed write:
-	/// a benchmark whose recorded stats are partial is invalid, so the caller
-	/// must fail the run rather than exit green.
+	/// cumulative counters and this interval's latency distribution, timestamped
+	/// so it can be joined against the host sampler's records (see
+	/// `moq-bench-host`). Returns only on a failed write: a benchmark whose
+	/// recorded stats are partial is invalid, so the caller must fail the run
+	/// rather than exit green.
 	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {
 		let mut ticker = tokio::time::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
@@ -91,6 +92,9 @@ impl Stats {
 		loop {
 			ticker.tick().await;
 			let now = Snapshot::take(self);
+			// Same bucket vectors as the cumulative percentiles, so the interval
+			// count cannot drift from the delta those percentiles describe.
+			let latency_interval = IntervalLatency::from_delta(&prev.latency_buckets, &now.latency_buckets);
 
 			if let Some(file) = &mut output {
 				let record = Record {
@@ -99,6 +103,7 @@ impl Stats {
 						.unwrap_or_default()
 						.as_millis(),
 					snapshot: &now,
+					interval: &latency_interval,
 				};
 				// A serialization failure is a bug, not a runtime condition.
 				let line = serde_json::to_string(&record).expect("stats must serialize");
@@ -138,6 +143,11 @@ impl Stats {
 				latency_p99_ms = ?now.latency_p99_ms,
 				latency_max_ms = ?now.latency_max_ms,
 				latency_clock_skew = now.latency_clock_skew,
+				latency_interval_samples = latency_interval.latency_interval_samples,
+				latency_interval_p50_ms = ?latency_interval.latency_interval_p50_ms,
+				latency_interval_p90_ms = ?latency_interval.latency_interval_p90_ms,
+				latency_interval_p99_ms = ?latency_interval.latency_interval_p99_ms,
+				latency_interval_max_ms = ?latency_interval.latency_interval_max_ms,
 				"stats"
 			);
 
@@ -146,15 +156,21 @@ impl Stats {
 	}
 }
 
-/// One machine-readable stats line: a timestamp plus the cumulative counters.
-/// Cumulative and monotonic like moq-stats frames: consumers diff successive
-/// lines to compute rates.
+/// One machine-readable stats line: a timestamp, the cumulative counters, and
+/// this report interval's latency distribution.
+///
+/// The counters are cumulative and monotonic like moq-stats frames: consumers
+/// diff successive lines to compute rates. The `latency_interval_*` fields
+/// already cover only this interval; do not diff them, and do not pair them
+/// with the cumulative `latency_samples`.
 #[derive(Serialize)]
 struct Record<'a> {
 	/// Wall-clock milliseconds since the Unix epoch.
 	timestamp_ms: u128,
 	#[serde(flatten)]
 	snapshot: &'a Snapshot,
+	#[serde(flatten)]
+	interval: &'a IntervalLatency,
 }
 
 #[derive(Serialize)]
@@ -179,6 +195,50 @@ struct Snapshot {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	latency_max_ms: Option<u64>,
 	latency_clock_skew: u64,
+	/// Cumulative one-millisecond bucket counts. Not part of the JSON line.
+	/// The next report subtracts these to get that interval's distribution.
+	#[serde(skip)]
+	latency_buckets: Vec<u64>,
+}
+
+/// Latency percentiles for the samples observed since the previous report.
+///
+/// Built from the bucket delta, so an earlier interval (the startup ramp)
+/// cannot move these numbers. `latency_interval_samples` is the sum of that
+/// delta and the only sample count that belongs with these percentiles.
+#[derive(Serialize)]
+struct IntervalLatency {
+	latency_interval_samples: u64,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	latency_interval_p50_ms: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	latency_interval_p90_ms: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	latency_interval_p99_ms: Option<u64>,
+	/// Highest occupied bucket in the delta. Exact below 60 seconds; 60_000
+	/// means the overflow bucket (at least 60 seconds), unlike cumulative
+	/// `latency_max_ms`, which keeps the exact maximum.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	latency_interval_max_ms: Option<u64>,
+}
+
+impl IntervalLatency {
+	fn from_delta(prev: &[u64], now: &[u64]) -> Self {
+		assert_eq!(prev.len(), now.len(), "latency snapshots must share one bucket layout");
+		let buckets: Vec<u64> = now
+			.iter()
+			.zip(prev)
+			.map(|(current, previous)| current.saturating_sub(*previous))
+			.collect();
+		let samples = buckets.iter().sum();
+		Self {
+			latency_interval_samples: samples,
+			latency_interval_p50_ms: percentile(&buckets, samples, 50),
+			latency_interval_p90_ms: percentile(&buckets, samples, 90),
+			latency_interval_p99_ms: percentile(&buckets, samples, 99),
+			latency_interval_max_ms: highest_bucket(&buckets),
+		}
+	}
 }
 
 impl Snapshot {
@@ -201,6 +261,7 @@ impl Snapshot {
 			latency_p99_ms: latency.p99_ms,
 			latency_max_ms: latency.max_ms,
 			latency_clock_skew: latency.clock_skew,
+			latency_buckets: latency.buckets,
 		}
 	}
 }
@@ -249,6 +310,7 @@ impl Latency {
 			p99_ms: percentile(&buckets, samples, 99),
 			max_ms: (samples > 0).then(|| self.max_ms.load(Ordering::Relaxed)),
 			clock_skew: self.clock_skew.load(Ordering::Relaxed),
+			buckets,
 		}
 	}
 }
@@ -260,6 +322,7 @@ struct LatencySnapshot {
 	p99_ms: Option<u64>,
 	max_ms: Option<u64>,
 	clock_skew: u64,
+	buckets: Vec<u64>,
 }
 
 fn percentile(buckets: &[u64], samples: u64, percentile: u64) -> Option<u64> {
@@ -275,6 +338,18 @@ fn percentile(buckets: &[u64], samples: u64, percentile: u64) -> Option<u64> {
 		}
 	}
 	Some((buckets.len() - 1) as u64)
+}
+
+/// Highest occupied bucket, or `None` when the slice is empty of samples.
+/// The index is the latency in milliseconds, except the last bucket, which
+/// also holds every larger value.
+fn highest_bucket(buckets: &[u64]) -> Option<u64> {
+	buckets
+		.iter()
+		.enumerate()
+		.rev()
+		.find(|(_, count)| **count > 0)
+		.map(|(value, _)| value as u64)
 }
 
 #[cfg(test)]
@@ -323,6 +398,94 @@ mod tests {
 		assert_eq!(snapshot.p99_ms, Some(99));
 		assert_eq!(snapshot.max_ms, Some(100));
 		assert_eq!(snapshot.clock_skew, 1);
+	}
+
+	/// A ramp of slow first groups must stay in the cumulative percentiles and
+	/// drop out of the next interval. The interval's own sample count is the
+	/// delta, not `latency_samples`.
+	#[test]
+	fn interval_delta_drops_the_ramp() {
+		let stats = Stats::default();
+		for _ in 0..10 {
+			stats.latency.observe(0, 500);
+		}
+		let ramp = Snapshot::take(&stats);
+		for value in 1..=100 {
+			stats.latency.observe(1_000, 1_000 + value);
+		}
+		let steady = Snapshot::take(&stats);
+		let interval = IntervalLatency::from_delta(&ramp.latency_buckets, &steady.latency_buckets);
+
+		assert_eq!(steady.latency_samples, 110);
+		assert_eq!(steady.latency_p50_ms, Some(55));
+		assert_eq!(steady.latency_p90_ms, Some(99));
+		assert_eq!(steady.latency_p99_ms, Some(500));
+		assert_eq!(steady.latency_max_ms, Some(500));
+
+		assert_eq!(interval.latency_interval_samples, 100);
+		assert_eq!(interval.latency_interval_p50_ms, Some(50));
+		assert_eq!(interval.latency_interval_p90_ms, Some(90));
+		assert_eq!(interval.latency_interval_p99_ms, Some(99));
+		assert_eq!(interval.latency_interval_max_ms, Some(100));
+
+		let record = Record {
+			timestamp_ms: 1,
+			snapshot: &steady,
+			interval: &interval,
+		};
+		let line = serde_json::to_value(&record).unwrap();
+		assert_eq!(line["latency_samples"], serde_json::json!(110));
+		assert_eq!(line["latency_interval_samples"], serde_json::json!(100));
+		assert_eq!(line["latency_p99_ms"], serde_json::json!(500));
+		assert_eq!(line["latency_interval_p99_ms"], serde_json::json!(99));
+		assert!(line.get("latency_buckets").is_none());
+	}
+
+	#[test]
+	fn quiet_interval_omits_percentiles() {
+		let stats = Stats::default();
+		stats.latency.observe(0, 4);
+		let first = Snapshot::take(&stats);
+		let again = Snapshot::take(&stats);
+		let interval = IntervalLatency::from_delta(&first.latency_buckets, &again.latency_buckets);
+		assert_eq!(interval.latency_interval_samples, 0);
+		assert_eq!(interval.latency_interval_p50_ms, None);
+		assert_eq!(interval.latency_interval_max_ms, None);
+
+		let record = Record {
+			timestamp_ms: 1,
+			snapshot: &again,
+			interval: &interval,
+		};
+		let line = serde_json::to_value(&record).unwrap();
+		assert_eq!(line["latency_samples"], serde_json::json!(1));
+		assert_eq!(line["latency_interval_samples"], serde_json::json!(0));
+		assert!(line.get("latency_interval_p50_ms").is_none());
+		assert!(line.get("latency_interval_p99_ms").is_none());
+		assert!(line.get("latency_interval_max_ms").is_none());
+		assert_eq!(line["latency_p50_ms"], serde_json::json!(4));
+	}
+
+	/// The overflow bucket is one value for interval max. Cumulative max still
+	/// keeps the exact sample, including one past 60 seconds.
+	#[test]
+	fn interval_max_saturates_at_the_overflow_bucket() {
+		let latency = Latency::default();
+		latency.observe(0, 70_000);
+		let slow = latency.snapshot();
+		let zeros = vec![0; slow.buckets.len()];
+		let interval = IntervalLatency::from_delta(&zeros, &slow.buckets);
+		assert_eq!(slow.max_ms, Some(70_000));
+		assert_eq!(interval.latency_interval_max_ms, Some(60_000));
+		assert_eq!(interval.latency_interval_p99_ms, Some(60_000));
+
+		latency.observe(0, 2);
+		let next = latency.snapshot();
+		let interval = IntervalLatency::from_delta(&slow.buckets, &next.buckets);
+		assert_eq!(next.max_ms, Some(70_000));
+		assert_eq!(interval.latency_interval_samples, 1);
+		assert_eq!(interval.latency_interval_max_ms, Some(2));
+		assert_eq!(interval.latency_interval_p50_ms, Some(2));
 	}
 
 	#[test]
