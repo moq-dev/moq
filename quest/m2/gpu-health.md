@@ -24,8 +24,8 @@ first-class, so an NVML-shaped API would be rewritten once they land.
 moq.pro's transcode admission and its benchmarks assume NVML today; they
 adopt this instead.
 
-Decided 2026-10-05: one device identity everywhere, the render node's
-`dev_t`, shared with [VA-API import](/quest/m2/vaapi-vulkan-import.md).
+Decided 2026-10-05: one device identity wherever a render node exists, the
+render node's `dev_t`, shared with [VA-API import](/quest/m2/vaapi-vulkan-import.md).
 NVIDIA's device UUID maps to its node through `VK_EXT_physical_device_drm`.
 The external GPU surface (#4975) carries that identity as
 `frame::vulkan::Device { device_uuid, driver_uuid, render_node: Option<u64> }`.

@@ -43,7 +43,7 @@ delivered and clean. The ordering race itself stays in the unit tests.
 
 ## Required
 
-- [Serve budget](/quest/m0/serve-budget.md) - fixes the stall that fails #4225's go lanes
+- [Serve budget](/quest/m0/serve-budget.md) - is meant to fix the stall that fails #4225's go lanes; rerun them once it lands
 
 ## Related
 

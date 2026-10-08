@@ -9,9 +9,9 @@ the formula installs nothing without an error. The published tap formula
 (0.4.12) matches the template.
 
 The Nix `moq-gst` package (`moq-gst` in `nix/overlay.nix`) also carries the
-encoders and decoders a moq-gst pipeline needs: `x264enc`
-(gst-plugins-ugly), and `avenc_aac` and `avdec_h264` (gst-libav), on its
-plugin path beside base, good, and bad. moq.pro's
+encoders and decoders a moq-gst pipeline needs. Its plugin path has core,
+base, good, and bad today; add gst-plugins-ugly (`x264enc`) and gst-libav
+(`avenc_aac`, `avdec_h264`). moq.pro's
 [gst-install-upstream](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/gst-install-upstream.md)
 waits on this, so its install can drop its own GStreamer setup.
 

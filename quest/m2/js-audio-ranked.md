@@ -4,8 +4,8 @@
 
 `@moq/hang` orders audio renditions the way Rust `hang::catalog::Audio::ranked`
 (#4993) does: enabled first, then highest bitrate, sample rate, and channels,
-unknown bitrate last, ties in name order. JS video `ranked` puts enabled
-renditions first too, as Rust's does. The Rust HLS exporter
+unknown bitrate last, ties in name order. JS video `ranked` gains the same
+enabled-first rule Rust's has (today it ranks by area, bitrate, and name). The Rust HLS exporter
 (`rs/moq-hls/src/export/renditions.rs`) lists audio renditions by
 `Audio::ranked` instead of by name.
 

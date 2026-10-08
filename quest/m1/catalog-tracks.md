@@ -11,7 +11,8 @@ resolution changes in band below them, and the codec string advertises the
 level the ceiling needs. A change to identity, or past a ceiling, publishes a
 new rendition name or a new broadcast epoch instead of mutating the track.
 Live state (`enabled`, the jitter and delay figures, `warmup`) changes freely
-under the same name.
+under the same name, as do the broadcast-level display properties
+(`display`, `rotation`, `flip`), which describe presentation, not decoding.
 
 ## Plan
 
@@ -25,9 +26,12 @@ Goal, and moved to m1 ahead of the archive line, since a replayed catalog
 relies on it. Reasons:
 
 - Resolution must change without a new name: VP8, VP9, and AV1 keyframes
-  carry their size, and H.264/H.265 carry it in in-band parameter sets, which
-  means no `description` (avc3/hev1). A track with a `description` changes
-  resolution only by minting a new identity.
+  carry their size, and H.264/H.265 carry it in in-band parameter sets
+  (avc3/hev1). A `description` holding parameter sets pins the resolution, so
+  that track changes it only by minting a new identity. CMAF keeps its
+  exception (`doc/concept/hang.md`): an avc3/hev1 CMAF track keeps a
+  configuration record with no parameter sets as its `description` for the
+  NAL length size, which is framing, not resolution.
 - Ceilings let a decoder be configured once for the largest picture, so a
   smaller one never needs a catalog update.
 - A change to codec or description, or past a ceiling, mints a new rendition

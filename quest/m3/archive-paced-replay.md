@@ -14,8 +14,11 @@ who joins late joins mid-replay.
   media groups on FETCH through `broadcast::Dynamic`, so a subscriber sees none.
   [Replay catalog](/quest/m1/archive/replay-catalog.md) adds the recorded
   catalog live too.
-- The catalog stays at its live edge, unpaced, as replay catalog publishes
-  it; pacing covers the media tracks only.
+- Decided 2026-10-08: the catalog paces on the same clock as the media, each
+  recorded catalog group emitted at its recorded time, so a viewer sees the
+  state that applied then. Left at its final live edge, a recording that ends
+  muted (`enabled: false`) or removes a rendition hides the earlier video,
+  since watch filters disabled renditions before subscribing. Test both.
 - One clock per import, not per subscriber. It starts at the earliest recorded
   timestamp across the selected tracks and every track paces against it, so
   tracks stay in sync and every viewer sees the same moment.

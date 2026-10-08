@@ -27,7 +27,8 @@ surface with the QUIC values rather than adding its own.
   `Limits` carrying the three values, implemented by the moq-tokio and
   moq-uring adapters over `moq-quic` after the fork switch; every other
   backend, the browser included, reports it unsupported.
-- The peer table gains the same three window fields plus `max_streams`,
+- The peer table gains the same three values (the stream limit and the two
+  windows),
   defaulting to an order of magnitude above the client defaults. `moq-relay`
   applies it once a session is classified as a cluster peer, on the io_uring
   workers too.
@@ -40,8 +41,6 @@ viewer session does not; the io_uring path applies the same values; a
 
 ## Required
 
+- [Relay session limits](/quest/m1/relay-session-limits.md) - introduces the peer classification and config table this extends
 - [Hard fork](/quest/m1/quic/fork/README.md) - moq-tokio and moq-uring run on `moq-quic`, whose setters this calls
 
-## Related
-
-- [Relay session limits](/quest/m1/relay-session-limits.md) - introduces the peer classification and config table this extends

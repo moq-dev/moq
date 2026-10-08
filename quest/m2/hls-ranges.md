@@ -23,14 +23,19 @@ Open, to settle in the PR with a recommendation:
   playlist URL in the timeline's media time, so one exporter serves any
   number of clips and an edge cache keys on the URL.
 - Which edges a range snaps to. Recommended: the segments that overlap it,
-  so a clip never starts mid-GOP.
+  with the start widened back to the preceding sync point (or refused when
+  none is held), since a long GOP spans several segments. Test over the
+  existing split-GOP fixture in `rs/moq-hls/src/export/mod.rs`.
 - What a range over a timeline that is not durable, or outside what the
   store holds, returns. Refuse it with a clear HTTP error rather than list a
   partial range.
 
 A range that ends in the future grows like an event playlist until its end
-passes. Every edge must list the same segments for the same range, which
-the live window alone guarantees today.
+passes. Every edge must list the same segments and `EXT-X-MEDIA-SEQUENCE` for the
+same range, regardless of when it joined. `Config::history` starts at the
+records restated when an exporter joins, so this relies on
+[replay history](/quest/m1/archive/replay-history.md); test two edges that
+join at different times.
 
 Tests: a recording longer than the default window, clipped at its start, in
 its middle, and across the live edge; a range on a live-only timeline is

@@ -112,7 +112,9 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   same format it reads.
 
 Decided 2026-10-08: if prefix tracks and self counters hold up the rest,
-split them into a follow-up quest and land totals and sessions first. The
+split them into a follow-up quest and land totals and sessions first; the
+per-root requested track stays in the first release, since session outcomes
+rides it and `sessions.json` retires with it. The
 per-path map retirement moves with prefix tracks and self counters into that
 follow-up: the maps are the only per-path source until prefix tracks exist,
 and moq.pro's Broadcasts page reads prefix tracks the moment the maps retire,
