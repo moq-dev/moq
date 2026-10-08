@@ -27,7 +27,7 @@ variant additively instead of breaking `gop` a second time. Go gets no uniffi
 default, so its zero value must read as keyframe mode.
 
 The audio and video frame and decoder-output records carry microsecond fields
-(`timestamp_us`, `max_age_us`, `frame_duration_us`); in Python and Go they
+(`timestamp_us`, `max_delay_us`, `frame_duration_us`); in Python and Go they
 should become owned `timedelta` / `time.Duration` records like net's.
 
 Public API: breaking in every binding. Wire: none.

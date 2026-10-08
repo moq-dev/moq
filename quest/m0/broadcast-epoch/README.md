@@ -96,3 +96,4 @@ then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
+- [Dynamic epoch update](/quest/m0/broadcast-epoch/dynamic-epoch.md) - an epoch change through `Dynamic::update` announces a `Restart` downstream, so subscribers drop the old copy and resubscribe, while the origin keeps serving

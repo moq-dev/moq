@@ -11,7 +11,10 @@ relay, the language bindings) keep building without it.
 ## Plan
 
 Decided in planning (09-29), after capture-control (#4545) found that
-pre-merge `just check` never runs moq-video's `capture` tests:
+pre-merge `just check` never ran moq-video's `capture` tests. `sh/rs/select.sh`
+now runs `just rs capture-test` when moq-video or moq-audio changes, so this
+is gate cleanup, not a coverage fix (reframed 2026-10-07): one default build
+replaces the special branch.
 
 - **Default-on, keep the flag.** Removing the flag was rejected: consumers
   that don't want device stacks would pay for them.

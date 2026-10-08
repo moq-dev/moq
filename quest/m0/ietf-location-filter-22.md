@@ -28,6 +28,10 @@ Decided 2026-10-06:
 
 Where:
 
+- Rust: `rs/moq-net/src/ietf/version.rs`'s
+  `draft21_and_draft22_match_draft20_on_the_wire` pins draft-22 to draft-20's
+  bytes and calls draft-22 editorial; narrow it to draft-21 (or exclude
+  LOCATION_FILTER) and fix the comment.
 - Rust: `rs/moq-net/src/ietf/filter.rs`, `Param for Filter` and the
   FILL_PARAMETERS scope in `Param for Fill`. Every 0x21 use goes through
   `Param for Filter`.
