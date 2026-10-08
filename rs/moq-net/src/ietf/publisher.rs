@@ -1524,11 +1524,22 @@ where
 		let draft20 = Filter::is_draft20(self.version);
 		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
 		// Draft-20 caps the response at Largest Object, and refuses a start past it (section
-		// 10.13). We do both only at the track's last object: a relay without a live feed
-		// cannot know Largest Object, and a cap anywhere else would refuse a valid range. The
-		// read waits out an unfinished group, so echoing the requested end over a finished
+		// 10.13). The cache knows it at the track's end, or while it reflects a live feed. A
+		// relay's copy with no upstream subscription does not, so it neither caps nor refuses:
+		// the read waits out an unfinished group, so echoing the requested end over a finished
 		// one only says objects it never held do not exist.
-		if draft20 && group.frames.is_empty() && end_of_track {
+		let largest = match end_of_track {
+			true => Some(group.end().checked_sub(1).map(|object| Location {
+				group: group.sequence,
+				object,
+			})),
+			false if !joined && track.is_live() => Some(live_edge(&track).largest),
+			false => None,
+		};
+		let past_largest = largest.is_some_and(|largest| {
+			largest.is_none_or(|largest| (start.group, start.object) > (largest.group, largest.object))
+		});
+		if draft20 && past_largest {
 			return self
 				.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "start past Largest Object")
 				.await;
@@ -1566,18 +1577,25 @@ where
 				false => (end, false),
 			}
 		};
-		// Draft-20's End Location is inclusive: the requested end, capped at the track's last
-		// object (section 10.14). Objects missing before it do not exist. A whole-group request
-		// has no End Object to report, so it covers what the finished group holds, and at least
+		// Draft-20's End Location is inclusive: the requested end, capped at Largest Object
+		// (section 10.14). Objects missing before it do not exist. A whole-group request has
+		// no End Object to report, so it covers what the finished group holds, and at least
 		// the start an empty answer covered.
 		let end_location = match draft20 {
-			true => Location {
-				group: group.sequence,
-				object: match (until, end_of_track) {
-					(Some(until), false) => until - 1,
-					_ => group.end().saturating_sub(1).max(start.object),
-				},
-			},
+			true => {
+				let requested = match until {
+					Some(until) => until - 1,
+					None => group.end().saturating_sub(1).max(start.object),
+				};
+				let object = match largest.flatten() {
+					Some(largest) if largest.group == group.sequence => requested.min(largest.object),
+					_ => requested,
+				};
+				Location {
+					group: group.sequence,
+					object,
+				}
+			}
 			false => end_location,
 		};
 
@@ -5190,18 +5208,41 @@ mod serve_tests {
 		}
 	}
 
-	/// On draft 20, a start past the track's last object is refused INVALID_RANGE (section
-	/// 10.13). The same range on a group that does not end the track is answered empty: only
-	/// the track's end is a Largest Object a relay without a live feed can know.
+	/// How much a draft-20 publisher knows of Largest Object.
+	#[derive(Clone, Copy, Debug)]
+	enum Largest {
+		/// The track is finished: its last object.
+		Finished,
+		/// A live feed: the newest object, here behind a newer group with no objects yet.
+		Live,
+		/// A relay's copy with no upstream subscription: unknown.
+		Idle,
+	}
+
+	/// Groups 0 to 4 of two objects each, with Largest Object known as `largest` says.
+	fn publish_largest(h: &mut Serve, largest: Largest) -> Option<group::Producer> {
+		publish_pairs(h, 5, None);
+		match largest {
+			Largest::Finished => {
+				h.track.finish().unwrap();
+				None
+			}
+			Largest::Live => Some(h.track.create_group(group::Info { sequence: 5 }).unwrap()),
+			Largest::Idle => {
+				h.track.set_idle();
+				None
+			}
+		}
+	}
+
+	/// On draft 20, a start past Largest Object is refused INVALID_RANGE (section 10.13),
+	/// wherever the publisher knows it. A relay's idle copy does not, and answers empty.
 	#[moq_net_sim::test]
-	async fn a_draft20_fetch_past_the_track_end_is_refused() {
+	async fn a_draft20_fetch_past_the_largest_object_is_refused() {
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
-			for finished in [true, false] {
+			for largest in [Largest::Finished, Largest::Live, Largest::Idle] {
 				let mut h = serve(version);
-				publish_pairs(&mut h, 5, None);
-				if finished {
-					h.track.finish().unwrap();
-				}
+				let _newer = publish_largest(&mut h, largest);
 				settle().await;
 
 				let buf = standalone_fetch(
@@ -5211,31 +5252,36 @@ mod serve_tests {
 					GroupOrder::Ascending,
 				)
 				.await;
-				match finished {
-					true => assert_eq!(fetch_refusal(buf, version), invalid_range(version), "{version}"),
-					false => {
+				match largest {
+					Largest::Idle => {
 						let (ok, objects) = fetch_answer(buf, version);
 						assert_eq!(ok.end_location, Location { group: 4, object: 5 }, "{version}");
 						assert_eq!(objects, Vec::new(), "{version}");
 					}
+					_ => assert_eq!(
+						fetch_refusal(buf, version),
+						invalid_range(version),
+						"{version} {largest:?}"
+					),
 				}
 			}
 		}
 	}
 
 	/// On draft 20, an End Object past a finished group's last object is still the End
-	/// Location reported (section 10.14), unless the group ends the track, which caps it. A
-	/// newer group with no objects yet does not make the older one hold Largest Object.
+	/// Location reported (section 10.14), unless the group holds Largest Object, which caps
+	/// it. A relay's idle copy does not know Largest Object, so it echoes the request.
 	#[moq_net_sim::test]
 	async fn a_draft20_fetch_past_a_group_end_reports_the_requested_end() {
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
-			for (group, finished, reported) in [(2, false, 7), (4, false, 7), (4, true, 1)] {
+			for (group, largest, reported) in [
+				(2, Largest::Live, 7),
+				(4, Largest::Live, 1),
+				(4, Largest::Finished, 1),
+				(4, Largest::Idle, 7),
+			] {
 				let mut h = serve(version);
-				publish_pairs(&mut h, 5, None);
-				match finished {
-					true => h.track.finish().unwrap(),
-					false => drop(h.track.create_group(group::Info { sequence: 5 }).unwrap()),
-				}
+				let _newer = publish_largest(&mut h, largest);
 				settle().await;
 
 				let buf = standalone_fetch(
@@ -5246,8 +5292,12 @@ mod serve_tests {
 				)
 				.await;
 				let (ok, objects) = fetch_answer(buf, version);
-				assert_eq!(ok.end_location, Location { group, object: reported }, "{version} group {group}");
-				assert_eq!(ok.end_of_track, finished, "{version}");
+				assert_eq!(
+					ok.end_location,
+					Location { group, object: reported },
+					"{version} group {group} {largest:?}"
+				);
+				assert_eq!(ok.end_of_track, matches!(largest, Largest::Finished), "{version}");
 				assert_eq!(objects, pairs([group]), "{version}");
 			}
 		}

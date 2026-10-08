@@ -3680,6 +3680,18 @@ where
 			end.object = object;
 		}
 
+		// From draft-20 an empty answer still covers its start, so an End Location before it
+		// is malformed and closes the session (section 10.14), before it can mark the track's end.
+		if draft20 && (end.group, end.object) <= (sequence, start) {
+			let err = Error::ProtocolViolation;
+			tracing::warn!(group = sequence, ?end, "FETCH_OK's End Location is before its start");
+			self.session
+				.clone()
+				.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
+			request.reject(err);
+			return;
+		}
+
 		// The publisher knows where the track ends, which a range FETCH downstream needs.
 		if ok.end_of_track {
 			let Some(final_sequence) = end.group.checked_add(u64::from(end.object > 0)) else {
@@ -3690,17 +3702,6 @@ where
 			request.finish_track_at(final_sequence);
 		}
 
-		// From draft-20 an empty answer still covers its start, so an End Location before it
-		// is malformed and closes the session (section 10.14).
-		if draft20 && (end.group, end.object) <= (sequence, start) {
-			let err = Error::ProtocolViolation;
-			tracing::warn!(group = sequence, ?end, "FETCH_OK's End Location is before its start");
-			self.session
-				.clone()
-				.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
-			request.reject(err);
-			return;
-		}
 		// Before draft-20, an empty answer opens no fetch stream at all.
 		if (end.group, end.object) <= (sequence, start) {
 			request.reject(Error::NotFound);
