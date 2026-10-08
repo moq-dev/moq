@@ -105,7 +105,10 @@ Three operations, on an origin:
   claim should stay advertised; `close()` retracts it. A request beneath it
   that no announced local broadcast wins is an `Origin.Request` to `accept` or `reject`;
   reject what you will not serve rather than narrowing the claim, since a
-  route is always a prefix on every wire.
+  route is always a prefix on every wire. JS apps do not proxy: `accept`
+  throws on a broadcast a session delivered, since it would go out labeled
+  with this origin's hop. Copy its tracks into a broadcast you produce and
+  accept that instead.
 
 A route is a capability, not an inventory. `origin.announced(scope)` yields
 `Announce.Event` values. `kind` is `"start"`, `"update"` (a reprice in

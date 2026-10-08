@@ -1796,6 +1796,7 @@ mod tests {
 					peer_setup_stream: None,
 					peer_declared: Some(peer::Peer::default()),
 					early_unis: Vec::new(),
+					limits: Default::default(),
 				})
 				.unwrap();
 				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
