@@ -25,7 +25,8 @@ const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 // which the subscriber drops.
 const FIRST_OBJECT_BIT = 0x40;
 
-function hasFirstObjectBit(version: IetfVersion): boolean {
+/** Whether the subgroup header carries FIRST_OBJECT: draft-18 and later, not drafts 14-17. */
+export function hasFirstObjectBit(version: IetfVersion): boolean {
 	switch (version) {
 		case Version.DRAFT_14:
 		case Version.DRAFT_15:
@@ -249,6 +250,19 @@ export class Group {
 	}
 }
 
+/**
+ * An object id that is not the next one in the group.
+ *
+ * moq-lite groups start at object 0 and never skip one, so a non-zero delta is either
+ * a subgroup that starts partway through or a hole later in the stream.
+ */
+export class ObjectIdGap extends Error {
+	constructor(delta: number) {
+		super(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);
+		this.name = "ObjectIdGap";
+	}
+}
+
 /** A moq-transport object inside a group stream. */
 export class Frame {
 	/** The object payload, or `undefined` for an end of group or end of track marker. */
@@ -319,7 +333,7 @@ export class Frame {
 		// either starts partway through or has a gap that would renumber the frames after it.
 		const delta = c.u53();
 		if (delta !== 0) {
-			throw new Error(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);
+			throw new ObjectIdGap(delta);
 		}
 
 		let timestamp: Timestamp | undefined;

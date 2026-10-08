@@ -49,9 +49,12 @@ Every track has its own timeline (`rs/moq-mux/src/timeline.rs`):
   playlists read only the timelines, and a segment GETs only its rendition's
   objects. The caller supplies the catalog.
 - A catalog `archive` entry with a `store` and no `replay` path declares its
-  spans durable on that broadcast, so the exporter lists the whole retained
-  timeline and only its pops trim it (`durable` in
-  `rs/moq-hls/src/export/mod.rs`).
+  spans durable on that broadcast. The exporter still lists a capped window
+  for it; only the explicit `export::Config::history` mode lists the whole
+  retained timeline and lets only its pops trim it (`durable` in
+  `rs/moq-hls/src/export/mod.rs`). Either way the listing starts at the
+  records the timeline restates on join (at most 256 from `moq-mux`), so a
+  longer recording does not list from its start yet.
 
 `rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`.
 `moq_archive::Writer` (`rs/moq-archive/src/writer.rs`) cuts each enrolled track
@@ -61,9 +64,12 @@ timeline's `segments/<n>`. A failed object PUT drops that record. A DVR prunes
 each timeline's oldest objects no checkpoint recovery reads. On a prefix
 that already holds a recording, it replays each retained timeline through
 `timeline::Producer::resume`, deletes objects past each track's committed tail,
-resumes after the newest record's end (partway through a split group), and a
-DVR deletes unreferenced objects and unneeded timeline objects one grace period
-after recovery.
+resumes after the newest record's end (partway through a split group). Each
+track's `.info` keeps the source route's epoch, and a resume under another
+epoch fails to enroll (`Error::EpochMismatch`); the caller starts a new
+prefix. A new group whose first timestamp precedes the recorded end fails the
+recording instead of overlapping media time. A DVR deletes unreferenced objects and unneeded timeline
+objects one grace period after recovery.
 `moq_archive::Reader` (`rs/moq-archive/src/reader/mod.rs`) replays every timeline
 onto a supplied `broadcast::Producer` and serves FETCH through `track::Dynamic`
 with a byte-bounded object LRU, stitching a group split across records and
@@ -159,14 +165,12 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md) - each timeline entry declares its segment duration (reported or estimated by the publisher), replacing the root `durationMax`
 - [JS per-track timelines](/quest/m1/archive/js-timelines.md) - `@moq/hang` publishes the same per-track timelines as Rust (it already reads them)
 - [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the reference timeline's declared duration; an overrun is listed with a warning
+- [History from the start](/quest/m1/archive/replay-history.md) - history mode lists a recording from its first segment by reading stored timeline groups, not only the restated tail
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq_archive::Reader` republishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay of `moq import archive`
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
-- [Backward timestamps](/quest/m1/archive/backward-timestamps.md) - a resumed recording refuses a restarted source instead of dropping its groups or overlapping media time
-- [HLS media sequence](/quest/m1/archive/hls-media-sequence.md) - `EXT-X-MEDIA-SEQUENCE` never decreases when the reference rendition switches
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 
 ## Related
 
-- [Bounded HLS playlists](/quest/m1/hls-bounded.md) - the live renderer rules a replayed archive inherits, planned outside this line
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
 - [e2ee](/quest/m1/e2ee/README.md) - protected broadcasts are excluded initially

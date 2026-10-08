@@ -10,6 +10,9 @@
 //! body exceeds the transport's datagram size, and sessions that can't carry datagrams at all
 //! (moq-lite before 05, or stream-only transports like WebSocket) never deliver them.
 //!
+//! A datagram is never cached or served by a fetch. Only the short per-track send buffer holds
+//! it, which a new subscription may still read.
+//!
 //! Wire counterparts: [`crate::lite::Datagram`], and on moq-transport an OBJECT_DATAGRAM at
 //! object 0 whose Group ID is the sequence ([`crate::ietf::ObjectDatagram`]).
 

@@ -160,19 +160,22 @@ export class Decoder {
 	}
 
 	#runPending(effect: Effect): void {
-		const values = effect.getAll([
-			this.in.enabled,
-			this.source.in.broadcast,
-			this.source.out.track,
-			this.#identity,
-		]);
-		if (!values) {
+		const enabled = effect.get(this.in.enabled);
+		const broadcast = effect.get(this.source.in.broadcast);
+		const track = effect.get(this.source.out.track);
+		const identity = effect.get(this.#identity);
+		if (!enabled || !broadcast || !track || !identity) {
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
 			this.#active.set(undefined);
+			// A paused or hidden player keeps its picture, but with nothing selectable (every rendition
+			// disabled or removed) it shows black rather than a frozen frame.
+			if (enabled && broadcast && !track) {
+				this.#clearCurrentFrame();
+				this.#out.buffered.set([]);
+			}
 			return;
 		}
-		const [_, broadcast, track, identity] = values;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast.

@@ -10,7 +10,7 @@ mod support;
 use std::time::Duration;
 
 use moq_net::{Hop, Timestamp, Version};
-use support::harness::{MockConnectOptions, MockPair, connect_mock};
+use support::harness::{MockConnectOptions, MockPair, connect_mock, peer};
 
 /// Maximum time any single test may run before being treated as a deadlock.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -225,4 +225,54 @@ async fn inserted_sequences_survive_the_lite_wire() {
 	})
 	.await
 	.expect("timed out");
+}
+
+/// A FETCH for a sequence the publisher sent as a datagram is refused with NOT_FETCHABLE on
+/// moq-lite-07, and with the NOT_FOUND an earlier version has for it. A relay carries the
+/// answer across in the downstream version's terms. The moq-transport side (DOES_NOT_EXIST)
+/// is covered by the IETF publisher's own tests.
+#[moq_net_sim::test]
+async fn a_fetched_datagram_is_refused_per_version() {
+	const NOT_FETCHABLE: &str = "not fetchable";
+	const NOT_FOUND: &str = "not found";
+
+	/// Fetch a datagram's sequence over one hop per version, publisher first.
+	async fn fetch_a_datagram(versions: &[&str]) -> &'static str {
+		let nodes: Vec<_> = (1..=versions.len() as u64 + 1).map(produce_origin).collect();
+		let mut _pairs = Vec::new();
+		for (pair, version) in nodes.windows(2).zip(versions) {
+			_pairs.push(peer(version.parse().unwrap(), &pair[0], &pair[1]).await);
+		}
+
+		let broadcast = nodes[0].create_broadcast("room").unwrap();
+		let mut producer = broadcast.create_track("datagrams", None).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
+
+		let consumer = nodes.last().unwrap().consume();
+		consumer.routed("room").await.unwrap();
+		let remote = consumer.request_broadcast("room").await.unwrap();
+		let err = match remote.track("datagrams").unwrap().fetch_group(sequence, None).await {
+			Ok(_) => panic!("{versions:?}: a datagram was fetched"),
+			Err(err) => err,
+		};
+		match err {
+			moq_net::Error::Stream(moq_net::StreamError::NotFetchable) => NOT_FETCHABLE,
+			moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound) => NOT_FOUND,
+			err => panic!("{versions:?}: refused with {err:?}"),
+		}
+	}
+
+	for (versions, expected) in [
+		(&["moq-lite-05"][..], NOT_FOUND),
+		(&["moq-lite-06"], NOT_FOUND),
+		(&["moq-lite-07-wip"], NOT_FETCHABLE),
+		(&["moq-lite-07-wip", "moq-lite-07-wip"], NOT_FETCHABLE),
+		(&["moq-lite-07-wip", "moq-lite-06"], NOT_FOUND),
+	] {
+		let refused = moq_net_sim::timeout(TEST_TIMEOUT, fetch_a_datagram(versions))
+			.await
+			.unwrap_or_else(|_| panic!("{versions:?}: timed out"));
+		assert_eq!(refused, expected, "{versions:?}");
+	}
 }

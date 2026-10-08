@@ -565,10 +565,6 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// that withheld an identity is not named on the wire. A server answers it per
 	// accepted session; a client only when it knows the peer.
 	session_origin: crate::Hop,
-	// A random Hop ID of this connection's own, written as the first hop of any path
-	// that arrives naming no publisher, so a publisher that reconnects reads downstream
-	// as a new one. Fresh per connection, unlike `session_origin`.
-	stamp: crate::Hop,
 	// Our own Hop ID, which an advertisement must not already contain: one that does
 	// looped back through us.
 	self_origin: crate::Hop,
@@ -657,7 +653,6 @@ where
 			origin,
 			control,
 			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
-			stamp: crate::Hop::random(),
 			self_origin,
 			peer_setup,
 			cost,
@@ -715,11 +710,10 @@ where
 
 	/// The route for an advertisement that carries no path of its own.
 	///
-	/// Base moq-transport has no hops on the wire, so the chain is this connection's
-	/// stamp, naming the unknown publisher for as long as the connection lasts, then
-	/// the anonymous 0 that keeps it ranked below identified routes.
-	/// The session's assigned identity stays on `via` for split-horizon; putting it in
-	/// the chain would publish a name for a peer that declined to give one.
+	/// Base moq-transport has no hops on the wire, so the chain is a single 0: the
+	/// anonymous mark, forwarded unchanged. The session's assigned identity stays
+	/// on `via` for split-horizon; putting it in the chain would publish a name for
+	/// a peer that declined to give one.
 	///
 	/// The link is charged all the same. Such an advertisement carries no ROUTE_COST,
 	/// which reads as 0, but the draft charges every advertisement for the direction it
@@ -728,11 +722,13 @@ where
 	///
 	/// It is charged only one hop, though the chain it stands for may be arbitrarily
 	/// long: a peer that carries no hop ids hides its depth, so this route understates
-	/// its true length. Price such a link with [`crate::Client::with_cost`].
+	/// its true length. An anonymous route already ranks below every identified one,
+	/// so that understatement cannot beat a real path. Price such a link with
+	/// [`crate::Client::with_cost`] among other anonymous routes.
 	fn session_route(&self, peer: &cluster::Peer) -> crate::origin::Route {
 		let mut hops = crate::Hops::new();
-		hops.stamp(self.stamp)
-			.expect("an empty hop chain has room for the stamp and its 0");
+		hops.push(crate::Hop::UNKNOWN)
+			.expect("an empty hop chain has room for one entry");
 		crate::origin::Route::default()
 			.with_hops(hops)
 			.with_via(self.via(peer))
@@ -745,8 +741,8 @@ where
 	///
 	/// A negotiated peer supplies the path and cost, so the route is what the mesh
 	/// actually knows: the full chain, and the accumulated cost plus this link's price.
-	/// A path starting with 0 gets this connection's stamp in front of it; the 0s stay. An advertisement whose path already contains our own Hop ID looped back,
-	/// and neither forwarding it nor subscribing through it is safe.
+	/// A received 0 stays 0. An advertisement whose path already contains our own Hop
+	/// ID looped back, and neither forwarding it nor subscribing through it is safe.
 	fn route(&self, advert: Option<&cluster::Advert>, peer: &cluster::Peer) -> Option<Advertised> {
 		let Some(advert) = advert else {
 			return Some(Advertised {
@@ -758,11 +754,11 @@ where
 			return None;
 		}
 
-		let mut route = advert
-			.route(cluster::link_cost(self.cost, peer))
-			.with_via(self.via(peer));
-		route.hops.stamp(self.stamp).ok()?;
-		Some(Advertised { route })
+		Some(Advertised {
+			route: advert
+				.route(cluster::link_cost(self.cost, peer))
+				.with_via(self.via(peer)),
+		})
 	}
 
 	/// Bind the alias the publisher chose for this subscription.
@@ -3259,7 +3255,7 @@ where
 		let mut prior_group = None;
 		let mut first = true;
 		while let Some(object) = decode_fetch_object(stream, self.version, std::mem::take(&mut first)).await? {
-			if !object.subgroup_ok {
+			if !object.datagram && !object.subgroup_ok {
 				tracing::warn!("subgroup ID is not supported, dropping fill");
 				return Err(Error::Unsupported);
 			}
@@ -3268,6 +3264,28 @@ where
 			let group = resolve_fetch_group(self.version, prior_group, object.group)?;
 			if let Some(sequence) = group {
 				prior_group = Some(sequence);
+			}
+
+			if object.datagram {
+				// An absolute join spans whole groups, so a datagram among them is a group of
+				// its own: the head before it is complete, and the groups after it still fill.
+				// Any other fill is the one group, which a datagram cannot be. The group is the
+				// resolved one, since a later object of a datagram group inherits its Group ID.
+				let sequence = prior_group.filter(|_| matches!(joining, Some(JoiningFetch::Absolute { .. })));
+				let Some(sequence) = sequence else {
+					tracing::debug!(?group, "a datagram group is not fetchable");
+					return Err(Error::NotFetchable);
+				};
+				// A datagram inside the head's own group mixes the two, which no group can hold.
+				if head.as_ref().is_some_and(|(head, _, _)| *head == sequence) {
+					tracing::debug!(sequence, "a fetched group mixes stream and datagram objects");
+					return Err(Error::NotFetchable);
+				}
+				end_fill_group(head, largest)?;
+				// Draft-16 on, where a datagram can appear, a fetch object has no status field.
+				let mut remaining = usize::try_from(stream.varint().await?).map_err(|_| Error::FrameTooLarge)?;
+				std::future::poll_fn(|cx| stream.poll_skip(cx, &mut remaining)).await?;
+				continue;
 			}
 
 			match head.as_ref().map(|(sequence, next, _)| (*sequence, *next)) {
@@ -3718,6 +3736,10 @@ where
 				tracing::warn!(sequence, "a group fetch continued past its end marker");
 				return Err(Error::ProtocolViolation);
 			}
+			if object.datagram {
+				tracing::debug!(sequence, "a datagram group is not fetchable");
+				return Err(Error::NotFetchable);
+			}
 			if !object.subgroup_ok {
 				tracing::warn!("subgroup ID is not supported, dropping group fetch");
 				return Err(Error::Unsupported);
@@ -3776,6 +3798,9 @@ where
 struct FetchedObject {
 	group: Option<u64>,
 	object: Option<u64>,
+	/// Draft-16 on lets a fetch carry an Object published as a datagram. A datagram group is
+	/// never cached, so it is never filled from a fetch.
+	datagram: bool,
 	subgroup_ok: bool,
 	properties: Option<Vec<u8>>,
 }
@@ -3802,6 +3827,7 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 		return Ok(Some(FetchedObject {
 			group: Some(group),
 			object: Some(object),
+			datagram: false,
 			subgroup_ok: subgroup == 0,
 			properties: Some(properties),
 		}));
@@ -3831,6 +3857,7 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 			Some(FetchedObject {
 				group,
 				object,
+				datagram: subgroup == ietf::FetchSubgroup::Datagram,
 				subgroup_ok: matches!(
 					subgroup,
 					ietf::FetchSubgroup::Zero | ietf::FetchSubgroup::Prior | ietf::FetchSubgroup::Explicit(0)
@@ -3886,8 +3913,17 @@ fn advance_fill_group(
 		return Err(Error::Unsupported);
 	}
 
+	end_fill_group(head, largest)?;
+	open_fill_group(track, head, sequence)
+}
+
+/// Finish the group an absolute joining FETCH was writing, since a later group started.
+fn end_fill_group(
+	head: &mut Option<(u64, u64, crate::recv::Group)>,
+	largest: Option<ietf::Location>,
+) -> Result<(), Error> {
 	let Some((prev, _, producer)) = head.take() else {
-		return open_fill_group(track, head, sequence);
+		return Ok(());
 	};
 
 	if largest.is_some_and(|largest| prev >= largest.group) {
@@ -3897,7 +3933,7 @@ fn advance_fill_group(
 	}
 
 	producer.finish()?;
-	open_fill_group(track, head, sequence)
+	Ok(())
 }
 
 /// Ready once a finished subscription's data streams are accounted for: Stream Count of
@@ -4659,6 +4695,55 @@ mod tests {
 		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
 	}
 
+	/// A datagram that lands before SUBSCRIBE_OK binds its alias is dropped, not held for the
+	/// subscription to replay once it is bound. The reader was already subscribed, so only the
+	/// missing alias can have dropped it.
+	#[moq_net_sim::test]
+	async fn a_datagram_before_its_alias_is_dropped() {
+		use crate::coding::Encode as _;
+		use futures::FutureExt as _;
+
+		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
+		let mut consumer = {
+			let mut state = subscriber.state.lock();
+			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
+			track.timescale = Some(Timescale::default());
+			track.producer.as_ref().unwrap().subscribe(None)
+		};
+		let datagram = |group_id: u64| {
+			let mut properties = Vec::new();
+			ietf::encode_object_time(
+				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
+				crate::Timestamp::new(96_000, Timescale::default()).unwrap(),
+				Timescale::default(),
+				Version::Draft19,
+			)
+			.unwrap();
+			ietf::ObjectDatagram {
+				track_alias: 7,
+				group_id,
+				object_id: None,
+				publisher_priority: None,
+				end_of_group: true,
+				properties: Some(properties),
+				body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
+			}
+			.encode_bytes(Version::Draft19)
+			.unwrap()
+		};
+
+		subscriber.recv_datagram(datagram(4)).unwrap();
+		subscriber.register_alias(RequestId(11), 7).unwrap();
+		subscriber.recv_datagram(datagram(5)).unwrap();
+
+		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(received.sequence, 5);
+		assert!(
+			consumer.recv_datagram().now_or_never().is_none(),
+			"group 4 never arrives"
+		);
+	}
+
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
 	#[test]
 	fn an_alias_reused_for_another_track_is_fatal() {
@@ -5293,9 +5378,9 @@ mod tests {
 		assert!(!table.map.contains_key(&0), "the oldest tombstone is forgotten first");
 	}
 
-	/// moq-transport carries no hop ids, so a peer's broadcasts are named by the
-	/// connection's own random stamp. An identity assigned via `Client::with_peer_hop`
-	/// is stored as `via` for split-horizon and never written into the chain.
+	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
+	/// anonymous (hop 0). An identity assigned via `Client::with_peer_hop` is
+	/// stored as `via` for split-horizon and never written into the chain.
 	#[moq_net_sim::test]
 	async fn assigned_peer_hop_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -5326,10 +5411,8 @@ mod tests {
 		let mut announced = consumer.announced();
 		let route = announced.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![subscriber.stamp, crate::Hop::UNKNOWN]);
-		assert_ne!(subscriber.stamp, crate::Hop::UNKNOWN);
-		assert!(route.is_anonymous(), "the 0 after the stamp still ranks it as unknown");
-		assert_ne!(subscriber.stamp, assigned, "the assigned identity stays off the chain");
+		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
+		assert!(route.is_anonymous());
 
 		let mut hidden = consumer.excluding(assigned).announced();
 		hidden.assert_next_wait();
@@ -5392,11 +5475,11 @@ mod tests {
 		assert_eq!(route.hops, upstream);
 	}
 
-	/// Two sessions assigned the same identity still stamp their own first hop, since
-	/// a wire with no hop ids cannot say the content continued: the reconnect reads as a
-	/// new source, while split-horizon keeps filtering on the shared identity.
+	/// Two sessions assigned the same identity announce the same anonymous chain.
+	/// The cursor treats that as an identical re-announce, so a reconnect is
+	/// invisible and retracting the stale session leaves the fresh route standing.
 	#[moq_net_sim::test]
-	async fn reconnecting_peer_is_a_new_first_hop() {
+	async fn reconnecting_peer_joins_the_front_it_replaces() {
 		let peer = crate::Hop::new(777).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
 
@@ -5428,18 +5511,20 @@ mod tests {
 		};
 
 		let first = connect();
-		let first_stamp = first.stamp;
-		let route = announced.assert_next_active("room/host");
-		assert_eq!(route.hops.iter().next(), Some(&first_stamp));
+		announced.assert_next_active("room/host");
 
-		// The peer reconnects before the old session is retired, under its own stamp.
-		let second = connect();
-		assert_ne!(second.stamp, first_stamp);
-		assert!(routed_now(&consumer, "room/host").is_some());
+		// The peer reconnects before the old session is retired: an identical route
+		// from the fresh session joins without any consumer-visible churn.
+		let _second = connect();
+		announced.assert_next_wait();
 
 		// Neither route is offered back to the peer they both came from.
-		consumer.excluding(peer).announced().assert_next_wait();
+		consumer.clone().excluding(peer).announced().assert_next_wait();
+
+		// The stale session finally retracting leaves the fresh route standing.
 		drop(first);
+		announced.assert_next_wait();
+		assert!(routed_now(&consumer, "room/host").is_some());
 	}
 
 	fn cluster_subscriber(
@@ -8167,6 +8252,181 @@ mod stitch_tests {
 				false => assert!(end.is_err(), "{count} objects: the group must fail, not end"),
 			}
 		}
+	}
+
+	/// A group's first fetch Object, with `group` as the wire's Group ID field.
+	fn first_object(subgroup: ietf::FetchSubgroup, group: u64, payload: &[u8]) -> Vec<u8> {
+		fetch_object(subgroup, Some(group), payload)
+	}
+
+	/// The next fetch Object of the prior one's group, inheriting its Group ID.
+	fn next_object(subgroup: ietf::FetchSubgroup, payload: &[u8]) -> Vec<u8> {
+		fetch_object(subgroup, None, payload)
+	}
+
+	/// A stamped fetch Object: a group's first when `group` names it, else the next one.
+	fn fetch_object(subgroup: ietf::FetchSubgroup, group: Option<u64>, payload: &[u8]) -> Vec<u8> {
+		let mut properties = Vec::new();
+		let w = &mut Encoder::new(&mut properties, VERSION.into());
+		ietf::encode_object_time(w, timestamp(0), Timescale::MICRO, VERSION).unwrap();
+		let mut buf = Vec::new();
+		ietf::FetchObject::Object {
+			subgroup,
+			group,
+			object: group.map(|_| 0),
+			priority: group.map(|_| 0),
+			properties: Some(properties),
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut buf, VERSION.into()), VERSION)
+		.unwrap();
+		crate::coding::Encoder::new(&mut buf, VERSION.into())
+			.varint(payload.len() as u64)
+			.unwrap();
+		buf.extend_from_slice(payload);
+		buf
+	}
+
+	/// One Object published as a datagram, as draft-16 on lets a fetch stream carry it.
+	fn datagram_object(sequence: u64) -> Vec<u8> {
+		first_object(ietf::FetchSubgroup::Datagram, sequence, b"d")
+	}
+
+	/// An absolute join spans whole groups, so a datagram among them is skipped: the group
+	/// before it is complete, and the groups after it still fill and stitch into the tail.
+	#[moq_net_sim::test]
+	async fn an_absolute_join_skips_a_datagram_group() {
+		const START: u64 = 7;
+		const LIVE_GROUP: u64 = 9;
+		let largest = ietf::Location {
+			group: LIVE_GROUP,
+			object: 0,
+		};
+		// Group 8 went out as two datagram objects, the second inheriting its Group ID. From
+		// draft-18 on a later Group ID is an ascending delta, so 7, 8, 9 is 7, 0, 0.
+		let mut fill = fill_stream_for(FETCH, &[(START, &[b"g7-0"])]);
+		fill.extend(first_object(ietf::FetchSubgroup::Datagram, 0, b"g8-0"));
+		fill.extend(next_object(ietf::FetchSubgroup::Datagram, b"g8-1"));
+		fill.extend(first_object(ietf::FetchSubgroup::Zero, 0, b"g9-0"));
+
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![fill, tail_stream(LIVE_GROUP, 1, &[b"g9-1"])],
+		)
+		.with_joining(JoiningFetch::Absolute { group_id: START }, FETCH, largest);
+		let mut consumer = h
+			.track
+			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+
+		let mut fill = h.stream().await;
+		let mut tail = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("absolute fetch");
+		h.subscriber.clone().recv_group(&mut tail).await.expect("tail");
+
+		let mut groups = Vec::new();
+		for _ in 0..2 {
+			let (sequence, frames) = read_group(&mut consumer).await;
+			groups.push((
+				sequence,
+				frames.into_iter().map(|(_, payload)| payload).collect::<Vec<_>>(),
+			));
+		}
+		assert_eq!(
+			groups,
+			vec![
+				(START, vec![b"g7-0".to_vec()]),
+				(LIVE_GROUP, vec![b"g9-0".to_vec(), b"g9-1".to_vec()]),
+			]
+		);
+	}
+
+	/// A datagram Object inside the head's own group mixes stream and datagram objects, which
+	/// no group can hold. The join fails as not fetchable and drops that group rather than
+	/// finishing it partway.
+	#[moq_net_sim::test]
+	async fn an_absolute_join_refuses_a_datagram_in_the_head() {
+		const START: u64 = 7;
+		let largest = ietf::Location { group: 9, object: 0 };
+		let mut fill = fill_stream_for(FETCH, &[(START, &[b"g7-0"])]);
+		fill.extend(next_object(ietf::FetchSubgroup::Datagram, b"g7-1"));
+
+		let h = Harness::new(Fill::Serving(Some(Timescale::MICRO)), vec![fill]).with_joining(
+			JoiningFetch::Absolute { group_id: START },
+			FETCH,
+			largest,
+		);
+		let mut consumer = h
+			.track
+			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+
+		let mut fill = h.stream().await;
+		assert!(matches!(
+			h.subscriber.clone().recv_fill(&mut fill).await,
+			Err(Error::NotFetchable)
+		));
+
+		assert!(
+			futures::FutureExt::now_or_never(consumer.recv_group()).is_none(),
+			"the partial head must not be published as a complete group"
+		);
+	}
+
+	/// A datagram group is never fetchable, so a group fetch answered with one fails as
+	/// not fetchable, and nothing is cached.
+	#[moq_net_sim::test]
+	async fn a_group_fetch_refuses_a_datagram_object() {
+		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
+		let group = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		let mut consumer = group.consume();
+		let slot = kio::Producer::new(GroupFetch::Ready {
+			producer: group,
+			timescale: None,
+			start: 0,
+			end: None,
+		});
+
+		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
+		assert!(matches!(res, Err(Error::NotFetchable)), "{res:?}");
+		assert!(
+			matches!(consumer.read_frame().await, Err(Error::NotFetchable)),
+			"the group fails without the payload"
+		);
+	}
+
+	/// A fill answered with a datagram Object is refused the same way. Only the fill goes:
+	/// the subscription keeps delivering the groups after it.
+	#[moq_net_sim::test]
+	async fn a_datagram_fill_fails_only_the_fill() {
+		let mut fill = Vec::new();
+		crate::coding::Encoder::new(&mut fill, VERSION.into())
+			.varint(ietf::FetchHeader::TYPE)
+			.unwrap();
+		ietf::FetchHeader { request_id: REQUEST }
+			.encode(&mut crate::coding::Encoder::new(&mut fill, VERSION.into()), VERSION)
+			.unwrap();
+		fill.extend(datagram_object(SEQUENCE));
+
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![fill, tail_stream(SEQUENCE + 1, 0, &[b"next"])],
+		);
+		let mut consumer = h.track.subscribe(None);
+		let mut fill = h.stream().await;
+		let mut tail = h.stream().await;
+
+		assert!(matches!(
+			h.subscriber.clone().recv_fill(&mut fill).await,
+			Err(Error::NotFetchable)
+		));
+		h.subscriber
+			.clone()
+			.recv_group(&mut tail)
+			.await
+			.expect("the subscription carries on");
+
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE + 1);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].1, b"next");
 	}
 
 	/// A group fetch's objects after the FETCH_HEADER: the first one names the group and
