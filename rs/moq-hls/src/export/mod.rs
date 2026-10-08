@@ -3422,10 +3422,10 @@ mod tests {
 		);
 	}
 
-	// A publisher restarted without a new generation rewinds the timeline, which resets the
-	// advertisement latch with the window.
+	// Clearing the window, whether a publisher restarted without a new generation (a rewind) or
+	// records were skipped, drops the advertisement latch with it.
 	#[tokio::test(start_paused = true)]
-	async fn a_rewound_timeline_drops_the_latch() {
+	async fn a_cleared_window_drops_the_latch() {
 		let test = Timelines::with(&["video0"], &[]);
 		let (_track, mut video0) = test.publish("video0");
 		video0.push(&split(0, 0, 40, 0..1)).unwrap();
@@ -3438,10 +3438,16 @@ mod tests {
 		video0.push(&split(2, 0, 40, 5..6)).unwrap();
 		let window = test.listed("video0", 2).await;
 		assert_eq!(numbers(&window), [2], "the rewind reset the window");
-		assert!(
-			advertised(&test.renditions).is_empty(),
-			"the latch belongs to the old run"
-		);
+		assert!(advertised(&test.renditions).is_empty(), "a rewind drops the latch");
+
+		video0.push(&split(3, 40, 40, 0..1)).unwrap();
+		test.listed("video0", 3).await;
+		assert_eq!(advertised(&test.renditions), ["video0"]);
+		test.renditions.fanout().skip();
+		video0.push(&split(4, 80, 40, 1..2)).unwrap();
+		let window = test.listed("video0", 4).await;
+		assert_eq!(numbers(&window), [4], "the skip cleared the window");
+		assert!(advertised(&test.renditions).is_empty(), "a skip drops the latch");
 	}
 
 	// A span with no media in one rendition keeps its slot as a gap of the same duration there

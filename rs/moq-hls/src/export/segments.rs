@@ -45,6 +45,8 @@ struct State {
 	sequence: u64,
 	/// The timeline track ended: the broadcast is over (`EXT-X-ENDLIST`).
 	ended: bool,
+	/// Bumped whenever the window is cleared, so a latch on what it listed can tell it is stale.
+	resets: u64,
 }
 
 /// Numbers the broadcast's content timeline: the sequence bumps wherever the timeline breaks.
@@ -214,18 +216,18 @@ impl Producer {
 				rows: VecDeque::new(),
 				sequence: 0,
 				ended: false,
+				resets: 0,
 			}),
 		}
 	}
 
 	/// Append a row, evicting the front of the window past `window` (see [`evicts`]). With no
-	/// `window`, only source timeline pops remove rows. Returns whether the timeline jumped
-	/// backwards, which resets the window.
-	pub fn push(&self, row: Row, window: Option<Duration>) -> bool {
+	/// `window`, only source timeline pops remove rows. Returns the window's
+	/// [`resets`](Self::resets) after the push.
+	pub fn push(&self, row: Row, window: Option<Duration>) -> u64 {
 		let Ok(mut state) = self.state.write() else {
-			return false;
+			return u64::MAX;
 		};
-		let mut restarted = false;
 
 		if let Some(back) = state.rows.back() {
 			// A backward jump in pts or segment number means the publisher restarted its timeline;
@@ -233,7 +235,7 @@ impl Producer {
 			if Duration::from(row.pts) < Duration::from(back.pts) || row.segment <= back.segment {
 				tracing::warn!("timeline jumped backwards; resetting the playlist window");
 				state.rows.clear();
-				restarted = true;
+				state.resets += 1;
 			}
 		}
 		if state.rows.is_empty() {
@@ -254,7 +256,7 @@ impl Producer {
 			state.rows.pop_front();
 		}
 		state.sequence = state.rows.front().unwrap().segment;
-		restarted
+		state.resets
 	}
 
 	/// Remove rows whose source timeline indices fall within `range`.
@@ -280,7 +282,14 @@ impl Producer {
 	pub fn clear(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.rows.clear();
+			state.resets += 1;
 		}
+	}
+
+	/// How many times the window was cleared: by [`clear`](Self::clear), or a timeline that
+	/// jumped backwards.
+	pub fn resets(&self) -> u64 {
+		self.state.read().resets
 	}
 
 	/// Mark the timeline ended (it finished, or failed): the playlist gets
@@ -372,11 +381,15 @@ impl Producer {
 		}
 	}
 
-	/// Poll `f` over the listed rows, waking on the next window change while it is pending. A
-	/// closed window stays pending: no new row can make `f` ready.
-	pub fn poll_rows(&self, waiter: &kio::Waiter, mut f: impl FnMut(&VecDeque<Row>) -> Poll<()>) -> Poll<()> {
-		match self.state.poll_ref(waiter, |state| f(&state.rows)) {
-			Poll::Ready(Ok(())) => Poll::Ready(()),
+	/// Poll `f` over the listed rows, waking on the next window change while it is pending, and
+	/// return the [`resets`](Self::resets) those rows belong to. A closed window stays pending: no
+	/// new row can make `f` ready.
+	pub fn poll_rows(&self, waiter: &kio::Waiter, mut f: impl FnMut(&VecDeque<Row>) -> Poll<()>) -> Poll<u64> {
+		match self
+			.state
+			.poll_ref(waiter, |state| f(&state.rows).map(|()| state.resets))
+		{
+			Poll::Ready(Ok(resets)) => Poll::Ready(resets),
 			_ => Poll::Pending,
 		}
 	}
@@ -639,16 +652,16 @@ mod tests {
 	fn backwards_jump_resets_the_window() {
 		let live = Producer::new();
 		let window = Some(Duration::from_secs(30));
-		assert!(!live.push(row(0, 0, 10_000, 2_000), window));
-		assert!(!live.push(row(1, 1, 12_000, 2_000), window));
-		assert!(live.push(row(2, 2, 1_000, 2_000), window)); // restart: pts rewound
+		assert_eq!(live.push(row(0, 0, 10_000, 2_000), window), 0);
+		assert_eq!(live.push(row(1, 1, 12_000, 2_000), window), 0);
+		assert_eq!(live.push(row(2, 2, 1_000, 2_000), window), 1); // restart: pts rewound
 
 		let snapshot = live.window();
 		assert_eq!(snapshot.segments.len(), 1, "the window restarted at the new row");
 		assert_eq!(snapshot.segments[0].segment, 2);
 
 		// A segment number that rewinds (a restarted publisher) resets the same way.
-		assert!(live.push(row(0, 0, 2_000, 2_000), window));
+		assert_eq!(live.push(row(0, 0, 2_000, 2_000), window), 2);
 		assert_eq!(live.window().segments.len(), 1);
 	}
 

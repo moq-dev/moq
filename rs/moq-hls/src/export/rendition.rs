@@ -90,11 +90,11 @@ struct Run {
 	init: Option<Arc<Init>>,
 	/// Bumped by every restart, so an init build that straddles one isn't cached for the new run.
 	epoch: u64,
-	/// A listed segment of this run started where a player can, so the master keeps advertising
-	/// the rendition even once a GOP past [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts
-	/// that segment. A new generation, or a timeline that jumps backwards, resets it with the
-	/// window.
-	startable: bool,
+	/// The window [`resets`](segments::Producer::resets) during which a listed segment started
+	/// where a player can, so the master keeps advertising the rendition even once a GOP past
+	/// [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts that segment. Stale once the window
+	/// is cleared (a new generation, a timeline skip or rewind, a replaced sibling publisher).
+	startable: Option<u64>,
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
@@ -414,12 +414,10 @@ impl Rendition {
 			discontinuity,
 		};
 		let starts = self.is(reference) && row.starts_sync();
-		// Held across the push, so a concurrent `poll_advertised` can't latch a cleared window.
-		let mut run = self.run.lock().expect("run lock poisoned");
-		if self.live.push(row, window) || starts {
-			run.startable = starts;
+		let resets = self.live.push(row, window);
+		if starts {
+			self.run.lock().expect("run lock poisoned").startable = Some(resets);
 		}
-		drop(run);
 		self.trim();
 	}
 
@@ -487,7 +485,7 @@ impl Rendition {
 			generation,
 			init: None,
 			epoch: run.epoch + 1,
-			startable: false,
+			startable: None,
 		};
 	}
 
@@ -659,12 +657,13 @@ impl Rendition {
 
 	/// Poll until [`is_advertised`](Self::is_advertised), for the master route's long-poll.
 	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
-		if self.kind == Kind::Audio || self.run().startable {
+		if self.kind == Kind::Audio {
 			return self.poll_playable(waiter);
 		}
 		self.media.sync(&self.live);
-		// Held across the scan, so a reset (`push`, `restart`) can't land between it and the latch.
-		let mut run = self.run.lock().expect("run lock poisoned");
+		if self.run().startable == Some(self.live.resets()) {
+			return self.poll_playable(waiter);
+		}
 		let startable = self.live.poll_rows(waiter, |rows| {
 			for row in rows {
 				let mut content = self.resolve(row);
@@ -684,10 +683,12 @@ impl Rendition {
 			}
 			Poll::Pending
 		});
-		if startable.is_ready() {
-			run.startable = true;
-		}
-		startable
+		let Poll::Ready(resets) = startable else {
+			return Poll::Pending;
+		};
+		// Tagged with the scanned window, so a clear racing this store leaves it stale.
+		self.run.lock().expect("run lock poisoned").startable = Some(resets);
+		Poll::Ready(())
 	}
 
 	/// This rendition's DASH representation: its master-level metadata plus its track's
