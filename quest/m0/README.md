@@ -14,7 +14,6 @@ publisher that can restart mints a fresh epoch, so #4741 stalls nobody.
 The release API gates (#3829..#3878) and the release that followed them are
 done. moq.pro pins this repository's `release` line, so the release gate below
 also keeps #4741 from reaching it early.
-The Pronto GPU integration lives in moq.pro.
 
 Relay hardening left in m0 is idle fronts: per-session request caps landed
 in #4820, and the rest of the 2026-09-29 DoS review moved to m1 with
@@ -58,7 +57,3 @@ remain and no release waits on them.
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
-
-## Related
-
-- [Pronto GPU integration](https://github.com/moq-dev/moq.pro/tree/main/quest/m0/pronto/gpu) - CARLA bridge, release adoption and desktop installation

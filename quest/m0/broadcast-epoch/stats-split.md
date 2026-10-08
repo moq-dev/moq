@@ -113,16 +113,18 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   same format it reads.
 
 Decided 2026-10-08: if prefix tracks and self counters hold up the rest,
-split them into a follow-up quest and land totals, sessions, and the map
-retirement first.
+split them into a follow-up quest and land totals and sessions first. The
+per-path map retirement moves with prefix tracks and self counters into that
+follow-up: the maps are the only per-path source until prefix tracks exist,
+and moq.pro's Broadcasts page reads prefix tracks the moment the maps retire,
+so a release that retires them first is one moq.pro cannot pin.
 
 Public API: `moq-stats` producer and consumer types. Wire: stats track names
 and payloads.
 
 MoQ Pro adopts it when it pins the release: billing reads totals, its
-Broadcasts page reads one prefix per visible row and group header, its `announced` probe
-reads totals only, and its customer stats feed serves this format summed
-across nodes.
+Broadcasts page reads one prefix per visible row and group header, and its
+customer stats feed serves this format summed across nodes.
 
 ## Related
 

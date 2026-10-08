@@ -48,6 +48,11 @@ added this quest):
   backend that can import the surface on its device, matched by device and
   driver UUID. `Kind::Named` stays for overrides and tests. Rejected: the
   caller names the backend.
+- `Kind::Auto` learns the device from an input-device field in the encoder
+  `Config`, naming it by device and driver UUID (decided 2026-10-06), so
+  `Encoder::new` opens fail-fast and `probe` still advertises before the first
+  frame, with no surface yet. Rejected: deferring the open to the first frame,
+  which breaks that `probe` contract.
 - The bar is no CPU round trip. Extra GPU-side copies are allowed, such as a
   conversion into the encoder's own NV12 input. A strict direct RGB encode is
   not required.
@@ -59,18 +64,6 @@ added this quest):
 
 Open, found in review:
 
-- Where `Kind::Auto` learns the device. `Encoder::new` opens its backend
-  eagerly from `Config` alone, and `Config::probe` feeds a throwaway encoder a
-  synthetic I420 frame. So no surface exists at selection time, and on a host
-  with two GPUs `Auto` would open whichever backend comes first in
-  `HARDWARE`. Options:
-  - a `Config` field naming the input device by device and driver UUID
-    (recommended: `probe` and fail-fast open keep working);
-  - deferring the open to the first frame, which breaks `probe`'s
-    advertise-before-the-first-frame contract.
-
-  Either is a public API change, so record it here. The refusal test must
-  cover `Encoder::new` and `probe` as well as a frame.
 - Slot identity. Today a `Slot` exists only through the CUDA
   `vulkan::Importer::import`, and `Slot::publish` and `Completion` wait on
   CUDA. Lift slot identity and completion out of the CUDA importer so a
@@ -104,6 +97,7 @@ Tests:
   later becomes. The other quests add their vendor's tests to it.
 
 Public API: `Surface::Vulkan` changes shape and loses its `nvidia` gate;
+the encoder `Config` gains the input device;
 `DmaBuf::new` becomes public; the CUDA import types leave the caller's path.
 Wire: none.
 
