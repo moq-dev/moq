@@ -204,7 +204,8 @@ function encodeHops(hops: Hop[]): Uint8Array {
 }
 
 /**
- * Read the parameters a negotiated session puts on every advertisement.
+ * Read the parameters a negotiated session puts on every advertisement, checked against
+ * the list of the message that carries them (PUBLISH_NAMESPACE also allows a token).
  *
  * The parameter block is mandatory there, so a message that ends before it (the base form)
  * or one whose block does not parse is the peer's violation, same as a block that parses but
@@ -212,10 +213,14 @@ function encodeHops(hops: Hop[]): Uint8Array {
  *
  * @internal
  */
-export async function decodeParams(r: Reader, version: IetfVersion): Promise<Advert> {
+export async function decodeParams(
+	r: Reader,
+	version: IetfVersion,
+	message: "namespace" | "publish-namespace",
+): Promise<Advert> {
 	let params: Parameters;
 	try {
-		params = await Parameters.decode(r, version, "namespace");
+		params = await Parameters.decode(r, version, message);
 	} catch (err) {
 		throw new ProtocolViolation(reason(err), { cause: err });
 	}

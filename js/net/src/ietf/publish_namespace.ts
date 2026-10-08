@@ -62,7 +62,7 @@ export class PublishNamespace {
 		}
 		const trackNamespace = await Namespace.decode(r);
 		if (negotiated) {
-			const cluster = await Cluster.decodeParams(r, version);
+			const cluster = await Cluster.decodeParams(r, version, "publish-namespace");
 			return new PublishNamespace({ requestId, trackNamespace, cluster });
 		}
 

@@ -296,7 +296,7 @@ export class SubscribeNamespaceEntry {
 		const suffix = await Namespace.decode(r);
 		if (!negotiated) return new SubscribeNamespaceEntry({ suffix });
 
-		return new SubscribeNamespaceEntry({ suffix, cluster: await Cluster.decodeParams(r, version) });
+		return new SubscribeNamespaceEntry({ suffix, cluster: await Cluster.decodeParams(r, version, "namespace") });
 	}
 }
 
