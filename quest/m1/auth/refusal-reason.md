@@ -33,16 +33,19 @@ Decided 2026-10-08 (split from [Session outcomes](/quest/m1/session-outcomes.md)
   a client cannot mint a stats entry per random path.
 - **Embedder.** An embedder deciding admission (moq.pro's edge) refuses
   through `Admission::refuse` (`rs/moq-relay/src/auth.rs`), whose
-  `auth::Error` carries no root or tier. Let that refusal carry an optional
-  root and tier too, under the same bound.
+  `auth::Error` has no `expired` and carries no root or tier. Give the HTTP
+  path and `Admission::refuse` one refusal shape (reason, optional root and
+  tier), under the same bound, and update `From<moq_auth::Error>`, which sends
+  anything but `Refused` to `Unavailable` today.
 - **Relay.** Map the typed error to a `Refusal` reason (adding `expired`) in
   `/metrics`, and count it in the root's `Presence` on that tier, or the
   default tier when the body names none. A refusal without a root stays
   unattributed.
 - Tests: the serve/client round trip for each reason with and without root
   and tier; a legacy plain-text 403 reads as `refused`; an expired token, an
-  auth server refusal on a named tier, and an embedder refusal on a named
-  tier each count under the right root, tier, and reason; a refusal for an
+  auth server refusal on a named tier, an embedder `expired` refusal, and an
+  embedder refusal on a named tier each count under the right root, tier, and
+  reason; a refusal for an
   unverified token stays unattributed.
 
 Public API: moq-auth's refusal error and the HTTP refusal body. Wire: the

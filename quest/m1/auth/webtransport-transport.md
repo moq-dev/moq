@@ -30,7 +30,8 @@ workers share the `quic` count today):
   change, so the next variant reads as unknown on an older server instead of
   failing the request. Test that an unknown transport deserializes to it.
   `@moq/auth`'s `TransportSchema` (`js/auth/src/contract.ts`) is a closed
-  `z.enum`; give it the same catch-all.
+  `z.enum`; add a member matching the Rust fallback's name and `.catch` to
+  it.
 - **The ALPN cannot tell them apart.** Both present the negotiated
   sub-protocol (e.g. `moq-lite-04`) as `alpn`; `h3` never reaches auth. The
   transport already knows: `moq_tokio::server::Request::transport()` returns
