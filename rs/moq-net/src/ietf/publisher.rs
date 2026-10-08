@@ -775,10 +775,11 @@ where
 			// its failures reset that stream and never touch the subscription.
 			let mut track_serve =
 				TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale);
+			let opened = track_serve.opened.clone();
 			let fill = async {
-				match fill {
-					Some((fill, cache, timescale)) => self.run_fill(request_id, priority, fill, cache, timescale).await,
-					None => false,
+				if let Some((fill, cache, timescale)) = fill {
+					self.run_fill(request_id, priority, fill, cache, timescale, &opened)
+						.await;
 				}
 			};
 			let served = self
@@ -786,7 +787,7 @@ where
 				.await;
 
 			let completed = served.is_some();
-			let (res, filled) = served.unwrap_or((Ok(()), false));
+			let res = served.unwrap_or(Ok(()));
 
 			// Draft-14 on carries no end location in PUBLISH_DONE: an END_OF_TRACK object is
 			// what tells the subscriber where the track ended. A cancelled subscription is
@@ -817,9 +818,11 @@ where
 				}
 			}
 
-			// Every data stream this subscription opened is closed by now, which PUBLISH_DONE
-			// requires, so the count it reports is final.
-			let streams = track_serve.opened() + u64::from(filled);
+			// PUBLISH_DONE must follow the close of every data stream. A subscription that
+			// completed has drained its groups; one that ended early resets the rest here.
+			// The fill stream closed when `run_subscription` dropped it.
+			track_serve.close_groups();
+			let streams = track_serve.opened();
 
 			// Send PublishDone
 			let (status, reason) = match &res {
@@ -853,11 +856,11 @@ where
 		stream: &mut Stream<S, Version>,
 		serve: &mut TrackServe<S>,
 		finished: &mut bool,
-		fill: impl std::future::Future<Output = bool>,
-	) -> Option<(Result<(), Error>, bool)> {
+		fill: impl std::future::Future<Output = ()>,
+	) -> Option<Result<(), Error>> {
 		let mut session = self.session.clone();
 		let mut fill = std::pin::pin!(fill);
-		let mut filled = None;
+		let mut fill_done = false;
 		let mut served = None;
 		loop {
 			let event = kio::wait(|waiter| {
@@ -897,27 +900,25 @@ where
 						}
 					}
 				}
-				if filled.is_none()
-					&& let Poll::Ready(done) = waiter.poll_future(fill.as_mut())
-				{
-					filled = Some(done);
+				if !fill_done && waiter.poll_future(fill.as_mut()).is_ready() {
+					fill_done = true;
 				}
 				if served.is_none()
 					&& let Poll::Ready(done) = serve.poll(waiter)
 				{
 					served = Some(done);
 				}
-				match (&served, filled) {
-					(Some(Ok(())), Some(_)) => Poll::Ready(Ok(None)),
-					(Some(Err(err)), Some(_)) => Poll::Ready(Err(err.clone())),
+				match (&served, fill_done) {
+					(Some(Ok(())), true) => Poll::Ready(Ok(None)),
+					(Some(Err(err)), true) => Poll::Ready(Err(err.clone())),
 					_ => Poll::Pending,
 				}
 			})
 			.await;
 			match event {
-				Ok(None) => return Some((Ok(()), filled.unwrap_or(false))),
+				Ok(None) => return Some(Ok(())),
 				Err(Error::Cancel) => return None,
-				Err(err) => return Some((Err(err), filled.unwrap_or(false))),
+				Err(err) => return Some(Err(err)),
 				Ok(Some(update)) => {
 					// Draft 14 answers no update. Drafts 15 and 16 answer on the control
 					// stream, naming the update's own Request ID; later drafts name none.
@@ -936,13 +937,13 @@ where
 						} else {
 							Ok(())
 						};
-						return Some((result.and(Err(Error::Unsupported)), filled.unwrap_or(false)));
+						return Some(result.and(Err(Error::Unsupported)));
 					}
 					if let Some(priority) = update.priority {
 						let mut subscription = serve.track.subscription();
 						subscription.priority = super::priority::from_wire(priority);
 						if let Err(err) = serve.track.update(subscription) {
-							return Some((Err(err), filled.unwrap_or(false)));
+							return Some(Err(err));
 						}
 					}
 					if answer
@@ -958,7 +959,7 @@ where
 						}
 						.await
 					{
-						return Some((Err(err), filled.unwrap_or(false)));
+						return Some(Err(err));
 					}
 				}
 			}
@@ -1040,7 +1041,8 @@ where
 	/// cannot serve still opens one and resets it right after the FETCH_HEADER, the
 	/// draft's fill-failure signal. Nothing here touches the subscription either way.
 	///
-	/// Returns whether it opened a stream, which PUBLISH_DONE's Stream Count includes.
+	/// Counts its stream into `opened` once it opens, like a group stream, so
+	/// PUBLISH_DONE's Stream Count includes it however the subscription ends.
 	async fn run_fill(
 		&self,
 		request_id: RequestId,
@@ -1048,9 +1050,10 @@ where
 		fill: FillServe,
 		track: track::Consumer,
 		timescale: Option<Timescale>,
-	) -> bool {
+		opened: &AtomicU64,
+	) {
 		if matches!(fill, FillServe::Empty) {
-			return false;
+			return;
 		}
 
 		let mut session = self.session.clone();
@@ -1058,9 +1061,10 @@ where
 			Ok(stream) => stream,
 			Err(err) => {
 				tracing::debug!(err = %Error::from_transport(err), fill = %request_id, "fill stream failed to open");
-				return false;
+				return;
 			}
 		};
+		opened.fetch_add(1, Ordering::Relaxed);
 		let mut stream = Writer::new(stream, self.version);
 		stream.set_priority(priority);
 
@@ -1100,7 +1104,6 @@ where
 				stream.abort(&err);
 			}
 		}
-		true
 	}
 
 	/// Write one group's frames in the negotiated draft's FETCH object layout.
@@ -2620,6 +2623,12 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		self.opened.load(Ordering::Relaxed)
 	}
 
+	/// Close every group stream still in flight. Dropping a group machine resets its
+	/// stream, as a cancelled subscription's would; a drained track has none left.
+	fn close_groups(&mut self) {
+		self.children = kio::Tasks::new();
+	}
+
 	/// Where the track ends, when the subscription ran to that end rather than stopping at
 	/// its own range first.
 	fn end(&self) -> Option<u64> {
@@ -3492,7 +3501,7 @@ mod subscribe_cursor_test {
 mod serve_tests {
 	use super::*;
 	use crate::coding::{Decode, Decoder};
-	use crate::lite::test_transport::{Log, ScriptedSession, SinkSession};
+	use crate::lite::test_transport::{Log, ScriptedSession, Sent, SinkSession};
 	use crate::model::ProduceTest;
 
 	fn occurrences(log: &Log, needle: &[u8]) -> usize {
@@ -3570,7 +3579,7 @@ mod serve_tests {
 			let mut run =
 				std::pin::pin!(
 					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+						.run_subscription(&mut stream, &mut serving, &mut finished, async {})
 				);
 			assert_eq!(
 				futures::poll!(run.as_mut()).is_ready(),
@@ -3667,7 +3676,7 @@ mod serve_tests {
 		let mut finished = false;
 		let mut run = std::pin::pin!(
 			h.publisher
-				.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+				.run_subscription(&mut stream, &mut serving, &mut finished, async {})
 		);
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		assert_eq!(h.track.subscription().unwrap().priority, 245);
@@ -3692,9 +3701,280 @@ mod serve_tests {
 		let mut finished = false;
 		let served = h
 			.publisher
-			.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+			.run_subscription(&mut stream, &mut serving, &mut finished, async {})
 			.await;
-		assert!(matches!(served, Some((Err(Error::Unsupported), false))), "{served:?}");
+		assert!(matches!(served, Some(Err(Error::Unsupported))), "{served:?}");
+	}
+
+	/// The request stream's control messages and every data stream's first FIN or reset,
+	/// as positions in the cross-stream [`Log::trail`].
+	struct Wire {
+		/// Each control message's type and the positions of its first and last bytes.
+		messages: Vec<(u64, std::ops::RangeInclusive<usize>)>,
+		/// PUBLISH_DONE's Status Code and Stream Count.
+		publish_done: Option<(u64, u64)>,
+		/// Each data stream and the position where it was closed, if it was.
+		data: std::collections::BTreeMap<usize, Option<usize>>,
+	}
+
+	impl Wire {
+		fn read(log: &Log, version: Version) -> Self {
+			let trail = log.trail();
+			let request = request_stream(&trail);
+			let mut bytes = Vec::new();
+			let mut written_at = Vec::new();
+			let mut data = std::collections::BTreeMap::new();
+			for (position, (stream, sent)) in trail.iter().enumerate() {
+				if *stream == request {
+					if let Sent::Write(buf) = sent {
+						bytes.extend_from_slice(buf);
+						written_at.extend(std::iter::repeat_n(position, buf.len()));
+					}
+					continue;
+				}
+				let closed = data.entry(*stream).or_insert(None);
+				if matches!(sent, Sent::Finish | Sent::Reset(_)) && closed.is_none() {
+					*closed = Some(position);
+				}
+			}
+
+			let mut messages = Vec::new();
+			let mut publish_done = None;
+			let mut offset = 0;
+			while offset < bytes.len() {
+				let mut rest = &bytes[offset..];
+				let id = crate::coding::decode_varint(&mut rest, version).unwrap();
+				let body = bytes.len() - rest.len();
+				let end = body + 2 + usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+				if id == ietf::PublishDone::ID {
+					let done = ietf::PublishDone::decode(&mut Decoder::new(&bytes[body..end], version.into()), version)
+						.unwrap();
+					publish_done = Some((done.status_code, done.stream_count));
+				}
+				messages.push((id, written_at[offset]..=written_at[end - 1]));
+				offset = end;
+			}
+			Self {
+				messages,
+				publish_done,
+				data,
+			}
+		}
+
+		fn sent(&self, id: u64) -> Option<std::ops::RangeInclusive<usize>> {
+			self.messages
+				.iter()
+				.find(|(sent, _)| *sent == id)
+				.map(|(_, at)| at.clone())
+		}
+
+		/// Draft-21 §3.1.1: the publisher "MUST NOT send [PUBLISH_DONE] until it has
+		/// closed all related streams", so each data stream's FIN or reset precedes
+		/// PUBLISH_DONE's first byte.
+		fn assert_streams_closed_before_publish_done(&self) {
+			let done = *self.sent(ietf::PublishDone::ID).expect("PUBLISH_DONE was sent").start();
+			for (stream, closed) in &self.data {
+				assert!(
+					closed.is_some_and(|closed| closed < done),
+					"data stream {stream} closed at {closed:?}, but PUBLISH_DONE began at {done}: {:?}",
+					self.data,
+				);
+			}
+		}
+	}
+
+	/// SUBSCRIBE_OK is written before any data stream opens, so the request stream is
+	/// the first to send anything.
+	fn request_stream(trail: &[(usize, Sent)]) -> usize {
+		trail.first().expect("nothing was sent").0
+	}
+
+	/// What each data stream has sent so far.
+	fn data_streams(log: &Log) -> std::collections::BTreeMap<usize, Vec<Sent>> {
+		let trail = log.trail();
+		let mut data = std::collections::BTreeMap::<usize, Vec<Sent>>::new();
+		if let Some((_, rest)) = trail.split_first() {
+			let request = request_stream(&trail);
+			for (stream, sent) in rest.iter().filter(|(stream, _)| *stream != request) {
+				data.entry(*stream).or_default().push(sent.clone());
+			}
+		}
+		data
+	}
+
+	/// Poll the subscription until `ready` holds, sleeping in between so the runtime can
+	/// resolve the subscription's demand. The subscription must still be running when
+	/// `ready` is reached.
+	///
+	/// Simulated time only advances once every task stalls. Sleeping stalls this one, so
+	/// the timeout can expire; a loop that only yields would keep the executor busy.
+	async fn serve_until<F: std::future::Future<Output = Result<(), Error>>>(
+		mut serve: std::pin::Pin<&mut F>,
+		what: &str,
+		ready: impl Fn() -> bool,
+	) {
+		moq_net_sim::timeout(std::time::Duration::from_secs(10), async {
+			while !ready() {
+				assert!(
+					futures::poll!(serve.as_mut()).is_pending(),
+					"the subscription ended before {what}"
+				);
+				moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{what} never happened"));
+	}
+
+	/// The canonical current-group join: Next Object plus a fill one group back. On a
+	/// group whose object 0 exists, this opens a fill stream for object 0 and a group
+	/// stream that waits for object 1.
+	fn join_current_group() -> ietf::Subscribe<'static> {
+		subscribe(
+			Filter::NextObject,
+			Some(ietf::Fill {
+				filter: Some(Filter::Relative(1)),
+				range_filters: false,
+			}),
+		)
+	}
+
+	/// A track error ends a draft-21 subscription while its group stream waits for the
+	/// next object. The abort reaches the group, which resets its stream before
+	/// PUBLISH_DONE(INTERNAL_ERROR) is sent.
+	#[moq_net_sim::test]
+	async fn publish_done_after_a_track_error_follows_every_stream_close() {
+		let version = Version::Draft21;
+		let h = serve(version);
+		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(timestamp(), b"head".as_slice()).unwrap();
+
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, join_current_group()));
+		serve_until(serve.as_mut(), "the fill finished and the group stream opened", || {
+			let data = data_streams(&h.log);
+			data.len() == 2 && data.values().any(|sent| sent.contains(&Sent::Finish))
+		})
+		.await;
+
+		h.track.abort(Error::Transport("upstream failed".into())).unwrap();
+		moq_net_sim::timeout(std::time::Duration::from_secs(10), serve)
+			.await
+			.expect("the track error ends the subscription")
+			.ok();
+
+		let wire = Wire::read(&h.log, version);
+		let (status, _) = wire.publish_done.expect("PUBLISH_DONE was sent");
+		assert_eq!(status, ietf::PublishDoneStatus::InternalError.code(version));
+		assert_eq!(wire.data.len(), 2, "a group stream and a fill stream");
+		wire.assert_streams_closed_before_publish_done();
+		drop(group);
+	}
+
+	/// A subscription that runs to the track's end counts every data stream it opened,
+	/// the fill and the END_OF_TRACK marker included, and closes each one before
+	/// PUBLISH_DONE(TRACK_ENDED).
+	#[moq_net_sim::test]
+	async fn publish_done_at_the_track_end_counts_and_follows_every_stream() {
+		let version = Version::Draft21;
+		let h = serve(version);
+		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(timestamp(), b"head".as_slice()).unwrap();
+
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, join_current_group()));
+		serve_until(serve.as_mut(), "the fill finished and the group stream opened", || {
+			let data = data_streams(&h.log);
+			data.len() == 2 && data.values().any(|sent| sent.contains(&Sent::Finish))
+		})
+		.await;
+
+		group.finish().unwrap();
+		h.track.finish().unwrap();
+		moq_net_sim::timeout(std::time::Duration::from_secs(10), serve)
+			.await
+			.expect("the track's end ends the subscription")
+			.unwrap();
+
+		let wire = Wire::read(&h.log, version);
+		let (status, count) = wire.publish_done.expect("PUBLISH_DONE was sent");
+		assert_eq!(status, ietf::PublishDoneStatus::TrackEnded.code(version));
+		assert_eq!(wire.data.len(), 3, "a fill, a group and an END_OF_TRACK stream");
+		assert_eq!(count, 3);
+		wire.assert_streams_closed_before_publish_done();
+	}
+
+	/// Draft-21 §9.5: a failed REQUEST_UPDATE is answered with REQUEST_ERROR, then the
+	/// subscription ends with PUBLISH_DONE(UPDATE_FAILED).
+	///
+	/// The update carries an authorization token this publisher cannot verify. It
+	/// arrives while object 0 of the current group is half written, so the fill stream
+	/// is stalled inside it and the group stream waits for object 1.
+	async fn fail_update_mid_flight(version: Version) -> Wire {
+		let h = serve(version);
+		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut frame = group
+			.create_frame(frame::Info {
+				timestamp: Some(timestamp()),
+				size: 4,
+			})
+			.unwrap();
+		frame.write(b"he".as_slice()).unwrap();
+
+		// The request stream shares the data streams' log, and its peer speaks later.
+		let mut request = ScriptedSession::new(Vec::new());
+		request.log = h.log.clone();
+		let stream = Stream::open(&mut request.clone(), version).await.unwrap();
+		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, join_current_group()));
+		serve_until(
+			serve.as_mut(),
+			"the fill stalled mid-object beside the group stream",
+			|| {
+				let data = data_streams(&h.log);
+				data.len() == 2 && data.values().any(|sent| sent.contains(&Sent::Write(b"he".to_vec())))
+			},
+		)
+		.await;
+
+		// REQUEST_UPDATE, Request ID 2, one AUTHORIZATION TOKEN (0x03) parameter.
+		request.push(&[0x02, 0, 5, 2, 1, 0x03, 1, 0x00]);
+		moq_net_sim::timeout(std::time::Duration::from_secs(10), serve)
+			.await
+			.expect("the failed update ends the subscription")
+			.ok();
+		drop(frame);
+		drop(group);
+
+		let wire = Wire::read(&h.log, version);
+		let error = wire
+			.sent(ietf::RequestError::ID)
+			.expect("REQUEST_ERROR answers the update");
+		let done = wire.sent(ietf::PublishDone::ID).expect("PUBLISH_DONE was sent");
+		assert!(error.end() < done.start(), "REQUEST_ERROR precedes PUBLISH_DONE");
+		let (status, _) = wire.publish_done.unwrap();
+		assert_eq!(status, ietf::PublishDoneStatus::UpdateFailed.code(version));
+		assert_eq!(wire.data.len(), 2, "a group stream and a fill stream");
+		wire
+	}
+
+	#[moq_net_sim::test]
+	async fn publish_done_after_a_failed_update_follows_every_stream_close() {
+		fail_update_mid_flight(Version::Draft21)
+			.await
+			.assert_streams_closed_before_publish_done();
+	}
+
+	/// Draft-21 §9.9: Stream Count is every data stream the publisher opened, "including
+	/// any fill fetch streams", or 2^64-1 when it can't be exact.
+	#[moq_net_sim::test]
+	async fn publish_done_after_a_failed_update_counts_the_open_fill() {
+		let wire = fail_update_mid_flight(Version::Draft21).await;
+		let (_, count) = wire.publish_done.unwrap();
+		assert!(
+			count == wire.data.len() as u64 || count == u64::MAX,
+			"Stream Count {count}, but {} data streams were opened",
+			wire.data.len(),
+		);
 	}
 
 	/// A draft 14-16 update framed as the adapter routes it onto its subscription.
@@ -3748,7 +4028,7 @@ mod serve_tests {
 			let mut run =
 				std::pin::pin!(
 					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+						.run_subscription(&mut stream, &mut serving, &mut finished, async {})
 				);
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
 			assert_eq!(h.track.subscription().unwrap().priority, 245, "{version}");
@@ -3790,12 +4070,9 @@ mod serve_tests {
 			let mut finished = false;
 			let served = h
 				.publisher
-				.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+				.run_subscription(&mut stream, &mut serving, &mut finished, async {})
 				.await;
-			assert!(
-				matches!(served, Some((Err(Error::Unsupported), false))),
-				"{version}: {served:?}"
-			);
+			assert!(matches!(served, Some(Err(Error::Unsupported))), "{version}: {served:?}");
 			// The answer is all that was written: [type, length (2), Request ID, ...].
 			let written = session.log.writes.lock().unwrap().clone();
 			match version {
