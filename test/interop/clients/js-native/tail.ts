@@ -29,10 +29,7 @@ try {
 		track.finishAt(GROUPS);
 		for (let sequence = 0; sequence < GROUPS; sequence++) {
 			const group = track.appendGroup();
-			group.writeFrame({
-				payload: new Uint8Array(BYTES).fill(sequence),
-				timestamp: Moq.Time.Timestamp.fromMillis(0),
-			});
+			group.writeFrame({ payload: new Uint8Array(BYTES).fill(sequence) });
 			group.close();
 		}
 		track.close();
