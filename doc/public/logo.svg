@@ -3,14 +3,15 @@
 	<style>
 		.arrow {
 			fill: #00BF2D;
-			stroke: #0f172a;
-			stroke-width: 4px;
+			stroke: #00BF2D;
+			stroke-width: 6px;
 		}
 
 		.text {
 			fill: #FBFBFB;
-			stroke: #0f172a;
-			stroke-width: 4px;
+			stroke: #FBFBFB;
+			stroke-width: 8px;
+			stroke-linejoin: round;
 		}
 	</style>
 <path class="arrow" opacity="1.000000" stroke="#0d1117" stroke-width="3px"

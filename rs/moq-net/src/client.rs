@@ -113,28 +113,34 @@ impl Client {
 		self
 	}
 
-	/// Assign an origin (hop) id to the peer, used whenever the peer doesn't declare
-	/// one itself.
+	/// Assign the identity this peer's routes are attributed to, overriding the fresh
+	/// per-dial default.
 	///
-	/// Some relays never declare their identity: moq-lite peers without the hops
-	/// extension, and moq-transport peers that don't negotiate the MoQ Cluster
-	/// extension (or predate it, on `moqt-16` and earlier).
-	/// Broadcasts received from such a peer are normally attributed to the reserved
-	/// Hop ID 0 ("unknown"), which identifies nothing: it never proves continuity,
-	/// so their advertisements neither splice nor survive a restart in place. This
-	/// knob pins a real identity instead, exactly as if the peer had declared it:
+	/// A dialed session whose peer declares no hop gets a random one for that
+	/// connection, the same way an accepted session does. That keeps a route
+	/// learned from the peer off the session that learned it, and keeps a
+	/// SUBSCRIBE that arrives on it from being routed back to it. An identity the
+	/// peer declares on the wire still wins.
 	///
-	/// - broadcasts received from the peer carry `origin` in their hop chains, so
-	///   every session dialing the same relay (with the same id) resolves to one
-	///   route and loop checks can recognize it;
-	/// - broadcasts whose hop chain already contains `origin` are neither announced
-	///   nor served back to the peer, preventing an echo through a relay that does
-	///   no loop detection of its own.
-	///
-	/// An identity the peer does declare wins over this one.
+	/// Pass an id only for a peer whose identity the caller has actually
+	/// established. Two dials given the same hop are treated as one endpoint:
+	/// routes learned from either are kept off both, and content arriving on
+	/// either is interchangeable with the other's. That is the point when they
+	/// really are one peer reconnecting or running redundant links, and a bug
+	/// otherwise. Derive it from the authenticated identity, never from something
+	/// coarser like the remote address.
 	pub fn with_peer_hop(mut self, hop: crate::Hop) -> Self {
 		self.peer_hop = Some(hop);
 		self
+	}
+
+	/// The hop this connection attributes the peer to when the peer declares none.
+	///
+	/// A caller-supplied id is stable across dials of this client. Otherwise each
+	/// connection gets a fresh one, matching the per-session default an accepted
+	/// session already has.
+	fn assigned_hop(&self) -> crate::Hop {
+		self.peer_hop.unwrap_or_else(crate::Hop::random)
 	}
 
 	/// The origin pair a session attaches, tagged and filtered.
@@ -142,12 +148,12 @@ impl Client {
 	/// Reads through the publish (egress) consumer and writes through the
 	/// subscribe (ingress) producer are attributed by the model through the
 	/// stats context; one shared context, so presence and viewer counts are
-	/// never double-attributed across the two halves. An assigned peer identity
-	/// means subscriptions from the peer resolve to a source whose hop chain
-	/// excludes it, the same split-horizon rule applied when a peer declares
-	/// its own id; announce filtering is per-protocol and handled inside each
-	/// publisher.
-	fn origins(&self) -> (Option<origin::Consumer>, Option<origin::Producer>) {
+	/// never double-attributed across the two halves. `peer_hop` is the identity
+	/// this connection attributes the peer to when the peer declares none, so
+	/// subscriptions from the peer resolve to a source whose route excludes it.
+	/// A declared identity still wins inside each publisher; announce filtering
+	/// is per-protocol and handled there too.
+	fn origins(&self, peer_hop: crate::Hop) -> (Option<origin::Consumer>, Option<origin::Producer>) {
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");
 		}
@@ -156,7 +162,7 @@ impl Client {
 			.subscribe
 			.clone()
 			.map(|origin| origin.with_stats(self.stats.clone()));
-		let publish = publish.map(|origin| origin.excluding(self.peer_hop.unwrap_or(crate::Hop::UNKNOWN)));
+		let publish = publish.map(|origin| origin.excluding(peer_hop));
 		(publish, subscribe)
 	}
 
@@ -167,11 +173,12 @@ impl Client {
 		runtime: Clock,
 		session: S,
 		version: lite::Version,
+		peer_hop: crate::Hop,
 	) -> Result<(Session, crate::Driver<S>), Error>
 	where
 		S: crate::transport::poll::Session,
 	{
-		let (publish, subscribe) = self.origins();
+		let (publish, subscribe) = self.origins(peer_hop);
 
 		// Advertise our capabilities (we report what the transport measures; we
 		// don't pad) plus the request path on URI-less transports, and the
@@ -198,7 +205,7 @@ impl Client {
 			setup_stream: None,
 			publish,
 			subscribe,
-			peer_hop: self.peer_hop,
+			peer_hop: Some(peer_hop),
 			version,
 			our_setup,
 			peer_setup: None,
@@ -238,7 +245,7 @@ impl Client {
 			_ => return Err(Error::Version),
 		};
 		self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
-		self.start_lite(runtime, session, version)
+		self.start_lite(runtime, session, version, self.assigned_hop())
 	}
 
 	/// Perform the MoQ handshake, returning the [`Session`] and its [`Driver`](crate::Driver).
@@ -249,7 +256,8 @@ impl Client {
 		S: crate::transport::poll::Boxable,
 	{
 		let runtime = Clock::new(now);
-		let (publish, subscribe) = self.origins();
+		let peer_hop = self.assigned_hop();
+		let (publish, subscribe) = self.origins(peer_hop);
 
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
@@ -277,7 +285,7 @@ impl Client {
 					client: true,
 					publish: publish.clone(),
 					subscribe: subscribe.clone(),
-					peer_hop: self.peer_hop,
+					peer_hop: Some(peer_hop),
 					cost: self.cost,
 					version: draft,
 					path: self.setup_path.clone(),
@@ -326,19 +334,19 @@ impl Client {
 					_ => lite::Version::Lite05,
 				};
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
-				return self.start_lite(runtime, session, version);
+				return self.start_lite(runtime, session, version, peer_hop);
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
-				return self.start_lite(runtime, session, lite::Version::Lite04);
+				return self.start_lite(runtime, session, lite::Version::Lite04, peer_hop);
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite03))
 					.ok_or(Error::Version)?;
-				return self.start_lite(runtime, session, lite::Version::Lite03);
+				return self.start_lite(runtime, session, lite::Version::Lite03, peer_hop);
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -396,7 +404,7 @@ impl Client {
 					setup_stream: Some(stream),
 					publish: publish.clone(),
 					subscribe: subscribe.clone(),
-					peer_hop: self.peer_hop,
+					peer_hop: Some(peer_hop),
 					version: v,
 					// This path only handles versions negotiated via the bidi SETUP exchange
 					// (pre-lite-05), which have no Setup Stream.
@@ -436,7 +444,7 @@ impl Client {
 					client: true,
 					publish: publish.clone(),
 					subscribe: subscribe.clone(),
-					peer_hop: self.peer_hop,
+					peer_hop: Some(peer_hop),
 					cost: self.cost,
 					version: v,
 					path: None,

@@ -43,15 +43,18 @@ targets `qmux-v0.5.x`):
   delivering past its initial window, and a peer reads the close code after a
   close issued mid-write.
 
-Remaining: merge both, release patched 0.5.x (after 0.5.2) and 0.6.x
-containing them, then bump `main` to that 0.6.x and backport `release`'s pin
-to that 0.5.x. `release` stays on 0.5: 0.6 needs web-transport-trait 0.5, a
+Remaining here, once both ship: bump `main` to that 0.6.x and backport
+`release`'s pin to that 0.5.x. `release` stays on 0.5: 0.6 needs web-transport-trait 0.5, a
 breaking change.
 
 Why m0: the WebSocket fallback and the planned edge-to-core `tls://` links
 both run on qmux, and MoQ drops streams constantly.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [web-transport releases the fixes](/quest/m0/qmux-credit-upstream.md) - #412 and #413 merge and ship as patched 0.6.x and 0.5.x
 
 ## Related
 
