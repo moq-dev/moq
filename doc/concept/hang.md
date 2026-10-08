@@ -170,8 +170,9 @@ size, even when the parameter sets ride in the samples.
 relay forwards ciphertext and never sees a content key. The application
 distributes the credential on its own channel. Each publisher run binds that
 credential to its [epoch](/concept/moq-lite#publisher-epochs), which derives
-the track names and keys for that run alone. A restart is a new epoch, and
-nothing from the previous one decrypts. The broadcast path is an opaque name
+the track names and keys for that run alone. A restart under a fresh epoch
+shares no names or keys with the previous run; pinning the same epoch reuses
+them. The broadcast path is an opaque name
 derived from the credential and a semantic name such as `foo.hang`; it carries
 no format marker. `moq-e2ee` is the Rust implementation. Relays need no
 configuration to carry it.
