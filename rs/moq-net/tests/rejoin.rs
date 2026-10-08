@@ -496,7 +496,7 @@ async fn rejoin_keeps_source_timestamps() {
 
 			let consumer = client.consume();
 			consumer.routed("bench").await.unwrap();
-			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench", None).await.unwrap();
 			// Far from any arrival time, so a frame stamped on arrival cannot pass.
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
 
@@ -515,8 +515,8 @@ async fn rejoin_keeps_source_timestamps() {
 				};
 				let frame = group.read_frame().await.unwrap().unwrap();
 				assert_eq!(
-					frame.timestamp.as_millis(),
-					u128::from(ms),
+					frame.timestamp.map(Timestamp::as_millis),
+					Some(u128::from(ms)),
 					"{version} group {sequence}"
 				);
 				drop((group, sub));
