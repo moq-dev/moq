@@ -28,8 +28,8 @@ test that fails without it:
   lite-07 varints can carry `u64::MAX`, so this is reachable from the wire.
 - `rs/moq-net/src/ietf/error.rs`: `has_going_away` lists Draft18 through
   Draft22 explicitly. Flip it to `!matches!(older drafts)` like
-  `has_too_far_behind` and `has_malformed_track` next to it, keeping Draft16
-  and Draft17 excluded (0x4 is UNKNOWN_OBJECT_STATUS there), so a new draft
+  `has_too_far_behind` and `has_malformed_track` next to it, keeping Draft14
+  through Draft17 excluded (0x4 is UNKNOWN_OBJECT_STATUS in 16 and 17), so a new draft
   variant falls forward. This also changes `from_stream_code`; update its doc,
   which says values a later draft may add stay `Unknown`.
 - `rs/moq-uring/src/udp.rs`: `RecvMeta::parse` stores a stride of 0 as
