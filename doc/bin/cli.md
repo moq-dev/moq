@@ -44,10 +44,12 @@ moq <MoQ side> fetch <track> [options]
 The **MoQ side** goes first and attaches the process to the network:
 `--connect <url>` dials a relay (the path is the auth path, `?jwt=`
 carries a token), and `--broadcast <name>` names the broadcast. A process can
-instead host sessions with `--listen`, or both at once. A listener admits
+instead host sessions with `--listen`, or both at once; without a listener,
+the `--listen-*` and `--auth-*` flags are refused. A listener admits
 clients by `--auth-url` or `--auth-public`, as the relay does (see
 [Authentication](/bin/relay/auth)); public rules ignore certificates, so
-`--auth-public` refuses to start with `--listen-tls-root`. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
+`--auth-public` refuses to start with `--listen-tls-root`, and only `--listen`
+(QUIC) verifies one. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
@@ -128,23 +130,45 @@ SI matches the selection by DVB `service_id`, which is assumed to equal the PAT
 moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts
 ```
 
-MPEG-TS export restarts its clock and table cadence after a declared marker,
-discarding the old mux buffer. The first new clock packet signals the break and
-stdout pacing re-anchors. Every rendition joins the new program generation;
-no track is fenced across the marker.
+MPEG-TS export starts a new clock after a declared marker, and the first new
+clock packet signals the break. Each track goes out on the old clock until it
+reaches the marker, then joins the new one, unless an old-clock frame would go
+out after the new clock's first, which is dropped. Once the export has measured
+each track's lead over the others (two seconds of media), the new clock keeps
+it, so a track the source sends later than the rest crosses without losing
+frames. No track is fenced across the marker.
 
 MPEG-TS export frames AAC as ADTS, which labels only the AAC Main, LC, SSR,
 and LTP profiles. HE-AAC and HE-AACv2 go out as their AAC-LC core, and decoders
 find the SBR and PS in band, as ffmpeg's ADTS output does. A track whose
 profile or channel layout ADTS cannot label is refused rather than mislabeled.
+An Opus track is labeled with the plain channel code its extension descriptor
+can name: a family 0 head, a family 1 head with the Vorbis mapping, or mono or
+stereo when the track has no OpusHead. Any other head is refused rather than
+written with a guessed channel code.
+
+An AAC layout without a channelConfiguration, such as quad, rides in a program
+config element. `export ts` repeats it in the first frame after each PAT/PMT, so a
+receiver tuning in mid-stream can decode. ffmpeg writes it in the first frame
+only, so `import ts` joining an ffmpeg source mid-stream publishes the rest of
+the program without that AAC track, and adds the track if an element arrives.
 
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
-`export ts` pads its output with null packets back to that rate so an IRD or
-groomer receives a constant-rate stream. `--mux-rate 5000000` pads to an explicit
-rate instead, including for a broadcast that recorded none. Media is never delayed
-or dropped to fit: a source that sustains more than the rate overruns it, and a
-VBR source records nothing, so export without either stays unpadded.
+`export ts` pads its output with null packets back to that rate on a constant-rate
+schedule, so an IRD or groomer recovering its clock from packet arrival can lock:
+every PCR is the time of its own byte position at the rate. `--mux-rate 5000000`
+pads to an explicit rate instead, including for a broadcast that recorded none.
+
+Each frame goes out as early as a receiver's buffers for its PID admit (the
+ISO 13818-1 T-STD: no more of a PID's packets per interval than its transport
+buffer passes on, and no more bytes than its decoder buffer holds, sized from the
+SPS's HRD or level for video and per codec for audio), up to `--delay` ahead of its
+decode time on the output's PCR clock, earliest decode time first. So a heavy passage rides the intervals
+before it, and the output trails the source by twice the delay. A frame that cannot
+arrive by its decode time at the rate fails the export with an error naming both
+knobs; a broadcast-sized decoder buffer (a CPB of a second or more) needs a delay to
+match. A VBR source records no rate, so export without one stays unpadded.
 
 The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports select renditions with
 flags before the sink: `--video-name` and `--audio-name` pick a rendition,
@@ -336,7 +360,7 @@ zero-based `frame` and padded standard base64.
 
 `<track>` is the literal track name. `/fetch` splits its path on the last `/`,
 so the two agree only for names without one. Fetch only dials `--connect`, and
-refuses any listener, cluster, auth, or `--hop` flag. It gives up after 30
+refuses any listener, cluster, auth, or `--epoch` flag. It gives up after 30
 seconds, as `/fetch` does, and exits non-zero when the broadcast or group is not
 found (before writing anything), the relay refuses, or the deadline passes.
 
@@ -356,9 +380,14 @@ Every track gets its own timeline, stored in spans cut at group boundaries
 between 2s and 10s. The catalog and every text, JSON, and binary track are
 sparse data, so each of their groups is stored as soon as it finishes, and a
 group that never closes is stored in pieces as it grows. It refuses a rendition served
-from another broadcast, and one that returns after the catalog dropped it. The
+from another broadcast, one that returns after the catalog dropped it, and an
+untimed track, which has no timestamps to record (any track over moq-lite before
+05, or moq-transport without `TIMESCALE`, such as drafts 14–16). The
 stage ends once the broadcast does. A store URL that already holds a
-recording is continued: each track resumes after its newest stored span. `--retention 1h` keeps only the last hour (a DVR),
+recording is continued: each track resumes after its newest stored span. A source
+announced under another [epoch](/concept/moq-lite#publisher-epochs) than the recording
+restarted, so the export fails; start a new prefix. A source without an epoch fails the
+same way once its timestamps jump back before the stored span. `--retention 1h` keeps only the last hour (a DVR),
 deleting expired objects, and timeline objects no longer needed to recover it,
 `--retention-grace` (default 30s) after the timeline stops needing them. Every
 track keeps at least its newest span, so a catalog that never changes outlives
@@ -389,11 +418,28 @@ moq --connect https://relay.example.com/anon \
 
 ## Redundant publishers
 
-Two publishers of the same broadcast name are interchangeable sources:
-relays hold both routes and fail over between them mid-group. They must
-produce identical tracks with aligned groups. A restarted encoder is the same
-broadcast too, so one whose groups restart from 0 must publish under a new
-name, or viewers wait for its sequence to catch up.
+Each run announces a fresh epoch, so a restarted publisher replaces the old
+broadcast instead of resuming into it. Two publishers that pass the same
+`--epoch` (a lowercase, hyphenated UUIDv7, such as util-linux `uuidgen -7`
+prints) are interchangeable sources: relays hold both routes and fail over
+between them mid-group. They must produce identical tracks with aligned groups,
+which no importer guarantees yet (see
+[#4352](https://github.com/moq-dev/moq/issues/4352) and
+[#4354](https://github.com/moq-dev/moq/issues/4354)). A member restarted with
+the same epoch rejoins as the same content, so if its groups restart from 0,
+viewers wait for its sequence to catch up.
+
+```bash
+EPOCH=$(uuidgen -7)
+# On each of the two hosts:
+moq --connect https://relay.example.com/anon --broadcast event.hang --epoch "$EPOCH" import ts < feed.ts
+```
+
+`--epoch` applies to the sources announced once per run. The RTMP, SRT, and
+WHIP ingests and `import ts --program all` announce their own, so they refuse it.
+
+`--epoch` replaces the removed `--hop`. `MOQ_HOP` is no longer read, so drop it
+from any deployment and pass `MOQ_EPOCH` instead.
 
 ## Cluster
 
@@ -466,14 +512,34 @@ See [Authentication](/bin/relay/auth).
 ## Retention and latency
 
 `import --max-age` (default 30 s) tells relays how long to keep old
-groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-age` (default 500 ms) is how long *this* consumer waits for a
-stalled group before skipping. Raising the first never delays playback.
+groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-delay` (default 500 ms) is how far a stalled group may fall
+behind the live edge before *this* consumer skips it. Raising the first never delays playback.
 
-For `export ts`, `--max-age` also bounds how long the muxer holds a leading
-track for a lagging one. Frames go out in media-time order across all tracks,
-not arrival order, so two exporters of one broadcast emit them in one order. A
-track quiet for longer is muxed around until it catches up; a sparse track
-(SCTE-35) costs that wait once per cue. `--max-age 0` keeps arrival order.
+`export ts` takes `--delay` (default 500 ms) instead, and works like an SRT
+receiver's latency. Every frame is released to the multiplexer that long after
+its decode time, on a clock that keeps the source's pace and muxes all tracks in decode order
+whatever their arrival skew: two exporters of one broadcast emit them in one
+order. The export joins at the newest group and holds its output until it
+has heard from every audio, video, DVB AC-3 and teletext track (two delays at most) and a
+track starts its next group, or one of the frames it holds falls due. It then
+starts the clock on the track the source sends latest against its decode time,
+from that track's freshest frame: a broadcast TS sends video most of a second
+ahead and audio just in time, and the audio must keep the delay too. What of
+the joined group is older than the delay is dropped, so a joiner runs at the
+delay from its first output. A frame that arrives later than its deadline is
+dropped, and video then resumes at its next keyframe. The clock follows the
+source's, measured from the frames that arrive least delayed on the track sent
+latest, so a source whose clock runs a
+little fast or slow neither goes late nor piles up over a long run, and a
+spell of network queueing does not move it. The output's PCR is that clock,
+so it keeps to what ISO/IEC 13818-1 allows a system clock: within 30 ppm of
+the exporter's, its rate changing by at most 0.075 Hz/s. Catching up with a
+source near that limit takes hours; one further off is counted in the
+export's stats, and fails the export once it has used half the delay. Each
+25 ms slice of the output is written when the clock reaches it. A stalled group
+is skipped once it falls half the delay behind, leaving the group after it the
+other half. `--delay 0` holds nothing and drops
+nothing, writing frames in arrival order as they come.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the broadcast to come back instead: a publisher that restarts within
@@ -481,7 +547,9 @@ it is picked up under the same PIDs, with the break flagged (PCR discontinuity,
 PAT/PMT re-sent). Nothing is written while it is gone. When the linger runs out,
 the exit code is that of the last end: 0 if the broadcast finished cleanly, 1 if
 it dropped or failed. The default is `0s`, which exits on the first end the same
-way. Only `ts` can mark the restart, so the other formats refuse `--linger`.
+way. An export that fails while the broadcast stays up, such as on a codec TS
+cannot carry, has nothing to wait for and exits 1 without lingering. Only `ts`
+can mark the restart, so the other formats refuse `--linger`.
 
 ## Debugging
 
