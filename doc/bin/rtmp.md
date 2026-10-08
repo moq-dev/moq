@@ -39,8 +39,10 @@ push arrived. A group starting before the previous group's start, such as an
 encoder restarting its timestamps mid-push, ends that push with an error.
 
 A player that advertises enhanced-RTMP multitrack receives every rendition.
-Any other player receives one video rendition: the largest picture (then
-highest bitrate) in a codec it advertised. A push carries the largest one.
+Any other player receives one video rendition, the largest picture (then
+highest bitrate) in a codec it advertised, and one audio rendition, the highest
+bitrate (then sample rate, then channels) in a codec it advertised. A push
+carries the best of each.
 
 Implemented in pure Rust (no librtmp). The CLI speaks plaintext `rtmp://`
 only. The library adds RTMPS on the same port when the embedder supplies a TLS

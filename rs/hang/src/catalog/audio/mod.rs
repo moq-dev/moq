@@ -55,14 +55,17 @@ impl Audio {
 		self.renditions.is_empty()
 	}
 
-	/// Iterate the renditions best first: highest bitrate, then sample rate, then channel count.
+	/// Iterate the renditions best first: enabled, then highest bitrate, then sample rate, then channel count.
 	///
 	/// A consumer that carries one rendition takes the first it supports, so the
-	/// choice doesn't depend on how the tracks are named. An unknown bitrate ranks
+	/// choice doesn't depend on how the tracks are named. A disabled rendition sends
+	/// no frames, so it ranks below every enabled one. An unknown bitrate ranks
 	/// below a known one, and exact ties keep name order.
 	pub fn ranked(&self) -> impl Iterator<Item = (&String, &AudioConfig)> {
 		let mut ranked: Vec<_> = self.renditions.iter().collect();
-		ranked.sort_by_key(|(_, config)| std::cmp::Reverse((config.bitrate, config.sample_rate, config.channel_count)));
+		ranked.sort_by_key(|(_, config)| {
+			std::cmp::Reverse((config.enabled, config.bitrate, config.sample_rate, config.channel_count))
+		});
 		ranked.into_iter()
 	}
 }
@@ -190,7 +193,7 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn ranked_orders_by_bitrate_then_rate_then_channels() {
+	fn ranked_orders_by_enabled_then_bitrate_then_rate_then_channels() {
 		fn rendition(sample_rate: u32, channels: u32, bitrate: Option<u64>) -> AudioConfig {
 			let mut config = AudioConfig::new(AudioCodec::Opus, sample_rate, channels);
 			config.bitrate = bitrate;
@@ -209,6 +212,11 @@ mod test {
 
 		let names: Vec<_> = audio.ranked().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, ["c", "d", "e", "b", "f", "a", "g"]);
+
+		// A disabled rendition sends no frames, so it ranks below every enabled one.
+		audio.renditions.get_mut("c").unwrap().enabled = false;
+		let names: Vec<_> = audio.ranked().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["d", "e", "b", "f", "a", "g", "c"]);
 	}
 
 	#[test]
