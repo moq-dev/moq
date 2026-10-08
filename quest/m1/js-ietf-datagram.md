@@ -15,7 +15,3 @@ same way Rust does, and close the session on a malformed Type.
 
 The integration test `ietf does not deliver datagrams` flips to delivery on
 every supported draft, and `just test interop --all` covers both directions.
-
-## Related
-
-- [Datagrams are live-only](/quest/m1/datagram-unfetchable.md) - the subscribe range for datagrams, settled on both protocols

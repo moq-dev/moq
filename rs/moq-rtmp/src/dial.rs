@@ -227,10 +227,12 @@ impl<S: Stream> Client<S> {
 		let queued = std::mem::take(&mut self.work);
 		self.drain(queued).await?;
 
-		let mut export = FlvExport::new(moq_mux::Source::new(origin, path))
+		let source = moq_mux::Source::new(origin, path);
+		let catalog = source
+			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await
-			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
-			.with_max_delay(self.export_max_delay);
+			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
+		let mut export = FlvExport::new(source, catalog).with_max_delay(self.export_max_delay);
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 
@@ -290,14 +292,14 @@ impl<S: Stream> Client<S> {
 		self.work.push_back(request);
 		self.await_event(Direction::Play).await?;
 
-		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
-		// app and broadcast path stand in for it.
-		tracing::info!(app = %self.app, %path, "rtmp play accepted by remote");
-
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(self.import_max_age)
 			.with_bandwidth(self.import_bandwidth.clone());
 		let mut publisher = Publisher::new(origin, path.as_str(), config)?;
+
+		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
+		// app and broadcast path stand in for it.
+		tracing::info!(app = %self.app, %path, epoch = %publisher.epoch, "rtmp play accepted by remote");
 
 		let result = self.pull_media(&mut publisher).await;
 		match &result {
@@ -491,12 +493,15 @@ struct Publisher {
 	// A clone of the importer's producer, so an end can close the broadcast
 	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
+	// This pull's publisher instance, so pulling again replaces it rather than resuming into it.
+	epoch: moq_net::Epoch,
 }
 
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
+		let epoch = moq_net::Epoch::mint();
 		let mut broadcast = origin
-			.publish(path, moq_net::origin::Route::default())
+			.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let handle = broadcast.clone();
@@ -506,6 +511,7 @@ impl Publisher {
 		importer.decode(&flv::file_header())?;
 		Ok(Self {
 			importer,
+			epoch,
 			broadcast: handle,
 		})
 	}

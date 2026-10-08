@@ -176,7 +176,7 @@ mod tests {
 	use tokio::io::{AsyncBufReadExt, BufReader, DuplexStream, Lines};
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
-	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_HOP", "MOQ_BROADCAST"];
+	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_EPOCH", "MOQ_BROADCAST"];
 
 	/// A running relay holding `demo/a`, `demo/b`, and `other/c` from one publisher.
 	struct Fixture {

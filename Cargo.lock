@@ -4476,6 +4476,7 @@ dependencies = [
  "gst-plugin-version-helper",
  "gstreamer",
  "hang",
+ "moq-audio",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -4904,6 +4905,7 @@ dependencies = [
 name = "moq-stats"
 version = "0.2.12"
 dependencies = [
+ "criterion",
  "futures",
  "moq-json",
  "moq-net",
