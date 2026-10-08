@@ -15,3 +15,7 @@ If it fails, apply #5019's rule: on a draft without the bit, a non-zero first
 delta takes the same drop path as a cleared FIRST_OBJECT bit on d18. A gap
 after an object was delivered still fails that group. If it passes, delete
 this quest.
+
+## Related
+
+- [Gapped IETF object IDs](/quest/m1/ietf-object-gaps.md) - a headless d14-17 subgroup is a quiet drop; only a gap after a delivered object is refused loudly

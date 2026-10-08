@@ -19,7 +19,11 @@ reacting to one track's event touch only that track.
   `Parked`/unparked transition, so `next_deadline` is its first entry and the
   deadline sweep pops only what expired.
 - Replace the driver's scan-every-track poll with per-track wakes, so an
-  event on one track polls that track.
+  event on one track polls that track. This also removes `run_front`'s
+  quadratic rescan, where each pass handles one ready track query and then
+  rescans every track: a route swap measured 186 µs at 32 tracks, 769 µs at
+  64, and 2.16 ms at 128 (#4995's `origin/copy_walk`), which is this fix's
+  regression bench.
 - Keep the front's exhaustive walk test passing, and add a unit test that the
   index agrees with a full scan across random transitions.
 - Not in scope: kio's level-only demand, which lets a reader that comes and
