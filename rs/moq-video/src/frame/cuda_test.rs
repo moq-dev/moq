@@ -479,18 +479,70 @@ async fn vulkan_cuda_three_view_workload() {
 	);
 }
 
+/// Mean per-plane error a decoded NVENC rendition may show against the CPU reference.
+const ROUNDTRIP_TOLERANCE: u64 = 8;
+
+/// The CPU reference for an RGBA gradient at `shift`, converted and then scaled to `output`.
+fn expected(size: Size, shift: usize, color: Color, output: Size) -> I420 {
+	let full = reference(&gradient(size, Channels::Rgba, shift), size, color);
+	if output == size {
+		full
+	} else {
+		full.resize(output).unwrap()
+	}
+}
+
+/// Each capture moves the gradient half a width, so successive pictures differ
+/// by more than twice the round-trip tolerance and a stale one cannot pass.
+fn capture_shift(size: Size, capture: u64) -> usize {
+	capture as usize * size.width as usize / 2
+}
+
+/// The pictures this test feeds are far enough apart for the tolerance to tell
+/// them apart, at every rendition size. CPU only, so it guards the hardware
+/// test's premise on every run.
+#[test]
+fn auto_external_captures_are_distinguishable() {
+	let size = Size::new(320, 192);
+	for output in [size, Size::new(160, 96)] {
+		for capture in 1..6 {
+			let previous = expected(size, capture_shift(size, capture - 1), Color::Bt709Limited, output);
+			let current = expected(size, capture_shift(size, capture), Color::Bt709Limited, output);
+			for (plane, a, b) in [
+				("y", current.y(), previous.y()),
+				("u", current.u(), previous.u()),
+				("v", current.v(), previous.v()),
+			] {
+				let distance = mae(a, b);
+				assert!(
+					distance >= 2 * ROUNDTRIP_TOLERANCE,
+					"{output} capture {capture}: {plane} differs from the previous capture by only {distance}"
+				);
+			}
+		}
+	}
+}
+
 /// Producers declare only their device; both renditions import, convert, and scale inside NVENC.
+///
+/// Every decoded rendition of every capture, in both channel orders, matches
+/// the CPU conversion and resize of what the producer uploaded, so stale,
+/// black, or channel-swapped output fails.
 #[tokio::test]
 #[ignore = "requires a Linux NVIDIA GPU with Vulkan/CUDA external memory and NVENC"]
 async fn vulkan_cuda_auto_external_encode() {
 	let size = Size::new(320, 192);
 	let color = Color::Bt709Limited;
 	let mut producer = Producer::new(size).expect("NVIDIA Vulkan device required by opted-in test");
-	let image = producer.contract(Channels::Rgba);
-	let mut encoders = Vec::new();
+	let device = producer.contract(Channels::Rgba).device;
+	let decode = crate::decode::Config {
+		kind: crate::decode::Kind::Software,
+		..crate::decode::Config::new()
+	};
+	let mut renditions = Vec::new();
 	for output in [size, Size::new(160, 96)] {
 		let mut config = crate::encode::Config::new(output.width, output.height, crate::Rate::new(30, 1).unwrap());
-		config.input = Some(image.device);
+		config.input = Some(device);
 		config.color = Some(color);
 		config
 			.probe()
@@ -498,44 +550,62 @@ async fn vulkan_cuda_auto_external_encode() {
 			.expect("probe the declared input device before capture");
 		let encoder = crate::encode::Encoder::new(&config).expect("automatic external-image selection");
 		assert_eq!(encoder.name(), "nvenc");
-		encoders.push(encoder);
+		let decoder = crate::decode::backend::open(crate::decode::backend::Codec::H264, &decode).unwrap();
+		renditions.push((encoder, decoder));
 	}
-	let mut slot = VulkanSlot::new(producer.export(), image, ()).unwrap();
-	for capture in 0..3 {
-		let ready = capture * 2 + 1;
-		let rgba = gradient(size, Channels::Rgba, capture as usize);
-		producer.upload(&rgba, (capture > 0).then_some(ready - 1), ready);
-		let (image, completion) = slot.publish(Timeline::new(ready, ready + 1).unwrap()).unwrap();
-		let frame = VideoFrame::new(
-			Surface::Vulkan(image),
-			moq_net::Timestamp::from_micros(capture * 33_333).unwrap(),
-		);
-		for encoder in &mut encoders {
-			encoder.cut().unwrap();
-			let encoded = encoder
-				.encode(&frame)
-				.expect("external image encoded entirely on the GPU");
-			assert!(!encoded.is_empty());
-			let decode = crate::decode::Config {
-				kind: crate::decode::Kind::Software,
-				..crate::decode::Config::new()
-			};
-			let mut decoder = crate::decode::backend::open(crate::decode::backend::Codec::H264, &decode).unwrap();
-			let mut decoded = Vec::new();
-			for packet in encoded {
-				decoded.extend(
-					decoder
-						.decode(packet.payload, packet.timestamp, packet.keyframe)
-						.unwrap(),
-				);
+
+	let mut capture = 0u64;
+	for channels in [Channels::Rgba, Channels::Bgra] {
+		let mut slot = VulkanSlot::new(producer.export(), producer.contract(channels), ()).unwrap();
+		for _ in 0..3 {
+			let ready = capture * 2 + 1;
+			let shift = capture_shift(size, capture);
+			producer.upload(
+				&gradient(size, channels, shift),
+				(capture > 0).then_some(ready - 1),
+				ready,
+			);
+			let (image, completion) = slot.publish(Timeline::new(ready, ready + 1).unwrap()).unwrap();
+			let timestamp = moq_net::Timestamp::from_micros(capture * 33_333).unwrap();
+			let frame = VideoFrame::new(Surface::Vulkan(image), timestamp);
+			for (encoder, decoder) in &mut renditions {
+				let output = encoder.size();
+				encoder.cut().unwrap();
+				let encoded = encoder
+					.encode(&frame)
+					.expect("external image encoded entirely on the GPU");
+				assert_eq!(encoded.len(), 1, "one access unit for {output} capture {capture}");
+				let mut decoded = Vec::new();
+				for packet in encoded {
+					decoded.extend(
+						decoder
+							.decode(packet.payload, packet.timestamp, packet.keyframe)
+							.unwrap(),
+					);
+				}
+				assert_eq!(decoded.len(), 1, "one picture for {output} capture {capture}");
+				let actual = decoded[0].surface.to_i420().unwrap();
+				assert_eq!(actual.size(), output);
+				let expected = expected(size, shift, color, output);
+				for (plane, actual, expected) in [
+					("y", actual.y(), expected.y()),
+					("u", actual.u(), expected.u()),
+					("v", actual.v(), expected.v()),
+				] {
+					let error = mae(actual, expected);
+					eprintln!("{channels:?} {output} capture {capture} {plane} mae={error}");
+					assert!(
+						error < ROUNDTRIP_TOLERANCE,
+						"{channels:?} {output} capture {capture}: decoded {plane} differs from the reference by {error}"
+					);
+				}
 			}
-			assert_eq!(decoded.len(), 1);
-			assert_eq!(decoded[0].size(), encoder.size());
+			drop(frame);
+			slot = completion
+				.wait()
+				.await
+				.expect("producer slot returned after both renditions");
+			capture += 1;
 		}
-		drop(frame);
-		slot = completion
-			.wait()
-			.await
-			.expect("producer slot returned after both renditions");
 	}
 }
