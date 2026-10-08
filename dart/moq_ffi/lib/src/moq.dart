@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -839,9 +837,13 @@ class FfiConverterMoqContainerInit {
 
 class MoqDatagram {
   final int sequence;
-  final int timestampUs;
+  final int? timestampUs;
   final Uint8List payload;
-  MoqDatagram({this.sequence = 0, this.timestampUs = 0, required this.payload});
+  MoqDatagram({
+    this.sequence = 0,
+    this.timestampUs = null,
+    required this.payload,
+  });
 }
 
 class FfiConverterMoqDatagram {
@@ -856,7 +858,7 @@ class FfiConverterMoqDatagram {
     );
     final sequence = sequence_lifted.value;
     new_offset += sequence_lifted.bytesRead;
-    final timestampUs_lifted = FfiConverterUInt64.read(
+    final timestampUs_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final timestampUs = timestampUs_lifted.value;
@@ -879,7 +881,7 @@ class FfiConverterMoqDatagram {
   static RustBuffer lower(MoqDatagram value) {
     final total_length =
         FfiConverterUInt64.allocationSize(value.sequence) +
-        FfiConverterUInt64.allocationSize(value.timestampUs) +
+        FfiConverterOptionalUInt64.allocationSize(value.timestampUs) +
         FfiConverterUint8List.allocationSize(value.payload) +
         0;
     final buf = Uint8List(total_length);
@@ -893,7 +895,7 @@ class FfiConverterMoqDatagram {
       value.sequence,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterUInt64.write(
+    new_offset += FfiConverterOptionalUInt64.write(
       value.timestampUs,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -906,7 +908,7 @@ class FfiConverterMoqDatagram {
 
   static int allocationSize(MoqDatagram value) {
     return FfiConverterUInt64.allocationSize(value.sequence) +
-        FfiConverterUInt64.allocationSize(value.timestampUs) +
+        FfiConverterOptionalUInt64.allocationSize(value.timestampUs) +
         FfiConverterUint8List.allocationSize(value.payload) +
         0;
   }
@@ -973,8 +975,8 @@ class FfiConverterMoqDimensions {
 
 class MoqFrame {
   final Uint8List payload;
-  final int timestampUs;
-  MoqFrame({required this.payload, this.timestampUs = 0});
+  final int? timestampUs;
+  MoqFrame({required this.payload, this.timestampUs = null});
 }
 
 class FfiConverterMoqFrame {
@@ -989,7 +991,7 @@ class FfiConverterMoqFrame {
     );
     final payload = payload_lifted.value;
     new_offset += payload_lifted.bytesRead;
-    final timestampUs_lifted = FfiConverterUInt64.read(
+    final timestampUs_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final timestampUs = timestampUs_lifted.value;
@@ -1003,7 +1005,7 @@ class FfiConverterMoqFrame {
   static RustBuffer lower(MoqFrame value) {
     final total_length =
         FfiConverterUint8List.allocationSize(value.payload) +
-        FfiConverterUInt64.allocationSize(value.timestampUs) +
+        FfiConverterOptionalUInt64.allocationSize(value.timestampUs) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -1016,7 +1018,7 @@ class FfiConverterMoqFrame {
       value.payload,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterUInt64.write(
+    new_offset += FfiConverterOptionalUInt64.write(
       value.timestampUs,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -1025,7 +1027,7 @@ class FfiConverterMoqFrame {
 
   static int allocationSize(MoqFrame value) {
     return FfiConverterUint8List.allocationSize(value.payload) +
-        FfiConverterUInt64.allocationSize(value.timestampUs) +
+        FfiConverterOptionalUInt64.allocationSize(value.timestampUs) +
         0;
   }
 }
@@ -12864,7 +12866,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqgroupproducer_sequence() != 21067) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqgroupproducer_write_frame() != 2442) {
+  if (uniffi_moq_ffi_checksum_method_moqgroupproducer_write_frame() != 51857) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqgrouprequest_abort() != 26970) {
@@ -12927,7 +12929,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_append_datagram() !=
-      6272) {
+      31895) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_append_group() != 45225) {
@@ -12960,7 +12962,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqtrackproducer_used() != 19906) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_write_frame() != 18663) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackproducer_write_frame() != 1418) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackrequest_abort() != 62713) {

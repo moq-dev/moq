@@ -140,3 +140,54 @@ export const VideoSchema = z.union([
 export type Video = z.infer<typeof VideoSchema>;
 /** Decoder config for a single video rendition. */
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;
+
+/**
+ * Rank video renditions best first: largest picture, then highest bitrate, then name.
+ *
+ * A missing width, height, or bitrate ranks below a known value. Exact ties keep name order,
+ * matching `hang::catalog::Video::ranked`, so the choice does not follow catalog insertion order.
+ */
+export function ranked(renditions: Record<string, VideoConfig>): [string, VideoConfig][] {
+	return Object.entries(renditions).sort(compareRanked);
+}
+
+/** Coded pixel count. A missing side is zero, so an unknown picture ranks below a known one. */
+function pictureArea(config: VideoConfig): number {
+	return (config.codedWidth ?? 0) * (config.codedHeight ?? 0);
+}
+
+function compareRanked(left: [string, VideoConfig], right: [string, VideoConfig]): number {
+	const leftArea = pictureArea(left[1]);
+	const rightArea = pictureArea(right[1]);
+	if (leftArea !== rightArea) return leftArea > rightArea ? -1 : 1;
+
+	const bitrate = compareBitrate(left[1].bitrate, right[1].bitrate);
+	if (bitrate !== 0) return bitrate;
+
+	return compareName(left[0], right[0]);
+}
+
+// A missing bitrate ranks below every known value, including zero. Higher known bitrates come first.
+function compareBitrate(left: number | undefined, right: number | undefined): number {
+	if (left === right) return 0;
+	if (left === undefined) return 1;
+	if (right === undefined) return -1;
+	return left > right ? -1 : 1;
+}
+
+// Rust `String` order is Unicode code point order. JS `<` is UTF-16 code unit order and disagrees
+// once a name leaves the BMP.
+function compareName(left: string, right: string): number {
+	const l = left[Symbol.iterator]();
+	const r = right[Symbol.iterator]();
+	for (;;) {
+		const a = l.next();
+		const b = r.next();
+		if (a.done && b.done) return 0;
+		if (a.done) return -1;
+		if (b.done) return 1;
+		const ac = a.value.codePointAt(0) ?? 0;
+		const bc = b.value.codePointAt(0) ?? 0;
+		if (ac !== bc) return ac < bc ? -1 : 1;
+	}
+}

@@ -171,30 +171,60 @@ class Picture {
 }
 
 type Read = NonNullable<Awaited<ReturnType<Container.Consumer["next"]>>>;
-function sample(group: number, timestamp: number, discontinuity = 0): Read {
+function sample(group: number, timestamp: number, discontinuity = 0, keyframe = true): Read {
 	return {
 		group,
 		discontinuity,
 		continuous: true,
-		frame: { timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe: true },
+		frame: { timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe },
 	};
 }
 
-async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[]) {
+async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = []) {
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
 	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
 	const submitted: number[] = [];
+	const outputs: number[] = [];
+	const owed = new Set(hold);
+	const pending: Array<() => void> = [];
+	let resets = 0;
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
 	class Codec {
-		state = "configured";
+		state = "unconfigured";
+		// Like WebCodecs, a configure requires a key chunk before any delta.
+		#keyRequired = true;
 		readonly callbacks: VideoDecoderInit;
 		constructor(callbacks: VideoDecoderInit) {
 			this.callbacks = callbacks;
 		}
-		configure() {}
+		configure() {
+			this.state = "configured";
+			this.#keyRequired = true;
+		}
+		// Pictures still inside the decoder come out ahead of a chunk decoded later, unless reset
+		// discarded them. That is the gap the generation guard misses: it is read when the frame
+		// comes out, which is after the playhead bump.
 		decode(chunk: EncodedVideoChunk) {
+			if (this.state !== "configured") throw new Error("decode on an unconfigured decoder");
+			if (this.#keyRequired && chunk.type !== "key") throw new Error("a key chunk is required");
+			this.#keyRequired = false;
 			submitted.push(chunk.timestamp);
-			this.callbacks.output(new Picture(chunk.timestamp) as unknown as VideoFrame);
+			const emit = () => {
+				outputs.push(chunk.timestamp);
+				void this.callbacks.output(new Picture(chunk.timestamp) as unknown as VideoFrame);
+			};
+			if (owed.delete(chunk.timestamp)) {
+				pending.push(emit);
+				return;
+			}
+			for (const earlier of pending) earlier();
+			pending.length = 0;
+			emit();
+		}
+		reset() {
+			resets++;
+			pending.length = 0;
+			this.state = "unconfigured";
 		}
 		close() {
 			this.state = "closed";
@@ -205,8 +235,10 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[]) {
 		configurable: true,
 		value: class {
 			timestamp: number;
+			type: EncodedVideoChunkType;
 			constructor(init: EncodedVideoChunkInit) {
 				this.timestamp = init.timestamp;
+				this.type = init.type;
 			}
 		},
 	});
@@ -230,6 +262,10 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[]) {
 		enabled,
 		catalog,
 		submitted,
+		outputs,
+		get resets() {
+			return resets;
+		},
 		close() {
 			decoder.close();
 			source.close();
@@ -303,6 +339,39 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
+		} finally {
+			playback.close();
+		}
+	});
+
+	// A group may restart at its own start, so a picture already queued from later in that
+	// group is above the new keyframe. It must not come out afterwards and late-reject it.
+	it(`${kind} drops a picture queued before a discontinuity`, async () => {
+		const queued = 60_000_000;
+		const playback = await guardedPlayback(kind, [sample(1, 0), sample(1, queued), sample(2, 0, 1)], [queued]);
+		try {
+			expect(playback.submitted).toEqual([0, queued, 0]);
+			expect(playback.outputs).toEqual([0, 0]);
+			expect(playback.resets).toBe(1);
+			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+		} finally {
+			playback.close();
+		}
+	});
+
+	// A stale marker (or a max-delay hole) can bump the playhead while the live group is only
+	// partly delivered, so the next frame is a delta that still needs the decoder's references.
+	it(`${kind} keeps decoding a delta that follows a discontinuity`, async () => {
+		const playback = await guardedPlayback(kind, [
+			sample(10, 1000),
+			sample(10, 1100, 0, false),
+			marker(8, 850, 1),
+			sample(10, 1200, 1, false),
+			sample(11, 1300, 1),
+		]);
+		try {
+			expect(playback.submitted).toEqual([1000, 1100, 1200, 1300]);
+			expect(playback.resets).toBe(0);
 		} finally {
 			playback.close();
 		}

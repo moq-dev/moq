@@ -390,7 +390,10 @@ impl<S: ObjectStore> Control<S> {
 			.subscribe(replay.clone())
 			.await
 			.map_err(source_error)?;
-		let timescale = subscriber.info().timescale;
+		let timescale = subscriber
+			.info()
+			.timescale
+			.ok_or_else(|| Error::Untimed(name.to_string()))?;
 		let info = Info::new(subscriber.info().priority, timescale.as_u64())?;
 		shared.store.put_info(name, &info).await?;
 
@@ -408,7 +411,11 @@ impl<S: ObjectStore> Control<S> {
 			.await
 			.map_err(timeline_error_net)?
 			.ordered();
-		let info = Info::new(groups.info().priority, groups.info().timescale.as_u64())?;
+		let timeline_scale = groups
+			.info()
+			.timescale
+			.ok_or_else(|| Error::Untimed(timeline.to_string()))?;
+		let info = Info::new(groups.info().priority, timeline_scale.as_u64())?;
 		shared.store.put_info(&timeline, &info).await?;
 
 		let resume = shared.recovered.lock().unwrap().remove(name);
@@ -713,8 +720,10 @@ fn handle<S: ObjectStore>(
 				Ok(Some(frame)) => {
 					let index = incoming.next;
 					incoming.next += 1;
+					// The track is timed, so every frame on it is.
 					let timestamp = frame
 						.timestamp
+						.ok_or_else(|| malformed(&name, sequence, Error::Untimed(name.clone())))?
 						.convert(track.timescale)
 						.map_err(|_| malformed(&name, sequence, Error::Overflow))?
 						.value();
@@ -870,7 +879,11 @@ impl<S: ObjectStore> Committer<S> {
 	/// instead keeps a recording's bytes a function of its content alone.
 	fn read_timeline(&mut self, pts: Timestamp) -> Result<Object> {
 		let waiter = kio::Waiter::noop();
-		let timescale = self.groups.info().timescale;
+		let timescale = self
+			.groups
+			.info()
+			.timescale
+			.ok_or_else(|| Error::Timeline("untimed timeline track".to_string()))?;
 		let mut groups = Vec::new();
 		while let Poll::Ready(result) = self.groups.poll_next_group(&waiter) {
 			let Some(mut group) = result.map_err(timeline_error_net)? else {
@@ -1151,6 +1164,25 @@ mod tests {
 		assert_eq!(store.get_info("video").await.unwrap(), Info::new(127, 1000).unwrap());
 		store.get_info(&timeline("video")).await.unwrap();
 		assert!(store.get_info("ignored").await.is_err());
+	}
+
+	/// A recording needs a timestamp on every frame, so an untimed track is refused.
+	#[tokio::test]
+	async fn an_untimed_track_is_refused() {
+		let source = broadcast::Info::new().produce();
+		let _data = source
+			.create_track("data", track::Info::default().with_timescale(None))
+			.unwrap();
+
+		let store = Store::new(InMemory::new(), "rec");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		assert_eq!(
+			writer.control().track("data", sparse()).await,
+			Err(Error::Untimed("data".into()))
+		);
+		assert!(store.get_info("data").await.is_err(), "nothing is recorded");
 	}
 
 	#[tokio::test]

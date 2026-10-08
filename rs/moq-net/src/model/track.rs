@@ -87,15 +87,18 @@ pub(crate) const IDLE_LINGER: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
-	/// Units per second for per-frame timestamps on this track.
+	/// Units per second for per-frame timestamps on this track, or `None` for an untimed
+	/// track.
 	///
-	/// Every track is timed; this defaults to [`Timescale::MILLI`]. On Lite05+ it is
-	/// reported in TRACK_INFO and the publisher zigzag-delta encodes per-frame
-	/// timestamps at this scale on the wire. IETF draft-17 and later carry the same
-	/// value as the TIMESCALE track property, and object Timestamps use these units.
-	/// A wire that cannot carry it (pre-Lite05 moq-lite, IETF drafts 14-16) sends no
-	/// timestamps, and the receiver falls back to local monotonic milliseconds.
-	pub timescale: Timescale,
+	/// A track is all timed or all untimed: every frame and datagram on a timed track
+	/// carries a timestamp, none on an untimed one does, and a write that doesn't match
+	/// is refused with [`Error::TimestampMismatch`]. Defaults to [`Timescale::MILLI`]. On
+	/// Lite05+ it is reported in TRACK_INFO and the publisher zigzag-delta encodes
+	/// per-frame timestamps at this scale on the wire; on moq-transport draft 17 and
+	/// later it is the TIMESCALE Track Property. A track received without one
+	/// (pre-Lite05 moq-lite, moq-transport drafts 14-16, or moq-transport without
+	/// TIMESCALE) is untimed.
+	pub timescale: Option<Timescale>,
 	/// How far behind the live edge a group may fall, in media timestamps, before it
 	/// is stale. The newest group is always retained.
 	///
@@ -127,7 +130,7 @@ pub struct Info {
 impl Default for Info {
 	fn default() -> Self {
 		Self {
-			timescale: Timescale::default(),
+			timescale: Some(Timescale::default()),
 			max_age: None,
 			priority: DEFAULT_PRIORITY,
 		}
@@ -135,12 +138,13 @@ impl Default for Info {
 }
 
 impl Info {
-	/// Set the per-frame timestamp scale, returning `self` for chaining.
+	/// Set the per-frame timestamp scale, or `None` for an untimed track, returning `self`
+	/// for chaining.
 	///
 	/// Defaults to [`Timescale::MILLI`]. On Lite05+ this scale is reported in TRACK_INFO
 	/// and used to encode per-frame timestamps on the wire.
-	pub fn with_timescale(mut self, timescale: Timescale) -> Self {
-		self.timescale = timescale;
+	pub fn with_timescale(mut self, timescale: impl Into<Option<Timescale>>) -> Self {
+		self.timescale = timescale.into();
 		self
 	}
 
@@ -644,6 +648,26 @@ impl TrackState {
 			})
 	}
 
+	/// Where a new reader with no explicit start begins on an untimed track: its newest
+	/// servable group below the exclusive `cap`.
+	///
+	/// A drift budget resolves a timed track's start, but nothing is ever stale on an
+	/// untimed track, so the budget would replay the whole cache. `None` on a timed track,
+	/// or while nothing is servable yet.
+	fn untimed_start(&self, cap: Option<u64>) -> Option<u64> {
+		if self.info.as_ref()?.timescale.is_some() {
+			return None;
+		}
+		self.lookup
+			.range((
+				std::ops::Bound::Unbounded,
+				cap.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
+			))
+			.rev()
+			.find(|(_, slot)| slot.visible && !slot.group.is_aborted())
+			.map(|(sequence, _)| *sequence)
+	}
+
 	/// This track's own edge under the exclusive `cap`, for measuring drift.
 	fn drift_edge(&self, cap: Option<u64>) -> Edge {
 		Edge {
@@ -697,8 +721,8 @@ impl TrackState {
 	/// A group's reach is bounded by its immediate successor (see [`Self::reach`]): it
 	/// cannot present past where the next group begins. The candidate itself needs no
 	/// timestamp: an empty group is bounded by its stamped successor the same way. Only
-	/// timestamps drive expiry; wall-clock reclamation of idle content is the cache's
-	/// own policy, not the budget's.
+	/// timestamps drive expiry, so nothing on an untimed track is ever stale; wall-clock
+	/// reclamation of idle content is the cache's own policy, not the budget's.
 	///
 	/// The bound is exclusive, so the comparison is `>=` rather than `>`: the freshest frame
 	/// a group could still hold sits just *below* its reach, so an age equal to the budget
@@ -1525,7 +1549,14 @@ impl Producer {
 	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
 	/// publisher uses this; a relay preserving upstream numbering uses
 	/// [`Self::insert_datagram`].
-	pub fn append_datagram<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
+	///
+	/// Pass `None` on an untimed track; a datagram that doesn't match its track is
+	/// [`Error::TimestampMismatch`].
+	pub fn append_datagram<B: crate::IntoBytes>(
+		&mut self,
+		timestamp: impl Into<Option<Timestamp>>,
+		payload: B,
+	) -> Result<u64> {
 		let payload = payload.into_bytes();
 		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
 			return Err(Error::FrameTooLarge);
@@ -1535,7 +1566,7 @@ impl Producer {
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
 		let timescale = state.info.as_ref().unwrap().timescale;
-		let timestamp = timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?;
+		let timestamp = group::on_track(timestamp.into(), timescale)?;
 		let sequence = match state.max_sequence {
 			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
@@ -1566,7 +1597,7 @@ impl Producer {
 	pub fn insert_datagram<B: crate::IntoBytes>(
 		&mut self,
 		sequence: u64,
-		timestamp: Timestamp,
+		timestamp: impl Into<Option<Timestamp>>,
 		payload: B,
 	) -> Result<()> {
 		let payload = payload.into_bytes();
@@ -1578,7 +1609,7 @@ impl Producer {
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
 		let timescale = state.info.as_ref().unwrap().timescale;
-		let timestamp = timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?;
+		let timestamp = group::on_track(timestamp.into(), timescale)?;
 		if let Some(fin) = state.final_sequence
 			&& sequence >= fin
 		{
@@ -1599,13 +1630,20 @@ impl Producer {
 
 	/// Create a group with a single frame, at the given presentation timestamp.
 	///
-	/// The timestamp is converted into the track's timescale. For data without
-	/// a presentation time, pass [`Timestamp::now`] explicitly.
-	pub fn write_frame<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, frame: B) -> Result<()> {
+	/// The timestamp is converted into the track's timescale. Pass `None` on an untimed
+	/// track; a frame that doesn't match its track is [`Error::TimestampMismatch`].
+	pub fn write_frame<B: crate::IntoBytes>(
+		&mut self,
+		timestamp: impl Into<Option<Timestamp>>,
+		frame: B,
+	) -> Result<()> {
 		let frame = crate::IntoBytes::into_bytes(frame);
 		if frame.len() as u64 > group::MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
 		}
+		// Checked before the group exists, so a refused frame leaves no empty group behind.
+		let timescale = self.modify()?.info.as_ref().unwrap().timescale;
+		let timestamp = group::on_track(timestamp.into(), timescale)?;
 		let mut group = self.append_group()?;
 		group.write_frame(timestamp, frame)?;
 		group.finish()?;
@@ -1857,7 +1895,8 @@ impl Producer {
 	/// The read cursor starts at the group the subscription named (its floor), or 0.
 	/// [`Subscription::max_delay`] is what asks for data: delivery skips everything above
 	/// the floor that the budget convicts, so the default budget of zero delivers only
-	/// the latest group and a larger one reaches back over what it can still use.
+	/// the latest group and a larger one reaches back over what it can still use. An
+	/// untimed track has nothing to convict, so it starts at its latest group.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
 		let preferences = subscription.into().unwrap_or_default();
 
@@ -2584,7 +2623,8 @@ impl Consumer {
 	/// The read cursor starts at the group the subscription named (its floor), or 0.
 	/// [`Subscription::max_delay`] is what asks for data: delivery skips everything above
 	/// the floor that the budget convicts, so the default budget of zero delivers only
-	/// the latest group and a larger one reaches back over what it can still use.
+	/// the latest group and a larger one reaches back over what it can still use. An
+	/// untimed track has nothing to convict, so it starts at its latest group.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
 		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
 
@@ -3344,7 +3384,7 @@ impl group::Expiry for GroupExpiry {
 			if let Some(reach) = successor.timestamp() {
 				break reach;
 			}
-			if successor.poll_timestamp(waiter).is_pending() || successor.timestamp().is_none() {
+			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
 				return false;
 			}
 		};
@@ -3426,7 +3466,18 @@ struct Cursor {
 
 impl Cursor {
 	fn new(state: kio::Consumer<TrackState>, subscription: kio::Producer<Subscription>) -> Self {
-		let min_sequence = floor_of(&subscription.read());
+		// An explicit start says how far back to reach, so only an unfloored subscription
+		// jumps to an untimed track's latest group.
+		let min_sequence = {
+			let preferences = subscription.read();
+			match preferences.start {
+				Some(_) => floor_of(&preferences),
+				None => {
+					let cap = preferences.end.and_then(|end| Cap::from(end.group_end()).exclusive());
+					state.read().untimed_start(cap).unwrap_or(0)
+				}
+			}
+		};
 		Self {
 			state,
 			subscription,
@@ -4472,7 +4523,7 @@ mod test {
 
 		let got = recv_datagram(&mut dg);
 		assert_eq!(got.sequence, seq);
-		assert_eq!(got.timestamp, ts);
+		assert_eq!(got.timestamp, Some(ts));
 		assert_eq!(&got.payload[..], b"hello");
 	}
 
@@ -4689,8 +4740,8 @@ mod test {
 			.append_datagram(Timestamp::from_millis(2).unwrap(), &b"z"[..])
 			.unwrap();
 		let got = recv_datagram(&mut dg);
-		assert_eq!(got.timestamp.scale(), Timescale::MICRO);
-		assert_eq!(got.timestamp.value(), 2_000);
+		assert_eq!(got.timestamp.unwrap().scale(), Timescale::MICRO);
+		assert_eq!(got.timestamp.unwrap().value(), 2_000);
 	}
 
 	#[test]
@@ -4779,7 +4830,7 @@ mod test {
 		let body = lite::Datagram {
 			subscribe: 5,
 			sequence: d.sequence,
-			timestamp: d.timestamp.value(),
+			timestamp: d.timestamp.unwrap().value(),
 			payload: d.payload.clone(),
 		}
 		.encode_bytes(version)
@@ -4799,7 +4850,7 @@ mod test {
 
 		let got = recv_datagram(&mut downstream_dg);
 		assert_eq!(got.sequence, seq);
-		assert_eq!(got.timestamp, ts);
+		assert_eq!(got.timestamp, Some(ts));
 		assert_eq!(&got.payload[..], b"payload");
 	}
 
@@ -4966,7 +5017,7 @@ mod test {
 		let mut frame = straggler
 			.create_frame(frame::Info {
 				size: 10,
-				timestamp: Timestamp::ZERO,
+				timestamp: Some(Timestamp::ZERO),
 			})
 			.unwrap();
 		// One chunk per half-window; the whole frame spans several windows. New
@@ -5001,7 +5052,7 @@ mod test {
 			.create_frame_owned(
 				frame::Info {
 					size: 3,
-					timestamp: Timestamp::ZERO,
+					timestamp: Some(Timestamp::ZERO),
 				},
 				&Default::default(),
 			)
@@ -5266,7 +5317,7 @@ mod test {
 		let mut frame = live
 			.create_frame(frame::Info {
 				size: 1,
-				timestamp: Timestamp::ZERO,
+				timestamp: Some(Timestamp::ZERO),
 			})
 			.unwrap();
 
@@ -6141,7 +6192,7 @@ mod test {
 		let late = end.await.expect("the straggler is not truncated");
 		assert_eq!(
 			late.map(|frame| frame.timestamp),
-			Some(Timestamp::from_millis(1950).unwrap())
+			Some(Some(Timestamp::from_millis(1950).unwrap()))
 		);
 	}
 
@@ -6198,7 +6249,7 @@ mod test {
 		let mut writing = source
 			.create_frame(frame::Info {
 				size: 6,
-				timestamp: Timestamp::ZERO,
+				timestamp: Some(Timestamp::ZERO),
 			})
 			.unwrap();
 		writing.write(bytes::Bytes::from_static(b"old")).unwrap();
@@ -6348,6 +6399,100 @@ mod test {
 			drain(&mut sub).contains(&0),
 			"group 0 is bounded by its successor at 10s, not by a later rewind"
 		);
+	}
+
+	fn untimed_producer() -> Producer {
+		track_producer("test", Info::default().with_timescale(None))
+	}
+
+	/// A group of untimed frames.
+	fn append_untimed(producer: &mut Producer) -> u64 {
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(None, bytes::Bytes::from_static(b"x")).unwrap();
+		group.finish().unwrap();
+		group.sequence
+	}
+
+	/// Nothing on an untimed track is ever stale, so a budget can't resolve where a new
+	/// subscriber starts. It takes the latest group instead of replaying the cache.
+	#[test]
+	fn an_untimed_track_starts_at_its_latest_group() {
+		let mut producer = untimed_producer();
+		for _ in 0..5 {
+			append_untimed(&mut producer);
+		}
+
+		let mut live = producer.subscribe(None);
+		assert_eq!(drain(&mut live), vec![4]);
+		let mut patient = producer.subscribe(replay());
+		assert_eq!(
+			drain(&mut patient),
+			vec![4],
+			"no budget reaches back on an untimed track"
+		);
+
+		append_untimed(&mut producer);
+		assert_eq!(drain(&mut live), vec![5], "every later group is delivered");
+	}
+
+	/// An explicit start says how far back to reach, so it wins over the untimed jump to
+	/// the latest group (a resume after failover names the group it lacks).
+	#[test]
+	fn an_explicit_start_holds_on_an_untimed_track() {
+		let mut producer = untimed_producer();
+		for _ in 0..5 {
+			append_untimed(&mut producer);
+		}
+
+		let mut subscriber = producer.subscribe(Subscription::default().with_start(Position::group(2)));
+		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
+	}
+
+	/// An unfloored untimed subscription with an end starts at the latest group below it,
+	/// as the lite publisher serves a SUBSCRIBE with an end and no start.
+	#[test]
+	fn an_untimed_start_stays_under_the_end() {
+		let mut producer = untimed_producer();
+		for _ in 0..5 {
+			append_untimed(&mut producer);
+		}
+
+		let mut subscriber = producer.subscribe(Subscription::default().with_end(Position::group(3)));
+		subscriber.end_at(Position::group(3).group_end());
+		assert_eq!(drain(&mut subscriber), vec![2]);
+	}
+
+	/// A refused single-frame write leaves no group behind: an empty open group would hold a
+	/// subscriber waiting for a frame that never comes.
+	#[test]
+	fn a_mismatched_frame_appends_no_group() {
+		let mut producer = track_producer("test", None);
+		assert!(matches!(
+			producer.write_frame(None, bytes::Bytes::from_static(b"x")),
+			Err(Error::TimestampMismatch)
+		));
+		assert_eq!(producer.append_group().unwrap().sequence, 0);
+	}
+
+	/// A track is all timed or all untimed, so a datagram that doesn't match it is refused.
+	#[test]
+	fn a_mismatched_datagram_is_refused() {
+		let mut untimed = track_producer("untimed", Info::default().with_timescale(None));
+		assert!(matches!(
+			untimed.append_datagram(Timestamp::ZERO, &b"x"[..]),
+			Err(Error::TimestampMismatch)
+		));
+		untimed.append_datagram(None, &b"x"[..]).unwrap();
+
+		let mut timed = track_producer("timed", None);
+		assert!(matches!(
+			timed.append_datagram(None, &b"x"[..]),
+			Err(Error::TimestampMismatch)
+		));
+		assert!(matches!(
+			timed.insert_datagram(5, None, &b"x"[..]),
+			Err(Error::TimestampMismatch)
+		));
 	}
 
 	/// Datagrams are unordered by construction, so the sequence cursor carries them too:
