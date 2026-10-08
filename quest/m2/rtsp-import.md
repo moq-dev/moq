@@ -86,8 +86,6 @@ Public API: the `moq-rtsp` crate and the `moq import rtsp` subcommand.
 Wire: none. Both are additive, so it is backported to `release` once it
 lands on main.
 
-The moq.pro guide link below resolves once moq.pro#2210 merges.
-
 ## Required
 
 - [Shared import clock](/quest/m1/shared-clock.md) - two sessions importing into one caller broadcast share one timeline

@@ -57,6 +57,7 @@ byte-identical.
 
 ## Related
 
+- [Fail loud on dropped timed metadata](/quest/m1/drop-loud.md) - counts and warns on what import drops until this carriage lands
 - [ID3 catalog section](/quest/m3/id3.md) - gives one payload type carried here a
   typed contract
 - [FLV script tags](/quest/m3/flv-script.md) - likewise

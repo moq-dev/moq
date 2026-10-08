@@ -27,8 +27,12 @@ and `SENDMSG_ZC` ([#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-
 build on the transmit contract. Report relay CPU per Gbps before and after on
 the same workloads.
 
+## Related
+
+- [Relay egress profile](/quest/m2/quic-egress-profile.md) - its send-buffer pool lever touches the same `SendBuffer` seam
+
 ## Required
 
 - [Hard fork](/quest/m1/quic/fork/README.md) - the redesign breaks `moq-quic`'s API
-- [Relay profiles](/quest/m1/performance-profiles.md) - the redesign targets measured costs
+- [Relay profiling recipe](/quest/m1/perf/lock-profile.md) - the captures that rank the candidates
 - [Remove moq-uring copies](/quest/m1/perf/uring-copies.md) - the cheap wins land first, so the profile shows what is left

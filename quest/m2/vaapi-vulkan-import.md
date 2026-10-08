@@ -2,7 +2,7 @@
 
 ## Goal
 
-An external [`Surface::Vulkan`](/quest/m2/gpu-surface.md) exported as a
+An external `Surface::Vulkan` exported as a
 DMA-BUF with a DRM format modifier, from a producer that synchronizes
 explicitly through a timeline, encodes through VA-API on Intel (iHD) without a
 CPU round trip. An ignored hardware test proves it on an Arrow Lake iGPU, and
@@ -41,7 +41,7 @@ sync_file import, so an explicit-sync producer races it.
   resize share it so a DMA-BUF moves between them without a copy. Choosing a
   node per surface makes `device()` per-node, so keep decode, resize, and
   encode on one node per DMA-BUF. Decided 2026-10-05: the producer puts the
-  render node's `dev_t` in the [surface](/quest/m2/gpu-surface.md), read from
+  render node's `dev_t` in the surface, read from
   its own `VK_EXT_physical_device_drm`, and VA-API opens that node. It is
   the one device identity [GPU health](/quest/m2/gpu-health.md) keys by too.
   Rejected: mapping the surface's UUID to a node on the VA-API side, which
@@ -60,10 +60,6 @@ first render node: the second-node check moved here from
 [Video hardware validation](/quest/m3/video-hardware.md) (2026-10-06 audit).
 
 Public API: none beyond the surface quest's. Wire: none.
-
-## Required
-
-- [One external GPU image for every encoder](/quest/m2/gpu-surface.md) - the surface VA-API imports
 
 ## Related
 

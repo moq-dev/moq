@@ -172,6 +172,8 @@ struct Candidate {
 	name: &'static str,
 	codecs: &'static [Codec],
 	open: fn(&Config) -> Result<Box<dyn Backend>, Error>,
+	#[cfg(target_os = "linux")]
+	vulkan: bool,
 }
 
 /// Hardware backends, in priority order. Platform-gated so only the ones that
@@ -182,30 +184,40 @@ const HARDWARE: &[Candidate] = &[
 		name: videotoolbox::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: videotoolbox::VideoToolbox::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	#[cfg(target_os = "windows")]
 	Candidate {
 		name: mediafoundation::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	#[cfg(all(target_os = "android", feature = "mediacodec"))]
 	Candidate {
 		name: mediacodec::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediacodec::MediaCodec::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Candidate {
 		name: nvenc::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: nvenc::Nvenc::open,
+		#[cfg(target_os = "linux")]
+		vulkan: true,
 	},
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	Candidate {
 		name: vaapi::NAME,
 		codecs: &[Codec::H264],
 		open: vaapi::Vaapi::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	// Last of the Linux hardware encoders: the SoC blocks it drives are the only
 	// hardware on a board that has neither an NVIDIA GPU nor a VAAPI stack, so it
@@ -215,6 +227,8 @@ const HARDWARE: &[Candidate] = &[
 		name: v4l2::NAME,
 		codecs: &[Codec::H264],
 		open: v4l2::V4l2::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 ];
 
@@ -227,6 +241,8 @@ const SOFTWARE: &[Candidate] = &[
 		name: openh264::NAME,
 		codecs: &[Codec::H264],
 		open: openh264::Openh264::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 ];
 
@@ -239,11 +255,15 @@ const NAMED_ONLY: &[Candidate] = &[
 		name: probe::NAME,
 		codecs: &[Codec::H264],
 		open: probe::Probe::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	Candidate {
 		name: probe::NO_CUT,
 		codecs: &[Codec::H264],
 		open: probe::Probe::open_no_cut,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 ];
 
@@ -313,6 +333,13 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 	for attempt in attempts {
 		let name = attempt.candidate.name;
 
+		#[cfg(target_os = "linux")]
+		if let Some(device) = config.input
+			&& (!attempt.hardware || !attempt.candidate.vulkan)
+		{
+			tried.push(format!("{name}: cannot import external Vulkan {device}"));
+			continue;
+		}
 		match (attempt.candidate.open)(config) {
 			Ok(backend) => {
 				// `Auto` returning a software encoder is otherwise invisible except for
@@ -348,6 +375,13 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 	// or a backend that does not take this codec. Reporting it as "no usable
 	// encoder (tried: )" tells the caller nothing, and naming what is here is
 	// most of the answer.
+	#[cfg(target_os = "linux")]
+	if let Some(device) = config.input {
+		return Err(Error::NoEncoder(format!(
+			"no backend can import external Vulkan {device} (tried: {})",
+			tried.join(", ")
+		)));
+	}
 	if tried.is_empty() {
 		let available = available_names(config.codec);
 		return match &config.kind {
@@ -506,6 +540,8 @@ mod tests {
 		name: "stub",
 		codecs: &[Codec::H264],
 		open: Stub::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	};
 
 	/// Compiled in but refusing at runtime, the way NVENC does on a host whose
@@ -514,6 +550,8 @@ mod tests {
 		name: "driverless",
 		codecs: &[Codec::H264],
 		open: |_| Err(Error::Codec(anyhow::anyhow!("driver libraries not found"))),
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	};
 
 	fn config() -> Config {

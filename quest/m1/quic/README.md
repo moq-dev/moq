@@ -10,9 +10,9 @@ BBR correctness, reliable stream resets, hierarchical stream scheduling with
 per-broadcast fairness, wider limits for relay peers, and endpoint sharding.
 Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
 stream state machine, and the experiments (the egress profile, media probing,
-L4S, careful resume, deadline keep-alive) live in [m2](/quest/m2/README.md);
-GCC with receive timestamps lives in [m3](/quest/m3/README.md). None of them
-gate this line.
+ECN measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); L4S,
+careful resume, and a receive-timestamps spike toward GCC live in
+[m3](/quest/m3/README.md). None of them gate this line.
 
 ## Plan
 
@@ -47,7 +47,9 @@ This is a transport API change, not a MoQ wire change.
 
 Decided in the 2026-09-30 audit: deadlines, qmux, BBR loss parity, ECN
 measurement, ACK progress, and the ACK hook moved to m2, since no m1 quest
-consumes them.
+consumes them. Decided 2026-10-08: L4S and careful resume moved on to m3,
+and GCC shrank to a receive-timestamps spike, since none has a consumer.
+The BBR app-limited fixes land in `moq-quic` without waiting for the switch.
 
 ## Required
 
@@ -70,8 +72,8 @@ consumes them.
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
-- [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
-- [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
+- [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
+- [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
-- [GCC egress experiment](/quest/m3/quic-gcc.md) - receive timestamps and a measured verdict on
-  WebRTC-style delay control
+- [GCC egress experiment](/quest/m3/quic-gcc.md) - a receive-timestamps measurement spike, the
+  first step toward WebRTC-style delay control

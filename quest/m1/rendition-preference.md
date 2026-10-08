@@ -70,7 +70,3 @@ Decided in planning interviews on 2026-10-01:
 - Out of scope: moq-ffi, libmoq, and the bindings until a native player needs
   the field. moq-transcode producing same-size codec fallbacks; the consumer
   publishes its own.
-
-## Related
-
-- [Audio rendition pick](/quest/m1/audio-ranked.md) - audio ranking, where `preference` could join later

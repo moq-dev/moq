@@ -1,27 +1,16 @@
 //! Linux CUDA device memory: the NV12 [`Frame`] behind `Surface::Cuda`, which
-//! NVDEC or a [`Converter`] produces and NVENC consumes in place.
+//! NVDEC or a `Converter` produces and NVENC consumes in place.
 //!
 //! # The GPU-only path
 //!
-//! A producer that must keep raw pixels off the CPU (a game engine publishing
-//! its render target) stays inside this module and `frame::vulkan`: import the
-//! image ([`vulkan::Importer`]), reserve a pool buffer ([`Converter::reserve`])
-//! and convert into it ([`Slot::convert`]), scale into another
-//! ([`Slot::resize`]), and encode it with an
-//! [`encode::Encoder`](crate::encode::Encoder) opened as
-//! `Kind::Named("nvenc")`, which registers a `Surface::Cuda` with NVENC in
-//! place. Every operation on that path runs on the device or fails: nothing
-//! here downloads, uploads, or converts on the CPU, and a request the device
-//! cannot serve (a mismatched device, an odd size) is an error rather than a
-//! fallback. A full pool is neither: `reserve` returns `None`, and the producer
-//! drops the frame.
+//! External producers publish `Surface::Vulkan` with `encode::Config::input`
+//! naming their device. NVENC imports and converts those images here, caching
+//! one full-size conversion per capture and color space, then scaling each
+//! rendition on the GPU. Those images are never downloaded.
 //!
-//! The portable `Surface` methods are a different contract. `Surface::resize`
-//! keeps a stream alive by downloading when the GPU scaler fails, and a
-//! software encoder reads a `Surface::Cuda` back through `Surface::to_i420`;
-//! both exist for the transcode path, whose frames come from NVDEC and may go
-//! anywhere. A GPU-only producer never calls them and never opens an encoder
-//! with `Kind::Auto`, whose openh264 fallback would read the frame back.
+//! Native `Surface::Cuda` frames from NVDEC also encode in place. Their portable
+//! `Surface` methods permit CPU readback for software transcoding, while an
+//! external Vulkan image refuses that fallback.
 //!
 //! NVENC takes the converted frame as a registered `cuMemAlloc` NV12 buffer
 //! (`NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR`), the registration the NVDEC
@@ -31,7 +20,7 @@
 //! its own conversion, so a kernel that writes NV12 straight from the image is
 //! the one pass this path needs: no staging copy in either direction.
 //!
-//! What the hardware says (RTX 3070 Ti, driver 595.91.07, `just rs vulkan-cuda`):
+//! What the hardware says (RTX 3070 Ti, driver 595.91.07, `just rs gpu`):
 //! the kernels match a CPU reference exactly, and an `nsys --trace=cuda` capture
 //! of `tests::vulkan_cuda_three_view_workload` records no `cuMemcpy` in either
 //! direction. Registering a converted buffer with NVENC costs around 70us and
@@ -47,7 +36,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig, PushKernelArg, result};
 
 use super::pool::{self, Pool};
-use super::{I420, vulkan};
+use super::{I420, cuda_vulkan, vulkan};
 use crate::{Color, Error, Size};
 
 /// The NV12 box-filter resize kernels, vendored as PTX (see nv12_resize.cu)
@@ -136,7 +125,7 @@ impl pool::Alloc for Device {
 	}
 }
 
-/// A frame's allocation: a buffer leased from a [`Converter`]'s pool, handed
+/// A frame's allocation: a buffer leased from a `Converter`'s pool, handed
 /// back for reuse on drop, or a plain one freed on drop.
 enum Buffer {
 	Pooled(pool::Lease<Device>),
@@ -154,7 +143,7 @@ impl std::ops::Deref for Buffer {
 	}
 }
 
-/// A GPU NV12 frame in CUDA device memory: NVDEC's or a [`Converter`]'s
+/// A GPU NV12 frame in CUDA device memory: NVDEC's or a `Converter`'s
 /// output and NVENC's zero-copy input. One buffer holds both planes at a
 /// shared row `pitch`: `height` luma rows, then `height / 2` interleaved-UV
 /// rows. Cloning bumps refcounts (no pixel copy), which keeps decode -> encode
@@ -241,7 +230,7 @@ impl Frame {
 		Size::new(self.width, self.height)
 	}
 
-	/// The color space of the samples: the one a [`Converter`] wrote, or `None`
+	/// The color space of the samples: the one a `Converter` wrote, or `None`
 	/// for a decoded frame that merely passed through.
 	pub fn color(&self) -> Option<Color> {
 		self.color
@@ -300,7 +289,7 @@ impl Frame {
 	/// [`Surface::resize`](crate::Surface::resize), which falls back to the CPU
 	/// when this fails. A pooled frame draws the copy from its own pool, so a
 	/// full pool is one such failure; a GPU-only producer scales through
-	/// [`Slot::resize`] instead.
+	/// the encoder's pooled rendition scaler instead.
 	pub(crate) fn resize(&self, size: Size) -> Result<Self, Error> {
 		size.validate("resize to")?;
 		let dst = match &*self.buf {
@@ -405,7 +394,7 @@ const CONVERT_PTX: &str = include_str!("rgba_to_nv12.ptx");
 /// bitstream, and the frames it returns report that space through
 /// [`Frame::color`] so the two cannot silently disagree. Convert once at the
 /// captured size and resize the result for smaller renditions, each into a
-/// [`Slot`] from [`reserve`](Self::reserve); every buffer, converted or scaled,
+/// `Slot` from `reserve`; every buffer, converted or scaled,
 /// comes from the pool sized by `capacity`, so a producer that outruns its
 /// encoder gets `None` from `reserve` instead of unbounded device memory. Drop
 /// the frames the encoder has finished with (it retains its own clone until
@@ -415,11 +404,12 @@ const CONVERT_PTX: &str = include_str!("rgba_to_nv12.ptx");
 /// transfer function is applied on the way to Y'CbCr, so an sRGB-encoded 8-bit
 /// render target is not gamma-encoded twice. Chroma is 4:2:0, each sample the
 /// average of its 2x2 block.
-pub struct Converter {
+pub(crate) struct Converter {
 	ctx: Arc<CudaContext>,
 	color: Color,
 	kernel: CudaFunction,
 	pool: Arc<Pool<Device>>,
+	importer: cuda_vulkan::Importer,
 }
 
 impl std::fmt::Debug for Converter {
@@ -436,7 +426,7 @@ impl Converter {
 	/// Open CUDA device `ordinal`, load the conversion kernel, and size the
 	/// buffer pool. Two live frames per captured frame (the converted one and
 	/// one scaled copy) plus one of slack is a reasonable `capacity`.
-	pub fn new(ordinal: usize, color: Color, capacity: NonZeroUsize) -> Result<Self, Error> {
+	pub(crate) fn new(ordinal: usize, color: Color, capacity: NonZeroUsize) -> Result<Self, Error> {
 		let ctx = CudaContext::new(ordinal)
 			.map_err(|e| Error::Unsupported(format!("CUDA device {ordinal} is unavailable: {e:?}")))?;
 		let kernel = ctx
@@ -444,6 +434,7 @@ impl Converter {
 			.and_then(|module| module.load_function("rgba_to_nv12"))
 			.map_err(|e| Error::Unsupported(format!("CUDA color conversion unavailable: {e:?}")))?;
 		Ok(Self {
+			importer: cuda_vulkan::Importer::new(ordinal)?,
 			pool: Arc::new(Pool::new(Device(ctx.clone()), capacity)),
 			ctx,
 			color,
@@ -456,27 +447,35 @@ impl Converter {
 		self.color
 	}
 
+	/// Import `frame` as its reader, so dropping it returns the producer slot
+	/// even when no pool buffer is free to convert it.
+	pub(crate) fn import(&self, frame: &vulkan::Frame) -> Result<(), Error> {
+		self.importer.import(frame).map(drop)
+	}
+
 	/// Hold one pool buffer for the next frame, or `None` while every buffer is
 	/// live: back-pressure, so drop the frame and try again after the encoder
 	/// releases one.
-	pub fn reserve(&self) -> Option<Slot> {
+	pub(crate) fn reserve(&self) -> Option<Slot> {
 		Some(Slot {
 			reservation: self.pool.reserve()?,
 			ctx: self.ctx.clone(),
 			color: self.color,
 			kernel: self.kernel.clone(),
+			importer: self.importer.clone(),
 		})
 	}
 }
 
-/// One buffer held from a [`Converter`]'s pool, filled by converting or
+/// One buffer held from a `Converter`'s pool, filled by converting or
 /// scaling a frame into it. Dropped unfilled, or on a failed fill, it goes
 /// back to the pool.
-pub struct Slot {
+pub(crate) struct Slot {
 	reservation: pool::Reservation<Device>,
 	ctx: Arc<CudaContext>,
 	color: Color,
 	kernel: CudaFunction,
+	importer: cuda_vulkan::Importer,
 }
 
 impl std::fmt::Debug for Slot {
@@ -497,7 +496,8 @@ impl Slot {
 	/// does not order against CUDA streams. Fails without touching the CPU when
 	/// the image lives on another device or has an odd dimension (4:2:0 chroma
 	/// needs even ones).
-	pub fn convert(self, frame: &vulkan::Frame) -> Result<Frame, Error> {
+	pub(crate) fn convert(self, frame: &vulkan::Frame) -> Result<Frame, Error> {
+		let frame = self.importer.import(frame)?;
 		if frame.cuda_context().ordinal() != self.ctx.ordinal() {
 			return Err(Error::Unsupported(format!(
 				"Vulkan image on CUDA device {} cannot be converted on device {}",
@@ -510,7 +510,7 @@ impl Slot {
 
 		let dst = Frame::pooled(self.reservation, size, Some(self.color))?;
 		let weights = self.color.coefficients();
-		let bgra = u32::from(frame.channels() == vulkan::Channels::Bgra);
+		let bgra = u32::from(frame.format() == vulkan::Format::Bgra8);
 		let stream = frame.cuda_stream();
 
 		// One thread per 2x2 block: the kernel writes four luma samples and one
@@ -552,7 +552,7 @@ impl Slot {
 	/// box-filter kernel, in the same color space. Fails without touching the
 	/// CPU when `frame` lives on another device or the driver refuses the
 	/// kernel.
-	pub fn resize(self, frame: &Frame, size: Size) -> Result<Frame, Error> {
+	pub(crate) fn resize(self, frame: &Frame, size: Size) -> Result<Frame, Error> {
 		if frame.buf.ctx.ordinal() != self.ctx.ordinal() {
 			return Err(Error::Unsupported(format!(
 				"CUDA frame on device {} cannot be scaled on device {}",

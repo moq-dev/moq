@@ -391,6 +391,77 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 	}
 }
 
+/// A rejoining reader is not handed the cached group while the route's next group has no
+/// frame yet.
+///
+/// The publisher moved on by one group while nobody subscribed, so the route answers the
+/// rejoin with that group, right after the one the relay cached. Its header lands before its
+/// first frame. Shown in between, it would leave the cached group without a stamped
+/// successor, and a reader at the live edge would be handed that older group first.
+#[moq_net_sim::test]
+async fn rejoin_waits_for_the_answers_first_frame() {
+	// Lite01/02 carry no max age, so the publisher serves the relay's cached head again and
+	// that answer is what makes the cache current.
+	let unbudgeted = ["moq-lite-01", "moq-lite-02"];
+	for version in Version::names().filter(|version| !unbudgeted.contains(version)) {
+		moq_net_sim::timeout(TEST_TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let relay = produce_origin(2);
+
+			let broadcast = publisher.create_broadcast("bench").unwrap();
+			let track = broadcast.create_track("video", None).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+
+			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay.clone());
+			let pair = connect_mock(options).await;
+
+			let consumer = relay.consume();
+			consumer.routed("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench", None).await.unwrap();
+			let ts = |ms| Timestamp::from_millis(ms).unwrap();
+
+			// Held for fetches only: it keeps the relay's copy without subscribing.
+			let _held = remote.track("video").unwrap();
+
+			let mut group = track.append_group().unwrap();
+			group.write_frame(ts(0), b"old".as_ref()).unwrap();
+			group.finish().unwrap();
+			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(read_all(&mut group).await.unwrap(), [b"old".to_vec()], "{version}");
+			drop((group, sub));
+			track.demand().unused().await.unwrap();
+
+			let mut group = track.append_group().unwrap();
+			group.write_frame(ts(500), b"new".as_ref()).unwrap();
+			group.finish().unwrap();
+
+			pair.server_transport.split_unis();
+			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let early = moq_net_sim::timeout(Duration::from_secs(1), sub.recv_group()).await;
+			assert!(
+				early.is_err(),
+				"{version}: the rejoining reader got the cached group {:?} first",
+				early.map(|group| group.unwrap().unwrap().sequence)
+			);
+
+			pair.server_transport.release_split();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			// A track that arrives untimed has no media age to skip the cached group by, so
+			// its reader starts at the newest group cached and reads on from there.
+			if sub.info().timescale.is_none() && group.sequence == 0 {
+				group = sub.recv_group().await.unwrap().unwrap();
+			}
+			assert_eq!(group.sequence, 1, "{version}");
+			assert_eq!(read_all(&mut group).await.unwrap(), [b"new".to_vec()], "{version}");
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}
+
 /// A reader leaving long after its last read leaves the relay holding the latest group.
 ///
 /// A catalog's latest group can sit unread past the cache's idle expiry. A downstream
@@ -466,6 +537,61 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 					.unwrap();
 				assert_eq!(group.sequence, 0, "{version}");
 				assert_eq!(read_all(&mut group).await.unwrap(), [b"c0"], "{version}");
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}
+
+/// A rejoin keeps the source's timestamps.
+///
+/// The returning subscription opts out of the track's properties from draft-20, since the
+/// copy already learned them, so its units must come from that first answer rather than
+/// the empty block the second one carries.
+#[moq_net_sim::test]
+async fn rejoin_keeps_source_timestamps() {
+	for version in ["moq-transport-19", "moq-transport-22"] {
+		moq_net_sim::timeout(TEST_TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let client = produce_origin(2);
+
+			let broadcast = publisher.create_broadcast("bench").unwrap();
+			let track = broadcast.create_track("video", None).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+
+			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(client.clone());
+			let _pair = connect_mock(options).await;
+
+			let consumer = client.consume();
+			consumer.routed("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench", None).await.unwrap();
+			// Far from any arrival time, so a frame stamped on arrival cannot pass.
+			let ts = |ms| Timestamp::from_millis(ms).unwrap();
+
+			for (sequence, ms) in [(0, 123_456), (1, 654_321)] {
+				let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+				track.demand().used().await.unwrap();
+				let mut group = track.append_group().unwrap();
+				group.write_frame(ts(ms), b"frame".as_ref()).unwrap();
+				group.finish().unwrap();
+
+				let mut group = loop {
+					let group = sub.recv_group().await.unwrap().unwrap();
+					if group.sequence == sequence {
+						break group;
+					}
+				};
+				let frame = group.read_frame().await.unwrap().unwrap();
+				assert_eq!(
+					frame.timestamp.map(Timestamp::as_millis),
+					Some(u128::from(ms)),
+					"{version} group {sequence}"
+				);
+				drop((group, sub));
+				track.demand().unused().await.unwrap();
 			}
 		})
 		.await

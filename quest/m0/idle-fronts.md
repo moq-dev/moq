@@ -74,7 +74,7 @@ Decisions (2026-10-07):
   Document that in `doc/concept/moq-lite.md` Resume: such a worker keeps its
   group sequence going, across its own source restarting too (mirroring an
   upstream sequence that goes back to 0 isn't enough), or gives each output its own epoch once
-  [Claim-served epochs](/quest/m0/broadcast-epoch/claim-epochs.md) lands.
+  [Claim-served epochs](/quest/m1/claim-epochs.md) lands.
   Without that, a viewer returning within the
   linger gets the old instance's cached latest group and then nothing until
   the new instance's sequence passes it.
@@ -93,9 +93,9 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - a request joins a front only while its route still wins, the routing half of the same report
-- [Claim-served epochs](/quest/m0/broadcast-epoch/claim-epochs.md) - on lite-07, a worker's restarted output is a new instance and never spliced
-- [Upstream position regression](/quest/m0/largest-regression.md) - fails loud on the stale splice where the answer shows it
-- [Prefix route fronts](/quest/m0/prefix-route-fronts.md) - bounds how many fronts a prefix route can mint at once; this reclaims idle ones
+- [Claim-served epochs](/quest/m1/claim-epochs.md) - on lite-07, a worker's restarted output is a new instance and never spliced
+- [Upstream position regression](/quest/m1/largest-regression.md) - fails loud on the stale splice where the answer shows it
 - [Front parking](/quest/m1/origin-front-parks.md) - a front waiting for coverage must survive this; the filtered-front leak moved here from it
 - [Route wakes](/quest/m1/route-wakes.md) - indexes fronts per route, so an ended front must drop its entries
+- [Front deadline index](/quest/m1/front-deadline-index.md) - indexes a front's per-track linger deadlines in the same `front.rs`; it rebases onto this
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - restarted publishers mint a fresh epoch, the documented fix for a re-served path

@@ -950,7 +950,7 @@ impl ExportSink {
 			},
 			Self::Ts(args) => Stdout {
 				format: SubscribeFormat::Ts,
-				max_delay: args.max_age.into_std(),
+				max_delay: args.delay.into_std(),
 				linger: args.linger.into_std(),
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
@@ -966,6 +966,7 @@ impl ExportSink {
 /// A stdout sink's format and the options that apply to it.
 pub struct Stdout {
 	pub format: SubscribeFormat,
+	/// The staleness budget, which `ts` also holds every frame for (`--delay`).
 	pub max_delay: Duration,
 	pub linger: Duration,
 	pub fragment_duration: Option<Duration>,
@@ -1008,17 +1009,18 @@ impl Container {
 }
 
 /// The MPEG-TS stdout container.
-// It keeps `--max-age` rather than `Container`'s `--max-delay`: TS export is moving to a
-// fixed release delay that subsumes the staleness budget under its own flag.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Transport {
-	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
+	/// How long after its decode time each frame is written (e.g. `500ms`), like an SRT
+	/// receiver's latency. A frame that arrives later than this is dropped, and a stalled
+	/// group is skipped once it falls half this behind the newest content.
 	#[usage(long, default = "500ms")]
-	pub max_age: crate::duration::Duration,
+	pub delay: crate::duration::Duration,
 
 	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
 	/// The output stops while it is gone and resumes flagged as a break.
+	/// An export that fails while the broadcast is still up exits without waiting.
 	#[usage(long, default = "0s")]
 	pub linger: crate::duration::Duration,
 
@@ -1028,16 +1030,24 @@ pub struct Transport {
 	#[usage(long)]
 	pub mux_rate: Option<u64>,
 
-	/// The released spelling of [`Self::max_age`].
+	/// The released spelling of [`Self::delay`].
+	#[usage(long = "max-age", hide = true)]
+	max_age: Option<crate::duration::Duration>,
+
+	/// The released spelling of [`Self::delay`], before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<crate::duration::Duration>,
 }
 
 impl Transport {
 	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		const HOLDS: &str = "it also holds every frame that long after its decode time";
 		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.max_age.is_some() {
+			found.changed("--max-age", None, "--delay", HOLDS);
+		}
 		if self.latency_max.is_some() {
-			found.flag("--latency-max", None, "--max-age");
+			found.changed("--latency-max", None, "--delay", HOLDS);
 		}
 		found
 	}
@@ -1099,6 +1109,32 @@ mod tests {
 				parse(format, "0s").validate().is_ok(),
 				"{format}: no linger is always fine"
 			);
+		}
+	}
+
+	/// `export ts` holds every frame for its staleness budget, so the budget is spelled
+	/// `--delay` there, and the released spellings stop a run with a migration.
+	#[test]
+	fn export_ts_takes_a_delay() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["moq", "export", "--broadcast", "b", "ts"];
+			argv.extend_from_slice(args);
+			Invocation::try_parse_from(argv)
+		};
+		let stdout = |args: &[&str]| {
+			let cli = parse(args).unwrap();
+			let Command::Export(export) = &cli.stages[0] else {
+				panic!("not an export");
+			};
+			export.sink.stdout().unwrap().max_delay
+		};
+		assert_eq!(stdout(&[]), Duration::from_millis(500));
+		assert_eq!(stdout(&["--delay", "2s"]), Duration::from_secs(2));
+		for old in ["--max-age", "--latency-max"] {
+			let Err(err) = parse(&[old, "1s"]) else {
+				panic!("{old} must not start a run");
+			};
+			assert!(err.to_string().contains(&format!("{old} -> --delay")), "{err}");
 		}
 	}
 
@@ -1693,12 +1729,6 @@ mod tests {
 		};
 		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
 
-		let Err(err) = Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "ts", "--latency-max", "1s"])
-		else {
-			panic!("--latency-max must not start a run");
-		};
-		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
-
 		let Err(err) = Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "mkv", "--latency-max", "1s"])
 		else {
 			panic!("--latency-max must not start a run");
@@ -1707,7 +1737,7 @@ mod tests {
 	}
 
 	/// A publisher's retention is `--max-age` on `import`; a subscriber's staleness budget is
-	/// `--max-delay` on `export`, except `export ts`, which still spells it `--max-age`.
+	/// `--max-delay` on `export`, except `export ts`, which spells it `--delay`.
 	#[test]
 	fn export_staleness_is_max_delay_and_import_retention_is_max_age() {
 		let export = |args: &[&str]| {
@@ -1736,8 +1766,8 @@ mod tests {
 			assert!(err.to_string().contains("--max-age -> --max-delay"), "{format}: {err}");
 		}
 
-		assert_eq!(stdout(&["ts", "--max-age", "2s"]), Duration::from_secs(2));
-		assert!(export(&["ts", "--max-delay", "2s"]).is_err(), "ts keeps --max-age");
+		assert_eq!(stdout(&["ts", "--delay", "2s"]), Duration::from_secs(2));
+		assert!(export(&["ts", "--max-delay", "2s"]).is_err(), "ts spells it --delay");
 
 		let rtmp = |flag: &str| export(&["rtmp", "--connect", "rtmp://example.com/live/key", flag, "2s"]);
 		let cli = rtmp("--max-delay").unwrap();

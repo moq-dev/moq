@@ -89,7 +89,7 @@ export class Fetch {
 			}
 		}
 
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "fetch");
 		if (params.rangeFilters && !hasRangeFilters(version)) {
 			throw new Error("Range Filters need draft-19");
 		}

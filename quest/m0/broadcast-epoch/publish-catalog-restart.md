@@ -22,4 +22,11 @@ re-announce. `js/publish/src/broadcast.ts` mints the epoch once and keeps the
 publisher across unannounce and announce on purpose, which points at
 continuing the sequence.
 
+#4929 (merged) made an on-demand producer continue a name's sequences
+across replacements in both languages, but JS `createTrack` and
+`insertTrack` still start at 0 (`doc/lib/js/net.md`). If this reproduces,
+consider fixing it there, in `@moq/net`'s `createTrack`, so every JS
+publisher continues the sequence, rather than in `@moq/publish` alone.
+
 Public API: none expected. Wire: none.
+

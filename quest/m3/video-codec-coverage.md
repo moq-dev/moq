@@ -1,0 +1,36 @@
+# [M] Prioritize remaining native and portable video codec coverage
+
+## Goal
+
+Identify which missing decoder/backend coverage serves actual consumers after
+the existing platform and NVIDIA work, without adding mandatory build costs.
+
+## Plan
+
+Review AV1 decode through Apple VideoToolbox and Windows Media Foundation,
+and a portable software AV1 fallback such as
+[dav1d](https://code.videolan.org/videolan/dav1d). Establish actual framework,
+OS, extension, hardware, format, and fixture requirements; a browser playing
+a codec is not proof that our native backend can open it.
+
+NVIDIA AV1 encode/10-bit and VAAPI expansion already have quests. Keep those
+owners. Software VP8/VP9 decode is libvpx behind moq-video's `vpx` feature;
+hardware VP8/VP9 decode is in scope here. Windows NVIDIA support needs a demonstrated advantage over
+the existing native path. If revisiting software AV1 encoding, measure the
+target real-time workload and build cost rather than assuming all presets or
+all hardware are equivalent. Optional codec dependencies stay optional.
+
+Produce a supported/refused matrix and separately completable implementation
+quests only for justified gaps. Each selected backend needs decode fixtures,
+drain/color/timestamp proof, and a CI or explicit hardware validation lane.
+Use the settled Frame/output/codec extension points; no parallel surface API.
+
+Public API and wire: no changes during this study.
+
+Decided 2026-10-08: moved to m3. No consumer has asked for a missing codec.
+
+## Related
+
+- [NVIDIA formats](/quest/m3/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - 10-bit HEVC scope; AV1 encode moved to [NVENC AV1](/quest/m3/nvenc-av1.md)
+- [VAAPI](/quest/m2/video-vaapi.md) - existing Linux codec expansion
+- [VP8/VP9 in OBS](/quest/m1/obs-moq-video/vpx-obs.md) - the software decoder reaching the OBS source

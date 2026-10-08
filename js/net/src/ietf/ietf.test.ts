@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
@@ -1559,6 +1560,73 @@ test("SubscribeNamespace: draft-18 omits subscribe options", async () => {
 	}
 });
 
+// FORWARD is legal on SUBSCRIBE_NAMESPACE through draft-17. A value other than 0 or 1
+// still closes the session. Draft-18 dropped it from this message.
+test("SubscribeNamespace: FORWARD follows the draft", async () => {
+	const legacy = (version: IetfVersion, value: number) => {
+		const body = [0x01];
+		if (version === Version.DRAFT_17) body.push(0x00);
+		body.push(0x00, 0x01, 0x01, 0x10, value);
+		return framed(body);
+	};
+
+	for (const version of [Version.DRAFT_16, Version.DRAFT_17] as const) {
+		const decoded = await decodeVersioned(
+			legacy(version, 0),
+			SubscribeNamespace.SubscribeNamespaceLegacy.decode,
+			version,
+		);
+		expect(decoded.requestId).toBe(1n);
+		await expect(
+			decodeVersioned(legacy(version, 2), SubscribeNamespace.SubscribeNamespaceLegacy.decode, version),
+		).rejects.toThrow(ProtocolViolation);
+	}
+
+	await expect(
+		decodeVersioned(
+			framed([0x01, 0x00, 0x01, 0x10, 0x00]),
+			SubscribeNamespace.SubscribeNamespace.decode,
+			Version.DRAFT_18,
+		),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+// EXPIRES is a draft-16 message parameter, but not on SUBSCRIBE. Draft-16 ignores it and
+// still reads the parameter after it. Draft-18 closes the session.
+test("Parameters: a known parameter on the wrong message", async () => {
+	const block = new Uint8Array([0x02, 0x08, 0x05, 0x18, 0x07]);
+	const ignored = await Parameters.decode(
+		new Reader(undefined, block, Version.DRAFT_16),
+		Version.DRAFT_16,
+		"subscribe",
+	);
+	expect(ignored.subscriberPriority).toBe(7);
+	expect(ignored.expires).toBeUndefined();
+
+	await expect(
+		Parameters.decode(new Reader(undefined, block, Version.DRAFT_18), Version.DRAFT_18, "subscribe"),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+// TRACK_NAMESPACE_PREFIX updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only, so a
+// subscription's REQUEST_UPDATE carrying it closes the session instead of being acked.
+test("Parameters: TRACK_NAMESPACE_PREFIX is not a subscription update parameter", async () => {
+	// One parameter: TRACK_NAMESPACE_PREFIX (0x34), a one-field namespace "a".
+	const block = new Uint8Array([0x01, 0x34, 0x01, 0x01, 0x61]);
+	await expect(
+		Parameters.decode(new Reader(undefined, block, Version.DRAFT_18), Version.DRAFT_18, "request-update"),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+test("Subscribe: SUBGROUP_DELIVERY_TIMEOUT follows its draft", async () => {
+	const body = framed([...TRACK_HEAD, 0x01, 0x06, 0x00]);
+	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow(
+		ProtocolViolation,
+	);
+	const decoded = await decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_18);
+	expect(decoded.trackName).toBe("video");
+});
+
 test("Group: draft-18 sets FIRST_OBJECT bit, draft-17 does not", async () => {
 	const makeGroup = () =>
 		new Group({
@@ -1942,3 +2010,77 @@ test("Subscribe v16: rejects INCLUDE_PROPERTIES", async () => {
 	const body = framed([...TRACK_HEAD, 0x01, 0x35, 0x01, 0x00]);
 	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow();
 });
+
+for (const version of [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	for (const kind of [0x20n, 0x21n, 0x9dn, 0x11cn]) {
+		test(`SETUP ${version}: repeated unknown option ${kind}`, async () => {
+			const { stream, written } = createTestWritableStream();
+			const writer = new Writer(stream, version);
+			if (version <= Version.DRAFT_16) await writer.u53(2);
+			await writer.u62(kind);
+			for (let i = 0; i < 2; i++) {
+				if (i > 0) await writer.u62(version <= Version.DRAFT_15 ? kind : 0n);
+				if (kind % 2n === 0n) await writer.u62(1n);
+				else {
+					await writer.u53(1);
+					await writer.u8(1);
+				}
+			}
+			await writer.close();
+			await writer.closed;
+			await SetupOptions.decode(new Reader(undefined, concatChunks(written), version), version);
+		});
+	}
+}
+
+for (const version of [
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	test(`SETUP ${version}: known options cannot repeat`, async () => {
+		for (const bytes of [new Uint8Array([4, 1, 0, 2]), new Uint8Array([7, 1, 97, 0, 1, 98])]) {
+			await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(
+				/duplicate/,
+			);
+		}
+	});
+	test(`SETUP ${version}: repeated unknown options still require complete values`, async () => {
+		const bytes = new Uint8Array([0x21, 1, 97, 0, 2, 98]);
+		await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow();
+	});
+	test(`GROUP_ORDER ${version}: only ascending and descending are legal`, async () => {
+		for (const value of [0, 3, 255]) {
+			const bytes = new Uint8Array([1, 0x22, value]);
+			await expect(Parameters.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(
+				/group order/,
+			);
+		}
+		for (const value of [1, 2]) {
+			const bytes = new Uint8Array([1, 0x22, value]);
+			const params = await Parameters.decode(new Reader(undefined, bytes, version), version);
+			expect(params.groupOrder).toBe(value);
+		}
+	});
+}
+
+for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16]) {
+	test(`legacy GROUP_ORDER ${version}: zero keeps the publisher preference`, async () => {
+		const bytes = new Uint8Array([1, 0x22, 0]);
+		const params = await Parameters.decode(new Reader(undefined, bytes, version), version);
+		expect(params.groupOrder).toBe(0);
+	});
+}

@@ -29,12 +29,11 @@ partly measure its own assumptions.
   in later frames whose headers were known while the hole was open, and bytes
   behind a lost header. Only the first two are forwardable; the last blocks with
   or without cut-through and is reported but excluded from the opportunity. The
-  first split shows what [multiple in-flight frames](/quest/m3/cut-through/frames.md)
-  add beyond the current frame. Report the drain estimate as an upper bound, and
+  first split shows what multiple in-flight frames per group would add beyond
+  the current frame. Report the drain estimate as an upper bound, and
   include both a payload-loss and a header-loss case to validate the split.
-- Take publisher and subscriber counts as parameters, so
-  [relay cut-through](/quest/m3/cut-through/relay.md) reuses the rig for its
-  fan-out sweep.
+- Take publisher and subscriber counts as parameters, so a relay build
+  reuses the rig for its fan-out sweep.
 - Record the loss-delay counter from the same runs, if
   [Loss delay](/quest/m3/cut-through/loss-delay.md) has landed, so production
   numbers can be read against the lab.
@@ -42,5 +41,6 @@ partly measure its own assumptions.
   into the nightly workflow.
 
 Write the numbers and the verdict into this line's README. The maintainer makes
-the go or no-go call from them; no threshold is set in advance. On a no-go,
-delete the build quests and keep the bench.
+the go or no-go call from them; no threshold is set in advance. On a go,
+re-plan the build quests from git history (decided 2026-10-08); either way
+the bench stays.

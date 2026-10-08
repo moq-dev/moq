@@ -2,7 +2,7 @@
 
 ## Goal
 
-The lite Auth Stream (0x7) and the 0x3A UNAUTHORIZED stream code exist only
+The lite Auth Stream (0x7) and the 0x3B UNAUTHORIZED stream code exist only
 on the wip lite version (`moq-lite-07-wip` today), in Rust, JS, the draft,
 and the interop matrix. A lite-06 session never opens or accepts an Auth
 Stream, so no published version changes in place.
@@ -28,6 +28,8 @@ The gate is one predicate on each side: `Version::has_auth`
   has no grant and opens no Auth Stream.
 - Check the docs (`doc/concept`, `doc/lib/rs/moq-net.md`, `doc/lib/js/net.md`)
   name the wip version, not lite-06.
+- Renumber UNAUTHORIZED from 0x3A to 0x3B in Rust, JS, and the draft
+  (decided 2026-10-08): `main` gave 0x3A to NOT_FETCHABLE.
 
 Public API: none. Wire: AUTH and UNAUTHORIZED leave lite-06; the line has not
 landed, so no released peer speaks them there.

@@ -510,8 +510,8 @@ export class Producer {
 	#state = new TrackState();
 	#sequence: TrackSequence = { next: 0 };
 	// One past the highest group or datagram this producer received, like the Rust
-	// `max_sequence`. The shared counter above can run ahead of it: sibling producers of
-	// the same track advance it too.
+	// `max_sequence`. The shared counter above can run ahead of it: earlier producers of
+	// the same broadcast track advanced it too.
 	#received = 0;
 
 	// Recently written source groups, retained for replay to late subscribers and
@@ -930,7 +930,7 @@ export class Producer {
 	 * never reuses a number). The payload must fit the negotiated transport datagram size minus
 	 * a small header; an oversize payload is dropped at each hop (there is no group fallback), so
 	 * keep datagram payloads small (e.g. a single audio frame). Datagrams are never delivered
-	 * over IETF moq-transport or stream-only transports (the WebSocket fallback). A payload over
+	 * over stream-only transports (the WebSocket fallback). A payload over
 	 * 65535 bytes (the QUIC datagram frame ceiling) throws. An origin publisher uses this; a
 	 * relay preserving upstream numbering uses {@link insertDatagram}.
 	 *

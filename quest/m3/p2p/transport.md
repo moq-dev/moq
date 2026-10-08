@@ -23,12 +23,9 @@ duplicated. The readable enqueues one `Uint8Array` per message with
 derives `desiredSize` from `bufferedAmount` against
 `bufferedAmountLowThreshold`. `max_record_size` defaults to 16 KiB and is
 clamped to the negotiated `maxMessageSize`; a record that would exceed it is
-split at a frame boundary, never chunked mid-frame. The channel is created
-with `ordered: true` and no retransmit limit unless signaling already
-agreed unordered; `ordered` is a constructor option so
-[unordered qmux](/quest/m3/p2p/unordered.md) flips it without a second
-transport. The flip is decided from the roster before `createDataChannel`,
-never from the first qmux record.
+split at a frame boundary, never chunked mid-frame. The channel is always
+created with `ordered: true` and no retransmit limit, with no option to
+change it (decided 2026-10-08, when unordered qmux was dropped).
 
 Tests: framing, the record-size clamp, and backpressure run under `bun test`
 against an in-memory channel pair; the real thing runs under the Playwright

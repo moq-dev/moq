@@ -26,7 +26,7 @@ use std::{
 	ops::{Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
-	sync::atomic::{AtomicBool, Ordering},
+	sync::atomic::{AtomicBool, AtomicU64, Ordering},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -161,6 +161,42 @@ impl Info {
 	}
 }
 
+/// The sequence namespace a track name keeps within its broadcast, shared by every
+/// producer that serves the name, so a replacement appends after whatever an earlier one
+/// wrote. Holds one past the highest sequence written.
+#[derive(Clone, Default)]
+pub(crate) struct Sequence(Arc<AtomicU64>);
+
+impl Sequence {
+	/// The next sequence an append takes.
+	fn next(&self) -> u64 {
+		self.0.load(Ordering::Relaxed)
+	}
+
+	fn advance(&self, sequence: u64) {
+		self.0.fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
+	}
+
+	/// Whether nothing holds it and nothing was written, so forgetting it changes nothing.
+	pub(crate) fn is_unused(&self) -> bool {
+		Arc::strong_count(&self.0) == 1 && self.next() == 0
+	}
+}
+
+/// Whether a track's cache reflects its live feed; see [`TrackState::set_idle`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Feed {
+	/// Readers take from the cache.
+	#[default]
+	Live,
+	/// The upstream subscription ended with the copy still held, so how stale the cache
+	/// is cannot be told until the route answers again.
+	Idle,
+	/// The route answered that its feed reaches group `from`, which the cache cannot show
+	/// yet: until it can, the newest group cached would read as the live edge.
+	Answered { from: u64 },
+}
+
 #[derive(Default)]
 pub(crate) struct TrackState {
 	// The publisher's properties, once known; always Some for Subscriber/Producer.
@@ -227,6 +263,10 @@ pub(crate) struct TrackState {
 	// datagrams, so it can run ahead of any cached group.
 	max_sequence: Option<u64>,
 
+	// The name's sequence namespace within the broadcast, which an append continues
+	// even when an earlier producer of the name wrote past this one's `max_sequence`.
+	sequence: Sequence,
+
 	// The sequence of the newest cached group: the live edge, protected from
 	// eviction by never entering the eviction order until the track is `closed`.
 	// Tracked separately from `max_sequence` because datagrams advance that shared
@@ -263,8 +303,8 @@ pub(crate) struct TrackState {
 	// Whether the cache reflects the live feed: readers get nothing from it while it does
 	// not, since how stale it is cannot be told; fetches still do. A track is live from
 	// creation, and only a session's copy goes idle: when its upstream subscription ends
-	// with the copy still held, until the route answers again.
-	live: bool,
+	// with the copy still held, until the route's answer shows in the cache.
+	feed: Feed,
 	// Readers start at this group: the route's live feed went on past a gap after
 	// everything cached, so nothing bounds how old the cache below it is.
 	live_floor: Option<u64>,
@@ -316,6 +356,10 @@ struct Slot {
 	// subscription content. Fetch-only backfill stays cached but never anchors drift.
 	visible: bool,
 
+	// A live group received from a route, withheld from readers until its first frame
+	// lands or its stream ends; see [`Producer::receive_group`].
+	pending: bool,
+
 	// A fetched copy of a live `group` that the feed started past the frames a fetch
 	// asked for. It runs to the end of the group too, so it is served in the live
 	// group's place while it lasts; `group` stays the slot, still written by the feed,
@@ -327,6 +371,11 @@ impl Slot {
 	/// Whether the live feed's group still holds this slot.
 	fn is_live(&self) -> bool {
 		self.visible && !self.group.is_aborted()
+	}
+
+	/// Whether readers see this slot as live content: [`Self::is_live`], and not withheld.
+	fn is_shown(&self) -> bool {
+		self.is_live() && !self.pending
 	}
 
 	/// The copy to hand readers: the fetched head while it lasts, else the live group.
@@ -463,7 +512,7 @@ impl TrackState {
 	/// Whether readers may take from the cache: it reflects the live feed, or the track
 	/// ended, which makes the cache the whole of it.
 	fn readable(&self) -> bool {
-		self.live || self.sealed || self.final_sequence.is_some() || self.abort.is_some()
+		self.feed == Feed::Live || self.sealed || self.final_sequence.is_some() || self.abort.is_some()
 	}
 
 	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Producer, usize)>>> {
@@ -524,7 +573,9 @@ impl TrackState {
 			self.datagrams.pop_front();
 			self.datagram_offset += 1;
 		}
+		let sequence = datagram.sequence;
 		self.datagrams.push_back(datagram);
+		self.shown(sequence);
 	}
 
 	/// Find the smallest-sequence cached group satisfying
@@ -639,7 +690,7 @@ impl TrackState {
 			.rev()
 			.filter(|(seq, _)| super::subscription::before_end(**seq, cap))
 			.find_map(|(_, slot)| {
-				if !slot.visible || slot.group.is_aborted() {
+				if !slot.is_shown() {
 					return None;
 				}
 				// The map is ordered by sequence, so the first stamped group from the
@@ -669,7 +720,7 @@ impl TrackState {
 				cap.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
 			))
 			.rev()
-			.find(|(_, slot)| slot.visible && !slot.group.is_aborted())
+			.find(|(_, slot)| slot.is_shown())
 			.map(|(sequence, _)| *sequence)
 	}
 
@@ -709,7 +760,7 @@ impl TrackState {
 			.range(from..)
 			.map(|(_, slot)| slot)
 			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
-			.find(|slot| slot.visible && !slot.group.is_aborted())
+			.find(|slot| slot.is_shown())
 			.map(|slot| &slot.group)
 	}
 
@@ -1002,12 +1053,27 @@ impl TrackState {
 	fn spawn(broadcast: Arc<broadcast::Info>) -> kio::Producer<Self> {
 		let state = kio::Producer::new(Self {
 			broadcast: broadcast.clone(),
-			live: true,
 			..Default::default()
 		});
 		let cache = cache::Track::new(broadcast.pool.clone(), state.downgrade());
 		state.write().ok().expect("a new track is open").cache = cache;
 		state
+	}
+
+	/// Record a written sequence, here and in the name's shared namespace.
+	fn advance(&mut self, sequence: u64) {
+		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		self.sequence.advance(sequence);
+	}
+
+	/// The sequence the next append takes: past this track's own writes and past every
+	/// earlier producer's of the same name.
+	fn next_sequence(&self) -> Result<u64> {
+		let own = match self.max_sequence {
+			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
+			None => 0,
+		};
+		Ok(own.max(self.sequence.next()))
 	}
 
 	/// Reject a sequence that is still cached; a dead (aborted or evicted)
@@ -1032,8 +1098,9 @@ impl TrackState {
 	/// Updates the live edge, demoting the previous latest into the eviction order;
 	/// the current latest is never enqueued, which is what protects it from
 	/// eviction. `visible` controls arrival-order delivery: publisher-produced
-	/// groups reach subscribers, fetched backfill is served by sequence only.
-	fn insert_group(&mut self, group: &group::Producer, visible: bool) {
+	/// groups reach subscribers, fetched backfill is served by sequence only. A
+	/// `pending` group joins arrival order only once [`Self::reveal`] shows it.
+	fn insert_group(&mut self, group: &group::Producer, visible: bool, pending: bool) {
 		let sequence = group.sequence;
 		self.next_stamp = self.next_stamp.wrapping_add(1);
 		let stamp = self.next_stamp;
@@ -1058,33 +1125,76 @@ impl TrackState {
 			self.evict.push_back((sequence, stamp));
 		}
 
-		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
-		let below = visible
-			.then(|| self.lookup.range(..sequence).rev().find(|(_, slot)| slot.is_live()))
-			.flatten()
-			.map(|(below, _)| *below);
+		self.advance(sequence);
 		self.lookup.insert(
 			sequence,
 			Slot {
 				group: group.clone(),
 				stamp,
 				visible,
+				pending,
 				head: None,
 			},
 		);
-		if visible {
+		if visible && !pending {
 			self.arrival.push_back((sequence, stamp));
-			let oldest = self.lookup.first_key_value().map_or(sequence, |(oldest, _)| *oldest);
-			self.cache.wakes().landed(below, sequence, oldest);
+			self.landed(sequence);
+		}
+	}
+
+	/// Show a [`Producer::receive_group`] group to readers, if `group` still holds its slot.
+	fn reveal(&mut self, group: &group::Producer) {
+		let sequence = group.sequence;
+		let Some(slot) = self.lookup.get_mut(&sequence) else {
+			return;
+		};
+		if !slot.pending || !slot.group.is_clone(group) {
+			return;
+		}
+		slot.pending = false;
+		self.arrival.push_back((sequence, slot.stamp));
+		// A group reset before its first frame shows nothing of the route's feed.
+		if slot.group.is_aborted() {
+			return;
+		}
+		let latest = slot.group.latest();
+		self.landed(sequence);
+		// Its frames presented while hidden, so a read woken by them may have judged the
+		// older edge and parked again: present them once more now that they count.
+		if let Some(latest) = latest {
+			self.cache.wakes().presented(latest);
+		}
+	}
+
+	/// Content at `sequence` became servable: wake the reads it succeeds, and show an answer
+	/// waiting on it.
+	fn landed(&mut self, sequence: u64) {
+		let below = self
+			.lookup
+			.range(..sequence)
+			.rev()
+			.find(|(_, slot)| slot.is_shown())
+			.map(|(below, _)| *below);
+		let oldest = self.lookup.first_key_value().map_or(sequence, |(oldest, _)| *oldest);
+		self.cache.wakes().landed(below, sequence, oldest);
+		self.shown(sequence);
+	}
+
+	/// Content at `sequence` became readable: an answer waiting on it now shows.
+	fn shown(&mut self, sequence: u64) {
+		if let Feed::Answered { from } = self.feed
+			&& sequence >= from
+		{
+			self.feed = Feed::Live;
 		}
 	}
 
 	/// Admit a freshly-created group: settle eviction debt first (so the newcomer
 	/// can never be a victim of the very write that created it), insert it, then
 	/// expire idle groups.
-	fn commit_group(&mut self, group: &group::Producer, visible: bool) {
+	fn commit_group(&mut self, group: &group::Producer, pending: bool) {
 		self.charge_debt();
-		self.insert_group(group, visible);
+		self.insert_group(group, true, pending);
 		self.evict_expired();
 	}
 
@@ -1285,12 +1395,12 @@ impl TrackState {
 	/// stale, so readers get nothing from it until the route answers again. Buffered
 	/// datagrams go too, since a reader returning later must not be handed them.
 	fn set_idle(&mut self) {
-		self.live = false;
+		self.feed = Feed::Idle;
 		self.idle_newest = self
 			.lookup
 			.iter()
 			.rev()
-			.find(|(_, slot)| slot.visible && !slot.group.is_aborted())
+			.find(|(_, slot)| slot.is_shown())
 			.map(|(sequence, _)| *sequence);
 		self.datagram_offset += self.datagrams.len();
 		self.datagrams.clear();
@@ -1300,23 +1410,47 @@ impl TrackState {
 	/// is current up to there. A feed that went on past a gap after everything cached
 	/// leaves the cache unjudgeable, since nothing bounds how far an old group reached, so
 	/// readers skip it; whatever the feed delivers stays.
+	///
+	/// Readers wait until the cache shows that position: before then its newest group would
+	/// read as the live edge, though the route already holds a newer one.
 	fn set_live(&mut self, largest: Option<Position>) {
-		if self.live {
+		if self.feed != Feed::Idle {
 			return;
 		}
-		self.live = true;
-		let cached = self.idle_newest.take();
+		// Judged by what survived: the cancel that idled the copy resets the group in flight,
+		// and an answer past it leaves a gap after the newest group still cached.
+		let cached = self.idle_newest.take().and_then(|newest| {
+			self.lookup
+				.range(..=newest)
+				.rev()
+				.find(|(_, slot)| slot.is_shown())
+				.map(|(sequence, _)| *sequence)
+		});
 		self.live_floor = match (largest, cached) {
 			(Some(largest), Some(cached)) if largest.group > cached.saturating_add(1) => Some(cached + 1),
 			// The route has nothing, so whatever is cached is not its feed.
 			(None, Some(cached)) => Some(cached.saturating_add(1)),
 			_ => self.live_floor,
 		};
+		self.feed = match largest {
+			Some(largest) if !self.shows(largest.group) => Feed::Answered { from: largest.group },
+			_ => Feed::Live,
+		};
+	}
+
+	/// Whether readers can already see content at or past `sequence`.
+	fn shows(&self, sequence: u64) -> bool {
+		self.lookup.range(sequence..).any(|(_, slot)| slot.is_shown())
+			|| self.datagrams.iter().any(|datagram| datagram.sequence >= sequence)
 	}
 
 	/// The newest live group the cache holds, and the number of frames it has so far.
 	fn newest(&self) -> Option<(u64, u64)> {
-		let (sequence, slot) = self.lookup.iter().rev().find(|(_, slot)| slot.visible)?;
+		let (sequence, slot) = self
+			.lookup
+			.iter()
+			.rev()
+			.find(|(_, slot)| slot.visible && !slot.pending)?;
 		Some((*sequence, slot.group.frame_count() as u64))
 	}
 
@@ -1407,7 +1541,7 @@ impl TrackState {
 			}
 			// Invisible to arrival-order subscribers: fetched on demand, not produced
 			// live by the publisher.
-			None => self.insert_group(&group, false),
+			None => self.insert_group(&group, false, false),
 		}
 		self.evict_expired();
 		Ok(group)
@@ -1493,6 +1627,13 @@ impl Producer {
 		self
 	}
 
+	/// Continue the name's sequence namespace within its broadcast. Set by the broadcast
+	/// before the track is handed out.
+	pub(crate) fn with_sequence(self, sequence: Sequence) -> Self {
+		set_sequence(&self.state, sequence);
+		self
+	}
+
 	/// The track's name, unique within its broadcast.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -1505,6 +1646,29 @@ impl Producer {
 
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
+		self.insert(group, false)
+	}
+
+	/// Create a group a session is receiving from a route, withheld from readers until
+	/// [`Self::reveal_group`].
+	///
+	/// A publisher writes a group's first frame as it creates it, but a route's group
+	/// header lands before its first frame. Shown in between, it would leave the group
+	/// before it with no stamped successor, so a joiner at the live edge would be handed
+	/// that older group first.
+	pub(crate) fn receive_group(&self, group: group::Info) -> Result<group::Producer> {
+		self.insert(group, true)
+	}
+
+	/// Show a [`Self::receive_group`] group to readers: its first frame landed, or its
+	/// stream ended. A no-op once another incarnation took its sequence.
+	pub(crate) fn reveal_group(&self, group: &group::Producer) {
+		if let Ok(mut state) = self.modify() {
+			state.reveal(group);
+		}
+	}
+
+	fn insert(&self, group: group::Info, pending: bool) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
 			&& group.sequence >= fin
@@ -1517,7 +1681,7 @@ impl Producer {
 		state.claim_sequence(group.sequence, 0)?;
 
 		let group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
-		state.commit_group(&group, true);
+		state.commit_group(&group, pending);
 
 		Ok(group)
 	}
@@ -1525,10 +1689,7 @@ impl Producer {
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
-		let sequence = match state.max_sequence {
-			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
-			None => 0,
-		};
+		let sequence = state.next_sequence()?;
 		if let Some(fin) = state.final_sequence
 			&& sequence >= fin
 		{
@@ -1539,7 +1700,7 @@ impl Producer {
 
 		let group =
 			group::Producer::new(group::Info { sequence }, track, state.cache.clone()).with_meter(self.stats.meter());
-		state.commit_group(&group, true);
+		state.commit_group(&group, false);
 
 		Ok(group)
 	}
@@ -1573,16 +1734,13 @@ impl Producer {
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
 		let timescale = state.info.as_ref().unwrap().timescale;
 		let timestamp = group::on_track(timestamp.into(), timescale)?;
-		let sequence = match state.max_sequence {
-			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
-			None => 0,
-		};
+		let sequence = state.next_sequence()?;
 		if let Some(fin) = state.final_sequence
 			&& sequence >= fin
 		{
 			return Err(Error::Closed);
 		}
-		state.max_sequence = Some(sequence);
+		state.advance(sequence);
 		meter.datagram(payload.len() as u64);
 		state.push_datagram(Datagram {
 			sequence,
@@ -1621,7 +1779,7 @@ impl Producer {
 		{
 			return Err(Error::Closed);
 		}
-		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(sequence));
+		state.advance(sequence);
 		meter.datagram(payload.len() as u64);
 		state.push_datagram(Datagram {
 			sequence,
@@ -1739,7 +1897,8 @@ impl Producer {
 	}
 
 	/// The route answered with its largest position, `None` for nothing yet; see
-	/// [`Self::set_idle`]. A no-op while live.
+	/// [`Self::set_idle`]. Readers resume once the cache shows that position. A no-op
+	/// unless idle.
 	pub(crate) fn set_live(&mut self, largest: Option<Position>) {
 		if let Ok(mut state) = self.modify() {
 			state.set_live(largest);
@@ -1748,14 +1907,14 @@ impl Producer {
 
 	/// Whether readers may take from the cache; see [`Self::set_idle`].
 	pub(crate) fn is_live(&self) -> bool {
-		self.state.read().live
+		self.state.read().feed == Feed::Live
 	}
 
 	/// While idle, the newest group cached when the track went idle: a route asked from
 	/// its head sends it again, and its first frame says whether the cache is current.
 	pub(crate) fn idle_newest(&self) -> Option<u64> {
 		let state = self.state.read();
-		state.idle_newest.filter(|_| !state.live)
+		state.idle_newest.filter(|_| state.feed == Feed::Idle)
 	}
 
 	/// Declare the floor a subscription asked for while the serving session has yet to
@@ -2114,6 +2273,16 @@ impl Drop for Dynamic {
 		if fetch.remove_handler() {
 			fetch.drain_queued();
 		}
+	}
+}
+
+fn set_sequence(state: &kio::Producer<TrackState>, sequence: Sequence) {
+	if let Ok(mut state) = state.write() {
+		debug_assert!(
+			state.max_sequence.is_none(),
+			"a track joins its namespace before writing"
+		);
+		state.sequence = sequence;
 	}
 }
 
@@ -4323,6 +4492,13 @@ impl Request {
 		self
 	}
 
+	/// Continue the name's sequence namespace within its broadcast. Set by the broadcast
+	/// before the request is visible to anyone.
+	pub(crate) fn with_sequence(self, sequence: Sequence) -> Self {
+		set_sequence(&self.state, sequence);
+		self
+	}
+
 	/// The requested track name.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -5680,6 +5856,35 @@ mod test {
 		sequences
 	}
 
+	/// A rejoined copy judges the route's answer by the groups that survived the leave.
+	///
+	/// The cancel that idles a copy resets the group in flight. The route then answers past
+	/// it, so the newest group still cached is two behind: a gap, which the cached group
+	/// cannot be measured across. Judged by the group the copy held when it went idle, the
+	/// answer would read as contiguous, and the cached group would reach all the way to the
+	/// answer, fresh to any positive budget.
+	#[test]
+	fn an_answer_past_a_reset_group_skips_the_cache() {
+		let mut producer = track_producer("test", None);
+		append_at(&mut producer, 0);
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::from_millis(500).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+
+		producer.set_idle();
+		open.abort(Error::Cancel).unwrap();
+
+		let mut answer = producer.receive_group(group::Info { sequence: 2 }).unwrap();
+		producer.set_live(Some(Position::group(2)));
+		answer
+			.write_frame(Timestamp::from_millis(533).unwrap(), bytes::Bytes::from_static(b""))
+			.unwrap();
+		producer.reveal_group(&answer);
+
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(400)));
+		assert_eq!(drain(&mut subscriber), vec![2]);
+	}
+
 	#[test]
 	fn real_time_skips_a_backlog_to_the_live_edge() {
 		let mut producer = track_producer("test", None);
@@ -6184,6 +6389,49 @@ mod test {
 			woken.load(Ordering::SeqCst),
 			"the replacement's first frame bounds the reach"
 		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// A received group's frames present while it is hidden, so a parked read they wake
+	/// still sees the older edge and parks again. Revealing the group has to wake it once
+	/// more, though the read sits below the group's nearest shown predecessor.
+	#[test]
+	fn revealing_a_presented_group_wakes_a_read_it_expires() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		append_at(&mut producer, 1000); // the successor bounds the head's reach
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0);
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		let mut received = producer.receive_group(group::Info { sequence: 2 }).unwrap();
+		received
+			.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		woken.store(false, Ordering::SeqCst);
+		assert!(
+			next.as_mut().poll(&mut cx).is_pending(),
+			"the hidden group moves no edge"
+		);
+
+		producer.reveal_group(&received);
+		assert!(woken.load(Ordering::SeqCst), "the reveal wakes the expired read");
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}

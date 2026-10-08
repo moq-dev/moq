@@ -45,6 +45,10 @@ and prefix tracks rather than the per-path `publisher.json` and
 Rejected: #4133 first, which would make stats-split carry the lag histogram
 and dropped counters across.
 
+Decided (2026-10-08): the egress histogram is its own quest,
+[viewer lag histogram](/quest/m1/qos/lag-histogram.md), since every other
+child reads it and it exists only on the line branch.
+
 Decided (2026-09-28): the line's moq-stats changes break the published
 crate. Client stats left the line (2026-09-29)
 when media stats moved out of moq-stats onto hang tracks, which are additive
@@ -52,9 +56,9 @@ on `main`.
 
 ## Required
 
-- [Lag across a splice](/quest/m1/qos/lag-splice.md) - a route switch
-  neither loses pending lag weight nor keeps weighing a segment replaced
-  before its first frame; the line does not land until it is fixed
+- [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the egress `lag`
+  histogram and `dropped` counters land on stats-split's totals and prefix
+  tracks
 - [Lag dashboard](/quest/m1/qos/lag-dashboard.md) - the demo stats
   dashboard shows viewer lag percentiles and dropped media
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - per

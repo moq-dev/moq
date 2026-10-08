@@ -16,4 +16,4 @@ The OBS MoQ source plays VP8 and VP9 (8-bit 4:2:0) on every platform it ships fo
 
 ## Related
 
-- [Codec coverage](/quest/m2/video-codec-coverage.md) - hardware VP8/VP9 decode belongs to that review
+- [Codec coverage](/quest/m3/video-codec-coverage.md) - hardware VP8/VP9 decode belongs to that review

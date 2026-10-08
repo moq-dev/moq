@@ -134,17 +134,17 @@ impl Update {
 		decode_params!(data, version,
 			0x02 => object_timeout: Option<u64>,
 			0x03 => token: Vec<Opaque>,
-			0x06 => subgroup_timeout: Option<u64>,
+			0x06 => subgroup_timeout: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 			0x10 => forward: Option<bool>,
 			0x20 => priority: Option<u8>,
 			0x21 => filter: Option<Filter>,
-			0x23 => fill: Option<Fill>,
-			0x25 => subgroup_filter: Vec<Opaque>,
-			0x26 => object_filter: Vec<Opaque>,
-			0x27 => priority_filter: Vec<Opaque>,
-			0x28 => property_filter: Vec<Opaque>,
-			0x29 => track_filter: Vec<Opaque>,
-			0x32 => new_group: Option<u64>,
+			0x23 => fill: Option<Fill> where Filter::is_draft20(version),
+			0x25 => subgroup_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+			0x26 => object_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+			0x27 => priority_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+			0x28 => property_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+			0x29 => track_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+			0x32 => new_group: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15),
 		);
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
@@ -177,5 +177,25 @@ impl Decode<Version> for Update {
 		let mut data = r.sub(size)?;
 		// The complete frame is present; a short field inside it is malformed.
 		Self::decode_body(&mut data, version).map_err(DecodeError::complete)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// TRACK_NAMESPACE_PREFIX (0x34) updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only,
+	/// so on a subscription's REQUEST_UPDATE it closes the session instead of being acked.
+	#[test]
+	fn namespace_prefix_on_subscription_update_closes() {
+		// Request ID 2, one parameter: TRACK_NAMESPACE_PREFIX, a one-field namespace "a".
+		let mut buf = bytes::Bytes::from_static(&[0x02, 0x01, 0x34, 0x01, 0x01, b'a']);
+		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, Update::decode_body).is_err());
+
+		// The same update with only a priority is accepted.
+		let mut buf = bytes::Bytes::from_static(&[0x02, 0x01, 0x20, 0x05]);
+		let update = crate::coding::decode_buf(&mut buf, Version::Draft18, Update::decode_body).unwrap();
+		assert_eq!(update.priority, Some(5));
+		assert!(!update.unsupported);
 	}
 }
