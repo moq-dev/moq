@@ -172,5 +172,5 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Related
 
-- [Catalog track identity](/quest/m2/catalog-tracks.md) - a track's definition never changes for its name, so any recorded catalog describes every group of the tracks it lists
+- [Catalog track identity](/quest/m1/catalog-tracks.md) - a track's definition never changes for its name, so any recorded catalog describes every group of the tracks it lists
 - [e2ee](/quest/m1/e2ee/README.md) - protected broadcasts are excluded initially

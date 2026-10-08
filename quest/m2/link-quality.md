@@ -27,8 +27,7 @@ the default and measured cost is opt-in, so the line ships without it.
   [priced topology](https://github.com/moq-dev/moq.pro/blob/main/quest/m3/priced-topology.md)
   keeps RTT out of monetary costs, and that stays true because measured cost
   is opt-in on links the operator chooses.
-- A lossy-link fixture over the mock transport with mocked time, reusable by
-  the line's drone-mesh end-to-end test.
+- A lossy-link fixture over the mock transport with mocked time.
 
 Public API: a per-link way to ask for measured cost in the peer entry.
 Wire: none.

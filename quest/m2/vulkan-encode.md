@@ -6,7 +6,9 @@ moq-video encodes an external `Surface::Vulkan`
 with Vulkan Video on AMD (RADV), in H.264 and H.265, scaled per rendition on
 the GPU, with no CPU round trip. An ignored hardware test proves it on an
 RX 9070, and `Kind::Auto` picks this backend for a surface on an AMD device
-with no caller change.
+with no caller change: the caller sets `encode::Config::input`, and the
+backend registers as a hardware candidate with `vulkan: true` in
+`rs/moq-video/src/encode/backend/mod.rs`.
 
 Non-goal: running CARLA itself on AMD.
 
@@ -31,7 +33,7 @@ added this quest):
   `VK_KHR_external_memory_fd` and `VK_KHR_external_semaphore_fd` itself. That
   lets it import the producer's `OPAQUE_FD` BGRA image as a dedicated
   allocation with create info identical to the exporter's. It also leaves
-  intra refresh and AV1 possible later.
+  AV1 possible later.
 - H.264 and H.265. AV1 is out of scope.
 - The bar is no CPU round trip; GPU-side copies are allowed.
 
@@ -53,13 +55,11 @@ Building it:
   - It carries the final `VK_KHR_video_encode_queue`, `_h264`, `_h265`, and
     `VK_KHR_video_maintenance1`, with the tuning, buffer, and B-frame fields
     above.
-  - It lacks `VK_KHR_video_encode_intra_refresh`, `_quantization_map`, and
-    `_av1`. Those need a newer ash and are out of scope; refresh mode is
-    refused on this backend.
-  - moq-video uses ash 0.38 only as a dev-dependency (the Vulkan/CUDA test
-    producer, through the workspace's `ash = "0.38"`). wgpu-hal 30, under
-    `render`, depends on the same 0.38. Make it a normal optional dependency
-    of this backend's feature.
+  - It lacks `_quantization_map` and `_av1`, which need a newer ash and are
+    out of scope.
+  - ash is already an optional dependency of moq-video (#4975, used by the
+    `nvidia` feature). This backend's feature enables `dep:ash` the same way.
+    wgpu-hal 30, under `render`, depends on the same 0.38.
 - Packaging: Fedora's stock Mesa omits the H.264 and H.265 encoders. A device
   without the extensions is refused with an error naming them, and the
   hardware recipe reports them as missing instead of failing obscurely.
@@ -76,4 +76,4 @@ Public API: a new encoder backend and feature. Wire: none.
 ## Related
 
 - [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - the Intel half of the same proof
-- [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - refresh mode this backend refuses until ash carries the extension
+- [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - import and playback of intra-refresh video, which this encoder does not produce
