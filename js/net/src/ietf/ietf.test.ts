@@ -2152,3 +2152,105 @@ for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16]) {
 		expect(params.groupOrder).toBe(0);
 	});
 }
+
+// Caller-selected SUBSCRIBE group order.
+//
+// GROUP_ORDER was a module constant written unconditionally on both wire shapes, and
+// `Subscribe` had no field for it -- so no caller, internal or public, could ask for
+// Ascending. The decoder already read and validated the value, and then dropped it: a relay
+// built on this parsed the subscriber's requested order correctly and could not act on it.
+test.each([
+	["v14", Version.DRAFT_14],
+	["v20", Version.DRAFT_20],
+] as const)("Subscribe %s: group order defaults to descending", async (_name, version) => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+	expect(msg.groupOrder).toBe(Subscribe.GroupOrder.Descending);
+
+	const encoded = await encodeVersioned(msg, version);
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, version);
+	expect(decoded.groupOrder).toBe(Subscribe.GroupOrder.Descending);
+});
+
+test.each([
+	["v14", Version.DRAFT_14],
+	["v20", Version.DRAFT_20],
+] as const)("Subscribe %s: a caller can request ascending group order", async (_name, version) => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+		groupOrder: Subscribe.GroupOrder.Ascending,
+	});
+
+	const encoded = await encodeVersioned(msg, version);
+
+	// Differential, not a byte search: `toContain(1)` would pass on requestId 1n
+	// alone. Encode the same message as Descending and require that exactly one
+	// byte moved, from 0x02 to 0x01.
+	const descending = await encodeVersioned(
+		new Subscribe.Subscribe({
+			requestId: 1n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			groupOrder: Subscribe.GroupOrder.Descending,
+		}),
+		version,
+	);
+	expect(encoded.length).toBe(descending.length);
+	const differing = [...encoded].flatMap((byte, i) => (byte === descending[i] ? [] : [i]));
+	expect(differing).toHaveLength(1);
+	expect(encoded[differing[0]]).toBe(Subscribe.GroupOrder.Ascending);
+	expect(descending[differing[0]]).toBe(Subscribe.GroupOrder.Descending);
+
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, version);
+	expect(decoded.groupOrder).toBe(Subscribe.GroupOrder.Ascending);
+});
+
+test.each([
+	["v14", Version.DRAFT_14],
+	["v20", Version.DRAFT_20],
+] as const)("Subscribe %s: a caller asking for Default sends a real order", async (_name, version) => {
+	// 0x0 is the wire's "no preference". A caller may pass it, but it must normalize to a
+	// real order rather than reaching the encoders -- from draft-15 GROUP_ORDER is a message
+	// parameter and Parameters rejects 0 outright, so sending it would be unencodable.
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+		groupOrder: Subscribe.GroupOrder.Default,
+	});
+	expect(msg.groupOrder).toBe(Subscribe.GroupOrder.Descending);
+
+	const encoded = await encodeVersioned(msg, version);
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, version);
+	expect(decoded.groupOrder).toBe(Subscribe.GroupOrder.Descending);
+});
+
+// Draft-14 carries GROUP_ORDER as an inline u8 rather than a message parameter, so 0 is
+// reachable there from a peer and must resolve to the default instead of surfacing as a
+// third value a caller has to handle.
+test("Subscribe v14: an inline group order of 0 decodes as the default", async () => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+
+	// Rewrite the encoded inline order byte to 0, which no encoder of ours will emit.
+	const orderAt = encoded.lastIndexOf(Subscribe.GroupOrder.Descending);
+	const zeroed = new Uint8Array(encoded);
+	zeroed[orderAt] = Subscribe.GroupOrder.Default;
+
+	const decoded = await decodeVersioned(zeroed, Subscribe.Subscribe.decode, Version.DRAFT_14);
+	expect(decoded.groupOrder).toBe(Subscribe.GroupOrder.Descending);
+});
