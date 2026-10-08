@@ -691,7 +691,7 @@ export interface Table {
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
 	dynamic(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint },
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] },
 	): Dynamic;
 }
 
@@ -858,7 +858,7 @@ export class Producer implements Table {
 	 */
 	dynamic(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), true);
 	}
@@ -871,7 +871,7 @@ export class Producer implements Table {
 	 */
 	#receive(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), false);
 	}
@@ -1631,7 +1631,7 @@ export class Dynamic {
 	 * The route is taken as given, epoch included: another epoch (or none) names another
 	 * publisher instance, so re-price from the current one, `update({ ...dynamic.route, cost })`.
 	 */
-	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint }): void {
+	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] }): void {
 		if (this.#closed) throw new Error("dynamic is closed");
 		const next = Route.normalize(route);
 		const previous = this.#entry.route.peek().epoch;

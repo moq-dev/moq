@@ -365,7 +365,8 @@ impl Cost {
 	/// The price of a draining route.
 	pub const DRAIN: Self = Self::MAX;
 
-	/// A peer without a wire cost contributes only the local link price.
+	/// A peer without a wire cost: the same as [`Cost::default`], so only the
+	/// local link price counts.
 	pub(crate) const UNKNOWN: Self = Self(0);
 
 	/// Add a link's static price without overflowing the wire ceiling.

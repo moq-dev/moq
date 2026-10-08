@@ -61,8 +61,7 @@ test("AnnounceBroadcast round-trips on draft-06", async () => {
 	const gotActive = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops }, Version.DRAFT_06);
 	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: 0n });
 
-	// Asymmetric on purpose: the two magnitudes travel independently, so a swapped
-	// or shared encode would round-trip a symmetric pair unnoticed.
+	// A priced start round-trips its one static cost.
 	const cost = 12n;
 	const gotCost = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops, cost }, Version.DRAFT_06);
 	expect(gotCost).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost });
