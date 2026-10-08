@@ -1980,7 +1980,7 @@ mod tests {
 			.expect("publish at the fleet path");
 		let subscriber = cluster.subscriber(&token).expect("subscribe grant").consume();
 		let broadcast = subscriber
-			.request_broadcast(".svc/foo")
+			.request_broadcast(".svc/foo", None)
 			.await
 			.expect("resolves through the mount");
 		assert_eq!(broadcast.info().path.as_str(), ".svc/foo");
@@ -2040,12 +2040,13 @@ mod tests {
 
 		let path = moq_net::Path::new(".stats").join("node").join("test");
 		let consumer = cluster.origin.consume();
-		tokio::time::timeout(std::time::Duration::from_secs(5), consumer.routed(&path))
+		let route = tokio::time::timeout(std::time::Duration::from_secs(5), consumer.routed(&path))
 			.await
 			.expect("stats broadcast announced within 5s")
 			.expect("stats broadcast present");
+		assert!(route.epoch.is_some(), "stats announce under an epoch");
 		let broadcast = consumer
-			.request_broadcast(&path)
+			.request_broadcast(&path, None)
 			.await
 			.expect("stats broadcast resolves");
 
@@ -2607,7 +2608,7 @@ mod tests {
 		assert!(pool.used() > 0, "writes charge the constructed cache pool");
 
 		let consumer = cluster.origin.consume();
-		tokio::time::timeout(Duration::from_secs(2), consumer.request_broadcast("cam"))
+		tokio::time::timeout(Duration::from_secs(2), consumer.request_broadcast("cam", None))
 			.await
 			.expect("broadcast resolves")
 			.expect("broadcast present");

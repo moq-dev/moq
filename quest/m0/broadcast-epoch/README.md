@@ -58,9 +58,9 @@ Decided:
   path cannot name one.
 - Every first-party publisher that can restart mints its own: the apps,
   moq-boy, and moq-room through [Apps](/quest/m0/broadcast-epoch/apps.md), the
-  ingest gateways, moqsink, and the bindings below. moq-stats mints one per group announcement
-  through [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which
-  also gates the release (decided 2026-10-04).
+  ingest gateways, moqsink, and the bindings below. moq-stats mints one per
+  [group announcement](/doc/concept/stats.md#broadcasts), which also gated
+  the release (decided 2026-10-04).
 - The m1 quests gating this line moved under it in the 2026-10-05 audit, and
   the OBS half moved to m1 as [OBS publishes under epochs](/quest/m1/obs-epoch.md).
 
@@ -82,6 +82,12 @@ that follow the announce `Restart` (or END then START) both reach the new
 epoch within one RTT-scale bound rather than the idle timeout, and killing the
 newest epoch falls back to a still-live older one.
 
+When the release cut carries stats epochs, drop
+[#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and
+its `doc/concept/stats.md` sentence from `release`; release-to-main
+back-merges keep `main`'s `rs/moq-stats` and `doc/concept/stats.md` until
+then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
+
 ## Required
 
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
@@ -89,5 +95,4 @@ newest epoch falls back to a still-live older one.
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
-- [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each group announcement under its own epoch, so neither a restarted node nor a returning idle group stalls its viewers
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)

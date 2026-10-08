@@ -47,6 +47,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   `producer.demand().used` and `.unused()`, as are `Group.Producer`'s, and
   `Allocator.reserve` takes `producer.demand()`, replacing the
   `Bandwidth.Demand` interface.
+- **`request_broadcast` takes an epoch.** In Rust,
+  `origin::Consumer::request_broadcast(path)` is
+  `request_broadcast(path, None)`; pass an `Epoch` instead to refuse any other
+  publisher instance. In TypeScript, `RequestOptions.epoch` does the same. A
+  dynamic route updated to another epoch now refuses the requests its handler
+  still holds with `Unroutable`, so a handler answering them late sees its
+  answer dropped.
 - **`moq --hop` is removed; `--epoch` replaces it.** A redundant pair shares an
   epoch, a UUIDv7 such as `uuidgen -7` prints, instead of a Hop ID: pass the
   same `--epoch` (or `MOQ_EPOCH`) to both. Unlike a rename, `--hop` is now an
@@ -335,7 +342,7 @@ Other changes to a deployment:
   `origin::Config`.
 - **Announcements are prefix routes** (#3225, #3770). `announce::Update` is
   `{ prefix, route, kind, captures }`: skip `!update.kind.is_active()` and
-  resolve the broadcast with `consumer.request_broadcast(&update.prefix)`.
+  resolve the broadcast with `consumer.request_broadcast(&update.prefix, update.route.epoch)`.
   Serve a subtree on demand with `origin.dynamic(prefix, route)`.
 - **Tracks.** `with_latency_max` / `latency_max` is `with_max_age` / `max_age`.
   `write_datagram(Datagram)` is `insert_datagram(sequence, timestamp, payload)`

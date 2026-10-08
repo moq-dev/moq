@@ -3752,11 +3752,15 @@ mod tests {
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
 		use futures::FutureExt;
 		assert!(
-			serving.request_broadcast("echoed/x").now_or_never().unwrap().is_err(),
+			serving
+				.request_broadcast("echoed/x", None)
+				.now_or_never()
+				.unwrap()
+				.is_err(),
 			"served the peer its own route"
 		);
 		assert!(
-			serving.request_broadcast("local/x").now_or_never().is_none(),
+			serving.request_broadcast("local/x", None).now_or_never().is_none(),
 			"withheld an independent route"
 		);
 	}
