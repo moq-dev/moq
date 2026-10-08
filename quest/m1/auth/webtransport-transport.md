@@ -5,9 +5,9 @@
 An auth decider tells a WebTransport session from a native QUIC one:
 `moq_auth::Transport::WebTransport` (`"webtransport"` on the wire) for a
 session that arrived over WebTransport, and `Transport::Quic` (`"quic"`) only
-for native QUIC. Every accept path sets it: moq-tokio's noq backend, moq-uring,
-and the relay's `request_for`. An auth server reading the request JSON sees the
-new value.
+for native QUIC. Both relay accept paths set it: the tokio listener's
+`request_for` and the uring listener. An auth server reading the request JSON
+sees the new value.
 
 ## Plan
 
@@ -22,14 +22,15 @@ workers share the `quic` count today):
   changelog.
 - **The ALPN cannot tell them apart.** Both present the negotiated
   sub-protocol (e.g. `moq-lite-04`) as `alpn`; `h3` never reaches auth. The
-  signal is the server request itself: `server::Request` has a URL only on
-  WebTransport (`rs/moq-tokio/src/noq.rs`, `rs/moq-uring/src/quic/web.rs`).
-  Carry the transport on `server::Request` rather than inferring it from the URL
-  at each call site.
+  transport already knows: `moq_tokio::server::Request::transport()` returns
+  `Transport::WebTransport`, which `request_for` in `rs/moq-relay/src/auth.rs`
+  collapses to `Quic`. Map it to the new variant there. The uring listener
+  (`rs/moq-relay/src/uring.rs`) builds its auth request with a hardcoded
+  `Quic`; set it from the `h3` branch it already takes.
 - Update `Transport::Quic`'s doc, which says it covers WebTransport, and any JS
   or binding mirror of the enum.
 - Tests: a WebTransport session and a native QUIC session each reach the
-  decider with their own transport, on the noq and uring backends.
+  decider with their own transport, on the tokio and uring listeners.
 
 ## Related
 
