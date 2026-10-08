@@ -27,9 +27,13 @@ Decided in planning (2026-10-06, after #4955 found that no quest covered
   than the path itself. `moqsrc` switches on a `Restart` of the route its
   path resolves through; the re-request re-resolves upstream, and if it
   lands on the same source the run still restarts on the same pads.
-- **Errors keep today's handling.** A replacement no longer ends the old
-  subscriptions, so a catalog error posts the session error and a track error
-  logs and ends that pad, as today. The earlier rule treating `Unroutable` as
+- **Errors keep today's handling, except source loss.** A replacement no
+  longer ends the old subscriptions, so a malformed catalog or track posts
+  the session error or ends that pad, as today. Losing the source (the
+  publisher's session closing, or the route going away) is not fatal: it
+  enters the held state below even when it arrives before the announce
+  `End`, since `catalog.next()` and session completion
+  (`rs/moq-gst/src/source/imp.rs`) see it first today. The earlier rule treating `Unroutable` as
   a switch in flight is dropped: it could not tell a switch from a dead route
   and could hang.
 - **Cutover.** Cancel the old pumps as soon as the `Restart` is seen, without
@@ -52,7 +56,8 @@ Decided in planning (2026-10-06, after #4955 found that no quest covered
   and START are not coalesced into a `Restart`, and a withdrawn source. A
   track that ends or loses its source hands its pad back without EOS, since
   tracks, the catalog, and `End` arrive on different streams in either order;
-  the next `Start` resumes on the same pads. A rendition the catalog retired
+  the next `Start` resumes on the same pads. The regression covers both
+  orders: source loss before `End`, and `End` before source loss. A rendition the catalog retired
   still drains to EOS. No timer and no property: announcements already say
   when the source is back, and a timer cannot tell a slow restart from a
   dead source.

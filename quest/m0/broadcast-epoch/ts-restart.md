@@ -38,9 +38,12 @@ Decided (maintainer, 2026-09-30):
   program and `Program::All`.
 
 Decided 2026-10-08: when the operator gave `--epoch`, a flagged rewind is
-fatal like an unsignalled one, so the supervisor restarts the process and
-both hosts of a redundant pair keep the operator's epoch. A fresh epoch per
-rewind would split the pair.
+fatal like an unsignalled one, since minting a fresh epoch per rewind would
+split a redundant pair. Restarting under the same epoch is not safe either:
+the new run restarts group numbering, and a matching epoch lets viewers and
+caches resume the old content under the same names. So the error says the
+operator's supervisor must restart both hosts under a new shared epoch, and
+`doc/bin/cli.md`'s redundant-pair example says the same.
 
 Tests: a fixture with a flagged rewind publishes two broadcasts, the second
 starting at the rewound PTS; the same rewind unflagged still errors; one SRT

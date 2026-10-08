@@ -12,7 +12,11 @@ carriage stays with the m3 timed-metadata quests.
 Today `rs/moq-mux/src/container/flv/import.rs` matches `TAG_SCRIPT => {}`,
 and the fMP4 importer's box loop (`rs/moq-mux/src/container/fmp4/import.rs`)
 sends `emsg` to the catch-all arm that skips unknown atoms, both without a
-log line.
+log line. RTMP metadata never reaches the FLV importer: the publish side
+discards `ServerSessionEvent::StreamMetadataChanged`
+(`rs/moq-rtmp/src/server.rs`) and the pull side discards
+`ClientSessionEvent::StreamMetadataReceived` (`rs/moq-rtmp/src/dial.rs`), so
+those two arms are counted too.
 
 Decided 2026-10-08, from the quest audit: a small m1 quest, since the
 carriage quests are parked in m3 with no consumer and the silent drop
@@ -26,8 +30,9 @@ line for genuinely unknown tags. If a refusal fits a narrower case better
 (for example an `emsg` scheme an application declared it needs), say so in
 the PR.
 
-Test: an FLV clip with `onMetaData` and an fMP4 fragment with an `emsg` box
-each import, warn once, and report a count of what was dropped.
+Test: an FLV clip with `onMetaData`, an fMP4 fragment with an `emsg` box, and
+an RTMP publish and pull carrying metadata each import, warn once, and report
+a count of what was dropped.
 
 Public API: possibly an accessor for the counts. Wire: none.
 
