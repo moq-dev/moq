@@ -325,8 +325,8 @@ pub struct Traffic {
 	/// A subset of `groups`: each one also counts there and its payload in
 	/// `frames` / `bytes`.
 	pub datagrams: u64,
-	/// Content skipped because it aged past a subscriber's
-	/// [`max_age`](crate::track::Subscription::max_age) budget. Disjoint from the top-level payload
+	/// Content skipped because it fell behind a subscriber's
+	/// [`max_delay`](crate::track::Subscription::max_delay) budget. Disjoint from the top-level payload
 	/// counters: skipped content is never handed over. A steady rate here means
 	/// subscribers are consistently behind the live edge.
 	pub stale: Content,
@@ -881,6 +881,17 @@ impl Registry {
 			stats: self.clone(),
 			tier,
 		}
+	}
+
+	/// Add `n` publisher-side payload bytes on `(path, tier)`. The hidden `fuzz`
+	/// module exposes this to the stats producer bench. A report drops the entry
+	/// unless a guard still holds it.
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn bump_publisher_bytes(&self, path: impl AsPath, tier: &Tier, n: u64) {
+		let Some(entry) = self.entry(path) else {
+			return;
+		};
+		entry.tier(tier).publisher.bytes.fetch_add(n, Ordering::Relaxed);
 	}
 
 	fn entry(&self, path: impl AsPath) -> Option<Arc<BroadcastEntry>> {

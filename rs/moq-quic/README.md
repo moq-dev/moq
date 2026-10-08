@@ -38,11 +38,18 @@ A `.rustfmt.toml` in each imported directory keeps quinn's formatting; `cargo fm
 
 Changes on top of the upstream commit, besides the renames:
 
+- **BBR3**, from [quinn#2481](https://github.com/quinn-rs/quinn/pull/2481) at [`55f74c0d`](https://github.com/quinn-rs/quinn/pull/2481/commits/55f74c0dd0738b5ad7d7676c0b2869a547783f83) (open upstream), rebased onto the fork point with authorship kept. It replaces quinn's BBR and is the default controller. It carries the BBR correctness fixes moq-dev/noq shipped in `moq-noq` 1.3.1, and with them the `Controller` changes BBR needs: packets named by number and `SpaceId`, `on_packet_sent`, `on_packet_lost`, `on_cwnd_limited`, `on_app_limited`, `on_ack_frequency_update`, and a `pacing_rate` and `send_quantum` the pacer obeys. `ControllerMetrics` rates are bytes per second.
+- **Classic ECN for BBR3**, ported from [moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12): CE exits Startup, stops a bandwidth probe, or lowers the short-term model, once per recovery episode, instead of counting as a loss.
+- **Pacer rounding**: a wait shorter than a nanosecond rounds up instead of re-arming the pacing timer at the current instant.
+- **qlog pacing rate** in bits per second, as qlog defines it.
+- moq-dev/noq's congestion-callback regressions, reworked onto quinn's test harness.
 - [quinn#2724](https://github.com/quinn-rs/quinn/pull/2724) (`moq_sock::udp`): when the kernel rejects a GSO batch with `EIO` or `EINVAL`, the socket halts GSO and resends the batch as individual datagrams instead of dropping it.
   We extend it to resend batches built before GSO was halted too, which upstream's version drops, and to log only the first rejection.
   A `WouldBlock` partway through the resend makes the caller retry the whole batch, duplicating the datagrams already sent; QUIC drops the duplicates.
   Drop it if upstream lands [quinn#2748](https://github.com/quinn-rs/quinn/pull/2748) and we cherry-pick that.
 - Apple fast-path fallback preserves the segmentation of batches prepared before the fast path was disabled, including when a private symbol is unavailable.
+
+Recheck the BBR3 changes when cherry-picking quinn#2481 updates, or if it merges.
 
 ### Advisory triage
 

@@ -28,7 +28,7 @@ install();
 // subscribers. A relay drops a superseded group (RESET_STREAM Old) rather than
 // finish sending it, e.g. a cached group a fresh one lands right behind, so a
 // subscriber has to move on to the next group instead of failing.
-const MAX_AGE = Moq.Time.Milli(1000);
+const MAX_DELAY = Moq.Time.Milli(1000);
 
 const { positionals, values } = parseArgs({
 	allowPositionals: true,
@@ -83,8 +83,8 @@ async function run(): Promise<void> {
 			throw new Error(`unsupported video container: ${JSON.stringify(config.container)}`);
 		}
 
-		const sub = bc.track(name).subscribe({ priority: 0, maxAge: MAX_AGE });
-		const consumer = new Container.Consumer(sub, { format, maxAge: MAX_AGE });
+		const sub = bc.track(name).subscribe({ priority: 0, maxDelay: MAX_DELAY });
+		const consumer = new Container.Consumer(sub, { format, maxDelay: MAX_DELAY });
 		try {
 			for (;;) {
 				const next = await consumer.next();

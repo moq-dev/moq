@@ -167,9 +167,15 @@ impl Spans {
 			.records
 			.iter()
 			.rev()
-			.find(|record| record.keyframe && record.start.frame == 0)
+			.find(|record| starts_sync(record))
 			.map(|record| record.start.group)
 	}
+}
+
+/// Whether `record` starts at a group start that is a sync point, so a player can begin decoding
+/// there.
+fn starts_sync(record: &Entry) -> bool {
+	record.keyframe && record.start.frame == 0
 }
 
 /// Snap `boundary` to the nearest keyframe record start within [`TOLERANCE`], preferring the
@@ -206,11 +212,7 @@ fn video(records: Vec<&Entry>, ended: bool, span: Range<Duration>) -> Content {
 		return Content::Pending;
 	}
 
-	let candidates: Vec<&Entry> = records
-		.iter()
-		.copied()
-		.filter(|record| record.keyframe && record.start.frame == 0)
-		.collect();
+	let candidates: Vec<&Entry> = records.iter().copied().filter(|record| starts_sync(record)).collect();
 	let Some(first) = snap(&candidates, span.start) else {
 		return Content::Gap;
 	};

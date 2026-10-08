@@ -45,6 +45,13 @@ pub struct Info {
 	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
 	/// root: any `..` reference escapes.
 	pub path: crate::PathOwned,
+
+	/// The epoch of the route a [`Consumer`] was resolved through, naming the publisher
+	/// instance it reads.
+	///
+	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
+	/// route without an epoch and for a handle not resolved through an origin.
+	pub epoch: Option<crate::Epoch>,
 }
 
 impl Default for Info {
@@ -53,6 +60,7 @@ impl Default for Info {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
 			path: crate::PathOwned::default(),
+			epoch: None,
 		}
 	}
 }
@@ -197,8 +205,16 @@ impl Producer {
 		self
 	}
 
-	/// Advertise this broadcast's exact path as a route, or re-price the standing
-	/// advertisement in place.
+	/// The route this broadcast is announced with, or `None` while it is not.
+	pub fn route(&self) -> Option<Route> {
+		self.alive.announcer.lock().as_ref()?.route()
+	}
+
+	/// Advertise this broadcast's exact path as a route, or replace the standing
+	/// advertisement's route. The route is taken as given, epoch included: another
+	/// epoch, or none, announces a new broadcast. To re-price the same instance,
+	/// start from the current route:
+	/// `broadcast.announce(broadcast.route().unwrap_or_default().with_cost(cost))`.
 	///
 	/// Until this is called the broadcast exists for nobody: announce cursors do
 	/// not list it and requests for its path fail with [`Error::Unroutable`], for
@@ -654,6 +670,16 @@ impl Consumer {
 		self
 	}
 
+	/// Stamp the epoch of the route this handle was resolved through, overriding [`Info::epoch`].
+	pub(crate) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
+		if self.info.epoch != epoch {
+			let mut info = (*self.info).clone();
+			info.epoch = epoch;
+			self.info = Arc::new(info);
+		}
+		self
+	}
+
 	/// The broadcast's metadata, as reached through this handle.
 	pub fn info(&self) -> &Info {
 		&self.info
@@ -890,6 +916,17 @@ impl Consumer {
 
 	pub fn assert_closed(&self) {
 		assert!(self.closed().now_or_never().is_some(), "should be closed");
+	}
+
+	/// The tracks still open on the broadcast, whether or not anyone reads them.
+	pub fn open_tracks(&self) -> usize {
+		use super::WeakEntry;
+		self.state
+			.read()
+			.tracks
+			.iter()
+			.filter(|track| !track.is_closed())
+			.count()
 	}
 }
 

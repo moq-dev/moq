@@ -23,5 +23,3 @@ because a mislabelled stream is wrong for every consumer.
 ## Related
 
 - [Catalog colour](/quest/m2/color-catalog.md) - the catalog describes a rendition's colour and HDR properties
-- [SEI sidecars](/quest/m2/sei.md) - moves SEI out of the video track;
-  the display metadata inside it needs the home this quest builds

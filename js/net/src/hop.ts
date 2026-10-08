@@ -8,6 +8,7 @@
  * @module
  */
 import * as z from "zod/mini";
+import type * as Epoch from "./epoch.ts";
 
 /**
  * One relay's identity in a broadcast's hop chain, encoded as a 62-bit varint on the wire.
@@ -67,20 +68,6 @@ export function randomHop(): Hop {
 }
 
 /**
- * Name an unknown original publisher: put `stamp`, the receiving connection's own random id,
- * in front of a chain that starts with 0, and turn an empty chain into `[stamp, 0]`. A
- * publisher that reconnects then reads downstream as a new first hop, while the 0 after the
- * stamp keeps the route ranked as anonymous. `undefined` if the chain is full or already holds
- * `stamp`. Mirrors `Hops::stamp` in rs/moq-net.
- */
-export function stampHops(hops: readonly Hop[], stamp: Hop): Hop[] | undefined {
-	if (hops.length === 0) return [stamp, UNKNOWN_HOP];
-	if (hops[0] !== UNKNOWN_HOP) return [...hops];
-	if (hops.length >= MAX_HOPS || hops.includes(stamp)) return undefined;
-	return [stamp, ...hops];
-}
-
-/**
  * What pulling content via a route costs, in two magnitudes accumulated together
  * and compared in that order: lower {@link Cost.warm} wins, and {@link Cost.cold}
  * breaks the tie.
@@ -112,6 +99,13 @@ export const Cost = {
  * an announce event carries it so consumers can read it back.
  */
 export interface Route {
+	/**
+	 * The publisher instance the route serves, if known: routes with the same epoch serve
+	 * the same bytes. Among routes at one prefix the newest epoch wins, and a route without
+	 * one ranks last. Fixed for the advertisement's lifetime: changing it retracts and
+	 * announces afresh. Mirrors `Route::epoch` in rs/moq-net.
+	 */
+	epoch?: Epoch.Valid;
 	/** The chain of hops the route has traversed, oldest first. */
 	hops: Hop[];
 	/** What pulling content via this route costs; lower wins. */
@@ -124,12 +118,13 @@ export const Route = {
 	default: { hops: [], cost: Cost.zero } as Route,
 
 	/** Normalize a partial route, treating a bare bigint cost as both magnitudes alike. */
-	normalize(route: Route | { hops?: readonly Hop[]; cost?: Cost | bigint } = {}): Route {
+	normalize(route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost | bigint } = {}): Route {
 		const hops = route.hops ? [...route.hops] : [];
+		const epoch = route.epoch;
 		const cost = route.cost;
-		if (cost === undefined) return { hops, cost: Cost.zero };
-		if (typeof cost === "bigint") return { hops, cost: { warm: cost, cold: cost } };
-		return { hops, cost: { warm: cost.warm, cold: cost.cold } };
+		if (cost === undefined) return { epoch, hops, cost: Cost.zero };
+		if (typeof cost === "bigint") return { epoch, hops, cost: { warm: cost, cold: cost } };
+		return { epoch, hops, cost: { warm: cost.warm, cold: cost.cold } };
 	},
 };
 
@@ -143,11 +138,12 @@ export function isAnonymous(route: Route): boolean {
 	return route.hops.includes(UNKNOWN_HOP);
 }
 
-/** Whether two routes name the same hop chain and cost. */
+/** Whether two routes name the same epoch, hop chain, and cost. */
 export function routesEqual(a: Route | undefined, b: Route | undefined): boolean {
 	if (a === b) return true;
 	if (!a || !b) return false;
 	return (
+		a.epoch === b.epoch &&
 		a.cost.warm === b.cost.warm &&
 		a.cost.cold === b.cost.cold &&
 		a.hops.length === b.hops.length &&

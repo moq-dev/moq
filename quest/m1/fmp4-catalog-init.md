@@ -27,7 +27,3 @@ Decided (2026-10-04), carried over from the export track-set work:
 Today a returning Annex-B rendition is compared by its avcC/hvcC, SPS bytes
 included; with in-band parameter sets the comparison covers only the
 catalog-derived record, so an encoder that restarts with a new SPS can return.
-
-## Required
-
-- [mp4-atom avc3](/quest/m1/mp4-atom-avc3.md) - mp4-atom can encode an avc3 sample entry

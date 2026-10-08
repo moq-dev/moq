@@ -25,4 +25,4 @@ The only positive reference carries MPEG audio, but the export emits AAC.
 
 ## Required
 
-- [T-STD TS export](/quest/m1/tstd/README.md) - `just test ts-tstd` and `tstd-controls.py` land with it (#4645)
+- [Fixed-delay muxing](/quest/m1/tstd/delay.md) - #4645 edits the same `tstd-controls.py`; the harness itself (`just test ts-tstd`) is already on `main` from #4640, so this does not wait on the whole T-STD line (2026-10-06 audit)

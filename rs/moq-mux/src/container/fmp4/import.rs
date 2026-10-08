@@ -16,8 +16,8 @@ use crate::catalog::Estimator;
 /// ## Supported Codecs
 ///
 /// **Video:**
-/// - H.264 (AVC1)
-/// - H.265 (HEVC/HEV1/HVC1)
+/// - H.264 (AVC1/AVC3)
+/// - H.265 (HEV1/HVC1)
 /// - VP8
 /// - VP9
 /// - AV1
@@ -388,24 +388,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		};
 
 		let config = match codec {
-			mp4_atom::Codec::Avc1(avc1) => {
-				let avcc = &avc1.avcc;
-
-				let mut description = BytesMut::new();
-				avcc.encode_body(&mut description)?;
-
-				let mut config = VideoConfig::new(H264 {
-					profile: avcc.avc_profile_indication,
-					constraints: avcc.profile_compatibility,
-					level: avcc.avc_level_indication,
-					inline: false,
-				});
-				config.coded_width = Some(avc1.visual.width as _);
-				config.coded_height = Some(avc1.visual.height as _);
-				config.description = Some(description.freeze());
-				config.container = container;
-				config
-			}
+			mp4_atom::Codec::Avc1(avc1) => self.init_h264(false, &avc1.avcc, &avc1.visual, container)?,
+			mp4_atom::Codec::Avc3(avc3) => self.init_h264(true, &avc3.avcc, &avc3.visual, container)?,
 			mp4_atom::Codec::Hev1(hev1) => self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
 			mp4_atom::Codec::Hvc1(hvc1) => self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
 			mp4_atom::Codec::Vp08(vp08) => {
@@ -445,6 +429,31 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
 
+		Ok(config)
+	}
+
+	/// The avcC stays the description even for avc3, where it may list no parameter
+	/// sets: it still carries the NAL length size the samples are framed with.
+	fn init_h264(
+		&mut self,
+		inline: bool,
+		avcc: &mp4_atom::Avcc,
+		visual: &mp4_atom::Visual,
+		container: Container,
+	) -> Result<VideoConfig> {
+		let mut description = BytesMut::new();
+		avcc.encode_body(&mut description)?;
+
+		let mut config = VideoConfig::new(H264 {
+			profile: avcc.avc_profile_indication,
+			constraints: avcc.profile_compatibility,
+			level: avcc.avc_level_indication,
+			inline,
+		});
+		config.coded_width = Some(visual.width as _);
+		config.coded_height = Some(visual.height as _);
+		config.description = Some(description.freeze());
+		config.container = container;
 		Ok(config)
 	}
 
@@ -928,7 +937,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let fragment_len = fragment_bytes.len();
 			let mut frame = g.create_frame(moq_net::frame::Info {
 				size: fragment_bytes.len() as u64,
-				timestamp,
+				timestamp: Some(timestamp),
 			})?;
 			frame.write(fragment_bytes)?;
 			frame.finish()?;

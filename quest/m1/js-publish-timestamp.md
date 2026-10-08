@@ -9,9 +9,10 @@ payload published without a timestamp goes out untimed.
 
 ## Plan
 
-Today the json and flate snapshot and stream producers default
-`at = Timestamp.now()`, the json window producer always uses now, and js/net's
-`writeString`, `writeJson`, and `writeBool` stamp now.
+The remaining work is these defaults (checked 2026-10-08): the json and
+flate snapshot and stream producers default `at = Timestamp.now()`, the json
+window producer always uses now, and js/net's `writeString`, `writeJson`, and
+`writeBool` (`js/net/src/group.ts`) stamp now.
 
 Decided (2026-10-01): `@moq/net` exports `Timed<T>`
 (`{ value: T; at?: Time.Timestamp }`), the Rust name and shape. Each producer
@@ -21,13 +22,16 @@ the same type in
 Callers in the repository (js/hang catalog, js/publish, js/room) pass their
 clock's now explicitly. Update `doc/lib/js/{json,flate,net}.md`.
 
-Decided (2026-10-05): timedness is per track, in the shape [Typed
-timedness](/quest/m1/typed-timedness.md) mirrors into `@moq/net`. Where the
-2026-10-01 note above assumes a per-frame optional timestamp (an absent `at`
-marking an untimed frame), that shape wins.
+Decided (2026-10-05, types settled 2026-10-06): timedness is per track, as
+the untimed model ([#4822](https://github.com/moq-dev/moq/pull/4822)) decided and `@moq/net`
+mirrors: `timescale` is optional, frames keep an optional timestamp, and a
+frame whose timedness doesn't match its track is refused. An absent
+`at` therefore belongs on an untimed track. `@moq/net` already refuses a
+mismatched frame, so the group helpers, which still stamp now, only work on a
+timed track today.
+
+Decided (2026-10-07): `@moq/net` has no default timescale. Omitting
+`Track.Info.timescale` declares an untimed track, so every timed publisher
+names its units, unlike Rust's millisecond default.
 
 Public API: breaking. Wire: none.
-
-## Required
-
-- [@moq/net carries untimed frames faithfully](/quest/m1/js-untimed-model.md) - the model must hold an untimed payload before producers stop filling in now

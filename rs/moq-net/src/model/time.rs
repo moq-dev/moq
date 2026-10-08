@@ -107,9 +107,8 @@ impl From<Timescale> for NonZero<u64> {
 }
 
 impl Default for Timescale {
-	/// Milliseconds ([`Self::MILLI`]). Every track has a timescale; this is the one
-	/// used when a producer doesn't pick one and the fallback for protocols whose wire
-	/// can't carry a timescale (pre-Lite05 moq-lite, IETF moq-transport).
+	/// Milliseconds ([`Self::MILLI`]): what a track uses when its producer doesn't pick
+	/// one, and what a lite encoder declares for an untimed track's send times.
 	fn default() -> Self {
 		Self::MILLI
 	}

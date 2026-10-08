@@ -14,8 +14,8 @@ Swift, Kotlin, Go, Dart). Not libmoq, which the
 Decided (2026-10-01), reversing the 2026-09-30 "timestamp required" plan: the
 timestamp is optional end to end, on the wire and in every API, and absent
 means untimed. A library never substitutes now, wall clock, or arrival time.
-How absence travels through the model and over the wire is
-[moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) and
+How absence travels through the model and over the wire is the untimed model
+([#4822](https://github.com/moq-dev/moq/pull/4822)) and
 [lite-07 encodes an absent timestamp](/quest/m1/lite-untimed.md); this quest
 removes every place that fills one in.
 
@@ -24,9 +24,10 @@ fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and moq-mux's
 data producers fill the broadcast clock's `now()`. The FFI raw
 `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` default to 0.
 
-- `moq_net::Timed` takes the shape [Typed
-  timedness](/quest/m1/typed-timedness.md) settles, without its clock
-  parameter `T`. Timedness is per track there (decided 2026-10-05), so an
+- `moq_net::Timed` drops its unused clock parameter `T` (decided 2026-10-06:
+  here rather than in #4822, which is already large). That's a breaking
+  change and gets an upgrade note. Timedness is per track
+  (the untimed model, [#4822](https://github.com/moq-dev/moq/pull/4822), decided 2026-10-05), so an
   untimed payload belongs on an untimed track, and one appended to a timed
   track is refused. The json/flate consumers return the same type
   (see [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md)).
@@ -41,9 +42,13 @@ data producers fill the broadcast clock's `now()`. The FFI raw
 - moq-ffi: data producers take an optional timestamp in microseconds on the
   broadcast clock, unchecked, as Rust does. moq-ffi exposes the broadcast
   clock's `now()` so callers have a value to stamp with. The raw frame and
-  datagram records' `timestamp_us` is already optional after
-  [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md); publishing one without it
-  goes out untimed instead of at `default = 0`.
+  datagram records' `timestamp_us` is optional since [#4822](https://github.com/moq-dev/moq/pull/4822), but only
+  on the receive side (decided 2026-10-07 by OneTooMany): a raw track
+  published through moq-ffi is always timed, and a write without a timestamp
+  is refused. Add a way to publish an untimed raw track. `MoqTrackInfo`'s
+  null `timescale` means microseconds when publishing and an untimed track on
+  a received one, so a received info doesn't round-trip yet. The wrappers'
+  `= 0` defaults go with it.
 - Go (`go/wrapper/moq`) and Python (`py/moq-rs`) wrap only the JSON
   producers; [#4137](https://github.com/moq-dev/moq/pull/4137) added
   `publish_binary_snapshot` / `publish_binary_stream` (now
@@ -56,11 +61,7 @@ data producers fill the broadcast clock's `now()`. The FFI raw
 Public API: breaking. Wire: none here; absence on the wire lands
 with the untimed implementation quests.
 
-## Required
-
-- [JSON and flate namespaces](/quest/m1/ffi-shape/json.md) - moves the data producers this changes, so the two breaks land in order rather than colliding
-- [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the model must hold an untimed payload before producers stop filling in now; until lite-07 encodes absence, a lite encoder writes its send time, as producers effectively do today
-
 ## Related
 
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same change in the JS packages
+- [FFI shape](/quest/m1/ffi-shape/README.md) - moves the data producers this changes into `json` and `flate` namespaces in the same merge, so this is ready once #4519 lands rather than waiting on the codec child (2026-10-06 audit)

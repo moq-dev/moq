@@ -17,6 +17,9 @@ const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
 #[derive(Clone, Debug)]
 pub struct Track<'a> {
 	pub broadcast: Path<'a>,
+	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// Lite07+ only.
+	pub epoch: Option<crate::Epoch>,
 	pub track: Cow<'a, str>,
 }
 
@@ -27,9 +30,14 @@ impl Message for Track<'_> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
+		let epoch = super::epoch::decode_epoch(r, version)?;
 		let track = Cow::Owned(r.string()?);
 
-		Ok(Self { broadcast, track })
+		Ok(Self {
+			broadcast,
+			epoch,
+			track,
+		})
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -38,6 +46,7 @@ impl Message for Track<'_> {
 		}
 
 		self.broadcast.encode(w, version)?;
+		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
 		w.string(&self.track)?;
 		Ok(())
 	}
@@ -203,7 +212,7 @@ mod test {
 		let info = TrackInfo {
 			priority: info.priority,
 			max_age: info.max_age,
-			timescale: info.timescale,
+			timescale: info.timescale.unwrap(),
 		};
 		let mut buf = Vec::new();
 		info.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
@@ -269,6 +278,7 @@ mod test {
 	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
+			epoch: None,
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),
 		};
@@ -284,6 +294,7 @@ mod test {
 	#[test]
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
+			epoch: None,
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),
 		};

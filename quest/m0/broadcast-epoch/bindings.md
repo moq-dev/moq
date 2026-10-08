@@ -2,18 +2,21 @@
 
 ## Goal
 
-`moq-ffi` and the py, swift, kt, go, and dart wrappers publish under the
-default epoch and follow bare names like Rust. The generated C and C++
-bindings pick it up from moq-ffi; libmoq gets no new API. The epoch of a published or
-consumed broadcast is readable, and a caller can pass an explicit one. The
-reconnect counter `session.epoch()` is renamed so "epoch" has one meaning.
+`moq-ffi` and the py, swift, kt, go, and dart wrappers can announce an epoch like Rust, with a minting helper. The generated C and C++
+bindings pick it up from moq-ffi; libmoq gets no new API. The epoch on an announced route is
+readable, and a publisher can pass an explicit one. Every wrapper surfaces
+the `Restart` announce event. The reconnect counter `session.epoch()` is
+renamed so "epoch" has one meaning.
 
 ## Plan
 
 - Expose the parsed epoch (text and time) and an explicit-epoch publish
   argument. Keep the surface to what a binding consumer needs.
-- Rename `session.epoch()` in every binding (for example to `connects()`).
-  That is a break.
+- Rename the reconnect counter, `moq_tokio::Connection::epoch()` and
+  `session.epoch()` in every binding (for example to `connects()`). That is
+  a break.
+- `MoqAnnounceEvent::Restart` lands in moq-ffi with
+  [Restart](/quest/m0/broadcast-epoch/restart.md); each wrapper maps it.
 - Update `doc/lib/{py,swift,kt,go,dart}` per the cross-package sync table,
   and run `just test smoke --all`.
 
@@ -26,4 +29,4 @@ adopts the epoch surface and the rename, so the wrappers break once each.
 
 ## Required
 
-- [Origin](/quest/m0/broadcast-epoch/origin.md) - the behavior the bindings surface
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - adds the `Restart` announce event the wrappers expose

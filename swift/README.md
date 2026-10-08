@@ -35,8 +35,7 @@ let session = try await client.connect(to: "https://relay.example.com")
 // origin between both sides.
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
 for try await event in announced {
-    // `.live` follows the routes live at subscribe time; `.update` and
-    // `.end` report later changes.
+    // `.update` reprices a route and `.end` retracts it.
     guard case .start(let announcement) = event else { continue }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")

@@ -53,7 +53,7 @@ typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
 typedef Announce = MoqAnnounce;
 
 /// What an [AnnounceConsumer] yields: [AnnounceEventStart],
-/// [AnnounceEventUpdate], [AnnounceEventEnd], or [AnnounceEventLive].
+/// [AnnounceEventUpdate], or [AnnounceEventEnd].
 typedef AnnounceEvent = MoqAnnounceEvent;
 
 /// A route now covers the prefix; the stream had none there.
@@ -64,9 +64,6 @@ typedef AnnounceEventUpdate = UpdateMoqAnnounceEvent;
 
 /// No route covers the prefix any more; carries its last route.
 typedef AnnounceEventEnd = EndMoqAnnounceEvent;
-
-/// Every route live at subscribe time has been delivered; what follows is live changes.
-typedef AnnounceEventLive = LiveMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
@@ -152,7 +149,7 @@ typedef Frame = MoqFrame;
 /// A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts.
 typedef MediaFrame = MoqMediaFrame;
 
-/// The catalog description of a video track, including whether the publisher recommends temporarily avoiding it.
+/// The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming).
 typedef Video = MoqVideo;
 
 /// Caller-provided catalog fields for a video track.
@@ -167,7 +164,7 @@ typedef VideoProperties = MoqVideoProperties;
 /// A single video codec an importer can parse.
 typedef VideoFormat = MoqVideoFormat;
 
-/// The catalog description of an audio track: codec, sample rate, channels, and container.
+/// The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container.
 typedef Audio = MoqAudio;
 
 /// An audio codec, its required init bytes, and an optional label.
