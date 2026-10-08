@@ -23,7 +23,7 @@ and its probe land before the peer's timer. Pick how the config expresses
 "derived" (an `Option`, or a sentinel) by what reads clearest in the
 `[quic]` section and CLI; document it in `doc/bin/relay/config.md`.
 
-iroh stays on upstream noq. [Listener deadlines](/quest/m1/listener-deadlines.md)
+iroh stays on upstream noq. [iroh keep-alive](/quest/m1/iroh-keep-alive.md)
 wires `quic.keep_alive` into iroh's `keep_alive_interval`; with no explicit
 value, iroh gets the same derivation from its idle timeout. The qmux
 WebSocket keep-alive (`qmux::ws::KeepAlive`, a fixed 5 s ping and 30 s
@@ -39,5 +39,5 @@ default; an explicit value wins; `0s` disables.
 
 ## Related
 
-- [Listener deadlines](/quest/m1/listener-deadlines.md) - wires the same setting into iroh's fixed interval
+- [iroh keep-alive](/quest/m1/iroh-keep-alive.md) - wires the same setting into iroh's fixed interval
 - [noq#810](https://github.com/n0-computer/noq/issues/810) - the deadline-driven proposal to n0; flub and matheus23 asked to keep a cap for NAT bindings, which the override covers

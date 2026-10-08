@@ -8,7 +8,7 @@ assumed.
 
 ## Plan
 
-Decided 2026-10-08: parked in m3 with [robot](/quest/m2/teleop/robot.md),
+Decided 2026-10-08: parked in m3 with [robot](/quest/m3/teleop-robot.md),
 which it builds on.
 
 `moq-boy` merges every viewer's input, which is right for crowd control and
@@ -42,4 +42,4 @@ not attempt.
 
 ## Required
 
-- [Robot teleoperation primitive](/quest/m2/teleop/robot.md)
+- [Robot teleoperation primitive](/quest/m3/teleop-robot.md)

@@ -32,4 +32,4 @@ existing suite does.
 
 ## Required
 
-- [Ring TCP ablation](/quest/m2/uring-tcp/ablation.md) - a positive verdict selects the mechanisms before the worker implementation starts
+- [Ring TCP ablation](/quest/m3/uring-tcp/ablation.md) - a positive verdict selects the mechanisms before the worker implementation starts

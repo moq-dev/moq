@@ -91,7 +91,7 @@ Open, to settle before starting (moved from the
 ## Related
 
 - [Ladder controller](/quest/m3/ladder/controller.md) - owns the rung targets a split-out transcode leg would feed
-- [Audio follows the grant](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) -
+- [Audio follows the grant](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) -
   the audio rate follow this signal would feed
 - [Ladder](/quest/m3/ladder/README.md) - the transcode ladder, which today
   encodes every rung at a fixed rate with no bandwidth input

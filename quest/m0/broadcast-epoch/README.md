@@ -54,7 +54,7 @@ Decided:
   explicit `Restart` announce event tells players to follow, through
   [Restart](/quest/m0/broadcast-epoch/restart.md). When the newest goes and
   an older one is still live, the older one wins again as a new broadcast.
-- [Claim-served epochs](/quest/m0/broadcast-epoch/claim-epochs.md), where a
+- [Claim-served epochs](/quest/m1/claim-epochs.md), where a
   lite-07 claim's answer carries the served broadcast's own epoch, no longer
   gates this line (decided 2026-10-08): it is a lite-07 opt-in, so it moved
   to m1.

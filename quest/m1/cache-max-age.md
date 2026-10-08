@@ -51,7 +51,7 @@ Decided (2026-10-06, maintainer):
   superseded group. Arm a wake at successor arrival + budget on those reader
   paths, re-armed when the successor changes. Decided 2026-10-08: one wake
   mechanism. The deadline rides the held group's `expiry::Wakes` entry from
-  [Held group wakes](/quest/m0/held-group-wakes.md), not a wake of its own;
+  [Held group wakes](/quest/m1/held-group-wakes.md), not a wake of its own;
   whichever lands second adds its trigger to that entry.
 - The swept benchmark measures cost and picks between evaluating the wall
   term on a timer and evaluating it lazily on access, for retention only. It
@@ -122,7 +122,7 @@ encoding change; Max Age semantics in the lite draft change.
 
 ## Related
 
-- [Held group wakes](/quest/m0/held-group-wakes.md) - the `Wakes` entry this quest's wall-clock deadline rides on
+- [Held group wakes](/quest/m1/held-group-wakes.md) - the `Wakes` entry this quest's wall-clock deadline rides on
 - [lite-07 Live flag](/quest/m1/lite-live.md) - its untimed `Live` start (the latest group) follows this rule instead: replay what is not stale
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors the failover rule in JS
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - relay memory past the expiry window, in the same cache

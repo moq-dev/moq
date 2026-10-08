@@ -36,7 +36,7 @@ the native decode path too, asserting the same target series the browser's
 
 ## Required
 
-- [Watch](/quest/m0/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
 
 ## Closes
 

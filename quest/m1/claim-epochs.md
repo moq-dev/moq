@@ -95,5 +95,5 @@ it. Wire: lite-07 TRACK_INFO gains `Epoch`.
 ## Related
 
 - [Idle fronts](/quest/m0/idle-fronts.md) - ends an unread front and its per-path state after the linger on every version
-- [Upstream position regression](/quest/m0/largest-regression.md) - catches the same restart from the answer's largest position on lite-07 and moq-transport; lite-05 and 06 stay uncovered
+- [Upstream position regression](/quest/m1/largest-regression.md) - catches the same restart from the answer's largest position on lite-07 and moq-transport; lite-05 and 06 stay uncovered
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - waits on this wire change

@@ -60,5 +60,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Claim-served epochs](/quest/m0/broadcast-epoch/claim-epochs.md) - prevents the splice on lite-07 by naming the instance
+- [Claim-served epochs](/quest/m1/claim-epochs.md) - prevents the splice on lite-07 by naming the instance
 - [Coalesce dynamic tracks](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - keeps sequences going when a dynamic track's producer is replaced within one broadcast

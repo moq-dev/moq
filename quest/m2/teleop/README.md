@@ -11,8 +11,8 @@ protocol and flight integration, parked in m3 until a real ArduPilot user or
 partner shows up.
 
 Decided in the 2026-09-30 audit: the ROS 2 bridge was deleted, cross-track
-correlation folded into [robot](/quest/m2/teleop/robot.md), V4L2-M2M encoding
-folded into [CLI packaging](/quest/m1/cli-packaging.md), and the MAVLink
+correlation folded into [robot](/quest/m3/teleop-robot.md), V4L2-M2M encoding
+folded into [CLI packaging](/quest/m2/cli-packaging.md), and the MAVLink
 bridge and SITL proof moved to m3. Kyber is a competitor with proprietary
 framing, not a transport we replace.
 
@@ -36,7 +36,7 @@ operator arbitration, and the latency instrumentation from scratch.
 The hang catalog is no longer a gap: it advertises data tracks in its `json`
 and `binary` sections beside video and audio. The other missing piece,
 `moq-video`'s V4L2-M2M encoder in a released `moq-cli`, is tracked by
-[CLI packaging](/quest/m1/cli-packaging.md).
+[CLI packaging](/quest/m2/cli-packaging.md).
 
 ### Two delivery classes, one session
 
@@ -56,7 +56,7 @@ for QUIC reliable streams as for DDS best-effort: correct and useless.
 The split is a framing decision, not a subscription flag, and `moq-json` and
 `moq-flate` already implement both halves as their snapshot and stream
 modes. What that
-means for the primitive is in [robot](/quest/m2/teleop/robot.md), and what it
+means for the primitive is in [robot](/quest/m3/teleop-robot.md), and what it
 means for a protocol multiplexing many message rates onto one link is in
 [mavlink](/quest/m3/teleop-mavlink.md).
 
@@ -94,10 +94,10 @@ stating plainly because it is what a builder is comparing against.
 
 ## Related
 
-- [Robot teleoperation primitive](/quest/m2/teleop/robot.md) - a `moq-robot`
+- [Robot teleoperation primitive](/quest/m3/teleop-robot.md) - a `moq-robot`
   crate carrying the track shapes and discovery every teleoperated machine
   needs, parked in m3
-- [Operator arbitration](/quest/m2/teleop/arbitration.md) - exactly one
+- [Operator arbitration](/quest/m3/teleop-arbitration.md) - exactly one
   controller commands a vehicle at a time, with explicit handoff and a stated
   authorization boundary, parked in m3
 - [e2ee](/quest/m1/e2ee/README.md) - the answer for a protected control link
@@ -106,7 +106,7 @@ stating plainly because it is what a builder is comparing against.
   extends those types rather than adding a second stats surface
 - [Video hardware validation](/quest/m3/video-hardware.md) - the VAAPI run
   that covers Intel ground robots and NUC companions
-- [CLI packaging](/quest/m1/cli-packaging.md) - ships the V4L2-M2M encoder the
+- [CLI packaging](/quest/m2/cli-packaging.md) - ships the V4L2-M2M encoder the
   boards that fly need
 - [MAVLink bridge](/quest/m3/teleop-mavlink.md) - a `moq-mavlink` gateway,
   parked until a real ArduPilot user or partner

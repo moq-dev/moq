@@ -29,4 +29,4 @@ decoder rather than to `BroadcastConsumer.decode_audio`, which Codecs removes.
 ## Related
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes the binding namespaces
-- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - landed the native decode delay API this exposes
+- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - landed the native decode delay API this exposes

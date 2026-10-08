@@ -25,4 +25,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Export delay](/quest/m1/flv-export-delay.md) - the export side of the same container
+- [Export delay](/quest/m1/export-delay.md) - the export side of the same container

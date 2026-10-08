@@ -10,7 +10,7 @@ burst sizes.
 
 Boundaries: no packet loss concealment; an underrun still renders a ramped
 gap. The target estimator and the ring's slack and re-stall are the
-[audio jitter target](/quest/m0/audio-jitter-target/README.md) line (#3517
+[audio jitter target](/quest/m1/audio-jitter-target/README.md) line (#3517
 was closed in favor of it); the clock the stretch converges toward is
 [A/V clock](/quest/m1/av-clock.md).
 
@@ -29,5 +29,5 @@ was closed in favor of it); the clock the stretch converges toward is
 
 ## Required
 
-- [Watch](/quest/m0/audio-jitter-target/watch.md) - the recorded traces this replays, and the JS target it converges toward
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - the recorded traces this replays, and the JS target it converges toward
 - [A/V clock](/quest/m1/av-clock.md) - the clock the stretch converges toward

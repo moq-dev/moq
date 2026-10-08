@@ -37,4 +37,4 @@ the maintenance.
 
 ## Related
 
-- [Robot teleoperation primitive](/quest/m2/teleop/robot.md) - the Rust types the zod schema mirrors
+- [Robot teleoperation primitive](/quest/m3/teleop-robot.md) - the Rust types the zod schema mirrors

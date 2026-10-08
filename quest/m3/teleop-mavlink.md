@@ -74,7 +74,7 @@ up to `MAX_DELTA_FRAMES` merge patches into one ordered group, so an earlier
 The reliable class is the append-log shape (the binary `stream` mode): commands,
 ACKs, mission, parameter and file transfer are stop-and-wait exchanges carried
 in one ordered group. Note the scope in
-[robot](/quest/m2/teleop/robot.md): that is gap-free for a live reader, not
+[robot](/quest/m3/teleop-robot.md): that is gap-free for a live reader, not
 recoverable after a lag or a reconnect, so these MAVLink services keep relying
 on their own retransmission across a link drop.
 
@@ -88,8 +88,8 @@ small, real contribution and its own future quest.
 
 ## Required
 
-- [Robot teleoperation primitive](/quest/m2/teleop/robot.md)
-- [Operator arbitration](/quest/m2/teleop/arbitration.md)
+- [Robot teleoperation primitive](/quest/m3/teleop-robot.md)
+- [Operator arbitration](/quest/m3/teleop-arbitration.md)
 
 ## Related
 

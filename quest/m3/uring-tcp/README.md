@@ -42,9 +42,9 @@ ablation stays the gate for the rest of the line.
 
 ## Required
 
-- [Ablation](/quest/m2/uring-tcp/ablation.md) - measure ring TCP against tokio
+- [Ablation](/quest/m3/uring-tcp/ablation.md) - measure ring TCP against tokio
   TCP under the qmux workload before committing to the port
-- [Stream](/quest/m2/uring-tcp/stream.md) - a `tcp` module in `moq-uring`, and
+- [Stream](/quest/m3/uring-tcp/stream.md) - a `tcp` module in `moq-uring`, and
   the `hyper::rt` adapters that let axum run on it
-- [Relay](/quest/m2/uring-tcp/relay.md) - serve the relay's WebSocket and
+- [Relay](/quest/m3/uring-tcp/relay.md) - serve the relay's WebSocket and
   stream listeners from the io_uring workers

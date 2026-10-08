@@ -18,7 +18,9 @@ request token authorizing its own request (the fallback after the session
 grant, refresh by REQUEST_UPDATE, and a per-request relay lease on
 `moq_auth::Client`) is deferred until a moq-transport peer needs it; re-plan
 it then from [#4675](https://github.com/moq-dev/moq/pull/4675), which built
-it. The decode needs neither [Relay tokens](/quest/m1/auth/relay-refresh.md)
+it. #4675 is too large to review as one change, so it splits: the
+decode-and-close part lands first as this quest, and the grant and lease work
+parks on its branch. The decode needs neither [Relay tokens](/quest/m1/auth/relay-refresh.md)
 nor a lease.
 
 - Decode with the SETUP option's structure and rules

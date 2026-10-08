@@ -129,4 +129,4 @@ hang catalog gains an `m2ts` root section; additive.
 ## Related
 
 - [TS hitless](/quest/m2/ts-hitless.md) - the demultiplexed lane's 2022-7 legs and the `--sync` anchor
-- [MSFTS convergence](/quest/m2/msfts-convergence.md) - the ES-level side of the same mapping
+- [MSFTS convergence](/quest/m3/msfts-convergence.md) - the ES-level side of the same mapping

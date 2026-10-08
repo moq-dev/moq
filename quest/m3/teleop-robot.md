@@ -116,5 +116,5 @@ control then it is the wrong abstraction.
 
 ## Related
 
-- [arbitration](/quest/m2/teleop/arbitration.md) - which controller is obeyed
+- [arbitration](/quest/m3/teleop-arbitration.md) - which controller is obeyed
 - [Rust untimed default](/quest/m1/rust-untimed-default.md) - why command and telemetry tracks declare their timescale

@@ -46,7 +46,7 @@ encodes through rkmpp in a vendor kernel, not V4L2, so it stays on the
 
 `pipewire` stays off in shipped builds (decided 2026-10-06): it needs
 libpipewire-0.3 to load, the same load-time requirement
-[ALSA](/quest/m1/capture-alsa-link.md) removes.
+[ALSA](/quest/m2/capture-alsa-link.md) removes.
 
 Decided in the 2026-09-30 audit: the v4l2 encode quest folded in here, since
 its remaining work was one release feature flag and a doc note.
@@ -57,4 +57,4 @@ making it default-on does not depend on the library defaults.
 
 ## Required
 
-- [Audio capture without runtime system libraries](/quest/m1/capture-alsa-link.md) - the microphone path must start without system audio libraries before every distribution can ship it
+- [Audio capture without runtime system libraries](/quest/m2/capture-alsa-link.md) - the microphone path must start without system audio libraries before every distribution can ship it

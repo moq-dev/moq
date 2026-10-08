@@ -98,4 +98,4 @@ pre-accepted streams can stand behind.
 
 - [P2P](/quest/m3/p2p/README.md) - the only consumer of a public STUN responder, which it plans when it needs one
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
-- [Stream sessions](/quest/m2/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later
+- [Stream sessions](/quest/m3/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later

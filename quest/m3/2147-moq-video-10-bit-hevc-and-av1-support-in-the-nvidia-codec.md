@@ -39,4 +39,4 @@ codec signaling, with cross-language fixtures for any metadata change.
 
 - [GPU CI](/quest/m1/gpu-ci.md) - the RTX 3070 Ti host that verifies Main10
 - [NVENC AV1](/quest/m3/nvenc-av1.md) - the AV1 half of #2147, hardware-gated
-- [Codec coverage study](/quest/m2/video-codec-coverage.md) - measure optional software and other native backends separately
+- [Codec coverage study](/quest/m3/video-codec-coverage.md) - measure optional software and other native backends separately

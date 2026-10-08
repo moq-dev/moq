@@ -20,7 +20,7 @@ still links and starts driverless.
 `capture` and `playback` pull cpal with ALSA always linked; the host flags
 alone no longer activate it. cpal cannot load ALSA at runtime in-tree (no
 release offers it, and the in-tree routes are hacks), so this waits on
-[the cpal release](/quest/m1/cpal-alsa-runtime.md). Once it ships, bump cpal,
+[the cpal release](/quest/m2/cpal-alsa-runtime.md). Once it ships, bump cpal,
 enable whatever it needs, and update the moq-audio and moq-cli feature
 comments that call libasound a build-time link.
 
@@ -41,8 +41,8 @@ covers it. Keep the platform jobs. Update the Cargo feature comments and
 
 ## Required
 
-- [cpal loads libasound at runtime](/quest/m1/cpal-alsa-runtime.md) - condition: a cpal release whose Linux build carries no load-time libasound requirement
+- [cpal loads libasound at runtime](/quest/m2/cpal-alsa-runtime.md) - condition: a cpal release whose Linux build carries no load-time libasound requirement
 
 ## Related
 
-- [Ship capture and playback](/quest/m1/cli-packaging.md) - the shippable capture milestone this work supports
+- [Ship capture and playback](/quest/m2/cli-packaging.md) - the shippable capture milestone this work supports

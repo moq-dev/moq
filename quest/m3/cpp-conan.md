@@ -26,4 +26,4 @@ first. The vcpkg registry, which this reuses, is parked in m3 too (decided
 
 ## Required
 
-- [vcpkg registry](/quest/m2/cpp-vcpkg.md) - the release manifest and bump automation this reuses
+- [vcpkg registry](/quest/m3/cpp-vcpkg.md) - the release manifest and bump automation this reuses

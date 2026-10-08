@@ -39,4 +39,4 @@ Public API: none. Wire: none.
 - [End of Group status](/quest/m0/ietf-end-of-group-status.md) - the same `Frame.decode` status branch, landing first
 
 - [Rust papercuts](/quest/m1/papercuts-rs.md) - the Rust half of the same audit
-- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - owns the audio ring and its backpressure
+- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - owns the audio ring and its backpressure

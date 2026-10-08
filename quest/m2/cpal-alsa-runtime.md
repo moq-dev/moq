@@ -12,7 +12,7 @@ runtime loading, `--features capture`; with an optional host, cpal's ALSA
 host off and `pulseaudio` on) and confirm `readelf -d` lists no
 `libasound.so.2` under `NEEDED`. A clean `readelf` is not enough on its own:
 the binary must also start, list devices, and play on a host without
-libasound, as [capture-alsa-link](/quest/m1/capture-alsa-link.md) verifies.
+libasound, as [capture-alsa-link](/quest/m2/capture-alsa-link.md) verifies.
 
 Advance it by proposing the change upstream (RustAudio/cpal, and
 diwic/alsa-sys if the loading lives there). Posting there needs maintainer
@@ -20,8 +20,8 @@ approval, which is pending: on 2026-10-06 the maintainer chose not to post
 yet. Once the release is out, delete this quest.
 
 Decided 2026-10-08: the capture chain (this quest,
-[capture-alsa-link](/quest/m1/capture-alsa-link.md), and
-[Ship capture and playback](/quest/m1/cli-packaging.md)) moves to m2 and parks
+[capture-alsa-link](/quest/m2/capture-alsa-link.md), and
+[Ship capture and playback](/quest/m2/cli-packaging.md)) moves to m2 and parks
 until cpal ships runtime ALSA loading. Nothing is posted upstream and no fork
 is taken meanwhile.
 
@@ -34,7 +34,7 @@ pkg-config and offers no runtime-loading mode. No upstream issue or PR asks
 for either.
 
 Two upstream shapes, either of which unblocks
-[Audio capture without runtime system libraries](/quest/m1/capture-alsa-link.md):
+[Audio capture without runtime system libraries](/quest/m2/capture-alsa-link.md):
 
 - **Runtime loading.** An `alsa-sys` feature that resolves the `snd_*`
   symbols through dlopen (bindgen can emit such a wrapper), forwarded by
@@ -62,4 +62,4 @@ calls a symbol the shim misses.
 
 ## Related
 
-- [Ship capture and playback](/quest/m1/cli-packaging.md) - needs the microphone path to start without libasound
+- [Ship capture and playback](/quest/m2/cli-packaging.md) - needs the microphone path to start without libasound

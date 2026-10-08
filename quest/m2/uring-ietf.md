@@ -33,5 +33,5 @@ that fleet deploy, which is m2 work.
 
 ## Related
 
-- [Stream sessions](/quest/m2/uring-tcp/README.md) - the other protocol gap
+- [Stream sessions](/quest/m3/uring-tcp/README.md) - the other protocol gap
   on the ring, WebSocket and HTTP

@@ -1,9 +1,9 @@
-# [M] @moq/net session parity with moq-net
+# [S] @moq/net per-session caps match moq-net
 
 ## Goal
 
-Two Rust moq-net session behaviors hold in `@moq/net` too, so a JS peer or
-relay behaves like a Rust one.
+Rust moq-net's per-session caps hold in `@moq/net` too, so a JS peer or
+relay refuses past them like a Rust one.
 
 ## Plan
 
@@ -11,12 +11,9 @@ relay behaves like a Rust one.
   subscription caps to JS with the same defaults (100,000 and 10,000) and
   close the session with TOO_MANY_REQUESTS (0x7) past them, as Rust does. JS's own request-ID window is
   [JS request window](/quest/m1/js-request-window.md).
-- Pending tail (#4225, still open): once Rust readers of a received track
-  wait for missing groups below a declared end until the tail settles, mirror
-  the hold. JS readers still end at the end with groups missing
-  (`doc/lib/js/net.md`).
-
-Test each against the Rust behavior, with mocked time.
+Test against the Rust behavior, with mocked time. The pending-tail hold
+split out to [JS pending tail](/quest/m1/js-pending-tail.md) on 2026-10-08,
+since it waits on #4225 and the caps do not.
 
 Decided 2026-10-08: the resolved-epoch check is done for JS
 (`broadcast.Consumer.epoch` mirrors `broadcast::Info::epoch`), and the
@@ -24,4 +21,5 @@ bindings' epoch surface is [Bindings](/quest/m0/broadcast-epoch/bindings.md)'s.
 
 ## Related
 
+- [JS pending tail](/quest/m1/js-pending-tail.md) - the other half of session parity, behind #4225
 - [JS request window](/quest/m1/js-request-window.md) - JS grants request IDs as requests close, the other half of JS request limits

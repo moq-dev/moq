@@ -12,7 +12,7 @@ then pinned to one thread for its whole life, exactly like a QUIC one.
 `tcp`/`unix` listeners and points the operator at a separate `init_streams`
 tokio server; the only thing it refuses is `tls.generate`. Replace the silent skip with real support: each
 worker binds its own listener in the reuseport group and runs the router from
-[stream](/quest/m2/uring-tcp/stream.md) on it.
+[stream](/quest/m3/uring-tcp/stream.md) on it.
 
 The split of work stays what the `uring.rs` module docs already describe: the worker
 owns everything transport-shaped, while authentication and session
@@ -28,5 +28,5 @@ worker.
 
 ## Required
 
-- [Stream](/quest/m2/uring-tcp/stream.md) - the module and adapters this
+- [Stream](/quest/m3/uring-tcp/stream.md) - the module and adapters this
   serves from
