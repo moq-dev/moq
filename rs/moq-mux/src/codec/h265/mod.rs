@@ -476,6 +476,36 @@ pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Byt
 	Ok(out.freeze())
 }
 
+/// An hvcC whose parameter sets will arrive in the samples, from a catalog codec
+/// string that already fixes the record.
+///
+/// Main and Main Still Picture are 8-bit 4:2:0. Main 10's depth is 8 or 10, and
+/// any other profile or profile space is not fixed by the codec string.
+pub(crate) fn catalog_hvcc(h265: &hang::catalog::H265) -> Option<Bytes> {
+	if !h265.in_band || h265.profile_space != 0 || !matches!(h265.profile_idc, 1 | 3) {
+		return None;
+	}
+
+	let mut out = BytesMut::with_capacity(23);
+	out.put_u8(1);
+	let profile = ((h265.profile_space & 0x3) << 6) | (u8::from(h265.tier_flag) << 5) | (h265.profile_idc & 0x1f);
+	out.put_u8(profile);
+	out.put_slice(&h265.profile_compatibility_flags);
+	out.put_slice(&h265.constraint_flags);
+	out.put_u8(h265.level_idc);
+	out.put_u16(0xf000); // min_spatial_segmentation_idc unknown
+	out.put_u8(0xfc); // parallelismType unknown
+	out.put_u8(0xfc | 1); // chroma_format_idc = 1 (4:2:0)
+	out.put_u8(0xf8); // bit_depth_luma_minus8 = 0
+	out.put_u8(0xf8); // bit_depth_chroma_minus8 = 0
+	out.put_u16(0); // avgFrameRate unspecified
+	// constantFrameRate 0, numTemporalLayers 0, temporalIdNested 0, lengthSizeMinusOne 3.
+	// temporalIdNested is ignored while numTemporalLayers is 0.
+	out.put_u8(0x03);
+	out.put_u8(0); // numOfArrays
+	Some(out.freeze())
+}
+
 /// Extract the parameter-set NALs (VPS, SPS, PPS in array order) and the NALU
 /// length size from an HEVCDecoderConfigurationRecord. The inverse of
 /// [`build_hvcc`]; used to re-emit out-of-band hvc1 parameter sets as inline
@@ -739,5 +769,49 @@ mod tests {
 
 		let parsed = hang::catalog::H265::from_str(&encoded).unwrap();
 		assert_eq!(parsed.profile_compatibility_flags, h265.profile_compatibility_flags);
+	}
+
+	fn hevc(profile_idc: u8, in_band: bool, profile_space: u8) -> hang::catalog::H265 {
+		hang::catalog::H265 {
+			in_band,
+			profile_space,
+			profile_idc,
+			profile_compatibility_flags: [0x60, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 93,
+			constraint_flags: [0x90, 0, 0, 0, 0, 0],
+		}
+	}
+
+	fn decode_hvcc(bytes: &Bytes) -> mp4_atom::Hvcc {
+		use mp4_atom::Atom;
+		mp4_atom::Hvcc::decode_body(&mut std::io::Cursor::new(bytes.as_ref())).unwrap()
+	}
+
+	#[test]
+	fn catalog_hvcc_main_and_still_picture_round_trip() {
+		for profile_idc in [1, 3] {
+			let hvcc = decode_hvcc(&catalog_hvcc(&hevc(profile_idc, true, 0)).unwrap());
+			assert_eq!(hvcc.general_profile_idc, profile_idc);
+			assert_eq!(hvcc.general_profile_space, 0);
+			assert!(!hvcc.general_tier_flag);
+			assert_eq!(hvcc.general_profile_compatibility_flags, [0x60, 0, 0, 0]);
+			assert_eq!(hvcc.general_constraint_indicator_flags, [0x90, 0, 0, 0, 0, 0]);
+			assert_eq!(hvcc.general_level_idc, 93);
+			assert_eq!(hvcc.chroma_format_idc, 1);
+			assert_eq!(hvcc.bit_depth_luma_minus8, 0);
+			assert_eq!(hvcc.bit_depth_chroma_minus8, 0);
+			assert_eq!(hvcc.length_size_minus_one, 3);
+			assert_eq!(hvcc.num_temporal_layers, 0);
+			assert!(!hvcc.temporal_id_nested);
+			assert!(hvcc.arrays.is_empty());
+		}
+	}
+
+	#[test]
+	fn catalog_hvcc_refuses_profiles_the_string_cannot_describe() {
+		assert!(catalog_hvcc(&hevc(2, true, 0)).is_none(), "Main 10");
+		assert!(catalog_hvcc(&hevc(1, true, 1)).is_none(), "profile space");
+		assert!(catalog_hvcc(&hevc(1, false, 0)).is_none(), "out of band");
 	}
 }

@@ -2,24 +2,26 @@
 //! resolved codec configuration record.
 //!
 //! Exporters declare what wire shape they want their frames in (currently:
-//! avc1/hvc1 length-prefixed for H.264/H.265) and call [`ExportSource::poll_read`]
+//! length-prefixed NAL units for H.264/H.265) and call [`ExportSource::poll_read`]
 //! to pull normalized frames. For Annex-B sources (catalog codec marked
 //! `inline: true` / `in_band: true`, empty `description`) the source attaches
-//! an [`Avc1`] / [`Hvc1`] transform that caches parameter sets, synthesizes
-//! the codec config record, and length-prefixes slice NALs. Frame emission
-//! is deferred until the transform has produced its config record.
+//! an [`Avc1`] / [`Hvc1`] transform that strips parameter sets into an avcC or
+//! hvcC and length-prefixes the rest; frames wait until that record exists. fMP4
+//! instead attaches an [`InBand`] transform, keeping the sets in the samples, when
+//! the catalog codec string and dimensions already determine the record.
 //!
-//! `description()` returns the resolved codec config: either the catalog's
-//! existing `description` (for already-out-of-band sources) or the synthesized
-//! avcC/hvcC (for Annex-B sources).
+//! `description()` returns the resolved codec config: the catalog description,
+//! a record derived from the codec string, or an avcC/hvcC synthesized from
+//! in-band parameter sets.
 
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
-use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
+use hang::catalog::{AudioConfig, Container, VideoCodec, VideoConfig};
 
 use super::consumer::Event;
 use crate::catalog::hang::Container as HangContainer;
+use crate::codec::annexb::{InBand, InBandCodec};
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
 use crate::container::{Consumer, Frame};
@@ -28,6 +30,8 @@ use crate::container::{Consumer, Frame};
 pub(crate) enum VideoTransform {
 	Avc1(Avc1),
 	Hvc1(Hvc1),
+	/// Parameter sets stay in the samples, under a record derived from the catalog.
+	InBand(InBand),
 }
 
 impl VideoTransform {
@@ -35,13 +39,15 @@ impl VideoTransform {
 		match self {
 			VideoTransform::Avc1(t) => t.avcc(),
 			VideoTransform::Hvc1(t) => t.hvcc(),
+			VideoTransform::InBand(_) => None,
 		}
 	}
 
-	pub(crate) fn transform(&mut self, payload: Bytes) -> crate::Result<Option<Bytes>> {
+	pub(crate) fn transform(&mut self, payload: Bytes, keyframe: bool) -> crate::Result<Option<Bytes>> {
 		match self {
 			VideoTransform::Avc1(t) => Ok(t.transform(payload)?),
 			VideoTransform::Hvc1(t) => Ok(t.transform(payload)?),
+			VideoTransform::InBand(t) => Ok(t.transform(payload, keyframe)?),
 		}
 	}
 }
@@ -78,6 +84,9 @@ pub(crate) struct ExportSource {
 	video_codec: Option<VideoCodec>,
 	/// Geometry resolved from the initial catalog or codec data received afterward.
 	video_dimensions: Option<(u32, u32)>,
+	/// The transform absorbed a keyframe that carried no picture (parameter sets sent
+	/// as their own frame), so the next frame it emits is the sync point.
+	absorbed_keyframe: bool,
 }
 
 impl ExportSource {
@@ -94,6 +103,30 @@ impl ExportSource {
 		max_delay: std::time::Duration,
 	) -> Result<Option<Self>, crate::Error> {
 		Self::video(source, name, config, max_delay, build_video_transform(config))
+	}
+
+	/// Subscribe to a video rendition for fMP4 export.
+	///
+	/// Annex-B H.264 and H.265 whose catalog codec string and dimensions determine
+	/// the sample entry keep their parameter sets in the samples and expose that
+	/// record immediately. Every other source matches [`Self::for_video`].
+	pub(crate) fn for_fmp4_video(
+		source: &crate::Source,
+		name: &str,
+		config: &VideoConfig,
+		max_delay: std::time::Duration,
+	) -> Result<Option<Self>, crate::Error> {
+		let record = annexb_catalog_record(config);
+		let transform = match (&config.codec, record.is_some()) {
+			(VideoCodec::H264(_), true) => Some(VideoTransform::InBand(InBand::new(InBandCodec::H264))),
+			(VideoCodec::H265(_), true) => Some(VideoTransform::InBand(InBand::new(InBandCodec::H265))),
+			_ => build_video_transform(config),
+		};
+		let mut source = Self::video(source, name, config, max_delay, transform)?;
+		if let (Some(source), Some(record)) = (source.as_mut(), record) {
+			source.description = Some(record);
+		}
+		Ok(source)
 	}
 
 	/// Subscribe to a video rendition without attaching any codec-shape
@@ -133,6 +166,7 @@ impl ExportSource {
 			description,
 			video_codec: Some(config.codec.clone()),
 			video_dimensions: catalog_dimensions(config),
+			absorbed_keyframe: false,
 		};
 		source.resolve_video_dimensions(&[])?;
 		Ok(Some(source))
@@ -163,6 +197,7 @@ impl ExportSource {
 			description,
 			video_codec: None,
 			video_dimensions: None,
+			absorbed_keyframe: false,
 		}))
 	}
 
@@ -186,6 +221,7 @@ impl ExportSource {
 			description: None,
 			video_codec: None,
 			video_dimensions: None,
+			absorbed_keyframe: false,
 		})
 	}
 
@@ -209,6 +245,24 @@ impl ExportSource {
 	/// The resolved codec-config record, if available.
 	pub fn description(&self) -> Option<&Bytes> {
 		self.description.as_ref()
+	}
+
+	/// Refresh a catalog-derived record after the catalog entry changes.
+	///
+	/// Returns false when this source was described from the catalog and the new
+	/// entry no longer carries everything that record needs. The previous record
+	/// is left in place so the caller can fail the export against it.
+	pub(crate) fn note_catalog(&mut self, config: &VideoConfig) -> bool {
+		if !matches!(self.transform, Some(VideoTransform::InBand(_))) {
+			return true;
+		}
+		match annexb_catalog_record(config) {
+			Some(record) => {
+				self.description = Some(record);
+				true
+			}
+			None => false,
+		}
 	}
 
 	/// How many times the publisher declared its timeline restarted, or 0 until the
@@ -325,11 +379,14 @@ impl ExportSource {
 				return Poll::Ready(Ok(Some(Event::Frame(frame))));
 			};
 
-			match transform.transform(frame.payload.clone())? {
+			// Spent on the next emitted frame even when that frame is a keyframe itself.
+			let keyframe = std::mem::take(&mut self.absorbed_keyframe) | frame.keyframe;
+			match transform.transform(frame.payload.clone(), keyframe)? {
 				None => {
 					// Parameter set absorbed by the transform. Refresh the
 					// resolved description (it may have just become available)
 					// and pull the next frame.
+					self.absorbed_keyframe = keyframe;
 					self.refresh_description();
 					self.resolve_video_dimensions(&frame.payload)?;
 					continue;
@@ -337,7 +394,11 @@ impl ExportSource {
 				Some(payload) => {
 					self.refresh_description();
 					self.resolve_video_dimensions(&payload)?;
-					return Poll::Ready(Ok(Some(Event::Frame(Frame { payload, ..frame }))));
+					return Poll::Ready(Ok(Some(Event::Frame(Frame {
+						payload,
+						keyframe,
+						..frame
+					}))));
 				}
 			}
 		}
@@ -399,6 +460,31 @@ pub(crate) fn codec_dimensions(
 	};
 
 	Ok(dimensions.filter(|(width, height)| *width > 0 && *height > 0))
+}
+
+/// An avcC or hvcC derived from the catalog codec string, when that string and
+/// the catalog dimensions are everything the fMP4 sample entry needs.
+///
+/// CMAF keeps the init segment it was declared with. A catalog that already
+/// carries a description, or that omits dimensions, stays on the path that
+/// waits for parameter sets in the bitstream.
+fn annexb_catalog_record(config: &VideoConfig) -> Option<Bytes> {
+	if !matches!(config.container, Container::Legacy | Container::Loc) {
+		return None;
+	}
+	if config
+		.description
+		.as_ref()
+		.is_some_and(|description| !description.is_empty())
+	{
+		return None;
+	}
+	catalog_dimensions(config)?;
+	match &config.codec {
+		VideoCodec::H264(h264) => crate::codec::h264::catalog_avcc(h264),
+		VideoCodec::H265(h265) => crate::codec::h265::catalog_hvcc(h265),
+		_ => None,
+	}
 }
 
 /// Build a video transform for an Annex-B source, or `None` if the catalog

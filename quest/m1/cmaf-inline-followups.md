@@ -20,7 +20,3 @@ From #5037:
 - Check moq-gst's `video_caps`: in-band H.265 with no description is labeled
   `stream-format=hev1` (length-prefixed), while a Legacy hev1 track is
   Annex-B (`byte-stream`). Fix the label if it is wrong.
-
-## Required
-
-- [fMP4 init from the catalog](/quest/m1/fmp4-catalog-init.md) - #5015 writes `avc3`/`hev1` entries from the catalog

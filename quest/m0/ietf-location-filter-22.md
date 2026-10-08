@@ -62,3 +62,6 @@ Public API: none. Wire: moqt-22 LOCATION_FILTER changes to the draft's form.
 
 - [#4847](https://github.com/moq-dev/moq/issues/4847) - draft-22 LOCATION_FILTER should drop the Length and carry the Location Filter Type
 
+## Related
+
+- [LOCATION_FILTER backport](/quest/m0/release-22/location-filter.md) - cherry-picks this fix onto `release` for a 0.17.x before Seattle

@@ -38,5 +38,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - #4826, the same `decode` functions; no forced order (decided 2026-10-08), whichever lands second rebases
-- [fMP4 init from the catalog](/quest/m1/fmp4-catalog-init.md) - #5015, the same fMP4 module; whichever lands second rebases
 - [Export sync flags](/quest/m2/intra-refresh/export-sync-flags.md) - the export side of the same flags

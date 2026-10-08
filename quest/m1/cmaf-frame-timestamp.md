@@ -54,4 +54,3 @@ the frame timestamp already means.
 
 - [Shared clock](/quest/m1/shared-clock.md) - the first publisher to rely on it
 - [CMAF sample defaults](/quest/m1/cmaf-sample-defaults.md) - the same `decode` functions; whichever lands second rebases
-- [fMP4 init from the catalog](/quest/m1/fmp4-catalog-init.md) - #5015, the same fMP4 module
