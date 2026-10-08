@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Time, Track } from "@moq/net";
+import { Group, Error as NetError, Time, Track } from "@moq/net";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
 type Rec = { n: number };
@@ -158,6 +158,40 @@ test("each record keeps its capture timestamp", async () => {
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(1_000);
-	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(2_000);
+	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_000);
+	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(2_000);
 });
+
+// A record past the group budget is refused before anything is written, so the log carries on: the
+// next record lands and decodes, which with compression proves the window never moved.
+for (const compression of [false, true]) {
+	test(`an oversized record is refused and the log continues (compression=${compression})`, async () => {
+		const track = new Track.Producer("test");
+		const producer = new Producer<Rec | string>({ track, compression: compression ? "deflate" : "none" });
+		producer.append({ n: 0 });
+
+		expect(() => producer.append("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow(NetError.GroupTooLarge);
+
+		producer.append({ n: 1 });
+		producer.finish();
+		expect(await drain(track.subscribe(), compression)).toEqual([0, 1]);
+	});
+}
+
+// The budget covers the whole log, so once its frames are spent every append is refused, and the log
+// written so far still finishes cleanly and reads back whole.
+for (const compression of [false, true]) {
+	test(`a spent budget refuses every append (compression=${compression})`, async () => {
+		const track = new Track.Producer("test");
+		const producer = new Producer<Rec>({ track, compression: compression ? "deflate" : "none" });
+		for (let n = 0; n < Group.MAX_GROUP_FRAMES; n++) producer.append({ n });
+
+		expect(() => producer.append({ n: -1 })).toThrow(NetError.GroupTooLarge);
+		expect(() => producer.append({ n: -2 })).toThrow(NetError.GroupTooLarge);
+		producer.finish();
+
+		const records = await drain(track.subscribe(), compression);
+		expect(records.length).toBe(Group.MAX_GROUP_FRAMES);
+		expect(records.at(-1)).toBe(Group.MAX_GROUP_FRAMES - 1);
+	});
+}

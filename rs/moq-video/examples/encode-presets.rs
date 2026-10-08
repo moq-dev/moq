@@ -4,15 +4,19 @@
 //! p50 / p95 / max frame-to-packet latency at real-time pacing, back-to-back
 //! throughput and CPU time per frame, the most frames the codec held at once,
 //! the frames it skipped, and the achieved bitrate. Each preset's stream is
-//! written next to the input, with the indices of any skipped frames beside it,
-//! so quality can be scored against the source with ffmpeg:
+//! written next to the input, beside a `.yuv` reference holding the source
+//! frames that stream carries, so quality is scored frame for frame even when
+//! the encoder skipped some:
 //!
 //! ```sh
 //! ffmpeg -f lavfi -i "mandelbrot=size=1280x720:rate=30" -t 10 -pix_fmt yuv420p src.yuv
 //! cargo run --release -p moq-video --example encode-presets -- src.yuv 1280x720 30 3000000 nvenc h264
-//! ffmpeg -i src.yuv.nvenc-h264-balanced.h264 -s 1280x720 -f rawvideo -pix_fmt yuv420p -i src.yuv \
-//!     -lavfi "[0:v][1:v]psnr;[0:v][1:v]ssim" -f null -
+//! ffmpeg -i src.yuv.nvenc-h264-balanced.h264 -s 1280x720 -f rawvideo -pix_fmt yuv420p \
+//!     -i src.yuv.nvenc-h264-balanced.h264.yuv -lavfi "[0:v][1:v]psnr;[0:v][1:v]ssim" -f null -
 //! ```
+//!
+//! Each reference is a full copy of the source, so a run takes about three
+//! times the input's size on disk.
 //!
 //! Hardware on another machine needs its own run; nothing here extrapolates.
 
@@ -36,6 +40,14 @@ fn main() -> anyhow::Result<()> {
 	let [input, size, fps, bitrate, backend, codec] = args else {
 		anyhow::bail!("usage: encode-presets <input.yuv> <WxH> <fps> <bitrate bps> <backend> <h264|h265> [preset]");
 	};
+	if let Some(only) = only {
+		let labels: Vec<&str> = PRESETS.iter().map(|(_, label)| *label).collect();
+		anyhow::ensure!(
+			labels.contains(&only),
+			"unknown preset {only}; expected one of {}",
+			labels.join(", ")
+		);
+	}
 	let (width, height) = size.split_once('x').ok_or_else(|| anyhow::anyhow!("size is WxH"))?;
 	let size = Size::new(width.parse()?, height.parse()?);
 	let fps: u32 = fps.parse()?;
@@ -71,9 +83,14 @@ fn main() -> anyhow::Result<()> {
 		};
 		let output = format!("{input}.{backend}-{extension}-{label}.{extension}");
 		std::fs::write(&output, &paced.stream)?;
-		// The frames the stream lacks, so a quality comparison can drop them from the source.
-		let skipped: Vec<String> = paced.skipped.iter().map(ToString::to_string).collect();
-		std::fs::write(format!("{output}.skipped"), skipped.join(" "))?;
+		// The source minus the frames the stream lacks, so each decoded frame meets its own source.
+		let reference: Vec<u8> = pictures
+			.iter()
+			.enumerate()
+			.filter(|(index, _)| !paced.skipped.contains(index))
+			.flat_map(|(_, picture)| picture.iter().copied())
+			.collect();
+		std::fs::write(format!("{output}.yuv"), reference)?;
 
 		let mut latency = paced.latency.clone();
 		latency.sort();

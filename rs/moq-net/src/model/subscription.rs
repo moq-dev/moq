@@ -50,19 +50,19 @@ pub struct Subscription {
 	/// stalled group is bounded by its stamped successor the same way. Wall-clock
 	/// reclamation of idle content is the cache's own policy, not this budget's.
 	///
-	/// Protocols whose wire can't carry a timestamp (pre-Lite05 moq-lite, moq-transport
-	/// without the Timestamp property) have their frames stamped on receipt, which makes
-	/// the measure burst-blind on the receiving side: thirty seconds of backlog delivered
-	/// in three reads as three. The publisher's copy is stamped as it produces, so the
-	/// gate there still holds; it is just the coarser of the two.
+	/// An untimed track (pre-Lite05 moq-lite, or moq-transport without TIMESCALE) has no
+	/// media time, so none of its groups is ever stale, and a new subscriber with no
+	/// [`Self::start`] begins at its latest group instead of replaying the cache.
 	pub max_delay: Duration,
 	/// The lowest [`Position`] the publisher may deliver, or `None` for no floor.
 	///
 	/// A floor, not a request: only [`Self::max_delay`] asks for data, and the floor bounds
-	/// how far back it may reach. `None` and a floor of group 0 mean the same thing, since
-	/// nothing sits below group 0. Delivery starts at the oldest group at or above the
-	/// floor that the budget still considers fresh, so a floor above the live edge simply
-	/// waits there (a resumed subscription naming where it left off).
+	/// how far back it may reach. `None` and a floor of group 0 mean the same thing on a
+	/// timed track, since nothing sits below group 0. On an untimed track, which no budget
+	/// can measure, `None` starts at the latest group and a floor is honored as given.
+	/// Delivery starts at the oldest group at or above the floor that the budget still
+	/// considers fresh, so a floor above the live edge simply waits there (a resumed
+	/// subscription naming where it left off).
 	///
 	/// Aggregated across every live subscriber (the loosest floor wins, and any subscriber
 	/// without one clears it), so it says what the publisher sends, not what any one
