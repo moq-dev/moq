@@ -1256,6 +1256,109 @@ mod tests {
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
 	}
 
+	/// The bytes of one legacy SUBSCRIBE_NAMESPACE, as the session writes them.
+	async fn subscribe_namespace_legacy(version: Version, namespace: &str) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		let msg = ietf::SubscribeNamespaceLegacy {
+			request_id: RequestId(0),
+			namespace: crate::Path::new(namespace),
+			subscribe_options: ietf::SubscribeOptions::Namespace,
+			hidden: false,
+		};
+		writer.varint(ietf::SubscribeNamespaceLegacy::ID).await.unwrap();
+		writer.encode(&msg).await.unwrap();
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// How many times a session with this scope writes SUBSCRIBE_NAMESPACE for it.
+	///
+	/// `prefix: None` is an unscoped origin, whose only interest head is empty. `solicit`
+	/// is what the peer's SETUP declared (MoQ Solicit).
+	async fn asked_namespace(version: Version, prefix: Option<&str>, solicit: Option<bool>) -> usize {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let subscribe = match prefix {
+			Some(name) => {
+				let scope: crate::Patterns = [crate::Pattern::subtree(name).unwrap()].into_iter().collect();
+				origin.scope("rootns", &scope).expect("scope the origin")
+			}
+			None => origin,
+		};
+
+		let gate = kio::Producer::new(true);
+		let mut session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+		let setup = Stream::open(&mut session, version)
+			.await
+			.expect("open the control stream");
+
+		let (driver, _goaway, _) = start(Config {
+			runtime: crate::time::Clock::sim(),
+			session,
+			setup: Some(setup),
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish: None,
+			subscribe: Some(subscribe),
+			peer_hop: None,
+			cost: None,
+			version,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer {
+				solicit,
+				..Default::default()
+			}),
+			early_unis: Vec::new(),
+		})
+		.expect("start the session");
+		let driver = moq_net_sim::spawn(driver);
+
+		let needle = subscribe_namespace_legacy(version, prefix.unwrap_or("")).await;
+		for _ in 0..ANNOUNCE_TURNS {
+			if occurrences(&log, &needle) > 0 {
+				break;
+			}
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
+
+		assert!(!driver.is_finished(), "{version:?} ended the session");
+		assert!(log.closes().is_empty(), "{version:?} closed: {:?}", log.closes());
+		occurrences(&log, &needle)
+	}
+
+	/// Draft-14 and draft-15 reject a zero-field track namespace, so a foreign peer (one
+	/// that declared no MoQ Solicit) is not asked for it, and a real prefix still goes
+	/// out. A peer that declared Solicit is ours: it only tells when asked, so it still
+	/// gets the empty prefix. Draft-16 made the empty prefix legal, so it stays.
+	#[moq_net_sim::test]
+	async fn an_empty_namespace_is_not_asked_of_a_foreign_peer_before_draft_16() {
+		for version in [Version::Draft14, Version::Draft15] {
+			assert_eq!(
+				asked_namespace(version, None, None).await,
+				0,
+				"{version:?} asked a foreign peer for every namespace"
+			);
+			assert_eq!(
+				asked_namespace(version, Some("cam"), None).await,
+				1,
+				"{version:?} skipped a real prefix"
+			);
+			assert_eq!(
+				asked_namespace(version, None, Some(true)).await,
+				1,
+				"{version:?} did not ask a soliciting peer for every namespace"
+			);
+		}
+		assert_eq!(
+			asked_namespace(Version::Draft16, None, None).await,
+			1,
+			"draft-16 dropped the empty prefix"
+		);
+	}
+
 	/// How many scheduling turns an advertisement gets before the count is taken. Time is
 	/// paused in these tests, so each turn costs nothing and only runs the driver until it
 	/// parks again; a busy machine cannot turn a slow announce into a passing silence.

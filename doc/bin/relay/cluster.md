@@ -16,6 +16,11 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
 on moq-transport 17+.
 
+moq-transport drafts 14 and 15 cannot ask for every broadcast (an empty
+namespace prefix is illegal before draft 16), so a link to a peer without the
+MoQ Solicit extension, such as moxygen, learns only what that peer announces
+unasked. moxygen announces nothing unasked on draft 14.
+
 When a moq-lite-04 or later peer withdraws a broadcast, the routes relayed
 through it go with it at once. A change of best route is announced after
 300 ms, so stale paths are retracted once instead of advertised in turn;
