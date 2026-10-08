@@ -25,16 +25,9 @@ benchmark swept over requesters and route-table churn would show whether the
 re-mint is a real slope or noise, and it is the same benchmark that would
 show the replacement is cheaper.
 
-Also reclaim the filtered front a peer session leaves behind (folded in
-2026-10-05). #4922 keyed fronts by `Horizon::effective`, so viewers share the
-plain front, but a hop that appears in a covering route chain still gets its
-own filtered front, and that front lives as long as the route. A peer that
-both publishes and subscribes, or reconnects with a fresh hop, leaves one
-behind per peer session. #4922 scoped it out because it scales with peer
-sessions, not viewers. Test that the front count returns to the plain front
-after the peer session closes. If this quest moves to m2, split this leftover
-into its own m1 quest: it is a leak, not a question of whether the retry loop
-costs anything.
+The filtered front a peer session leaves behind, folded in here on
+2026-10-05, moved to [Idle fronts](/quest/m0/idle-fronts.md) on 2026-10-07:
+it ends once unread like any other front.
 
 Public API: no signature change expected. `routed_broadcast` and
 `request_broadcast` keep their contracts; only where the waiting happens

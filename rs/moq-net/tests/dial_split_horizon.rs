@@ -175,7 +175,7 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	// session it arrived on.
 	let viewed = subscriber
 		.consume()
-		.request_broadcast("room")
+		.request_broadcast("room", None)
 		.await
 		.expect("subscriber resolves the namespace");
 	let subscription = moq_net::track::Subscription::default();
