@@ -8,7 +8,7 @@ Filter Type and no Length, in `moq-net` and `@moq/net`, matching the fix on
 
 ## Plan
 
-Cherry-pick the main PR as its own PR onto `release`. `release` lacks #5028's
+Cherry-pick the main PR (#5080) as its own PR onto `release`. `release` lacks #5028's
 per-draft 0x21 rework in `js/net/src/ietf/parameters.ts`, `fetch.rs`, and
 `subscribe.rs`, so expect to adapt rather than apply cleanly. Keep the main
 PR's byte-vector tests for every type.
