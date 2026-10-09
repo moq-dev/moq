@@ -741,6 +741,7 @@ fn spawn_export(
 			format: stdout.format,
 			max_delay: stdout.max_delay,
 			linger: stdout.linger,
+			stitch: stdout.stitch,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			catalog: export.catalog_format,
@@ -815,8 +816,7 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
-	let source = moq_mux::Source::new(consumer, &name);
-	Subscribe::new(source, catalog, args).run().await
+	Subscribe::new(consumer, &name, catalog, args).run().await
 }
 
 /// Run every endpoint until the first finishes (stdin EOF, SIGINT, SIGTERM, or an

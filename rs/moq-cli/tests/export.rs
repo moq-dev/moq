@@ -1,5 +1,6 @@
-//! `moq export ts --linger` over a real relay: the export rides out a publisher that
-//! leaves and comes back, and exits with the verdict of the broadcast's last end.
+//! `moq export ts --linger` and `--stitch` over a real relay: the export rides out the same
+//! publisher instance leaving and coming back, switches to a replacement only when asked, and
+//! exits with the verdict of the broadcast's last end.
 #![cfg(unix)]
 
 use std::process::Stdio;
@@ -20,20 +21,30 @@ type Output = Arc<Mutex<Vec<u8>>>;
 
 struct Relay {
 	url: String,
-	fingerprint: String,
 }
 
+/// A public relay on ephemeral loopback ports that also accepts lite-07, the version that
+/// carries epochs, for a client that opts in with `--connect-version`. Its generated
+/// certificate is trusted blindly, since nothing but loopback reaches it.
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
-	let fixture = moq_relay::test_relay().await.expect("test relay");
-	let ready = fixture.relay.ready();
-	tokio::spawn(fixture.relay.run());
+	let mut config = moq_relay::Config::default();
+	config.drain_timeout = Duration::ZERO;
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.listen.tls.generate = vec!["localhost".into()];
+	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
+		.chain(hang::moq_net::Versions::all().iter().copied())
+		.collect();
+	config.auth.public = vec![moq_auth::Pattern::all()];
+	let relay = moq_relay::Relay::load(config).await.expect("test relay");
+	let url = format!("https://{}/", relay.quic_addr().expect("QUIC address"));
+	let ready = relay.ready();
+	tokio::spawn(relay.run());
 	ready.wait().await.expect("relay ready");
-	Relay {
-		url: fixture.url.to_string(),
-		fingerprint: fixture.fingerprint,
-	}
+	Relay { url }
 }
+
+const LITE_07: &str = "moq-lite-07-wip";
 
 fn moq(relay: &Relay, args: &[&str]) -> tokio::process::Command {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
@@ -47,8 +58,7 @@ fn moq(relay: &Relay, args: &[&str]) -> tokio::process::Command {
 		.args([
 			"--connect",
 			&relay.url,
-			"--connect-tls-fingerprint",
-			&relay.fingerprint,
+			"--connect-tls-insecure",
 			"--broadcast",
 			"demo",
 		])
@@ -59,28 +69,49 @@ fn moq(relay: &Relay, args: &[&str]) -> tokio::process::Command {
 
 /// Start `moq export ts --linger <linger>`, collecting its stdout.
 fn export(relay: &Relay, linger: &str) -> (Child, Output) {
-	let mut child = moq(relay, &["export", "ts", "--linger", linger])
+	let (child, output, _) = export_with(relay, &[], &["--linger", linger]);
+	(child, output)
+}
+
+/// Start `moq <global> export ts <flags>`, collecting its stdout and stderr.
+fn export_with(relay: &Relay, global: &[&str], flags: &[&str]) -> (Child, Output, Output) {
+	let mut child = moq(relay, global)
+		.args(["export", "ts"])
+		.args(flags)
 		.stdout(Stdio::piped())
+		.stderr(Stdio::piped())
 		.spawn()
 		.expect("spawn export");
-	let mut stdout = child.stdout.take().expect("stdout");
+	let output = collect(child.stdout.take().expect("stdout"));
+	let errors = collect(child.stderr.take().expect("stderr"));
+	(child, output, errors)
+}
+
+/// Collect everything `pipe` yields.
+fn collect(mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static) -> Output {
 	let output = Output::default();
 	let sink = output.clone();
 	tokio::spawn(async move {
 		let mut buf = vec![0; 64 * 1024];
-		while let Ok(n) = stdout.read(&mut buf).await
+		while let Ok(n) = pipe.read(&mut buf).await
 			&& n > 0
 		{
 			sink.lock().unwrap().extend_from_slice(&buf[..n]);
 		}
 	});
-	(child, output)
+	output
 }
 
 /// Start `moq import ts` and feed it the clip at about real time, handing stdin back
 /// once it is all written. Closing stdin then finishes the broadcast.
 fn import(relay: &Relay) -> (Child, JoinHandle<ChildStdin>) {
-	let mut child = moq(relay, &["import", "ts"])
+	import_with(relay, &[])
+}
+
+/// [`import`] with `global` flags, such as the session version or the epoch.
+fn import_with(relay: &Relay, global: &[&str]) -> (Child, JoinHandle<ChildStdin>) {
+	let mut child = moq(relay, global)
+		.args(["import", "ts"])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");
@@ -207,18 +238,69 @@ async fn an_export_failure_with_the_broadcast_up_exits_without_lingering() {
 	wait(&mut publisher).await;
 }
 
-#[tokio::test]
-async fn a_publisher_restarted_within_the_linger_resumes_the_output() {
-	let relay = relay().await;
-	let (mut export, output) = export(&relay, "10s");
+/// The `version_number` of a packet starting a PAT section.
+fn pat_version(packet: &[u8]) -> Option<u8> {
+	if pid(packet) != 0 || packet[1] & 0x40 == 0 {
+		return None;
+	}
+	let start = 4 + adaptation_flags(packet).map_or(0, |_| 1 + usize::from(packet[4]));
+	let section = start + 1 + usize::from(packet[start]);
+	Some((packet[section + 5] >> 1) & 0x1f)
+}
 
-	let (publisher, feeding) = import(&relay);
+/// Each PID whose first packet in `ts` does not flag a discontinuity.
+fn unflagged(ts: &[u8]) -> Vec<u16> {
+	let mut seen = std::collections::HashSet::new();
+	packets(ts)
+		.filter(|packet| pid(*packet) != 0x1fff && seen.insert(pid(*packet)))
+		.filter(|packet| adaptation_flags(*packet).is_none_or(|flags| flags & 0x80 == 0))
+		.map(|packet| pid(packet))
+		.collect()
+}
+
+/// Run `publisher` until it was interrupted, then mark the end of its output once the paced
+/// tail has drained.
+async fn interrupted(output: &Output, publisher: (Child, JoinHandle<ChildStdin>)) -> usize {
+	let (publisher, feeding) = publisher;
 	let stdin = feeding.await.unwrap();
-	output_past(&output, 0).await;
+	output_past(output, 0).await;
 	interrupt(publisher, stdin).await;
-	// Let the paced tail of the first broadcast drain before marking where it ended.
 	tokio::time::sleep(Duration::from_secs(1)).await;
-	let mark = output.lock().unwrap().len().next_multiple_of(188);
+	output.lock().unwrap().len().next_multiple_of(188)
+}
+
+/// A restarted publisher is another instance, so the export does not splice it in: it exits 1
+/// as soon as the replacement shows up, naming the flag that would follow it.
+#[tokio::test]
+async fn a_restarted_publisher_exits_one_without_stitch() {
+	let relay = relay().await;
+	let (mut export, output, errors) = export_with(&relay, &[], &["--linger", "20s"]);
+	let mark = interrupted(&output, import(&relay)).await;
+
+	let (mut publisher, feeding) = import(&relay);
+	let started = Instant::now();
+	let status = wait(&mut export).await;
+	assert_eq!(status.code(), Some(1), "a replacement exits 1, got {status}");
+	assert!(
+		started.elapsed() < Duration::from_secs(10),
+		"exited after {:?}, as though waiting out the linger",
+		started.elapsed()
+	);
+	let errors = String::from_utf8_lossy(&errors.lock().unwrap()).into_owned();
+	assert!(errors.contains("--stitch"), "the error names --stitch: {errors}");
+	assert_eq!(output.lock().unwrap().len(), mark, "nothing of the replacement went out");
+
+	drop(feeding.await.unwrap());
+	wait(&mut publisher).await;
+}
+
+/// With `--stitch`, a restarted publisher is a full program switch: a new PAT version, and
+/// every PID's first packet flagging the break.
+#[tokio::test]
+async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
+	let relay = relay().await;
+	let (mut export, output, _) = export_with(&relay, &[], &["--linger", "10s", "--stitch"]);
+	let mark = interrupted(&output, import(&relay)).await;
 
 	let (mut publisher, feeding) = import(&relay);
 	let stdin = feeding.await.unwrap();
@@ -230,13 +312,83 @@ async fn a_publisher_restarted_within_the_linger_resumes_the_output() {
 	assert!(status.success(), "the last end was a clean finish, got {status}");
 
 	let output = output.lock().unwrap();
-	let after = &output[mark..];
+	let (before, after) = output.split_at(mark);
 	let total = packets(after).count();
-	assert!(total > 100, "the returned broadcast went out: {total} packets");
-	assert!(packets(after).any(|p| pid(p) == 0), "PAT re-emitted after the restart");
-	// The PCR the returned broadcast opens with flags the break.
-	let first_pcr = packets(after)
-		.find_map(|p| adaptation_flags(p).filter(|flags| flags & 0x10 != 0))
-		.expect("a PCR after the restart");
-	assert_ne!(first_pcr & 0x80, 0, "the restart is flagged as a break");
+	assert!(total > 100, "the replacement went out: {total} packets");
+	assert!(packets(before).filter_map(|p| pat_version(p)).all(|version| version == 0));
+	let versions: Vec<u8> = packets(after).filter_map(|p| pat_version(p)).collect();
+	assert!(
+		!versions.is_empty() && versions.iter().all(|&version| version == 1),
+		"the switch advances the PAT version: {versions:?}"
+	);
+	assert_eq!(unflagged(after), Vec::<u16>::new(), "every PID flags the break");
+}
+
+/// The same instance (a shared `--epoch` on a version that carries it) back within the linger
+/// continues the stream, under the program already announced.
+#[tokio::test]
+async fn the_same_instance_within_the_linger_continues() {
+	let relay = relay().await;
+	let epoch = hang::moq_net::Epoch::mint().to_string();
+	let lite07 = ["--connect-version", LITE_07];
+	let publish = [lite07[0], lite07[1], "--epoch", epoch.as_str()];
+	let (mut export, output, _) = export_with(&relay, &lite07, &["--linger", "10s"]);
+	let mark = interrupted(&output, import_with(&relay, &publish)).await;
+
+	let (mut publisher, feeding) = import_with(&relay, &publish);
+	let stdin = feeding.await.unwrap();
+	output_past(&output, mark).await;
+	drop(stdin);
+	assert!(wait(&mut publisher).await.success());
+
+	let status = wait(&mut export).await;
+	assert!(status.success(), "the last end was a clean finish, got {status}");
+
+	let output = output.lock().unwrap();
+	let after = &output[mark..];
+	assert!(packets(after).count() > 100, "the returned broadcast went out");
+	let versions: Vec<u8> = packets(&output).filter_map(|p| pat_version(p)).collect();
+	assert!(
+		versions.iter().all(|&version| version == 0),
+		"the same instance keeps the PSI version: {versions:?}"
+	);
+}
+
+/// Subscriptions are sticky: a replacement announced while the old publisher stays up leaves
+/// the export on the old one until it ends, and only then exits 1.
+#[tokio::test]
+async fn an_old_publisher_that_stays_up_keeps_the_export() {
+	let relay = relay().await;
+	let lite07 = ["--connect-version", LITE_07];
+	let (mut export, output, errors) = export_with(&relay, &lite07, &["--linger", "10s"]);
+
+	let (mut old, feeding) = import_with(&relay, &lite07);
+	output_past(&output, 0).await;
+	let (mut new, replacing) = import_with(&relay, &lite07);
+	let old_stdin = feeding.await.unwrap();
+	let new_stdin = replacing.await.unwrap();
+	tokio::time::sleep(Duration::from_secs(1)).await;
+	assert!(
+		export.try_wait().unwrap().is_none(),
+		"the export stays on the old publisher while it is up"
+	);
+	let written = output.lock().unwrap().len();
+	assert!(packets(&output.lock().unwrap()).filter_map(|p| pat_version(p)).all(|v| v == 0));
+
+	drop(old_stdin);
+	assert!(wait(&mut old).await.success());
+	let status = wait(&mut export).await;
+	assert_eq!(status.code(), Some(1), "the replacement exits 1 once the old one ends, got {status}");
+	let errors = String::from_utf8_lossy(&errors.lock().unwrap()).into_owned();
+	assert!(errors.contains("--stitch"), "the error names --stitch: {errors}");
+	let output = output.lock().unwrap();
+	assert!(
+		packets(&output[written.next_multiple_of(188).min(output.len())..])
+			.filter_map(|p| pat_version(p))
+			.all(|version| version == 0),
+		"nothing of the replacement went out"
+	);
+
+	drop(new_stdin);
+	wait(&mut new).await;
 }
