@@ -9722,7 +9722,6 @@ mod tests {
 			hidden: false,
 			auth: false,
 			active_count: false,
-			max_request_updates: None,
 		});
 		slot
 	}

@@ -2510,7 +2510,9 @@ where
 		// is outstanding. Draft-14 answers no accepted renewal, so it cannot pace on answers
 		// and re-presents each change directly; it also advertises no credit to exceed.
 		let throttle = !matches!(self.version, Version::Draft14);
-		let mut in_flight: Option<crate::setup::Token> = None;
+		// The token awaiting an answer, and on drafts 15 and 16 the routing that brings the
+		// answer back here.
+		let mut in_flight: Option<(crate::setup::Token, Option<super::control::FollowUp>)> = None;
 		// Bumped by `read_publish_done` on each renewal answer; the loop releases the
 		// coalesced replacement when it advances past `seen_answers`.
 		let answers = kio::Shared::new(0u64);
@@ -2588,13 +2590,13 @@ where
 								)
 								.await
 							{
-								Ok(()) if throttle => {
-									in_flight = Some(token);
+								Ok(follow_up) if throttle => {
+									in_flight = Some((token, follow_up));
 									// Only an answer that arrives after this send releases the
 									// coalesced follow-up, so a stray earlier answer cannot.
 									seen_answers = *answers.lock();
 								}
-								Ok(()) => {}
+								Ok(_) => {}
 								// A failed send does not end the subscription: it continues on the old
 								// grant until that lapses, and the next change re-presents the token.
 								Err(err) => tracing::debug!(%err, "failed to re-present the request token"),
@@ -2605,7 +2607,7 @@ where
 						// The outstanding renewal was answered. If the credential changed while it
 						// was in flight, present the newest now (a cleared token sends nothing);
 						// otherwise the publisher already holds the latest.
-						let was = in_flight.take();
+						let was = in_flight.take().map(|(token, _)| token);
 						if last_token != was
 							&& let Some(token) = last_token.clone()
 						{
@@ -2619,7 +2621,7 @@ where
 								)
 								.await
 							{
-								Ok(()) => in_flight = Some(token),
+								Ok(follow_up) => in_flight = Some((token, follow_up)),
 								Err(err) => tracing::debug!(%err, "failed to re-present the request token"),
 							}
 						}
@@ -2878,7 +2880,8 @@ where
 	/// as they are. Draft-14's fields are fixed, so it restates the subscription's own:
 	/// `start` is where it began (the Largest Object after SUBSCRIBE_OK), which the peer
 	/// must not see decrease. The answer, if the version sends one, is read on the
-	/// subscription stream by [`read_publish_done`](Self::read_publish_done).
+	/// subscription stream by [`read_publish_done`](Self::read_publish_done); on drafts 15
+	/// and 16 the returned guard routes it there until dropped.
 	async fn send_request_token_update(
 		&self,
 		writer: &mut crate::coding::Writer<S::SendStream, Version>,
@@ -2886,8 +2889,12 @@ where
 		subscriber_priority: u8,
 		start: ietf::Location,
 		token: crate::setup::Token,
-	) -> Result<(), Error> {
+	) -> Result<Option<super::control::FollowUp>, Error> {
 		let request_id = self.control.next_request_id(&self.runtime).await?;
+		// Drafts 15 and 16 answer naming the update itself; draft 14 answers no accepted
+		// update, and later drafts answer on the subscription's own stream.
+		let follow_up = matches!(self.version, Version::Draft15 | Version::Draft16)
+			.then(|| self.control.follow_up(request_id, subscription_id));
 		// Draft-14/15/16 name the subscription being updated; draft-17+ identifies it by stream.
 		let subscription_request_id = match self.version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(subscription_id),
@@ -2905,7 +2912,8 @@ where
 				filter: None,
 				authorization_token: Some(crate::ietf::token::RequestToken(token)),
 			})
-			.await
+			.await?;
+		Ok(follow_up)
 	}
 
 	/// Tell the publisher to stop serving a subscription we are walking away from.

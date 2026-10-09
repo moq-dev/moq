@@ -149,21 +149,6 @@ pub fn into_setup(params: &mut super::Parameters, version: Version) {
 	}
 }
 
-/// The MAX_REQUEST_UPDATES the peer advertised, if it set a limit. `None` on a draft
-/// without the option, on a peer that sent none, and on an explicit `0`: draft-19 section
-/// 10.3.1.7 reads both absent and `0` as no limit. Recorded for a future sender that paces
-/// to the peer's credit; today the sender keeps one renewal in flight per request, which
-/// honors any limit without reading it.
-pub fn from_setup(params: &super::Parameters, version: Version) -> Option<u64> {
-	match supported(version) {
-		// Draft-19 section 10.3.1.7: an absent option and a `0` value both mean no limit.
-		true => params
-			.get_varint(super::ParameterVarInt::MaxRequestUpdates)
-			.filter(|&n| n != 0),
-		false => None,
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -197,43 +182,5 @@ mod tests {
 				"{version} has no MAX_REQUEST_UPDATES option to advertise"
 			);
 		}
-	}
-
-	/// What we advertise is what a peer reading our SETUP records, on the drafts that carry
-	/// the option; an older draft or an absent option records no limit.
-	#[test]
-	fn records_the_advertised_limit() {
-		let mut params = super::super::Parameters::default();
-		into_setup(&mut params, Version::Draft19);
-		assert_eq!(
-			from_setup(&params, Version::Draft19),
-			Some(MAX_REQUEST_UPDATES),
-			"a draft-19 peer must record the advertised credit"
-		);
-
-		// A draft-19 SETUP carrying no option reads as no limit, not as a default.
-		assert_eq!(
-			from_setup(&super::super::Parameters::default(), Version::Draft19),
-			None,
-			"an absent option is no limit"
-		);
-
-		// An explicit 0 is also no limit (draft-19 section 10.3.1.7), not a zero credit.
-		let mut zero = super::super::Parameters::default();
-		zero.set_varint(super::super::ParameterVarInt::MaxRequestUpdates, 0);
-		assert_eq!(
-			from_setup(&zero, Version::Draft19),
-			None,
-			"0 means no limit, not zero credit"
-		);
-
-		// The option does not exist below draft-19, so even a stray value is ignored.
-		let mut legacy = super::super::Parameters::default();
-		legacy.set_varint(super::super::ParameterVarInt::MaxRequestUpdates, MAX_REQUEST_UPDATES);
-		assert_eq!(
-			from_setup(&legacy, Version::Draft18),
-			None,
-			"draft-18 defines no MAX_REQUEST_UPDATES option to read"
-		);
 	}
 }

@@ -27,6 +27,8 @@ const AUTH_STREAM: u8 = 0x7;
 /// The first draft that negotiates MoQ Auth, and the newest.
 const MOQT_17: &str = "moq-transport-17";
 /// A draft-18 session, the shape a standard request-token peer uses.
+const MOQT_15: &str = "moq-transport-15";
+const MOQT_16: &str = "moq-transport-16";
 const MOQT_18: &str = "moq-transport-18";
 const MOQT_19: &str = "moq-transport-19";
 const MOQT_22: &str = "moq-transport-22";
@@ -549,6 +551,58 @@ async fn a_moq_lite_session_refuses_a_request_token() {
 	})
 	.await
 	.expect("timed out");
+}
+
+/// Draft-15/16 answer an update naming the update's own Request ID, which has no stream of
+/// its own on the control stream. The answer must still reach the subscription it renews:
+/// the client keeps one renewal in flight, so a second one goes out only once the first is
+/// answered there.
+#[moq_net_sim::test]
+async fn a_legacy_renewal_answer_reaches_its_subscription() {
+	for version in [MOQT_15, MOQT_16] {
+		within(async {
+			let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+			let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+			let server_origin = produce_origin(1);
+			let down = server_origin.create_broadcast("room/alice").unwrap();
+			let down_track = down.create_track("video", None).unwrap();
+			down.announce(Default::default()).unwrap();
+
+			let received = produce_origin(3);
+			let mut pair = connect(Options {
+				version: Some(version),
+				client_subscribe: Some(received.clone()),
+				client_request_token: Some(request_token(b"aa")),
+				server_publish: Some(server_origin.clone()),
+				server_requests: true,
+				..Default::default()
+			})
+			.await;
+			let requests = pair.requests.take().expect("server took its requests pre-ok");
+			let mut answered = serve(requests, |_token| Some(grant(&[], &["room/alice"])));
+
+			let remote = received.consume().routed_broadcast("room/alice").await.unwrap();
+			let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
+			let mut group = down_track.append_group().unwrap();
+			group.write_frame(ts(0), b"one".as_ref()).unwrap();
+			group.finish().unwrap();
+			let (token, _first) = answered.next().await.expect("the first token reached the acceptor");
+			assert_eq!(token, b"aa", "{version}");
+			sub.recv_group().await.unwrap().unwrap();
+
+			pair.client.auth().set_request_token(request_token(b"bb")).unwrap();
+			let (token, _second) = answered.next().await.expect("the first renewal reached the acceptor");
+			assert_eq!(token, b"bb", "{version}");
+
+			// Sent only once the first renewal's answer came back to the subscription.
+			moq_net_sim::sleep(Duration::from_millis(100)).await;
+			pair.client.auth().set_request_token(request_token(b"cc")).unwrap();
+			let (token, _third) = answered.next().await.expect("the second renewal reached the acceptor");
+			assert_eq!(token, b"cc", "{version}");
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
 }
 
 /// A request token renews over the wire: replacing it on the client's `Session::auth()`

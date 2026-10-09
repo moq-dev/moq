@@ -737,7 +737,6 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		hidden: hidden::from_setup(params, version),
 		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
-		max_request_updates: request_update::from_setup(params, version),
 	})
 }
 

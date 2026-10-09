@@ -16,6 +16,8 @@ struct ControlState {
 	request_id_max: Option<RequestId>,
 	/// The peer's requests, flow controlled on drafts 14 to 16 only.
 	incoming: Option<Incoming>,
+	/// Our outstanding updates, by their own Request ID, to the request each updates.
+	follow_ups: std::collections::HashMap<RequestId, RequestId>,
 }
 
 /// The MAX_REQUEST_ID window we grant the peer.
@@ -44,6 +46,7 @@ impl Control {
 				request_id_next: if client { RequestId(0) } else { RequestId(1) },
 				request_id_max,
 				incoming: None,
+				follow_ups: Default::default(),
 			}),
 		}
 	}
@@ -149,6 +152,38 @@ impl Control {
 	}
 }
 
+impl Control {
+	/// Route the answer to our update `update` back to the request `target` it updates, until
+	/// the returned guard drops.
+	///
+	/// Drafts 15 and 16 name an update's own Request ID in its answer, and an update has no
+	/// stream of its own on the control stream.
+	pub fn follow_up(&self, update: RequestId, target: RequestId) -> FollowUp {
+		self.state.lock().follow_ups.insert(update, target);
+		FollowUp {
+			control: self.clone(),
+			update,
+		}
+	}
+
+	/// The request an answer naming `id` belongs to, when `id` is an update of ours.
+	pub fn follow_up_target(&self, id: RequestId) -> Option<RequestId> {
+		self.state.lock().follow_ups.remove(&id)
+	}
+}
+
+/// An update of ours awaiting its answer, routed back to the request it updates until dropped.
+pub(super) struct FollowUp {
+	control: Control,
+	update: RequestId,
+}
+
+impl Drop for FollowUp {
+	fn drop(&mut self) {
+		self.control.state.lock().follow_ups.remove(&self.update);
+	}
+}
+
 /// One request the peer holds open, retired (and eventually granted back) on drop.
 pub(super) struct RequestPermit(Control);
 
@@ -161,6 +196,21 @@ impl Drop for RequestPermit {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// An answer to our update maps to the request it updates once, and not after the
+	/// update stops waiting on it.
+	#[test]
+	fn an_update_answer_follows_its_request() {
+		let control = Control::new(None, true);
+		let answered = control.follow_up(RequestId(8), RequestId(2));
+		assert_eq!(control.follow_up_target(RequestId(8)), Some(RequestId(2)));
+		assert_eq!(control.follow_up_target(RequestId(8)), None, "routed once");
+		drop(answered);
+
+		let abandoned = control.follow_up(RequestId(10), RequestId(2));
+		drop(abandoned);
+		assert_eq!(control.follow_up_target(RequestId(10)), None, "dropped with its update");
+	}
 
 	fn granted(control: &Control) -> Option<u64> {
 		match control.poll_grant(&kio::Waiter::noop()) {
