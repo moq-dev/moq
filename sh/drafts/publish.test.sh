@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # publish.sh opens the next changelog section only after the datatracker
 # accepts the submission. A Since-<prev> (in progress) heading publishes as
-# prev+1. A retry submits the source without the section already opened.
+# prev+1. The first submission and a retry both send that heading closed,
+# and neither sends a next section that is already open.
 # Fixtures stand in for curl and kramdown-rfc.
 set -euo pipefail
 
@@ -54,17 +55,17 @@ printf 'kramdown\n' >>"$KRAM_LOG"
 cat >"$KRAM_STDIN"
 printf '<rfc/>\n'
 EOF
-# A template argument is the changelog temp beside the draft. Make that one
-# unwritable when FAKE_MKTEMP_RO is set, so the write fails after submit.
+# A template argument is the changelog temp beside the draft. Fail that call
+# when FAKE_MKTEMP_FAIL is set. Dropping write bits does not stop root.
 real_mktemp=$(command -v mktemp)
 cat >"$bin/mktemp" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-path=\$("$real_mktemp" "\$@")
-if [[ -n \${FAKE_MKTEMP_RO:-} && \$# -gt 0 ]]; then
-    chmod a-w "\$path"
+if [[ -n \${FAKE_MKTEMP_FAIL:-} && \$# -gt 0 ]]; then
+    echo "fake mktemp failed" >&2
+    exit 1
 fi
-printf '%s\n' "\$path"
+"$real_mktemp" "\$@"
 EOF
 chmod +x "$bin/curl" "$bin/kramdown-rfc" "$bin/mktemp"
 
@@ -266,6 +267,18 @@ assert_opened() {
     fi
 }
 
+# Submitted markdown is the source. A Since `(in progress)` heading is closed.
+# The next section, when the file already has one, is omitted by the publisher.
+submitted_source() {
+    local src=$1
+    local out=$2
+    if grep -q '^## Since ' "$src"; then
+        sed 's/^\(## Since .*\) (in progress)$/\1/' "$src" >"$out"
+    else
+        cp "$src" "$out"
+    fi
+}
+
 # A retry still has the next heading in the file, and the text sent to
 # kramdown does not. Versioned submissions match the pre-insert source.
 # Since submissions match it with ` (in progress)` removed from that heading.
@@ -284,11 +297,7 @@ assert_retry_submission() {
         fail "$name retry submitted the next heading: $next_heading"
     fi
     grep -qxF "$published_heading" "$KRAM_STDIN" || fail "$name retry dropped $published_heading"
-    if grep -q '^## Since ' "$src"; then
-        sed 's/^\(## Since .*\) (in progress)$/\1/' "$src" >"$tmp/retry-src.md"
-    else
-        cp "$src" "$tmp/retry-src.md"
-    fi
+    submitted_source "$src" "$tmp/retry-src.md"
     sed "s/${name}-latest/${name}-${version}/g" "$tmp/retry-src.md" >"$tmp/retry-want.md"
     cmp -s "$tmp/retry-want.md" "$KRAM_STDIN" || {
         diff -u "$tmp/retry-want.md" "$KRAM_STDIN" >&2 || true
@@ -304,8 +313,13 @@ expect_file() {
         diff -u "$want" "$repo/drafts/$name.md" >&2 || true
         fail "$name did not match the expected changelog"
     }
-    # The rendered text is the draft from before the insert.
-    cmp -s "$src" "$KRAM_STDIN" || fail "$name was rendered after the insert"
+    # The first submission closes a Since heading and does not include a next
+    # section. It matches a later retry of the same source.
+    submitted_source "$src" "$tmp/render-src.md"
+    cmp -s "$tmp/render-src.md" "$KRAM_STDIN" || {
+        diff -u "$tmp/render-src.md" "$KRAM_STDIN" >&2 || true
+        fail "$name submission did not match the closed source"
+    }
 }
 
 cat >"$tmp/hang.md" <<'EOF'
@@ -594,9 +608,9 @@ no_submit
 unchanged "$tmp/hang.md" draft-lcurley-moq-hang
 
 install_draft draft-lcurley-moq-hang "$tmp/hang.md"
-export FAKE_MKTEMP_RO=1
+export FAKE_MKTEMP_FAIL=1
 run 200 "" draft-lcurley-moq-hang 04 test@example.com
-unset FAKE_MKTEMP_RO
+unset FAKE_MKTEMP_FAIL
 [[ $RUN_RC -ne 0 ]] || fail "write failure succeeded"
 unchanged "$tmp/hang.md" draft-lcurley-moq-hang
 grep -q "not updated" "$tmp/err" || fail "write failure did not report the missed update"
@@ -623,7 +637,8 @@ for src in "$root"/drafts/draft-*.md; do
     run 200 "" "$name" "$ver" test@example.com
     [[ $RUN_RC -eq 0 ]] || fail "$name publish $ver exited $RUN_RC"
     assert_opened "$src" "$repo/drafts/$name.md" "$ver" "$next"
-    sed "s/${name}-latest/${name}-${ver}/g" "$src" >"$tmp/rendered.md"
+    submitted_source "$src" "$tmp/render-src.md"
+    sed "s/${name}-latest/${name}-${ver}/g" "$tmp/render-src.md" >"$tmp/rendered.md"
     cmp -s "$tmp/rendered.md" "$KRAM_STDIN" || fail "$name was rendered after the insert"
     cp "$repo/drafts/$name.md" "$tmp/once.md"
     run 200 "" "$name" "$ver" test@example.com

@@ -14,8 +14,10 @@
 #
 # The XML is built from the source with an already-opened next section
 # omitted, including when publish is run again after that section exists.
-# Anything short of a 200 or 201 leaves the file untouched. The update is an
-# atomic rename beside the draft; a failed write leaves the original file.
+# A Since heading that still says `(in progress)` is closed in that XML, so
+# the first submission matches a retry. Anything short of a 200 or 201 leaves
+# the file untouched. The update is an atomic rename beside the draft; a
+# failed write leaves the original file.
 set -euo pipefail
 
 usage="usage: sh/drafts/publish.sh NAME VERSION EMAIL"
@@ -25,7 +27,8 @@ usage="usage: sh/drafts/publish.sh NAME VERSION EMAIL"
 # FILE must have one changelog heading for PUBLISHED. Versioned headings end
 # in PUBLISHED. A Since heading ends in the previous version and may say
 # `(in progress)`. --write inserts the empty next section when it is absent.
-# --render prints the markdown to submit, without that next section.
+# --render prints the markdown to submit, without that next section, and with
+# `(in progress)` removed from the Since heading being published.
 open_next_section() {
     local file=$1
     local published=$2
@@ -145,15 +148,26 @@ open_next_section() {
     fi
 
     if [[ $mode == render ]]; then
-        if ((next_count == 0)); then
+        local close=0
+        if [[ $style == since && ${lines[$published_at]} == *" (in progress)" ]]; then
+            close=1
+        fi
+        # Leave an unchanged file as bytes. Rewriting it would add a missing
+        # trailing newline that the datatracker never had.
+        if ((next_count == 0 && close == 0)); then
             cat "$file" || return 1
             return 0
         fi
-        for ((i = 0; i < next_at; i++)); do
-            printf '%s\n' "${lines[$i]}"
-        done
-        for ((i = published_at; i < n; i++)); do
-            printf '%s\n' "${lines[$i]}"
+        local out_line
+        for ((i = 0; i < n; i++)); do
+            if ((next_count == 1 && i >= next_at && i < published_at)); then
+                continue
+            fi
+            out_line=${lines[$i]}
+            if ((close == 1 && i == published_at)); then
+                out_line=${out_line%" (in progress)"}
+            fi
+            printf '%s\n' "$out_line" || return 1
         done
         return 0
     fi
