@@ -1,6 +1,7 @@
 //! Publishing an ordered log of opaque payloads over a track.
 
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use bytes::Bytes;
 use moq_net::Timed;
@@ -27,6 +28,8 @@ impl Producer {
 				track,
 				group: None,
 				flate: config.compression.is_deflate().then(crate::Encoder::new),
+				frames: 0,
+				bytes: 0,
 			})),
 		}
 	}
@@ -48,9 +51,14 @@ impl Producer {
 
 	/// Append one payload to the log.
 	///
-	/// A payload that cannot be written ends the track: a log missing a record is not the lossless
-	/// log this mode promises, so the failure is surfaced rather than papered over with a second
-	/// group. The group is aborted rather than closed cleanly, so a consumer sees the failure
+	/// A payload that might not fit in what is left of the group's budget is refused with
+	/// [`moq_net::Error::GroupTooLarge`] before anything is written, leaving the log intact. The
+	/// budget covers the whole log, so once it is spent every append is refused; a publisher with
+	/// more to say opens a new track.
+	///
+	/// Any other payload that cannot be written ends the track: a log missing a record is not the
+	/// lossless log this mode promises, so the failure is surfaced rather than papered over with a
+	/// second group. The group is aborted rather than closed cleanly, so a consumer sees the failure
 	/// instead of a log that merely looks complete. Every later append fails on the closed track.
 	///
 	/// Returns the frame's encoded size.
@@ -73,20 +81,42 @@ struct Inner {
 
 	/// The DEFLATE encoder, one window for the whole group, `Some` while compressing.
 	flate: Option<crate::Encoder>,
+
+	/// Frames and payload bytes written to the group, checked against moq-net's group budget before
+	/// each payload is encoded.
+	frames: usize,
+	bytes: u64,
 }
+
+// The budget check also stands in for the decoder's cap: a payload that fits the group is one every
+// consumer can inflate.
+const _: () = assert!(moq_net::group::MAX_CACHE_BYTES <= crate::DEFAULT_MAX_FRAME_SIZE);
 
 impl Inner {
 	fn append(&mut self, payload: Timed<Bytes>) -> Result<usize> {
 		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
 		let payload = payload.value;
 
-		// A payload no consumer could decode is as terminal as one the track rejects: the log is
-		// missing a record either way, and carrying on would present that gap as a complete log.
-		// Checked before the group is opened, so nothing is published, and routed through the same
-		// abort so a reader sees the failure rather than a clean end.
-		if self.flate.is_some() && payload.len() as u64 > crate::DEFAULT_MAX_FRAME_SIZE {
-			self.abort(moq_net::Error::FrameTooLarge);
-			return Err(crate::Error::TooLarge(crate::DEFAULT_MAX_FRAME_SIZE));
+		// A closed track refuses every append, so say so before the budget: `GroupTooLarge` promises
+		// the log is still writable.
+		if let Poll::Ready(err) = self.track.poll_closed(&kio::Waiter::noop()) {
+			return Err(err.into());
+		}
+
+		// Check before compressing: encoding advances the window, so a payload refused afterwards
+		// would leave the encoder ahead of every reader. The worst case is checked rather than the
+		// actual size for the same reason. Also checked before the group is opened, so a refused
+		// first payload publishes nothing.
+		let size = payload.len() as u64;
+		let bound = if self.flate.is_some() {
+			crate::Encoder::bound(size)
+		} else {
+			size
+		};
+		if self.frames >= moq_net::group::MAX_GROUP_FRAMES
+			|| self.bytes.saturating_add(bound) > moq_net::group::MAX_CACHE_BYTES
+		{
+			return Err(moq_net::Error::GroupTooLarge.into());
 		}
 
 		// Open the group before compressing: a failure here must not leave the window ahead of a
@@ -103,6 +133,8 @@ impl Inner {
 		let size = payload.len();
 		let group = self.group.as_mut().expect("a group is open");
 		let Err(err) = group.write_frame(timestamp, payload) else {
+			self.frames += 1;
+			self.bytes += size as u64;
 			return Ok(size);
 		};
 

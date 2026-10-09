@@ -146,7 +146,11 @@ impl<T: Serialize> Encoder<T> {
 		// actual size for the same reason. The budget is also below moq-flate's per-frame decode cap,
 		// so any record that fits is one every consumer can inflate.
 		let size = bytes.len() as u64;
-		let bound = if self.compression { deflate_bound(size) } else { size };
+		let bound = if self.compression {
+			moq_flate::Encoder::bound(size)
+		} else {
+			size
+		};
 		if self.frames >= moq_net::group::MAX_GROUP_FRAMES
 			|| self.bytes.saturating_add(bound) > moq_net::group::MAX_CACHE_BYTES
 		{
@@ -163,48 +167,5 @@ impl<T: Serialize> Encoder<T> {
 			payload,
 			committed: false,
 		})
-	}
-}
-
-/// The largest a sync-flushed DEFLATE frame of `len` raw bytes can grow to.
-///
-/// zlib's `deflateBound` for its default window and memory level, which both moq-flate and the
-/// browser's pako use: incompressible input falls back to stored blocks, 5 bytes per 16 KiB. The
-/// constant covers the block headers and the flush, whose fixed 4-byte marker is stripped anyway.
-fn deflate_bound(len: u64) -> u64 {
-	len + (len >> 12) + (len >> 14) + (len >> 25) + 13
-}
-
-#[cfg(test)]
-mod test {
-	use super::*;
-
-	/// The bound holds for incompressible input, the worst case, at sizes straddling the 16 KiB
-	/// block boundary, and on a window already primed by earlier frames.
-	#[test]
-	fn deflate_bound_covers_incompressible_frames() {
-		// xorshift: incompressible enough to force stored blocks, and deterministic.
-		let mut state = 0x9e37_79b9_7f4a_7c15u64;
-		let mut noise = |len: usize| {
-			(0..len)
-				.map(|_| {
-					state ^= state << 13;
-					state ^= state >> 7;
-					state ^= state << 17;
-					state as u8
-				})
-				.collect::<Vec<u8>>()
-		};
-
-		let mut flate = moq_flate::Encoder::new();
-		for len in [1, 2, 100, 16_383, 16_384, 16_385, 65_535, 65_536, 1 << 20, 3 << 20] {
-			let payload = flate.frame(&noise(len));
-			assert!(
-				payload.len() as u64 <= deflate_bound(len as u64),
-				"{len} raw bytes deflated to {}, past the bound {}",
-				payload.len(),
-				deflate_bound(len as u64)
-			);
-		}
 	}
 }
