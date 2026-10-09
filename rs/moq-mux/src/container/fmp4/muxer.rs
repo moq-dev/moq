@@ -788,8 +788,7 @@ mod tests {
 
 	// A group boundary is never a duration, even when the groups arrived consecutively: the
 	// publisher may have paused across it (moq-boy runs its PTS on a clock that keeps going
-	// while the encoder is off), which is what produced a 2405 second sample in
-	// moq-dev/moq.pro#814.
+	// while the encoder is off), which is what once produced a 2405 second sample.
 	#[tokio::test]
 	async fn audio_fragment_does_not_absorb_a_pause() {
 		use hang::catalog::AudioCodec;

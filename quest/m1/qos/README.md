@@ -32,9 +32,8 @@ moq.pro (downstream) dashboard work, including the health badge and the
 connection-health drill-down, consumes both.
 
 The per-broadcast verdict combining client reports, the relay's starvation,
-and publisher timeliness lives in moq.pro's
-[health badge](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/qos/badge.md).
-This line only reports the counters.
+and publisher timeliness lives downstream. This line only reports the
+counters.
 
 Decided (2026-10-06 audit): [stats totals and prefix
 tracks](/quest/m0/broadcast-epoch/stats-split.md) lands first, since it is m0

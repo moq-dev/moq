@@ -13,8 +13,7 @@ partner shows up.
 Decided in the 2026-09-30 audit: the ROS 2 bridge was deleted, cross-track
 correlation folded into [robot](/quest/m3/teleop-robot.md), V4L2-M2M encoding
 folded into [CLI packaging](/quest/m2/cli-packaging.md), and the MAVLink
-bridge and SITL proof moved to m3. Kyber is a competitor with proprietary
-framing, not a transport we replace.
+bridge and SITL proof moved to m3.
 
 Decided 2026-10-08: the robot primitive and operator arbitration are parked in
 m3 until a teleoperation consumer needs them, so the line's m2 work is the
@@ -60,24 +59,18 @@ means for the primitive is in [robot](/quest/m3/teleop-robot.md), and what it
 means for a protocol multiplexing many message rates onto one link is in
 [mavlink](/quest/m3/teleop-mavlink.md).
 
-### Who is already here
+### What a WAN deployment expects
 
-Nobody runs DDS over a WAN. The fight is MoQ against Zenoh over QUIC and MoQ
-against Foxglove on WebRTC.
+Nobody runs DDS over a WAN. What remote robotics needs over one:
 
-- **Zenoh** shipped priority-mapped QUIC multistream plus mixed
-  stream/datagram reliability in v1.9.0 (April 2026) and is a Tier 1 ROS 2
-  middleware. Closest thing to our delivery model in the wild, but its WAN
-  topology is hand-configured router endpoints with no relay or media pipeline.
-- **Foxglove** Remote Access went GA in August 2026 as a hand-rolled MoQ: the
-  device gateway connects outbound, uploads each stream at most once to an SFU
-  that fans out, uses lossy data channels by default with reliable opt-in per
-  topic, and adapts video quality. Built on WebRTC because nothing else existed.
-- **Kyber** (kyber.tech, Jean-Baptiste Kempf of VLC, $5M seed June 2026) is the
-  only other party betting on QUIC over WebRTC for machine control. Point to
-  point with no relay or fan-out story, proprietary framing with no interop, no
-  ROS or MAVLink integration, at v0.26. The competition is over the narrative,
-  not the technology.
+- Priority-mapped QUIC streams with mixed stream and datagram reliability,
+  without hand-configured router endpoints between sites.
+- A device that connects outbound, uploads each stream at most once, and
+  lets a relay fan it out.
+- Lossy delivery by default with reliable opt-in per topic, and video that
+  adapts to the link.
+- Open framing that interoperates, with ROS and MAVLink integrations as
+  adapters on top.
 
 ### CGNAT is the pain the ecosystem routes around
 

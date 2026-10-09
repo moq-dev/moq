@@ -71,7 +71,7 @@ The BBR app-limited fixes land in `moq-quic` without waiting for the switch.
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
-- [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
+- [Discover media headroom](/quest/m1/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides

@@ -10,8 +10,7 @@ this quest and every `Required` entry that links it.
 
 ## Plan
 
-moq.pro's lite-07 rollout is `quest/m2/lite07.md` in moq-dev/moq.pro. It
-waits on [Finalize moq-lite-07](/quest/m1/lite07-finalize.md), so this
+moq.pro's lite-07 rollout waits on [Finalize moq-lite-07](/quest/m1/lite07-finalize.md), so this
 condition cannot clear before a release carries the final version.
 
 Decided 2026-10-05: [Cluster routing](/quest/m1/cluster-routing/README.md)'s
