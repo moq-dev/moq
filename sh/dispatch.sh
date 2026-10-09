@@ -77,8 +77,9 @@ declare -A scope=(
     # The package links moq-c's native-libs lists, and compiles its doc samples.
     [cpp]='^(cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
     # The plugin and its tests call through the bindings generated from cpp/moq
-    # and moq-ffi, and flake.nix owns the libobs headers it compiles against.
-    [obs_compile]='^(cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|flake\.nix$)'
+    # and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
+    # the libobs headers it compiles against.
+    [obs_compile]='^(cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)'
     # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
     # nixpkgs, and the last moves on a flake.lock bump alone.
     [obs]='^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)'
