@@ -61,6 +61,7 @@ were done or not worth their cost.
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - moq.dev and the moq.pro dashboard host the worklets and call `assets()` after the release
 - [Media audio-tone check](/quest/m1/media-audio-tone.md) - the media lane's audio-tone check passes under load, fixed at its cause
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
+- [Test TypeScript check](/quest/m1/test-ts-check.md) - `just check` type-checks the TypeScript harnesses under test/
 - [IETF request headers](/quest/m1/ietf-dispatch-headers.md) - each bidi request reads its header in its own task, so a slow one never blocks the next
 - [END_OF_TRACK placement](/quest/m1/ietf-end-of-track-placement.md) - END_OF_TRACK rides the upstream's Location, and Rust's header stops claiming END_OF_GROUP
 - [moq-uring tests under load](/quest/m1/uring-tests-under-load.md) - uring tests pass while parallel checks share locked memory
@@ -176,3 +177,4 @@ were done or not worth their cost.
 - [Datagram replay bound](/quest/m1/datagram-replay-bound.md) - a new Rust datagram subscriber starts within its max delay of the newest datagram, not at a minutes-old buffer
 - [Catalog colour](/quest/m1/color-catalog.md) - the catalog describes a rendition's colour and HDR properties, which the WebGPU HDR renderer reads
 - [WebGPU HDR](/quest/m1/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
+- [Request ID order](/quest/m1/request-id-order.md) - drafts 14 to 16 refuse a reused or lower Request ID in both languages
