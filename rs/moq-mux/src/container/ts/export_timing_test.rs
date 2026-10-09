@@ -210,16 +210,7 @@ impl Live {
 			let (video_at, audio_at) = self.send_times(video, audio);
 			advance(video_at.min(audio_at), legs).await;
 			if audio_at < video_at {
-				let index = self.audio_index;
-				self.audio
-					.write(Frame {
-						timestamp: Timestamp::from_micros(audio).unwrap(),
-						duration: None,
-						payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
-						keyframe: index.is_multiple_of(AUDIO_GROUP),
-					})
-					.unwrap();
-				self.audio_index += 1;
+				self.send_audio();
 			} else {
 				let tick = self.tick;
 				let keyframe = tick.is_multiple_of(GOP);
@@ -255,6 +246,33 @@ impl Live {
 				}
 				self.tick += 1;
 			}
+			for leg in legs.iter_mut() {
+				leg.poll_now();
+			}
+		}
+	}
+
+	/// Write the next audio frame.
+	fn send_audio(&mut self) {
+		let index = self.audio_index;
+		self.audio
+			.write(Frame {
+				timestamp: Timestamp::from_micros(index * AUDIO_US).unwrap(),
+				duration: None,
+				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
+				keyframe: index.is_multiple_of(AUDIO_GROUP),
+			})
+			.unwrap();
+		self.audio_index += 1;
+	}
+
+	/// Send audio alone, each frame at its instant, until media time `until` (µs), as a
+	/// broadcast whose video has stopped.
+	async fn run_audio(&mut self, until: u64, legs: &mut [&mut Leg]) {
+		while self.audio_index * AUDIO_US < until {
+			let (_, at) = self.send_times(0, self.audio_index * AUDIO_US);
+			advance(at, legs).await;
+			self.send_audio();
 			for leg in legs.iter_mut() {
 				leg.poll_now();
 			}
@@ -589,18 +607,22 @@ async fn a_track_sent_later_than_the_delay_loses_nothing() {
 /// schedule had stopped, as in the field.
 #[tokio::test(start_paused = true)]
 async fn frames_held_through_a_silence_drop_as_late() {
+	let jitter = Duration::from_millis(300);
+	// The frames presented within the jitter of the last one read before the silence.
+	let held = jitter.as_micros() as u64 / VIDEO_US + 1;
 	for lag in [0, LAGS[0], LAGS[1]] {
 		let mut live = Live::new(1.0, lag);
-		live.declare_video_jitter(Duration::from_millis(300));
+		live.declare_video_jitter(jitter);
 		let mut leg = live.join(Duration::ZERO).await;
 		live.run(8 * GOP + 5, &mut [&mut leg], |_| false).await;
 		live.fall_silent(Duration::from_secs(3), &mut [&mut leg]).await;
 		let resumed = Instant::now();
 		live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
 
+		let dropped = leg.export.dropped();
 		assert!(
-			leg.export.dropped() > 0,
-			"lag {lag}: nothing held through the silence dropped"
+			(1..=held).contains(&dropped),
+			"lag {lag}: {dropped} dropped, where {held} were held through the silence"
 		);
 		let after: Vec<Unit> = leg.units().into_iter().filter(|unit| unit.sent >= resumed).collect();
 		let late: Vec<f64> = after
@@ -617,6 +639,39 @@ async fn frames_held_through_a_silence_drop_as_late() {
 			video >= 6 * GOP,
 			"lag {lag}: only {video} video units after the silence"
 		);
+	}
+}
+
+/// Video held for its DTS for most of the delay keeps its deadline on a clean source: the frame
+/// that settles a held one arrives the hold after it, inside the delay.
+#[tokio::test(start_paused = true)]
+async fn video_held_for_most_of_the_delay_drops_nothing() {
+	for lag in [0, LAGS[0], LAGS[1]] {
+		let mut live = Live::new(1.0, lag);
+		live.declare_video_jitter(DELAY * 4 / 5);
+		let mut leg = live.join(Duration::ZERO).await;
+		live.run(20 * GOP, &mut [&mut leg], |_| false).await;
+		assert_eq!(leg.export.dropped(), 0, "lag {lag}: frames dropped on a clean source");
+	}
+}
+
+/// Video that stops while the audio runs on, for longer than the delay, still holds its last
+/// frames for their DTS when the broadcast ends. Nothing but the end settles them, and the end of
+/// the stream is not a missed deadline, so they go out rather than drop.
+#[tokio::test(start_paused = true)]
+async fn the_video_held_at_the_end_goes_out() {
+	for lag in [0, LAGS[0], LAGS[1]] {
+		let mut live = Live::new(1.0, lag);
+		live.declare_video_jitter(Duration::from_millis(300));
+		let mut leg = live.join(Duration::ZERO).await;
+		let last = 8 * GOP + 5;
+		live.run(last, &mut [&mut leg], |_| false).await;
+		live.run_audio((last + 3 * GOP) * VIDEO_US, &mut [&mut leg]).await;
+		live.finish(&mut [&mut leg]).await;
+
+		assert_eq!(leg.export.dropped(), 0, "lag {lag}: frames dropped");
+		let video = leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
+		assert_eq!(video, last, "lag {lag}: {video} of {last} video units went out");
 	}
 }
 

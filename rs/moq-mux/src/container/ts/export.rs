@@ -308,12 +308,15 @@ impl Track {
 	/// empty, which settled it, so it is judged as arriving then. Frames held through a silence,
 	/// such as a dead publisher's last frames settled only by its replacement's, are late by the
 	/// silence: the jitter buffer drops them, where their own arrival would queue them behind a
-	/// schedule that has already gone past them.
+	/// schedule that has already gone past them. Nothing settles the frames still held when the
+	/// track ends, so they keep their own arrival and go out late if they must.
 	fn release(&mut self, name: &str, jitter: &mut jitter::Buffer<u16, Queued>, flush: bool) -> anyhow::Result<()> {
 		let (delay, lookahead) = self.timing.reorder();
 		let lookahead = lookahead.max(self.timing.jitter);
 		while let Some(((mut pending, description), dts)) = self.clock.pop(lookahead, delay, flush) {
-			pending.arrived = pending.arrived.max(self.empty);
+			if !self.finished {
+				pending.arrived = pending.arrived.max(self.empty);
+			}
 			self.push(name, pending, Some(dts), description, jitter)?;
 		}
 		Ok(())
