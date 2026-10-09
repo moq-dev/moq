@@ -135,6 +135,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// SPTS scope: one clock for the whole input. Under MPTS every program's video
 	/// advances it, so a cue could be stamped with another program's PTS.
 	last_pts: Option<Timestamp>,
+	/// The first PES's PTS on the catalog clock: the section clock until video starts
+	/// `last_pts`, so a cue ahead of the first picture lands on the media timeline, not at zero.
+	start_pts: Option<Timestamp>,
 	media_unwrap: PtsUnwrap,
 	/// The program number chosen by [`with_program`](Self::with_program). `None` imports the
 	/// multiplex's only program and refuses a PAT that lists more than one.
@@ -182,6 +185,7 @@ impl<E: catalog::Catalog> Import<E> {
 			si,
 			identity_recorded: false,
 			last_pts: None,
+			start_pts: None,
 			media_unwrap: PtsUnwrap::default(),
 			program: None,
 		}
@@ -283,7 +287,7 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			if let Some(section) = self.sections.get_mut(&pid) {
-				let units = section.packet(&pkt, self.last_pts, self.input.offset())?;
+				let units = section.packet(&pkt, self.last_pts.or(self.start_pts), self.input.offset())?;
 				self.published |= units > 0;
 				self.liveness.delivered(pid, units);
 				continue;
@@ -678,7 +682,14 @@ impl<E: catalog::Catalog> Import<E> {
 		// The first PTS anchors the program: it needs no unwrap yet. Anchoring at the PES start
 		// rather than its flush keeps the section clock below on the same offset as the media.
 		let offset = match pes.pts {
-			Some(pts) => self.input.anchor(Timestamp::from_scale(pts, 90_000)?)?,
+			Some(pts) => {
+				let pts = Timestamp::from_scale(pts, 90_000)?;
+				let offset = self.input.anchor(pts)?;
+				if self.start_pts.is_none() {
+					self.start_pts = Some(offset.apply(pts)?);
+				}
+				offset
+			}
 			None => Offset::default(),
 		};
 		if is_video {
@@ -728,10 +739,12 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Publish the sections held for the input's offset, now that it is known.
+	/// Publish the sections held for the input's offset, now that it is known. They are stamped
+	/// with the section clock at release: no timeline existed when they arrived.
 	fn release_sections(&mut self, offset: Offset) -> anyhow::Result<()> {
+		let pts = self.last_pts.or(self.start_pts);
 		for (pid, section) in &mut self.sections {
-			let units = section.release(self.last_pts, offset)?;
+			let units = section.release(pts, offset)?;
 			self.published |= units > 0;
 			self.liveness.delivered(*pid, units);
 		}
@@ -3868,22 +3881,37 @@ pub(super) mod test {
 	/// lands on the exported picture it names, and the section still verifies.
 	#[tokio::test(start_paused = true)]
 	async fn a_splice_follows_its_media_onto_a_clock_in_use() {
-		splice_onto_a_clock_in_use(false).await;
+		splice_onto_a_clock_in_use(CueAt::AfterVideo).await;
 	}
 
 	/// A cue arriving before any PES waits for the offset the media takes, rather than
 	/// publishing unshifted.
 	#[tokio::test(start_paused = true)]
 	async fn a_startup_splice_follows_its_media_onto_a_clock_in_use() {
-		splice_onto_a_clock_in_use(true).await;
+		splice_onto_a_clock_in_use(CueAt::BeforeVideo).await;
 	}
 
-	async fn splice_onto_a_clock_in_use(cue_first: bool) {
+	/// A cue released by a non-video PES lands on that PES's shifted PTS, not at zero.
+	#[tokio::test(start_paused = true)]
+	async fn a_splice_released_before_video_lands_on_the_media_timeline() {
+		splice_onto_a_clock_in_use(CueAt::BeforePrivate).await;
+	}
+
+	/// Where the cue arrives relative to the first PES.
+	enum CueAt {
+		AfterVideo,
+		BeforeVideo,
+		/// Ahead of a private PES at the first picture's PTS, which anchors the input.
+		BeforePrivate,
+	}
+
+	async fn splice_onto_a_clock_in_use(at: CueAt) {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 
 		const VIDEO_PID: u16 = 0x0050;
 		const CUE_PID: u16 = 0x0021;
+		const PRIVATE_PID: u16 = 0x0051;
 		const MASK: u64 = (1 << 33) - 1;
 		// Ten pictures a second from one second in; the cue splices at the sixth.
 		let picture = |k: u64| 90_000 + k * 9_000;
@@ -3903,12 +3931,18 @@ pub(super) mod test {
 			&[
 				(StreamType::H264, VIDEO_PID),
 				(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
+				(StreamType::Mpeg2PacketizedData, PRIVATE_PID),
 			],
 			true,
 		);
 		let cue_packet = packet(true, 0, 0, &splice_insert(picture(5)));
-		if cue_first {
-			bytes.extend_from_slice(&cue_packet);
+		match at {
+			CueAt::AfterVideo => {}
+			CueAt::BeforeVideo => bytes.extend_from_slice(&cue_packet),
+			CueAt::BeforePrivate => {
+				bytes.extend_from_slice(&cue_packet);
+				bytes.extend_from_slice(&pes_packet(PRIVATE_PID, picture(0)));
+			}
 		}
 		for k in 0..20 {
 			bytes.extend_from_slice(&audio_pes_packet(
@@ -3917,7 +3951,7 @@ pub(super) mod test {
 				picture(k),
 				&annexb_au(k % 10 == 0),
 			));
-			if k == 0 && !cue_first {
+			if k == 0 && matches!(at, CueAt::AfterVideo) {
 				bytes.extend_from_slice(&cue_packet);
 			}
 		}
@@ -3963,7 +3997,7 @@ pub(super) mod test {
 				let section = &payload[1 + usize::from(payload[0])..];
 				let len = 3 + (usize::from(section[1] & 0x0f) << 8 | usize::from(section[2]));
 				cue = Some(section[..len].to_vec());
-			} else if payload.starts_with(&[0, 0, 1]) && (0xe0..=0xef).contains(&payload[3]) {
+			} else if pid != PRIVATE_PID && payload.starts_with(&[0, 0, 1]) && (0xe0..=0xef).contains(&payload[3]) {
 				pictures.push(stamp(&payload[9..14]));
 			}
 		}
