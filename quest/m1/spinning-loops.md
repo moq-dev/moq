@@ -18,6 +18,10 @@ Decided 2026-10-09 while reworking #5088:
   finding work in one poll (receive, accept, announce, and request loops in
   `lite/subscriber.rs`, `ietf/subscriber.rs`, `ietf/session.rs`, and
   `model/origin.rs`). This guard decides which of them actually spin.
+- Also unbudgeted: ietf `run_fetch_stream`'s write loop over the frames
+  `read_fetch` collected, which sends a whole cached group in one poll over
+  always-ready writes. Add an end-to-end FETCH test that checks a sibling
+  still gets its turns (found by the OpenAI review of #5088).
 - The count is test-only, so kio's hot path stays untouched: a feature or
   `cfg` that only the sim runtime enables, reset on each task poll.
 - A loop takes a `Budget` only where its `Pending` goes straight up to the
