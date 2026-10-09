@@ -33,7 +33,11 @@ nix develop --command just drafts publish draft-lcurley-moq-lite 05 you@example.
 This builds `draft-lcurley-moq-lite-05.xml` and submits it to the datatracker,
 which emails you a confirmation link. The submission is final only once you
 click that link. For a brand-new draft (`-00`), set "Replaces" on the
-confirmation page.
+confirmation page. On a 200 or 201, the source gains an empty changelog
+section for the next version above the one just published, in that draft's
+heading style. Commit that edit; it is the record of the publish. The draft
+needs a changelog section for the version being published, and anything short
+of a 200 or 201 leaves the file untouched.
 
 ## Contributing
 
