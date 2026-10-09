@@ -167,6 +167,9 @@ export class ControlStreamAdapter implements Session {
 		client: boolean,
 		window: bigint = REQUEST_WINDOW,
 	) {
+		// Routing assumes the shared control stream's layout, such as an update's two ids.
+		if (version >= Version.DRAFT_17)
+			throw new Error(`control stream adapter is for drafts 14 to 16, not ${version}`);
 		this.#quic = quic;
 		this.#reader = controlStream.reader;
 		this.#reader.version = version;

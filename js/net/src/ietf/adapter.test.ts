@@ -222,6 +222,14 @@ test("a server adapter rejects a client GOAWAY that names a redirect", async () 
 	await expect(running).rejects.toThrow("client GOAWAY must not name a redirect");
 });
 
+test("the control stream adapter refuses draft 17 and later", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_17);
+	const control = await Stream.open(pair.server, { version: Version.DRAFT_17 });
+	expect(() => new ControlStreamAdapter(pair.server, control, Version.DRAFT_17, 100n, true)).toThrow(
+		"drafts 14 to 16",
+	);
+});
+
 test("a second GOAWAY on the control stream closes the session", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_15);
 	const control = await Stream.open(pair.server, { version: VERSION });
