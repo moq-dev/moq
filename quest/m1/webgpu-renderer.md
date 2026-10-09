@@ -43,9 +43,11 @@ added this quest). Re-planned from issue #703, whose stub quest the
 - Device loss: request a new device and rebuild the pipeline. A canvas that
   acquired a `webgpu` context never returns a `2d` one, and the canvas is
   caller-owned, so when no adapter comes back the renderer fails loud:
-  rendering stops and `out.error` reports a surface-lost error. Recovery is a
-  fresh canvas on the existing `canvas` input; with `"auto"` the renderer
-  then re-selects (Canvas2D if WebGPU is still gone). `<moq-watch>` and
+  rendering stops and `out.error` reports `"surface-lost"`. Like the video
+  source's `out.error`, it is a string union, `undefined` while healthy.
+  Recovery is a fresh canvas on the existing `canvas` input, which clears
+  the error; with `"auto"` the renderer then re-selects (Canvas2D if WebGPU
+  is still gone). `<moq-watch>` and
   `<moq-publish>` do this themselves by swapping their `<canvas>` child for a
   fresh one with the same attributes. In the worker, the main thread
   transfers a new `OffscreenCanvas`. Decided 2026-10-08. Rejected: a canvas
