@@ -1742,7 +1742,8 @@ where
 			.await
 		};
 		if let Err(err) = res {
-			// The fetch stream, if open, reset as it dropped with the response.
+			// The fetch stream, if open, reset as it dropped with the response. Once FETCH_OK
+			// is out, no REQUEST_ERROR can follow it, so the reset is the whole refusal.
 			stream.writer.abort(&err);
 			return Err(err);
 		}
@@ -5745,8 +5746,6 @@ mod serve_tests {
 		}
 	}
 
-	/// A datagram group is never fetchable: a FETCH for one is refused like a group that
-	/// does not exist, newest or not, and opens no fetch stream for its payload.
 	/// A standalone FETCH outside what the peer may subscribe to is refused before it
 	/// reaches the origin, and one whose grant narrows while its group loads is refused too.
 	#[moq_net_sim::test]
@@ -5892,6 +5891,8 @@ mod serve_tests {
 		}
 	}
 
+	/// A datagram group is never fetchable: a FETCH for one is refused like a group that
+	/// does not exist, newest or not, and opens no fetch stream for its payload.
 	#[moq_net_sim::test]
 	async fn a_standalone_fetch_of_a_datagram_group_is_refused() {
 		for version in FETCH_DRAFTS {

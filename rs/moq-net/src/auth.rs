@@ -820,8 +820,10 @@ impl Drop for Request {
 
 fn refuse(issue: &kio::Shared<Issue>, code: SessionError, reason: String) {
 	let mut issue = issue.lock();
-	issue.outbox.push_back(Reply::Refuse { code, reason });
-	issue.done = true;
+	if !issue.done {
+		issue.outbox.push_back(Reply::Refuse { code, reason });
+		issue.done = true;
+	}
 }
 
 /// A grant issued to one of the peer's tokens. Dropping it ends the grant.

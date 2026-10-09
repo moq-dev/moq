@@ -158,7 +158,8 @@ pub struct AuthError {
 	pub reason: String,
 }
 
-/// Longest AUTH_ERROR reason, in bytes, matching the lite wire.
+/// Longest AUTH_ERROR reason, in bytes, matching the lite wire and rejected from the
+/// length prefix alone.
 const MAX_REASON: usize = 8192;
 
 impl Message for AuthError {
@@ -176,10 +177,11 @@ impl Message for AuthError {
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		check_version(version)?;
 		let code = r.varint()?;
-		let reason = r.string()?;
-		if reason.len() > MAX_REASON {
+		let len = r.varint()?;
+		if len > MAX_REASON as u64 {
 			return Err(DecodeError::InvalidValue);
 		}
+		let reason = String::from_utf8(r.slice(len as usize)?.to_vec())?;
 		Ok(Self { code, reason })
 	}
 }
@@ -625,6 +627,17 @@ mod tests {
 			reason: "expired".to_string(),
 		};
 		assert_eq!(round_trip(&msg), msg);
+	}
+
+	/// An oversized reason is refused from its length prefix, before any of it arrives.
+	#[test]
+	fn auth_error_reason_is_capped_by_its_prefix() {
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, VERSION.into());
+		w.varint(UNAUTHORIZED).unwrap();
+		w.varint(MAX_REASON as u64 + 1).unwrap();
+		let err = AuthError::decode_msg(&mut Decoder::new(&buf, VERSION.into()), VERSION).unwrap_err();
+		assert!(matches!(err, DecodeError::InvalidValue), "{err:?}");
 	}
 
 	/// Only subtrees fit the prefix encoding, alone or in a union; anything narrower is
