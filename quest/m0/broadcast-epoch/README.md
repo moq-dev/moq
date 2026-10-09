@@ -95,7 +95,9 @@ then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 ## Required
 
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - a replaced broadcast reaches announce consumers as an explicit Restart, subscriptions stay sticky, and new requests never join a replaced route's front
+- [No stitch](/quest/m0/broadcast-epoch/no-stitch.md) - an epochless track ends on an upstream error instead of re-splicing onto whatever instance now wins upstream
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
+- [Export ts](/quest/m0/broadcast-epoch/export-ts.md) - `export ts --linger` and SRT egress build a fresh TS export on a replaced broadcast, marked in-band
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) - moqsrc switches to the new broadcast on a `Restart`, keeping its pads by rendition name
