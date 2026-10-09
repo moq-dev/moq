@@ -20,8 +20,8 @@ added this quest):
   #1071) with no stated reason.
 - Use `new_multi_thread().enable_all()` with tokio's default worker count.
   No configuration knob until an embedder needs one. Rejected: a small fixed
-  pool, and keeping `current_thread` behind the
-  kio's cooperative budget (`kio::coop`) alone.
+  pool, and keeping `current_thread` behind kio's cooperative budget
+  (`kio::coop`) alone.
 - Keep the "foreign caller's thread never drives our futures" property: work
   still runs via `Task::run` and `detached`. Check the exported async fns that
   await in place (`subscribe_catalog`, `subscribe_track`, `fetch_group`,

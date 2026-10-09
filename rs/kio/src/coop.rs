@@ -74,8 +74,8 @@ pub(crate) fn spend(waiter: &Waiter) -> bool {
 /// With the budget spent, a kio poll returns `Pending` even when it had an answer, so
 /// a caller about to treat `Pending` as a verdict (blocked, idle, not found) checks this
 /// first. `Pending` means the budget is spent: the task is woken, and the verdict waits
-/// for a fresh turn. `Ready` means no poll this turn yielded, so its `Pending` was real.
-/// Spends nothing.
+/// for a fresh turn. That is one spare turn when the `Pending` was real after all.
+/// `Ready` means no poll this turn yielded, so its `Pending` was real. Spends nothing.
 pub fn poll_proceed(waiter: &Waiter) -> std::task::Poll<()> {
 	match waiter.is_noop() || LEFT.get() != Some(0) {
 		true => std::task::Poll::Ready(()),

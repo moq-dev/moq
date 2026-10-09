@@ -17,7 +17,8 @@ cell.
 The cause is known: a serve loop with work always ready never yields and
 starves moq-ffi's single runtime thread until the relay times the publisher
 out (found 2026-10-08 landing #4225). kio's cooperative budget (`kio::coop`)
-fixes it, so no bisect is needed.
+is meant to fix it: interop run 37889112106 on #5088 passed every Go and
+Python publisher cell. Confirm on `main` and nightly before closing.
 
 Decided 2026-10-08:
 
