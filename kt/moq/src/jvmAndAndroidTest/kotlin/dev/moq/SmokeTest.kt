@@ -173,7 +173,7 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", null)
             val group = track.appendGroup()
-            group.writeFrame(Frame(payload = "cached".encodeToByteArray()))
+            group.writeFrame(Frame(payload = "cached".encodeToByteArray(), timestampUs = 0uL))
             group.finish()
 
             val fetched = broadcast.consume().fetchGroup(

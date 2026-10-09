@@ -36,7 +36,7 @@ from whichever platform a user happened to be on.
 
 Nothing here is a second estimator, and this lane does not compare the two
 runtimes' target series: the [Audio jitter
-target](/quest/m0/audio-jitter-target/README.md) line replays its recorded
+target](/quest/m1/audio-jitter-target/README.md) line replays its recorded
 trace through the native decode path and asserts the browser's target series
 (2026-10-06 audit). This lane relies on that result; a disagreement there is
 a finding against that line and never a reason to widen a budget. It grades
@@ -50,4 +50,4 @@ it grades is done on the jitter target line.
 
 ## Related
 
-- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - its native trace replay is the estimator comparison this lane relies on
+- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - its native trace replay is the estimator comparison this lane relies on

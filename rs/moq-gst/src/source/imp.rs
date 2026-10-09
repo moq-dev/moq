@@ -764,7 +764,7 @@ impl Pump {
 		// rendition.
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return,
-			subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1))) => match subscriber {
+			subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1))) => match subscriber {
 				Ok(subscriber) => subscriber,
 				Err(err) => {
 					gst::warning!(CAT, "track {name} failed to subscribe: {err:?}");

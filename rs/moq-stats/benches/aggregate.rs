@@ -1,5 +1,6 @@
 //! Cost of one merged traffic frame from [`moq_stats::aggregate`], swept over live nodes and
 //! nodes that have come and gone, with and without the grace that folds departed nodes away.
+//! Compare known metadata with one touched publisher losing and recovering its epoch.
 //!
 //! Each node reports the same broadcast paths, like a restarted node under a new name. A bounded
 //! aggregate's cost follows the live nodes; an unbounded one (`grace` never elapsing) also pays for
@@ -9,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use moq_net::origin;
+use moq_net::{Epoch, origin};
 use moq_stats::{Role, Tier, Traffic, TrafficFrame, aggregate, traffic_track};
 
 /// Broadcast paths each node reports.
@@ -23,7 +24,9 @@ const GRACE: Duration = Duration::from_secs(1);
 
 /// A hand-published node stats broadcast with a default-tier publisher traffic track.
 struct Node {
-	_source: moq_net::broadcast::Producer,
+	source: moq_net::broadcast::Producer,
+	epoch: Epoch,
+	known: bool,
 	traffic: moq_json::snapshot::Producer<TrafficFrame>,
 	frame: TrafficFrame,
 }
@@ -33,7 +36,10 @@ impl Node {
 		let source = origin
 			.create_broadcast(format!(".stats/acme/node/{name}").as_str())
 			.unwrap();
-		source.announce(origin::Route::default()).unwrap();
+		let epoch = Epoch::mint();
+		source
+			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.unwrap();
 		let track = source
 			.create_track(traffic_track(&Tier::default(), Role::Publisher, false), None)
 			.unwrap();
@@ -42,7 +48,9 @@ impl Node {
 			.map(|key| (format!("acme/room-{key:02}"), Traffic::default()))
 			.collect();
 		Self {
-			_source: source,
+			source,
+			epoch,
+			known: true,
 			traffic: moq_json::snapshot::Producer::new(track, config),
 			frame,
 		}
@@ -68,7 +76,7 @@ async fn read_until(traffic: &mut aggregate::TrafficConsumer, want: u64) {
 }
 
 /// Mean wall time per merged frame with `live` nodes publishing after `departed` nodes left.
-async fn measure(live: usize, departed: usize, grace: Duration) -> Duration {
+async fn measure(live: usize, departed: usize, grace: Duration, mixed: bool) -> Duration {
 	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
 	let agg = aggregate::Consumer::new(
@@ -102,6 +110,14 @@ async fn measure(live: usize, departed: usize, grace: Duration) -> Duration {
 	for frame in 0..=FRAMES {
 		let node = &mut nodes[frame as usize % live];
 		let start = Instant::now();
+		if mixed {
+			node.known = !node.known;
+			let mut route = origin::Route::default();
+			if node.known {
+				route.epoch = Some(node.epoch.clone());
+			}
+			node.source.announce(route).unwrap();
+		}
 		node.publish(1);
 		total += 1;
 		read_until(&mut traffic, total).await;
@@ -127,13 +143,15 @@ fn main() {
 		.build()
 		.unwrap();
 
-	println!("live departed grace    us/frame");
+	println!("live departed grace metadata    us/frame");
 	for live in [1, 16, 128] {
 		for departed in [0, 256, 4096] {
 			for (label, grace) in [("1s", GRACE), ("never", Duration::MAX)] {
-				let elapsed = runtime.block_on(measure(live, departed, grace));
-				let micros = elapsed.as_secs_f64() * 1e6;
-				println!("{live:>4} {departed:>8} {label:>5} {micros:>11.1}");
+				for (metadata, mixed) in [("known", false), ("mixed", true)] {
+					let elapsed = runtime.block_on(measure(live, departed, grace, mixed));
+					let micros = elapsed.as_secs_f64() * 1e6;
+					println!("{live:>4} {departed:>8} {label:>5} {metadata:>8} {micros:>11.1}");
+				}
 			}
 		}
 	}

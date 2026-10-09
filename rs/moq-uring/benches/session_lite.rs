@@ -159,7 +159,10 @@ mod linux {
 					let bc = {
 						let consumer = sub_origin.consume();
 						consumer.routed("bench").await.expect("broadcast announced");
-						consumer.request_broadcast("bench").await.expect("broadcast resolves")
+						consumer
+							.request_broadcast("bench", None)
+							.await
+							.expect("broadcast resolves")
 					};
 					let sub = bc
 						.track("data")

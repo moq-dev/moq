@@ -42,8 +42,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use super::group;
 use super::track::{self, TrackState};
+use super::{expiry, group};
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
@@ -498,6 +498,10 @@ pub(crate) struct Track {
 	// This account's slot in the pool's sweep registry, absent when the pool has no
 	// expiry window (nothing is registered) or for the detached default account.
 	sweep: OnceLock<usize>,
+
+	// The track's reads parked on their drift budget. Here because this account is the
+	// link every group's frame writes already follow back to the track.
+	wakes: expiry::Wakes,
 }
 
 impl Track {
@@ -510,6 +514,7 @@ impl Track {
 			expiry_cursor: AtomicUsize::new(0),
 			state,
 			sweep: OnceLock::new(),
+			wakes: Default::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -520,6 +525,11 @@ impl Track {
 	/// The pool this track caches into.
 	pub(crate) fn pool(&self) -> &Pool {
 		&self.pool
+	}
+
+	/// The track's reads parked on their drift budget.
+	pub(crate) fn wakes(&self) -> &expiry::Wakes {
+		&self.wakes
 	}
 
 	/// Charge a new group's fixed overhead, returning its [`Charge`].

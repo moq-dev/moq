@@ -29,7 +29,7 @@ async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let handle = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let handle = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -43,7 +43,7 @@ async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net
 	assert!(matches!(handle.track("video"), Err(Error::Unroutable)));
 	assert!(matches!(handle.track("audio"), Err(Error::Unroutable)));
 	assert!(matches!(
-		consumer.request_broadcast("bcast").await,
+		consumer.request_broadcast("bcast", None).await,
 		Err(Error::Unroutable)
 	));
 	assert!(matches!(broadcast.announce(Default::default()), Err(Error::Closed)));

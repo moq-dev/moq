@@ -94,6 +94,14 @@ enum RawStep<T> {
 	Stop,
 }
 
+/// A raw frame or datagram timestamp in microseconds, `None` when untimed.
+fn timestamp_us(timestamp: Option<moq_net::Timestamp>) -> Result<Option<u64>, Error> {
+	timestamp
+		.map(|timestamp| timestamp.as_micros().try_into())
+		.transpose()
+		.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))
+}
+
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
@@ -270,8 +278,8 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Return whether the publisher recommends temporarily avoiding a video rendition.
-	pub fn video_stalled(&self, catalog: Id, index: usize) -> Result<bool, Error> {
+	/// Return whether a video rendition may be selected.
+	pub fn video_enabled(&self, catalog: Id, index: usize) -> Result<bool, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (_, config) = consume
 			.catalog
@@ -280,7 +288,7 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		Ok(config.stalled.unwrap_or(false))
+		Ok(config.enabled)
 	}
 
 	/// Fill `dst` with the properties shared by every video rendition.
@@ -402,7 +410,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		max_age: std::time::Duration,
+		max_delay: std::time::Duration,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
@@ -440,7 +448,7 @@ impl Consume {
 					.subscribe(
 						moq_net::track::Subscription::default()
 							.with_priority(hang::catalog::PRIORITY.video)
-							.with_max_age(max_age),
+							.with_max_delay(max_delay),
 					)
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container);
@@ -463,7 +471,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		max_age: std::time::Duration,
+		max_delay: std::time::Duration,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
@@ -496,7 +504,7 @@ impl Consume {
 					.subscribe(
 						moq_net::track::Subscription::default()
 							.with_priority(hang::catalog::PRIORITY.audio)
-							.with_max_age(max_age),
+							.with_max_delay(max_delay),
 					)
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container);
@@ -562,6 +570,7 @@ impl Consume {
 			payload: f.payload.as_ptr(),
 			payload_size: f.payload.len(),
 			timestamp_us,
+			timestamp_present: true,
 			keyframe: f.keyframe,
 		};
 
@@ -754,16 +763,13 @@ impl Consume {
 	/// frame is released with [`Self::raw_frame_close`].
 	pub fn raw_frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
 		let frame = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
-		let timestamp_us = frame
-			.timestamp
-			.as_micros()
-			.try_into()
-			.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))?;
+		let timestamp_us = timestamp_us(frame.timestamp)?;
 
 		*dst = moq_frame {
 			payload: frame.payload.as_ptr(),
 			payload_size: frame.payload.len(),
-			timestamp_us,
+			timestamp_us: timestamp_us.unwrap_or_default(),
+			timestamp_present: timestamp_us.is_some(),
 			keyframe: false,
 		};
 
@@ -854,10 +860,13 @@ impl Consume {
 	pub fn datagram(&self, datagram: Id, dst: &mut moq_datagram) -> Result<(), Error> {
 		let value = self.datagram.get(datagram).ok_or(Error::FrameNotFound)?;
 
+		let timestamp_us = timestamp_us(value.timestamp)?;
+
 		*dst = moq_datagram {
 			payload: value.payload.as_ptr(),
 			payload_size: value.payload.len(),
-			timestamp_us: value.timestamp.as_micros() as u64,
+			timestamp_us: timestamp_us.unwrap_or_default(),
+			timestamp_present: timestamp_us.is_some(),
 			sequence: value.sequence,
 		};
 

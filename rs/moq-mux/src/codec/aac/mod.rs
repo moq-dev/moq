@@ -32,6 +32,15 @@ pub enum Error {
 	#[error("reserved channelConfiguration: {0}")]
 	ReservedChannelConfig(u8),
 
+	/// A channel count that does not pick a channelConfiguration on its own.
+	///
+	/// Counts 1 through 6 are that configuration, and 8 channels are configuration 7 (7.1).
+	/// Seven channels (6.1, or configuration 11) and 24 (22.2, configuration 13) have a
+	/// configuration but also program config element layouts, so the speaker positions are
+	/// not guessed. Every other count has no configuration at all.
+	#[error("cannot pick a channelConfiguration for {0} channels")]
+	UnsupportedChannelCount(u32),
+
 	/// A program config element is used with an object type that has no GASpecificConfig.
 	#[error("channelConfiguration 0 is unsupported for audioObjectType {0}")]
 	ProgramConfigUnsupported(u8),
@@ -109,8 +118,9 @@ impl Config {
 	///
 	/// Standard sample rates produce 2 bytes; non-standard rates fall back to
 	/// the 5-byte form with an explicit 24-bit frequency. SBR and PS are signaled explicitly
-	/// over an AAC-LC core at half the output rate, mono under PS.
-	pub fn encode(&self) -> Bytes {
+	/// over an AAC-LC core at half the output rate, mono under PS. A channel count that does
+	/// not pick a channelConfiguration is refused rather than written as another layout.
+	pub fn encode(&self) -> Result<Bytes> {
 		// audioObjectType is a 5-bit field; a wider type is masked, not escaped.
 		let profile = self.profile & 0x1F;
 
@@ -123,16 +133,16 @@ impl Config {
 				self.channel_count
 			};
 			write_sample_rate(&mut out, self.sample_rate / 2);
-			out.write(4, channel_config_from_count(channel_count).into());
+			out.write(4, channel_config_from_count(channel_count)?.into());
 			write_sample_rate(&mut out, self.sample_rate);
 			out.write(5, OBJECT_TYPE_LC.into());
 		} else {
 			write_sample_rate(&mut out, self.sample_rate);
-			out.write(4, channel_config_from_count(self.channel_count).into());
+			out.write(4, channel_config_from_count(self.channel_count)?.into());
 		}
 		// GASpecificConfig: frameLengthFlag, dependsOnCoreCoder, and extensionFlag, all clear.
 		out.write(3, 0);
-		Bytes::from(out.bytes)
+		Ok(Bytes::from(out.bytes))
 	}
 }
 
@@ -440,16 +450,18 @@ fn channel_count_from_config(channel_config: u8) -> Result<u32> {
 	}
 }
 
-/// Inverse of [`channel_count_from_config`]. Defaults to stereo for unsupported
-/// counts (channel configs > 7 are reserved).
-fn channel_config_from_count(channel_count: u32) -> u8 {
+/// Inverse of [`channel_count_from_config`] for the configurations a bare count names.
+///
+/// Counts 1 through 6 are that configuration. Eight channels are configuration 7, the
+/// 7.1 layout, so a configuration 12 or 14 source keeps its layout only through its
+/// verbatim AudioSpecificConfig. Any other count is refused rather than guessing speaker
+/// positions, including 7 and 24, which configurations 11 and 13 name alongside program
+/// config element layouts.
+fn channel_config_from_count(channel_count: u32) -> Result<u8> {
 	match channel_count {
-		1..=6 => channel_count as u8,
-		8 => 7,
-		_ => {
-			tracing::warn!(channel_count, "unsupported channel count, defaulting to stereo");
-			2
-		}
+		1..=6 => Ok(channel_count as u8),
+		8 => Ok(7),
+		_ => Err(Error::UnsupportedChannelCount(channel_count)),
 	}
 }
 
@@ -479,7 +491,7 @@ mod tests {
 			sample_rate: 44_056, // not in the standard table
 			channel_count: 2,
 		};
-		let encoded = cfg.encode();
+		let encoded = cfg.encode().unwrap();
 		assert_eq!(encoded.len(), 5, "explicit-rate config is 5 bytes");
 
 		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
@@ -508,7 +520,7 @@ mod tests {
 			sample_rate: 48000,
 			channel_count: 6,
 		};
-		let encoded = cfg.encode();
+		let encoded = cfg.encode().unwrap();
 		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
 		assert_eq!(parsed.channel_count, 6);
 	}
@@ -521,7 +533,7 @@ mod tests {
 			sample_rate: 48000,
 			channel_count: 8,
 		};
-		let encoded = cfg.encode();
+		let encoded = cfg.encode().unwrap();
 		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
 		assert_eq!(parsed.channel_count, 8, "7.1 surround should round-trip as 8 channels");
 	}
@@ -626,7 +638,7 @@ mod tests {
 			assert_eq!(cfg.profile, profile);
 			assert_eq!(cfg.sample_rate, 48_000, "the output rate, not the 24 kHz core");
 			assert_eq!(cfg.channel_count, 2, "stereo, including over a mono PS core");
-			assert_eq!(cfg.encode(), asc.as_slice(), "encode writes the core back");
+			assert_eq!(cfg.encode().unwrap(), asc.as_slice(), "encode writes the core back");
 		}
 
 		// A config naming SBR or PS but stopping before its extension rate has no output to name.
@@ -780,12 +792,66 @@ mod tests {
 			sample_rate: 44_100,
 			channel_count: 2,
 		}
-		.encode();
+		.encode()
+		.unwrap();
 		assert_eq!(asc, encoded);
 	}
 
 	#[test]
-	fn unsupported_channel_count_falls_back_to_stereo_config() {
-		assert_eq!(channel_config_from_count(9), 2);
+	fn encode_names_only_channel_configurations() {
+		// 48 kHz AAC-LC. Frequency index 3's low bit sits in the second byte, then the
+		// channelConfiguration, so that byte is 0x80 plus the configuration shifted by 3.
+		for count in 1..=8 {
+			let encoded = Config {
+				profile: 2,
+				sample_rate: 48_000,
+				channel_count: count,
+			}
+			.encode();
+			let config = match count {
+				1..=6 => count as u8,
+				8 => 7,
+				_ => {
+					assert!(matches!(encoded, Err(Error::UnsupportedChannelCount(got)) if got == count));
+					continue;
+				}
+			};
+			let encoded = encoded.unwrap();
+			assert_eq!(encoded.as_ref(), &[0x11, 0x80 | (config << 3)], "{count} channels");
+			assert_eq!(Config::parse(&mut encoded.as_ref()).unwrap().channel_count, count);
+		}
+
+		// One past the configurations a count names, plus zero and 22.2 (configuration 13).
+		for count in [0, 9, 24] {
+			assert!(matches!(
+				Config {
+					profile: 2,
+					sample_rate: 48_000,
+					channel_count: count,
+				}
+				.encode(),
+				Err(Error::UnsupportedChannelCount(got)) if got == count
+			));
+		}
+	}
+
+	#[test]
+	fn catalog_synthesis_refuses_an_unnameable_count() {
+		let err = hang::catalog::AudioConfig::try_from(Config {
+			profile: 2,
+			sample_rate: 48_000,
+			channel_count: 7,
+		})
+		.unwrap_err();
+		assert!(matches!(err, Error::UnsupportedChannelCount(7)));
+	}
+
+	#[test]
+	fn verbatim_config_keeps_a_program_config_element() {
+		// Encode refuses seven channels. Import keeps the element instead of re-encoding.
+		let asc = pce_asc(2, &[false, true], &[true], &[true], 0);
+		let audio = config(&asc).unwrap();
+		assert_eq!(audio.channel_count, 7);
+		assert_eq!(audio.description.as_deref(), Some(asc.as_slice()));
 	}
 }

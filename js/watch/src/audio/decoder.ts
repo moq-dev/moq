@@ -21,7 +21,7 @@ import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
-import { AUTO_MAX_AGE, ringSamples, target } from "./latency";
+import { AUTO_MAX_DELAY, ringSamples, target } from "./latency";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -122,8 +122,8 @@ export class Decoder {
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Time.Milli | undefined>(undefined);
 
-	// The subscription's max age: the shared budget, raised to the estimator's ceiling in "auto".
-	#subscribeMaxAge = new Signal<Time.Milli>(Time.Milli.zero);
+	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
+	#subscribeMaxDelay = new Signal<Time.Milli>(Time.Milli.zero);
 
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
 	#frame = new Signal<Time.Milli | undefined>(undefined);
@@ -167,7 +167,7 @@ export class Decoder {
 			(effect) => effect.get(this.source.out.config) === undefined && effect.get(this.#out.stalled),
 		);
 
-		this.#signals.run(this.#runSubscribeMaxAge.bind(this));
+		this.#signals.run(this.#runSubscribeMaxDelay.bind(this));
 		this.#signals.run(this.#runShape.bind(this));
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
@@ -178,10 +178,10 @@ export class Decoder {
 	// A group the relay expires is never observed, so a subscription cut to the target would cap the
 	// estimate at the target it already holds. The container consumer keeps the shared budget as its
 	// local skip, since it observes each frame before applying it. See doc/concept/audio-jitter.md.
-	#runSubscribeMaxAge(effect: Effect): void {
-		const maxAge = effect.get(this.sync.out.maxAge);
+	#runSubscribeMaxDelay(effect: Effect): void {
+		const maxDelay = effect.get(this.sync.out.maxDelay);
 		const auto = effect.get(this.sync.in.delay) === "auto";
-		this.#subscribeMaxAge.set(auto ? Time.Milli.max(maxAge, AUTO_MAX_AGE) : maxAge);
+		this.#subscribeMaxDelay.set(auto ? Time.Milli.max(maxDelay, AUTO_MAX_DELAY) : maxDelay);
 	}
 
 	#runShape(effect: Effect): void {
@@ -207,6 +207,9 @@ export class Decoder {
 		// This is less efficient for video-only playback but makes muting/unmuting instant.
 		const shape = effect.get(this.#shape);
 		if (!shape) return;
+		// Rendition absence keeps the graph warm, but a disabled broadcast releases its resources.
+		const broadcast = effect.get(this.source.in.broadcast);
+		if (!broadcast || !effect.get(broadcast.in.enabled)) return;
 
 		const { sampleRate, channels: channelCount } = shape;
 
@@ -352,7 +355,7 @@ export class Decoder {
 			broadcast: active,
 			track,
 			priority: Catalog.PRIORITY.audio,
-			maxAge: this.#subscribeMaxAge,
+			maxDelay: this.#subscribeMaxDelay,
 		});
 		if (!sub) return;
 
@@ -373,7 +376,7 @@ export class Decoder {
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
 			format,
-			maxAge: this.sync.out.maxAge,
+			maxDelay: this.sync.out.maxDelay,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -491,7 +494,7 @@ export class Decoder {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			maxAge: this.sync.out.maxAge,
+			maxDelay: this.sync.out.maxDelay,
 		});
 		effect.cleanup(() => consumer.close());
 

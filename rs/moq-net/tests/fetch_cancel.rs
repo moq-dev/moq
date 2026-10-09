@@ -47,7 +47,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 
 	let consumer = nodes[relays as usize]
 		.consume()
-		.request_broadcast("room")
+		.request_broadcast("room", None)
 		.await
 		.unwrap();
 	let track = consumer.track("video").unwrap();
@@ -171,7 +171,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	broadcast.announce(Default::default()).unwrap();
 	moq_net_sim::sleep(Duration::from_secs(1)).await;
 
-	let consumer = relay.consume().request_broadcast("room").await.unwrap();
+	let consumer = relay.consume().request_broadcast("room", None).await.unwrap();
 	let mut waiting = Box::pin(consumer.track("video").unwrap().fetch_group(0, None));
 	let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the track request reaches the publisher"),

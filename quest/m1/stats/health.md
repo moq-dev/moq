@@ -53,11 +53,10 @@ Guidance, to be settled while building:
 - Lives beside the snapshot types in `hang` and `@moq/hang` unless building
   it shows a better home.
 
-Open, for the maintainer (the same question is recorded in
-[QoS](/quest/m1/qos/README.md)): whether anything computes a per-broadcast
-verdict combining client reports, the relay's starvation, and publisher
-timeliness, and where it would live. Nothing here depends on the answer, and
-no quest promises it until it is decided.
+A per-broadcast verdict combining client reports, the relay's starvation,
+and publisher timeliness lives in moq.pro's
+[health badge](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/qos/badge.md),
+not here.
 
 Prove a degrading publisher self-report, a degrading viewer report, a stale
 report going unknown, and a counter reset by both a decrease and an epoch
@@ -72,6 +71,7 @@ Public API: new health types in `hang` and `@moq/hang`. Wire: none.
 ## Related
 
 - [moq.pro: connection health](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/qos-connection-health.md) - the per-project view built on this model
-- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, which a combined verdict would also read (open above)
+- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, which moq.pro's combined verdict also reads
+- [moq.pro: health badge](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/qos/badge.md) - the per-broadcast verdict combining this one with relay lag and publisher timeliness
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a new epoch is one way a counter reset shows
 - [TS health counters](/quest/m2/ts-health-stats.md) - container counters kept out of the verdict

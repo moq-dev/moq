@@ -63,8 +63,9 @@ export interface Config {
 
 // Signals the encoder reads.
 export type EncoderInput = {
-	// Whether to publish (and encode) this rendition. Defaults to true. When false the rendition drops out of the
-	// catalog and stops encoding, but stays registered so a subscriber still gets an idle track.
+	// Whether to encode this rendition. Defaults to true. When false it stops encoding but stays in the
+	// catalog with `enabled: false` and its last config, and stays registered so a subscriber still gets
+	// an idle track.
 	enabled: Getter<boolean>;
 
 	// The broadcast to register the rendition on. Undefined resolves the config for a local preview
@@ -86,7 +87,8 @@ export type EncoderProps = Inputs<EncoderInput> & {
 };
 
 type EncoderOutput = {
-	// The catalog config published for this rendition, or undefined while disabled.
+	// The catalog config published for this rendition, `enabled: false` while disabled, or undefined
+	// until one resolves.
 	catalog: Signal<Catalog.VideoConfig | undefined>;
 	// The resolved WebCodecs config (codec, bitrate, dimensions), available even with no subscriber.
 	// Exposed so a local preview can re-encode with identical settings to mirror the wire output.
@@ -166,12 +168,15 @@ export class Encoder {
 	readonly settled: Computed<boolean>;
 
 	#signals = new Effect();
-	#stalled = new Catalog.Stalled.Detector();
-	#firstCaptured?: Time.Micro;
-	#lastCaptured?: Time.Micro;
-	#lastAccepted?: Time.Micro;
-	#lastCaptureWall?: number;
 	#estimator = new Estimator();
+	// The estimator's jitter and delay, republished whenever either rises.
+	#estimate = new Signal<Estimator["estimate"]>({});
+	// The last config published while enabled, which a disabled rendition keeps advertising.
+	#last?: Catalog.VideoConfig;
+	// Whether the rendition was disabled since a config last resolved, so it keeps advertising `#last`
+	// as disabled until the re-enabled capture resolves a new one. A capture that never reopens leaves
+	// it disabled, which is accurate: no frames are coming.
+	#paused = false;
 
 	constructor(name: string, props?: EncoderProps) {
 		this.name = name;
@@ -233,7 +238,7 @@ export class Encoder {
 		const rendition = broadcast.video(this.name);
 		effect.cleanup(() => rendition.close());
 
-		// Publish the resolved catalog config; undefined (while disabled) drops it from the catalog.
+		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
 
 		// Encode only while enabled and a subscriber is attached (the demand gate).
@@ -241,10 +246,7 @@ export class Encoder {
 			const enabled = effect.get(this.in.enabled);
 			const track = effect.get(rendition.track);
 			effect.set(this.#out.active, enabled && !!track, false);
-			if (!enabled || !track) {
-				this.#observe({ demand: false, idle: true });
-				return;
-			}
+			if (!enabled || !track) return;
 
 			this.#encode(track, broadcast.baseline, effect);
 		});
@@ -279,25 +281,13 @@ export class Encoder {
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
 	#encode(track: Moq.Track.Producer, baseline: Baseline, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
-		if (!capture) {
-			this.#observe({ demand: true, idle: true });
-			return;
-		}
-
-		this.#observe({ demand: false, idle: true });
-		this.#lastCaptureWall = performance.now();
+		if (!capture) return;
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
-		// The broadcast owns this static track across demand gaps. When demand disappears, close the
-		// current group, marking the break so a later subscriber resumes on the same track without
-		// the pre-gap group reading as live. A fatal encoder error still aborts the track through
-		// producer.close(err) below.
-		effect.cleanup(() => {
-			if (track.closed.peek() === undefined) producer.discontinuity();
-		});
 
 		let lastKeyframe: Time.Micro | undefined;
 		let lastEncoded: Time.Micro | undefined;
+		let tearingDown = false;
 
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
@@ -315,24 +305,25 @@ export class Encoder {
 
 					producer.encode(frame, frame.timestamp as Time.Micro, key);
 					if (this.#estimator.flush(frame.timestamp, baseline)) {
-						const catalog = this.#out.catalog.peek();
-						if (catalog) this.#out.catalog.set({ ...catalog, ...this.#estimator.estimate });
+						this.#estimate.set({ ...this.#estimator.estimate });
 					}
-					this.#lastAccepted = frame.timestamp as Time.Micro;
-					this.#observe({ demand: true, idle: false, frame: true });
 				},
 				error: (err: Error) => {
-					producer.close(err);
+					// The black keyframe is cosmetic; failing it must not end the track the broadcast owns.
+					if (tearingDown) console.warn("video encoder failed while stopping:", err);
+					else producer.close(err);
 				},
 			});
 
-			effect.cleanup(() => encoder.close());
-
+			// What the encoder was last configured with. The resolved config clears on disable, before
+			// the black keyframe below is encoded.
+			let configured: VideoEncoderConfig | undefined;
 			effect.run((effect) => {
 				const config = effect.get(this.out.resolved);
 				if (!config) return;
 
 				encoder.configure(config);
+				configured = config;
 			});
 
 			effect.run((effect) => {
@@ -368,11 +359,6 @@ export class Encoder {
 								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
 							}
 							lastEncoded = frame.timestamp as Time.Micro;
-							const captured = frame.timestamp as Time.Micro;
-							this.#firstCaptured ??= captured;
-							this.#lastCaptured = captured;
-							this.#lastCaptureWall = performance.now();
-							this.#observe({ demand: true, idle: false });
 
 							const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
 
@@ -396,52 +382,56 @@ export class Encoder {
 					}
 				});
 			});
+
+			// Teardown is ours rather than a cleanup, since disabling first encodes one black keyframe and
+			// has to wait for it. A viewer that predates `enabled` keeps selecting a disabled rendition,
+			// and shows black instead of a frozen picture.
+			await new Promise((resolve) => effect.abort.addEventListener("abort", resolve, { once: true }));
+			tearingDown = true;
+			try {
+				const config = configured;
+				if (
+					!this.in.enabled.peek() &&
+					config &&
+					lastEncoded !== undefined &&
+					encoder.state === "configured" &&
+					track.closed.peek() === undefined
+				) {
+					// One frame interval after the last picture, in whole microseconds like any VideoFrame.
+					const interval = Time.Micro.fromSecond((1 / (config.framerate ?? 30)) as Time.Second);
+					const frame = black(config, Math.round(lastEncoded + interval));
+					try {
+						encoder.encode(frame, { keyFrame: true });
+					} finally {
+						frame.close();
+					}
+					// A rejected flush already reported through the error callback.
+					await encoder.flush().catch(() => {});
+				}
+			} finally {
+				if (encoder.state !== "closed") encoder.close();
+				// The broadcast owns this static track across demand gaps. Close the current group, marking
+				// the break so a later subscriber resumes on the same track without the pre-gap group reading
+				// as live. A fatal encoder error still aborts the track through producer.close(err) above.
+				if (track.closed.peek() === undefined) producer.discontinuity();
+			}
 		});
-
-		effect.interval(() => this.#observe({ demand: true, idle: false }), 50);
 	}
 
-	#observe(state: { demand: boolean; idle: boolean; frame?: boolean }): void {
-		if (state.idle) {
-			this.#firstCaptured = undefined;
-			this.#lastCaptured = undefined;
-			this.#lastAccepted = undefined;
-			this.#lastCaptureWall = undefined;
-		}
-		const catalog = this.#out.catalog.peek();
-		const mediaLag = ((): Time.Micro => {
-			if (this.#lastCaptured === undefined || this.#firstCaptured === undefined) return 0 as Time.Micro;
-			const accepted = this.#lastAccepted ?? this.#firstCaptured;
-			return Math.max(0, this.#lastCaptured - accepted) as Time.Micro;
-		})();
-		const quiet =
-			this.#lastCaptureWall === undefined
-				? (0 as Time.Micro)
-				: Time.Micro.fromMilli((performance.now() - this.#lastCaptureWall) as Time.Milli);
-		if (
-			!this.#stalled.observe({
-				frame: state.frame ?? false,
-				mediaLag,
-				quiet,
-				interval: Catalog.Stalled.intervalFromFps(catalog?.framerate ?? this.out.resolved.peek()?.framerate),
-				demand: state.demand,
-				idle: state.idle,
-			})
-		) {
-			return;
-		}
-		if (!catalog) return;
-		this.#out.catalog.set({ ...catalog, stalled: this.#stalled.flag() });
-	}
-
-	// Returns the catalog for the configured settings, or undefined while disabled / unresolved.
+	// Publishes the catalog for the configured settings. A disabled rendition keeps its last config,
+	// since muting also releases the capture it would resolve a new one from. It stays disabled after
+	// re-enabling until the reopened capture resolves, so an unmute is one field changing too.
 	#runCatalog(effect: Effect): void {
+		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled);
-		const live = effect.get(this.#live);
-		if (!enabled || !live) {
-			effect.set(this.#out.catalog, undefined);
+		if (!enabled) this.#paused = true;
+		const live = enabled ? effect.get(this.#live) : undefined;
+		if (!live) {
+			const last = this.#paused ? this.#last : undefined;
+			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
 			return;
 		}
+		this.#paused = false;
 
 		// Advertise the codec string the probe's encoder reported rather than the one we configured,
 		// so it names the profile and level the bitstream actually carries.
@@ -454,10 +444,10 @@ export class Encoder {
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
 			container: { kind: "legacy" } as const,
-			...this.#estimator.estimate,
-			stalled: this.#stalled.flag(),
+			...estimate,
 		};
 
+		this.#last = catalog;
 		effect.set(this.#out.catalog, catalog);
 	}
 
@@ -720,6 +710,16 @@ function ceiling(codec: string, dimensions: { width: number; height: number }, t
 	// Refuse a bad knob here, before the browser coerces it into an unsigned bitrate.
 	if (!(capped > 0)) throw new Error(`bitrate must be positive: ${capped}`);
 	return capped;
+}
+
+// One black I420 picture the size of `config`, in limited range like most encoders expect.
+function black(config: VideoEncoderConfig, timestamp: number): VideoFrame {
+	const { width, height } = config;
+	const luma = width * height;
+	const data = new Uint8Array((luma * 3) / 2);
+	data.fill(0x10, 0, luma);
+	data.fill(0x80, luma);
+	return new VideoFrame(data, { format: "I420", codedWidth: width, codedHeight: height, timestamp });
 }
 
 // Encode one frame with a throwaway encoder and return the codec string it reports, like

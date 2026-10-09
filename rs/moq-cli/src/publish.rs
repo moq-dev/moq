@@ -394,13 +394,13 @@ impl Publish {
 		})
 	}
 
-	/// Advertise the broadcast's path, now that the catalog tracks are in place.
-	pub fn announce(&self) -> anyhow::Result<()> {
+	/// Advertise the broadcast's path under `epoch`, now that the catalog tracks are in place.
+	pub fn announce(&self, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 		let Some(broadcast) = &self.broadcast else {
 			return Ok(());
 		};
 		broadcast
-			.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
+			.announce(moq_net::origin::Route::default().with_epoch(epoch))
 			.context("failed to announce broadcast")
 	}
 
@@ -633,7 +633,10 @@ pub(crate) mod tests {
 	/// `next()` blocks, surfaced here as a timeout once the buffered frames are gone.
 	async fn drain(mut exporter: Export<tscat::Ext>) -> Vec<u8> {
 		let mut out = Vec::new();
-		while let Ok(res) = tokio::time::timeout(Duration::from_millis(500), exporter.next()).await {
+		// Past the export's release delay and the send-ahead window behind it, so the first
+		// frame goes out before it ends.
+		let wait = RECORDING_MAX_AGE * 3 + Duration::from_secs(1);
+		while let Ok(res) = tokio::time::timeout(wait, exporter.next()).await {
 			match res.expect("exporter error") {
 				Some(frame) => out.extend_from_slice(&frame.payload),
 				None => break,
@@ -677,12 +680,12 @@ pub(crate) mod tests {
 			.tracks
 			.insert(section.name().to_string(), section_track);
 		let mut section_producer = Producer::new(section, Container::Legacy(moq_mux::container::Kind::Data));
-		// bbb's first video keyframe is at 1.4 s; stamp the ancillary streams just after
-		// it so they clear the export's keyframe alignment (anything before the first
-		// keyframe is dropped on tune-in).
+		// The export joins each media track at its newest group, bbb's last at about
+		// 1.446 s; stamp the ancillary streams just after it so they clear the keyframe
+		// alignment (anything before the first keyframe is dropped on tune-in).
 		section_producer
 			.write(Frame {
-				timestamp: Timestamp::from_millis(1410).unwrap(),
+				timestamp: Timestamp::from_millis(1450).unwrap(),
 				duration: None,
 				payload: bytes::Bytes::from_static(CUE),
 				keyframe: true,
@@ -710,7 +713,7 @@ pub(crate) mod tests {
 		let mut pes_producer = Producer::new(pes, Container::Legacy(moq_mux::container::Kind::Data));
 		pes_producer
 			.write(Frame {
-				timestamp: Timestamp::from_millis(1410).unwrap(),
+				timestamp: Timestamp::from_millis(1450).unwrap(),
 				duration: None,
 				payload: bytes::Bytes::from_static(PES_PAYLOAD),
 				keyframe: true,
@@ -730,16 +733,13 @@ pub(crate) mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
-				.with_max_age(RECORDING_MAX_AGE),
+				.with_delay(RECORDING_MAX_AGE),
 		)
 		.await
 	}
 
-	/// The media track's full retention window, so an exporter started after publishing
-	/// can still read every retained group. These tests publish a whole feed before
-	/// exporting it, which the default
-	/// [`Duration::ZERO`] collapses to the live edge:
-	/// completeness has to be asked for, exactly as a real recorder does.
+	/// The export's delay, long enough to reach the ancillary tracks: these tests publish a
+	/// whole feed before exporting it, and the media tracks start at their newest group.
 	const RECORDING_MAX_AGE: std::time::Duration = Duration::from_secs(30);
 	/// Full CLI round-trip over the hang catalog.
 	#[tokio::test(start_paused = true)]
@@ -784,7 +784,7 @@ pub(crate) mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), format)
 				.await
 				.unwrap()
-				.with_max_age(RECORDING_MAX_AGE),
+				.with_delay(RECORDING_MAX_AGE),
 		)
 		.await;
 

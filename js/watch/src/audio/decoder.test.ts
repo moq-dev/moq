@@ -191,7 +191,9 @@ async function play(initial: Delay) {
 		numberOfChannels: 2,
 	});
 	const catalog = new Signal<Catalog.Root>({ audio: { renditions: { audio } } });
+	const enabled = new Signal(true);
 	const broadcast = new Signal<Broadcast | undefined>({
+		in: { enabled },
 		out: { catalog },
 		relativeBroadcast,
 	} as unknown as Broadcast);
@@ -216,9 +218,18 @@ async function play(initial: Delay) {
 
 	return {
 		delay,
+		enabled,
+		context: decoder.out.context,
 		play,
 		// Remove the rendition from the catalog, then restore it.
 		remove: () => catalog.set({}),
+		// Keep the rendition in the catalog with `enabled: false`, as a muted publisher does.
+		disable: () =>
+			catalog.set({
+				audio: { renditions: { audio: Catalog.AudioConfigSchema.parse({ ...audio, enabled: false }) } },
+			}),
+		// The rendition the source selected.
+		track: () => source.out.track.peek(),
 		restore: (patch: Record<string, unknown> = {}) =>
 			catalog.set({ audio: { renditions: { audio: Catalog.AudioConfigSchema.parse({ ...audio, ...patch }) } } }),
 		// Serve another broadcast from the next subscription, its timeline starting over.
@@ -246,6 +257,29 @@ async function play(initial: Delay) {
 		},
 	};
 }
+
+describe("Decoder across a broadcast disable", () => {
+	it("releases the graph when its broadcast is disabled and rebuilds on return", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const [context] = contexts;
+
+			playback.enabled.set(false);
+			await microtasks();
+			expect(context.calls.close).toBe(1);
+			expect(playback.context.peek()).toBeUndefined();
+
+			playback.enabled.set(true);
+			await microtasks();
+			expect(contexts).toHaveLength(2);
+			expect(contexts[1].state).toBe("running");
+			expect(playback.context.peek()).toBe(contexts[1] as unknown as AudioContext);
+		} finally {
+			playback.close();
+		}
+	});
+});
 
 describe("Decoder across a delay change", () => {
 	for (const initial of [Time.Milli(100), "auto"] as const) {
@@ -348,6 +382,30 @@ describe("Decoder across a rendition's absence", () => {
 			expect(playback.subscriptions()).toBe(2);
 			expect(playback.rings()).toEqual([ring]);
 			expect(playback.inserted().slice(before)).toEqual(timestamps.slice(3));
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("deselects a disabled rendition and keeps one graph across disable and enable", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play(12);
+			expect(playback.track()).toBe("audio");
+
+			playback.disable();
+			await microtasks();
+			expect(playback.track()).toBeUndefined();
+			expect(contexts).toHaveLength(1);
+
+			playback.restore();
+			await microtasks();
+			expect(playback.track()).toBe("audio");
+			await playback.play(6);
+
+			expect(contexts).toHaveLength(1);
+			expect(contexts[0].calls.close).toBe(0);
+			expect(playback.subscriptions()).toBe(2);
 		} finally {
 			playback.close();
 		}

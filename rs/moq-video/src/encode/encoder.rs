@@ -88,13 +88,15 @@ impl Gop {
 
 /// How an encoder trades latency for compression at the configured bitrate.
 ///
-/// Bitrate is set separately, via [`Config::bitrate`]. No preset reorders
-/// frames (no B-frames) or queues them without bound: they differ only in the
+/// Bitrate is set separately, via [`Config::bitrate`]. Presets differ in the
 /// codec effort spent per frame and the buffering the backend allows. Each
 /// backend maps a preset onto the controls it actually has, so two presets can
-/// apply the same controls on one backend; [`Encoder::applied`] reports what
-/// took effect. A preset describes the encoder alone, not keyframe join time,
-/// transport delay, or viewer playout.
+/// apply the same controls on one backend, and some backends cannot rule out
+/// frame reordering or queueing: V4L2 leaves both to the driver, and
+/// MediaCodec's no-B-frame setting is only a hint. [`Encoder::applied`] reports
+/// what took effect, and only a reported [`Applied::preset`] confirms it. A
+/// preset describes the encoder alone, not keyframe join time, transport delay,
+/// or viewer playout.
 ///
 /// `#[non_exhaustive]` so a later policy can be added without breaking a
 /// `match`.
@@ -156,7 +158,7 @@ impl Applied {
 }
 
 /// Encoder configuration. `width` / `height` / `framerate` are the encoded
-/// output; input frames must already be at this resolution.
+/// output; external Vulkan frames are scaled by the backend on their GPU.
 ///
 /// `#[non_exhaustive]`: build via [`Config::new`] and set the optional fields,
 /// so future knobs don't break callers.
@@ -186,6 +188,10 @@ pub struct Config {
 	/// Set it only when feeding frames the crate did not convert and whose space
 	/// you know from elsewhere.
 	pub color: Option<Color>,
+	/// External Vulkan input device, required before opening a GPU-only encoder.
+	/// `None` retains selection for CPU and native decoder/capture surfaces.
+	#[cfg(target_os = "linux")]
+	pub input: Option<crate::frame::vulkan::Device>,
 }
 
 impl Config {
@@ -202,6 +208,8 @@ impl Config {
 			kind: Kind::Auto,
 			preset: Preset::default(),
 			color: None,
+			#[cfg(target_os = "linux")]
+			input: None,
 		}
 	}
 
@@ -321,6 +329,8 @@ pub struct Encoder {
 	/// rather than applied immediately because the caller decides a group
 	/// boundary before it has the frame that opens it.
 	pending_cut: bool,
+	#[cfg(target_os = "linux")]
+	input: Option<crate::frame::vulkan::Device>,
 	/// Keeps direct use bound to the constructing thread, regardless of backend.
 	_thread_bound: PhantomData<Rc<()>>,
 }
@@ -345,6 +355,8 @@ impl Encoder {
 			applied,
 			color: config.resolved_color(),
 			pending_cut: false,
+			#[cfg(target_os = "linux")]
+			input: config.input,
 			_thread_bound: PhantomData,
 		})
 	}
@@ -360,7 +372,7 @@ impl Encoder {
 		&self.applied
 	}
 
-	/// The resolution this encoder emits, which every frame fed to it must match.
+	/// The resolution this encoder emits; external Vulkan inputs may be larger.
 	pub fn size(&self) -> Size {
 		self.size
 	}
@@ -448,15 +460,31 @@ impl Encoder {
 	/// A GPU surface feeds a hardware encoder on the same device directly
 	/// (NVDEC -> NVENC never leaves the GPU, a `CVPixelBuffer` goes straight to
 	/// VideoToolbox); anything else falls back to a CPU I420 upload. The frame must
-	/// already be at the encoder's resolution: scale it with
+	/// already be at the encoder's resolution, except external Vulkan inputs
+	/// which the backend scales on the GPU. Scale other surfaces with
 	/// [`Frame::resize`](crate::Frame::resize), which
 	/// [`decode::Config::scale_hint`](crate::decode::Config::scale_hint) lets a
 	/// hardware decoder make a no-op.
 	pub fn encode(&mut self, frame: &Frame) -> Result<Vec<Encoded>, Error> {
 		// A transposed frame is why this compares the shape rather than a byte
 		// count: 240x320 and 320x240 hold the same number of bytes.
+		#[cfg(target_os = "linux")]
+		let external = if let crate::Surface::Vulkan(image) = &frame.surface {
+			let device = image.image().device;
+			if self.input != Some(device) {
+				return Err(Error::Unsupported(format!(
+					"external Vulkan {device} does not match encoder input {:?}",
+					self.input
+				)));
+			}
+			true
+		} else {
+			false
+		};
+		#[cfg(not(target_os = "linux"))]
+		let external = false;
 		let size = frame.size();
-		if size != self.size {
+		if !external && size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"frame {size} does not match encoder {}",
 				self.size
@@ -1105,6 +1133,8 @@ mod tests {
 			applied: Applied::default(),
 			color: config.resolved_color(),
 			pending_cut: false,
+			#[cfg(target_os = "linux")]
+			input: None,
 			_thread_bound: PhantomData,
 		}
 	}
@@ -1558,5 +1588,69 @@ mod tests {
 				);
 			}
 		}
+	}
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod external_tests {
+	use super::*;
+	use crate::frame::vulkan::{Device, Format, Handles, Image, Memory, Slot, Timeline};
+	use std::os::unix::net::UnixStream;
+
+	fn device() -> Device {
+		Device {
+			device_uuid: [0xaa; 16],
+			driver_uuid: [0xbb; 16],
+			render_node: None,
+		}
+	}
+
+	#[tokio::test]
+	async fn unknown_external_device_is_refused_at_open_and_probe() {
+		let mut config = Config::new(320, 240, Rate::new(30, 1).unwrap());
+		config.input = Some(device());
+		let error = match Encoder::new(&config) {
+			Ok(_) => panic!("opened an unrelated device"),
+			Err(error) => error,
+		};
+		assert!(error.to_string().contains(&device().to_string()), "{error}");
+		let error = config.probe().await.unwrap_err();
+		assert!(error.to_string().contains(&device().to_string()), "{error}");
+		config.kind = Kind::Software;
+		assert!(matches!(Encoder::new(&config), Err(Error::NoEncoder(_))));
+	}
+
+	#[test]
+	fn refuses_external_frame_on_an_encoder_without_that_device() {
+		let config = {
+			let mut config = Config::new(320, 240, Rate::new(30, 1).unwrap());
+			config.kind = Kind::Named("probe".into());
+			config
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+		let (memory, timeline) = UnixStream::pair().unwrap();
+		let slot = Slot::new(
+			Handles {
+				memory: memory.into(),
+				timeline: timeline.into(),
+			},
+			Image {
+				device: device(),
+				memory: Memory::OpaqueFd { memory_type: 0 },
+				size: config.size(),
+				allocation_size: 4096,
+				format: Format::Rgba8,
+			},
+			(),
+		)
+		.unwrap();
+		let (image, _) = slot.publish(Timeline::new(1, 2).unwrap()).unwrap();
+		let frame = Frame::new(
+			crate::Surface::Vulkan(image),
+			moq_net::Timestamp::from_micros(0).unwrap(),
+		);
+		let error = encoder.encode(&frame).unwrap_err();
+		assert!(error.to_string().contains(&device().to_string()), "{error}");
+		assert!(frame.surface.to_i420().is_err());
 	}
 }

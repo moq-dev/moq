@@ -173,10 +173,10 @@ impl<O: Output> Media<O> {
 					// doubles as the staleness budget on the wire. With no speaker to
 					// follow, the playhead is video's own, so waiting on the audio
 					// estimate's budget would only freeze the picture.
-					let max_age = if snapshot.audio.renditions.is_empty() {
+					let max_delay = if snapshot.audio.renditions.is_empty() {
 						self.args.video_delay()
 					} else {
-						self.args.max_age()
+						self.args.max_delay()
 					};
 					let opened = async {
 						let decoder = moq_video::decode::Sink::open(&config, &Default::default()).await?;
@@ -185,7 +185,7 @@ impl<O: Output> Media<O> {
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(hang::catalog::PRIORITY.video)
-									.with_max_age(max_age),
+									.with_max_delay(max_delay),
 							)
 							.await?;
 						// Start at the local live edge without asking the shared publisher
@@ -205,7 +205,7 @@ impl<O: Output> Media<O> {
 								frames: self.video.clone(),
 								changed: self.drained.clone(),
 								output: self.output.clone(),
-								max_age,
+								max_delay,
 							};
 							tasks.spawn(async move { (Kind::Video, video.run(track, decoder).await.map(|()| None)) });
 							playback.started(Kind::Video);
@@ -236,7 +236,7 @@ impl<O: Output> Media<O> {
 					// asked for, so a smaller budget would skip a group the playhead could
 					// still have reached, and would size the hole fill below to a playhead
 					// that does not exist.
-					decode.max_age = self.args.max_age().max(AUDIO_BUFFER_MIN);
+					decode.max_delay = self.args.max_delay().max(AUDIO_BUFFER_MIN);
 					decode.delay = self.args.fixed_delay();
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.
@@ -333,7 +333,7 @@ async fn play_audio<O: Output>(
 	// decoder's latency budget says: anything longer is what that budget chose to
 	// skip, so playing it as silence would hand back the delay the skip avoided.
 	// Past it the sink skips the hole and the clock re-anchors, as it does today.
-	let fill_max = samples(consumer.max_age());
+	let fill_max = samples(consumer.max_delay());
 
 	let mut timeline = AudioTimeline::default();
 
@@ -386,7 +386,7 @@ async fn play_audio<O: Output>(
 		// so a deeper target could never fill. The advertised floor needs the cap,
 		// being a number the publisher declared about itself, unbounded. The budget
 		// is also what the sink's ring was sized to hold.
-		let target = samples(consumer.delay().min(consumer.max_age()).max(AUDIO_BUFFER_MIN));
+		let target = samples(consumer.delay().min(consumer.max_delay()).max(AUDIO_BUFFER_MIN));
 		let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
 		dry = false;
 
@@ -619,13 +619,13 @@ mod tests {
 		});
 		let mut options = moq_video::decode::Options::new();
 		options.decoder.kind = moq_video::decode::Kind::Software;
-		options.max_age = delay;
+		options.max_delay = delay;
 		let decoder = moq_video::decode::Sink::open(&catalog, &options.decoder).await.unwrap();
 		let subscriber = broadcast
 			.consume()
 			.track("video")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_age(delay))
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
 			.await
 			.unwrap();
 		let track = moq_mux::container::Consumer::new(subscriber, Container::try_from(&catalog).unwrap());
@@ -639,7 +639,7 @@ mod tests {
 				frames: media.video.clone(),
 				changed: media.drained.clone(),
 				output: recorder.clone(),
-				max_age: delay,
+				max_delay: delay,
 			}
 			.run(track, decoder),
 		);

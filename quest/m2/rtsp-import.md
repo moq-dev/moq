@@ -45,7 +45,9 @@ Decided 2026-10-01:
   sharing it under a fresh epoch, per
   [Broadcast epochs](/quest/m0/broadcast-epoch/README.md), with a fresh
   catalog, tracks, and importers starting on a keyframe. The CLI publishes
-  each run (each reconnect) under a fresh epoch. Decided 2026-10-02 and
+  each run (each reconnect) under a fresh epoch, so `moq import rtsp` refuses
+  `--epoch` (`takes_epoch` is false for it, as for the other gateways); test
+  the refusal. Decided 2026-10-02 and
   2026-10-05; shifting timestamps onto the existing catalog clock behind a
   `discontinuity()` marker was rejected.
 - Credentials ride the URL's userinfo, as every RTSP tool takes them. retina
@@ -83,8 +85,6 @@ a new epoch, starting on a keyframe with its own catalog.
 Public API: the `moq-rtsp` crate and the `moq import rtsp` subcommand.
 Wire: none. Both are additive, so it is backported to `release` once it
 lands on main.
-
-The moq.pro guide link below resolves once moq.pro#2210 merges.
 
 ## Required
 

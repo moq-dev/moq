@@ -1018,7 +1018,7 @@ mod tests {
 		let (update, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
 		let bc = egress
-			.request_broadcast(moq_net::Path::new(update.prefix.as_str()))
+			.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None)
 			.await
 			.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();

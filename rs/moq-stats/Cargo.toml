@@ -12,6 +12,12 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "stats", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[features]
+# Exposes one producer tick to the producer_tick bench, through the hidden
+# `produce::bench` module, and moq-net's hidden counter bump. Off by default
+# and hidden from the docs. Not a supported API.
+bench = ["moq-net/fuzz"]
+
 [dependencies]
 moq-json = { workspace = true }
 moq-net = { workspace = true }
@@ -22,6 +28,7 @@ tracing = { workspace = true }
 web-async = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 
@@ -32,3 +39,9 @@ harness = false
 [[bench]]
 name = "aggregate"
 harness = false
+
+# Reaches the producer drain through the hidden `bench` module.
+[[bench]]
+name = "producer_tick"
+harness = false
+required-features = ["bench"]

@@ -45,6 +45,8 @@ struct State {
 	sequence: u64,
 	/// The timeline track ended: the broadcast is over (`EXT-X-ENDLIST`).
 	ended: bool,
+	/// Bumped whenever the window is cleared, so a latch on what it listed can tell it is stale.
+	resets: u64,
 }
 
 /// Numbers the broadcast's content timeline: the sequence bumps wherever the timeline breaks.
@@ -82,6 +84,28 @@ impl Discontinuities {
 	}
 }
 
+/// The most segments a playlist window lists, however short they are.
+///
+/// A fresh subscriber to a `moq-mux` timeline is only promised this many recent records (the
+/// checkpoint each timeline group restates), so an edge that joined long ago must not list more
+/// than one joining now, or the two would disagree on `EXT-X-MEDIA-SEQUENCE`. The dense-timeline
+/// test fails if the two drift apart.
+pub(crate) const MAX_SEGMENTS: usize = 256;
+
+/// Whether a window of `len` rows, whose rows after the oldest span `rest`, should drop its
+/// oldest: it lists more than [`MAX_SEGMENTS`], or the rest still covers `window` and still
+/// holds a start (`keeps_start`, see [`starts`]). A GOP longer than the window keeps its sync
+/// row, so the window stretches to that one GOP, and stays startable.
+pub(crate) fn evicts(window: Duration, len: usize, rest: Duration, keeps_start: bool) -> bool {
+	len > MAX_SEGMENTS || (len >= 2 && rest >= window && keeps_start)
+}
+
+/// Whether a player can start at a `reference` record: audio starts anywhere, video only at a
+/// group start that is a sync point.
+pub(crate) fn starts(reference: &(Kind, String), keyframe: bool, start: &hang::timeline::Position) -> bool {
+	reference.0 == Kind::Audio || (keyframe && start.frame == 0)
+}
+
 /// The rendition a broadcast's segment boundaries come from.
 pub(crate) type Reference = Arc<(Kind, String)>;
 
@@ -104,7 +128,8 @@ pub(crate) struct Row {
 	pub reference: Reference,
 	/// The reference record's frames, which the reference rendition serves as is.
 	pub frames: std::ops::Range<hang::timeline::Position>,
-	/// Whether the reference record starts on a keyframe.
+	/// Whether the reference record's first frame is a sync point, where a player can start
+	/// decoding (the record's `keyframe` flag).
 	pub keyframe: bool,
 	/// Presentation duration.
 	pub duration: Duration,
@@ -116,6 +141,19 @@ pub(crate) struct Row {
 	/// The broadcast's [`Discontinuities`] sequence for this record, shared by every rendition,
 	/// so renditions mark the same breaks however many segments each one skipped.
 	pub discontinuity: u64,
+}
+
+impl Row {
+	/// Whether the segment starts at a group start that is a sync point, so a player can begin
+	/// decoding with it.
+	pub fn starts_sync(&self) -> bool {
+		self.keyframe && self.frames.start.frame == 0
+	}
+
+	/// Whether a player can start at this segment (see [`starts`]).
+	fn starts(&self) -> bool {
+		starts(&self.reference, self.keyframe, &self.frames.start)
+	}
 }
 
 /// A consistent read of the window, for rendering one playlist (the serve path only).
@@ -178,15 +216,17 @@ impl Producer {
 				rows: VecDeque::new(),
 				sequence: 0,
 				ended: false,
+				resets: 0,
 			}),
 		}
 	}
 
-	/// Append a row, evicting the front of the window past `window`. With no `window`, only
-	/// source timeline pops remove rows.
-	pub fn push(&self, row: Row, window: Option<Duration>) {
+	/// Append a row, evicting the front of the window past `window` (see [`evicts`]). With no
+	/// `window`, only source timeline pops remove rows. Returns the window's
+	/// [`resets`](Self::resets) after the push.
+	pub fn push(&self, row: Row, window: Option<Duration>) -> u64 {
 		let Ok(mut state) = self.state.write() else {
-			return;
+			return u64::MAX;
 		};
 
 		if let Some(back) = state.rows.back() {
@@ -195,6 +235,7 @@ impl Producer {
 			if Duration::from(row.pts) < Duration::from(back.pts) || row.segment <= back.segment {
 				tracing::warn!("timeline jumped backwards; resetting the playlist window");
 				state.rows.clear();
+				state.resets += 1;
 			}
 		}
 		if state.rows.is_empty() {
@@ -203,17 +244,19 @@ impl Producer {
 
 		state.rows.push_back(row);
 
-		// Evict from the front while the remaining rows still cover the window.
-		while let Some(window) = window
-			&& state.rows.len() >= 2
-		{
-			let span = state.rows.back().unwrap().end.saturating_sub(state.rows[1].pts.into());
-			if span < window {
+		while let Some(window) = window {
+			let rest = match state.rows.get(1) {
+				Some(second) => state.rows.back().unwrap().end.saturating_sub(second.pts.into()),
+				None => Duration::ZERO,
+			};
+			let keeps_start = !state.rows[0].starts() || state.rows.iter().skip(1).any(Row::starts);
+			if !evicts(window, state.rows.len(), rest, keeps_start) {
 				break;
 			}
 			state.rows.pop_front();
 		}
 		state.sequence = state.rows.front().unwrap().segment;
+		state.resets
 	}
 
 	/// Remove rows whose source timeline indices fall within `range`.
@@ -239,7 +282,14 @@ impl Producer {
 	pub fn clear(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.rows.clear();
+			state.resets += 1;
 		}
+	}
+
+	/// How many times the window was cleared: by [`clear`](Self::clear), or a timeline that
+	/// jumped backwards.
+	pub fn resets(&self) -> u64 {
+		self.state.read().resets
 	}
 
 	/// Mark the timeline ended (it finished, or failed): the playlist gets
@@ -302,7 +352,7 @@ impl Producer {
 			.iter()
 			.rev()
 			.filter(|row| *row.reference == *reference)
-			.find(|row| row.keyframe && row.frames.start.frame == 0)
+			.find(|row| row.starts_sync())
 			.map(|row| row.frames.start.group)
 	}
 
@@ -328,6 +378,19 @@ impl Producer {
 			// Ready, or the channel closed (no more rows will arrive): stop waiting either way.
 			Poll::Ready(_) => Poll::Ready(()),
 			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Poll `f` over the listed rows, waking on the next window change while it is pending, and
+	/// return the [`resets`](Self::resets) those rows belong to. A closed window stays pending: no
+	/// new row can make `f` ready.
+	pub fn poll_rows(&self, waiter: &kio::Waiter, mut f: impl FnMut(&VecDeque<Row>) -> Poll<()>) -> Poll<u64> {
+		match self
+			.state
+			.poll_ref(waiter, |state| f(&state.rows).map(|()| state.resets))
+		{
+			Poll::Ready(Ok(resets)) => Poll::Ready(resets),
+			_ => Poll::Pending,
 		}
 	}
 
@@ -589,16 +652,16 @@ mod tests {
 	fn backwards_jump_resets_the_window() {
 		let live = Producer::new();
 		let window = Some(Duration::from_secs(30));
-		live.push(row(0, 0, 10_000, 2_000), window);
-		live.push(row(1, 1, 12_000, 2_000), window);
-		live.push(row(2, 2, 1_000, 2_000), window); // restart: pts rewound
+		assert_eq!(live.push(row(0, 0, 10_000, 2_000), window), 0);
+		assert_eq!(live.push(row(1, 1, 12_000, 2_000), window), 0);
+		assert_eq!(live.push(row(2, 2, 1_000, 2_000), window), 1); // restart: pts rewound
 
 		let snapshot = live.window();
 		assert_eq!(snapshot.segments.len(), 1, "the window restarted at the new row");
 		assert_eq!(snapshot.segments[0].segment, 2);
 
 		// A segment number that rewinds (a restarted publisher) resets the same way.
-		live.push(row(0, 0, 2_000, 2_000), window);
+		assert_eq!(live.push(row(0, 0, 2_000, 2_000), window), 2);
 		assert_eq!(live.window().segments.len(), 1);
 	}
 

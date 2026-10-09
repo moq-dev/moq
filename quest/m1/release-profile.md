@@ -49,3 +49,4 @@ Guidance:
 
 - [Size report](/quest/m1/size-report.md) - the nightly job that shows what this changes over time
 - [Bindings size profile](/quest/m1/ffi-size-profile.md) - the opt-level trade this quest leaves out
+- [Relay profiling](/quest/m1/perf/lock-profile.md) - the profiling recipe whose captures the `profiling` override keeps symbolized

@@ -38,7 +38,7 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")

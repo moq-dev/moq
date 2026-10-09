@@ -224,3 +224,8 @@ version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
 GROUP stream with frames, and re-encodes them byte for byte. Past 2^62-1 the
 range is per version: JS writes lite-07's 64-bit values, which Rust reads back,
 and JS refuses them on lite-06.
+
+`ietf_datagram_interop` does the same for moq-transport's `OBJECT_DATAGRAM` on
+drafts 14 through 22: `ietf-datagram.ts` decodes Rust's datagrams and their
+Timestamps and re-encodes them byte for byte, and Rust decodes the datagram the
+JS publisher sends.

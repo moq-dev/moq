@@ -226,7 +226,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 	});
 
 	const capture = new Capture({ source: input.source });
-	const track = new Moq.Track.Producer("video").accept();
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	// No subscriber yet, so the encoder idles while the source sends its only frame.
 	const live = new Signal<Moq.Track.Producer | undefined>(undefined);
 	const rendition = { config: new Signal(undefined), track: live, close: () => {} };

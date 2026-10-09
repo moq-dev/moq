@@ -45,7 +45,7 @@ mediacodec = ["dep:ndk"]
 # zero-copy transcode path. Everything is dlopen'd at runtime, so a build with
 # this on still links GPU-less and starts driverless, falling back to the next
 # encoder or decoder.
-nvidia = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
+nvidia = ["dep:ash", "dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # Vendored, statically linked software H.264 encode/decode. Enabled by default,
 # but separable from native codecs for hardware-only and minimal builds.
 openh264 = ["dep:openh264", "dep:openh264-sys2"]
@@ -164,6 +164,7 @@ objc2-video-toolbox = "0.3.2"
 ndk = { version = "0.9", optional = true, default-features = false, features = ["media", "api-level-26"] }
 
 [target.'cfg(target_os="linux")'.dependencies]
+ash = { workspace = true, optional = true }
 # xdg-desktop-portal ScreenCast and Camera negotiation for the `pipewire` feature
 # (pure Rust, zbus over DBus). The ScreenCast portal owns source selection: the
 # user picks a monitor in a compositor dialog, and we get back a PipeWire fd +

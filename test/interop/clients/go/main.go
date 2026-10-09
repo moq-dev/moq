@@ -28,8 +28,8 @@ import (
 
 const readChunk = 64 * 1024
 
-// SubscribeMedia max age: how much reordering the jitter buffer tolerates.
-const maxAgeUs = 1_000_000
+// SubscribeMedia max delay: how much reordering the jitter buffer tolerates.
+const maxDelayUs = 1_000_000
 
 // Synthetic audio: a 48 kHz mono tone, encoded as Opus.
 const (
@@ -201,7 +201,7 @@ func subscribe(ctx context.Context, url, broadcast string, timeout time.Duration
 		break
 	}
 
-	media, err := consumer.SubscribeMedia(ctx, name, video.Container, &moq.Subscription{MaxAgeUs: maxAgeUs})
+	media, err := consumer.SubscribeMedia(ctx, name, video.Container, &moq.Subscription{MaxDelayUs: maxDelayUs})
 	if err != nil {
 		return err
 	}

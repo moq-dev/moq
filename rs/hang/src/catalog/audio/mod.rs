@@ -54,6 +54,20 @@ impl Audio {
 	pub fn is_empty(&self) -> bool {
 		self.renditions.is_empty()
 	}
+
+	/// Iterate the renditions best first: enabled, then highest bitrate, then sample rate, then channel count.
+	///
+	/// A consumer that carries one rendition takes the first it supports, so the
+	/// choice doesn't depend on how the tracks are named. A disabled rendition sends
+	/// no frames, so it ranks below every enabled one. An unknown bitrate ranks
+	/// below a known one, and exact ties keep name order.
+	pub fn ranked(&self) -> impl Iterator<Item = (&String, &AudioConfig)> {
+		let mut ranked: Vec<_> = self.renditions.iter().collect();
+		ranked.sort_by_key(|(_, config)| {
+			std::cmp::Reverse((config.enabled, config.bitrate, config.sample_rate, config.channel_count))
+		});
+		ranked.into_iter()
+	}
 }
 
 /// Audio decoder configuration based on WebCodecs AudioDecoderConfig.
@@ -102,6 +116,14 @@ pub struct AudioConfig {
 	// The bitrate of the audio track in bits per second
 	#[serde(default)]
 	pub bitrate: Option<u64>,
+
+	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
+	/// must not select it. Only written when false.
+	#[serde(
+		default = "crate::catalog::enabled_default",
+		skip_serializing_if = "crate::catalog::enabled_skip"
+	)]
+	pub enabled: bool,
 
 	// Some codecs include a description so the decoder can be initialized without extra data.
 	// If not provided, there may be in-band metadata (marginally higher overhead).
@@ -157,6 +179,7 @@ impl AudioConfig {
 			sample_rate,
 			channel_count,
 			bitrate: None,
+			enabled: true,
 			description: None,
 			container: Container::default(),
 			jitter: None,
@@ -170,6 +193,33 @@ mod test {
 	use super::*;
 
 	#[test]
+	fn ranked_orders_by_enabled_then_bitrate_then_rate_then_channels() {
+		fn rendition(sample_rate: u32, channels: u32, bitrate: Option<u64>) -> AudioConfig {
+			let mut config = AudioConfig::new(AudioCodec::Opus, sample_rate, channels);
+			config.bitrate = bitrate;
+			config
+		}
+
+		let mut audio = Audio::default();
+		// Names sort the weaker renditions first, so name order alone would pick the wrong one.
+		audio.insert("a", rendition(48_000, 2, None)).unwrap();
+		audio.insert("b", rendition(48_000, 1, Some(64_000))).unwrap();
+		audio.insert("c", rendition(16_000, 1, Some(128_000))).unwrap();
+		audio.insert("d", rendition(48_000, 2, Some(64_000))).unwrap();
+		audio.insert("e", rendition(48_000, 2, Some(64_000))).unwrap();
+		audio.insert("f", rendition(44_100, 2, Some(64_000))).unwrap();
+		audio.insert("g", rendition(16_000, 1, None)).unwrap();
+
+		let names: Vec<_> = audio.ranked().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["c", "d", "e", "b", "f", "a", "g"]);
+
+		// A disabled rendition sends no frames, so it ranks below every enabled one.
+		audio.renditions.get_mut("c").unwrap().enabled = false;
+		let names: Vec<_> = audio.ranked().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["d", "e", "b", "f", "a", "g", "c"]);
+	}
+
+	#[test]
 	fn label_round_trips() {
 		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		config.label = Some("English".to_string());
@@ -178,5 +228,17 @@ mod test {
 		assert_eq!(encoded["label"], "English");
 		let decoded: AudioConfig = serde_json::from_value(encoded).expect("failed to decode");
 		assert_eq!(decoded.label.as_deref(), Some("English"));
+	}
+
+	#[test]
+	fn enabled_is_written_only_when_false() {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		assert!(serde_json::to_value(&config).unwrap().get("enabled").is_none());
+
+		config.enabled = false;
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert_eq!(encoded["enabled"], false);
+		let decoded: AudioConfig = serde_json::from_value(encoded).expect("failed to decode");
+		assert!(!decoded.enabled);
 	}
 }

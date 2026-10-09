@@ -4476,6 +4476,7 @@ dependencies = [
  "gst-plugin-version-helper",
  "gstreamer",
  "hang",
+ "moq-audio",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -4637,9 +4638,9 @@ version = "0.0.0"
 
 [[package]]
 name = "moq-noq"
-version = "2.0.1"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0a0e01b1f80b85d3400996c14d5f7b100f51c759ebd9eb17bff98213b3ee181"
+checksum = "c9f6a4bff164ee93937c76528b1183eb03a89158d4ffad9978ce02f92db18b42"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -4659,9 +4660,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-proto"
-version = "2.0.1"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "043408eb06c86268717797ff41835996cfdbb81796a62f20da069cf2ac974bde"
+checksum = "01fe577f261bf4d7f84c35f81028db0d26d47f17c45c3df6a012504c1773c6a2"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -4690,9 +4691,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-udp"
-version = "2.0.1"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ff631ac231644d3a309174c892c9f7eac89c0f396de5abca5a16c0267fa48f3"
+checksum = "70a7c34996db77a509617f12db2d735ad5ca013e2d01293e0339afac331f17a7"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -4904,6 +4905,7 @@ dependencies = [
 name = "moq-stats"
 version = "0.2.12"
 dependencies = [
+ "criterion",
  "futures",
  "moq-json",
  "moq-net",
@@ -5137,9 +5139,9 @@ dependencies = [
 
 [[package]]
 name = "mp4-atom"
-version = "0.16.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adf4a16eebb3eb223ad0f2d16f37ad276736cec3a74538954e5ce0aec2268467"
+checksum = "b6f6638ef4f165c7eb423d7ab9666fff423c8ab53f0dc67ec523aa49530729a7"
 dependencies = [
  "bytes",
  "derive_more 2.1.1",
@@ -10134,9 +10136,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-moq"
-version = "2.0.1"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ceedbe5bb53b8a6b915193c767d3c52b99925d9cadb3ef4f8d8bb643a2718f84"
+checksum = "5c84f87ce8e1cfaa50e9f0dfe0f6e8de31c9905388d68ca7cde984375ffc4891"
 dependencies = [
  "bytes",
  "futures",

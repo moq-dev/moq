@@ -6,6 +6,7 @@ import { createMockTransportPair, type MockTransport } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
+import { Timescale } from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { Connection, probeLevel } from "./connection.ts";
 import { Fetch } from "./fetch.ts";
@@ -209,7 +210,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		const origin = new Producer();
 		const broadcast = origin.createBroadcast(Path.from("room"));
 		broadcast.announce();
-		const producer = broadcast.createTrack("video");
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const url = new URL("https://localhost/test");
 		const [client, server] = await Promise.all([
 			connect({ url, transport: pair.client }),
@@ -259,7 +260,7 @@ async function servedRawSubscription() {
 	const origin = new Producer();
 	const broadcast = origin.createBroadcast(Path.from("room"));
 	broadcast.announce();
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
 		quic: pair.server,
@@ -278,7 +279,7 @@ async function servedRawSubscription() {
 		broadcast: Path.from("room"),
 		track: "video",
 		priority: 0,
-		maxAge: 10_000,
+		maxDelay: 10_000,
 		startGroup: 0,
 	}).encode(subscriber.writer, version);
 
@@ -366,7 +367,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const origin = new Producer();
 	const broadcast = origin.createBroadcast(Path.from("room"));
 	broadcast.announce();
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeString("last");
 	group.close();
@@ -418,7 +419,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const destination = new Producer();
 	const broadcast = source.createBroadcast(Path.from("room"));
 	broadcast.announce();
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeString("last");
 	group.close();
@@ -446,7 +447,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 			broadcast: Path.from("room"),
 			track: "video",
 			priority: 0,
-			maxAge: 10_000,
+			maxDelay: 10_000,
 			startGroup: 0,
 		}).encode(subscriber.writer, version);
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);

@@ -16,8 +16,8 @@ cannot remove. Measured in bundled, minified form (2026-09-26):
 ## Plan
 
 Decided in planning: all three trims are in scope (worklet minification
-landed with the strict-CSP worklet change). Mediabunny is its own
-quest.
+landed with the strict-CSP worklet change). Mediabunny already loads only
+when a file source needs it (#4893).
 
 Guidance:
 
@@ -40,4 +40,5 @@ Guidance:
 
 ## Related
 
+- [Safari WebTransport](/quest/m3/safari-webtransport.md) - also edits the WebKit and iOS gate in `browser.ts`; the bowser replacement must expose the Safari and iOS versions that gate needs
 - [Size report](/quest/m1/size-report.md) - tracks these entries nightly

@@ -425,16 +425,6 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		quic.qlog.is_none(),
 		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
 	);
-	for (name, window) in [
-		("quic.receive_window", quic.receive_window),
-		("quic.stream_receive_window", quic.stream_receive_window),
-		("quic.send_window", quic.send_window),
-	] {
-		anyhow::ensure!(
-			window.is_none(),
-			"io_uring workers run fixed flow-control windows; drop {name} or use the tokio workers"
-		);
-	}
 
 	let mut transport = moq_uring::quic::Transport::default();
 	#[cfg(feature = "qlog")]
@@ -448,6 +438,12 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
+	// Unset stays `None`, so the worker keeps its own credits. A set window
+	// has to land here: dropping it would leave the operator believing a
+	// limit that the workers are not running.
+	transport.receive_window = quic.receive_window;
+	transport.stream_receive_window = quic.stream_receive_window;
+	transport.send_window = quic.send_window;
 	transport.congestion = match quic.congestion_control {
 		Some(moq_tokio::quic::CongestionControl::Loss) => moq_uring::quic::Congestion::Loss,
 		// Unset means the backend's own default, and live media wants a steady
@@ -802,32 +798,32 @@ async fn serve_connection(
 mod tests {
 	use super::*;
 
-	/// The worker's transport settings have no window knobs, so a configured one is
-	/// refused at startup rather than left as a setting the operator believes is in
-	/// force. Each is named separately so the message points at the right line.
+	/// A window the operator set has to reach the worker. Refusing it, or
+	/// accepting the config and leaving the field unset, would both hide it.
+	///
+	/// `Config` is non-exhaustive, so the windows are filled in after `default`
+	/// rather than in a struct literal.
 	#[test]
-	fn windows_are_refused() {
-		type Set = fn(&mut moq_tokio::quic::Config);
-		let cases: [(&str, Set); 3] = [
-			("quic.receive_window", |quic| quic.receive_window = Some(64 << 20)),
-			("quic.stream_receive_window", |quic| {
-				quic.stream_receive_window = Some(8 << 20)
-			}),
-			("quic.send_window", |quic| quic.send_window = Some(32 << 20)),
-		];
+	#[allow(clippy::field_reassign_with_default)]
+	fn windows_are_applied() {
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.receive_window = Some(64 << 20);
+		quic.stream_receive_window = Some(8 << 20);
+		quic.send_window = Some(32 << 20);
 
-		for (name, set) in cases {
-			let mut quic = moq_tokio::quic::Config::default();
-			set(&mut quic);
-
-			let err = transport(&quic.resolve()).expect_err("a window must be refused");
-			assert!(err.to_string().contains(name), "{err}");
-		}
+		let transport = transport(&quic.resolve()).expect("windows must be accepted");
+		assert_eq!(transport.receive_window, Some(64 << 20));
+		assert_eq!(transport.stream_receive_window, Some(8 << 20));
+		assert_eq!(transport.send_window, Some(32 << 20));
 	}
 
-	/// Leaving the windows unset is the ordinary case and must still build.
+	/// Leaving the windows unset is the ordinary case. The worker then keeps
+	/// its own credits rather than inheriting another backend's default.
 	#[test]
 	fn defaults_are_accepted() {
-		transport(&moq_tokio::quic::Config::default().resolve()).expect("defaults must build");
+		let transport = transport(&moq_tokio::quic::Config::default().resolve()).expect("defaults must build");
+		assert_eq!(transport.receive_window, None);
+		assert_eq!(transport.stream_receive_window, None);
+		assert_eq!(transport.send_window, None);
 	}
 }

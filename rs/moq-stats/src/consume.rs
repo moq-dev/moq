@@ -177,7 +177,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path).await.expect("resolve");
+		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
 		let sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		Feed {
@@ -196,7 +196,7 @@ mod tests {
 		assert!(active);
 		origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(update.prefix.as_str()))
+			.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None)
 			.await
 			.expect("resolve")
 	}

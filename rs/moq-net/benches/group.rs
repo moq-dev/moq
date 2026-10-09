@@ -75,7 +75,7 @@ fn bench_write(c: &mut Criterion) {
 				|(mut ctx, mut buf)| {
 					for _ in 0..n {
 						let frame = frame::Frame {
-							timestamp: Timestamp::ZERO,
+							timestamp: Some(Timestamp::ZERO),
 							payload: payload.clone(),
 						};
 						// A full buffer hands the frame back: flush, then take it.
@@ -213,7 +213,7 @@ fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 /// Request the full cache window instead of the default live edge.
 fn replay() -> track::Subscription {
 	track::Subscription::default()
-		.with_max_age(Duration::MAX)
+		.with_max_delay(Duration::MAX)
 		.with_start(track::Position::group(0))
 }
 

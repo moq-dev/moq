@@ -57,8 +57,9 @@ Shared decisions, which Rust implements and [JavaScript](/quest/m1/transport-upg
   network, so the head start comes back. Otherwise a network where WebSocket
   narrowly beats QUIC would open two connections on every reconnect.
 - The old session gets `Goaway::new()` with the configured handover cap before
-  it enters draining. The relay refuses new requests on it from then on; the
-  front cancels its subscriptions once the new session feeds them.
+  it enters draining. The relay prices its routes at the drain cost and keeps
+  opening requests on it only until the new session's route wins; the front
+  cancels its subscriptions once the new session feeds them.
 - One-shot `connect()` returns one session and never upgrades; every
   `Connection` upgrades, reconnecting or not.
 - Publishing over the old session is announced again over the new one; the
@@ -68,6 +69,5 @@ Shared decisions, which Rust implements and [JavaScript](/quest/m1/transport-upg
 
 ## Required
 
-- [JS qmux finish](/quest/m1/transport-upgrade/js-qmux-finish.md) - `@moq/qmux` reports a cleanly finished send stream as closed without error
 - [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through the client-goaway handover
 - [Closed fallback](/quest/m1/transport-upgrade/closed-fallback.md) - a WebSocket session that closes right after connecting falls back to the pending QUIC dial instead of redialing

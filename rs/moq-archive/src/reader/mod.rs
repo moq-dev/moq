@@ -268,7 +268,7 @@ impl Timeline {
 				Err(moq_net::Error::Duplicate) => continue,
 				Err(err) => return Err(err.into()),
 			};
-			let timescale = producer.timescale();
+			let timescale = producer.timescale().expect("`track_info` declares a timescale");
 			for frame in &stored.frames {
 				producer.write_frame(timestamp(frame.timestamp, timescale)?, frame.payload.clone())?;
 			}
@@ -322,7 +322,7 @@ async fn serve_track<T: ObjectStore>(shared: Arc<Shared<T>>, request: track::Req
 		},
 	};
 
-	let timescale = info.timescale;
+	let timescale = info.timescale.expect("`track_info` declares a timescale");
 	let dynamic = request.dynamic();
 	let demand = dynamic.demand();
 	let _producer = request.accept(info);

@@ -23,14 +23,11 @@ once per tab by the origin rather than once per session. lite-07 drops the
 hop list, so no hop chain carries it.
 
 Roster: each peer publishes `<prefix><id>` with an `info.json` snapshot track:
-the moq ALPNs it accepts, `webrtc: true`, whether it can run qmux unordered,
-the presenter public key that
+the moq ALPNs it accepts, `webrtc: true`, the presenter public key that
 [peer grants](/quest/m3/p2p/peer-grant.md) bind, the application's `meta`,
 and for native peers an optional `webtransport: { url, fingerprint }` and
 `iroh` endpoint id. The schema is shared with
-[moq-cli](/quest/m3/p2p/cli.md). Unordered is advertised here so the dialer
-can set `RTCDataChannel.ordered` at create time; see
-[unordered qmux](/quest/m3/p2p/unordered.md).
+[moq-cli](/quest/m3/p2p/cli.md).
 
 Pairing is sparse: broadcasts exist only for pairs some `select` chose, so
 the cost is the dialed pairs, not the square of the roster. Whoever selects a
@@ -68,9 +65,9 @@ scoped like a relay session, but the relay token itself never crosses it: a
 `moq_auth` JWT is a bearer credential with no audience or proof of
 possession, so a peer that received one could replay it against the relay.
 Instead the relay issues each session a peer grant, a relay-signed statement
-of that session's path scopes bound to its hop id, its presenter public key,
+of that session's path scopes bound to its node id, its presenter public key,
 and short-lived, which the peer presents in band with a proof of possession;
-the other side verifies the relay's signature, the hop id and key against
+the other side verifies the relay's signature, the node id and key against
 the roster, and AUTH_POP, then serves only the granted paths. Issuance,
 asymmetric keys, JWKS, PoP, and refresh live in
 [Peer grants](/quest/m3/p2p/peer-grant.md): HMAC keys cannot be given to
@@ -80,5 +77,6 @@ there is no equal-scope shortcut.
 
 ## Required
 
+- [Routes](/quest/m1/cluster-routing/routes.md) - the ROUTE_START node id the roster keys on
 - [Data channel transport](/quest/m3/p2p/transport.md)
-- [Peer grants](/quest/m3/p2p/peer-grant.md) - the hop-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none
+- [Peer grants](/quest/m3/p2p/peer-grant.md) - the node-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none

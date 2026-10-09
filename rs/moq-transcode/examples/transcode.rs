@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
 
 	// Resolve it for real; the session subscribes upstream on demand.
 	let source = consumer
-		.request_broadcast(&source_path)
+		.request_broadcast(&source_path, None)
 		.await
 		.context("source broadcast unavailable")?;
 

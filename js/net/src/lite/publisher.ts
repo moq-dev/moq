@@ -1,19 +1,20 @@
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
-import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
+import * as DatagramStream from "../datagram_stream.ts";
+import { error, NotFound, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
-import { Milli, Timescale } from "../time.ts";
+import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
+import { untilAborted } from "../util/abort.ts";
 import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
-import * as DatagramStream from "./datagram_stream.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Priority, sendOrder } from "./priority.ts";
@@ -52,11 +53,38 @@ function zigzag(delta: bigint): bigint {
 }
 
 /**
+ * The timescale TRACK_INFO declares for a track. Lite05+ requires one, so an untimed track
+ * declares milliseconds, the scale its frames' send times go out at.
+ */
+function wireTimescale(info: track.Info): Timescale {
+	return info.timescale ?? Timescale.MILLI;
+}
+
+/**
+ * A frame or datagram timestamp as its raw value at the wire `timescale`. No lite version
+ * encodes an absent timestamp yet, so an untimed payload carries its send time instead.
+ */
+function wireTime(timestamp: Timestamp | undefined, timescale: Timescale): number {
+	return Math.round((timestamp ?? Timestamp.now()).as(timescale));
+}
+
+/**
  * Settles once the peer acknowledged everything written before the FIN, or the stream failed.
  * Closing the session sooner would discard bytes still in flight.
  */
 function acknowledged(writer: Writer): Promise<void> {
 	return writer.closed.catch(() => {});
+}
+
+/** A track's cached TRACK_INFO, and the request behind it while requesters hold it. */
+interface TrackInfoEntry {
+	info: Promise<TrackInfoMessage>;
+	/** The requesters holding the request: open TRACK streams, and FETCHes awaiting the answer. */
+	holders: number;
+	/** Whether the application answered, so a FETCH can reuse it after the request is let go. */
+	answered: boolean;
+	/** Lets the request go once its last holder leaves, abandoning it if still unanswered. */
+	release: AbortController;
 }
 
 /** What {@link Publisher.openGroup} and {@link Publisher.serveGroup} need to serve one group. */
@@ -302,12 +330,12 @@ function waitForSubscription(controls: SubscriptionControls, subscriber: track.S
  * a legacy subscriber never declined, so fall back to a window wide enough not to drop
  * and leave enforcement to the receiver, as the IETF path does for the same reason.
  */
-function servingMaxAge(version: Version, requested: number | undefined): number {
-	return carriesMaxAge(version) ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
+function servingMaxDelay(version: Version, requested: number | undefined): number {
+	return carriesMaxDelay(version) ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
 }
 
 /** Whether this version's SUBSCRIBE carries Subscriber Max Age at all. */
-function carriesMaxAge(version: Version): boolean {
+function carriesMaxDelay(version: Version): boolean {
 	return version !== Version.DRAFT_01 && version !== Version.DRAFT_02;
 }
 
@@ -315,12 +343,12 @@ function carriesMaxAge(version: Version): boolean {
  * Position a subscription's read cursor for the wire serving it.
  *
  * On lite-06 there is nothing to do: the cursor is floored at the group the subscription
- * named (or 0), and its Max Age decides what above the floor is worth delivering.
+ * named (or 0), and its max delay decides what above the floor is worth delivering.
  *
  * Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
  * latest group, so say so explicitly rather than letting the budget reach back. Lite-03/04/05
- * carry a Max Age, but there it is a staleness tolerance only; lite-01/02 additionally get
- * an unbounded budget so nothing is dropped under them (see {@link servingMaxAge}), which
+ * carry a `Subscriber Max Age`, but there it is a staleness tolerance only; lite-01/02 additionally get
+ * an unbounded budget so nothing is dropped under them (see {@link servingMaxDelay}), which
  * must not read as a request to replay the whole cache on join.
  */
 function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
@@ -370,7 +398,7 @@ export class Publisher {
 	// routing front rather than the path: immutability holds for one broadcast, and a
 	// republish puts a different one on the path, so its entries must not be reused.
 	// A rejected lookup is evicted so a retry can re-probe.
-	#trackInfo = new WeakMap<broadcast.Consumer, Map<string, Promise<TrackInfoMessage>>>();
+	#trackInfo = new WeakMap<broadcast.Consumer, Map<string, TrackInfoEntry>>();
 
 	/**
 	 * Creates a new Publisher instance.
@@ -593,7 +621,7 @@ export class Publisher {
 		const endGroup = exclusiveGroupEnd(msg.endGroup);
 		const track = wireOf(front).subscribe(msg.track, {
 			priority: msg.priority,
-			maxAge: Milli(servingMaxAge(this.version, msg.maxAge)),
+			maxDelay: Milli(servingMaxDelay(this.version, msg.maxDelay)),
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
 				end: endGroup === undefined ? undefined : { excluded: endGroup },
@@ -622,12 +650,12 @@ export class Publisher {
 				// (accept never called, track closed) as an error here, which resets the
 				// stream.
 				const info = await track.info();
-				timescale = info.timescale;
+				timescale = wireTimescale(info);
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
 					priority: msg.priority,
-					maxAge: msg.maxAge,
+					maxDelay: msg.maxDelay,
 					startGroup: msg.startGroup,
 					endGroup: msg.endGroup,
 				});
@@ -650,7 +678,7 @@ export class Publisher {
 					const end = exclusiveGroupEnd(update.endGroup);
 					track.update({
 						priority: update.priority,
-						maxAge: Milli(servingMaxAge(this.version, update.maxAge)),
+						maxDelay: Milli(servingMaxDelay(this.version, update.maxDelay)),
 						groups: {
 							start: update.startGroup === undefined ? undefined : { included: update.startGroup },
 							end: end === undefined ? undefined : { excluded: end },
@@ -719,11 +747,21 @@ export class Publisher {
 		// response here, on the same scale as the group streams it competes with.
 		stream.writer.setPriority(sendOrder({ priority: msg.priority }));
 
+		// A FETCH requester leaves early by resetting its stream or losing its session, which
+		// lets go of a lookup still waiting on the answer.
+		const hold = new AbortController();
+		void stream.reader.closed.catch(() => hold.abort());
+
 		let group: group.Consumer | undefined;
 		try {
 			// The timescale is immutable, so serve exactly what TRACK_INFO advertised. Both
 			// come off the same front, so the metadata and the frames are one generation.
-			const info = await this.#resolveTrackInfo(front, msg.track);
+			let info: TrackInfoMessage;
+			try {
+				info = await this.#resolveTrackInfo(front, msg.track, hold.signal, true);
+			} finally {
+				hold.abort();
+			}
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
@@ -968,9 +1006,23 @@ export class Publisher {
 	/**
 	 * Answers a TRACK stream (0x6) with a single TRACK_INFO, then FINs.
 	 *
+	 * The open stream is interest in the track, held until the requester closes its side,
+	 * so demand holds while the requester moves on to SUBSCRIBE. Only the reply is owed.
+	 *
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
+		const hold = new AbortController();
+		// Watched from the start, so a requester leaving while the reply is still blocked on
+		// flow control lets go of the track too.
+		void stream.reader.done().then(
+			(fin) => {
+				hold.abort();
+				// TRACK is the requester's only message.
+				if (!fin) stream.abort(new ProtocolViolation("data after TRACK"));
+			},
+			() => hold.abort(),
+		);
 		try {
 			const front =
 				this.#publish &&
@@ -978,12 +1030,13 @@ export class Publisher {
 					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
-			const info = await this.#resolveTrackInfo(front, msg.track);
+			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
-			stream.close();
+			stream.writer.close();
 			await acknowledged(stream.writer);
 		} catch (err) {
+			hold.abort();
 			console.debug(`track unknown: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.reset(error(err));
 		}
@@ -992,34 +1045,67 @@ export class Publisher {
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
 	// `resolveTrackInfo` triggers a TrackRequest the app answers with accept(TrackInfo);
 	// only the immutable properties are needed (not the groups). Cached because they're
-	// fixed for the track's lifetime. Rejects if the track is unavailable.
-	#resolveTrackInfo(front: broadcast.Consumer, track: string): Promise<TrackInfoMessage> {
+	// fixed for the track's lifetime. Rejects if the track is unavailable, or once `hold`
+	// aborts. Each requester holds the lookup until `hold` aborts, and the lookup ends with
+	// its last holder, answered or not; an unanswered one is dropped, so the next requester
+	// asks again. A TRACK stream is interest, so it always holds a live lookup, while a
+	// FETCH (`reuse`) only needs the answer and takes one a released lookup left behind.
+	#resolveTrackInfo(
+		front: broadcast.Consumer,
+		track: string,
+		hold: AbortSignal,
+		reuse = false,
+	): Promise<TrackInfoMessage> {
+		hold.throwIfAborted();
 		let tracks = this.#trackInfo.get(front);
 		if (!tracks) {
 			tracks = new Map();
 			this.#trackInfo.set(front, tracks);
 		}
 
-		const cached = tracks.get(track);
-		if (cached !== undefined) return cached;
+		let entry = tracks.get(track);
+		if (reuse && entry?.answered) return entry.info;
+		if (!entry || entry.release.signal.aborted) {
+			const release = new AbortController();
+			const info = (async () => {
+				const info = await wireOf(front).resolveTrackInfo(track, release.signal);
+				return new TrackInfoMessage({
+					priority: info.priority,
+					// Publisher Max Age: the publisher's retention bound, advertised so
+					// relays re-serve with the same window.
+					maxAge: info.maxAge,
+					// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
+					// `#serveGroup` emits each frame converted to it.
+					timescale: wireTimescale(info),
+				});
+			})();
 
-		const pending = (async () => {
-			const info = await wireOf(front).resolveTrackInfo(track);
-			return new TrackInfoMessage({
-				priority: info.priority,
-				// Publisher Max Age: the publisher's retention bound, advertised so
-				// relays re-serve with the same window.
-				maxAge: info.maxAge,
-				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
-				// `#serveGroup` emits each frame converted to it.
-				timescale: info.timescale,
-			});
-		})();
+			const created: TrackInfoEntry = { info, holders: 0, answered: false, release };
+			info.then(
+				() => {
+					created.answered = true;
+				},
+				// Don't poison the cache on failure: a later request may succeed.
+				() => {
+					if (tracks.get(track) === created) tracks.delete(track);
+				},
+			);
+			tracks.set(track, created);
+			entry = created;
+		}
 
-		// Don't poison the cache on failure: a later request may succeed.
-		pending.catch(() => tracks.delete(track));
-		tracks.set(track, pending);
-		return pending;
+		const held = entry;
+		held.holders++;
+		hold.addEventListener(
+			"abort",
+			() => {
+				if (--held.holders > 0) return;
+				held.release.abort();
+				if (!held.answered && tracks.get(track) === held) tracks.delete(track);
+			},
+			{ once: true },
+		);
+		return untilAborted(held.info, hold);
 	}
 
 	/**
@@ -1041,7 +1127,7 @@ export class Publisher {
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
-				const ts = Math.round(datagram.timestamp.as(timescale));
+				const ts = wireTime(datagram.timestamp, timescale);
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
@@ -1080,7 +1166,7 @@ export class Publisher {
 			const frame = await race([group.readFrame(), stream.closed]);
 			if (!frame) break;
 
-			const ts = BigInt(Math.round(frame.timestamp.as(timescale)));
+			const ts = BigInt(wireTime(frame.timestamp, timescale));
 			await stream.u62(zigzag(ts - prevTs));
 			prevTs = ts;
 
@@ -1170,7 +1256,7 @@ export class Publisher {
 
 					if (timestamps) {
 						// Convert each frame to the track's advertised timescale.
-						const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
+						const ts = BigInt(wireTime(read.frame.timestamp, timescale));
 						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
 						prevTs = ts;
 					}

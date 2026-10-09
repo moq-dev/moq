@@ -28,4 +28,4 @@ whether a second binding wants it. Verify against a shaped uplink and with
 
 ## Related
 
-- [Audio follows the grant](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the shared rate policy audio adopts; OBS audio still reserves only
+- [Audio follows the grant](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the shared rate policy audio adopts; OBS audio still reserves only

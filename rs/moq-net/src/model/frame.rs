@@ -1,4 +1,4 @@
-//! Frames are the leaf of the model: a sized, timestamped payload within a group.
+//! Frames are the leaf of the model: a sized, optionally timestamped payload within a group.
 //!
 //! A group is a single ordered stream, so at most one frame is ever in flight.
 //! Completed frames are plain data ([`Frame`]); the in-flight frame is written
@@ -17,7 +17,7 @@ use bytes::Bytes;
 use crate::group::{self, GroupState};
 use crate::{Error, IntoBytes, Result, Timestamp, stats};
 
-/// A chunk of data with an upfront size and a presentation timestamp.
+/// A chunk of data with an upfront size and an optional presentation timestamp.
 ///
 /// This is just the header; the payload is carried separately (as a completed
 /// [`Frame`] or streamed via [`Producer`] / [`Consumer`]).
@@ -25,22 +25,25 @@ use crate::{Error, IntoBytes, Result, Timestamp, stats};
 pub struct Info {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,
-	/// Presentation timestamp.
+	/// Presentation timestamp, or `None` on an untimed track. It must match the track
+	/// ([`Error::TimestampMismatch`] otherwise).
 	///
 	/// [`group::Producer::create_frame`] converts it into the parent track's
 	/// timescale, so the scale you build it with doesn't have to match the track.
-	/// For data without a presentation time, pass [`Timestamp::now`] explicitly.
-	pub timestamp: Timestamp,
+	/// No receiver fills one in, so an untimed track stays untimed across hops, except
+	/// over moq-lite 05 and later, which can't mark a track untimed yet and carries the
+	/// encoder's send time instead.
+	pub timestamp: Option<Timestamp>,
 }
 
-/// A completed frame: a timestamp and its full, contiguous payload.
+/// A completed frame: an optional timestamp and its full, contiguous payload.
 ///
 /// This is the stored form of every finished frame in a group. The payload is a
 /// single [`Bytes`], so a consumer gets it with one zero-copy slice.
 #[derive(Clone, Debug)]
 pub struct Frame {
-	/// Presentation timestamp, at the parent track's timescale.
-	pub timestamp: Timestamp,
+	/// Presentation timestamp, at the parent track's timescale, or `None` when untimed.
+	pub timestamp: Option<Timestamp>,
 	/// The full frame payload.
 	pub payload: Bytes,
 }

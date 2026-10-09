@@ -68,7 +68,7 @@ pub struct Frame {
 	/// muxers receive the later endpoint separately, so media stays immediately available.
 	/// The [`Consumer`] adds it to `timestamp` to learn how far a group has
 	/// presented, so it can advance to a newer group as soon as the gap is
-	/// covered instead of waiting out the max age budget.
+	/// covered instead of waiting out the max delay budget.
 	pub duration: Option<moq_net::Timestamp>,
 
 	/// Encoded codec payload.
