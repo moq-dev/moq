@@ -434,6 +434,27 @@ impl Handle {
 		}
 	}
 
+	/// Admit a request on the token it carries, scoped to that request alone.
+	///
+	/// The acceptor's grant must cover the request, and is then held for the request's life.
+	/// The error is what the request is refused with: the acceptor's refusal, UNAUTHORIZED for
+	/// a grant that does not cover it, or NOT_SUPPORTED with no [`requests`](Self::requests)
+	/// consumer.
+	pub(crate) async fn admit_request(
+		&self,
+		clock: &crate::time::Clock,
+		token: crate::setup::Token,
+		path: crate::PathOwned,
+		kind: RequestKind,
+	) -> Result<RequestGrant> {
+		let verdict = self.verify_request(token, path.clone(), kind);
+		let grant = verdict.grant().await?;
+		if !kind.covers(&grant, path.as_str()) {
+			return Err(Error::Unauthorized);
+		}
+		Ok(RequestGrant::new(clock, verdict, grant, path, kind))
+	}
+
 	/// Decide who answers the peer's tokens: the app if it took the requests,
 	/// otherwise the session itself (`None`). Idempotent.
 	pub(crate) fn acceptor(&self) -> Option<kio::Queue<Request>> {
@@ -1128,24 +1149,31 @@ impl RequestGrant {
 	}
 
 	/// Whether `grant` covers the request this guard holds.
-	pub(crate) fn covers(&self, grant: &Grant) -> bool {
+	fn covers(&self, grant: &Grant) -> bool {
 		self.kind.covers(grant, self.path.as_str())
 	}
 
-	/// The grant in force right now. Observed by the lifecycle tests; the reader checks a
-	/// renewal's coverage on the freshly awaited grant before it calls [`renew`](Self::renew).
-	#[cfg_attr(not(test), expect(dead_code))]
+	/// The grant in force right now. Observed by the lifecycle tests.
+	#[cfg(test)]
 	pub(crate) fn grant(&self) -> &Grant {
 		&self.grant
 	}
 
-	/// Replace the grant after an accepted REQUEST_UPDATE: adopt the new verdict (dropping
-	/// the old, which ends the old token) and re-arm the deadline at the new expiry. A
-	/// refused renewal does NOT call this; the serve loop ends only that request instead.
-	pub(crate) fn renew(&mut self, verdict: RequestVerdict, grant: Grant) {
+	/// Apply a renewal's verdict, returning whether it renewed the request.
+	///
+	/// A grant that still covers the request replaces this one: the new verdict is adopted
+	/// (dropping the old, which ends the old token) and the deadline re-armed at the new
+	/// expiry. A refusal, or a grant that no longer covers the request, changes nothing here;
+	/// the caller ends only that request.
+	pub(crate) fn renew(&mut self, verdict: RequestVerdict, res: Result<Grant>) -> bool {
+		let grant = match res {
+			Ok(grant) if self.covers(&grant) => grant,
+			_ => return false,
+		};
 		self.verdict = verdict;
 		self.deadline.set(grant.expires);
 		self.grant = grant;
+		true
 	}
 
 	/// Resolve with the error that ends the request: the deadline lapsing
@@ -1626,8 +1654,8 @@ mod request_token_tests {
 		let second = grant_in(&runtime, 600);
 		let second_expires = second.expires;
 		let _issued2 = requests.next().await.unwrap().accept(second);
-		let renewed = renewal.grant().await.unwrap();
-		request_grant.renew(renewal, renewed);
+		let renewed = renewal.grant().await;
+		assert!(request_grant.renew(renewal, renewed), "a covering renewal renews");
 
 		assert_eq!(request_grant.grant().expires, second_expires);
 		assert_ne!(second_expires, first_expires);
@@ -1652,13 +1680,12 @@ mod request_token_tests {
 		assert_eq!(handle.grant().peek(), None, "the session grant is untouched");
 	}
 
-	/// A refused renewal verdict is not applied: the caller does not call
-	/// [`RequestGrant::renew`], so the request grant it already holds stands untouched and ends
-	/// only when its own deadline lapses. The serve loops end the request on a refusal separately
-	/// (a refused renewal ends only that request); this covers only that the grant object is
-	/// not mutated.
+	/// A refused renewal verdict is not applied: the request grant it already holds stands
+	/// untouched and ends only when its own deadline lapses. The serve loops end the request on
+	/// a refusal separately (a refused renewal ends only that request); this covers only that
+	/// the grant object is not mutated.
 	#[moq_net_sim::test]
-	async fn renew_is_not_called_on_refusal() {
+	async fn a_refused_renewal_leaves_the_grant() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -1670,18 +1697,16 @@ mod request_token_tests {
 		let mut request_grant =
 			RequestGrant::new(&runtime, verdict, answered, subscribe_path(), RequestKind::Subscribe);
 
-		// The renewal token is refused: verify it resolves to a refusal, and the caller does
-		// NOT renew. The old grant is untouched.
+		// The renewal token is refused, so it renews nothing and the old grant is untouched.
 		let renewal = handle.verify_request(token(b"bad", 0), subscribe_path(), RequestKind::Subscribe);
 		requests
 			.next()
 			.await
 			.unwrap()
 			.reject(SessionError::Unauthorized, "bad token");
-		assert!(matches!(
-			renewal.grant().await,
-			Err(Error::Session(SessionError::Unauthorized))
-		));
+		let refused = renewal.grant().await;
+		assert!(matches!(refused, Err(Error::Session(SessionError::Unauthorized))));
+		assert!(!request_grant.renew(renewal, refused), "a refusal does not renew");
 
 		// The old grant still stands with its original expiry, and the request ends only
 		// when that lapses.

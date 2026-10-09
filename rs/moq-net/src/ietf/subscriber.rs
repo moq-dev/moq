@@ -1270,35 +1270,19 @@ where
 		if let Some(token) = &msg.authorization_token
 			&& !self.auth.covers(crate::auth::Direction::Subscribe, path.as_str())
 		{
-			let verdict = self.auth.verify_request(
-				token.0.clone(),
-				path.clone(),
-				crate::auth::RequestKind::PublishNamespace,
-			);
-			match verdict.grant().await {
-				// The token's grant must cover this announce; it authorizes nothing else and
-				// never joins the session union.
-				Ok(grant) if crate::auth::RequestKind::PublishNamespace.covers(&grant, path.as_str()) => {
-					token_grant = Some(crate::auth::RequestGrant::new(
-						&self.runtime,
-						verdict,
-						grant,
-						path.clone(),
-						crate::auth::RequestKind::PublishNamespace,
-					));
-				}
-				Ok(_) => {
-					self.write_error(
-						&mut stream,
-						request_id,
-						&Error::Unauthorized,
-						"token does not cover this request",
-					)
-					.await?;
-					let _ = stream.writer.close().await;
-					return Ok(());
-				}
-				// UNAUTHORIZED for a refusal, NOT_SUPPORTED when no consumer verifies tokens.
+			// The token's grant must cover this announce; it authorizes nothing else and never
+			// joins the session union.
+			let admitted = self
+				.auth
+				.admit_request(
+					&self.runtime,
+					token.0.clone(),
+					path.clone(),
+					crate::auth::RequestKind::PublishNamespace,
+				)
+				.await;
+			match admitted {
+				Ok(grant) => token_grant = Some(grant),
 				Err(err) => {
 					self.write_error(&mut stream, request_id, &err, &err.to_string())
 						.await?;
@@ -1374,19 +1358,13 @@ where
 		attached: &mut bool,
 		mut token_grant: Option<crate::auth::RequestGrant>,
 	) -> Result<(), Error> {
-		// Renewal state carried across turns of the loop. A REQUEST_UPDATE carrying a fresh token
-		// refreshes the announce's request grant (MoQ request-token); its verify is raced against
-		// the stream and the old grant's deadline in the loop's single wait (never a bare await),
-		// so the old deadline still fires while a slow acceptor decides and a peer ending the
-		// announce ends it whatever the acceptor does.
-		//
-		// Updates that arrive while a verdict is pending are buffered and handled in order once it
-		// resolves. A FIFO queue, not a single slot: draft-18 section 10.9.1 still requires an
-		// answer per update, so an earlier buffered update must not be dropped by a later one.
-		// The queue is bounded by MAX_REQUEST_UPDATES, counting the one being verified, so a peer
-		// cannot grow it without limit behind a slow verdict.
-		let mut pending: Option<(crate::auth::RequestVerdict, RequestId)> = None;
-		let mut stashed: std::collections::VecDeque<(u64, ietf::Body)> = std::collections::VecDeque::new();
+		// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant (MoQ
+		// request-token); its verify is raced against the stream and the old grant's deadline in
+		// the loop's single wait (never a bare await), so the old deadline still fires while a
+		// slow acceptor decides and a peer ending the announce ends it whatever the acceptor
+		// does. Messages behind a pending verdict wait in `renewal`, handled in order once it
+		// resolves.
+		let mut renewal = request_update::Renewal::<(u64, ietf::Body)>::default();
 		// Draft-19+ only: the peer finished its send direction, which does not withdraw the
 		// advertisement there, so stop reading and keep watching the writer.
 		let mut finished = false;
@@ -1404,14 +1382,12 @@ where
 			// The request grant lapsed or was revoked: the announce ends, never the session.
 			Ended(Error),
 			// A pending renewal's verdict resolved, for the update with this request id.
-			Renewal(Result<crate::auth::Grant, Error>, RequestId),
+			Renewal(request_update::Verdict),
 		}
 
 		loop {
-			// Drain one buffered update before reading the next, so answers stay in order.
-			let turn = if pending.is_none()
-				&& let Some((id, body)) = stashed.pop_front()
-			{
+			// Handle one buffered update before reading the next, so answers stay in order.
+			let turn = if let Some((id, body)) = renewal.next() {
 				Turn::Message(id, body)
 			} else {
 				let version = self.version;
@@ -1427,10 +1403,8 @@ where
 					{
 						return Poll::Ready(Turn::Ended(err));
 					}
-					if let Some((verdict, rid)) = pending.as_mut()
-						&& let Poll::Ready(res) = verdict.poll_grant(waiter)
-					{
-						return Poll::Ready(Turn::Renewal(res, *rid));
+					if let Poll::Ready(renewed) = renewal.poll(waiter) {
+						return Poll::Ready(Turn::Renewal(renewed));
 					}
 					// Keep reading while a verdict is pending, so a withdrawal still ends the
 					// announce: a buffered update must not mask a later terminal.
@@ -1453,43 +1427,24 @@ where
 			};
 
 			let (type_id, body) = match turn {
-				// A non-terminal message read while a verdict is pending waits for it. Only a
-				// REQUEST_UPDATE counts toward the limit (anything else is caught as an
-				// unexpected message when it drains); the one being verified plus the queued
-				// updates are the outstanding REQUEST_UPDATEs, and what happens when another
-				// would exceed the ceiling is version-appropriate.
-				Turn::Message(id, body) if pending.is_some() && !self.terminal_publish_namespace(id) => {
-					let is_update = id == ietf::PublishNamespaceUpdate::ID;
-					let outstanding = stashed
-						.iter()
-						.filter(|(id, _)| *id == ietf::PublishNamespaceUpdate::ID)
-						.count() as u64 + 1;
-					if request_update::supported(self.version) && is_update {
-						// Draft-19+: we advertised MAX_REQUEST_UPDATES, so a peer with that many
-						// already outstanding sending another broke the negotiated limit. Draft-19
-						// section 10.3.1.7 answers that with a session close,
-						// TOO_MANY_REQUEST_UPDATES. Returning the error is not enough here: the
-						// dispatcher closes only on is_protocol_violation, which excludes
-						// Error::Session, so close explicitly as the publisher does. A conforming
-						// peer self-limits and never reaches here.
-						if outstanding >= request_update::MAX_REQUEST_UPDATES {
-							self.session.close(
-								crate::SessionError::TooManyRequestUpdates.to_code(),
-								"too many request updates",
-							);
-							return Err(Error::Session(crate::SessionError::TooManyRequestUpdates));
+				// A non-terminal message read while a verdict is pending waits for it.
+				Turn::Message(id, body) if renewal.pending() && !self.terminal_publish_namespace(id) => {
+					match renewal.queue((id, body), self.version) {
+						Ok(()) => continue,
+						// The dispatcher closes only on is_protocol_violation, which excludes
+						// Error::Session, so the session is closed here.
+						Err(request_update::Overflow::Session) => {
+							return Err(request_update::too_many(&mut self.session));
 						}
-					} else if stashed.len() >= request_update::UNNEGOTIATED_GUARD {
-						// Drafts below 19 negotiate no limit, so a peer agreed to no ceiling: this
-						// is a local memory guard, not a protocol fault. End this announce, never
-						// the session: finish the stream and stop.
-						if stream.writer.finish().is_ok() {
-							let _ = stream.writer.closed().await;
+						// Drafts below 19 negotiate no limit, so this is a local memory guard, not a
+						// protocol fault: end this announce, never the session.
+						Err(request_update::Overflow::Request) => {
+							if stream.writer.finish().is_ok() {
+								let _ = stream.writer.closed().await;
+							}
+							return Ok(());
 						}
-						return Ok(());
 					}
-					stashed.push_back((id, body));
-					continue;
 				}
 				// A terminal read while a verdict is pending is handled now, ahead of any queued
 				// update: nothing more is owed once the peer retracts.
@@ -1514,30 +1469,27 @@ where
 				}
 				Turn::Failed(err) => return Err(err),
 				Turn::Ended(err) => return Err(err),
-				Turn::Renewal(res, rid) => {
-					let (verdict, _) = pending.take().expect("a pending renewal");
-					let Some(rg) = token_grant.as_mut() else {
+				Turn::Renewal(request_update::Verdict {
+					verdict,
+					grant: res,
+					request_id: rid,
+				}) => {
+					// Only a token-authorized announce starts a renewal.
+					let rg = token_grant.as_mut().expect("a renewal without a request grant");
+					// On accept the old grant is dropped and the deadline re-armed (REQUEST_OK).
+					if rg.renew(verdict, res) {
+						self.write_ok(stream, rid).await?;
 						continue;
-					};
-					match res {
-						// On accept the old grant is dropped and the deadline re-armed (REQUEST_OK).
-						Ok(grant) if rg.covers(&grant) => {
-							rg.renew(verdict, grant);
-							self.write_ok(stream, rid).await?;
-							continue;
-						}
-						// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused or uncovered
-						// renewal ends only this announce. Answer REQUEST_ERROR, then close the
-						// stream; the session stays up and the old grant does not survive.
-						_ => {
-							self.write_error(stream, rid, &Error::Unauthorized, "renewal not granted")
-								.await?;
-							if stream.writer.finish().is_ok() {
-								let _ = stream.writer.closed().await;
-							}
-							return Ok(());
-						}
 					}
+					// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused or uncovered
+					// renewal ends only this announce. Answer REQUEST_ERROR, then close the stream;
+					// the session stays up and the old grant does not survive.
+					self.write_error(stream, rid, &Error::Unauthorized, "renewal not granted")
+						.await?;
+					if stream.writer.finish().is_ok() {
+						let _ = stream.writer.closed().await;
+					}
+					return Ok(());
 				}
 			};
 
@@ -1638,7 +1590,7 @@ where
 				let verdict =
 					self.auth
 						.verify_request(token.0, path.clone(), crate::auth::RequestKind::PublishNamespace);
-				pending = Some((verdict, msg.request_id));
+				renewal.verify(verdict, msg.request_id);
 				continue;
 			}
 

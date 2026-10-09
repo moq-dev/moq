@@ -699,42 +699,27 @@ where
 					let err = Error::Unauthorized;
 					return self.reject_subscribe(stream, request_id, &err, "not granted").await;
 				}
-				let verdict = self.auth.verify_request(
-					token.0.clone(),
-					msg.track_namespace.to_owned(),
-					crate::auth::RequestKind::Subscribe,
-				);
-				match verdict.grant().await {
-					// The token's grant must cover this exact request; it authorizes nothing
-					// else and never joins the session union.
-					Ok(grant) if crate::auth::RequestKind::Subscribe.covers(&grant, msg.track_namespace.as_str()) => {
-						// Held for the subscription's life: the request ends when this grant
-						// lapses, is revoked, or stops covering it, or when the limit narrows
-						// past it (the gate), never the session.
-						request_grant = Some(crate::auth::RequestGrant::new(
-							&self.runtime,
-							verdict,
-							grant,
-							msg.track_namespace.to_owned(),
-							crate::auth::RequestKind::Subscribe,
-						));
-						crate::auth::Gate::limit(
-							self.auth.clone(),
-							msg.track_namespace.to_owned(),
-							crate::auth::Direction::Publish,
-						)
-					}
-					Ok(_) => {
-						let err = Error::Unauthorized;
-						return self
-							.reject_subscribe(stream, request_id, &err, "token does not cover this request")
-							.await;
-					}
-					// UNAUTHORIZED for a refusal, NOT_SUPPORTED when no consumer verifies tokens.
-					Err(err) => {
-						return self.reject_subscribe(stream, request_id, &err, &err.to_string()).await;
-					}
+				// Held for the subscription's life: the request ends when this grant lapses, is
+				// revoked, or stops covering it, or when the limit narrows past it (the gate),
+				// never the session. It authorizes nothing else and never joins the session union.
+				let admitted = self
+					.auth
+					.admit_request(
+						&self.runtime,
+						token.0.clone(),
+						msg.track_namespace.to_owned(),
+						crate::auth::RequestKind::Subscribe,
+					)
+					.await;
+				match admitted {
+					Ok(grant) => request_grant = Some(grant),
+					Err(err) => return self.reject_subscribe(stream, request_id, &err, &err.to_string()).await,
 				}
+				crate::auth::Gate::limit(
+					self.auth.clone(),
+					msg.track_namespace.to_owned(),
+					crate::auth::Direction::Publish,
+				)
 			} else if self
 				.auth
 				.allows(crate::auth::Direction::Publish, msg.track_namespace.as_str())
@@ -1015,8 +1000,7 @@ where
 		// further update, token or not, to handle once the verdict resolves: draft-17+ answers
 		// carry no Request ID, so they must go out in the order the updates arrived. The stash is
 		// a FIFO bounded by MAX_REQUEST_UPDATES (counting the one being verified).
-		let mut pending: Option<(crate::auth::RequestVerdict, RequestId)> = None;
-		let mut stashed: std::collections::VecDeque<super::request_stream::Update> = std::collections::VecDeque::new();
+		let mut renewal = request_update::Renewal::<super::request_stream::Update>::default();
 
 		// What one turn of the loop resolved to.
 		enum Turn {
@@ -1029,16 +1013,14 @@ where
 			// A REQUEST_UPDATE, already decoded.
 			Update(super::request_stream::Update),
 			// A pending renewal's verdict resolved, for the update with this request id.
-			Renewal(Result<crate::auth::Grant, Error>, RequestId),
+			Renewal(request_update::Verdict),
 		}
 
 		loop {
-			// Drain one stashed update before reading the next, so answers stay in order.
-			if pending.is_none()
-				&& let Some(update) = stashed.pop_front()
-			{
+			// Handle one queued update before reading the next, so answers stay in order.
+			if let Some(update) = renewal.next() {
 				if let Err(err) = self
-					.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut pending, update)
+					.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut renewal, update)
 					.await
 				{
 					return Some(Err(err));
@@ -1062,10 +1044,8 @@ where
 					tracing::info!(broadcast = %namespace, %err, "request token grant ended");
 					return Poll::Ready(Turn::Ended(err));
 				}
-				if let Some((verdict, rid)) = pending.as_mut()
-					&& let Poll::Ready(res) = verdict.poll_grant(waiter)
-				{
-					return Poll::Ready(Turn::Renewal(res, *rid));
+				if let Poll::Ready(renewed) = renewal.poll(waiter) {
+					return Poll::Ready(Turn::Renewal(renewed));
 				}
 				if !*finished {
 					if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
@@ -1121,51 +1101,47 @@ where
 				Turn::Served(res) => return Some(res),
 				Turn::Cancelled => return None,
 				Turn::Ended(err) => return Some(Err(err)),
-				Turn::Renewal(res, rid) => {
-					let (verdict, _) = pending.take().expect("a pending renewal");
-					let Some(rg) = request_grant.as_mut() else {
+				Turn::Renewal(request_update::Verdict {
+					verdict,
+					grant: res,
+					request_id: rid,
+				}) => {
+					// Only a token-authorized request starts a renewal.
+					let rg = request_grant.as_mut().expect("a renewal without a request grant");
+					// On accept the old grant is dropped (ending the old token) and the deadline
+					// re-armed at the new expiry.
+					if rg.renew(verdict, res) {
+						if answer && let Err(err) = self.write_request_ok(&mut stream.writer, rid).await {
+							return Some(Err(err));
+						}
 						continue;
-					};
-					match res {
-						// The renewal's grant must still cover this request. On accept the old grant
-						// is dropped (ending the old token) and the deadline re-armed at the new
-						// expiry.
-						Ok(grant) if rg.covers(&grant) => {
-							rg.renew(verdict, grant);
-							if answer && let Err(err) = self.write_request_ok(&mut stream.writer, rid).await {
-								return Some(Err(err));
-							}
-						}
-						// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused or uncovered
-						// renewal ends only this subscription: REQUEST_ERROR, then PUBLISH_DONE
-						// UPDATE_FAILED. The session stays up and the old grant does not survive.
-						_ => {
-							if answer
-								&& let Err(err) = self
-									.write_subscribe_error(
-										&mut stream.writer,
-										rid,
-										&Error::Unauthorized,
-										"renewal not granted",
-									)
-									.await
-							{
-								return Some(Err(err));
-							}
-							return Some(Err(Error::Unsupported));
-						}
 					}
+					// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused or uncovered
+					// renewal ends only this subscription: REQUEST_ERROR, then PUBLISH_DONE
+					// UPDATE_FAILED. The session stays up and the old grant does not survive.
+					if answer
+						&& let Err(err) = self
+							.write_subscribe_error(&mut stream.writer, rid, &Error::Unauthorized, "renewal not granted")
+							.await
+					{
+						return Some(Err(err));
+					}
+					return Some(Err(Error::Unsupported));
 				}
 				// An update behind a pending verdict waits its turn, so its answer follows the
 				// verdict's.
-				Turn::Update(update) if pending.is_some() => {
-					if let Some(err) = self.stash_update(&mut stashed, update) {
-						return Some(Err(err));
+				Turn::Update(update) if renewal.pending() => match renewal.queue(update, self.version) {
+					Ok(()) => {}
+					Err(request_update::Overflow::Session) => {
+						return Some(Err(request_update::too_many(&mut self.session.clone())));
 					}
-				}
+					// Below draft 19 no limit is negotiated, so this is a local memory guard: end
+					// this request, never the session.
+					Err(request_update::Overflow::Request) => return Some(Err(Error::ProtocolViolation)),
+				},
 				Turn::Update(update) => {
 					if let Err(err) = self
-						.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut pending, update)
+						.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut renewal, update)
 						.await
 					{
 						return Some(Err(err));
@@ -1188,7 +1164,7 @@ where
 		serve: &mut TrackServe<S>,
 		namespace: &crate::PathOwned,
 		request_grant: &Option<crate::auth::RequestGrant>,
-		pending: &mut Option<(crate::auth::RequestVerdict, RequestId)>,
+		renewal: &mut request_update::Renewal<super::request_stream::Update>,
 		update: super::request_stream::Update,
 	) -> Result<(), Error> {
 		// Draft 14 answers no update. Drafts 15 and 16 answer on the control stream, naming the
@@ -1212,50 +1188,16 @@ where
 			serve.track.update(subscription)?;
 		}
 		if let (Some(token), true) = (update.authorization_token, request_grant.is_some()) {
-			*pending = Some((self.verify_renewal(namespace, token.0), update.request_id));
+			let verdict = self
+				.auth
+				.verify_request(token.0, namespace.clone(), crate::auth::RequestKind::Subscribe);
+			renewal.verify(verdict, update.request_id);
 			return Ok(());
 		}
 		if answer {
 			self.write_request_ok(&mut stream.writer, update.request_id).await?;
 		}
 		Ok(())
-	}
-
-	/// Stash an update behind a pending verdict, enforcing the update-count ceiling. Returns
-	/// `Some(err)` when the ceiling is exceeded (a session close on draft-19+, else ending the
-	/// request), `None` once stashed.
-	fn stash_update(
-		&self,
-		stashed: &mut std::collections::VecDeque<super::request_stream::Update>,
-		update: super::request_stream::Update,
-	) -> Option<Error> {
-		// Outstanding counts the one being verified (1) plus those already queued.
-		let outstanding = stashed.len() as u64 + 1;
-		if request_update::supported(self.version) {
-			// Draft-19+: we advertised MAX_REQUEST_UPDATES, so a peer with that many outstanding
-			// sending another broke the negotiated limit (draft-19 section 10.3.1.7), answered
-			// with a session close.
-			if outstanding >= request_update::MAX_REQUEST_UPDATES {
-				self.session.clone().close(
-					crate::SessionError::TooManyRequestUpdates.to_code(),
-					"too many request updates",
-				);
-				return Some(Error::Session(crate::SessionError::TooManyRequestUpdates));
-			}
-		} else if stashed.len() >= request_update::UNNEGOTIATED_GUARD {
-			// Below draft-19 no limit is negotiated, so this is a local memory guard: end this
-			// request, never the session.
-			return Some(Error::ProtocolViolation);
-		}
-		stashed.push_back(update);
-		None
-	}
-
-	/// Start verifying a renewal's token without blocking the serve loop; the verdict is
-	/// polled in the loop's wait.
-	fn verify_renewal(&self, namespace: &crate::PathOwned, token: crate::setup::Token) -> crate::auth::RequestVerdict {
-		self.auth
-			.verify_request(token, namespace.clone(), crate::auth::RequestKind::Subscribe)
 	}
 
 	/// Answer a REQUEST_UPDATE with REQUEST_OK.
