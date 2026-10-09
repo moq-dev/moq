@@ -1,6 +1,7 @@
 import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
+import * as Filter from "./filter.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /// Setup Option key constants (separate namespace from Message Parameters).
@@ -360,7 +361,7 @@ const MSG_PARAM_REPEATABLE: readonly bigint[] = [
 	MSG_PARAM_TRACK_PROPERTY_FILTER,
 ];
 
-type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "bytes";
+type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "filter" | "bytes";
 /** A `{Group, Object}` pair carried by a message parameter, such as LARGEST_OBJECT. */
 export type MessageLocation = { groupId: bigint; objectId: bigint };
 
@@ -385,8 +386,9 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 			return "bool";
 		case MSG_PARAM_LARGEST_OBJECT:
 			return "location";
-		case MSG_PARAM_AUTHORIZATION_TOKEN:
 		case MSG_PARAM_SUBSCRIPTION_FILTER:
+			return "filter";
+		case MSG_PARAM_AUTHORIZATION_TOKEN:
 		case MSG_PARAM_FILL_PARAMETERS:
 		case MSG_PARAM_HOP_PATH:
 			return "bytes";
@@ -424,6 +426,8 @@ export class Parameters {
 	vars: Map<bigint, bigint>;
 	bytes: Map<bigint, Uint8Array>;
 	#locations: Map<bigint, MessageLocation>;
+	/** LOCATION_FILTER, kept decoded because its framing depends on the draft. */
+	#filter: Filter.Filter | undefined;
 	/** Every instance of a parameter that may repeat, decoded only; we never send one. */
 	#repeated: Map<bigint, Uint8Array[]>;
 
@@ -539,18 +543,13 @@ export class Parameters {
 		this.#locations.set(MSG_PARAM_LARGEST_OBJECT, { ...v });
 	}
 
-	/**
-	 * LOCATION_FILTER, as its raw parameter value.
-	 *
-	 * Raw because the encoding is version dependent: a Filter Type tag through draft-19, a
-	 * list of up to four varints from draft-20 on. See `filter.ts`.
-	 */
-	get subscriptionFilter(): Uint8Array | undefined {
-		return this.bytes.get(MSG_PARAM_SUBSCRIPTION_FILTER);
+	/** LOCATION_FILTER: which Objects the subscription delivers. See `filter.ts`. */
+	get subscriptionFilter(): Filter.Filter | undefined {
+		return this.#filter;
 	}
 
-	set subscriptionFilter(v: Uint8Array) {
-		this.bytes.set(MSG_PARAM_SUBSCRIPTION_FILTER, v);
+	set subscriptionFilter(v: Filter.Filter) {
+		this.#filter = v;
 	}
 
 	/** FILL_PARAMETERS: the draft-20 backfill request, as its raw parameter value. */
@@ -597,7 +596,8 @@ export class Parameters {
 	}
 
 	async encode(w: Writer, version: IetfVersion) {
-		await w.u53(this.vars.size + this.bytes.size + this.#locations.size);
+		const filter = this.#filter;
+		await w.u53(this.vars.size + this.bytes.size + this.#locations.size + (filter ? 1 : 0));
 
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
 			for (const [id, value] of this.vars) {
@@ -617,12 +617,20 @@ export class Parameters {
 				await w.u53(encoded.length);
 				await w.write(encoded);
 			}
+
+			if (filter) {
+				const encoded = Filter.encode(filter, version);
+				await w.u62(MSG_PARAM_SUBSCRIPTION_FILTER);
+				await w.u53(encoded.length);
+				await w.write(encoded);
+			}
 		} else {
 			// d16+: Delta encoding, merge all parameter storage, sort by key
-			const all: { key: bigint; storage: "var" | "bytes" | "location" }[] = [];
+			const all: { key: bigint; storage: "var" | "bytes" | "location" | "filter" }[] = [];
 			for (const id of this.vars.keys()) all.push({ key: id, storage: "var" });
 			for (const id of this.bytes.keys()) all.push({ key: id, storage: "bytes" });
 			for (const id of this.#locations.keys()) all.push({ key: id, storage: "location" });
+			if (filter) all.push({ key: MSG_PARAM_SUBSCRIPTION_FILTER, storage: "filter" });
 			all.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
 			let prevId = 0n;
@@ -641,8 +649,10 @@ export class Parameters {
 							storage === "bytes"
 								? // biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in bytes map
 									this.bytes.get(key)!
-								: // biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in locations map
-									encodeLocation(this.#locations.get(key)!);
+								: storage === "filter" && filter
+									? Filter.encode(filter, version)
+									: // biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in locations map
+										encodeLocation(this.#locations.get(key)!);
 						await w.u53(value.length);
 						await w.write(value);
 					}
@@ -681,6 +691,11 @@ export class Parameters {
 						// "Two consecutive varints (Group, Object)", so they go out bare.
 						await w.u62(location.groupId);
 						await w.u62(location.objectId);
+						break;
+					}
+					case "filter": {
+						if (!filter) throw new Error(`invalid LOCATION_FILTER message parameter: ${key.toString()}`);
+						await w.write(Filter.encodeParam(filter, version));
 						break;
 					}
 					case "bytes": {
@@ -755,6 +770,12 @@ export class Parameters {
 							throw new Error(`duplicate message parameter id: ${id.toString()}`);
 						}
 						params.#locations.set(id, decodeLocation(bytes));
+					} else if (id === MSG_PARAM_SUBSCRIPTION_FILTER && version !== Version.DRAFT_14) {
+						// Draft-14 carries the filter in the SUBSCRIBE body, so 0x21 is undefined there.
+						if (params.#filter !== undefined) {
+							throw new Error(`duplicate message parameter id: ${id.toString()}`);
+						}
+						params.#filter = Filter.decode(bytes, version);
 					} else {
 						if (params.bytes.has(id)) {
 							throw new Error(`duplicate message parameter id: ${id.toString()}`);
@@ -771,7 +792,8 @@ export class Parameters {
 				continue;
 			}
 
-			if (params.vars.has(id) || params.bytes.has(id) || params.#locations.has(id)) {
+			const filter = id === MSG_PARAM_SUBSCRIPTION_FILTER && params.#filter !== undefined;
+			if (params.vars.has(id) || params.bytes.has(id) || params.#locations.has(id) || filter) {
 				throw new Error(`duplicate message parameter id: ${id.toString()}`);
 			}
 
@@ -802,6 +824,9 @@ export class Parameters {
 					params.#locations.set(id, { groupId, objectId });
 					break;
 				}
+				case "filter":
+					params.#filter = await Filter.decodeParam(r, version);
+					break;
 				case "bytes": {
 					const size = await r.u53();
 					params.bytes.set(id, await r.read(size));
