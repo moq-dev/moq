@@ -399,6 +399,10 @@ export class Publisher {
 	// version without AUTH, which allows everything.
 	#grant?: Getter<Grant | undefined>;
 
+	// Resolves once the tokens this session presented at setup are answered, so nothing is
+	// announced before the grant it would be checked against.
+	#ready: Promise<void>;
+
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
 	// and reuse it for every later TRACK request of the same track. Keyed by the
@@ -413,7 +417,8 @@ export class Publisher {
 	 * @param version - Negotiated protocol version
 	 * @param origin - Hop id shared with the Subscriber
 	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
-	 * @param grant - The union of our tokens' grants, which bounds what we publish
+	 * @param auth - The union of our tokens' grants, which bounds what we publish, and when the
+	 *   setup tokens are answered
 	 *
 	 * @internal
 	 */
@@ -422,10 +427,11 @@ export class Publisher {
 		version: Version,
 		hop: Hop,
 		publish?: OriginConsumer,
-		grant?: Getter<Grant | undefined>,
+		auth?: { grant: Getter<Grant | undefined>; ready: Promise<void> },
 	) {
 		this.#quic = quic;
-		this.#grant = grant;
+		this.#grant = auth?.grant;
+		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
 		this.hop = hop;
 		const origin = publish && wireOf(publish);
@@ -551,6 +557,9 @@ export class Publisher {
 		let changed = arm();
 
 		try {
+			// Nothing is announced before the grant it would be checked against.
+			if ((await race([this.#ready.then(() => "ready" as const), stream.reader.closed])) !== "ready") return;
+
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
@@ -1149,6 +1158,8 @@ export class Publisher {
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
+			// The grant may have narrowed while the broadcast and its track resolved.
+			if (this.#denied(msg.broadcast)) throw unauthorized(msg.broadcast);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.close();

@@ -1435,6 +1435,9 @@ where
 				.await;
 		}
 
+		// A joining FETCH rides its subscription's grant; a standalone one is checked here,
+		// before it reaches the origin, and again while its group loads.
+		let mut gate = None;
 		let (track, start, end, timescale, joined) = match msg.fetch_type {
 			FetchType::Standalone {
 				namespace,
@@ -1442,6 +1445,17 @@ where
 				start,
 				end,
 			} => {
+				if !self.auth.allows(crate::auth::Direction::Publish, namespace.as_str()) {
+					return self
+						.reject_fetch(stream, msg.request_id, &Error::Unauthorized, "not granted")
+						.await;
+				}
+				gate = Some(crate::auth::Gate::new(
+					self.auth.clone(),
+					namespace.to_owned(),
+					crate::auth::Direction::Publish,
+				));
+
 				// An End Object of 0 asks for the whole End Group.
 				let end = match end.object {
 					0 => end.group.checked_add(1).map(|group| Location { group, object: 0 }),
@@ -1537,6 +1551,11 @@ where
 				let mut cx = waiter.context();
 				if super::request_stream::poll_cancel(&mut stream, &mut finished, self.version, &mut cx).is_ready() {
 					return Poll::Ready(None);
+				}
+				if let Some(gate) = gate.as_mut()
+					&& gate.poll_denied(waiter).is_ready()
+				{
+					return Poll::Ready(Some(Err(Error::Unauthorized)));
 				}
 				waiter.poll_future(read.as_mut()).map(Some)
 			})
@@ -5277,6 +5296,71 @@ mod serve_tests {
 
 	/// A datagram group is never fetchable: a FETCH for one is refused like a group that
 	/// does not exist, newest or not, and opens no fetch stream for its payload.
+	/// A standalone FETCH outside what the peer may subscribe to is refused before it
+	/// reaches the origin, and one whose grant narrows while its group loads is refused too.
+	#[moq_net_sim::test]
+	async fn a_standalone_fetch_outside_the_grant_is_refused() {
+		let unauthorized = |version| {
+			crate::ietf::error::request::to_code(
+				&Error::Unauthorized,
+				crate::ietf::error::request::Kind::Fetch,
+				version,
+			)
+		};
+		let nothing = crate::auth::Grant {
+			publish: Default::default(),
+			subscribe: Default::default(),
+			expires: None,
+		};
+		let location = Location { group: 0, object: 0 };
+
+		for version in FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 1, None);
+			settle().await;
+			let auth = crate::auth::Handle::new(false);
+			auth.authorize(&nothing);
+			h.publisher = h.publisher.clone().with_auth(auth);
+
+			let buf = standalone_fetch(&h, location, location, GroupOrder::Ascending).await;
+			assert_eq!(
+				fetch_refusal(buf, version),
+				unauthorized(version),
+				"{version}: denied up front"
+			);
+		}
+
+		for version in FETCH_DRAFTS {
+			// The group is still being written, so the fetch waits on it when the grant narrows.
+			let h = serve(version);
+			let _group = h.track.clone().create_group(group::Info { sequence: 0 }).unwrap();
+			settle().await;
+			let auth = crate::auth::Handle::new(false);
+			let mut h = h;
+			h.publisher = h.publisher.clone().with_auth(auth.clone());
+
+			let mut fetch = std::pin::pin!(standalone_fetch(
+				&h,
+				location,
+				Location { group: 0, object: 1 },
+				GroupOrder::Ascending
+			));
+			assert!(
+				futures::poll!(fetch.as_mut()).is_pending(),
+				"{version}: served an unwritten group"
+			);
+			auth.authorize(&nothing);
+			let buf = moq_net_sim::timeout(std::time::Duration::from_secs(1), fetch)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: still loading after the grant narrowed"));
+			assert_eq!(
+				fetch_refusal(buf, version),
+				unauthorized(version),
+				"{version}: narrowed mid-load"
+			);
+		}
+	}
+
 	#[moq_net_sim::test]
 	async fn a_standalone_fetch_of_a_datagram_group_is_refused() {
 		for version in FETCH_DRAFTS {

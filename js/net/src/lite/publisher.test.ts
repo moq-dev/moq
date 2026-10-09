@@ -18,6 +18,7 @@ import { sendOrder } from "./priority.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe, type SubscribeEnd, SubscribeUpdate } from "./subscribe.ts";
+import { Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
@@ -1658,6 +1659,92 @@ function unauthorizedResets(resets: { mock: { calls: unknown[][] } }): string[] 
 		.map((reason) => reason.message);
 }
 
+// Nothing is announced before the grant it would be checked against: an ANNOUNCE_REQUEST that
+// lands before the setup token is answered waits, then leaves out what the grant excludes.
+test("lite draft-06: announces wait for the setup grant", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const grant = new Signal<Grant | undefined>(undefined);
+	let answered = () => {};
+	const ready = new Promise<void>((resolve) => {
+		answered = resolve;
+	});
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), { grant, ready });
+	const broadcast = origin.createBroadcast(Path.from("foo/bar"));
+	broadcast.announce();
+
+	const written: Uint8Array[] = [];
+	const stream = new Stream({
+		version: Version.DRAFT_06,
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			write(chunk) {
+				written.push(chunk);
+			},
+		}),
+	});
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+	await settle();
+	expect(written.length).toBe(0);
+
+	grant.set(grantOf("baz"));
+	answered();
+	await settle();
+	// ANNOUNCE_OK alone: the grant excludes foo/bar, so it never reaches the wire.
+	const bytes = written.flatMap((chunk) => [...chunk]);
+	expect(new TextDecoder().decode(new Uint8Array(bytes))).not.toContain("foo/bar");
+
+	stream.close();
+	await running;
+	publisher.close();
+	broadcast.close();
+	origin.close();
+	pair.client.close();
+	pair.server.close();
+});
+
+// A TRACK is checked again once its broadcast and track resolve, so a shrink in between
+// refuses it rather than sending TRACK_INFO the grant no longer covers.
+test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const handle = origin.dynamic(Path.from("live"));
+	const requests = handle.requested();
+	const grant = new Signal<Grant | undefined>(grantOf("live"));
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
+		grant,
+		ready: Promise.resolve(),
+	});
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
+	if (!server) throw new Error("publisher never accepted the track stream");
+
+	const resets = spyOn(Writer.prototype, "reset");
+	const produced = new BroadcastProducer();
+	produced.createTrack("video", { timescale: Timescale.MILLI });
+	try {
+		const serving = publisher.runTrackInfo(new TrackMessage(Path.from("live/cam"), "video"), server);
+
+		// The TRACK is parked resolving the broadcast when the grant shrinks.
+		const request = await requests.next();
+		if (request.done) throw new Error("the handler never saw the request");
+		grant.set(grantOf("other"));
+		request.value.accept(produced);
+		await serving;
+
+		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");
+	} finally {
+		resets.mockRestore();
+		produced.close();
+		handle.close();
+		publisher.close();
+		client.close();
+		origin.close();
+	}
+});
+
 // The grant watch is armed before the first check, so a shrink that lands while the broadcast
 // is still resolving resets the subscription instead of being missed for good.
 test("lite draft-06: a grant that shrinks while the broadcast resolves resets the subscription", async () => {
@@ -1666,7 +1753,10 @@ test("lite draft-06: a grant that shrinks while the broadcast resolves resets th
 	const handle = origin.dynamic(Path.from("live"));
 	const requests = handle.requested();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
-	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), grant);
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
+		grant,
+		ready: Promise.resolve(),
+	});
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_06);
@@ -1703,7 +1793,10 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
-	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), grant);
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
+		grant,
+		ready: Promise.resolve(),
+	});
 
 	const broadcast = publish(origin, Path.from("live"));
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });

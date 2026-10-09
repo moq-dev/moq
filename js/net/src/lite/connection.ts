@@ -159,7 +159,10 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 		});
-		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, this.#auth.grant);
+		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, {
+			grant: this.#auth.grant,
+			ready: this.#auth.setupAnswered(),
+		});
 		this.#subscriber = new Subscriber(
 			this.#quic,
 			this.#version,
