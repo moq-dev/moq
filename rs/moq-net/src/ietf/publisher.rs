@@ -709,10 +709,18 @@ where
 			// cover the group with no gap and no overlap.
 			let edge = live_edge(&cache);
 			let range = subscribe_range(&msg, edge, self.version);
-			subscription.start = range.start.map(|start| track::Position {
-				group: start.group,
-				frame: start.object,
-			});
+			// The current group (`Relative(1)`) is moq-lite's live edge; every other
+			// resolved start is a floor. No start at all (a relative filter on an empty
+			// track) is the live edge too.
+			subscription.floor =
+				range
+					.start
+					.filter(|_| msg.filter != Filter::Relative(1))
+					.map(|start| track::Position {
+						group: start.group,
+						frame: start.object,
+					});
+			subscription.live = subscription.floor.is_none();
 			subscription.end = range.end.and_then(|end| match end.object {
 				Some(object) => track::Position::after(end.group, object),
 				None => track::Position::after_group(end.group),
@@ -8066,10 +8074,13 @@ fn subscribe_range(msg: &ietf::Subscribe<'_>, edge: LiveEdge, version: Version) 
 /// The Locations a single Location Filter selects, resolved against the live edge.
 fn filter_range(filter: Filter, edge: LiveEdge) -> ServeRange {
 	match filter {
-		// No restriction. moq-lite starts at the beginning of the latest group, which is
-		// the join point it is built around; a subscription passes objects as they are
-		// published, so an absent filter is not a request to replay history.
-		Filter::Unfiltered => ServeRange::default(),
+		// Every Object, which the draft defines as an open ended absolute {0, 0}: the same
+		// start an explicit one asks for. A relay folding `live` into a floor sends it to
+		// reach back over what its readers may still use, and filters locally.
+		Filter::Unfiltered => ServeRange {
+			start: Some(Location { group: 0, object: 0 }),
+			end: None,
+		},
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the
 		// already-published head of the current group, is outside the requested range,
 		// so the join is mid-group by construction. The draft pairs this with a fill
@@ -8247,12 +8258,18 @@ mod range_tests {
 		assert_eq!(subscribe_range(&msg, EDGE, Version::Draft19), ServeRange::default());
 	}
 
-	/// An absent filter is "no restriction on what is forwarded", not a request for
-	/// history, so it joins at the live edge.
+	/// An absent filter is every Object, an open ended absolute {0, 0}, so it starts at the
+	/// origin like the explicit spelling the draft defines it as.
 	#[test]
-	fn an_unfiltered_subscription_stays_live() {
+	fn an_unfiltered_subscription_starts_at_the_origin() {
 		let msg = subscribe(Filter::Unfiltered);
-		assert_eq!(subscribe_range(&msg, EDGE, Version::Draft20), ServeRange::default());
+		assert_eq!(
+			subscribe_range(&msg, EDGE, Version::Draft20),
+			ServeRange {
+				start: Some(Location { group: 0, object: 0 }),
+				end: None,
+			}
+		);
 	}
 
 	/// Next Object starts one past the Largest Object, mid-group. Everything below it,

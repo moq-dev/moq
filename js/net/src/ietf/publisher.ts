@@ -401,14 +401,17 @@ export class Publisher {
 
 			// The wire request tells an upstream what we need; the cursor is what actually
 			// trims this subscriber, since the producer fans every cached group out to every
-			// sink regardless. An absent start joins at the latest group, which is what
-			// moq-lite means by joining a live track. The range's end is the inclusive last
-			// group; the model's `endGroup` is exclusive.
+			// sink regardless. The current group (`relative` 1) is moq-lite's live edge, and
+			// so is an absent start (a relative filter on an empty track); every other
+			// resolved start is a floor. The range's end is the inclusive last group; the
+			// model's `endGroup` is exclusive.
+			const live = !range.start || (msg.filter.kind === "relative" && msg.filter.groups === 1n);
 			track.update({
 				priority,
 				maxDelay: Milli(Varint.MAX_U53),
+				live,
 				groups: {
-					start: range.start ? { included: Number(range.start.group) } : undefined,
+					start: range.start && !live ? { included: Number(range.start.group) } : undefined,
 					end: range.end ? { included: Number(range.end.group) } : undefined,
 				},
 			});
@@ -1638,11 +1641,11 @@ function subscribeRange(msg: Subscribe, edge: LiveEdge, version: IetfVersion): S
 /** The Locations a single Location Filter selects, resolved against the live edge. */
 function filterRange(filter: Filter.Filter, edge: LiveEdge): ServeRange {
 	switch (filter.kind) {
-		// No restriction. moq-lite starts at the beginning of the latest group, which is the
-		// join point it is built around; a subscription passes objects as they are published,
-		// so an absent filter is not a request to replay history.
+		// Every Object, which the draft defines as an open ended absolute {0, 0}: the same
+		// start an explicit one asks for. A relay folding `live` into a floor sends it to
+		// reach back over what its readers may still use, and filters locally.
 		case "unfiltered":
-			return {};
+			return { start: { group: 0n, object: 0n } };
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the already
 		// published head of the current group, is outside the requested range, so the join is
 		// mid-group by construction. The draft pairs this with a fill when the subscriber

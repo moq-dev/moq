@@ -92,7 +92,7 @@ async fn round(version: &str) {
 	let mut peer_sub = peer_remote
 		.track("catalog.json")
 		.unwrap()
-		.subscribe(Subscription::default().with_start(start))
+		.subscribe(Subscription::default().with_live(false).with_floor(start))
 		.await
 		.expect("peer subscribe");
 	let mut peer_group = moq_net_sim::timeout(TIMEOUT, peer_sub.recv_group())

@@ -36,9 +36,11 @@ import {
 	decodeSubscribeResponse,
 	decodeSubscribeResponseMaybe,
 	EMPTY_RANGE,
+	EMPTY_START,
 	emptyRange,
 	exclusiveGroupEnd,
 	inclusiveGroupEnd,
+	type Start,
 	Subscribe,
 	SubscribeUpdate,
 } from "./subscribe.ts";
@@ -76,6 +78,18 @@ function supportsTrackStream(version: Version): boolean {
 		default:
 			return true;
 	}
+}
+
+/** What `subscription` asks a peer for: the live edge, its floor, or both. */
+function wireStart(subscription: track.Subscription): Start {
+	const startGroup = subscription.groups?.start === undefined ? undefined : groupBounds(subscription.groups).start;
+	return { live: subscription.live ?? startGroup === undefined, startGroup, startFrame: 0 };
+}
+
+/** The floor below which the peer serves nothing, or undefined for the live edge, which reaches below any floor. */
+function servedFloor(subscription: track.Subscription): number | undefined {
+	const start = wireStart(subscription);
+	return start.live ? undefined : start.startGroup;
 }
 
 interface SubscribeEntry {
@@ -555,8 +569,13 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, epoch: Epoch.Valid | undefined, request: track.Request) {
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
+		const start = wireStart(subscription);
+		if (!start.live && start.startGroup === undefined) {
+			request.reject(new Error(EMPTY_START));
+			return;
+		}
 		const initialBounds = groupBounds(subscription.groups);
-		if (emptyRange({ startGroup: initialBounds.start, endGroup: initialBounds.end })) {
+		if (emptyRange({ ...start, endGroup: initialBounds.end })) {
 			request.reject(new Error(EMPTY_RANGE));
 			return;
 		}
@@ -575,7 +594,7 @@ export class Subscriber {
 			track: request.name,
 			priority: subscription.priority ?? 0,
 			maxDelay: subscription.maxDelay,
-			startGroup: subscription.groups?.start === undefined ? undefined : bounds.start,
+			start,
 			endGroup: inclusiveGroupEnd(bounds.end),
 		});
 
@@ -728,7 +747,7 @@ export class Subscriber {
 					return maxDelay > 0 ? maxDelay : TAIL_GRACE_MS;
 				},
 			}),
-			requested: msg.startGroup,
+			requested: msg.start.live ? undefined : msg.start.startGroup,
 			held: state.track,
 		};
 		this.#subscribes.set(id, entry);
@@ -1051,9 +1070,9 @@ export class Subscriber {
 			// Owed from the floor the demand last asked for, which an update can move either
 			// way, or where SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE
 			// asked for below its SUBSCRIBE_START were accounted for when it arrived.
-			const groups = track.subscription.peek()?.groups;
-			const bounds = groupBounds(groups ?? {});
-			const start = groups?.start === undefined ? entry.start : bounds.start;
+			const current = track.subscription.peek();
+			const bounds = groupBounds(current?.groups ?? {});
+			const start = (current && servedFloor(current)) ?? entry.start;
 			const end = bounds.end === undefined ? entry.end : Math.min(entry.end, bounds.end);
 			return tail.covers(start, end);
 		};
@@ -1084,8 +1103,9 @@ export class Subscriber {
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			maxDelay: Time.Milli(msg.maxDelay),
+			live: msg.start.live,
 			groups: {
-				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
+				start: msg.start.startGroup === undefined ? undefined : { included: msg.start.startGroup },
 				end: msg.endGroup === undefined ? undefined : { excluded: exclusiveGroupEnd(msg.endGroup) ?? 0 },
 			},
 		};
@@ -1101,13 +1121,16 @@ export class Subscriber {
 
 			// Demand collapsing to nothing is refused the same way an initial empty
 			// request is: the error closes the track, so every local subscriber sees it.
+			const start = wireStart(current);
+			if (!start.live && start.startGroup === undefined) throw new Error(EMPTY_START);
 			const bounds = groupBounds(current.groups);
-			if (emptyRange({ startGroup: bounds.start, endGroup: bounds.end })) throw new Error(EMPTY_RANGE);
+			if (emptyRange({ ...start, endGroup: bounds.end })) throw new Error(EMPTY_RANGE);
 
 			// A lowered floor owes groups nobody asked for until now.
-			if (current.groups?.start !== undefined) {
-				const floor = lastSent.groups?.start === undefined ? entry.start : groupBounds(lastSent.groups).start;
-				entry.tail.demand(bounds.start, floor ?? Number.POSITIVE_INFINITY);
+			const floor = servedFloor(current);
+			if (floor !== undefined) {
+				const last = servedFloor(lastSent) ?? entry.start;
+				entry.tail.demand(floor, last ?? Number.POSITIVE_INFINITY);
 			}
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
@@ -1115,7 +1138,7 @@ export class Subscriber {
 			const update = new SubscribeUpdate({
 				priority: current.priority ?? 0,
 				maxDelay: current.maxDelay,
-				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
+				start,
 				endGroup: inclusiveGroupEnd(bounds.end),
 			});
 			await update.encode(stream.writer, this.version);
@@ -1130,6 +1153,8 @@ export class Subscriber {
 		return (
 			(a.priority ?? 0) === (b.priority ?? 0) &&
 			(a.maxDelay ?? 0) === (b.maxDelay ?? 0) &&
+			wireStart(a).live === wireStart(b).live &&
+			(a.groups?.start === undefined) === (b.groups?.start === undefined) &&
 			ag.start === bg.start &&
 			ag.end === bg.end
 		);

@@ -213,6 +213,25 @@ export function resolvesStart(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry a `Live` flag beside an optional floor.
+ * Added in lite-07; older versions fold `live` into `Group Start`.
+ */
+export function hasLive(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07. */
 export function hasHidden(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.

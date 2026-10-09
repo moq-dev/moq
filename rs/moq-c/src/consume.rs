@@ -638,7 +638,14 @@ impl Consume {
 
 	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
 		let subscription = subscription.unwrap_or_default();
-		let start = subscription.start.map(|start| start.group).or_else(|| track.latest());
+		// The live edge is the latest group, lowering any floor below it.
+		let floor = subscription.floor.map(|floor| floor.group);
+		let start = match subscription.live {
+			true => track
+				.latest()
+				.map(|latest| floor.map_or(latest, |floor| floor.min(latest))),
+			false => floor,
+		};
 		track.set_groups((
 			start.map_or(Bound::Unbounded, Bound::Included),
 			subscription

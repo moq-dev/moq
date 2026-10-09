@@ -368,14 +368,14 @@ mod tests {
 		);
 
 		// The skip is the local read cursor and nothing else. Asking for it
-		// through `Subscription::start` would look equivalent and is not: the
+		// through `Subscription::floor` would look equivalent and is not: the
 		// floor is aggregated across every live subscriber and tells the
 		// publisher what to send, so naming a cached sequence there rewinds the
 		// track for everyone reading it. A rendition switched away from and back
 		// to is the case that bites, because its cached sequence is stale by
 		// then and the publisher resends the broadcast from it.
 		assert_eq!(
-			published.subscription().and_then(|sub| sub.start),
+			published.subscription().and_then(|sub| sub.floor),
 			None,
 			"the publisher was asked to rewind the track",
 		);

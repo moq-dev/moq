@@ -51,25 +51,36 @@ pub struct Subscription {
 	/// reclamation of idle content is the cache's own policy, not this budget's.
 	///
 	/// An untimed track (pre-Lite05 moq-lite, or moq-transport without TIMESCALE) has no
-	/// media time, so none of its groups is ever stale, and a new subscriber with no
-	/// [`Self::start`] begins at its latest group instead of replaying the cache.
+	/// media time, so none of its groups is ever stale, and [`Self::live`] begins at its
+	/// latest group instead of replaying the cache.
 	pub max_delay: Duration,
+	/// Deliver from the live edge: the first frame of the oldest group [`Self::max_delay`]
+	/// has not expired, or of the latest group on an untimed track.
+	///
+	/// Lowers [`Self::floor`] to that position whenever it sorts below the floor, so a
+	/// floor above the live edge (a resumed subscription naming where it left off) never
+	/// hides the latest group from a subscriber that also wants it. On a timed track a
+	/// floor adds nothing to `live`: anything below the live edge is expired anyway.
+	///
+	/// A subscription with neither `live` nor a floor asks for nothing, like an empty
+	/// range: it holds no demand, and no wire carries it. Defaults to `true`.
+	///
+	/// Aggregated across every live subscriber as an OR.
+	pub live: bool,
 	/// The lowest [`Position`] the publisher may deliver, or `None` for no floor.
 	///
 	/// A floor, not a request: only [`Self::max_delay`] asks for data, and the floor bounds
-	/// how far back it may reach. `None` and a floor of group 0 mean the same thing on a
-	/// timed track, since nothing sits below group 0. On an untimed track, which no budget
-	/// can measure, `None` starts at the latest group and a floor is honored as given.
-	/// Delivery starts at the oldest group at or above the floor that the budget still
-	/// considers fresh, so a floor above the live edge simply waits there (a resumed
-	/// subscription naming where it left off).
+	/// how far back it may reach. Delivery starts at the oldest group at or above the floor
+	/// that the budget still considers fresh, so a floor above the live edge simply waits
+	/// there (a resumed subscription naming where it left off). [`Self::live`] lowers it.
 	///
-	/// Aggregated across every live subscriber (the loosest floor wins, and any subscriber
-	/// without one clears it), so it says what the publisher sends, not what any one
-	/// subscriber sees. [`crate::track::Subscriber::set_groups`] is the local read cursor;
-	/// setting one does not imply the other. See [Local cursor vs wire
+	/// Aggregated across every live subscriber as the minimum, where `None` is neutral, so
+	/// it says what the publisher sends, not what any one subscriber sees. Each
+	/// subscriber's own cursor still filters what it reads.
+	/// [`crate::track::Subscriber::set_groups`] is the local read cursor; setting one does
+	/// not imply the other. See [Local cursor vs wire
 	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
-	pub start: Option<Position>,
+	pub floor: Option<Position>,
 	/// First [`Position`] the publisher should *not* deliver, or `None` for no end.
 	///
 	/// Exclusive, like the end of a [`std::ops::Range`], which is what lets one field
@@ -93,7 +104,8 @@ impl Default for Subscription {
 		Self {
 			priority: 0,
 			max_delay: Duration::ZERO,
-			start: None,
+			live: true,
+			floor: None,
 			end: None,
 		}
 	}
@@ -113,13 +125,21 @@ impl Subscription {
 		self
 	}
 
-	/// Floor delivery at `start`, or leave it unfloored when `None`. Returns `self` for
+	/// Deliver from the live edge or not, returning `self` for chaining. See [`Self::live`].
+	pub fn with_live(mut self, live: bool) -> Self {
+		self.live = live;
+		self
+	}
+
+	/// Floor delivery at `floor`, or leave it unfloored when `None`. Returns `self` for
 	/// chaining.
 	///
 	/// A floor bounds how far back [`Self::max_delay`] may reach; it does not request data
-	/// on its own. [`Position::group`] is the whole-group form.
-	pub fn with_start(mut self, start: impl Into<Option<Position>>) -> Self {
-		self.start = start.into();
+	/// on its own. [`Position::group`] is the whole-group form. This leaves
+	/// [`Self::live`] alone, so a resume that wants only what follows its floor also
+	/// clears it.
+	pub fn with_floor(mut self, floor: impl Into<Option<Position>>) -> Self {
+		self.floor = floor.into();
 		self
 	}
 
@@ -134,18 +154,43 @@ impl Subscription {
 		self
 	}
 
-	/// Request the whole groups in `groups`, replacing both [`Self::start`] and
-	/// [`Self::end`]. Returns `self` for chaining.
+	/// Request the whole groups in `groups`, replacing [`Self::live`], [`Self::floor`],
+	/// and [`Self::end`]. Returns `self` for chaining.
 	///
 	/// Any range of group sequences works: `2..=5`, `2..6`, `..6`, `2..`, or `..` to
-	/// clear both bounds. An inclusive end past the last group is unbounded, as
+	/// clear both bounds. A bounded start is a floor alone, and an unbounded one is
+	/// [`Self::live`]. An inclusive end past the last group is unbounded, as
 	/// [`Position::after_group`] spells it.
 	pub fn with_groups(mut self, groups: impl RangeBounds<u64>) -> Self {
 		let unbounded_start = matches!(groups.start_bound(), Bound::Unbounded);
 		let (start, end) = sequence_bounds(groups);
-		self.start = (!unbounded_start).then(|| Position::group(start));
+		self.live = unbounded_start;
+		self.floor = (!unbounded_start).then(|| Position::group(start));
 		self.end = end.map(Position::group);
 		self
+	}
+
+	/// The floor a wire without a `live` field carries for this subscription: `None` for
+	/// `live` alone, and the very first position for `live` with a floor, which the
+	/// receiver filters locally by age and floor.
+	///
+	/// A subscription that asks for nothing ([`Self::is_empty`]) has no such floor;
+	/// callers drop it first.
+	pub(crate) fn folded_floor(&self) -> Option<Position> {
+		match self.live {
+			true => self.floor.map(|_| Position::default()),
+			false => self.floor,
+		}
+	}
+
+	/// Whether this subscription asks for nothing: neither [`Self::live`] nor a floor, or
+	/// an end at or below the lowest position it could start from.
+	pub(crate) fn is_empty(&self) -> bool {
+		if !self.live && self.floor.is_none() {
+			return true;
+		}
+		self.end
+			.is_some_and(|end| end <= self.folded_floor().unwrap_or_default())
 	}
 
 	// Fold this subscription into the running aggregate: Ready with the merged
@@ -160,10 +205,13 @@ impl Subscription {
 			priority: self.priority.max(combined.priority),
 			// Sequence-first prioritization is enabled only when every subscriber wants it.
 			max_delay: self.max_delay.max(combined.max_delay),
+			// Anyone wanting the live edge gets it, without lowering anyone's floor.
+			live: self.live || combined.live,
 			// Bounds fold as whole positions. Two subscribers starting in the same group
 			// are separated only by their frame, so folding group and frame independently
-			// would invent a bound neither asked for.
-			start: min_floored(self.start, combined.start),
+			// would invent a bound neither asked for. A live-only subscriber has no floor,
+			// the neutral value, so it never clears another's.
+			floor: min_some(self.floor, combined.floor),
 			end: max_unbounded(self.end, combined.end),
 		};
 
@@ -316,13 +364,12 @@ pub(super) fn max_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	}
 }
 
-/// The lower of two optional floors, `None` absorbing (no floor). The mirror of
-/// [`max_unbounded`]: both bounds only ever *restrict*, so a subscriber without one keeps
-/// the aggregate unrestricted.
-pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+/// The lower of two optional bounds, `None` neutral.
+pub(super) fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
-		(None, _) | (_, None) => None,
+		(Some(a), None) | (None, Some(a)) => Some(a),
+		(None, None) => None,
 	}
 }
 
@@ -348,24 +395,29 @@ mod tests {
 		combined
 	}
 
+	/// A floor alone, without the live edge.
+	fn floored(floor: Position) -> Subscription {
+		Subscription::default().with_live(false).with_floor(floor)
+	}
+
 	/// The exclusive representation runs out at both extremes, and `Option` says so
 	/// rather than saturating into a bound that contradicts the request.
 	/// A group range spells both positions at once, in whichever form the caller has.
 	#[test]
 	fn group_ranges_build_whole_group_positions() {
 		let sub = Subscription::default().with_groups(2..=5);
-		assert_eq!(sub.start, Some(Position::group(2)));
+		assert_eq!((sub.live, sub.floor), (false, Some(Position::group(2))));
 		assert_eq!(sub.end, Some(Position::group(6)));
 
 		let sub = Subscription::default().with_groups(2..6);
 		assert_eq!(sub.end, Some(Position::group(6)));
 
 		let sub = Subscription::default().with_groups(..6);
-		assert_eq!(sub.start, None);
+		assert_eq!((sub.live, sub.floor), (true, None));
 		assert_eq!(sub.end, Some(Position::group(6)));
 
 		let sub = Subscription::default().with_groups(2..);
-		assert_eq!(sub.start, Some(Position::group(2)));
+		assert_eq!(sub.floor, Some(Position::group(2)));
 		assert_eq!(sub.end, None);
 
 		// Through the last group is unbounded, as `after_group` spells it.
@@ -373,7 +425,7 @@ mod tests {
 		assert_eq!(sub.end, None);
 
 		let sub = Subscription::default().with_groups(2..=5).with_groups(..);
-		assert_eq!((sub.start, sub.end), (None, None));
+		assert_eq!((sub.live, sub.floor, sub.end), (true, None, None));
 	}
 
 	#[test]
@@ -407,18 +459,52 @@ mod tests {
 	}
 
 	#[test]
-	fn combined_group_start_keeps_the_loosest_floor() {
+	fn combined_floor_keeps_the_loosest_floor() {
 		// A floor only restricts, so the lowest one wins across floored subscribers.
-		let catchup = Subscription::default().with_start(Position::group(10));
-		let older_catchup = Subscription::default().with_start(Position::group(5));
+		let catchup = floored(Position::group(10));
+		let older_catchup = floored(Position::group(5));
 		let combined = combine(&[catchup.clone(), older_catchup]).unwrap();
-		assert_eq!(combined.start, Some(Position::group(5)));
+		assert_eq!((combined.live, combined.floor), (false, Some(Position::group(5))));
 
-		// A subscriber with no floor at all clears the aggregate: its budget may reach
-		// below any floor the others set.
-		let unfloored = Subscription::default();
-		let combined = combine(&[catchup, unfloored]).unwrap();
-		assert_eq!(combined.start, None);
+		// A live-only subscriber has no floor, the neutral value, so it keeps the others'
+		// floor and adds the live edge rather than clearing it. Clearing it starved the
+		// floored subscriber's resume; keeping only the floor starved the live one.
+		let live = Subscription::default();
+		let combined = combine(&[catchup.clone(), live.clone()]).unwrap();
+		assert_eq!((combined.live, combined.floor), (true, Some(Position::group(10))));
+		let combined = combine(&[live, catchup]).unwrap();
+		assert_eq!((combined.live, combined.floor), (true, Some(Position::group(10))));
+	}
+
+	/// A wire without a `live` field folds it into the floor: `live` alone is no floor,
+	/// and `live` with a floor reaches back to the very first position, which the receiver
+	/// filters locally.
+	#[test]
+	fn older_wires_fold_live_into_the_floor() {
+		let live = Subscription::default();
+		assert_eq!(live.folded_floor(), None);
+		assert_eq!(floored(Position::group(4)).folded_floor(), Some(Position::group(4)));
+		assert_eq!(
+			live.clone().with_floor(Position { group: 3, frame: 5 }).folded_floor(),
+			Some(Position::default())
+		);
+	}
+
+	/// Neither `live` nor a floor asks for nothing, like an end at the first position.
+	#[test]
+	fn a_subscription_without_live_or_a_floor_is_empty() {
+		assert!(!Subscription::default().is_empty());
+		assert!(Subscription::default().with_live(false).is_empty());
+		assert!(!floored(Position::group(0)).is_empty());
+		assert!(Subscription::default().with_end(Position::group(0)).is_empty());
+		assert!(floored(Position::group(5)).with_end(Position::group(5)).is_empty());
+		// The live edge may sit below a floor, so only the first position empties it.
+		assert!(
+			!Subscription::default()
+				.with_floor(Position::group(5))
+				.with_end(Position::group(5))
+				.is_empty()
+		);
 	}
 
 	#[test]
@@ -433,19 +519,19 @@ mod tests {
 	}
 
 	#[test]
-	fn combined_start_folds_the_whole_position() {
-		let early_frame = Subscription::default().with_start(Position { group: 5, frame: 2 });
-		let late_frame = Subscription::default().with_start(Position { group: 5, frame: 9 });
+	fn combined_floor_folds_the_whole_position() {
+		let early_frame = floored(Position { group: 5, frame: 2 });
+		let late_frame = floored(Position { group: 5, frame: 9 });
 
 		// Same group: the earlier frame wins.
 		let combined = combine(&[late_frame.clone(), early_frame.clone()]).unwrap();
-		assert_eq!(combined.start, Some(Position { group: 5, frame: 2 }));
+		assert_eq!(combined.floor, Some(Position { group: 5, frame: 2 }));
 
 		// An earlier group wins outright, carrying its own frame rather than the
 		// smallest frame across the two.
-		let earlier_group = Subscription::default().with_start(Position { group: 4, frame: 7 });
+		let earlier_group = floored(Position { group: 4, frame: 7 });
 		let combined = combine(&[early_frame, earlier_group]).unwrap();
-		assert_eq!(combined.start, Some(Position { group: 4, frame: 7 }));
+		assert_eq!(combined.floor, Some(Position { group: 4, frame: 7 }));
 	}
 
 	#[test]

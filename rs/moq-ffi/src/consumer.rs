@@ -86,7 +86,8 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 		moq_net::track::Subscription::default()
 			.with_priority(s.priority)
 			.with_max_delay(std::time::Duration::from_micros(s.max_delay_us))
-			.with_start(s.group_start.map(moq_net::track::Position::group))
+			.with_live(s.group_start.is_none())
+			.with_floor(s.group_start.map(moq_net::track::Position::group))
 			.with_end(s.group_end.map(moq_net::track::Position::group))
 	}
 }

@@ -3,10 +3,12 @@ import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
 	decodeSubscribeResponse,
+	EMPTY_START,
 	emptyRange,
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
 	inclusiveGroupEnd,
+	type Start,
 	Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
@@ -79,71 +81,112 @@ test("SubscribeOk round-trips priority/groups on draft-04", async () => {
 	expect(got.ok.startGroup).toBe(3);
 });
 
-test("Subscribe round-trips every option including startGroup 0", async () => {
+const LIVE: Start = { live: true, startFrame: 0 };
+const floored = (startGroup: number, startFrame = 0): Start => ({ live: false, startGroup, startFrame });
+const both = (startGroup: number, startFrame = 0): Start => ({ live: true, startGroup, startFrame });
+
+/** What `start` reads back as on `version`, through SUBSCRIBE and SUBSCRIBE_UPDATE. */
+async function roundtrip(version: Version, start: Start): Promise<Start> {
+	const subscribe = new Subscribe({ id: 4n, broadcast: Path.from("test"), track: "video", priority: 7, start });
+	const got = await Subscribe.decode(
+		new Reader(undefined, await encodeMessage(version, subscribe), version),
+		version,
+	);
+	const update = new SubscribeUpdate({ priority: 8, start });
+	const updated = await SubscribeUpdate.decode(
+		new Reader(undefined, await encodeMessage(version, update), version),
+		version,
+	);
+	expect(updated.start).toEqual(got.start);
+	return got.start;
+}
+
+test("Subscribe round-trips every option", async () => {
 	const message = new Subscribe({
 		id: 4n,
 		broadcast: Path.from("test"),
 		track: "video",
 		priority: 7,
 		maxDelay: 250,
-		startGroup: 0,
+		start: floored(3, 2),
 		endGroup: 9,
+		endFrame: 4,
 	});
-	// Lite-06 carries the raw floor, and a floor of 0 with no frame offset is the same
-	// absence of a constraint as no floor at all, so it canonicalizes to undefined.
-	const got = await Subscribe.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message), Version.DRAFT_06),
-		Version.DRAFT_06,
-	);
-	expect(got.priority).toBe(7);
-	expect(got.maxDelay).toBe(250);
-	expect(got.startGroup).toBeUndefined();
-	expect(got.endGroup).toBe(9);
-
-	// Group 0 stays named when a Frame Start qualifies it: a subscription can resume
-	// partway through group 0 (a catalog never leaves it).
-	message.startFrame = 4;
-	const resumed = await Subscribe.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message), Version.DRAFT_06),
-		Version.DRAFT_06,
-	);
-	expect(resumed.startGroup).toBe(0);
-	expect(resumed.startFrame).toBe(4);
-	message.startFrame = 0;
-
-	// A pre-06 wire folds the vacuous floor back to absent: an explicit group 0 there
-	// would mean "replay from the beginning", which is not what a floor of 0 asks for.
-	const folded = await Subscribe.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message), Version.DRAFT_05),
-		Version.DRAFT_05,
-	);
-	expect(folded.startGroup).toBeUndefined();
-	expect(folded.endGroup).toBe(9);
+	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+		const got = await Subscribe.decode(
+			new Reader(undefined, await encodeMessage(version, message), version),
+			version,
+		);
+		expect(got.priority).toBe(7);
+		expect(got.maxDelay).toBe(250);
+		expect(got.start).toEqual(floored(3, 2));
+		expect(got.endGroup).toBe(9);
+		expect(got.endFrame).toBe(4);
+	}
 });
 
-test("SubscribeUpdate round-trips every option including startGroup 0", async () => {
-	const message = new SubscribeUpdate({
-		priority: 8,
-		maxDelay: 500,
-		startGroup: 0,
-		endGroup: 12,
-	});
-	const got = await SubscribeUpdate.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message), Version.DRAFT_06),
-		Version.DRAFT_06,
-	);
-	expect(got.priority).toBe(8);
-	expect(got.maxDelay).toBe(500);
-	expect(got.startGroup).toBeUndefined();
-	expect(got.endGroup).toBe(12);
+test("lite-07 carries live beside the floor", async () => {
+	for (const start of [LIVE, floored(0), floored(3, 5), both(0), both(4, 2)]) {
+		expect(await roundtrip(Version.DRAFT_07, start)).toEqual(start);
+	}
 
-	// The same fold as SUBSCRIBE on a pre-06 wire.
-	const folded = await SubscribeUpdate.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message), Version.DRAFT_05),
-		Version.DRAFT_05,
+	// `Live`, then the floor's presence, then the floor itself, ahead of the two end varints;
+	// the same bytes the Rust codec pins.
+	const bytes = async (start: Start) =>
+		Array.from(
+			await encodeMessage(
+				Version.DRAFT_07,
+				new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 0, start }),
+			),
+		);
+	expect((await bytes(both(4, 2))).slice(-6)).toEqual([1, 1, 4, 2, 0, 0]);
+	expect((await bytes(LIVE)).slice(-4)).toEqual([1, 0, 0, 0]);
+});
+
+test("lite-07 refuses neither live nor a floor", async () => {
+	const neither = new Subscribe({
+		id: 1n,
+		broadcast: Path.from("room"),
+		track: "video",
+		priority: 0,
+		start: { live: false, startFrame: 0 },
+	});
+	await expect(encodeMessage(Version.DRAFT_07, neither)).rejects.toThrow(EMPTY_START);
+
+	// Clear `Live` on an encoded live-only SUBSCRIBE: the absent floor and the two end
+	// varints follow it.
+	const bytes = await encodeMessage(
+		Version.DRAFT_07,
+		new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 0 }),
 	);
-	expect(folded.startGroup).toBeUndefined();
-	expect(folded.endGroup).toBe(12);
+	const live = bytes.length - 4;
+	expect(bytes[live]).toBe(1);
+	bytes[live] = 0;
+	await expect(Subscribe.decode(new Reader(undefined, bytes, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow(
+		EMPTY_START,
+	);
+});
+
+test("lite-06 folds live into group start zero", async () => {
+	expect(await roundtrip(Version.DRAFT_06, LIVE)).toEqual(LIVE);
+	// `live` with a floor goes out as (0, 0), and the receiver filters locally.
+	expect(await roundtrip(Version.DRAFT_06, both(4))).toEqual(LIVE);
+	expect(await roundtrip(Version.DRAFT_06, floored(7, 4))).toEqual(floored(7, 4));
+	// A catalog resume partway through group 0 stays a floor.
+	expect(await roundtrip(Version.DRAFT_06, floored(0, 4))).toEqual(floored(0, 4));
+	// A floor of (0, 0) reads back as `live`, which lite-06 cannot tell apart.
+	expect(await roundtrip(Version.DRAFT_06, floored(0))).toEqual(LIVE);
+});
+
+test("pre-06 folds live into an explicit group zero", async () => {
+	for (const version of [Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05]) {
+		expect(await roundtrip(version, LIVE)).toEqual(LIVE);
+		// Replay from the beginning, so the receiver can filter by age and floor.
+		expect(await roundtrip(version, both(2))).toEqual(floored(0));
+		expect(await roundtrip(version, floored(7))).toEqual(floored(7));
+		// An explicit group 0 is 1 on the wire, not folded back to absent.
+		expect(await roundtrip(version, floored(0))).toEqual(floored(0));
+	}
 });
 
 test("SubscribeStart round-trips on draft-05", async () => {
@@ -222,9 +265,6 @@ test("frame bounds without their group bounds are rejected before encoding", asy
 		track: "video",
 		priority: 0,
 	};
-	await expect(encodeSubscribe(new Subscribe({ ...base, startFrame: 3 }))).rejects.toThrow(
-		"frame bound without a group bound",
-	);
 	await expect(encodeSubscribe(new Subscribe({ ...base, endFrame: 7 }))).rejects.toThrow(
 		"frame bound without a group bound",
 	);
@@ -247,4 +287,7 @@ test("a requested range is empty when its bounds meet anywhere", () => {
 	expect(emptyRange({ startGroup: 6, endGroup: 5 })).toBe(true);
 	expect(emptyRange({ startGroup: 5, endGroup: 6 })).toBe(false);
 	expect(emptyRange({ startGroup: 5 })).toBe(false);
+	// The live edge may sit below any floor, so only an end of 0 empties a live range.
+	expect(emptyRange({ live: true, startGroup: 5, endGroup: 5 })).toBe(false);
+	expect(emptyRange({ live: true, startGroup: 5, endGroup: 0 })).toBe(true);
 });

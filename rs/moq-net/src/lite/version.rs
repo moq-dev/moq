@@ -216,6 +216,17 @@ impl Version {
 		}
 	}
 
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry a `Live` flag beside an optional
+	/// floor. Added in lite-07; older versions fold `live` into `Group Start`.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_live(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail
 	/// from a live announcement on the same stream. Added in lite-07.
 	#[allow(clippy::match_like_matches_macro)]

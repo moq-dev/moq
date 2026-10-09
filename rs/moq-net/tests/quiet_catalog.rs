@@ -157,7 +157,11 @@ async fn a_quiet_catalog_reaches_a_fresh_reader_when_a_peer_resumes_past_it() {
 			let _sub = resume_remote
 				.track("catalog.json")
 				.unwrap()
-				.subscribe(track::Subscription::default().with_start(track::Position::group(1)))
+				.subscribe(
+					track::Subscription::default()
+						.with_live(false)
+						.with_floor(track::Position::group(1)),
+				)
 				.await
 				.expect("resume subscribe");
 			moq_net_sim::sleep(Duration::from_secs(60)).await;
@@ -167,7 +171,7 @@ async fn a_quiet_catalog_reaches_a_fresh_reader_when_a_peer_resumes_past_it() {
 		// rather than opening its own floorless subscription.
 		let resumed = Some(track::Position::group(1));
 		moq_net_sim::timeout(TIMEOUT, async {
-			while track.subscription().map(|sub| sub.start) != Some(resumed) {
+			while track.subscription().map(|sub| sub.floor) != Some(resumed) {
 				track.subscription_changed().await.unwrap();
 			}
 		})

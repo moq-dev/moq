@@ -255,14 +255,29 @@ enum Sub {
 	Ready(track::Subscriber),
 }
 
+/// `reader`'s preferences for a copy resuming past `floor`, the newest group already
+/// handed out, or `None` for a first copy.
+///
+/// A resume asks only for what follows: the reader already has the live edge it wanted,
+/// up to `floor`, so `live` would only ask the new route for groups below it again. A
+/// reader whose own floor sits above `floor` keeps `live`, or nothing would ask for the
+/// groups in between.
+fn resumed(reader: &Subscription, floor: Option<Position>) -> Subscription {
+	let Some(floor) = floor else {
+		return reader.clone();
+	};
+	Subscription {
+		live: reader.live && reader.floor.is_some_and(|own| own > floor),
+		floor: max_some(reader.floor, Some(floor)),
+		..reader.clone()
+	}
+}
+
 impl Copy {
 	/// What this copy is asked for: the reader's own preferences, from no earlier than
 	/// where it was asked to start, and through no later than where it was replaced.
 	fn wire(&self, reader: &Subscription) -> Subscription {
-		let mut wire = Subscription {
-			start: max_some(reader.start, self.floor),
-			..reader.clone()
-		};
+		let mut wire = resumed(reader, self.floor);
 		if let Some(until) = self.until {
 			let end = until.and_then(Position::after_group).unwrap_or_default();
 			wire.end = Some(wire.end.map_or(end, |requested| requested.min(end)));
@@ -458,10 +473,7 @@ impl Reader {
 		let floor = self.newest.map(Position::group);
 		// The wire request carries the floor from the first message: some sessions read
 		// the demand only once.
-		let wire = Subscription {
-			start: max_some(self.mirrored.start, floor),
-			..self.mirrored.clone()
-		};
+		let wire = resumed(&self.mirrored, floor);
 		self.copies.push(Copy {
 			generation,
 			sub: Sub::Pending(track.subscribe(wire)),

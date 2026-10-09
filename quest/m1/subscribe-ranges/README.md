@@ -40,8 +40,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   group's existing prefix but never wait for its future objects. Downstream,
   an IETF FETCH is served from the model's ranges, capped at the Largest
   Object.
-- The `Live` flag from [lite-07 Live flag](/quest/m1/lite-live.md)
-  stays a separate field beside the range list (maintainer, 10-07): a range
+- The lite-07 `Live` flag stays a separate field beside the range list (maintainer, 10-07): a range
   starting above the live edge must not hide the latest group from a
   subscriber merged with it.
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining
@@ -56,7 +55,6 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [lite-07 Live flag](/quest/m1/lite-live.md) - the `Live` field the range list sits beside
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges and order, and `Dynamic` fills misses by range
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft

@@ -70,7 +70,9 @@ fn outcome(result: &Result<moq_net::broadcast::Consumer, String>) -> String {
 /// group's frames and then how the subscription ended. Read continuously, as a
 /// real subscriber would, so the subscription is driven the whole time.
 async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::UnboundedReceiver<String> {
-	let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+	let subscription = moq_net::track::Subscription::default()
+		.with_live(false)
+		.with_floor(moq_net::track::Position::group(0));
 	let mut sub = broadcast
 		.track(name)
 		.unwrap()

@@ -5,7 +5,7 @@ import * as DatagramStream from "../datagram_stream.ts";
 import { error, NotFound, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
-import { hiddenBelow, hooks, presented } from "../internal.ts";
+import { hiddenBelow, hooks, liveStart, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
@@ -22,6 +22,7 @@ import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
+	type Start,
 	type Subscribe,
 	SubscribeEnd,
 	SubscribeOk,
@@ -133,6 +134,10 @@ function supportsTrackStream(version: Version): boolean {
  * subscriber's read cursor (see {@link frameRange}).
  */
 type FrameBounds = {
+	/** Whether the subscription wants the live edge, which starts a group at frame 0. */
+	live: boolean;
+	/** An untimed track's latest group when the bounds were set: where `live` starts there. */
+	untimedEdge?: number;
 	/** The group {@link startFrame} qualifies, if the subscription named one. */
 	startGroup?: number;
 	/** First frame to send within {@link startGroup}; every other group starts at 0. */
@@ -156,9 +161,28 @@ type FrameBounds = {
  */
 function frameRange(bounds: FrameBounds, sequence: number): { start: number; end?: number } {
 	return {
-		start: bounds.startGroup === sequence ? bounds.startFrame : 0,
+		start: bounds.startGroup === sequence && floorApplies(bounds) ? bounds.startFrame : 0,
 		end: bounds.endGroup === sequence ? bounds.endFrame : undefined,
 	};
+}
+
+/**
+ * Whether the floor's frame applies: only while the floor is where delivery starts. `live`
+ * starts from a group's first frame, so it takes over once that position sorts at or below
+ * the floor: always on a timed track, where anything below the live edge is expired anyway,
+ * and on an untimed one when the floor is not below its latest group.
+ */
+function floorApplies(bounds: FrameBounds): boolean {
+	if (!bounds.live) return true;
+	return (
+		bounds.startGroup !== undefined && bounds.untimedEdge !== undefined && bounds.startGroup < bounds.untimedEdge
+	);
+}
+
+/** An untimed track's latest group, where `live` starts there; undefined on a timed track. */
+function untimedEdge(info: track.Info | undefined, subscriber: track.Subscriber): number | undefined {
+	if (!info || info.timescale != null) return undefined;
+	return subscriber.latest();
 }
 
 /** What serving one group needs beyond the group itself. */
@@ -351,8 +375,9 @@ function carriesMaxDelay(version: Version): boolean {
  * an unbounded budget so nothing is dropped under them (see {@link servingMaxDelay}), which
  * must not read as a request to replay the whole cache on join.
  */
-function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
-	if (resolvesStart(version) || startGroup !== undefined) return;
+function positionCursor(track: track.Subscriber, version: Version, start: Start) {
+	// A pre-06 wire decodes either `live` alone (no `Group Start`) or a floor alone.
+	if (resolvesStart(version) || !start.live) return;
 
 	const latest = track.latest();
 	if (latest !== undefined) hooks.replaceGroups(track, { start: { included: latest } });
@@ -622,12 +647,13 @@ export class Publisher {
 		const track = wireOf(front).subscribe(msg.track, {
 			priority: msg.priority,
 			maxDelay: Milli(servingMaxDelay(this.version, msg.maxDelay)),
+			live: msg.start.live,
 			groups: {
-				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
+				start: msg.start.startGroup === undefined ? undefined : { included: msg.start.startGroup },
 				end: endGroup === undefined ? undefined : { excluded: endGroup },
 			},
 		});
-		positionCursor(track, this.version, msg.startGroup);
+		positionCursor(track, this.version, msg.start);
 		hooks.replaceGroups(track, { end: endGroup === undefined ? undefined : { excluded: endGroup } });
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
@@ -638,6 +664,7 @@ export class Publisher {
 
 		try {
 			let timescale: Timescale = Timescale.MILLI;
+			let info: track.Info | undefined;
 
 			if (supportsTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
@@ -649,14 +676,14 @@ export class Publisher {
 				// they always agree. Awaiting info() also surfaces a rejected track
 				// (accept never called, track closed) as an error here, which resets the
 				// stream.
-				const info = await track.info();
+				info = await track.info();
 				timescale = wireTimescale(info);
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
 					priority: msg.priority,
 					maxDelay: msg.maxDelay,
-					startGroup: msg.startGroup,
+					startGroup: msg.start.startGroup,
 					endGroup: msg.endGroup,
 				});
 				await encodeSubscribeResponse(stream.writer, { ok }, this.version);
@@ -679,8 +706,12 @@ export class Publisher {
 					track.update({
 						priority: update.priority,
 						maxDelay: Milli(servingMaxDelay(this.version, update.maxDelay)),
+						live: update.start.live,
 						groups: {
-							start: update.startGroup === undefined ? undefined : { included: update.startGroup },
+							start:
+								update.start.startGroup === undefined
+									? undefined
+									: { included: update.start.startGroup },
 							end: end === undefined ? undefined : { excluded: end },
 						},
 					});
@@ -690,9 +721,12 @@ export class Publisher {
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				timescale,
+				info,
 				bounds: {
-					startGroup: msg.startGroup,
-					startFrame: msg.startFrame,
+					live: msg.start.live,
+					untimedEdge: untimedEdge(info, track),
+					startGroup: msg.start.startGroup,
+					startFrame: msg.start.startFrame,
 					endGroup: msg.endGroup,
 					endFrame: msg.endFrame,
 				},
@@ -797,9 +831,15 @@ export class Publisher {
 		track: track.Subscriber,
 		stream: Writer,
 		controls: SubscriptionControls,
-		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale; bounds: FrameBounds },
+		serving: {
+			sub: bigint;
+			broadcast: Path.Valid;
+			timescale: Timescale;
+			info: track.Info | undefined;
+			bounds: FrameBounds;
+		},
 	): Promise<boolean> {
-		const { sub, broadcast, timescale, bounds } = serving;
+		const { sub, broadcast, timescale, info, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
@@ -868,12 +908,25 @@ export class Publisher {
 						case "update": {
 							const update = control.update;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
+							// A floor alone moves the read cursor to it. Gaining `live` drops the
+							// cursor back to the live edge: it only rises on its own, and a finished
+							// group below the old floor (a quiet catalog) is never served otherwise.
+							// A cursor that was already live stays where the first served group put
+							// it. Pre-06 `live` means the latest group, which positionCursor applied.
+							const edge = untimedEdge(info, track);
+							const start = update.start.live
+								? !bounds.live && resolvesStart(this.version)
+									? liveStart(true, update.start.startGroup, edge ?? 0)
+									: undefined
+								: update.start.startGroup;
 							hooks.replaceGroups(track, {
-								start: update.startGroup === undefined ? undefined : { included: update.startGroup },
+								start: start === undefined ? undefined : { included: start },
 								end: update.endGroup === undefined ? undefined : { included: update.endGroup },
 							});
-							bounds.startGroup = update.startGroup;
-							bounds.startFrame = update.startFrame;
+							bounds.live = update.start.live;
+							bounds.untimedEdge = edge;
+							bounds.startGroup = update.start.startGroup;
+							bounds.startFrame = update.start.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
 							await yieldToControls();
@@ -895,7 +948,13 @@ export class Publisher {
 						// what it holds) is answered at once with the largest position, on
 						// versions that carry it: a quiet track may not reach that start for a
 						// while, and the subscriber judges what it holds against the answer.
-						if (emitRange && !startSent && hasLargest(this.version) && bounds.startGroup !== undefined) {
+						if (
+							emitRange &&
+							!startSent &&
+							hasLargest(this.version) &&
+							!bounds.live &&
+							bounds.startGroup !== undefined
+						) {
 							const startFrame = bounds.startFrame;
 							if (
 								largest !== undefined &&

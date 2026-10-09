@@ -103,8 +103,9 @@ fn serving_max_delay(version: Version, requested: Duration) -> Duration {
 ///
 /// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
 /// resolved: anything written in between is newer, so it is delivered.
-fn position_cursor(track: &mut track::Subscriber, version: Version, start_group: Option<u64>, latest: Option<u64>) {
-	if version.resolves_start() || start_group.is_some() {
+fn position_cursor(track: &mut track::Subscriber, version: Version, start: lite::Start, latest: Option<u64>) {
+	// A pre-06 wire decodes either `live` alone (no `Group Start`) or a floor alone.
+	if version.resolves_start() || !start.live {
 		return;
 	}
 
@@ -1525,7 +1526,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					};
 
 					let bounds = Bounds::from(msg.as_ref());
-					position_cursor(&mut track, shared.version, bounds.start_group, latest);
+					position_cursor(&mut track, shared.version, bounds.start, latest);
 					let mut run = TrackRun::new(sub, track, bounds, track_priority_tx);
 					if let Some(update) = update {
 						run.update(update);
@@ -1771,20 +1772,20 @@ mod test {
 		);
 
 		let mut legacy = served(Version::Lite01);
-		position_cursor(&mut legacy, Version::Lite01, None, producer.latest());
+		position_cursor(&mut legacy, Version::Lite01, lite::Start::LIVE, producer.latest());
 		assert_eq!(drain(&mut legacy), vec![2]);
 
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
 		// and an absent start as the latest group, so they are pinned all the same.
 		let mut tolerant =
 			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
-		position_cursor(&mut tolerant, Version::Lite05, None, producer.latest());
+		position_cursor(&mut tolerant, Version::Lite05, lite::Start::LIVE, producer.latest());
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let mut declared =
 			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
-		position_cursor(&mut declared, Version::Lite06, None, producer.latest());
+		position_cursor(&mut declared, Version::Lite06, lite::Start::LIVE, producer.latest());
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
@@ -2374,30 +2375,25 @@ fn position_group(group: &mut group::Consumer, start: Option<(u64, u64)>, end: O
 
 /// A subscription's requested delivery range, exactly as it arrived on the wire.
 ///
-/// The frame bounds qualify the start and end group, so they only mean anything paired
-/// with one; [`Self::start_frame`] / [`Self::end_frame`] hand back that pairing.
+/// The end frame qualifies the end group, so it only means anything paired with one;
+/// [`Self::end_frame`] hands back that pairing.
 struct Bounds {
-	start_group: Option<u64>,
-	start_frame: u64,
+	start: lite::Start,
 	end_group: Option<u64>,
 	end_frame: Option<u64>,
 }
 
 impl Bounds {
-	/// The requested range as the model's half-open pair of [`track::Position`]s.
+	/// The requested range as the model's [`Subscription`]: its start, and a half-open
+	/// end.
 	///
-	/// The wire carries the two halves of each bound separately and both ends
-	/// inclusive; the model carries whole positions with an exclusive end. The
-	/// [`Subscription`] builders own that conversion, so this goes through them
-	/// rather than repeating it.
+	/// The wire carries the two halves of the end separately and inclusive; the model
+	/// carries a whole position with an exclusive end. The [`Subscription`] builders own
+	/// that conversion, so this goes through them rather than repeating it.
 	fn positions(&self) -> crate::track::Subscription {
-		let mut sub = crate::track::Subscription::default();
-		if let Some(group) = self.start_group {
-			sub = sub.with_start(track::Position {
-				group,
-				frame: self.start_frame,
-			});
-		}
+		let mut sub = crate::track::Subscription::default()
+			.with_live(self.start.live)
+			.with_floor(self.start.floor);
 		if let Some(group) = self.end_group {
 			sub = sub.with_end(match self.end_frame {
 				Some(frame) => track::Position::after(group, frame),
@@ -2409,10 +2405,18 @@ impl Bounds {
 
 	/// The group to apply a frame offset to and the offset itself, or `None` when
 	/// delivery starts on a group boundary.
-	fn start_frame(&self) -> Option<(u64, u64)> {
-		self.start_group
-			.map(|group| (group, self.start_frame))
-			.filter(|(_, frame)| *frame != 0)
+	///
+	/// The floor's frame applies only while the floor is where delivery starts. `live`
+	/// starts from a group's first frame, so it takes over once that position sorts at or
+	/// below the floor: always on a timed track, where anything below the live edge is
+	/// expired anyway, and on an untimed one when the floor is not below `untimed_live`,
+	/// its latest group.
+	fn start_frame(&self, untimed_live: Option<u64>) -> Option<(u64, u64)> {
+		let floor = self.start.floor.filter(|floor| floor.frame != 0)?;
+		if self.start.live && untimed_live.is_none_or(|live| floor.group >= live) {
+			return None;
+		}
+		Some((floor.group, floor.frame))
 	}
 
 	/// The group to cap and the last frame to serve within it (inclusive).
@@ -2424,8 +2428,7 @@ impl Bounds {
 impl From<&lite::Subscribe<'_>> for Bounds {
 	fn from(msg: &lite::Subscribe<'_>) -> Self {
 		Self {
-			start_group: msg.start_group,
-			start_frame: msg.start_frame,
+			start: msg.start,
 			end_group: msg.end_group,
 			end_frame: msg.end_frame,
 		}
@@ -2435,8 +2438,7 @@ impl From<&lite::Subscribe<'_>> for Bounds {
 impl From<&lite::SubscribeUpdate> for Bounds {
 	fn from(msg: &lite::SubscribeUpdate) -> Self {
 		Self {
-			start_group: msg.start_group,
-			start_frame: msg.start_frame,
+			start: msg.start,
 			end_group: msg.end_group,
 			end_frame: msg.end_frame,
 		}
@@ -2553,6 +2555,15 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	}
 }
 
+/// Where [`track::Subscription::live`] starts on an untimed track: its latest group, or
+/// `None` on a timed track (or an untimed one with nothing yet).
+fn untimed_live(track: &track::Subscriber) -> Option<u64> {
+	match track.info().timescale {
+		Some(_) => None,
+		None => track.latest(),
+	}
+}
+
 /// A subscription's run loop: one subscriber cursor serving groups, datagrams,
 /// and SUBSCRIBE_UPDATE messages, with an in-flight group machine per group.
 struct TrackRun<S: crate::transport::poll::Session> {
@@ -2600,7 +2611,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
 
 		Self {
-			start_frame: bounds.start_frame(),
+			start_frame: bounds.start_frame(untimed_live(&track)),
 			end_frame: bounds.end_frame(),
 			ctx,
 			track,
@@ -2630,30 +2641,32 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
 		// Read first: `update` replaces these preferences.
-		let floored = self.track.subscription().start.is_some_and(|start| start.group > 0);
+		let was_live = self.track.subscription().live;
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
 			max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
 			..bounds.positions()
 		});
-		// An explicit start moves the read cursor. Lite-06+ encodes an absent
-		// start as no floor, so a subscription that had one above group 0 has to
-		// drop back to 0: the cursor only rises on its own, and a finished group
-		// below the old floor (a quiet catalog) is never served otherwise. A
-		// cursor that was already at 0 stays where the first served group put it.
-		// No fresh SUBSCRIBE_START follows: the subscriber clears its permanent-miss
-		// floor on the same update, so both sides have to change together.
-		// Pre-06 an absent start means the latest group, which `position_cursor`
-		// already applied.
-		match upd.start_group {
-			Some(start_group) => self.track.start_at(start_group),
-			None if floored && self.ctx.version.resolves_start() => self.track.start_at(0),
-			None => {}
+		// A floor alone moves the read cursor to it. Gaining `live` drops the cursor
+		// back to the live edge: the cursor only rises on its own, and a finished group
+		// below the old floor (a quiet catalog) is never served otherwise. A cursor that
+		// was already live stays where the first served group put it. No fresh
+		// SUBSCRIBE_START follows: the subscriber clears its permanent-miss floor on the
+		// same update, so both sides have to change together. Pre-06 `live` means the
+		// latest group, which `position_cursor` already applied.
+		let untimed_live = untimed_live(&self.track);
+		match (upd.start.live, upd.start.floor) {
+			(false, Some(floor)) => self.track.start_at(floor.group),
+			(true, floor) if !was_live && self.ctx.version.resolves_start() => {
+				let live = untimed_live.unwrap_or(0);
+				self.track.start_at(floor.map_or(live, |floor| floor.group.min(live)));
+			}
+			_ => {}
 		}
 		self.track
 			.end_at(upd.end_group.map_or(Bound::Unbounded, Bound::Included));
-		self.start_frame = bounds.start_frame();
+		self.start_frame = bounds.start_frame(untimed_live);
 		self.end_frame = bounds.end_frame();
 	}
 
@@ -2713,7 +2726,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		if self.emit_range
 			&& !self.start_sent
 			&& self.ctx.version.has_largest()
-			&& let Some(start) = self.track.subscription().start
+			&& let subscription = self.track.subscription()
+			&& !subscription.live
+			&& let Some(start) = subscription.floor
 			&& let Poll::Ready(Some(largest)) = self.track.poll_live(waiter)
 			&& start > largest
 		{
@@ -3167,8 +3182,7 @@ mod serve_group_test {
 	#[test]
 	fn bounds_convert_to_positions() {
 		let whole = Bounds {
-			start_group: None,
-			start_frame: 0,
+			start: lite::Start::LIVE,
 			end_group: Some(5),
 			end_frame: None,
 		};
@@ -3181,24 +3195,41 @@ mod serve_group_test {
 		assert_eq!(capped.positions().end, Some(track::Position { group: 5, frame: 3 }));
 
 		let started = Bounds {
-			start_group: Some(5),
-			start_frame: 3,
+			start: lite::Start::floored(crate::track::Position { group: 5, frame: 3 }),
 			end_group: None,
 			end_frame: None,
 		};
 		let positions = started.positions();
-		assert_eq!(positions.start, Some(track::Position { group: 5, frame: 3 }));
+		assert_eq!(
+			(positions.live, positions.floor),
+			(false, Some(track::Position { group: 5, frame: 3 }))
+		);
 		assert_eq!(positions.end, None);
+		assert_eq!(started.start_frame(None), Some((5, 3)));
+
+		// `live` starts from a group's first frame, so it takes over the floor's frame
+		// whenever it sorts at or below the floor: always on a timed track (`None`), and on
+		// an untimed one unless the floor is below its latest group.
+		let live = Bounds {
+			start: lite::Start {
+				live: true,
+				floor: Some(track::Position { group: 5, frame: 3 }),
+			},
+			..started
+		};
+		assert_eq!(live.start_frame(None), None);
+		assert_eq!(live.start_frame(Some(5)), None);
+		assert_eq!(live.start_frame(Some(4)), None);
+		assert_eq!(live.start_frame(Some(6)), Some((5, 3)));
 
 		// A frame bound the peer sent without its group has nothing to count from, so it
 		// cannot reach the model at all.
 		let orphan = Bounds {
-			start_group: None,
-			start_frame: 3,
+			start: lite::Start::LIVE,
 			end_group: None,
 			end_frame: Some(7),
 		};
-		assert_eq!((orphan.positions().start, orphan.positions().end), (None, None));
+		assert_eq!((orphan.positions().floor, orphan.positions().end), (None, None));
 	}
 
 	/// A group whose head the publisher no longer holds is skipped, not served short:
@@ -3633,8 +3664,7 @@ mod serve_group_test {
 			opens: Default::default(),
 		};
 		let bounds = Bounds {
-			start_group: Some(0),
-			start_frame: 0,
+			start: lite::Start::floored(crate::track::Position::group(0)),
 			end_group: None,
 			end_frame: None,
 		};
@@ -3682,7 +3712,8 @@ mod serve_group_test {
 		fn new(track: &mut track::Producer, start_group: u64) -> Self {
 			track.request_start(Some(0)).unwrap();
 			let subscription = track::Subscription::default()
-				.with_start(track::Position::group(start_group))
+				.with_live(false)
+				.with_floor(track::Position::group(start_group))
 				.with_max_delay(Duration::from_secs(30));
 			let subscriber = track.subscribe(subscription);
 
@@ -3703,8 +3734,7 @@ mod serve_group_test {
 				opens: opens.clone(),
 			};
 			let bounds = Bounds {
-				start_group: Some(start_group),
-				start_frame: 0,
+				start: lite::Start::floored(crate::track::Position::group(start_group)),
 				end_group: None,
 				end_frame: None,
 			};
@@ -3753,9 +3783,8 @@ mod serve_group_test {
 		relay.run.update(lite::SubscribeUpdate {
 			priority: 0,
 			max_delay: Duration::from_secs(30),
-			start_group: None,
+			start: lite::Start::LIVE,
 			end_group: None,
-			start_frame: 0,
 			end_frame: None,
 		});
 		relay.settle();
@@ -3779,9 +3808,8 @@ mod serve_group_test {
 		relay.run.update(lite::SubscribeUpdate {
 			priority: 0,
 			max_delay: Duration::from_secs(30),
-			start_group: None,
+			start: lite::Start::LIVE,
 			end_group: None,
-			start_frame: 0,
 			end_frame: None,
 		});
 		relay.settle();
@@ -3802,9 +3830,8 @@ mod serve_group_test {
 		let update = lite::SubscribeUpdate {
 			priority: 0,
 			max_delay: Duration::ZERO,
-			start_group: Some(7),
+			start: lite::Start::floored(crate::track::Position::group(7)),
 			end_group: None,
-			start_frame: 0,
 			end_frame: None,
 		};
 		relay.run.update(update);
@@ -4376,9 +4403,8 @@ mod tests {
 						track: "video".into(),
 						priority: 0,
 						max_delay: Duration::ZERO,
-						start_group: None,
+						start: lite::Start::LIVE,
 						end_group: None,
-						start_frame: 0,
 						end_frame: None,
 					};
 					leave_request::<SubscribeServe<ScriptedSession>>(version, &subscribe, wait, close).await;
@@ -4510,9 +4536,8 @@ mod tests {
 			track: "video".into(),
 			priority: 1,
 			max_delay: Duration::ZERO,
-			start_group: None,
+			start: lite::Start::LIVE,
 			end_group: None,
-			start_frame: 0,
 			end_frame: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -4533,9 +4558,8 @@ mod tests {
 		let update = lite::SubscribeUpdate {
 			priority: 7,
 			max_delay: Duration::ZERO,
-			start_group: None,
+			start: lite::Start::LIVE,
 			end_group: None,
-			start_frame: 0,
 			end_frame: None,
 		};
 		session.push(&update.encode_bytes(version).unwrap());
@@ -4577,9 +4601,8 @@ mod tests {
 				track: "video".into(),
 				priority: 0,
 				max_delay: Duration::ZERO,
-				start_group: None,
+				start: lite::Start::LIVE,
 				end_group: None,
-				start_frame: 0,
 				end_frame: None,
 			}
 			.encode(&mut crate::coding::Encoder::new(script, VERSION.into()), VERSION)

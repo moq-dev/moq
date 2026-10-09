@@ -140,7 +140,7 @@ When a new Group is started, the previous Group is closed and may be dropped for
 The duration before an incomplete group is dropped is determined by the application and the publisher/subscriber's latency target.
 
 Every subscription is scoped to a single Track.
-A subscription starts at a configurable Group (defaulting to the latest) and continues until a configurable end Group or until either the publisher or subscriber cancels the subscription.
+A subscription starts at the live edge, at a floor Group, or at whichever of the two is lower, and continues until a configurable end Group or until either the publisher or subscriber cancels the subscription.
 Both bounds may be refined to a Frame within their Group, so a subscription can start or stop partway through a Group rather than only on a Group boundary (see [Positions](#positions)).
 
 The subscriber and publisher both indicate their delivery preference:
@@ -469,7 +469,7 @@ A subscriber opens Subscribe Streams to request a Track.
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
 The publisher replies with a SUBSCRIBE_OK message once the start group is resolved, followed by a SUBSCRIBE_END message once the subscription ends.
 For a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start; if the track has already ended with no matching groups, it sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
-A requested start past the publisher's largest position is the exception: the publisher MUST send SUBSCRIBE_OK without waiting, with `Group` set to the requested start group, so a subscriber resuming just past what it holds learns where the live feed is from the answer alone (a quiet track may not reach the start for a long time).
+A floor past the publisher's largest position without `Live` is the exception: the publisher MUST send SUBSCRIBE_OK without waiting, with `Group` set to the floor's group, so a subscriber resuming just past what it holds learns where the live feed is from the answer alone (a quiet track may not reach the floor for a long time).
 A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
 A route claims capability rather than inventory, so a subscription for a covered path that names nothing is refused this way too.
 
@@ -1026,9 +1026,11 @@ SUBSCRIBE Message {
   Track Name (s)
   Subscriber Priority (8)
   Subscriber Max Age (i)
-  Group Start (i)
+  Live (8)
+  Floor (8)
+  [Group Start (i)]
+  [Frame Start (i)]
   Group End (i)
-  Frame Start (i)
   Frame End (i)
 }
 ~~~
@@ -1050,14 +1052,25 @@ A value of `0` means the subscriber wants only the latest group in live delivery
 This is a delivery-time preference, not a retention rule: the publisher MAY still hold these groups for FETCH or future subscriptions (see `Publisher Max Age` in [TRACK_INFO](#track-info)).
 See the [Expiration](#expiration) section for more information.
 
+**Live**:
+1 to deliver from the live edge, 0 otherwise.
+Any other value is a PROTOCOL_VIOLATION.
+The live edge is frame 0 of the oldest group that [Expiration](#expiration) has not expired, so a `Subscriber Max Age` of 0 starts at the latest group, and a subscriber that buffers is handed the head of what it can still play.
+On a Track without presentation time, which no age can measure, it is frame 0 of the latest group.
+`Live` lowers the floor to the live edge whenever that Position sorts below it, so a floor above the latest group never hides the latest group from a subscription that also asks for `Live`.
+
+**Floor**:
+1 when `Group Start` and `Frame Start` follow, 0 when the subscription has no floor.
+Any other value is a PROTOCOL_VIOLATION.
+A subscription with neither `Live` nor a floor asks for nothing, and the publisher MUST treat it as a PROTOCOL_VIOLATION.
+
 **Group Start**:
-The minimum group sequence to deliver: an absolute floor, defaulting to 0 (no floor).
+The minimum group sequence to deliver: an absolute floor.
 
 A floor is not a request; `Subscriber Max Age` is the only thing that asks for data.
-The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
-A `Subscriber Max Age` of 0 therefore starts at the latest group, since every older group is already stale.
-A subscriber that buffers is then handed the head of what it can still play instead of only the live edge, and is never sent history it would discard on arrival: the same bound decides what to start at and what to expire, so the two cannot disagree.
-A floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
+The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one unless `Live` lowers the floor.
+The subscriber is then never sent history it would discard on arrival: the same bound decides what to start at and what to expire, so the two cannot disagree.
+Without `Live`, a floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
 
 **Group End**:
@@ -1067,8 +1080,8 @@ A non-zero value is the absolute group sequence + 1.
 
 **Frame Start**:
 The index of the first frame to deliver within the `Group Start` group (see [Positions](#positions)).
-A value of 0 means from the start of that group (default), so the group is delivered whole.
-Frames before this index are not delivered, even when delivery begins at that exact group; a start resolved at a later group is always delivered from frame 0.
+A value of 0 means from the start of that group, so the group is delivered whole.
+Frames before this index are not delivered, even when delivery begins at that exact group; a start resolved at a later group, or lowered by `Live`, is always delivered from frame 0.
 A subscriber that has received no group MUST send 0, since it cannot number the frames of a group it has not seen.
 
 **Frame End**:
@@ -1077,7 +1090,7 @@ A value of 0 means the whole group (default).
 A non-zero value is the absolute frame index + 1, matching `Group End`.
 MUST be 0 when `Group End` is 0, since an unbounded subscription has no end group to qualify.
 
-`Group Start` and `Group End` are offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence.
+`Group End` is offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence.
 
 ## SUBSCRIBE_UPDATE
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
@@ -1089,14 +1102,17 @@ SUBSCRIBE_UPDATE Message {
   Message Length (i)
   Subscriber Priority (8)
   Subscriber Max Age (i)
-  Group Start (i)
+  Live (8)
+  Floor (8)
+  [Group Start (i)]
+  [Frame Start (i)]
   Group End (i)
-  Frame Start (i)
   Frame End (i)
 }
 ~~~
 
 See [SUBSCRIBE](#subscribe) for information about each field.
+Every field replaces the subscription's: an update clears the floor with `Floor` 0 and the live edge with `Live` 0, and clearing both is a PROTOCOL_VIOLATION.
 Moving `Frame Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; like `Group Start`, it only bounds what the publisher sends from here on.
 
 
@@ -1187,13 +1203,13 @@ Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
 **Group**:
 The absolute sequence number of the first group that will be delivered.
-It MUST be greater than or equal to the requested start group; any groups in between are unavailable.
-A subscriber that requested the latest group learns the resolved sequence here.
+It MUST be greater than or equal to the floor's group, unless `Live` lowered it; any groups in between are unavailable.
+A subscriber that requested `Live` learns the resolved sequence here.
 
 There is no matching frame field, because the start frame is never in doubt: a partial group is only delivered when it was asked for, so the subscription starts either exactly where it asked or at the beginning of a later group (see [Positions](#positions)).
 The subscriber derives the start frame from `Group` and its own request:
 
-- `Group` equals the requested start group: delivery begins at the requested `Frame Start`.
+- `Group` equals the floor's group, and `Live` did not lower the floor: delivery begins at the requested `Frame Start`.
 - `Group` is greater: delivery begins at frame 0.
 
 The second case is easy to get wrong, so to be explicit: a subscriber that requested group 5 frame 15 and receives `Group` = 6 starts at **frame 0** of group 6, not frame 15.
@@ -1395,6 +1411,7 @@ The `Message Length` describes the payload size on the wire.
 - A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
 - Replaced Warm and Cold Route Cost with one static Route Cost in moq-lite-07-wip; lite-06 retains both fields, reading Warm and writing Cold at saturation.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
+- Added `Live` and `Floor` to SUBSCRIBE and SUBSCRIBE_UPDATE. `Live` delivers from the live edge, lowering the floor when the oldest unexpired group sorts below it. `Group Start` and `Frame Start` are a plain absolute floor, present only when `Floor` is 1. A subscription with neither is a PROTOCOL_VIOLATION. lite-06 reads `Group Start` 0 with `Frame Start` 0 as `Live`, and earlier versions read an absent `Group Start` as `Live`.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
 - Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path and ends subscriptions to the older one. Replaces the first-hop identity.
 - An untimed Track's frames and datagrams carry their send time. lite-05 and lite-06 publishers do the same.

@@ -171,8 +171,6 @@ test("integration: lite subscription options and updates reach the publisher", a
 	})();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	// A floor of 1, not 0: a pre-06 wire folds a vacuous floor of 0 back to absent, since
-	// its encoding of group 0 means "replay from the beginning" instead.
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
 		maxDelay: Milli(250),
@@ -182,6 +180,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
 		maxDelay: Milli(250),
+		live: false,
 		groups: { start: { included: 1 }, end: { excluded: 9 } },
 	});
 
@@ -194,6 +193,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	expect(await updated).toEqual({
 		priority: 8,
 		maxDelay: Milli(500),
+		live: false,
 		groups: { start: { included: 2 }, end: { excluded: 12 } },
 	});
 

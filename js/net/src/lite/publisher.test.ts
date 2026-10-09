@@ -563,7 +563,10 @@ async function servedSubscription(
 		broadcast: Path.from("test"),
 		track: "video",
 		priority: 0,
-		startGroup: options.startGroup,
+		start:
+			options.startGroup === undefined
+				? undefined
+				: { live: false, startGroup: options.startGroup, startFrame: 0 },
 		endGroup: options.endGroup,
 		endFrame: options.endFrame,
 	});
@@ -705,7 +708,10 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 		await sub.parked;
 		sub.serve(1);
 
-		await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, start: { live: false, startGroup: 2, startFrame: 0 } }).encode(
+			sub.client.writer,
+			Version.DRAFT_06,
+		);
 		sub.serve(2);
 		await flush();
 		expect(ranges).toHaveBeenCalledTimes(1);
@@ -731,13 +737,33 @@ test("lite draft-06: a widening update lowers the serving floor", async () => {
 		sub.serve(10);
 		expect(await sub.servedSequence()).toBe(10);
 
-		await replayUpdate({ priority: 0, startGroup: 5 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, start: { live: false, startGroup: 5, startFrame: 0 } }).encode(
+			sub.client.writer,
+			Version.DRAFT_06,
+		);
 		await flush();
 
 		sub.serve(5);
 		sub.serve(6);
 		expect(await sub.servedSequence()).toBe(5);
 		expect(await sub.servedSequence()).toBe(6);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A resume floored above a quiet track's newest group, then joined by a live subscriber: the
+// relay's update gains `live`, which drops the cursor to the live edge so the newest group is
+// served at once rather than once the floor's group exists.
+test("lite draft-06: gaining live serves the newest group below the floor", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 4 });
+	try {
+		sub.serve(3);
+		await flush();
+
+		await replayUpdate({ priority: 0 }).encode(sub.client.writer, Version.DRAFT_06);
+		await flush();
+		expect(await sub.servedSequence()).toBe(3);
 	} finally {
 		await sub.close();
 	}
@@ -758,7 +784,10 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 		await sub.parked;
 		sub.serve(1);
 
-		await replayUpdate({ priority: 0, startGroup: 1, startFrame: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, start: { live: false, startGroup: 1, startFrame: 2 } }).encode(
+			sub.client.writer,
+			Version.DRAFT_06,
+		);
 		await flush();
 		expect(ranges).toHaveBeenCalledTimes(1);
 		expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: undefined });
@@ -831,7 +860,6 @@ test("lite draft-06: a popped group keeps its frame bounds across a queued updat
 test("lite draft-06: a burst of updates coalesces before the next group pop", async () => {
 	const sub = await servedSubscription({
 		version: Version.DRAFT_06,
-		startGroup: 0,
 		endGroup: 1,
 		endFrame: 2,
 		frames: ["a", "b", "c"],
@@ -875,7 +903,6 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 test("lite draft-06: a newer update wins before a buffered group backlog drains", async () => {
 	const sub = await servedSubscription({
 		version: Version.DRAFT_06,
-		startGroup: 0,
 		gated: true,
 	});
 	let second!: Promise<void>;
@@ -914,7 +941,7 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 // Scheduling affects streams already in flight, so it cannot wait behind a response write.
 // The full update remains atomic to observers, while the local range cursor stays serialized.
 test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked", async () => {
-	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
+	const sub = await servedSubscription({ version: Version.DRAFT_06, gated: true });
 	const ranges = spyOn(hooks, "replaceGroups");
 	try {
 		sub.serve(0);
@@ -927,6 +954,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
 			maxDelay: TEST_MAX_DELAY_MS,
+			live: true,
 			groups: { start: undefined, end: { excluded: 6 } },
 		});
 		expect(ranges).not.toHaveBeenCalled();
@@ -1188,8 +1216,10 @@ async function serve(
 		broadcast: Path.from("test"),
 		track: "video",
 		priority: 0,
-		startGroup: bounds.startGroup,
-		startFrame: bounds.startFrame ?? 0,
+		start:
+			bounds.startGroup === undefined
+				? undefined
+				: { live: false, startGroup: bounds.startGroup, startFrame: bounds.startFrame ?? 0 },
 		endGroup: bounds.endGroup,
 		endFrame: bounds.endFrame,
 	});
@@ -1663,7 +1693,7 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 			broadcast: Path.from("quiet"),
 			track: "video",
 			priority: 0,
-			startGroup,
+			start: { live: false, startGroup, startFrame: 0 },
 		}),
 		server,
 	);

@@ -280,7 +280,7 @@ async function servedRawSubscription() {
 		track: "video",
 		priority: 0,
 		maxDelay: 10_000,
-		startGroup: 0,
+		start: { live: false, startGroup: 0, startFrame: 0 },
 	}).encode(subscriber.writer, version);
 
 	// Finish the track only once it is served: a track closed before anyone subscribed is gone.
@@ -448,7 +448,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 			track: "video",
 			priority: 0,
 			maxDelay: 10_000,
-			startGroup: 0,
+			start: { live: false, startGroup: 0, startFrame: 0 },
 		}).encode(subscriber.writer, version);
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 		producer.close();

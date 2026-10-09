@@ -25,7 +25,8 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	// From the first group with a replay window: a late reader is owed the whole track,
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()
-		.with_start(moq_net::track::Position::group(0))
+		.with_live(false)
+		.with_floor(moq_net::track::Position::group(0))
 		.with_max_delay(std::time::Duration::from_secs(30));
 	let mut consumer = track.subscribe(subscription);
 

@@ -25,6 +25,3 @@ Guidance:
 - `max_delay` caps every range.
 - Benchmark range count and span as separate axes (AGENTS.md fan-out rule).
 
-## Required
-
-- [lite-07 Live flag](/quest/m1/lite-live.md) - reshapes the same `Subscription` first

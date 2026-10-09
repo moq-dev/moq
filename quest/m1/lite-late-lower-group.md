@@ -24,8 +24,7 @@ Decided:
 - An explicit floor delivers late lower groups within `max_delay`, matching
   moq-transport, draft-ietf-moq-transport ("subscriptions without a filter pass
   all Objects"), and moq-mux's floor handling (#3258).
-- A live-only subscription (no floor, per
-  [lite-07 Live flag](/quest/m1/lite-live.md)) joins where the publisher
+- A live-only subscription (`live` without a floor) joins where the publisher
   starts: the first served group becomes the floor, so a group created below
   it is dropped by design. This is what moq-mux's `container::Consumer` and the IETF publisher already assume.
   Fix the `Subscription` docs in moq-net (which say `None` equals a floor of
@@ -34,10 +33,9 @@ Decided:
   (`floor.is_none()`). With an explicit floor, merged with `live` or not,
   `SUBSCRIBE_START` still reports the first served group, but nothing below
   it is suppressed; each subscriber's cursor filters locally.
-- Aggregation follows [lite-07 Live flag](/quest/m1/lite-live.md): letting
-  an explicit floor survive mixing with no floor starved a floorless subscriber
-  until the floor's group existed (#5000's review), so the floor and `Live`
-  become separate fields and merge as min and OR.
+- Aggregation already keeps the floor and `live` apart, merging them as min
+  and OR (lite-07 carries `Live`; older wires fold it into the floor), so this
+  PR drops its own floor-combining change.
 - `start_floor_suppresses_late_lower_arrivals` stays as the live-only case: it
   subscribes with no floor, receives group 7, raises the start to 7 as
   `SUBSCRIBE_START` does, and group 5 is still suppressed. Add its explicit-floor
@@ -53,10 +51,6 @@ mock transport) for lite-05, lite-06, and lite-07-wip, direct and through a
 relay, with the in-process and moq-transport controls. Add a mixed case through
 a relay: a live-only subscriber already receiving group 1, then one with a floor
 of group 0, and a fresh group 0 reaches only the second.
-
-## Required
-
-- [lite-07 Live flag](/quest/m1/lite-live.md) - floors and `Live` are separate fields, so merging them never starves a subscriber
 
 ## Closes
 
