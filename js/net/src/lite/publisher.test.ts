@@ -1704,6 +1704,44 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 	pair.server.close();
 });
 
+// A local close while an announce waits on the setup grant finishes it at once, rather than
+// holding the close until its deadline.
+test("lite draft-06: closing while announces wait for the setup grant does not hang", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const grant = new Signal<Grant | undefined>(undefined);
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
+		grant,
+		ready: new Promise<void>(() => {}),
+	});
+
+	const written: Uint8Array[] = [];
+	const stream = new Stream({
+		version: Version.DRAFT_06,
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			write(chunk) {
+				written.push(chunk);
+			},
+		}),
+	});
+	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+	await new Promise((resolve) => setTimeout(resolve, 10));
+
+	const drained = await Promise.race([
+		publisher.drain().then(() => "drained" as const),
+		new Promise((resolve) => setTimeout(() => resolve("hung"), 500)),
+	]);
+	expect(drained).toBe("drained");
+	await running;
+	expect(written.length).toBe(0);
+
+	publisher.close();
+	origin.close();
+	pair.client.close();
+	pair.server.close();
+});
+
 // A TRACK is checked again once its broadcast and track resolve, so a shrink in between
 // refuses it rather than sending TRACK_INFO the grant no longer covers.
 test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", async () => {

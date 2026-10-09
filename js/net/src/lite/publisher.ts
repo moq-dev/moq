@@ -557,8 +557,16 @@ export class Publisher {
 		let changed = arm();
 
 		try {
-			// Nothing is announced before the grant it would be checked against.
-			if ((await race([this.#ready.then(() => "ready" as const), stream.reader.closed])) !== "ready") return;
+			// Nothing is announced before the grant it would be checked against. A local close
+			// meanwhile finishes the stream with nothing announced.
+			const ready = this.#ready.then(() => "ready" as const);
+			if ((await race([ready, stream.reader.closed, this.#withdrawal.closing])) !== "ready") {
+				if (this.#withdrawal.closing.peek()) {
+					stream.close();
+					await stream.writer.closed;
+				}
+				return;
+			}
 
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed

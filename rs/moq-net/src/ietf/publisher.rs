@@ -1678,52 +1678,74 @@ where
 			false => end_location,
 		};
 
-		// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
-		// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
-		// requests it answers without ever naming this one.
-		stream.writer.varint(ietf::FetchOk::ID).await?;
-		stream
-			.writer
-			.encode(&ietf::FetchOk {
-				request_id: match self.version {
-					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(msg.request_id),
-					_ => None,
-				},
-				// Only draft-14 encodes it, and only as the publisher restating the order.
-				group_order: match msg.group_order {
-					GroupOrder::Descending => GroupOrder::Descending,
-					_ => GroupOrder::Ascending,
-				},
-				end_of_track,
-				end_location,
-				properties: Default::default(),
-			})
-			.await?;
+		// The response, raced against the grant: a standalone FETCH whose grant narrows while it
+		// waits on stream credit stops there instead of sending what it no longer may.
+		let respond = async {
+			// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
+			// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
+			// requests it answers without ever naming this one.
+			stream.writer.varint(ietf::FetchOk::ID).await?;
+			stream
+				.writer
+				.encode(&ietf::FetchOk {
+					request_id: match self.version {
+						Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(msg.request_id),
+						_ => None,
+					},
+					// Only draft-14 encodes it, and only as the publisher restating the order.
+					group_order: match msg.group_order {
+						GroupOrder::Descending => GroupOrder::Descending,
+						_ => GroupOrder::Ascending,
+					},
+					end_of_track,
+					end_location,
+					properties: Default::default(),
+				})
+				.await?;
 
-		let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
-		let mut writer = Writer::new(uni, self.version);
-		writer.set_priority(priority);
-		writer.varint(FetchHeader::TYPE).await?;
-		writer
-			.encode(&FetchHeader {
-				request_id: msg.request_id,
+			let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
+			let mut writer = Writer::new(uni, self.version);
+			writer.set_priority(priority);
+			writer.varint(FetchHeader::TYPE).await?;
+			writer
+				.encode(&FetchHeader {
+					request_id: msg.request_id,
+				})
+				.await?;
+			let mut first = true;
+			for (object, frame) in (group.first..).zip(group.frames) {
+				Self::write_fetch_object(
+					&mut writer,
+					group.sequence,
+					object,
+					FetchPrior::next(&mut first),
+					frame.timestamp,
+					timescale,
+					self.version,
+				)
+				.await?;
+				Self::write_fetch_payload(&mut writer, frame.payload, self.version).await?;
+			}
+			writer.close().await?;
+			Ok::<(), Error>(())
+		};
+		let res = {
+			let mut respond = std::pin::pin!(respond);
+			kio::wait(|waiter| {
+				if let Some(gate) = gate.as_mut()
+					&& gate.poll_denied(waiter).is_ready()
+				{
+					return Poll::Ready(Err(Error::Unauthorized));
+				}
+				waiter.poll_future(respond.as_mut())
 			})
-			.await?;
-		let mut first = true;
-		for (object, frame) in (group.first..).zip(group.frames) {
-			Self::write_fetch_object(
-				&mut writer,
-				group.sequence,
-				object,
-				FetchPrior::next(&mut first),
-				frame.timestamp,
-				timescale,
-				self.version,
-			)
-			.await?;
-			Self::write_fetch_payload(&mut writer, frame.payload, self.version).await?;
+			.await
+		};
+		if let Err(err) = res {
+			// The fetch stream, if open, reset as it dropped with the response.
+			stream.writer.abort(&err);
+			return Err(err);
 		}
-		writer.close().await?;
 
 		// FETCH_OK is the last thing this stream has to say, and [`Writer`] resets on drop:
 		// without the finish the answer is discarded before the peer ever reads it, exactly
@@ -1816,6 +1838,21 @@ where
 		msg: ietf::TrackStatus<'_>,
 	) -> Result<(), Error> {
 		let request_id = msg.request_id;
+
+		// Answer only for what our grant lets us publish (MoQ Auth): checked before the
+		// track resolves, and held until the answer.
+		if !self
+			.auth
+			.allows(crate::auth::Direction::Publish, msg.track_namespace.as_str())
+		{
+			return self.reject_track_status(stream, request_id, &Error::Unauthorized).await;
+		}
+		let mut gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			msg.track_namespace.to_owned(),
+			crate::auth::Direction::Publish,
+		);
+
 		let broadcast = match self
 			.serving_origin()
 			.await
@@ -1838,6 +1875,9 @@ where
 				let mut cx = waiter.context();
 				if super::request_stream::poll_cancel(&mut stream, &mut finished, self.version, &mut cx).is_ready() {
 					return Poll::Ready(None);
+				}
+				if gate.poll_denied(waiter).is_ready() {
+					return Poll::Ready(Some(Err(Error::Unauthorized)));
 				}
 				query.poll_ok(waiter).map(Some)
 			})
@@ -4224,6 +4264,94 @@ mod serve_tests {
 		}
 	}
 
+	/// A TRACK_STATUS outside what the peer may subscribe to is refused before the track
+	/// resolves, and one whose grant narrows while it resolves is refused too.
+	#[moq_net_sim::test]
+	async fn track_status_outside_the_grant_is_refused() {
+		let nothing = || crate::auth::Grant {
+			publish: Default::default(),
+			subscribe: Default::default(),
+			expires: None,
+		};
+		let unauthorized = |version| request::to_code(&Error::Unauthorized, request::Kind::TrackStatus, version);
+
+		for version in ALL_VERSIONS {
+			let mut h = serve(version);
+			let claim = h._origin.dynamic("live", crate::origin::Route::default()).unwrap();
+			let auth = crate::auth::Handle::new(false);
+			auth.authorize(&nothing());
+			h.publisher = h.publisher.clone().with_auth(auth);
+			let code = moq_net_sim::timeout(
+				std::time::Duration::from_secs(1),
+				answer_code(&h, track_status("live/cam", true, version), version),
+			)
+			.await
+			.unwrap_or_else(|_| panic!("{version}: waited on a broadcast it may not answer for"));
+			assert_eq!(code, Some(unauthorized(version)), "{version}: denied up front");
+			use futures::FutureExt;
+			assert!(
+				claim.requested_broadcast().now_or_never().is_none(),
+				"{version}: a denied request reached the origin"
+			);
+		}
+
+		for version in ALL_VERSIONS {
+			let mut h = serve(version);
+			let claim = h._origin.dynamic("live", crate::origin::Route::default()).unwrap();
+			let auth = crate::auth::Handle::new(false);
+			h.publisher = h.publisher.clone().with_auth(auth.clone());
+
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let mark = h.log.writes.lock().unwrap().len();
+			let body = track_status("live/cam", true, version);
+			let mut answer = std::pin::pin!(
+				h.publisher
+					.clone()
+					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.unwrap()
+			);
+			assert!(futures::poll!(answer.as_mut()).is_pending(), "{version}");
+
+			// Parked resolving the broadcast when the grant narrows.
+			let request = claim.requested_broadcast().await.unwrap();
+			auth.authorize(&nothing());
+			let output = crate::broadcast::Info::new().produce();
+			let _track = output.create_track("video", None).unwrap();
+			request.accept(&output);
+			answer.await;
+
+			let code = refusal_code(&h.log.writes.lock().unwrap()[mark..], version);
+			assert_eq!(code, Some(unauthorized(version)), "{version}: narrowed while resolving");
+		}
+	}
+
+	/// Run one TRACK_STATUS to its end, returning the refusal code it got, if any.
+	async fn answer_code(h: &Serve, body: Vec<u8>, version: Version) -> Option<u64> {
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let mark = h.log.writes.lock().unwrap().len();
+		h.publisher
+			.clone()
+			.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+			.unwrap()
+			.await;
+		refusal_code(&h.log.writes.lock().unwrap()[mark..], version)
+	}
+
+	/// The refusal code on the wire, or `None` for any other answer.
+	fn refusal_code(wire: &[u8], version: Version) -> Option<u64> {
+		let mut buf = Decoder::new(wire, version.into());
+		let id = buf.varint().unwrap();
+		match version {
+			Version::Draft14 if id == ietf::TRACK_STATUS_ERROR_14 => {
+				Some(ietf::SubscribeError::decode(&mut buf, version).unwrap().error_code)
+			}
+			_ if version != Version::Draft14 && id == ietf::RequestError::ID => {
+				Some(ietf::RequestError::decode(&mut buf, version).unwrap().error_code)
+			}
+			_ => None,
+		}
+	}
+
 	/// A TRACK_STATUS for a broadcast we do not serve is refused as a SUBSCRIBE would be.
 	#[moq_net_sim::test]
 	async fn track_status_for_a_missing_broadcast_is_refused() {
@@ -5681,6 +5809,86 @@ mod serve_tests {
 				unauthorized(version),
 				"{version}: narrowed mid-load"
 			);
+		}
+	}
+
+	/// A grant that narrows while a standalone FETCH waits on stream credit for its response
+	/// stops it there: nothing it no longer may send reaches the wire.
+	#[moq_net_sim::test]
+	async fn a_standalone_fetch_narrowed_while_responding_stops() {
+		for version in FETCH_DRAFTS {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+			let track = broadcast.create_track("video", None).unwrap();
+			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			group.write_frame(timestamp(), b"0-0".to_vec()).unwrap();
+			group.finish().unwrap();
+			settle().await;
+
+			// Request streams flow, but no uni stream credit is ever granted.
+			let bi = kio::Producer::new(true);
+			let credit = kio::Producer::new(false);
+			let session = SinkSession::gated_bi(bi.consume()).with_open_uni_gate(credit.consume());
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+			let auth = crate::auth::Handle::new(false);
+			let publisher = Publisher::new(
+				crate::time::Clock::sim(),
+				session.clone(),
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				peer_setup,
+				version,
+			)
+			.with_auth(auth.clone());
+
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let mark = session.log.writes.lock().unwrap().len();
+			let location = Location { group: 0, object: 0 };
+			let mut fetch = std::pin::pin!(publisher.run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order: GroupOrder::Ascending,
+					fetch_type: FetchType::Standalone {
+						namespace: crate::Path::new("room"),
+						track: "video".into(),
+						start: location,
+						end: Location { group: 0, object: 1 },
+					},
+					range_filters: false,
+					fill_timeout: false,
+					properties_wanted: true,
+				},
+			));
+			// Driven until FETCH_OK is out, so the fetch is parked on uni stream credit.
+			for _ in 0..100 {
+				assert!(
+					futures::poll!(fetch.as_mut()).is_pending(),
+					"{version}: never waited on credit"
+				);
+				if session.log.writes.lock().unwrap().len() > mark {
+					break;
+				}
+				moq_net_sim::yield_now().await;
+			}
+			assert!(
+				session.log.writes.lock().unwrap().len() > mark,
+				"{version}: FETCH_OK never went out"
+			);
+
+			auth.authorize(&crate::auth::Grant {
+				publish: Default::default(),
+				subscribe: Default::default(),
+				expires: None,
+			});
+			let res = moq_net_sim::timeout(std::time::Duration::from_secs(1), fetch)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: still responding after the grant narrowed"));
+			assert!(matches!(res, Err(Error::Unauthorized)), "{version}: {res:?}");
+			drop(credit);
 		}
 	}
 
