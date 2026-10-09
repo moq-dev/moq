@@ -1807,8 +1807,14 @@ export class Dynamic {
 	/**
 	 * Replace the route in place. The prefix is fixed at announce time.
 	 *
-	 * The route is taken as given, epoch included: another epoch (or none) names another
-	 * publisher instance, so re-price from the current one, `update({ ...dynamic.route, cost })`.
+	 * The route is taken as given. At the same epoch this re-prices: consumers see an update
+	 * and every handle survives. Another epoch, or none, names another publisher instance:
+	 * consumers see a restart, the requests resolved through the old one end, and a
+	 * re-request never joins it. Requests this handle still holds are refused as unroutable,
+	 * and the next request for a path it served asks the handler again. The broadcasts it
+	 * served keep running for the subscriptions already on them; close them to end those too.
+	 * Route selection still applies: another route still at the old epoch outranks one
+	 * without. To re-price, start from the current route, `update({ ...dynamic.route, cost })`.
 	 */
 	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] }): void {
 		if (this.#closed) throw new Error("dynamic is closed");

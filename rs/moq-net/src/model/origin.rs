@@ -3724,11 +3724,14 @@ impl Dynamic {
 
 	/// Replace the route in place, taken as given.
 	///
-	/// At the same [`Route::epoch`], consumers observe another active update for
-	/// the same prefix and sessions forward it as an update, so re-pricing never
-	/// looks like new content. Another epoch, or none, names another publisher
-	/// instance: consumers see a restart, the broadcasts served through the old one
-	/// end, and requests still waiting on it are refused with [`Error::Unroutable`].
+	/// At the same [`Route::epoch`] this re-prices: consumers observe an update and
+	/// every handle survives. Another epoch, or none, names another publisher
+	/// instance: consumers see an [`AnnounceEvent::Restart`], and a re-request never
+	/// joins what was resolved under the old one. Requests this handle still holds
+	/// are refused with [`Error::Unroutable`], and the next request for a path it
+	/// served asks the handler again. The broadcasts it served keep running for the
+	/// subscriptions already on them; close them to end those too. Route selection
+	/// still applies: another route still at the old epoch outranks one without.
 	/// To re-price, start from the current route:
 	/// `dynamic.update(dynamic.route().with_cost(cost))`.
 	///

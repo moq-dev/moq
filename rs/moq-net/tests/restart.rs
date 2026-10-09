@@ -10,7 +10,7 @@ mod support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Hop, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Epoch, Hop, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -226,4 +226,173 @@ async fn prefix_pool_lite07() {
 	moq_net_sim::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-07-wip"))
 		.await
 		.expect("timed out");
+}
+
+/// A claim at `live` whose handler answers each request with a fresh output, kept so
+/// the test can write into it: `outputs[n]` answered the `n`th request.
+struct Claim {
+	dynamic: Rc<origin::Dynamic>,
+	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
+}
+
+impl Claim {
+	fn new(origin: &origin::Producer, epoch: Option<Epoch>) -> Self {
+		let mut route = origin::Route::default();
+		route.epoch = epoch;
+		let dynamic = Rc::new(origin.dynamic("live", route).unwrap());
+		let outputs = Rc::new(RefCell::new(Vec::new()));
+		let (handler, served) = (dynamic.clone(), outputs.clone());
+		drop(moq_net_sim::spawn(async move {
+			while let Ok(request) = handler.requested_broadcast().await {
+				let output = broadcast::Info::new().produce();
+				let track = output.create_track("video", None).unwrap();
+				request.accept(&output);
+				served.borrow_mut().push((output, track));
+			}
+		}));
+		Self { dynamic, outputs }
+	}
+
+	/// Write `tag` into the output that answered the `n`th request.
+	fn write(&self, n: usize, tag: &str) {
+		write(&self.outputs.borrow()[n].1, tag);
+	}
+
+	fn answered(&self) -> usize {
+		self.outputs.borrow().len()
+	}
+
+	/// Move the claim to `epoch` in place, keeping the rest of its route.
+	fn update_epoch(&self, epoch: Option<Epoch>) {
+		let mut route = self.dynamic.route();
+		route.epoch = epoch;
+		self.dynamic.update(route).unwrap();
+	}
+}
+
+/// `P -> R -> V`, where `P` claims `live` at `from` and updates the claim in place.
+/// A same-epoch re-price keeps every handle. Moving to `to` restarts `V`, the
+/// subscription already open stays on the old answer, and a re-request asks the
+/// handler again and reads none of the old answer's cached groups.
+async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let viewer = produce_origin(3);
+	let _upstream = link(version, &publisher, &relay).await;
+	let _downstream = link(version, &relay, &viewer).await;
+
+	let claim = Claim::new(&publisher, from);
+	let mut announced = viewer.consume().announced();
+	match next_event(&mut announced).await {
+		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		other => panic!("{version}: expected the claim, got {other:?}"),
+	}
+
+	let (stale, mut sticky) = subscribe(&viewer, "live/cam").await;
+	claim.write(0, "old:0");
+	assert_eq!(read(&mut sticky).await, "old:0", "{version}");
+
+	// A re-price at the same epoch is an update at most: every handle survives.
+	claim.dynamic.update(claim.dynamic.route().with_cost(5)).unwrap();
+	while let Ok(event) = moq_net_sim::timeout(Duration::from_secs(1), announced.next()).await {
+		assert!(
+			matches!(event, Some(announce::Event::Update(_))),
+			"{version}: a re-price delivered {event:?}"
+		);
+	}
+	claim.write(0, "old:1");
+	assert_eq!(read(&mut sticky).await, "old:1", "{version}");
+	let (same, _) = subscribe(&viewer, "live/cam").await;
+	assert!(same.is_clone(&stale), "{version}: a re-price replaced the broadcast");
+	assert_eq!(claim.answered(), 1, "{version}: a re-price asked the handler again");
+
+	// Another epoch, or none, is another instance downstream.
+	claim.update_epoch(to.clone());
+	expect_restart(version, &mut announced, "live").await;
+
+	// The subscription already open stays on the old answer.
+	claim.write(0, "old:2");
+	assert_eq!(read(&mut sticky).await, "old:2", "{version}");
+
+	// A re-request asks the handler again and never reads the old answer.
+	let (fresh, mut subscription) = subscribe(&viewer, "live/cam").await;
+	assert!(!fresh.is_clone(&stale), "{version}: joined the old instance's copy");
+	assert_eq!(claim.answered(), 2, "{version}: the old answer was served again");
+	if version == "moq-lite-07-wip".parse().unwrap() {
+		assert_eq!(fresh.info().epoch, to, "{version}: resolved under the old epoch");
+	}
+	claim.write(1, "new:0");
+	assert_eq!(read(&mut subscription).await, "new:0", "{version}");
+}
+
+/// The epoch the claim starts at, and a newer one it moves to.
+fn epochs() -> (Epoch, Epoch) {
+	(
+		"01900000-0000-7000-8000-000000000001".parse().unwrap(),
+		"01900000-0000-7000-8000-000000000002".parse().unwrap(),
+	)
+}
+
+macro_rules! dynamic_epoch_tests {
+	($($name:ident: $version:literal,)*) => {
+		$(
+			#[moq_net_sim::test]
+			async fn $name() {
+				let (a, b) = epochs();
+				for (from, to) in [(Some(a.clone()), Some(b.clone())), (Some(a), None), (None, Some(b))] {
+					moq_net_sim::timeout(TEST_TIMEOUT, dynamic_epoch($version, from, to))
+						.await
+						.expect("timed out");
+				}
+			}
+		)*
+	};
+}
+
+dynamic_epoch_tests! {
+	dynamic_epoch_lite06: "moq-lite-06",
+	dynamic_epoch_lite07: "moq-lite-07-wip",
+	dynamic_epoch_ietf19: "moq-transport-19",
+	dynamic_epoch_ietf22: "moq-transport-22",
+}
+
+/// An update does not override route selection: with a second claim still at the
+/// epoch, a claim dropping it hands re-requests to the second, which outranks any
+/// route without one.
+#[moq_net_sim::test]
+async fn dynamic_epoch_second_route_keeps_winning() {
+	let (a, _) = epochs();
+	let origin = produce_origin(1);
+	let first = Claim::new(&origin, Some(a.clone()));
+	first.dynamic.update(first.dynamic.route().with_cost(1)).unwrap();
+	let second = Claim::new(&origin, Some(a.clone()));
+	second.dynamic.update(second.dynamic.route().with_cost(5)).unwrap();
+	let mut announced = origin.consume().announced();
+	match next_event(&mut announced).await {
+		announce::Event::Start(announce) => assert_eq!(announce.route.epoch.as_ref(), Some(&a)),
+		other => panic!("expected the claim, got {other:?}"),
+	}
+
+	let (resolved, mut sticky) = subscribe(&origin, "live/cam").await;
+	first.write(0, "first:0");
+	assert_eq!(read(&mut sticky).await, "first:0");
+	assert_eq!(second.answered(), 0, "the costlier claim answered");
+
+	// The epoch still stands through the second claim, so this is no restart, and the
+	// instance's subscriptions resume through it.
+	first.update_epoch(None);
+	while let Ok(event) = moq_net_sim::timeout(Duration::from_secs(1), announced.next()).await {
+		assert!(
+			matches!(event, Some(announce::Event::Update(_))),
+			"dropping a shared epoch delivered {event:?}"
+		);
+	}
+	let fresh = origin.consume().request_broadcast("live/cam", None).await.unwrap();
+	assert!(fresh.is_clone(&resolved), "the epoch's broadcast was replaced");
+	assert_eq!((first.answered(), second.answered()), (1, 1));
+	// The same epoch serves the same bytes: group 0 was delivered, so it resumes at 1.
+	second.write(0, "first:0");
+	second.write(0, "second:1");
+	assert_eq!(read(&mut sticky).await, "second:1");
 }
