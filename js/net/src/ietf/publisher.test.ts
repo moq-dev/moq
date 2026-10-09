@@ -12,7 +12,7 @@ import { Reader, Stream } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
-import { NativeSession, type Session } from "./adapter.ts";
+import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
@@ -20,7 +20,7 @@ import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk } from "./subscribe.ts";
+import { Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -1508,6 +1508,47 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 			broadcast.close();
 			origin.close();
 		}
+	}
+});
+
+// The adapter delivers a draft-14 to -16 update to its subscription's stream. Left unread, it
+// keeps that stream from reporting closed, so a later UNSUBSCRIBE would never end the subscription.
+test("drafts 14 to 16 end a subscription on UNSUBSCRIBE after an update", async () => {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const control = await Stream.open(pair.server, { version });
+		const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+		void adapter.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+
+		const path = Path.from("test");
+		const { pub, origin } = publisher(pair.server, { session: adapter });
+		const broadcast = publish(origin, path);
+		broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+		await peer.writer.u53(Subscribe.id);
+		await new Subscribe({ requestId: 0n, trackNamespace: path, trackName: "video", subscriberPriority: 0 }).encode(
+			peer.writer,
+			version,
+		);
+		const server = await adapter.acceptBi();
+		if (!server) throw new Error("no subscribe stream");
+		expect(await server.reader.u53()).toBe(Subscribe.id);
+		const running = pub.runSubscribe(await Subscribe.decode(server.reader, version), server);
+
+		expect(await peer.reader.u53()).toBe(SubscribeOk.id);
+		await SubscribeOk.decode(peer.reader, version);
+
+		await peer.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 0n, ownRequestId: 2n }).encode(peer.writer, version);
+		await peer.writer.u53(Unsubscribe.id);
+		await new Unsubscribe({ requestId: 0n }).encode(peer.writer, version);
+
+		await running;
+		broadcast.close();
+		origin.close();
+		adapter.close();
 	}
 });
 

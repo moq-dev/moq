@@ -247,6 +247,7 @@ type AudioSchema = {
 The `renditions` field contains a map of track names to audio decoder configurations.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
+The `sampleRate` and `numberOfChannels` fields describe the decoded output: for HE-AAC, the SBR rate rather than the core's, and two channels under parametric stereo.
 
 In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}).
 
@@ -1089,6 +1090,7 @@ This document has no IANA actions.
 - Described deriving HLS and DASH at the edge from a reference rendition's records.
 - An edge keeps its derived-format video reference rendition while that rendition stays in the catalog; an audio reference yields once video has a timeline.
 - Added an optional `epoch` to `.info`: the source route's Epoch, compared on resume so a restarted source fails enrollment.
+- Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.
 
 ## moq-hang-03
 {:numbered="false"}
