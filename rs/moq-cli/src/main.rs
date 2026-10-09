@@ -765,11 +765,11 @@ fn spawn_export(
 				}
 			}
 			ExportSink::Srt(srt) => {
-				if let Some(addr) = srt.listen {
+				if let Some(addr) = srt.endpoint.listen {
 					let name = require_broadcast(name, "export srt --listen")?;
-					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt.latency.into_std()));
-				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt.latency.into_std()));
+					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt));
+				} else if let Some(url) = srt.endpoint.connect.clone() {
+					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt));
 				}
 			}
 			ExportSink::Rtc(rtc) => {

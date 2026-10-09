@@ -937,7 +937,7 @@ pub enum ExportSink {
 	/// RTMP: push to a remote (`--connect`) or serve plays (`--listen`).
 	Rtmp(crate::rtmp::ExportArgs),
 	/// SRT: push to a remote (`--connect`) or serve requests (`--listen`).
-	Srt(crate::srt::Args),
+	Srt(crate::srt::ExportArgs),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Record the broadcast into an object store until it ends.
@@ -1334,6 +1334,27 @@ mod tests {
 
 		assert!(
 			Invocation::try_parse_from(["moq", "export", "srt", "--listen", "[::]:9000", "--program", "2"]).is_err()
+		);
+	}
+
+	/// `export srt` follows its broadcast with the same `--linger` and `--stitch` as `export ts`.
+	#[test]
+	fn export_srt_takes_linger_and_stitch() {
+		let cli = Invocation::try_parse_from([
+			"moq", "export", "srt", "--listen", "[::]:9000", "--linger", "10s", "--stitch",
+		])
+		.unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("an export stage");
+		};
+		let ExportSink::Srt(args) = &export.sink else {
+			panic!("an export srt stage");
+		};
+		assert_eq!(args.linger.into_std(), Duration::from_secs(10));
+		assert!(args.stitch);
+		assert!(
+			Invocation::try_parse_from(["moq", "import", "srt", "--listen", "[::]:9000", "--stitch"]).is_err(),
+			"an ingest has nothing to follow"
 		);
 	}
 

@@ -160,20 +160,46 @@ impl Publisher {
 	}
 }
 
+/// How an egress treats its broadcast ending or being replaced.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Options {
+	/// The muxer's jitter-buffer delay ([`Subscriber::new`]).
+	pub latency: Duration,
+	/// How long to wait for the same publisher instance to come back once its broadcast ends.
+	pub linger: Duration,
+	/// Follow another instance replacing the broadcast, as a full program switch.
+	pub stitch: bool,
+}
+
+/// How long an export failure waits for its broadcast to go before it counts as the export's own.
+///
+/// A killed publisher's tracks can error just before its route is withdrawn, so the two need not
+/// land together.
+const CLOSE_GRACE: Duration = Duration::from_secs(1);
+
+type Export = ts::Export<ts::Ext>;
+
 /// Muxes a single MoQ broadcast back into an MPEG-TS byte stream for egress.
 ///
 /// The mirror of [`Publisher`]: where that demuxes SRT-carried TS into the
 /// origin, this consumes a broadcast from the origin and re-muxes it to TS so an
 /// SRT caller can play it. Pull frames with [`next`](Self::next); each carries
 /// the TS bytes plus the media timestamp used to pace delivery.
+///
+/// The path's announcements drive it, as they drive a player: the same publisher instance
+/// returning within the linger continues the stream, and a replacement either ends it with
+/// [`Error::Replaced`](crate::Error::Replaced) or, with `stitch`, switches the program.
 pub struct Subscriber {
-	export: ts::Export<ts::Ext>,
+	/// Taken only while [`ts::Export::follow`] carries it on.
+	export: Option<Export>,
+	watch: Watch,
+	options: Options,
 }
 
 impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
-	/// `latency` is the muxer's jitter-buffer delay: each frame is muxed that long after
+	/// `options.latency` is the muxer's jitter-buffer delay: each frame is muxed that long after
 	/// its decode time, a frame arriving later is dropped, and a stalled group is
 	/// skipped after half of it. We reuse the locally configured SRT receive latency for
 	/// it, the same budget an SRT hop gives a packet. It's the configured value,
@@ -184,36 +210,218 @@ impl Subscriber {
 	/// Returns `Ok(None)` if the broadcast can never be served (path outside the
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
 	/// to be announced, so a caller may connect before the publisher does.
-	pub async fn new(origin: &origin::Consumer, path: &str, latency: Duration) -> Result<Option<Self>> {
-		// Confirm the broadcast is in scope and wait for it to be announced (out-of-scope /
-		// origin-closed -> `None`). The export re-resolves it (and any referenced sibling
-		// broadcast, via the catalog `broadcast` field) through the origin.
-		if origin.routed(path).await.is_none() {
+	pub(crate) async fn new(origin: &origin::Consumer, path: &str, options: Options) -> Result<Option<Self>> {
+		let Some(mut watch) = Watch::new(origin.consume(), path) else {
+			return Ok(None);
+		};
+		if !watch.first().await? {
 			return Ok(None);
 		}
 
+		// The export resolves the broadcast (and any referenced sibling broadcast, via the
+		// catalog `broadcast` field) through the origin, joining the one just resolved.
 		let source = moq_mux::Source::new(origin.consume(), path);
 		let export = ts::Export::with_ts(source, moq_mux::catalog::CatalogFormat::Hang)
 			.await?
-			.with_delay(latency);
-		Ok(Some(Self { export }))
+			.with_delay(options.latency);
+		Ok(Some(Self {
+			export: Some(export),
+			watch,
+			options,
+		}))
 	}
 
 	/// Pull the next muxed frame (TS bytes + media timestamp), or `None` once the
-	/// broadcast ends.
+	/// broadcast ends with nothing to follow.
 	pub async fn next(&mut self) -> Result<Option<Frame>> {
-		Ok(self.export.next().await?)
+		loop {
+			let export = self.export.as_mut().expect("an export between follows");
+			let end = tokio::select! {
+				next = export.next() => match next {
+					Ok(Some(frame)) => return Ok(Some(frame)),
+					Ok(None) => Ok(()),
+					Err(err) => Err(err),
+				},
+				// Subscriptions are sticky, so a replacement leaves the export on the old
+				// instance until it ends, unless asked to switch at once.
+				true = self.watch.changed(), if !self.watch.closed => {
+					if self.options.stitch && matches!(self.watch.serving, Serving::Other(_)) {
+						tracing::info!(path = %self.watch.path, "broadcast replaced, switching the program to the new instance");
+						let export = self.export.take().expect("an export between follows");
+						self.export = Some(self.watch.follow(export).await?);
+					}
+					continue;
+				}
+			};
+			let export = self.export.take().expect("an export between follows");
+			match self.watch.settle(export, end, self.options).await? {
+				Some(next) => self.export = Some(next),
+				None => return Ok(None),
+			}
+		}
 	}
 
 	/// The muxer's generation counter for the frame [`next`](Self::next) just
-	/// returned, which increments each time the publisher rewinds its timeline.
+	/// returned, which increments each time the program clock restarts: a marker that
+	/// breaks the publisher's timeline, or a switch to another instance.
 	///
-	/// The muxer restarts its program clock across that boundary, so a caller
-	/// pacing on the media timestamps has to drop its own anchor with it: sample
-	/// this after every frame and re-anchor when it changes, or the rewound span
-	/// maps into the past and the whole new generation collapses onto one instant.
+	/// A caller pacing on the media timestamps has to drop its own anchor with it: sample
+	/// this after every frame and re-anchor when it changes, or the new clock maps
+	/// through the old anchor and the whole new generation collapses onto one instant.
 	pub fn discontinuity(&self) -> u64 {
-		self.export.discontinuity()
+		self.export.as_ref().map_or(0, |export| export.discontinuity())
+	}
+}
+
+/// What the announcements say serves the exported path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Serving {
+	/// Nothing: every route went.
+	Gone,
+	/// The publisher instance being exported.
+	Ours,
+	/// Another instance: a newer epoch, or any return of an epochless route.
+	Other(Option<moq_net::Epoch>),
+}
+
+/// Follows the announcements covering the exported path, against the instance the export reads.
+struct Watch {
+	origin: origin::Consumer,
+	path: moq_net::PathOwned,
+	announced: moq_net::announce::Consumer,
+	/// The epoch of the instance being exported.
+	epoch: Option<moq_net::Epoch>,
+	serving: Serving,
+	/// Every route went since the export resolved its broadcast.
+	ended: bool,
+	/// The origin closed, so nothing more is announced.
+	closed: bool,
+}
+
+impl Watch {
+	/// Watch `path`, or `None` when it is outside the origin's scope.
+	fn new(origin: origin::Consumer, path: &str) -> Option<Self> {
+		// A max-depth path cannot be spelled as a subtree, so it watches every announcement.
+		let announced = match moq_net::Pattern::subtree(path) {
+			Ok(subtree) => origin.scope("", &moq_net::Patterns::from(subtree)).ok()?.announced(),
+			Err(_) => origin.announced(),
+		};
+		Some(Self {
+			origin,
+			path: moq_net::Path::new(path).to_owned(),
+			announced,
+			epoch: None,
+			serving: Serving::Gone,
+			ended: false,
+			closed: false,
+		})
+	}
+
+	/// Wait for the first instance to serve the path and resolve it, or `false` if the origin
+	/// closes first.
+	async fn first(&mut self) -> Result<bool> {
+		while self.serving == Serving::Gone {
+			if !self.changed().await {
+				return Ok(false);
+			}
+		}
+		self.resolve().await?;
+		Ok(true)
+	}
+
+	/// Apply the next announcement covering the path, or `false` once the origin closes.
+	async fn changed(&mut self) -> bool {
+		loop {
+			let Some(event) = self.announced.next().await else {
+				self.closed = true;
+				return false;
+			};
+			let (announce, restart) = match event {
+				moq_net::announce::Event::Start(announce) => (announce, false),
+				moq_net::announce::Event::Restart(announce) => (announce, true),
+				moq_net::announce::Event::End(announce) => {
+					if self.path.has_prefix(&announce.prefix) {
+						self.serving = Serving::Gone;
+						self.ended = true;
+						return true;
+					}
+					continue;
+				}
+				// The same instance over another route.
+				moq_net::announce::Event::Update(_) => continue,
+			};
+			if !self.path.has_prefix(&announce.prefix) {
+				continue;
+			}
+			let epoch = announce.route.epoch;
+			self.serving = match !restart && epoch.is_some() && epoch == self.epoch {
+				true => Serving::Ours,
+				false => Serving::Other(epoch),
+			};
+			return true;
+		}
+	}
+
+	/// Resolve the instance serving the path now, and export it from here on.
+	async fn resolve(&mut self) -> Result<moq_net::broadcast::Consumer> {
+		let epoch = match &self.serving {
+			Serving::Other(epoch) => epoch.clone(),
+			Serving::Ours | Serving::Gone => self.epoch.clone(),
+		};
+		let broadcast = self.origin.request_broadcast(&self.path, epoch).await?;
+		self.epoch = broadcast.info().epoch.clone();
+		self.serving = Serving::Ours;
+		self.ended = false;
+		tracing::info!(path = %self.path, epoch = self.epoch.as_ref().map(tracing::field::display), "exporting broadcast");
+		Ok(broadcast)
+	}
+
+	/// Carry `export` on into the instance serving the path now.
+	async fn follow(&mut self, export: Export) -> Result<Export> {
+		let broadcast = self.resolve().await?;
+		Ok(export.follow(broadcast).await?)
+	}
+
+	/// Decide what follows the export's `end`: the export carried on into a return, or `None`
+	/// once a clean end has waited out the linger with nothing to follow.
+	///
+	/// The same instance coming back within the linger continues the stream. A replacement
+	/// fails unless `stitch` follows it, and the linger bounds the whole return, catalog
+	/// subscription included.
+	async fn settle(&mut self, export: Export, end: moq_mux::Result<()>, options: Options) -> Result<Option<Export>> {
+		let Options { linger, stitch, .. } = options;
+		let deadline = tokio::time::Instant::now() + linger;
+		// A failure ends the broadcast only if the broadcast goes too. One still announced
+		// cannot return, so the failure is the export's own and ends the egress now.
+		if let Err(err) = &end
+			&& !self.ended
+			&& self.serving == Serving::Ours
+		{
+			let grace = tokio::time::Instant::now() + CLOSE_GRACE.min(linger);
+			while self.serving == Serving::Ours && tokio::time::timeout_at(grace, self.changed()).await == Ok(true) {}
+			if self.serving == Serving::Ours {
+				tracing::warn!(path = %self.path, %err, "export failed with the broadcast still up, so not lingering");
+				return Err(end.unwrap_err().into());
+			}
+		}
+
+		loop {
+			let follow = match &self.serving {
+				Serving::Ours => self.ended,
+				Serving::Other(_) if stitch => true,
+				Serving::Other(_) => return Err(crate::Error::Replaced(self.path.to_string())),
+				Serving::Gone => false,
+			};
+			if follow {
+				return match tokio::time::timeout_at(deadline, self.follow(export)).await {
+					Ok(next) => next.map(Some),
+					Err(_) => Ok(end.map(|()| None)?),
+				};
+			}
+			if !matches!(tokio::time::timeout_at(deadline, self.changed()).await, Ok(true)) {
+				return Ok(end.map(|()| None)?);
+			}
+		}
 	}
 }
 
@@ -619,7 +827,7 @@ mod tests {
 		let expected_cue = cue.payload;
 		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
 
-		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", Duration::ZERO)
+		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", Options::default())
 			.await
 			.unwrap()
 			.expect("the ingest broadcast is available for SRT egress");

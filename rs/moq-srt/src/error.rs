@@ -25,6 +25,10 @@ pub enum Error {
 	/// The listener stopped accepting connections.
 	#[error("SRT listener stopped accepting connections")]
 	ListenerClosed,
+
+	/// Another publisher instance replaced the egress broadcast, and stitch was off.
+	#[error("another publisher instance replaced broadcast `{0}`; enable stitch (--stitch) to follow it as a program switch")]
+	Replaced(String),
 }
 
 impl From<std::io::Error> for Error {

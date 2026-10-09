@@ -69,6 +69,16 @@ pub struct Config {
 	/// multiplex. To choose per path, drive [`Server`] and call
 	/// [`Publish::with_program`](crate::Publish::with_program) on each request.
 	pub program: Option<Program>,
+
+	/// How long an egress waits for the same publisher instance to come back once its
+	/// broadcast ends, carrying on with the same stream. Zero (the default) closes the SRT
+	/// stream at the end. Only affects egress (`m=request`).
+	pub linger: Duration,
+
+	/// Whether an egress follows another publisher instance replacing its broadcast, as a full
+	/// program switch on the same SRT connection. Off by default, which ends the stream with
+	/// [`Error::Replaced`](crate::Error::Replaced). Only affects egress (`m=request`).
+	pub stitch: bool,
 }
 
 impl Default for Config {
@@ -79,6 +89,8 @@ impl Default for Config {
 			latency: crate::server::DEFAULT_LATENCY,
 			max_age: None,
 			program: None,
+			linger: Duration::ZERO,
+			stitch: false,
 		}
 	}
 }
@@ -117,6 +129,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 	let prefix = config.prefix;
 	let max_age = config.max_age;
 	let program = config.program;
+	let (linger, stitch) = (config.linger, config.stitch);
 
 	while let Some(request) = server.accept().await {
 		let prefix = prefix.clone();
@@ -156,6 +169,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 				tokio::spawn(async move {
 					let peer = subscribe.peer();
 					let path = prefix.join(subscribe.resource());
+					let subscribe = subscribe.with_linger(linger).with_stitch(stitch);
 					if let Err(err) = subscribe.accept(&consumer, &path).await {
 						tracing::warn!(%peer, %path, %err, "SRT request ended with error");
 					} else {
