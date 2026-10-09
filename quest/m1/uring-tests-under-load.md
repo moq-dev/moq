@@ -6,6 +6,8 @@
 2026-10-06 parallel quest run, moq-uring tests failed while concurrent runs
 shared an 8 MiB `RLIMIT_MEMLOCK`, and `deadline_fires_at_park` and
 `dropped_worker_rejects_operations` failed under heavy load and passed alone.
+It recurred on 2026-10-08: four `moq-uring` worker tests failed on ENOMEM
+during a 19-agent quest run, in a PR that never touched the crate.
 
 ## Plan
 
