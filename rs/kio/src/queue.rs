@@ -140,6 +140,10 @@ impl<T> Queue<T> {
 				waiter.register(&mut state.waiters_push);
 				return Poll::Pending;
 			}
+			if !crate::coop::spend(waiter) {
+				drop(state);
+				return crate::coop::exhausted(waiter);
+			}
 			let item = make();
 			state.queue.push_back(item);
 			state.waiters_pop.take()
@@ -183,14 +187,19 @@ impl<T> Queue<T> {
 	pub fn poll_pop(&self, waiter: &Waiter) -> Poll<Result<T, Closed>> {
 		let (item, mut waiters) = {
 			let mut state = self.state.lock();
-			match state.queue.pop_front() {
-				Some(item) => (item, state.waiters_push.take()),
-				None if state.closed => return Poll::Ready(Err(Closed)),
-				None => {
-					waiter.register(&mut state.waiters_pop);
-					return Poll::Pending;
+			if state.queue.is_empty() {
+				if state.closed {
+					return Poll::Ready(Err(Closed));
 				}
+				waiter.register(&mut state.waiters_pop);
+				return Poll::Pending;
 			}
+			if !crate::coop::spend(waiter) {
+				drop(state);
+				return crate::coop::exhausted(waiter);
+			}
+			let item = state.queue.pop_front().expect("checked non-empty");
+			(item, state.waiters_push.take())
 		};
 		waiters.wake();
 		Poll::Ready(Ok(item))

@@ -42,6 +42,11 @@ pub struct Waiter {
 	// A registration found no free slot in `parked`, so a list may hold this waiter
 	// unrecorded and a later registration there would stack a duplicate.
 	lost: AtomicBool,
+
+	// Built by `Waiter::noop`, whose caller reads `Pending` as "nothing now", so the
+	// cooperative budget must never turn a `Ready` into one. Wakers can't be compared
+	// reliably, so the flag says it.
+	noop: bool,
 }
 
 /// Lists a waiter remembers being parked on. A relay's busiest tasks park on up to 8.
@@ -55,12 +60,24 @@ impl Waiter {
 			shared: OnceLock::new(),
 			parked: Default::default(),
 			lost: AtomicBool::new(false),
+			noop: false,
 		}
 	}
 
 	/// Create a no-op waiter that discards registrations.
+	///
+	/// Polls through it never yield to the [cooperative budget](crate::coop), since
+	/// nothing would wake them.
 	pub fn noop() -> Self {
-		Self::new(Waker::noop().clone())
+		Self {
+			noop: true,
+			..Self::new(Waker::noop().clone())
+		}
+	}
+
+	/// Whether this is a [`Self::noop`] waiter, exempt from the cooperative budget.
+	pub(crate) fn is_noop(&self) -> bool {
+		self.noop
 	}
 
 	/// Register this waiter with a [`WaiterList`] for future notification.
@@ -158,6 +175,7 @@ impl Clone for Waiter {
 			shared: OnceLock::from(shared),
 			parked: std::array::from_fn(|i| AtomicU64::new(self.parked[i].load(Ordering::Relaxed))),
 			lost: AtomicBool::new(self.lost.load(Ordering::Relaxed)),
+			noop: self.noop,
 		}
 	}
 }

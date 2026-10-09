@@ -135,6 +135,10 @@ impl<T> Producer<T> {
 
 		let mut guard = Ref { state };
 		match f(&guard) {
+			Poll::Ready(()) if !crate::coop::spend(waiter) => {
+				drop(guard);
+				crate::coop::exhausted(waiter)
+			}
 			// Upgrade the Ref to a Mut, keeping the same lock guard.
 			Poll::Ready(()) => Poll::Ready(Ok(Mut::new(guard.state))),
 			Poll::Pending => {
@@ -158,6 +162,10 @@ impl<T> Producer<T> {
 		let mut guard = Ref { state };
 
 		if let Poll::Ready(res) = f(&guard) {
+			if !crate::coop::spend(waiter) {
+				drop(guard);
+				return crate::coop::exhausted(waiter);
+			}
 			return Poll::Ready(Ok(res));
 		}
 

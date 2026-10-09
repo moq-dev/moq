@@ -245,6 +245,9 @@ impl<T: Task<Output = ()>> Tasks<T> {
 	/// such an arm with [`is_empty`](Self::is_empty).
 	/// `waiter` is registered for the next task wake or push; the tasks
 	/// themselves park on their own wakers.
+	///
+	/// Each task polls under a fresh [cooperative budget](crate::coop), so one that
+	/// always finds work ready yields to the next pass instead of holding the owner.
 	pub fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
 		{
 			let mut parent = self.shared.parent.lock().unwrap();
@@ -305,7 +308,9 @@ impl<T: Task<Output = ()>> Tasks<T> {
 					}
 					let cx = Context::from_waker(&self.wakers[index]);
 					let child_waiter = occupant.park.hold(&cx);
-					if occupant.task.poll(child_waiter).is_ready() {
+					// Each task gets a turn of its own: one that spends its budget
+					// self-wakes into the next pass, after the owner's other arms run.
+					if crate::coop::budget(|| occupant.task.poll(child_waiter)).is_ready() {
 						self.children[index] = None;
 						self.free.push(index);
 						self.len -= 1;
@@ -580,6 +585,49 @@ mod tests {
 			polls.load(Ordering::SeqCst),
 			2,
 			"the next owner poll runs the task again"
+		);
+	}
+
+	/// A task that always finds work ready yields once its budget runs out, lands in
+	/// the next pass, and leaves its sibling's budget untouched.
+	#[test]
+	fn a_busy_task_yields_within_its_budget() {
+		fn busy(work: crate::Consumer<u32>, done: Arc<AtomicUsize>) -> impl FnMut(&Waiter) -> Poll<()> {
+			move |waiter| {
+				loop {
+					if done.load(Ordering::SeqCst) == 1_000 {
+						return Poll::Ready(());
+					}
+					// Always ready: only the budget ends this loop.
+					std::task::ready!(work.poll(waiter, |value| Poll::Ready(**value))).ok();
+					done.fetch_add(1, Ordering::SeqCst);
+				}
+			}
+		}
+
+		let work = crate::Producer::new(0u32);
+		let (a, b) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+		let mut tasks = Tasks::new();
+		tasks.push(busy(work.consume(), a.clone()));
+		tasks.push(busy(work.consume(), b.clone()));
+
+		let waiter = Waiter::noop();
+		assert!(tasks.poll(&waiter).is_pending());
+		let units = crate::coop::UNITS as usize;
+		assert_eq!(a.load(Ordering::SeqCst), units, "a yields after its budget");
+		assert_eq!(b.load(Ordering::SeqCst), units, "b gets a budget of its own");
+
+		let mut passes = 1;
+		loop {
+			passes += 1;
+			if tasks.poll(&waiter).is_ready() {
+				break;
+			}
+		}
+		assert_eq!(
+			passes,
+			1_000usize.div_ceil(units),
+			"each pass serves one budget per task"
 		);
 	}
 

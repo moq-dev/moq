@@ -277,6 +277,10 @@ impl<T> ConsumerWeak<T> {
 		let consumer_state = Ref { state };
 
 		if let Poll::Ready(res) = f(&consumer_state) {
+			if !crate::coop::spend(waiter) {
+				drop(consumer_state);
+				return crate::coop::exhausted(waiter);
+			}
 			return Poll::Ready(Ok(res));
 		}
 

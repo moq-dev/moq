@@ -1882,6 +1882,31 @@ mod test {
 		}
 	}
 
+	/// A finished track still announces its boundary when the poll that finds the groups
+	/// over has run out of budget: a yield there must not read as "no boundary".
+	#[test]
+	fn a_budget_yield_keeps_the_boundary() {
+		let waiter = kio::Waiter::new(std::task::Waker::noop().clone());
+		for left in 0..4 {
+			let mut producer = track_producer("test");
+			let mut subscriber = producer.subscribe(None);
+			producer.finish_at(0).unwrap();
+
+			let starved = kio::coop::budget(|| {
+				crate::util::leave_budget(left);
+				poll_recv_next(&mut subscriber, false, true, &waiter)
+			});
+			let res = match starved {
+				Poll::Pending => kio::coop::budget(|| poll_recv_next(&mut subscriber, false, true, &waiter)),
+				res => res,
+			};
+			assert!(
+				matches!(res, Poll::Ready(Ok(Recv::Boundary(0)))),
+				"left {left}: the boundary was skipped"
+			);
+		}
+	}
+
 	/// A relay can ingest back-to-back groups micro-reordered (the upstream leg
 	/// sends newest-first). The older group is cached and in demand, so serving
 	/// must still deliver it; a sequence cursor would skip it permanently.
@@ -2327,7 +2352,13 @@ fn poll_recv_next(
 		}
 		// No live data ready: report the boundary (if declared) before signalling Finished, so a
 		// future boundary reaches the subscriber while the trailing groups are still in flight.
-		if emit_boundary && let Poll::Ready(res) = track.poll_finished(waiter) {
+		// Once the groups finished this is a probe whose answer decides between the two, so it
+		// must not yield to the cooperative budget; either way nothing is left to wait on.
+		let probe = match groups_finished {
+			true => &kio::Waiter::noop(),
+			false => waiter,
+		};
+		if emit_boundary && let Poll::Ready(res) = track.poll_finished(probe) {
 			return Poll::Ready(res.map(Recv::Boundary));
 		}
 		if groups_finished {
@@ -3647,6 +3678,77 @@ mod serve_group_test {
 			.write_frame(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
 			.unwrap();
 		group.finish().unwrap();
+	}
+
+	/// A serve loop that always has another group ready yields within kio's cooperative
+	/// budget, so a sibling (the transport's driver, say) runs between its turns. Without
+	/// it, one poll served every group the producer kept appending and starved the rest
+	/// of the runtime (a go publisher's 2.5 ms audio groups timed its session out).
+	#[test]
+	fn a_busy_serve_yields_to_its_siblings() {
+		/// kio's per-turn budget: each served group spends at least one unit.
+		const BUDGET: u64 = 32;
+		const GROUPS: u64 = 10_000;
+		const BATCH: u64 = 1_000;
+
+		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		// Unacknowledged FINs keep every served group in flight.
+		let log = Log::default();
+		let (mut run, mut writer, _) = lite07_run(SinkSession::new(log.clone()).with_unacked_fin(), subscriber);
+		let opens = run.ctx.opens.clone();
+
+		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
+
+		// The producer appends a batch of ready groups on each of its turns. A clone, so the
+		// track outlives the task.
+		let mut producer = track.clone();
+		let mut appended = 0;
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			for _ in 0..BATCH.min(GROUPS - appended) {
+				write_group(&mut producer, appended, appended);
+				appended += 1;
+			}
+			if appended == GROUPS {
+				return Poll::Ready(());
+			}
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+
+		// Stands in for the transport's driver: it only needs a turn.
+		let turns = Arc::new(AtomicU64::new(0));
+		let counted = turns.clone();
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			counted.fetch_add(1, Ordering::Relaxed);
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			run.poll(&mut writer, waiter).map(|res| res.expect("serve"))
+		}));
+
+		let owner = kio::Waiter::noop();
+		let mut polls = 0;
+		while opens.opened.load(Ordering::Relaxed) < GROUPS {
+			let before = opens.opened.load(Ordering::Relaxed);
+			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			polls += 1;
+			let served = opens.opened.load(Ordering::Relaxed) - before;
+			assert!(served <= BUDGET, "one turn served {served} groups");
+			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
+			assert!(polls <= 2 * GROUPS, "the serve stalled");
+		}
+
+		// Every group was served exactly once, and nothing more is left to serve.
+		for _ in 0..4 {
+			assert!(tasks.poll(&owner).is_pending());
+		}
+		assert_eq!(opens.opened.load(Ordering::Relaxed), GROUPS);
+		assert!(log.resets().is_empty(), "a group was reset: {:?}", log.resets());
 	}
 
 	/// SUBSCRIBE_END counts the group streams opened, not the groups below the end: a

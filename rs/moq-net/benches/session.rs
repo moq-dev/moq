@@ -81,6 +81,9 @@ struct Shape {
 	frame: usize,
 	/// Write one frame per round, as a live source does, instead of a whole group.
 	paced: bool,
+	/// Whole groups each watched broadcast writes per round, so a serve loop finds a
+	/// backlog ready: the group rate a round stands in for.
+	burst: usize,
 }
 
 impl Shape {
@@ -94,7 +97,14 @@ impl Shape {
 		watch: 1,
 		frame: 64,
 		paced: false,
+		burst: 1,
 	};
+
+	/// What each viewer subscribes with: a burst is a backlog, which the default
+	/// subscription writes off as late.
+	fn subscription(&self) -> Option<track::Subscription> {
+		(self.burst > 1).then(|| track::Subscription::default().with_max_delay(Duration::from_secs(30)))
+	}
 
 	fn total(&self) -> usize {
 		self.publishers * self.broadcasts
@@ -107,19 +117,28 @@ impl Shape {
 
 	/// Payload bytes every viewer reads in one round.
 	fn expected(&self) -> usize {
-		self.viewers * self.watch * self.frames() * self.frame
+		self.viewers * self.watch * self.burst * self.frames() * self.frame
 	}
 
 	fn id(&self, version: &str) -> String {
 		format!(
-			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}",
+			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}",
 			self.relays,
 			self.publishers,
 			self.broadcasts,
 			self.viewers,
 			self.watch,
 			self.frame,
-			if self.paced { "/paced" } else { "" },
+			if self.paced {
+				"/paced".to_string()
+			} else {
+				String::new()
+			},
+			if self.burst > 1 {
+				format!("/burst={}", self.burst)
+			} else {
+				String::new()
+			},
 		)
 	}
 }
@@ -289,11 +308,17 @@ struct Viewer {
 
 impl Viewer {
 	/// Resolve `path` and subscribe to each of its `tracks`.
-	async fn watch(&mut self, path: &str, tracks: &[impl AsRef<str>]) {
+	async fn watch(&mut self, path: &str, tracks: &[impl AsRef<str>], subscription: Option<track::Subscription>) {
 		let broadcast = self.origin.consume().routed_broadcast(path).await.unwrap();
 		for track in tracks {
-			self.subscribers
-				.push(broadcast.track(track.as_ref()).unwrap().subscribe(None).await.unwrap());
+			self.subscribers.push(
+				broadcast
+					.track(track.as_ref())
+					.unwrap()
+					.subscribe(subscription.clone())
+					.await
+					.unwrap(),
+			);
 		}
 	}
 }
@@ -320,6 +345,7 @@ impl Room {
 			shape.watch <= shape.total(),
 			"a viewer can't watch more broadcasts than exist"
 		);
+		assert!(!shape.paced || shape.burst == 1, "a paced round writes one frame");
 		let mut cluster = Cluster::new(version, shape).await;
 
 		// Viewer v watches a contiguous window starting at v * watch, so viewers
@@ -337,7 +363,7 @@ impl Room {
 			// publisher it watches whenever there is more than one.
 			let mut viewer = cluster.join((viewer + 1) % shape.relays).await;
 			for broadcast in broadcasts {
-				viewer.watch(&path(broadcast), &[TRACK]).await;
+				viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
 			}
 			viewers.push(viewer);
 		}
@@ -371,12 +397,17 @@ impl Room {
 			return self.paced_round().await;
 		}
 		for &broadcast in &self.watched {
-			write_group(&self.cluster.tracks[broadcast], &self.payload, FRAMES);
+			for _ in 0..self.shape.burst {
+				write_group(&self.cluster.tracks[broadcast], &self.payload, FRAMES);
+			}
 		}
 		let mut bytes = 0;
-		for viewer in &mut self.viewers {
-			for subscriber in &mut viewer.subscribers {
-				bytes += read_group(subscriber).await;
+		// Round-robin, so no subscription's backlog waits on another's being read.
+		for _ in 0..self.shape.burst {
+			for viewer in &mut self.viewers {
+				for subscriber in &mut viewer.subscribers {
+					bytes += read_group(subscriber).await;
+				}
 			}
 		}
 		assert_eq!(bytes, self.shape.expected());
@@ -472,7 +503,7 @@ fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) 
 							let broadcast = hosted[iter % hosted.len()];
 							let start = Instant::now();
 							let mut viewer = cluster.join(relay).await;
-							viewer.watch(&path(broadcast), &[TRACK]).await;
+							viewer.watch(&path(broadcast), &[TRACK], None).await;
 							let bytes = read_group(&mut viewer.subscribers[0]).await;
 							elapsed += start.elapsed();
 							assert_eq!(bytes, FRAMES * shape.frame);
@@ -560,7 +591,7 @@ impl DashRoom {
 
 		let mut dash = cluster.join(0).await;
 		for path in &paths {
-			dash.watch(path, &names).await;
+			dash.watch(path, &names, None).await;
 		}
 
 		let mut room = Self {
@@ -696,7 +727,7 @@ impl ChurnRoom {
 		let mut broadcasts = Vec::new();
 		for _ in 0..shape.sessions {
 			let mut viewer = cluster.join(0).await;
-			viewer.watch(&path(0), &held).await;
+			viewer.watch(&path(0), &held, None).await;
 			broadcasts.push(viewer.origin.consume().routed_broadcast(&path(0)).await.unwrap());
 			viewers.push(viewer);
 		}
@@ -852,6 +883,20 @@ fn session(c: &mut Criterion) {
 		}),
 	);
 	delivery(c, "frame", [64, 1024, 16 * 1024].map(|frame| Shape { frame, ..base }));
+	// One session serving a backlog on each of its subscriptions: the serve loop that
+	// kio's cooperative budget bounds per turn.
+	delivery(
+		c,
+		"burst",
+		[(1, 1), (1, 8), (1, 64), (8, 1), (8, 8)].map(|(watch, burst)| Shape {
+			publishers: 1,
+			broadcasts: 16,
+			viewers: 1,
+			watch,
+			burst,
+			..base
+		}),
+	);
 	delivery(
 		c,
 		"relays",

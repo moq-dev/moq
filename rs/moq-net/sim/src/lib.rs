@@ -328,24 +328,27 @@ pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> impl Future<Outp
 pub async fn drive<E>(mut poll: impl FnMut(Instant, &kio::Waiter) -> Result<Option<Instant>, E> + Unpin) -> E {
 	let runtime = current();
 	let mut timer: Option<Sleep> = None;
+	// One cooperative budget per poll, like `moq_net::time::run`.
 	kio::wait(move |waiter| {
-		loop {
-			let at = match poll(runtime.now(), waiter) {
-				Ok(Some(at)) => at,
-				Ok(None) => {
-					timer = None;
+		kio::coop::budget(|| {
+			loop {
+				let at = match poll(runtime.now(), waiter) {
+					Ok(Some(at)) => at,
+					Ok(None) => {
+						timer = None;
+						return Poll::Pending;
+					}
+					Err(err) => return Poll::Ready(err),
+				};
+				let sleep = timer.get_or_insert_with(|| sleep_until(at));
+				if sleep.deadline() != at {
+					sleep.reset(at);
+				}
+				if waiter.poll_future(Pin::new(sleep)).is_pending() {
 					return Poll::Pending;
 				}
-				Err(err) => return Poll::Ready(err),
-			};
-			let sleep = timer.get_or_insert_with(|| sleep_until(at));
-			if sleep.deadline() != at {
-				sleep.reset(at);
 			}
-			if waiter.poll_future(Pin::new(sleep)).is_pending() {
-				return Poll::Pending;
-			}
-		}
+		})
 	})
 	.await
 }

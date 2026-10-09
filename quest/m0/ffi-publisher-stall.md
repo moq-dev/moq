@@ -16,14 +16,14 @@ cell.
 
 The cause is known: a serve loop with work always ready never yields and
 starves moq-ffi's single runtime thread until the relay times the publisher
-out (found 2026-10-08 landing #4225). [Serve budget](/quest/m0/serve-budget.md)
-fixes it, so this quest starts once it lands and no bisect is needed.
+out (found 2026-10-08 landing #4225). kio's cooperative budget (`kio::coop`)
+fixes it, so no bisect is needed.
 
 Decided 2026-10-08:
 
 - In m0, moved from m1 and widened from the browser cells: the stall masks
   interop on every wire PR and may disconnect real FFI publishers.
-- Re-check every Go and Python publisher cell once the serve budget lands.
+- Re-check every Go and Python publisher cell now that the budget landed.
   The #4225 root-cause comment saw a 64-iteration yield still time the
   publisher out, so if a cell still stalls, find the rest of the cause.
   Never raise a timeout or add a retry.
@@ -51,10 +51,6 @@ Harness facts (2026-10-08):
   having the client report its own drop.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Serve budget](/quest/m0/serve-budget.md) - fixes the stall's cause; this quest verifies the cells and hardens the harness
 
 ## Related
 
