@@ -210,7 +210,12 @@ pub struct Config {
 		env = "MOQ_LISTEN_QUIC_LB_ID",
 		setting = "listen.lb_id"
 	)]
-	#[serde(default, rename = "__cli_lb_id", skip_serializing_if = "Option::is_none")]
+	#[serde(
+		default,
+		rename = "__cli_lb_id",
+		alias = "lb_id",
+		skip_serializing_if = "Option::is_none"
+	)]
 	pub(crate) lb_id: Option<crate::quic::ServerId>,
 
 	/// Number of random nonce bytes in QUIC-LB connection IDs.
@@ -222,7 +227,12 @@ pub struct Config {
 		setting = "listen.lb_nonce",
 		requires = "--listen-quic-lb-id"
 	)]
-	#[serde(default, rename = "__cli_lb_nonce", skip_serializing_if = "Option::is_none")]
+	#[serde(
+		default,
+		rename = "__cli_lb_nonce",
+		alias = "lb_nonce",
+		skip_serializing_if = "Option::is_none"
+	)]
 	pub(crate) lb_nonce: Option<usize>,
 
 	/// QUIC-LB connection-ID encoding.
@@ -433,6 +443,18 @@ impl Config {
 				"--listen-unix-allow-* requires --listen-unix-bind",
 			));
 		}
+		// A nonce with no server id used to be dropped, and `lb_id` used to hide
+		// `load_balancer`. Either one is a setting the process would not run.
+		if self.load_balancer.is_some() && (self.lb_id.is_some() || self.lb_nonce.is_some()) {
+			return Err(crate::Error::NoBackend(
+				"load_balancer cannot be combined with lb_id or lb_nonce",
+			));
+		}
+		if self.lb_nonce.is_some() && self.lb_id.is_none() {
+			return Err(crate::Error::NoBackend(
+				"--listen-quic-lb-nonce requires --listen-quic-lb-id",
+			));
+		}
 		Ok(())
 	}
 
@@ -627,6 +649,50 @@ mod tests {
 				id: "ab".parse().unwrap(),
 				nonce: 9,
 			})
+		);
+	}
+
+	/// A nonce with no server id is refused at startup, from either TOML spelling,
+	/// instead of being dropped.
+	#[test]
+	fn quic_lb_nonce_without_id_refuses_to_start() {
+		for toml in ["lb_nonce = 8", "__cli_lb_nonce = 8"] {
+			let config: Config = toml::from_str(toml).unwrap_or_else(|err| panic!("{toml}: {err}"));
+			match config.init(Default::default()) {
+				Err(crate::Error::NoBackend(reason)) => {
+					assert!(reason.contains("requires --listen-quic-lb-id"), "{toml}: {reason}")
+				}
+				Err(err) => panic!("{toml}: {err}"),
+				Ok(_) => panic!("{toml} was ignored"),
+			}
+		}
+	}
+
+	/// `lb_id` must not hide a `load_balancer` value. One source, or startup stops.
+	#[test]
+	fn quic_lb_id_and_load_balancer_cannot_both_be_set() {
+		let both = |toml: &str| {
+			let config: Config = toml::from_str(toml).unwrap_or_else(|err| panic!("{toml}: {err}"));
+			match config.init(Default::default()) {
+				Err(crate::Error::NoBackend(reason)) => {
+					assert!(reason.contains("cannot be combined"), "{toml}: {reason}")
+				}
+				Err(err) => panic!("{toml}: {err}"),
+				Ok(_) => panic!("{toml} let lb_id win"),
+			}
+		};
+		both(
+			r#"
+lb_id = "ab"
+load_balancer = { id = "cd", nonce = 4 }
+"#,
+		);
+		both(
+			r#"
+__cli_lb_id = "ab"
+lb_nonce = 9
+load_balancer = { id = "cd", nonce = 4 }
+"#,
 		);
 	}
 
