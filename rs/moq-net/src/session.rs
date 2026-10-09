@@ -333,6 +333,9 @@ impl Session {
 		S: crate::transport::poll::Session,
 	{
 		let Handles { goaway, auth, setup } = handles;
+		if version.is_lite() {
+			auth.lite();
+		}
 		let sample = snapshot(&session);
 
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.

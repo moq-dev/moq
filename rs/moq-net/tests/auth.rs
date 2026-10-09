@@ -266,7 +266,10 @@ async fn connect(opts: Options) -> Pair {
 		let (session, driver) = client.connect(now(), client_transport).await.expect("client handshake");
 		// Set before the driver runs, so the first request already carries it.
 		if let Some(token) = client_token {
-			session.auth().set_request_token(token);
+			session
+				.auth()
+				.set_request_token(token)
+				.expect("a moq-transport session carries a request token");
 		}
 		spawn(driver);
 		session
@@ -525,6 +528,29 @@ async fn a_client_may_decline_the_auth_extension() {
 	.expect("timed out");
 }
 
+/// moq-lite requests carry no token, so a moq-lite session refuses one rather than drop it,
+/// and a moq-transport session takes it.
+#[moq_net_sim::test]
+async fn a_moq_lite_session_refuses_a_request_token() {
+	within(async {
+		let lite = connect(Options::default()).await;
+		let refused = lite.client.auth().set_request_token(request_token(b"ok"));
+		assert!(matches!(refused, Err(Error::Unsupported)), "{refused:?}");
+
+		let ietf = connect(Options {
+			version: Some(MOQT_18),
+			..Default::default()
+		})
+		.await;
+		ietf.client
+			.auth()
+			.set_request_token(request_token(b"ok"))
+			.expect("a moq-transport session takes a request token");
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A request token renews over the wire: replacing it on the client's `Session::auth()`
 /// re-presents it on the live SUBSCRIBE as a REQUEST_UPDATE, the server's driver routes it to
 /// the acceptor, and the new grant keeps the subscription alive past the old one's expiry.
@@ -576,7 +602,7 @@ async fn a_request_token_renews_a_subscription_through_the_driver() {
 		assert_eq!(token, first.value);
 		sub.recv_group().await.unwrap().unwrap();
 
-		pair.client.auth().set_request_token(second.clone());
+		pair.client.auth().set_request_token(second.clone()).unwrap();
 		let (token, _renewed) = answered.recv().await.expect("the renewal reached the acceptor");
 		assert_eq!(token, second.value, "the replaced token rides the REQUEST_UPDATE");
 
@@ -687,7 +713,7 @@ async fn a_held_renewal_coalesces_a_burst_without_tripping_the_credit() {
 
 		// Replace the token once and let that one renewal reach the held acceptor, so the held
 		// renewal is deterministic regardless of scheduling.
-		pair.client.auth().set_request_token(token(1));
+		pair.client.auth().set_request_token(token(1)).unwrap();
 		assert_eq!(
 			seen.next().await.expect("first renewal"),
 			token(1).value,
@@ -701,7 +727,7 @@ async fn a_held_renewal_coalesces_a_burst_without_tripping_the_credit() {
 		// would close the session with TOO_MANY_REQUEST_UPDATES, losing every request on it;
 		// the one-in-flight rule coalesces them behind the held one instead.
 		for n in 2..=64u8 {
-			pair.client.auth().set_request_token(token(n));
+			pair.client.auth().set_request_token(token(n)).unwrap();
 			moq_net_sim::sleep(Duration::from_millis(5)).await;
 		}
 

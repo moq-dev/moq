@@ -904,8 +904,9 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	// starts, and the first request carries the token current now (one renewed while the
 	// handshake was pending included). Every later renewal then reaches this session. On
 	// draft-14/15/16 the first PUBLISH_NAMESPACE carries the token inline and cannot renew in
-	// place, so a stale seed there would stick.
-	token.attach(session.auth());
+	// place, so a stale seed there would stick. A session that cannot carry the token set
+	// (moq-lite) fails the dial rather than drop it.
+	token.attach(session.auth())?;
 	use tracing::Instrument;
 	tokio::spawn(moq_net::time::run(driver).instrument(tracing::Span::current()));
 	Ok(session)

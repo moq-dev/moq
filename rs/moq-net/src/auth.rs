@@ -103,6 +103,8 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 pub(crate) struct State {
 	/// Whether the negotiated version carries AUTH at all.
 	supported: bool,
+	/// The session speaks moq-lite, whose requests carry no token.
+	lite: bool,
 	/// Set once the session ends; every waiter resolves with it.
 	closed: Option<Error>,
 	next_id: u64,
@@ -315,8 +317,20 @@ impl Handle {
 	/// Replacing it later re-presents the new token on every live request as a
 	/// REQUEST_UPDATE, renewing a token-authorized request in place; setting the same value
 	/// again sends nothing. Independent of the MoQ Auth extension.
-	pub fn set_request_token(&self, token: crate::setup::Token) {
+	///
+	/// A moq-lite session has no request token to carry it, so it refuses with
+	/// [`Error::Unsupported`] rather than drop it.
+	pub fn set_request_token(&self, token: crate::setup::Token) -> Result<()> {
+		if self.state.read().lite {
+			return Err(Error::Unsupported);
+		}
 		self.request_token.set(Some(token));
+		Ok(())
+	}
+
+	/// The session speaks moq-lite, so [`set_request_token`](Self::set_request_token) refuses.
+	pub(crate) fn lite(&self) {
+		self.state.lock().lite = true;
 	}
 
 	/// The request-token cell the session's publisher and subscriber present from.

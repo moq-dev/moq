@@ -526,7 +526,8 @@ impl Shared {
 		// The failed upgrade attached its own session before its handshake failed, so renewals
 		// go back to the session that kept serving.
 		if let Some(session) = &self.state.read().session {
-			self.request_token.attach(session.auth());
+			// It carried the token when it attached, so it still can.
+			let _ = self.request_token.attach(session.auth());
 		}
 	}
 
@@ -664,13 +665,14 @@ struct Presenting {
 
 /// Where a request token is presented: a session's auth handle.
 pub(crate) trait Present: Send {
-	/// Present `token` on this session's requests from now on.
-	fn present(&self, token: moq_net::setup::Token);
+	/// Present `token` on this session's requests from now on, or refuse it when the session
+	/// cannot carry one (moq-lite).
+	fn present(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error>;
 }
 
 impl Present for moq_net::auth::Handle {
-	fn present(&self, token: moq_net::setup::Token) {
-		self.set_request_token(token);
+	fn present(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
+		self.set_request_token(token)
 	}
 }
 
@@ -689,24 +691,29 @@ impl RequestToken {
 	}
 
 	/// Replace the token, on the newest session too, and seed every later session with it.
-	fn set(&self, token: moq_net::setup::Token) {
+	///
+	/// Errors when the newest session cannot carry it; later sessions are still seeded.
+	fn set(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
 		let mut presenting = self.0.lock().unwrap();
-		if let Some(session) = &presenting.session {
-			session.present(token.clone());
+		presenting.token = Some(token.clone());
+		match &presenting.session {
+			Some(session) => session.present(token),
+			None => Ok(()),
 		}
-		presenting.token = Some(token);
 	}
 
 	/// Seed `session` with the current token and make it the session later renewals reach.
 	///
 	/// Called once the handshake completes and before the session's driver starts, so its
-	/// first request carries the newest token.
-	pub(crate) fn attach(&self, session: impl Present + 'static) {
+	/// first request carries the newest token. Errors when the session cannot carry the token
+	/// set, which leaves it unattached.
+	pub(crate) fn attach(&self, session: impl Present + 'static) -> Result<(), moq_net::Error> {
 		let mut presenting = self.0.lock().unwrap();
 		if let Some(token) = &presenting.token {
-			session.present(token.clone());
+			session.present(token.clone())?;
 		}
 		presenting.session = Some(Box::new(session));
+		Ok(())
 	}
 
 	/// Stop reaching the session once nothing is live; renewals then only update the seed.
@@ -753,8 +760,11 @@ impl Auth {
 	/// reaches the live session (if any) so a renewal re-presents on its live requests as a
 	/// REQUEST_UPDATE. A session still handshaking starts with it. Replaces whatever
 	/// [`crate::connect::Config::with_request_token`] seeded.
-	pub fn set_request_token(&self, token: moq_net::setup::Token) {
-		self.token.set(token);
+	///
+	/// Errors with [`moq_net::Error::Unsupported`] when the live session speaks moq-lite, whose
+	/// requests carry no token; later sessions are still seeded with it.
+	pub fn set_request_token(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
+		self.token.set(token)
 	}
 }
 
@@ -1713,10 +1723,10 @@ mod tests {
 
 		// No live session: the cell still updates and does not panic. This is the value a
 		// reconnect reads to seed its session.
-		auth.set_request_token(tok(b"first"));
+		auth.set_request_token(tok(b"first")).unwrap();
 		assert_eq!(token.get(), Some(tok(b"first")));
 
-		auth.set_request_token(tok(b"second"));
+		auth.set_request_token(tok(b"second")).unwrap();
 		assert_eq!(
 			token.get(),
 			Some(tok(b"second")),
@@ -1751,13 +1761,14 @@ mod tests {
 	}
 
 	impl Present for Parked {
-		fn present(&self, token: moq_net::setup::Token) {
+		fn present(&self, token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
 			let park = self.park.lock().unwrap().take();
 			if let Some((parked, release)) = park {
 				parked.send(Step::Parked).unwrap();
 				release.wait();
 			}
 			self.presented.lock().unwrap().push(token);
+			Ok(())
 		}
 	}
 
@@ -1795,12 +1806,34 @@ mod tests {
 
 		let renewer = {
 			let token = token.clone();
-			std::thread::spawn(move || token.set(renew))
+			std::thread::spawn(move || token.set(renew).unwrap())
 		};
 		release.wait();
 		writer.join().expect("writer panicked");
 		renewer.join().expect("renewer panicked");
 		std::mem::take(&mut *presented.lock().unwrap())
+	}
+
+	/// A session that cannot carry a request token (moq-lite).
+	struct Refuses;
+
+	impl Present for Refuses {
+		fn present(&self, _token: moq_net::setup::Token) -> Result<(), moq_net::Error> {
+			Err(moq_net::Error::Unsupported)
+		}
+	}
+
+	/// A session that cannot carry the token refuses it loudly: attaching fails, so the dial
+	/// does too, and a renewal reaching it fails while still seeding later sessions.
+	#[test]
+	fn a_session_that_cannot_carry_the_token_refuses_it() {
+		let token = RequestToken::new(Some(tok(b"token-a")));
+		assert!(matches!(token.attach(Refuses), Err(moq_net::Error::Unsupported)));
+
+		let token = RequestToken::new(None);
+		token.attach(Refuses).expect("nothing to present");
+		assert!(matches!(token.set(tok(b"token-b")), Err(moq_net::Error::Unsupported)));
+		assert_eq!(token.get(), Some(tok(b"token-b")), "later sessions are still seeded");
 	}
 
 	/// A reconnect seeding its new session cannot replay the token it read over a renewal that
@@ -1811,7 +1844,7 @@ mod tests {
 		let b = tok(b"token-b");
 		let token = RequestToken::new(Some(a.clone()));
 
-		let presented = race_renewal(&token, |token, session| token.attach(session), b.clone());
+		let presented = race_renewal(&token, |token, session| token.attach(session).unwrap(), b.clone());
 
 		assert_eq!(presented, [a, b.clone()], "seeded with A, then renewed to B");
 		assert_eq!(token.get(), Some(b), "the next reconnect is seeded with B too");
@@ -1831,8 +1864,8 @@ mod tests {
 				let a = a.clone();
 				move |token, session| {
 					// Nothing to seed, so the attach presents nothing and the renewal parks.
-					token.attach(session);
-					token.set(a);
+					token.attach(session).unwrap();
+					token.set(a).unwrap();
 				}
 			},
 			b.clone(),
@@ -1849,16 +1882,16 @@ mod tests {
 		let session = || Parked::new(&presented);
 		let token = RequestToken::new(Some(tok(b"token-a")));
 
-		token.attach(session());
+		token.attach(session()).unwrap();
 		token.detach();
-		token.set(tok(b"token-b"));
+		token.set(tok(b"token-b")).unwrap();
 		assert_eq!(
 			presented.lock().unwrap().len(),
 			1,
 			"a renewal reached a detached session"
 		);
 
-		token.attach(session());
+		token.attach(session()).unwrap();
 		assert_eq!(presented.lock().unwrap().last().cloned(), Some(tok(b"token-b")));
 	}
 
@@ -1890,7 +1923,7 @@ mod tests {
 		);
 
 		let t2 = tok(b"token-two");
-		conn.auth().set_request_token(t2.clone());
+		conn.auth().set_request_token(t2.clone()).unwrap();
 		assert_eq!(
 			conn.request_token.get(),
 			Some(t2),
@@ -2009,7 +2042,7 @@ mod tests {
 		let (b, b_value) = request_token(b"b");
 		let (conn, _broadcast) = announcing_client(a, url);
 		paused.await.expect("the client's SETUP reached the server");
-		conn.auth().set_request_token(b);
+		conn.auth().set_request_token(b).unwrap();
 		release.send(()).unwrap();
 
 		let first = tokio::time::timeout(Duration::from_secs(10), first)
