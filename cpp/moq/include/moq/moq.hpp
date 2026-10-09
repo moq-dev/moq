@@ -60,6 +60,7 @@ using Client = MoqClient;
 using FlateSnapshotProducer = MoqFlateSnapshotProducer;
 using FlateStreamProducer = MoqFlateStreamProducer;
 using GroupConsumer = MoqGroupConsumer;
+using GroupDemand = MoqGroupDemand;
 using GroupProducer = MoqGroupProducer;
 using GroupRequest = MoqGroupRequest;
 using JsonSnapshotConsumer = MoqJsonSnapshotConsumer;

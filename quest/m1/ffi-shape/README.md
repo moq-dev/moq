@@ -75,5 +75,4 @@ runs `just test interop --all`.
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video producers, codec-only encoders, and decoders move under their own namespaces, named as in Rust; binding releases wait for it
 - [Named error fields](/quest/m1/ffi-shape/error-fields.md) - `MoqError` variants name their fields, so no binding exposes a positional `v1`
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - the wrappers expose epochs and rename `session.epoch()`, on the reshaped wrappers
-- [Group request demand](/quest/m1/ffi-shape/group-request-demand.md) - `MoqGroupRequest::demand()` in moq-ffi and every wrapper
 - [Layers guide](/quest/m1/ffi-shape/layers-guide.md) - a `doc/lib` page maps each Rust layer to every binding's module, once Codecs adds `audio` and `video`
