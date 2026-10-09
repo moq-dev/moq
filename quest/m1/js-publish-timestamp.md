@@ -39,8 +39,6 @@ timed track today.
 
 Decided (2026-10-07): `@moq/net` has no default timescale. Omitting
 `Track.Info.timescale` declares an untimed track, so every timed publisher
-names its units, as Rust will once
-[An undeclared Rust timescale means untimed](/quest/m1/rust-untimed-default.md)
-lands.
+names its units, as Rust does.
 
 Public API: breaking. Wire: none.

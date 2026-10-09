@@ -16,6 +16,11 @@ use futures::{StreamExt, channel::mpsc};
 use moq_net::{Error, Hop, Timestamp, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Long enough, in virtual time, for anything in flight to reach the far side.
 const SETTLE: Duration = Duration::from_secs(1);
 
@@ -137,7 +142,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	// Created, not yet announced: nobody can see or reach it.
 	let broadcast = publisher.create_broadcast(PATH).unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	moq_net_sim::sleep(SETTLE).await;
 	log.push(format!(
 		"created: {:?} {}",
@@ -192,7 +197,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	));
 	let again = again.expect("a reannounced broadcast resolves");
 
-	let audio = broadcast.create_track("audio", None).unwrap();
+	let audio = broadcast.create_track("audio", timed()).unwrap();
 	let mut reader = read(&again, "audio").await;
 	moq_net_sim::timeout(SETTLE, audio.demand().used())
 		.await

@@ -7,6 +7,11 @@ use mp4_atom::{DecodeMaybe, Encode};
 
 use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// The media track's full retention window, so an exporter started after publishing
 /// can still read every retained group. These tests write or import a whole broadcast
 /// and only then export it, which the
@@ -2147,7 +2152,7 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	catalog
 		.modify()
 		.unwrap()

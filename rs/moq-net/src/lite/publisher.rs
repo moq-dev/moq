@@ -1381,12 +1381,12 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 		let info = ready!(self.querying.poll_ok(waiter))?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where the
-		// timescale is mandatory. An untimed track declares the default, the scale its
+		// timescale is mandatory. An untimed track declares milliseconds, the scale its
 		// frames' send times go out at (see `wire_timestamp`).
 		writer.buffer(&lite::TrackInfo {
 			priority: info.priority,
 			max_age: info.max_age,
-			timescale: info.timescale.unwrap_or_default(),
+			timescale: info.timescale.unwrap_or(crate::Timescale::MILLI),
 		})?;
 		Poll::Ready(Ok(ControlFlow::Break(())))
 	}
@@ -1486,7 +1486,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					// "don't emit the prefix" (the frames still carry timestamps in the
 					// model, just not on this wire).
 					let timescale = if shared.version.has_track_stream() {
-						Some(track.info().timescale.unwrap_or_default())
+						Some(track.info().timescale.unwrap_or(crate::Timescale::MILLI))
 					} else {
 						None
 					};
@@ -1637,7 +1637,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					// FETCH is gated to lite-05+, which learned the track timescale via
 					// TRACK_INFO.
 					let timescale = if shared.version.has_track_stream() {
-						Some(group.timescale().unwrap_or_default())
+						Some(group.timescale().unwrap_or(crate::Timescale::MILLI))
 					} else {
 						None
 					};
@@ -1729,7 +1729,7 @@ mod test {
 	use crate::{Timestamp, broadcast};
 
 	fn track_producer(name: impl Into<Arc<str>>) -> track::Producer {
-		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
+		track::Producer::new(Arc::new(broadcast::Info::default()), name, crate::track::Info::timed())
 	}
 
 	/// A pre-06 wire is served from the live edge when it names no start: those drafts
@@ -2245,7 +2245,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 /// A frame or datagram timestamp as its raw value at the wire `timescale`.
 ///
 /// No lite version encodes an absent timestamp yet, so a payload on an untimed track
-/// carries its send time on `runtime` instead, at the default scale its TRACK_INFO
+/// carries its send time on `runtime` instead, at the millisecond scale its TRACK_INFO
 /// declares. A timed payload is already at the track's timescale.
 fn wire_timestamp(
 	timestamp: Option<crate::Timestamp>,
@@ -2488,8 +2488,11 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
 	fn serve_datagram(&mut self, datagram: crate::Datagram) {
 		// Datagrams are lite-05+, which always declares a timescale in TRACK_INFO.
-		let Ok(timestamp) = wire_timestamp(datagram.timestamp, self.timescale.unwrap_or_default(), &self.runtime)
-		else {
+		let Ok(timestamp) = wire_timestamp(
+			datagram.timestamp,
+			self.timescale.unwrap_or(crate::Timescale::MILLI),
+			&self.runtime,
+		) else {
 			return;
 		};
 		let body = lite::Datagram {
@@ -3205,7 +3208,11 @@ mod serve_group_test {
 	/// only a subscriber that asked for a partial group may receive one.
 	#[test]
 	fn position_group_skips_a_missing_head() {
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		let mut group = track.create_group(group::Info { sequence: 3 }).unwrap();
 		group.start_at(5).unwrap();
 		group.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
@@ -3234,7 +3241,11 @@ mod serve_group_test {
 	/// The end bound caps the end group and leaves the others whole.
 	#[test]
 	fn position_group_caps_the_end_group() {
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		let mut group = track.create_group(group::Info { sequence: 7 }).unwrap();
 		for i in 0..4u8 {
 			group.write_frame(Timestamp::ZERO, vec![i]).unwrap();
@@ -3281,12 +3292,16 @@ mod serve_group_test {
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::default()),
+			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
@@ -3321,12 +3336,16 @@ mod serve_group_test {
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::default()),
+			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -3365,12 +3384,16 @@ mod serve_group_test {
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::default()),
+			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		let mut frame = old
@@ -3427,12 +3450,16 @@ mod serve_group_test {
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::default()),
+			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -3498,12 +3525,16 @@ mod serve_group_test {
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::default()),
+			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
@@ -3541,12 +3572,16 @@ mod serve_group_test {
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::default()),
+			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -3583,12 +3618,16 @@ mod serve_group_test {
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::default()),
+			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
 
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(Timestamp::ZERO, b"hello".as_slice()).unwrap();
 		let consumer = group.consume();
@@ -3628,7 +3667,7 @@ mod serve_group_test {
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
 			version: Version::Lite07,
-			timescale: Some(crate::Timescale::default()),
+			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
 		};
@@ -3653,7 +3692,11 @@ mod serve_group_test {
 	/// group the track never produced has no stream and is not counted.
 	#[moq_net_sim::test]
 	async fn lite07_end_counts_the_streams_opened() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(None);
 		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut writer, waiter)));
@@ -3698,7 +3741,7 @@ mod serve_group_test {
 				track_priority: track_priority.consume(),
 				track_priority_seen: 0,
 				version: Version::Lite07,
-				timescale: Some(crate::Timescale::default()),
+				timescale: Some(crate::Timescale::MILLI),
 				runtime: crate::time::Clock::sim(),
 				opens: opens.clone(),
 			};
@@ -3744,7 +3787,11 @@ mod serve_group_test {
 	/// exists, and a catalog never publishes the next one.
 	#[moq_net_sim::test]
 	async fn a_widening_update_serves_the_finished_group_it_had_skipped() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		write_group(&mut track, 0, 0);
 		let mut relay = RelayRun::new(&mut track, 1);
 		relay.settle();
@@ -3766,7 +3813,11 @@ mod serve_group_test {
 	/// arrived before the served groups, so the cursor has moved past it.
 	#[moq_net_sim::test]
 	async fn a_widening_update_does_not_rewind_past_served_groups() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		for sequence in 0..3 {
 			write_group(&mut track, sequence, sequence);
 		}
@@ -3792,7 +3843,11 @@ mod serve_group_test {
 	/// the floor it raised: resolving the start from the held group must not lower it.
 	#[moq_net_sim::test]
 	async fn held_first_group_keeps_an_updated_floor() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut relay = RelayRun::new(&mut track, 0);
 
 		write_group(&mut track, 5, 0);
@@ -3824,7 +3879,11 @@ mod serve_group_test {
 	/// a newer group arriving first must not resolve the start past it.
 	#[moq_net_sim::test]
 	async fn held_first_group_resolves_to_the_floor_under_the_source() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut relay = RelayRun::new(&mut track, 5);
 
 		write_group(&mut track, 6, 6);
@@ -3843,7 +3902,11 @@ mod serve_group_test {
 	/// SUBSCRIBE_START must not name it, even where the source's feed starts.
 	#[moq_net_sim::test]
 	async fn held_first_group_starts_past_a_skipped_head() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut relay = RelayRun::new(&mut track, 5);
 
 		// Group 5's first frame is gone.
@@ -3865,7 +3928,11 @@ mod serve_group_test {
 	/// A track that ends without a group still ends the subscription, with no stream owed.
 	#[moq_net_sim::test]
 	async fn lite07_end_counts_zero_streams() {
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(None);
 		track.finish().unwrap();
 
@@ -3880,7 +3947,11 @@ mod serve_group_test {
 	#[moq_net_sim::test]
 	async fn lite07_end_waits_for_every_stream_to_open() {
 		let gate = kio::Producer::new(false);
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(None);
 		write_group(&mut track, 0, 0);
 
@@ -4409,7 +4480,7 @@ mod tests {
 					let case = format!("{version:?}, {close:?}, blocked {blocked}");
 					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 					let broadcast = origin.create_broadcast("room").unwrap();
-					let track = broadcast.create_track("video", None).unwrap();
+					let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 					broadcast.announce(Default::default()).unwrap();
 
 					let peer_setup = crate::lite::PeerSetup::default();
@@ -4547,7 +4618,7 @@ mod tests {
 			.now_or_never()
 			.expect("track requested")
 			.unwrap();
-		let _track = request.accept(None);
+		let _track = request.accept(crate::track::Info::timed());
 		assert!(!drive(&mut serve).await, "the subscription ended");
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");

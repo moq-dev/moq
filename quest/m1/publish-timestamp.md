@@ -63,10 +63,6 @@ Swift wrappers default them to 0.
 Public API: breaking. Wire: none here; absence on the wire lands
 with the untimed implementation quests.
 
-## Required
-
-- [An undeclared Rust timescale means untimed](/quest/m1/rust-untimed-default.md) - each track declares its timescale first, so a publisher that stops stamping writes onto a track that already says whether it is timed
-
 ## Related
 
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same change in the JS packages

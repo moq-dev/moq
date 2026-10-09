@@ -1083,14 +1083,18 @@ mod test {
 
 	/// A route's copy of the track.
 	fn copy() -> track::Producer {
-		track::Producer::new(Arc::new(broadcast::Info::default()), "video", None)
+		track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		)
 	}
 
 	/// The logical track `routes` serves.
 	fn logical(routes: &Producer) -> track::Producer {
 		track::Request::new(Arc::new(broadcast::Info::default()), "video")
 			.routes(routes.consume())
-			.accept(None)
+			.accept(crate::track::Info::timed())
 	}
 
 	fn subscribe(logical: &track::Producer, max_delay: Duration) -> track::Subscriber {

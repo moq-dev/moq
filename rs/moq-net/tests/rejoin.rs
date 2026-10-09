@@ -7,6 +7,11 @@ use std::time::Duration;
 use moq_net::{Hop, Timestamp, Version, group, track};
 use support::harness::{MockConnectOptions, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Maximum time any single test may run before being treated as a deadlock.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -39,7 +44,7 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 				let relay = produce_origin(2);
 
 				let broadcast = publisher.create_broadcast("bench").unwrap();
-				let track = broadcast.create_track("video", None).unwrap();
+				let track = broadcast.create_track("video", timed()).unwrap();
 				broadcast.announce(Default::default()).unwrap();
 
 				let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -132,7 +137,7 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 			let relay = produce_origin(2);
 
 			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", None).unwrap();
+			let track = broadcast.create_track("video", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -196,7 +201,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			let client = produce_origin(3);
 
 			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", None).unwrap();
+			let track = broadcast.create_track("video", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 			// Left open, as a JSON snapshot group stays open for its deltas.
 			let mut open = track.append_group().unwrap();
@@ -269,7 +274,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 			let client = produce_origin(3);
 
 			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", None).unwrap();
+			let track = broadcast.create_track("video", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 			let mut open = track.append_group().unwrap();
 			open.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
@@ -339,7 +344,7 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 			let relay = produce_origin(2);
 
 			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", None).unwrap();
+			let track = broadcast.create_track("video", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -409,7 +414,7 @@ async fn rejoin_waits_for_the_answers_first_frame() {
 			let relay = produce_origin(2);
 
 			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", None).unwrap();
+			let track = broadcast.create_track("video", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -482,7 +487,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 			let relay = produce_origin(2);
 
 			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("catalog", None).unwrap();
+			let track = broadcast.create_track("catalog", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"c0".as_ref()).unwrap();
@@ -557,7 +562,7 @@ async fn rejoin_keeps_source_timestamps() {
 			let client = produce_origin(2);
 
 			let broadcast = publisher.create_broadcast("bench").unwrap();
-			let track = broadcast.create_track("video", None).unwrap();
+			let track = broadcast.create_track("video", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());

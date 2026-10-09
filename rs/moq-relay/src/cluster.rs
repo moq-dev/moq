@@ -1959,6 +1959,11 @@ mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
@@ -2618,7 +2623,7 @@ mod tests {
 
 		let broadcast = origin.create_broadcast("cam").expect("create");
 		broadcast.announce(Default::default()).expect("announce");
-		let mut track = broadcast.create_track("data", None).expect("track");
+		let mut track = broadcast.create_track("data", timed()).expect("track");
 		track.write_frame(moq_net::Timestamp::ZERO, b"hello").expect("write");
 		assert!(pool.used() > 0, "writes charge the constructed cache pool");
 

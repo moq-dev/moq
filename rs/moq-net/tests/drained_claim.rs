@@ -14,6 +14,11 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use moq_net::{Hop, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -57,7 +62,7 @@ impl Worker {
 		drop(moq_net_sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
-				let track = output.create_track("video", None).unwrap();
+				let track = output.create_track("video", timed()).unwrap();
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, name.as_bytes().to_vec()).unwrap();
 				group.finish().unwrap();

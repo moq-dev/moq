@@ -12,6 +12,11 @@ use moq_net::{Hop, Version, goaway::Goaway};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 use support::mock::create_mock_session_pair;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: Hop) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(hop));
@@ -318,9 +323,9 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		let pub_origin = produce_origin(Hop::random());
 		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
-		let track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", timed()).expect("create track");
 		// A second track with content ready for the subscribe opened after the GOAWAY.
-		let audio = broadcast.create_track("audio", None).expect("create track");
+		let audio = broadcast.create_track("audio", timed()).expect("create track");
 		let mut audio_group = audio.append_group().expect("append group");
 		audio_group
 			.write_frame(moq_net::Timestamp::ZERO, b"audio".as_ref())

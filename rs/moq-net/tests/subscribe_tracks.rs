@@ -12,6 +12,11 @@ use moq_net::transport::poll::{RecvStream as _, SendStream as _, Session as _};
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// SUBSCRIBE_TRACKS for prefix `room`, with no parameters. Every value fits a one-byte
@@ -43,7 +48,7 @@ struct Setup {
 async fn setup(version: Version) -> Setup {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("room").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);

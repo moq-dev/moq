@@ -30,8 +30,7 @@ naming imply one leg.
 Read the header only: the 24-bit msgid in v2, 8-bit in v1. Payloads stay opaque
 bytes and route to a delivery class through a config table, with an unknown
 msgid falling to a default. Every track declares `Timescale::MILLI`
-explicitly, since an undeclared Rust timescale means untimed
-([Rust untimed default](/quest/m1/rust-untimed-default.md)).
+explicitly, since an undeclared Rust timescale means untimed.
 
 This is what makes frame-aware routing free of the dialect tax. CRC_EXTRA (the
 per-message schema hash) is only needed to validate a frame, never to read its
@@ -90,7 +89,3 @@ small, real contribution and its own future quest.
 
 - [Robot teleoperation primitive](/quest/m3/teleop-robot.md)
 - [Operator arbitration](/quest/m3/teleop-arbitration.md)
-
-## Related
-
-- [Rust untimed default](/quest/m1/rust-untimed-default.md) - tracks that leave out their timescale are untimed

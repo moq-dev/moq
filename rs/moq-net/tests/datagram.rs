@@ -12,6 +12,11 @@ use std::time::Duration;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Maximum time any single test may run before being treated as a deadlock.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -38,7 +43,7 @@ async fn connect_datagram_track() -> Fixture {
 	let consumer_origin = produce_origin(2);
 
 	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let producer = broadcast.create_track("datagrams", None).unwrap();
+	let producer = broadcast.create_track("datagrams", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
@@ -133,7 +138,7 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 	let consumer_origin = produce_origin(2);
 
 	let broadcast = publisher.create_broadcast("bench").unwrap();
-	let mut producer = broadcast.create_track("datagrams", None).unwrap();
+	let mut producer = broadcast.create_track("datagrams", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -248,7 +253,7 @@ async fn a_fetched_datagram_is_refused_per_version() {
 		}
 
 		let broadcast = nodes[0].create_broadcast("room").unwrap();
-		let mut producer = broadcast.create_track("datagrams", None).unwrap();
+		let mut producer = broadcast.create_track("datagrams", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
 

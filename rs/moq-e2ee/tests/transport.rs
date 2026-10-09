@@ -10,6 +10,11 @@ use moq_net::Epoch;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
@@ -40,7 +45,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	let consumer_origin = produce_origin(2);
 
 	let broadcast = publisher.create_broadcast(&path).unwrap();
-	let net = broadcast.create_track(name.as_str(), None).unwrap();
+	let net = broadcast.create_track(name.as_str(), timed()).unwrap();
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(generation.epoch().clone()))
 		.unwrap();

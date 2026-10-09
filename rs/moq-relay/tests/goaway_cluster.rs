@@ -15,6 +15,11 @@ use moq_relay::{
 };
 use url::Url;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Bound `fut` by [`TEST_TIMEOUT`], panicking with `step` so a hang names the
@@ -137,7 +142,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let upstream_origin = moq_tokio::origin::spawn();
 	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 	let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
@@ -277,7 +282,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		let upstream_origin = moq_tokio::origin::spawn();
 		let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("create broadcast");
-		let track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", timed()).expect("create track");
 
 		let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 		let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
@@ -473,7 +478,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let top_origin = moq_tokio::origin::spawn();
 	let broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone()).await;
 	let top_url = format!("tcp://127.0.0.1:{top_port}/");
@@ -749,7 +754,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone()).await;
 

@@ -12,6 +12,11 @@ use bytes::{Bytes, BytesMut};
 
 use crate::codec::{self, Bridge, Frame, Track};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const START_CODE_4: &[u8] = &[0, 0, 0, 1];
 
 fn annexb(nals: &[&[u8]]) -> Bytes {
@@ -208,7 +213,7 @@ async fn egress_opus_passthrough() {
 async fn egress_opus_reads_the_rendition_container() {
 	let producer = moq_net::broadcast::Info::new().produce();
 	let mut writer = moq_mux::container::Producer::new(
-		producer.create_track("audio", None).expect("track"),
+		producer.create_track("audio", timed()).expect("track"),
 		moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Audio),
 	);
 	let payload = Bytes::from_static(&[0xfc, 0xff, 0xfe]);

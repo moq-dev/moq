@@ -114,7 +114,10 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqJsonSnapshotProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let track = state.broadcast.create_track(name, None)?;
+			let track = state.broadcast.create_track(
+				name,
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)?;
 			let config = moq_mux::json::Config::default()
 				.with_compression(config.compression)
 				.with_delta_ratio(config.delta_ratio);
@@ -136,7 +139,10 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqJsonStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let track = state.broadcast.create_track(name, None)?;
+			let track = state.broadcast.create_track(
+				name,
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)?;
 			let config = moq_mux::json::Config::default().with_compression(config.compression);
 			let producer = state.catalog.json_stream::<Value>(track, config)?;
 			Ok(Arc::new(MoqJsonStreamProducer {

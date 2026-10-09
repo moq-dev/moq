@@ -616,6 +616,11 @@ fn resolve<V: Mergeable>(origin: &origin::Consumer, path: &PathOwned, epoch: Opt
 
 #[cfg(test)]
 mod tests {
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -679,7 +684,7 @@ mod tests {
 		let mut announced = egress.announced();
 		let source = feed_origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
-		let track = source.create_track("video", None).expect("create_track");
+		let track = source.create_track("video", timed()).expect("create_track");
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
@@ -753,7 +758,7 @@ mod tests {
 			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
 			let name = traffic_track(&Tier::default(), Role::Publisher, false);
-			let track = source.create_track(name, None).expect("create track");
+			let track = source.create_track(name, timed()).expect("create track");
 			let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 			Self {
 				traffic: moq_json::snapshot::Producer::new(track.clone(), config),

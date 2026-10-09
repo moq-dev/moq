@@ -4799,7 +4799,11 @@ mod tests {
 				state.subscribes.insert(
 					*request_id,
 					TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), *name, None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							*name,
+							crate::track::Info::timed(),
+						),
 						Path::new(broadcast).to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,
@@ -4839,17 +4843,17 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 
-		let timestamp = crate::Timestamp::new(96_000, Timescale::default()).unwrap();
+		let timestamp = crate::Timestamp::new(96_000, Timescale::MILLI).unwrap();
 		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
 				timestamp,
-				Timescale::default(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -4906,15 +4910,15 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 		let datagram = |group_id: u64| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
-				crate::Timestamp::new(96_000, Timescale::default()).unwrap(),
-				Timescale::default(),
+				crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -5406,7 +5410,11 @@ mod tests {
 				TrackState {
 					alias: Some(7),
 					..TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							"video",
+							crate::track::Info::timed(),
+						),
 						Path::new("broadcast").to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,

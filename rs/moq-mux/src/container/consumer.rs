@@ -726,6 +726,11 @@ mod tests {
 
 	use bytes::Bytes;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
 	/// born from their broadcast (no public `track::Producer::new`).
 	fn track_producer(
@@ -2014,7 +2019,7 @@ mod tests {
 	#[tokio::test]
 	async fn decode_error_propagates() {
 		tokio::time::pause();
-		let track = track_producer("test", None);
+		let track = track_producer("test", timed());
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, FailingDecode);
 
@@ -2767,7 +2772,7 @@ mod tests {
 		tokio::time::pause();
 		// DurationWire is a test-only container that doesn't stamp moq_net frame
 		// timestamps; leave the track untimed so model-layer validation matches.
-		let track = track_producer("test", None);
+		let track = track_producer("test", timed());
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)));
 		// The max delay dwarfs the gap, so only duration coverage can trigger the skip.
@@ -2805,7 +2810,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_nonsequential_contiguous_jump_does_not_bump_playhead() {
-		let track = track_producer("test", None);
+		let track = track_producer("test", timed());
 		let mut consumer = Consumer::new(
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))),
 			DurationWire,
@@ -2836,7 +2841,7 @@ mod tests {
 	async fn duration_below_gap_does_not_skip() {
 		tokio::time::pause();
 		// DurationWire is untimed at the moq_net frame layer.
-		let track = track_producer("test", None);
+		let track = track_producer("test", timed());
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)));
 		let mut consumer = Consumer::new(consumer_track, DurationWire);

@@ -632,7 +632,7 @@ mod tests {
 	fn track(priority: u8) -> (broadcast::Producer, track::Producer) {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast
-			.create_track("t", track::Info::default().with_priority(priority))
+			.create_track("t", track::Info::timed().with_priority(priority))
 			.unwrap();
 		(broadcast, track)
 	}

@@ -207,6 +207,11 @@ These land with the next breaking release, not the 2026-09-23 train.
     `Option<Timestamp>`. The `write_frame`, `append_datagram`, and
     `insert_datagram` calls take `impl Into<Option<Timestamp>>`, so passing a
     `Timestamp` still compiles.
+    An undeclared timescale is untimed: `track::Info::default()`,
+    `create_track(name, None)`, and `accept(None)` no longer default to
+    milliseconds, and `Timescale` has no `Default`. A track you write
+    timestamps to declares one, such as
+    `Info::default().with_timescale(Timescale::MILLI)`.
   - moq-e2ee: `Frame` and `Datagram` timestamps are optional, and its writers
     take `impl Into<Option<Timestamp>>`.
   - moq-archive: recording an untimed track fails with `Error::Untimed`, so

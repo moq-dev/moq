@@ -512,6 +512,11 @@ async fn watch(
 
 #[cfg(test)]
 mod tests {
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -986,7 +991,7 @@ mod tests {
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1057,7 +1062,7 @@ mod tests {
 		let mut registration = catalog.test_video("video0").unwrap();
 		registration.set(video_config()).unwrap();
 		drop(reserved);
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1257,7 +1262,7 @@ mod tests {
 		config.coded_height = None;
 		registration.set(config).unwrap();
 		drop(reserved);
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1312,7 +1317,7 @@ mod tests {
 		drop(reserved);
 
 		// Three GOPs, 2s apart: groups 0 and 1 are complete, group 2 is the live edge.
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1394,7 +1399,7 @@ mod tests {
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1442,14 +1447,14 @@ mod tests {
 		audio_registration.set(audio_config).unwrap();
 		drop(reserved);
 
-		let video_track = broadcast.create_track("video0", None).unwrap();
+		let video_track = broadcast.create_track("video0", timed()).unwrap();
 		let mut video = catalog
 			.media_producer(
 				video_track,
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 			)
 			.unwrap();
-		let audio_track = broadcast.create_track("audio0", None).unwrap();
+		let audio_track = broadcast.create_track("audio0", timed()).unwrap();
 		let mut audio = catalog
 			.media_producer(
 				audio_track,
@@ -1540,7 +1545,7 @@ mod tests {
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1597,7 +1602,7 @@ mod tests {
 		drop(reserved);
 		assert_eq!(catalog.snapshot().clock, None);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1701,7 +1706,7 @@ mod tests {
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1775,7 +1780,7 @@ mod tests {
 			("video1", &[300, 2_300, 4_300, 6_300, 8_300]),
 			("video2", &[4_000, 6_000, 8_000]),
 		] {
-			let track = broadcast.create_track(name, None).unwrap();
+			let track = broadcast.create_track(name, timed()).unwrap();
 			let mut media = catalog
 				.media_producer(
 					track,
@@ -1860,7 +1865,7 @@ mod tests {
 			.unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("audio0", None).unwrap();
+		let track = broadcast.create_track("audio0", timed()).unwrap();
 		let mut audio = catalog
 			.media_producer(
 				track,
@@ -1911,7 +1916,7 @@ mod tests {
 		drop(reserved);
 
 		// 3s GOPs against the default 1s minimum: every segment is one whole GOP.
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -1952,14 +1957,14 @@ mod tests {
 		audio_registration.set(audio_config).unwrap();
 		drop(reserved);
 
-		let video_track = broadcast.create_track("video0", None).unwrap();
+		let video_track = broadcast.create_track("video0", timed()).unwrap();
 		let mut video = catalog
 			.media_producer(
 				video_track,
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
 			)
 			.unwrap();
-		let audio_track = broadcast.create_track("audio0", None).unwrap();
+		let audio_track = broadcast.create_track("audio0", timed()).unwrap();
 		let mut audio = catalog
 			.media_producer(
 				audio_track,
@@ -2046,7 +2051,7 @@ mod tests {
 
 		// Two GOPs: group 0 is complete, while group 1 stays at the live edge until the
 		// publisher finishes.
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -2144,7 +2149,7 @@ mod tests {
 			registration.set(config.clone()).unwrap();
 			drop(reserved);
 
-			let track = broadcast.create_track("video0", None).unwrap();
+			let track = broadcast.create_track("video0", timed()).unwrap();
 			let mut media = catalog
 				.media_producer(
 					track,
@@ -2241,7 +2246,7 @@ mod tests {
 		) -> Box<dyn std::any::Any> {
 			let broadcast = origin.create_broadcast("media").expect("publish allowed");
 			broadcast.announce(Default::default()).expect("publish allowed");
-			let track = broadcast.create_track("video0", None).unwrap();
+			let track = broadcast.create_track("video0", timed()).unwrap();
 
 			let mut media = moq_mux::container::Producer::new(
 				track,
@@ -2353,7 +2358,7 @@ mod tests {
 		recorder: moq_mux::timeline::Recorder,
 		start_micros: u64,
 	) -> moq_mux::container::Producer<moq_mux::catalog::hang::Container> {
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = moq_mux::container::Producer::new(
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
@@ -2771,7 +2776,7 @@ mod tests {
 		registration.set(config).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -2831,7 +2836,7 @@ mod tests {
 		drop(reserved);
 
 		// Groups 0 and 1 are complete; group 2 is the live edge until the publisher drops.
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -3144,7 +3149,7 @@ mod tests {
 		video0.set(video_config()).unwrap();
 		drop(reserved);
 
-		let track = broadcast.create_track("video0", None).unwrap();
+		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = catalog
 			.media_producer(
 				track,
@@ -3195,7 +3200,7 @@ mod tests {
 
 		// Enroll the earlier timeline before the rendition, so the catalog snapshot that adds
 		// the rendition already indexes it. The reference decision runs in that same update.
-		let earlier = broadcast.create_track("a", None).unwrap();
+		let earlier = broadcast.create_track("a", timed()).unwrap();
 		let mut earlier_media = catalog
 			.media_producer(
 				earlier,

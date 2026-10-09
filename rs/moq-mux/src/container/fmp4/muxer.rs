@@ -346,6 +346,11 @@ mod tests {
 	use hang::catalog::VideoCodec;
 	use moq_net::Timestamp;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn frame(micros: u64, keyframe: bool) -> Frame {
 		Frame {
 			timestamp: Timestamp::from_micros(micros).unwrap(),
@@ -361,7 +366,7 @@ mod tests {
 	async fn legacy_group_round_trips() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("v", None)
+			.create_track("v", timed())
 			.unwrap();
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
@@ -398,7 +403,7 @@ mod tests {
 	async fn a_duration_marker_times_the_trailing_sample() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("v", None)
+			.create_track("v", timed())
 			.unwrap();
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy(crate::container::Kind::Video));
@@ -421,7 +426,7 @@ mod tests {
 	async fn dimensionless_vp8_init_waits_for_keyframe_geometry() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("v", None)
+			.create_track("v", timed())
 			.unwrap();
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));

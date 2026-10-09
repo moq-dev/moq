@@ -58,10 +58,15 @@ mod test {
 	use super::*;
 	use crate::Compression;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
@@ -222,7 +227,7 @@ mod test {
 		// A map with non-string keys can't be represented as JSON, so serialization fails.
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::<std::collections::BTreeMap<(u8, u8), u8>>::new(track, Config::default());
@@ -245,7 +250,7 @@ mod test {
 	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
 	/// allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
-		let mut info = moq_net::track::Info::default();
+		let mut info = timed();
 		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
 
 		moq_net::broadcast::Info::new()
@@ -318,7 +323,7 @@ mod test {
 	fn a_second_group_is_reported_while_the_first_is_open() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 
 		// Ask for a replay window, so the first group is delivered rather than skipped by the

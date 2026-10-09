@@ -97,9 +97,8 @@ documented in `doc/concept/hang.md` (#4461). Media and command tracks keep
 their own timescales; convert PTS explicitly into the broadcast clock before
 joining samples. The robot's video and telemetry share a clock; the operator's
 command broadcast supplies its own mapping. Command and telemetry tracks
-declare `Timescale::MILLI` explicitly: once an undeclared Rust timescale means
-untimed ([Rust untimed default](/quest/m1/rust-untimed-default.md)), a track
-that leaves it out carries no timestamps to join.
+declare `Timescale::MILLI` explicitly: an undeclared Rust timescale means
+untimed, so a track that leaves it out carries no timestamps to join.
 
 The clock assumption: the two hosts' wall clocks are synchronized by the
 deployment, not by the library. State this beside the API, since a join across
@@ -117,4 +116,3 @@ control then it is the wrong abstraction.
 ## Related
 
 - [arbitration](/quest/m3/teleop-arbitration.md) - which controller is obeyed
-- [Rust untimed default](/quest/m1/rust-untimed-default.md) - why command and telemetry tracks declare their timescale

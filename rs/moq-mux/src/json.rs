@@ -20,7 +20,8 @@
 //! #     broadcast: &mut moq_net::broadcast::Producer,
 //! #     catalog: &moq_mux::catalog::Producer,
 //! # ) -> moq_mux::Result<()> {
-//! let track = broadcast.create_track("chat", None)?;
+//! let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+//! let track = broadcast.create_track("chat", info)?;
 //! let config = moq_mux::json::Config::default().with_compression(true);
 //! let mut chat = catalog.json_stream::<Message>(track, config)?;
 //! chat.append(&Message { text: "hello".to_string() })?;
@@ -450,6 +451,11 @@ mod test {
 
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn catalog() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -458,7 +464,7 @@ mod test {
 
 	/// Create the moq-net track a data producer publishes on, as a caller does for a media track.
 	fn track(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> moq_net::track::Producer {
-		broadcast.create_track(name, None).unwrap()
+		broadcast.create_track(name, timed()).unwrap()
 	}
 
 	fn entry(catalog: &crate::catalog::Producer, name: &str) -> JsonConfig {
@@ -846,7 +852,7 @@ mod test {
 	fn an_unrecognized_mode_or_compression_is_refused() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("chat", None)
+			.create_track("chat", timed())
 			.unwrap();
 
 		let mut config = JsonConfig::new(Mode::Unknown("windowed".to_string()));

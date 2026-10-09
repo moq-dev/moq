@@ -11,6 +11,11 @@
 use moq_tokio::moq_net::{self, Hop};
 use std::time::Duration;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Publish a broadcast on the server, subscribe on the client, and verify
@@ -28,7 +33,9 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	// Write a group containing a single frame.
 	let mut group = track.append_group().expect("failed to append group");
@@ -138,7 +145,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.announce(Default::default())
 		.expect("failed to create broadcast");
 
-	// Track with an explicit microsecond timescale (the default is milliseconds).
+	// Track with an explicit microsecond timescale (the default is untimed).
 	let track = broadcast
 		.create_track(
 			"video",
@@ -385,7 +392,9 @@ async fn transport_fetch_roundtrip(version: &str, served: bool) {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to announce broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 	for sequence in 0..3u64 {
 		let mut group = track.append_group().expect("failed to append group");
 		for frame in 0..2 {
@@ -646,12 +655,12 @@ async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 	lite05_fetch_during_subscribe("https").await;
 }
 
-/// On Lite05 timestamps are mandatory: a publisher that doesn't set a timescale gets
-/// the default (milliseconds), and frames written without an explicit timestamp are
-/// stamped with wall-clock time. The subscriber receives `Some(ts)` at that scale.
+/// Lite05 can't declare an untimed track, so a track that sets no timescale goes out
+/// in milliseconds, its frames stamped with their send time. The subscriber receives
+/// `Some(ts)` at that scale.
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_moq_lite_05_default_timescale() {
+async fn broadcast_moq_lite_05_untimed_track() {
 	use moq_tokio::moq_net::Timescale;
 
 	let pub_origin = moq_tokio::origin::spawn();
@@ -660,9 +669,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 	let track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group = track.append_group().expect("append group");
-	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
-		.expect("write frame");
+	group.write_frame(None, b"hello".as_ref()).expect("write frame");
 	group.finish().expect("finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -731,7 +738,11 @@ async fn broadcast_moq_lite_05_default_timescale() {
 		.expect("group closed");
 
 	let ts = frame_sub.timestamp.expect("timed frame");
-	assert_eq!(ts.scale(), Timescale::MILLI, "default timescale is milliseconds");
+	assert_eq!(
+		ts.scale(),
+		Timescale::MILLI,
+		"an untimed track's send times are milliseconds"
+	);
 
 	drop(connection);
 	server_handle
@@ -754,7 +765,7 @@ async fn broadcast_moq_transport_20_current_group_join() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	// The group is left open, so the subscriber joins part way through it: the two head
 	// frames are published before the SUBSCRIBE and the tail frame after.
@@ -1016,7 +1027,7 @@ async fn broadcast_route_migration() {
 				.with_cost(1),
 		)
 		.expect("announce");
-	let track_a = broadcast_a.create_track("video", None).expect("create track");
+	let track_a = broadcast_a.create_track("video", timed()).expect("create track");
 	for sequence in 0..2u64 {
 		let mut group = track_a
 			.create_group(moq_net::group::Info { sequence })
@@ -1041,7 +1052,7 @@ async fn broadcast_route_migration() {
 				.with_cost(2),
 		)
 		.expect("announce");
-	let track_b = broadcast_b.create_track("video", None).expect("create track");
+	let track_b = broadcast_b.create_track("video", timed()).expect("create track");
 	// A clone to keep producing from the test body once the task owns the rest.
 	let standby_track = track_b.clone();
 	// B carries the continuation of the same content: groups 2 and 3.
@@ -1203,7 +1214,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("audio", None).expect("create track");
+	let track = broadcast.create_track("audio", timed()).expect("create track");
 	let live = track.clone();
 	for sequence in 0..4u64 {
 		write(&track, sequence, sequence * 20);
@@ -1319,7 +1330,7 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("catalog.json", None).expect("create track");
+	let track = broadcast.create_track("catalog.json", timed()).expect("create track");
 	let live = track.clone();
 	let mut group = live.append_group().expect("append group");
 	group
@@ -1446,7 +1457,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	producer
 		.announce(moq_net::origin::Route::default().with_hops(initial_hops))
 		.expect("announce");
-	let track = producer.create_track("video", None).expect("create track");
+	let track = producer.create_track("video", timed()).expect("create track");
 	{
 		let mut group = track
 			.create_group(moq_net::group::Info { sequence: 0 })
@@ -1761,7 +1772,7 @@ async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Dura
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let info = moq_net::track::Info::default().with_max_age(published);
+	let info = timed().with_max_age(published);
 	let track = broadcast.create_track("video", info).expect("create track");
 
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -2067,7 +2078,9 @@ async fn broadcast_websocket() {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -2184,7 +2197,9 @@ async fn broadcast_websocket_fallback() {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -2312,7 +2327,9 @@ async fn broadcast_websocket_uses_newest_version() {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
 		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -2390,7 +2407,9 @@ async fn quic_driver_task_inherits_connection_span() {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
 		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -2517,7 +2536,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	let mut group0 = track.append_group().expect("append group 0");
 	group0
@@ -2652,7 +2671,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	let mut group = track.append_group().expect("append group");
 	group
@@ -2999,7 +3018,9 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
 		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -3090,7 +3111,7 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 	] {
 		let broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
 		broadcast.announce(Default::default()).expect("announce");
-		let track = broadcast.create_track("data", None).expect("create track");
+		let track = broadcast.create_track("data", timed()).expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, path.as_bytes())
@@ -3301,7 +3322,9 @@ async fn publish_only_client_to_subscribe_only_server() {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
 		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -3378,7 +3401,9 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group

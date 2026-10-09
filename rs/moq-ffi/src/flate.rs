@@ -48,7 +48,10 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqFlateSnapshotProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let track = state.broadcast.create_track(name, None)?;
+			let track = state.broadcast.create_track(
+				name,
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)?;
 			let producer = state.catalog.binary_snapshot(track, Config::from(config))?;
 			Ok(Arc::new(MoqFlateSnapshotProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
@@ -66,7 +69,10 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqFlateStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let track = state.broadcast.create_track(name, None)?;
+			let track = state.broadcast.create_track(
+				name,
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)?;
 			let producer = state.catalog.binary_stream(track, Config::from(config))?;
 			Ok(Arc::new(MoqFlateStreamProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
