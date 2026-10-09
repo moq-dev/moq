@@ -11,6 +11,7 @@ pub mod fragment;
 mod fragmenter;
 mod import;
 mod muxer;
+mod sample;
 
 pub use export::*;
 pub use fragmenter::*;
@@ -287,26 +288,35 @@ impl Kind {
 /// doesn't bloat unrelated variants.
 pub struct Wire {
 	trak: Box<mp4_atom::Trak>,
+	defaults: sample::Defaults,
 }
 
 impl Wire {
-	/// Wrap an already-parsed track.
+	/// Wrap an already-parsed track, with no `trex` for its samples to fall back to.
 	pub fn new(trak: mp4_atom::Trak) -> Self {
-		Self { trak: Box::new(trak) }
+		Self {
+			trak: Box::new(trak),
+			defaults: sample::Defaults::default(),
+		}
 	}
 
-	/// Parse a CMAF init segment (ftyp+moov), extracting the single track.
+	/// Parse a CMAF init segment (ftyp+moov), extracting the single track and its `trex` defaults.
 	pub fn from_init(init_data: &[u8]) -> Result<Self> {
 		use mp4_atom::DecodeMaybe;
 
 		let mut cursor = std::io::Cursor::new(init_data);
 		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
 			if let mp4_atom::Any::Moov(mut moov) = atom {
-				return match moov.trak.len() {
-					1 => Ok(Self::new(moov.trak.remove(0))),
-					0 => Err(Error::NoTracks),
-					_ => Err(Error::MultipleTracks),
+				let trak = match moov.trak.len() {
+					1 => moov.trak.remove(0),
+					0 => return Err(Error::NoTracks),
+					_ => return Err(Error::MultipleTracks),
 				};
+				let defaults = sample::Defaults::from_moov(&moov, trak.tkhd.track_id);
+				return Ok(Self {
+					trak: Box::new(trak),
+					defaults,
+				});
 			}
 		}
 		Err(Error::NoMoov)
@@ -324,6 +334,15 @@ impl Wire {
 	/// The media kind declared by the track handler.
 	fn kind(&self) -> Result<Kind> {
 		Kind::from_handler(self.trak.mdia.hdlr.handler)
+	}
+
+	/// What decoding this track's fragments needs.
+	fn track(&self) -> Result<Track> {
+		Ok(Track {
+			timescale: self.timescale()?,
+			kind: self.kind()?,
+			defaults: self.defaults,
+		})
 	}
 }
 
@@ -370,17 +389,37 @@ impl Container for Wire {
 			return Poll::Ready(Ok(None));
 		};
 
-		let timescale = self.timescale()?;
-		Poll::Ready(Ok(Some(decode(
-			frame.payload,
-			frame.timestamp,
+		Poll::Ready(Ok(Some(decode(frame.payload, frame.timestamp, self.track()?)?)))
+	}
+}
+
+/// What decoding a track's fragments needs from its init segment.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Track {
+	/// The `mdhd` timescale the samples count in.
+	pub timescale: moq_net::Timescale,
+	/// Whether the samples are audio or video.
+	pub kind: Kind,
+	/// The `trex` values a sample falls back to.
+	pub defaults: sample::Defaults,
+}
+
+#[cfg(test)]
+impl Track {
+	/// A track whose fragments carry every sample value, as `encode` writes them.
+	pub fn new(timescale: moq_net::Timescale, kind: Kind) -> Self {
+		Self {
 			timescale,
-			self.kind()?,
-		)?)))
+			kind,
+			defaults: Default::default(),
+		}
 	}
 }
 
 /// Decode one moof+mdat fragment into its samples.
+///
+/// Each sample's size, duration, and flags resolve through [`sample::Defaults`], and a video
+/// sample is a keyframe when [`sample::Sample::is_sync`].
 ///
 /// `Kind::Audio` says the track's samples are all independently decodable. Packagers flag every
 /// audio sample a sync sample, which as a [`Frame::keyframe`] would open a group per sample,
@@ -391,13 +430,14 @@ impl Container for Wire {
 /// to each other, since a publisher may move a passthrough track to another timeline without
 /// rewriting the payload. An untimed frame (`None`) has no broadcast time, so its samples
 /// present at the time `tfdt` gives them.
-pub(crate) fn decode(
-	data: Bytes,
-	timestamp: Option<Timestamp>,
-	timescale: moq_net::Timescale,
-	kind: Kind,
-) -> Result<Vec<Frame>> {
+pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) -> Result<Vec<Frame>> {
 	use mp4_atom::DecodeMaybe;
+
+	let Track {
+		timescale,
+		kind,
+		defaults,
+	} = track;
 
 	let mut cursor = std::io::Cursor::new(&data);
 	let mut moof = None;
@@ -428,9 +468,6 @@ pub(crate) fn decode(
 	let tfdt = traf.tfdt.as_ref().ok_or(Error::NoTfdt)?;
 	let base_dts = tfdt.base_media_decode_time;
 
-	let default_size = traf.tfhd.default_sample_size;
-	let default_duration = traf.tfhd.default_sample_duration;
-
 	// DTS is reconstructed by accumulating each sample's duration. A non-final sample
 	// with no resolvable duration would leave every following sample stuck at the same
 	// DTS, silently collapsing their timestamps, so reject that fragment instead.
@@ -454,8 +491,8 @@ pub(crate) fn decode(
 		}
 
 		for entry in &trun.entries {
-			let size = entry.size.or(default_size).unwrap_or(0) as usize;
-			let end = offset + size;
+			let sample = defaults.resolve(&traf.tfhd, entry);
+			let end = offset + sample.size as usize;
 
 			if end > mdat_data.len() {
 				return Err(Error::SampleRangeOutOfBounds {
@@ -467,13 +504,11 @@ pub(crate) fn decode(
 
 			ptss.push(dts + i128::from(entry.cts.unwrap_or_default()));
 			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
-			let flags = entry.flags.unwrap_or(0);
-			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
-			let keyframe = kind == Kind::Video && (flags >> 24) & 0x3 == 0x2;
+			let keyframe = kind == Kind::Video && sample.is_sync();
 
 			// Carry the sample-duration through at the track's scale when present, so
 			// the jitter buffer can use it and an exporter can write it back.
-			let sample_duration = entry.duration.or(default_duration).filter(|d| *d != 0);
+			let sample_duration = sample.duration;
 
 			// The last sample needs no duration (nothing follows it to time), but any
 			// earlier sample without one makes the rest of the fragment's DTS ambiguous.
@@ -1187,6 +1222,51 @@ pub(crate) fn sample_durations(fragment: &Bytes) -> Vec<Option<u32>> {
 		.collect()
 }
 
+/// One case of `test_data/sample-defaults.json`, which `js/hang` decodes too.
+#[cfg(test)]
+#[serde_with::serde_as]
+#[derive(serde::Deserialize)]
+pub(crate) struct Fixture {
+	pub name: String,
+	#[serde_as(as = "serde_with::base64::Base64")]
+	pub init: Vec<u8>,
+	#[serde_as(as = "serde_with::base64::Base64")]
+	pub fragment: Vec<u8>,
+	pub samples: Vec<FixtureSample>,
+}
+
+/// A sample a [`Fixture`] decodes to, timed in microseconds.
+#[cfg(test)]
+#[derive(serde::Deserialize, Debug, PartialEq)]
+pub(crate) struct FixtureSample {
+	pub timestamp: u64,
+	pub duration: u64,
+	pub keyframe: bool,
+	pub data: Vec<u8>,
+}
+
+#[cfg(test)]
+impl From<&Frame> for FixtureSample {
+	fn from(frame: &Frame) -> Self {
+		Self {
+			timestamp: frame.timestamp.as_micros() as u64,
+			duration: frame.duration.map_or(0, |d| d.as_micros() as u64),
+			keyframe: frame.keyframe,
+			data: frame.payload.to_vec(),
+		}
+	}
+}
+
+#[cfg(test)]
+pub(crate) fn fixtures() -> Vec<Fixture> {
+	#[derive(serde::Deserialize)]
+	struct File {
+		cases: Vec<Fixture>,
+	}
+	let file: File = serde_json::from_str(include_str!("test_data/sample-defaults.json")).unwrap();
+	file.cases
+}
+
 #[cfg(test)]
 fn first_traf(fragment: &Bytes) -> mp4_atom::Traf {
 	use mp4_atom::DecodeMaybe;
@@ -1401,7 +1481,7 @@ mod tests {
 		.encode(&mut buf)
 		.unwrap();
 
-		let frames = decode(Bytes::from(buf), None, timescale, Kind::Video).unwrap();
+		let frames = decode(Bytes::from(buf), None, Track::new(timescale, Kind::Video)).unwrap();
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[0].duration, Some(ts(33_333)));
@@ -1421,7 +1501,7 @@ mod tests {
 		}];
 
 		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
-		let frames = decode(fragment, None, timescale, Kind::Video).unwrap();
+		let frames = decode(fragment, None, Track::new(timescale, Kind::Video)).unwrap();
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, Some(ts(33_333)));
@@ -1536,7 +1616,7 @@ mod tests {
 		];
 
 		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
-		let frames = decode(fragment, None, timescale, Kind::Video).unwrap();
+		let frames = decode(fragment, None, Track::new(timescale, Kind::Video)).unwrap();
 
 		assert_eq!(frames.len(), input.len());
 		for (actual, expected) in frames.iter().zip(&input) {
@@ -1577,16 +1657,29 @@ mod tests {
 			.collect();
 		assert_eq!(flags, vec![0x0200_0000; 3]);
 
-		let audio = decode(fragment.clone(), None, timescale, Kind::Audio).unwrap();
+		let audio = decode(fragment.clone(), None, Track::new(timescale, Kind::Audio)).unwrap();
 		assert!(
 			audio.iter().all(|frame| !frame.keyframe),
 			"audio never decodes a keyframe"
 		);
-		let video = decode(fragment, None, timescale, Kind::Video).unwrap();
+		let video = decode(fragment, None, Track::new(timescale, Kind::Video)).unwrap();
 		assert!(
 			video.iter().all(|frame| frame.keyframe),
 			"the sync flag is a video keyframe"
 		);
+	}
+
+	/// A fragment that leaves sample values to `tfhd` or the init segment's `trex` decodes the way
+	/// `js/hang` decodes the same fixtures.
+	#[test]
+	fn decodes_the_sample_defaults_fixtures() {
+		for fixture in fixtures() {
+			let wire = Wire::from_init(&fixture.init).unwrap();
+			let frames = decode(Bytes::from(fixture.fragment), None, wire.track().unwrap())
+				.unwrap_or_else(|err| panic!("{}: {err}", fixture.name));
+			let samples: Vec<FixtureSample> = frames.iter().map(FixtureSample::from).collect();
+			assert_eq!(samples, fixture.samples, "{}", fixture.name);
+		}
 	}
 
 	#[test]
@@ -1632,7 +1725,7 @@ mod tests {
 		let input = [sample(source), sample(source + 66_000), sample(source + 33_000)];
 		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
 
-		let frames = decode(fragment, Some(ts(10_000_000)), timescale, Kind::Video).unwrap();
+		let frames = decode(fragment, Some(ts(10_000_000)), Track::new(timescale, Kind::Video)).unwrap();
 		assert_eq!(micros(&frames), [10_000_000, 10_066_000, 10_033_000]);
 	}
 
@@ -1656,10 +1749,15 @@ mod tests {
 		let frame = group.consume().read_frame().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp.unwrap().as_micros(), 33_000);
 
-		let frames = decode(frame.payload.clone(), frame.timestamp, timescale, Kind::Video).unwrap();
+		let frames = decode(
+			frame.payload.clone(),
+			frame.timestamp,
+			Track::new(timescale, Kind::Video),
+		)
+		.unwrap();
 		assert_eq!(micros(&frames), [100_000, 33_000, 66_000]);
 
-		let shifted = decode(frame.payload, Some(ts(5_000_000)), timescale, Kind::Video).unwrap();
+		let shifted = decode(frame.payload, Some(ts(5_000_000)), Track::new(timescale, Kind::Video)).unwrap();
 		assert_eq!(micros(&shifted), [5_067_000, 5_000_000, 5_033_000]);
 	}
 
@@ -1727,7 +1825,7 @@ mod tests {
 		moof.encode(&mut skewed).unwrap();
 		skewed.extend_from_slice(mdat);
 
-		let err = decode(Bytes::from(skewed), None, timescale, Kind::Video).unwrap_err();
+		let err = decode(Bytes::from(skewed), None, Track::new(timescale, Kind::Video)).unwrap_err();
 		assert!(matches!(err, Error::InvalidDataOffset), "got {err:?}");
 	}
 
@@ -1739,7 +1837,7 @@ mod tests {
 		let fragment = encode_fragment(info(1, timescale, 0), &[sample(0)]).unwrap();
 
 		// Tick 100 is 1111.1 µs, which a microsecond track truncates to 1111.
-		let frames = decode(fragment, Some(ts(1_111)), timescale, Kind::Video).unwrap();
+		let frames = decode(fragment, Some(ts(1_111)), Track::new(timescale, Kind::Video)).unwrap();
 		assert_eq!(frames[0].timestamp, Timestamp::new(100, timescale).unwrap());
 	}
 
@@ -1756,7 +1854,7 @@ mod tests {
 		}];
 
 		let fragment = encode_fragment(info(1, timescale, 0), &frames).unwrap();
-		let frames = decode(fragment, None, timescale, Kind::Video).unwrap();
+		let frames = decode(fragment, None, Track::new(timescale, Kind::Video)).unwrap();
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, None);
@@ -1795,7 +1893,7 @@ mod tests {
 		moof.encode(&mut buf).unwrap();
 		mp4_atom::Mdat { data: vec![0xDE, 0xAD] }.encode(&mut buf).unwrap();
 
-		let frames = decode(Bytes::from(buf), None, timescale, Kind::Video).unwrap();
+		let frames = decode(Bytes::from(buf), None, Track::new(timescale, Kind::Video)).unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp.as_micros(), 83_333);
 		assert_eq!(frames[0].duration, None);
