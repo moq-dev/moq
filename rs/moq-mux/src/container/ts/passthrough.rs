@@ -167,6 +167,9 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	/// Held until the first group is written, so the first catalog already names the track with
 	/// its final `randomAccess`.
 	reservation: Option<crate::catalog::Reserved<E>>,
+	/// The import's timestamp base on the catalog: the first object anchors it, and every object
+	/// shifts by its offset onto the catalog clock.
+	clock: crate::catalog::Timebase<E>,
 	media: crate::container::Producer<crate::catalog::hang::Container>,
 	/// The section as last written to the catalog, `None` before the first group.
 	section: Option<Section<E>>,
@@ -293,6 +296,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		)?;
 		Ok(Self {
 			catalog,
+			clock: reserved.timebase(),
 			reservation: Some(reserved),
 			media,
 			section: None,
@@ -601,7 +605,11 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		// Extrapolating past the last PCR before a small flagged jump can overshoot the jump.
 		let ticks = ticks.max(self.written);
 		self.written = ticks;
-		let timestamp = moq_net::Timestamp::from_micros(ticks / (PCR_HZ / 1_000_000))?;
+		// The first object starts a group, so it anchors the import before the reservation below
+		// publishes.
+		let timestamp = self
+			.clock
+			.shift(moq_net::Timestamp::from_micros(ticks / (PCR_HZ / 1_000_000))?)?;
 		let size = object.payload.len() as u64;
 		let start = object.start.or_else(|| {
 			self.group
@@ -616,10 +624,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			}
 			if start != Start::RandomAccess || !self.single {
 				self.all_random_access = false;
-			}
-			if self.reservation.is_some() {
-				// The first object of the import is live on arrival.
-				self.catalog.anchor(timestamp)?;
 			}
 			self.group = Some(Group {
 				ticks,
