@@ -886,6 +886,10 @@ impl Recover {
 				return Poll::Pending;
 			}
 			let res = self.poll_serving(generation, &serving, index, failed, waiter);
+			// A lookup that yielded to the cooperative budget is no verdict either way.
+			if res.is_pending() {
+				ready!(kio::coop::poll_proceed(waiter));
+			}
 			// The serving route failed too, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
 				&& (closed || end.is_some())
@@ -1172,6 +1176,50 @@ mod test {
 			sub.recv_group().now_or_never().is_none(),
 			"the group was handed out twice"
 		);
+	}
+
+	/// A failed copy whose replacement holds the group still continues from it when the
+	/// lookup yields to the cooperative budget: the yield is no failed recovery.
+	#[test]
+	fn a_budget_yield_is_not_a_failed_recovery() {
+		let waiter = kio::Waiter::new(std::task::Waker::noop().clone());
+		for left in 0..4 {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			// The replacement holds the whole group, then fails with nothing left to follow.
+			let b = copy();
+			let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+			for (ms, frame) in [(0, b"a"), (1, b"b")] {
+				whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+			}
+			whole.finish().unwrap();
+			routes.serve(b.consume());
+			b.abort(Error::Cancel).unwrap();
+			routes.conclude();
+			open.abort(Error::Dropped).unwrap();
+
+			let starved = kio::coop::budget(|| {
+				crate::util::leave_budget(left);
+				reading.poll_read_frame(&waiter)
+			});
+			let res = match starved {
+				Poll::Pending => kio::coop::budget(|| reading.poll_read_frame(&waiter)),
+				res => res,
+			};
+			assert!(
+				matches!(&res, Poll::Ready(Ok(Some(frame))) if frame.payload.as_ref() == b"b"),
+				"left {left}: {:?}",
+				res.map(|res| res.map(|frame| frame.map(|frame| frame.payload)))
+			);
+		}
 	}
 
 	#[test]

@@ -1698,7 +1698,9 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 								}
 								Poll::Ready(Ok(_)) => return Poll::Ready(Ok(ControlFlow::Break(()))),
 								Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-								Poll::Pending => {}
+								// Out of cooperative budget, the batch it filled waits for the next turn
+								// rather than draining through the chunked read for free.
+								Poll::Pending => ready!(kio::coop::poll_proceed(waiter)),
 							}
 							match ready!(group.poll_next_frame(waiter))? {
 								Some(next) => {
@@ -3116,7 +3118,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									}
 									Poll::Ready(Ok(_)) => break 'serve Ok(()),
 									Poll::Ready(Err(err)) => break 'serve Err(err),
-									Poll::Pending => {}
+									// Out of cooperative budget, the batch it filled waits for the next turn
+									// rather than draining through the chunked read for free.
+									Poll::Pending => ready!(kio::coop::poll_proceed(waiter)),
 								}
 
 								match self.group.poll_next_frame(waiter) {
@@ -3773,6 +3777,58 @@ mod serve_group_test {
 		}
 		assert_eq!(opens.opened.load(Ordering::Relaxed), GROUPS);
 		assert!(log.resets().is_empty(), "a group was reset: {:?}", log.resets());
+	}
+
+	/// A group with more frames ready than a turn's budget drains over several turns: a
+	/// batch the budget cut short waits for the next turn instead of draining through the
+	/// chunked fallback for free.
+	#[test]
+	fn a_long_group_drains_within_the_budget() {
+		/// kio's per-turn budget; each refill of up to 8 frames spends a unit.
+		const BUDGET: usize = 32;
+		const FRAMES: usize = 4_000;
+		const PAYLOAD: usize = 100;
+
+		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let log = Log::default();
+		let (mut run, mut writer, _) = lite07_run(SinkSession::new(log.clone()).with_unacked_fin(), subscriber);
+
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		for millis in 0..FRAMES as u64 {
+			group
+				.write_frame(Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
+				.unwrap();
+		}
+		group.finish().unwrap();
+
+		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
+		let turns = Arc::new(AtomicU64::new(0));
+		let counted = turns.clone();
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			counted.fetch_add(1, Ordering::Relaxed);
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			run.poll(&mut writer, waiter).map(|res| res.expect("serve"))
+		}));
+
+		// A frame's header (size and timestamp delta) takes well under a payload more.
+		let most = (BUDGET + 1) * 8 * 2 * PAYLOAD;
+		let owner = kio::Waiter::noop();
+		let mut polls = 0;
+		while log.writes.lock().unwrap().len() < FRAMES * PAYLOAD {
+			let before = log.writes.lock().unwrap().len();
+			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			polls += 1;
+			let wrote = log.writes.lock().unwrap().len() - before;
+			assert!(wrote <= most, "one turn wrote {wrote} bytes");
+			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
+			assert!(polls <= FRAMES as u64, "the serve stalled");
+		}
 	}
 
 	/// SUBSCRIBE_END counts the group streams opened, not the groups below the end: a

@@ -1136,6 +1136,9 @@ where
 						return Poll::Ready(Err(Error::Cancel));
 					}
 					match group.poll_read_frames(waiter, &mut buf) {
+						// Out of cooperative budget, the batch it filled waits for the next turn
+						// rather than draining through the chunked read for free.
+						Poll::Pending if kio::coop::poll_proceed(waiter).is_pending() => Poll::Pending,
 						Poll::Pending => match group.poll_next_frame(waiter) {
 							Poll::Ready(Ok(Some(frame))) => Poll::Ready(Ok(FillStep::Partial(frame))),
 							Poll::Ready(Ok(None)) => Poll::Ready(Ok(FillStep::Done)),
@@ -2987,7 +2990,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									}
 									Poll::Ready(Ok(_)) => break 'serve Ok(()),
 									Poll::Ready(Err(err)) => break 'serve Err(err),
-									Poll::Pending => {}
+									// Out of cooperative budget, the batch it filled waits for the next turn
+									// rather than draining through the chunked read for free.
+									Poll::Pending => ready!(kio::coop::poll_proceed(waiter)),
 								}
 
 								match self.group.poll_next_frame(waiter) {
