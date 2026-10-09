@@ -385,7 +385,7 @@ jobs:
       contents: write
 
   release-cpp:
-    name: Release C++
+    name: Release Cpp
     uses: ./.github/workflows/release-cpp.yml
     permissions:
       contents: write
