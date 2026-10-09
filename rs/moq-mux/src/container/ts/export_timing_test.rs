@@ -1,6 +1,7 @@
 //! Timing of a delayed [`Export`] on a live clock: what a receiver renders when it joins a
-//! broadcast already running, when one track loses frames, when the source's clock runs off the
-//! receiver's, and when two receivers render one broadcast for a 1+1 (SMPTE ST 2022-7) pair.
+//! broadcast already running, when one track loses frames, when the source falls silent and
+//! resumes, when the source's clock runs off the receiver's, and when two receivers render one
+//! broadcast for a 1+1 (SMPTE ST 2022-7) pair.
 //!
 //! Every case runs on the paused clock, with each frame written at the instant a live source
 //! would send it. A receiver's view is measured from its own output: the lead of each PES (its
@@ -59,7 +60,7 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// A live H.264 + AAC broadcast whose frames are written on the source's clock.
 struct Live {
 	_broadcast: moq_net::broadcast::Producer,
-	_catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer,
 	/// Written group by group, so a group can be left open: see [`Self::run`].
 	video: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
@@ -129,7 +130,7 @@ impl Live {
 		Self {
 			source: crate::source::announced(&consumer),
 			_broadcast: broadcast,
-			_catalog: catalog,
+			catalog,
 			video,
 			group: None,
 			stalling: false,
@@ -158,6 +159,26 @@ impl Live {
 			false => (lag, Duration::ZERO),
 		};
 		(self.sent(video) + v, self.sent(audio) + a)
+	}
+
+	/// Declare that video decodes up to `jitter` before it is presented, as a deep B-pyramid's
+	/// catalog would, so a receiver holds that much of it for its DTS.
+	fn declare_video_jitter(&mut self, jitter: Duration) {
+		let mut catalog = self.catalog.modify().unwrap();
+		for config in catalog.video.renditions.values_mut() {
+			config.jitter = Some(jitter);
+		}
+	}
+
+	/// Send nothing for `gap`, as a publisher that died, then resume at the live edge on the
+	/// same timeline from the next group, as its replacement or the other half of a 1+1 pair
+	/// would.
+	async fn fall_silent(&mut self, gap: Duration, legs: &mut [&mut Leg]) {
+		let resume = Instant::now() + gap;
+		advance(resume, legs).await;
+		let media = (resume.duration_since(self.start).as_secs_f64() * self.scale * 1e6) as u64;
+		self.tick = media.div_ceil(VIDEO_US * GOP) * GOP;
+		self.audio_index = media.div_ceil(AUDIO_US);
 	}
 
 	/// A receiver joining now.
@@ -554,6 +575,49 @@ async fn a_track_sent_later_than_the_delay_loses_nothing() {
 		"frames went late on a clean source:\n{}",
 		lost.join("\n")
 	);
+}
+
+// A publisher that dies leaves the last video frames it sent held for their DTS, and nothing
+// settles them until frames come again. Where the receiver is not told the source changed (a
+// replacement on a protocol without an epoch, or the other half of a 1+1 pair), those come on the
+// same timeline after the silence. In the field the held frames then went into a schedule that had
+// already gone past them, and the export ended on a missed decode deadline.
+
+/// A source silent for longer than the delay, with video held for its DTS, resumes on the same
+/// timeline: the frames held through the silence drop as late, nothing goes out after it
+/// decodes, and the video resumes. Sent in step, the tracks put a held unit on the slot where the
+/// schedule had stopped, as in the field.
+#[tokio::test(start_paused = true)]
+async fn frames_held_through_a_silence_drop_as_late() {
+	for lag in [0, LAGS[0], LAGS[1]] {
+		let mut live = Live::new(1.0, lag);
+		live.declare_video_jitter(Duration::from_millis(300));
+		let mut leg = live.join(Duration::ZERO).await;
+		live.run(8 * GOP + 5, &mut [&mut leg], |_| false).await;
+		live.fall_silent(Duration::from_secs(3), &mut [&mut leg]).await;
+		let resumed = Instant::now();
+		live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
+
+		assert!(
+			leg.export.dropped() > 0,
+			"lag {lag}: nothing held through the silence dropped"
+		);
+		let after: Vec<Unit> = leg.units().into_iter().filter(|unit| unit.sent >= resumed).collect();
+		let late: Vec<f64> = after
+			.iter()
+			.filter(|unit| unit.lead < 0.0)
+			.map(|unit| unit.lead)
+			.collect();
+		assert!(
+			late.is_empty(),
+			"lag {lag}: units went out after they decode, by {late:?} ms"
+		);
+		let video = after.iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
+		assert!(
+			video >= 6 * GOP,
+			"lag {lag}: only {video} video units after the silence"
+		);
+	}
 }
 
 // A source's clock is never the receiver's. A transport stream's 27 MHz may be off by 30 ppm,
