@@ -27,8 +27,9 @@ supported"): no filter, a relative start, or an absolute start with no end.
 
 The same FETCH-end path sets End of Track only when the read hits FIN, so a
 bounded FETCH that ends exactly at the track's last object reports
-`end_of_track: false` (found while landing #4971; it predates it). Set it from
-the track's known end, and test a FETCH ending on the final object.
+`end_of_track: false` (found while landing #4971; it predates it). Set it only
+when the track has finished and the FETCH reaches its final object, never from
+a live track's Largest Object, and test both cases.
 
 ## Required
 
