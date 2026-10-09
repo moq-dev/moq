@@ -1,0 +1,4 @@
+# uniffi-bindgen-cpp config for rs/moq-ffi. Errors are returned, never thrown, so the
+# bindings build with exceptions disabled (Unreal's default).
+[bindings.cpp]
+error_style = "expected"

@@ -22,10 +22,6 @@ whether a second binding wants it. Verify against a shaped uplink and with
 `just obs compile` and `just obs test`; document the behaviour in
 `doc/bin/obs.md`.
 
-## Required
-
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ first
-
 ## Related
 
 - [Audio follows the grant](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the shared rate policy audio adopts; OBS audio still reserves only
