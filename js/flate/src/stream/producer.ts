@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
+import type { Timed } from "@moq/net";
 import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "../codec.ts";
 
 import { type Compression, isDeflate } from "../compression.ts";
@@ -41,9 +41,10 @@ export class Producer {
 	 * group. The group is aborted rather than closed cleanly, so a consumer sees the failure
 	 * instead of a log that merely looks complete. Every later append fails on the closed track.
 	 *
-	 * `at` is when the payload was captured, written as its frame timestamp. Defaults to now.
+	 * `at` is when the payload was captured, written as its frame timestamp. Omit it only on an
+	 * untimed track: it is never filled in.
 	 */
-	append(payload: Uint8Array, at: Time.Timestamp = Time.Timestamp.now()): void {
+	append({ value: payload, at }: Timed<Uint8Array>): void {
 		// A payload no consumer could decode is as terminal as one the track rejects: consumers all
 		// decode with `@moq/flate`'s default cap, so this would publish a record none of them could
 		// read. Ends the track like any other lost record, and aborts the group the same way the

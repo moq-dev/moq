@@ -16,9 +16,10 @@ reader will not pick it up.
 - **Stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
 - **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice.
 
-Both sides choose the same compression, `"none"` or `"deflate"`. A value is
-stamped when written, unless you pass its capture time, so the track must
-declare a timescale.
+Both sides choose the same compression, `"none"` or `"deflate"`. Producers take
+a `Timed` value, `{ value, at }`, where `at` is the capture time written as
+the frame timestamp. Nothing fills in now: a timed track needs `at` on every
+write, and an untimed track (no `timescale`) takes none.
 
 A stream rides one group, so the whole log shares `@moq/net`'s group budget:
 32 MiB of payload and 8192 records. An append that might not fit is refused

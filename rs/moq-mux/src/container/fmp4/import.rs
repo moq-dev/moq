@@ -4,7 +4,7 @@ use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::{HashMap, HashSet};
 
-use super::{Error, Kind};
+use super::{Error, Kind, sample};
 use crate::Result;
 use crate::catalog::Estimator;
 
@@ -95,6 +95,9 @@ impl<E: crate::catalog::hang::CatalogExt> Rendition<E> {
 
 struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	kind: Kind,
+
+	/// The `trex` values this track's samples fall back to.
+	defaults: sample::Defaults,
 
 	/// The catalog entry, which owns the published bitrate and jitter and removes itself on drop.
 	rendition: Rendition<E>,
@@ -314,6 +317,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				track_id,
 				Fmp4Track {
 					kind,
+					defaults: sample::Defaults::from_moov(&moov, track_id),
 					rendition,
 					track,
 					group: None,
@@ -594,15 +598,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A segment is the unit a group carries: each fragment inside it becomes a frame, which is
 	/// what lets audio (whose samples are all independently decodable, so it has no boundary of
 	/// its own) follow the same segmentation as video instead of opening a group per fragment.
-	fn starts_segment(&self, moof: &Moof, has_video: bool) -> Result<bool> {
+	fn starts_segment(&self, moof: &Moof, has_video: bool) -> bool {
 		if self.pending_cut {
-			return Ok(true);
+			return true;
 		}
 
 		if !has_video {
 			// Audio-only and unsegmented: nothing in the container says where a segment ends, so
 			// fall back to a group per fragment. Bounded, unlike one group for the whole source.
-			return Ok(true);
+			return true;
 		}
 
 		// A video keyframe starts a segment, but only once the current segment already has its
@@ -610,30 +614,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// `styp` or a `cut()` that already declared the boundary, and bumping a second time would
 		// strand video a segment ahead of the audio that rolled on the declaration.
 		if !self.video_rolled() {
-			return Ok(false);
+			return false;
 		}
 
-		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
-		Ok(moof.traf.iter().any(|traf| {
-			let track_id = traf.tfhd.track_id;
-			if self.tracks.get(&track_id).map(|t| &t.kind) != Some(&Kind::Video) {
+		moof.traf.iter().any(|traf| {
+			let Some(track) = self.tracks.get(&traf.tfhd.track_id) else {
 				return false;
-			}
-			let trex_flags = moov
-				.mvex
-				.as_ref()
-				.and_then(|mvex| mvex.trex.iter().find(|trex| trex.track_id == track_id))
-				.map(|trex| trex.default_sample_flags)
-				.unwrap_or_default();
-
-			traf.trun.iter().flat_map(|trun| trun.entries.iter()).any(|entry| {
-				is_sync_sample(
-					entry
-						.flags
-						.unwrap_or(traf.tfhd.default_sample_flags.unwrap_or(trex_flags)),
-				)
-			})
-		}))
+			};
+			track.kind == Kind::Video
+				&& traf
+					.trun
+					.iter()
+					.flat_map(|trun| trun.entries.iter())
+					.any(|entry| track.defaults.resolve(&traf.tfhd, entry).is_sync())
+		})
 	}
 
 	/// Whether every video track has already opened its group for the current segment.
@@ -654,7 +648,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Resolve the segment boundary BEFORE the per-track loop. A moof can carry both an audio
 		// and a video traf, and whichever comes first must see the same answer, or the other rolls
 		// a fragment late and the two tracks stop agreeing on where segments fall.
-		if self.starts_segment(&moof, has_video)? {
+		if self.starts_segment(&moof, has_video) {
 			self.segment += 1;
 			// A boundary the source declared is also a timeline boundary; one merely inferred
 			// from a keyframe is not, since the default pacing already sees that group open.
@@ -680,15 +674,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				.iter()
 				.find(|trak| trak.tkhd.track_id == track_id)
 				.ok_or(Error::UnknownTrack(track_id))?;
-			let trex = moov
-				.mvex
-				.as_ref()
-				.and_then(|mvex| mvex.trex.iter().find(|trex| trex.track_id == track_id));
-
-			// The moov contains some defaults
-			let default_sample_duration = trex.map(|trex| trex.default_sample_duration).unwrap_or_default();
-			let default_sample_size = trex.map(|trex| trex.default_sample_size).unwrap_or_default();
-			let default_sample_flags = trex.map(|trex| trex.default_sample_flags).unwrap_or_default();
 
 			let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
@@ -745,17 +730,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 
 				for entry in &trun.entries {
-					let flags = entry
-						.flags
-						.unwrap_or(tfhd.default_sample_flags.unwrap_or(default_sample_flags));
-					let duration = entry
-						.duration
-						.or(tfhd.default_sample_duration)
-						.or(Some(default_sample_duration))
-						.filter(|duration| *duration != 0);
-					let size = entry
-						.size
-						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
+					let sample = track.defaults.resolve(tfhd, entry);
+					let duration = sample.duration;
+					let size = sample.size as usize;
 
 					// A non-final sample with no resolvable duration leaves the rest of the
 					// fragment's DTS ambiguous, so reject it rather than collapse timestamps.
@@ -787,7 +764,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					}
 
 					let keyframe = match track.kind {
-						Kind::Video => is_sync_sample(flags),
+						Kind::Video => sample.is_sync(),
 						Kind::Audio => true,
 					};
 
@@ -871,10 +848,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					let trun_data_size: u64 = trun_mut
 						.entries
 						.iter()
-						.map(|e| {
-							e.size
-								.unwrap_or(traf_mut.tfhd.default_sample_size.unwrap_or(default_sample_size)) as u64
-						})
+						.map(|entry| u64::from(track.defaults.resolve(&traf_mut.tfhd, entry).size))
 						.sum();
 					cumulative_offset += trun_data_size;
 				}
@@ -1029,12 +1003,4 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track.last_decode_time = None;
 		}
 	}
-}
-
-/// Whether a sample's `trun` flags mark it a sync sample (an IDR): `sample_depends_on == 2` and
-/// `sample_is_non_sync_sample` clear, per ISO/IEC 14496-12.
-fn is_sync_sample(flags: u32) -> bool {
-	let depends_on_none = (flags >> 24) & 0x3 == 0x2;
-	let non_sync = (flags >> 16) & 0x1 == 0x1;
-	depends_on_none && !non_sync
 }
