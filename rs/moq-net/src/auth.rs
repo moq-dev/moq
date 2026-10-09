@@ -925,28 +925,29 @@ impl RequestKind {
 	}
 }
 
-/// The request a token rode on, kept beside the token so the acceptor can scope its
-/// grant to that one request.
-struct RequestContext {
-	path: crate::PathOwned,
-	kind: RequestKind,
-	/// The Token structure's type (section 8.9): which verifier the token is for.
-	token_kind: u64,
+/// The request a token rode on, which its grant is scoped to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Scope {
+	/// The request's path: the track's namespace, or the namespace announced.
+	pub path: crate::PathOwned,
+	/// Which request it is.
+	pub kind: RequestKind,
+	/// The token's Token Type (moq-transport section 8.9), naming the verifier it is for.
+	pub token_kind: u64,
 }
 
 /// A token the peer presented, waiting for an answer.
 ///
-/// A token with no [`path`](Request::path) is the connection's own credential (or an
-/// AUTH-stream token), granting the whole session. A token that rode on a request carries
-/// that request's [`path`](Request::path) and [`kind`](Request::kind): its grant covers
-/// only that request and never joins the session union.
+/// A token with no [`scope`](Request::scope) is the connection's own credential (or an
+/// AUTH-stream token), granting the whole session. A token that rode on a request is scoped
+/// to it: its grant covers only that request and never joins the session union.
 ///
 /// Dropping it unanswered refuses the token with [`SessionError::Unauthorized`].
 pub struct Request {
 	token: Bytes,
 	issue: Option<kio::Shared<Issue>>,
-	/// `Some` when the token rode on a request; `None` for the connection credential.
-	context: Option<RequestContext>,
+	scope: Option<Scope>,
 }
 
 impl Request {
@@ -954,7 +955,7 @@ impl Request {
 		Self {
 			token,
 			issue: Some(issue),
-			context: None,
+			scope: None,
 		}
 	}
 
@@ -969,7 +970,7 @@ impl Request {
 		Self {
 			token: Bytes::from(token.value),
 			issue: Some(issue),
-			context: Some(RequestContext {
+			scope: Some(Scope {
 				path,
 				kind,
 				token_kind: token.kind,
@@ -984,20 +985,8 @@ impl Request {
 	}
 
 	/// The request this token rode on, or `None` for the connection's own credential.
-	pub fn path(&self) -> Option<&str> {
-		self.context.as_ref().map(|c| c.path.as_str())
-	}
-
-	/// Which request this token rode on, or `None` for the connection's own credential.
-	pub fn kind(&self) -> Option<RequestKind> {
-		self.context.as_ref().map(|c| c.kind)
-	}
-
-	/// The Token structure's type (section 8.9), for a request token: which verifier it
-	/// is for (a CAT reaches the CAT verifier, not the JWT one). `None` for the
-	/// connection's own credential.
-	pub fn token_kind(&self) -> Option<u64> {
-		self.context.as_ref().map(|c| c.token_kind)
+	pub fn scope(&self) -> Option<&Scope> {
+		self.scope.as_ref()
 	}
 
 	/// Grant the token. The grant holds until the returned [`Issued`] is revoked
@@ -1519,9 +1508,14 @@ mod request_token_tests {
 
 		let request = requests.next().await.expect("a request");
 		assert_eq!(request.token(), &Bytes::from_static(b"jwt"));
-		assert_eq!(request.path(), Some("room/alice"));
-		assert_eq!(request.kind(), Some(RequestKind::Subscribe));
-		assert_eq!(request.token_kind(), Some(7));
+		assert_eq!(
+			request.scope(),
+			Some(&Scope {
+				path: subscribe_path(),
+				kind: RequestKind::Subscribe,
+				token_kind: 7,
+			})
+		);
 		let _issued = request.accept(Grant::all());
 
 		let grant = verdict.grant().await.expect("granted");
@@ -1540,7 +1534,7 @@ mod request_token_tests {
 		for kind in [RequestKind::Subscribe, RequestKind::PublishNamespace] {
 			let verdict = handle.verify_request(token(b"jwt", 0), subscribe_path(), kind);
 			let request = requests.next().await.expect("a request reaches the acceptor");
-			assert_eq!(request.kind(), Some(kind));
+			assert_eq!(request.scope().map(|scope| scope.kind), Some(kind));
 			let _issued = request.accept(Grant::all());
 			assert!(
 				verdict.grant().await.expect("granted").publish.matches("room/alice"),
@@ -1603,9 +1597,7 @@ mod request_token_tests {
 	#[test]
 	fn a_session_token_has_no_request_context() {
 		let request = Request::new(Bytes::new(), kio::Shared::<Issue>::default());
-		assert_eq!(request.path(), None);
-		assert_eq!(request.kind(), None);
-		assert_eq!(request.token_kind(), None);
+		assert_eq!(request.scope(), None);
 	}
 
 	use std::time::Duration;

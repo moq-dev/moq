@@ -1194,12 +1194,9 @@ mod tests {
 				crate::auth::RequestKind::PublishNamespace,
 			);
 			let received = requests.next().await.expect("the pre-ok consumer receives the request");
-			assert_eq!(received.path(), Some("room/alice"), "{version:?}");
-			assert_eq!(
-				received.kind(),
-				Some(crate::auth::RequestKind::PublishNamespace),
-				"{version:?}"
-			);
+			let scope = received.scope().expect("a request token");
+			assert_eq!(scope.path.as_str(), "room/alice", "{version:?}");
+			assert_eq!(scope.kind, crate::auth::RequestKind::PublishNamespace, "{version:?}");
 			let _issued = received.accept(crate::auth::Grant::all());
 			assert!(verdict.grant().await.is_ok(), "granting admits at {version:?}");
 		}

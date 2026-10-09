@@ -1934,7 +1934,7 @@ mod tests {
 			let mut first_tx = Some(first_tx);
 			let mut held = Vec::new();
 			while let Some(req) = requests.next().await {
-				if req.path().is_some()
+				if req.scope().is_some()
 					&& let Some(tx) = first_tx.take()
 				{
 					let _ = tx.send(req.token().clone());
