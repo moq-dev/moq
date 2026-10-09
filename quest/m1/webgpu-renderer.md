@@ -40,6 +40,22 @@ added this quest). Re-planned from issue #703, whose stub quest the
   default) picks WebGPU where supported, else Canvas2D, and logs the choice.
   An explicit `"webgpu"` where it is missing refuses loudly; only `"auto"`
   falls back.
+- Selection happens once, before the renderer touches the canvas, so a
+  canvas only ever gets the one context it will keep. WebGPU counts as
+  supported when `navigator.gpu` exists, `requestAdapter()` returns an
+  adapter that is not a software fallback (`adapter.info.isFallbackAdapter`,
+  or the deprecated `adapter.isFallbackAdapter` on older Chrome),
+  `requestDevice()` succeeds, and a 1x1 `VideoFrame` imports through
+  `importExternalTexture` with neither an exception nor a validation error
+  (checked with a `"validation"` error scope, since an invalid import
+  returns a texture instead of throwing; Firefox Android lacks it). The
+  renderer keeps the probe's device rather than requesting a second one.
+  Only then does the renderer call `getContext("webgpu")`, else
+  `getContext("2d")`. An explicit `"webgpu"` runs the same probe and refuses
+  on the same failures, and a failed probe logs which check failed. The
+  probe is a coarse gate: it does not exercise decoder output formats (see
+  the Safari item below). There is no runtime fallback: a renderer never
+  switches paths on a canvas it already drew to. Decided 2026-10-08.
 - Device loss: request a new device and rebuild the pipeline. A canvas that
   acquired a `webgpu` context never returns a `2d` one, and the canvas is
   caller-owned, so when no adapter comes back the renderer fails loud:
@@ -66,8 +82,9 @@ added this quest). Re-planned from issue #703, whose stub quest the
   frames, biplanar formats, iOS orientation) and test on Safari.
 - Measurement: ship, then measure. Extending the browser benchmarks with a
   per-browser Canvas2D vs WebGPU comparison is a follow-up, not a gate.
-- Tests: selection (auto picks WebGPU or Canvas2D by support, an explicit
-  `"webgpu"` refuses where missing), rotation and flip parity between the two
+- Tests: selection (auto picks WebGPU or Canvas2D by support, including
+  Canvas2D when the adapter is a fallback or the import probe fails; an
+  explicit `"webgpu"` refuses where missing), rotation and flip parity between the two
   paths, device-loss recovery, and the preview's rotation. The fallback
   test runs in a real browser: paint with WebGPU, lose the device with no
   adapter to recover, check `out.error` reports it, then check the element's
