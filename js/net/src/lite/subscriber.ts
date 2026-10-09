@@ -49,6 +49,7 @@ import {
 	hasDatagrams,
 	hasProbeRtt,
 	hasStreamCount,
+	resolvesStart,
 	restartSupported,
 	Version,
 	waitsForSubscriberFin,
@@ -1127,12 +1128,14 @@ export class Subscriber {
 	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
 		const ag = groupBounds(a.groups);
 		const bg = groupBounds(b.groups);
-		// `groupBounds` reads an omitted start as 0. On a pre-06 wire those are different
-		// subscriptions: omitted joins at the publisher's start, and 0 is group 0.
+		// `groupBounds` reads an omitted start as 0. A pre-06 wire tells them apart: omitted
+		// joins at the publisher's start, and 0 is group 0. Lite-06 encodes both as 0.
+		const sameStart =
+			resolvesStart(this.version) || (a.groups?.start === undefined) === (b.groups?.start === undefined);
 		return (
 			(a.priority ?? 0) === (b.priority ?? 0) &&
 			(a.maxDelay ?? 0) === (b.maxDelay ?? 0) &&
-			(a.groups?.start === undefined) === (b.groups?.start === undefined) &&
+			sameStart &&
 			ag.start === bg.start &&
 			ag.end === bg.end
 		);

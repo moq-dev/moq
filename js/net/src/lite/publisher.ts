@@ -619,14 +619,11 @@ export class Publisher {
 		}
 
 		const endGroup = exclusiveGroupEnd(msg.endGroup);
-		// Lite-06 encodes an omitted floor as 0, and that 0 is group 0. Store it as an
-		// explicit floor so it widens a higher resume. A pre-06 absent start stays absent.
-		const startGroup = msg.startGroup === undefined && resolvesStart(this.version) ? 0 : msg.startGroup;
 		const track = wireOf(front).subscribe(msg.track, {
 			priority: msg.priority,
 			maxDelay: Milli(servingMaxDelay(this.version, msg.maxDelay)),
 			groups: {
-				start: startGroup === undefined ? undefined : { included: startGroup },
+				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
 				end: endGroup === undefined ? undefined : { excluded: endGroup },
 			},
 		});

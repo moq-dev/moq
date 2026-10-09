@@ -1432,7 +1432,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
 			max_delay: serving_max_delay(shared.version, msg.max_delay),
-			..Bounds::from(&msg).subscription(shared.version)
+			..Bounds::from(&msg).positions()
 		};
 
 		// One subscriber for the whole subscription: the run loop polls its groups and its
@@ -2439,20 +2439,6 @@ impl Bounds {
 		sub
 	}
 
-	/// The range to store on the serving track.
-	///
-	/// Lite-06 encodes an omitted floor as 0, and that 0 is group 0. Store it as an
-	/// explicit floor so it widens a higher resume instead of leaving that resume in
-	/// place: a fresh reader still receives a finished group the resume skipped. A
-	/// pre-06 absent start stays absent, because those drafts join at the latest group.
-	fn subscription(&self, version: Version) -> crate::track::Subscription {
-		let mut sub = self.positions();
-		if version.resolves_start() && sub.start.is_none() {
-			sub.start = Some(track::Position::group(0));
-		}
-		sub
-	}
-
 	/// The group to apply a frame offset to and the offset itself, or `None` when
 	/// delivery starts on a group boundary.
 	fn start_frame(&self) -> Option<(u64, u64)> {
@@ -2681,7 +2667,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
 			max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
-			..bounds.subscription(self.ctx.version)
+			..bounds.positions()
 		});
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
 		// start as no floor, so a subscription that had one above group 0 has to

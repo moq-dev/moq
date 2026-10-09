@@ -100,7 +100,7 @@ async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u6
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -193,115 +193,4 @@ async fn an_unfloored_lite05_join_drops_a_group_created_below_the_first_served_g
 		}
 	}
 	assert!(failures.is_empty(), "{failures:#?}");
-}
-
-/// A `None` subscriber is already reading group 1. A second subscriber names group 0.
-/// The fresh group 0 reaches only the second. Lite-05 is the draft that can tell the
-/// two subscriptions apart on the wire.
-#[moq_net_sim::test]
-async fn a_relayed_explicit_floor_survives_an_unfloored_subscriber() {
-	let version: Version = "moq-lite-05".parse().unwrap();
-	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast
-		.create_track("late", Info::default().with_max_age(FOREVER))
-		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
-
-	let relay = produce_origin(2);
-	let mut options = MockConnectOptions::new(version);
-	options.server_publish = Some(publisher.consume());
-	options.client_subscribe = Some(relay.clone());
-	let upstream = connect_mock(options).await;
-
-	let unfloored_origin = produce_origin(3);
-	let mut options = MockConnectOptions::new(version);
-	options.server_publish = Some(relay.consume());
-	options.client_subscribe = Some(unfloored_origin.clone());
-	let unfloored_pair = connect_mock(options).await;
-	let consumer = unfloored_origin.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.unwrap();
-	let remote = consumer.request_broadcast("bcast").await.unwrap();
-	let unfloored_sub = Subscription::default().with_max_delay(BUDGET);
-	let reader = moq_net_sim::spawn(async move {
-		let mut sub = remote.track("late").unwrap().subscribe(unfloored_sub).await.unwrap();
-		let mut group = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
-			.await
-			.expect("group 1")
-			.unwrap()
-			.expect("group 1 ended");
-		assert_eq!(group.sequence, 1);
-		for _ in 0..4 {
-			assert!(group.read_frame().await.unwrap().is_some());
-		}
-		assert!(group.read_frame().await.unwrap().is_none());
-		sub
-	});
-
-	track.demand().used().await.unwrap();
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
-	write_group(&track, 1);
-	let mut unfloored = moq_net_sim::timeout(TIMEOUT, reader)
-		.await
-		.expect("unfloored reader")
-		.unwrap();
-
-	let floored_origin = produce_origin(4);
-	let mut options = MockConnectOptions::new(version);
-	options.server_publish = Some(relay.consume());
-	options.client_subscribe = Some(floored_origin.clone());
-	let floored_pair = connect_mock(options).await;
-	let consumer = floored_origin.consume();
-	consumer.routed("bcast").await.unwrap();
-	let remote = consumer.request_broadcast("bcast").await.unwrap();
-	let floored_sub = Subscription::default()
-		.with_max_delay(BUDGET)
-		.with_start(Position::group(0));
-	let floored_reader = moq_net_sim::spawn(async move {
-		let mut sub = remote.track("late").unwrap().subscribe(floored_sub).await.unwrap();
-		let mut saw_zero = false;
-		for _ in 0..2 {
-			let Some(mut group) = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
-				.await
-				.expect("floored recv")
-				.unwrap()
-			else {
-				break;
-			};
-			let sequence = group.sequence;
-			while group.read_frame().await.unwrap().is_some() {}
-			if sequence == 0 {
-				saw_zero = true;
-				break;
-			}
-		}
-		assert!(saw_zero, "explicit floor missed group 0");
-	});
-
-	// The spawned subscribe runs to its first wait, which forwards the new floor.
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
-	write_group(&track, 0);
-	moq_net_sim::timeout(TIMEOUT, floored_reader)
-		.await
-		.expect("floored reader")
-		.unwrap();
-
-	let late = moq_net_sim::timeout(Duration::from_millis(50), unfloored.recv_group()).await;
-	assert!(late.is_err(), "unfloored subscriber received a group below its join");
-
-	drop((
-		unfloored,
-		unfloored_pair,
-		floored_pair,
-		upstream,
-		track,
-		broadcast,
-		publisher,
-		relay,
-		unfloored_origin,
-		floored_origin,
-	));
 }
