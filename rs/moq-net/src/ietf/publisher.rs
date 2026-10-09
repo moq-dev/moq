@@ -1527,10 +1527,10 @@ where
 		// 10.13). Both only bite when Largest Object is in the fetched group or behind it, so
 		// this is its Object ID there, or `Some(None)` when the group holds nothing at or
 		// past it. The cache knows it at the track's end, or when a live feed's newest object
-		// it can name is in or behind this group. Otherwise (a relay's copy with no upstream subscription, or a
-		// newest group it cannot read) it neither caps nor refuses: the read waits out an
-		// unfinished group, so echoing the requested end over a finished one only says
-		// objects it never held do not exist.
+		// it can name is in or behind this group. Otherwise (a relay's copy with no upstream
+		// subscription, or a newest group it cannot read) it neither caps nor refuses: the
+		// read waits out an unfinished group, so echoing the requested end over a finished
+		// one only says objects it never held do not exist.
 		let largest = match end_of_track {
 			true => Some(group.end().checked_sub(1)),
 			false if !joined && track.is_live() => match live_edge(&track).largest {
@@ -5236,6 +5236,8 @@ mod serve_tests {
 		IdleEnded,
 		/// A live feed whose newest group is a datagram the cache cannot read: unknown.
 		Datagram,
+		/// A live feed whose newest group was aborted mid-write: unknown.
+		Aborted,
 	}
 
 	/// Groups 0 to 4 of two objects each, with Largest Object known as `largest` says.
@@ -5260,6 +5262,12 @@ mod serve_tests {
 				h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
 				None
 			}
+			Largest::Aborted => {
+				let mut newer = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+				newer.write_frame(timestamp(), b"5-0".to_vec()).unwrap();
+				newer.abort(Error::Cancel).unwrap();
+				None
+			}
 		}
 	}
 
@@ -5274,6 +5282,7 @@ mod serve_tests {
 				Largest::Idle,
 				Largest::IdleEnded,
 				Largest::Datagram,
+				Largest::Aborted,
 			] {
 				let mut h = serve(version);
 				let _newer = publish_largest(&mut h, largest);
@@ -5341,6 +5350,7 @@ mod serve_tests {
 				(4, Largest::Idle, 7),
 				(4, Largest::IdleEnded, 7),
 				(4, Largest::Datagram, 7),
+				(4, Largest::Aborted, 7),
 			] {
 				let mut h = serve(version);
 				let _newer = publish_largest(&mut h, largest);
