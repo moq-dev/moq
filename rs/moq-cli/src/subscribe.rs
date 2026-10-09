@@ -557,7 +557,10 @@ impl Watch {
 		self.epoch = broadcast.info().epoch.clone();
 		self.serving = Serving::Ours;
 		self.ended = false;
-		tracing::info!(epoch = self.epoch.as_ref().map(tracing::field::display), "exporting broadcast");
+		tracing::info!(
+			epoch = self.epoch.as_ref().map(tracing::field::display),
+			"exporting broadcast"
+		);
 		Ok(broadcast)
 	}
 
@@ -644,12 +647,10 @@ mod tests {
 		Watch::new(origin.consume(), moq_net::Path::new("live").to_owned()).unwrap()
 	}
 
-	fn export(source: moq_mux::Source) -> impl std::future::Future<Output = TsExport> {
-		async move {
-			moq_mux::container::ts::Export::with_ts(source, CatalogFormat::Hang)
-				.await
-				.unwrap()
-		}
+	async fn export(source: moq_mux::Source) -> TsExport {
+		moq_mux::container::ts::Export::with_ts(source, CatalogFormat::Hang)
+			.await
+			.unwrap()
 	}
 
 	/// A failure while the broadcast stays announced is the export's own: it exits after the

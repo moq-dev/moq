@@ -55,13 +55,7 @@ fn moq(relay: &Relay, args: &[&str]) -> tokio::process::Command {
 		}
 	}
 	command
-		.args([
-			"--connect",
-			&relay.url,
-			"--connect-tls-insecure",
-			"--broadcast",
-			"demo",
-		])
+		.args(["--connect", &relay.url, "--connect-tls-insecure", "--broadcast", "demo"])
 		.args(args)
 		.kill_on_drop(true);
 	command
@@ -288,7 +282,11 @@ async fn a_restarted_publisher_exits_one_without_stitch() {
 	);
 	let errors = String::from_utf8_lossy(&errors.lock().unwrap()).into_owned();
 	assert!(errors.contains("--stitch"), "the error names --stitch: {errors}");
-	assert_eq!(output.lock().unwrap().len(), mark, "nothing of the replacement went out");
+	assert_eq!(
+		output.lock().unwrap().len(),
+		mark,
+		"nothing of the replacement went out"
+	);
 
 	drop(feeding.await.unwrap());
 	wait(&mut publisher).await;
@@ -315,7 +313,11 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 	let (before, after) = output.split_at(mark);
 	let total = packets(after).count();
 	assert!(total > 100, "the replacement went out: {total} packets");
-	assert!(packets(before).filter_map(|p| pat_version(p)).all(|version| version == 0));
+	assert!(
+		packets(before)
+			.filter_map(|p| pat_version(p))
+			.all(|version| version == 0)
+	);
 	let versions: Vec<u8> = packets(after).filter_map(|p| pat_version(p)).collect();
 	assert!(
 		!versions.is_empty() && versions.iter().all(|&version| version == 1),
@@ -373,15 +375,23 @@ async fn an_old_publisher_that_stays_up_keeps_the_export() {
 		"the export stays on the old publisher while it is up"
 	);
 	let written = output.lock().unwrap().len();
-	assert!(packets(&output.lock().unwrap()).filter_map(|p| pat_version(p)).all(|v| v == 0));
+	assert!(
+		packets(&output.lock().unwrap())
+			.filter_map(|p| pat_version(p))
+			.all(|v| v == 0)
+	);
 
 	drop(old_stdin);
 	assert!(wait(&mut old).await.success());
 	let status = wait(&mut export).await;
-	assert_eq!(status.code(), Some(1), "the replacement exits 1 once the old one ends, got {status}");
+	assert_eq!(
+		status.code(),
+		Some(1),
+		"the replacement exits 1 once the old one ends, got {status}"
+	);
 	let errors = String::from_utf8_lossy(&errors.lock().unwrap()).into_owned();
 	assert!(errors.contains("--stitch"), "the error names --stitch: {errors}");
-	let output = output.lock().unwrap();
+	let output = output.lock().unwrap().clone();
 	assert!(
 		packets(&output[written.next_multiple_of(188).min(output.len())..])
 			.filter_map(|p| pat_version(p))

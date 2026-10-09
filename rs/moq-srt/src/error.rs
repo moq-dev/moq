@@ -27,7 +27,9 @@ pub enum Error {
 	ListenerClosed,
 
 	/// Another publisher instance replaced the egress broadcast, and stitch was off.
-	#[error("another publisher instance replaced broadcast `{0}`; enable stitch (--stitch) to follow it as a program switch")]
+	#[error(
+		"another publisher instance replaced broadcast `{0}`; enable stitch (--stitch) to follow it as a program switch"
+	)]
 	Replaced(String),
 }
 

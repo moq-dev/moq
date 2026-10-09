@@ -405,7 +405,10 @@ mod tests {
 		source.broadcast().await.expect("the pinned instance resolves");
 
 		let _new = origin
-			.publish("live", moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.publish(
+				"live",
+				moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+			)
 			.unwrap();
 		settle().await;
 		assert!(source.broadcast().await.is_err(), "the replacement is refused");

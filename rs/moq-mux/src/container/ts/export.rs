@@ -2059,7 +2059,7 @@ impl<E: catalog::Catalog> Export<E> {
 		let mut first = true;
 		loop {
 			let flag = first && self.breaks(unit.pid);
-			let adaptation = (first && unit.keyframe || flag).then(|| AdaptationField {
+			let adaptation = ((first && unit.keyframe) || flag).then(|| AdaptationField {
 				random_access_indicator: first && unit.keyframe,
 				..flags(flag)
 			});
@@ -2272,8 +2272,6 @@ fn stamp(nanos: u128) -> anyhow::Result<Timestamp> {
 	Ok(Timestamp::from_micros(micros)?)
 }
 
-/// External byte size of an adaptation field (manual mirror of the crate's
-/// private `external_size`); only PCR is ever set.
 /// An adaptation field carrying nothing but `discontinuity_indicator`.
 fn flags(discontinuity: bool) -> AdaptationField {
 	AdaptationField {
@@ -2288,6 +2286,8 @@ fn flags(discontinuity: bool) -> AdaptationField {
 	}
 }
 
+/// External byte size of an adaptation field (manual mirror of the crate's
+/// private `external_size`); only PCR is ever set.
 fn adaptation_size(af: &AdaptationField) -> usize {
 	2 + if af.pcr.is_some() { 6 } else { 0 }
 }

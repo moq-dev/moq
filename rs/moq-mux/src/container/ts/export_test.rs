@@ -7159,7 +7159,11 @@ async fn another_instance_is_a_full_program_switch() {
 
 	let bytes: Vec<u8> = after.iter().flat_map(|f| f.payload.iter().copied()).collect();
 	let (video_pts, audio_pts) = collect_pes_pts(&bytes);
-	assert_eq!(video_pts.first(), Some(&(60_000 * 90)), "the video starts on its keyframe");
+	assert_eq!(
+		video_pts.first(),
+		Some(&(60_000 * 90)),
+		"the video starts on its keyframe"
+	);
 	assert_eq!(video_pts.len(), 10);
 	assert!(
 		audio_pts.iter().all(|&pts| pts < 60_400 * 90),

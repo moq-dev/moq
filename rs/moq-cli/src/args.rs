@@ -1341,7 +1341,14 @@ mod tests {
 	#[test]
 	fn export_srt_takes_linger_and_stitch() {
 		let cli = Invocation::try_parse_from([
-			"moq", "export", "srt", "--listen", "[::]:9000", "--linger", "10s", "--stitch",
+			"moq",
+			"export",
+			"srt",
+			"--listen",
+			"[::]:9000",
+			"--linger",
+			"10s",
+			"--stitch",
 		])
 		.unwrap();
 		let Command::Export(export) = &cli.stages[0] else {

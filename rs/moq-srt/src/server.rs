@@ -1012,9 +1012,8 @@ mod tests {
 			let mut broadcast = origin.publish("live", route).unwrap();
 			let mut catalog = moq_mux::catalog::Producer::new(
 				&mut broadcast,
-				moq_mux::catalog::Config::default().with_catalog(moq_mux::catalog::hang::Catalog::<
-					moq_mux::container::ts::Ext,
-				>::default()),
+				moq_mux::catalog::Config::default()
+					.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::container::ts::Ext>::default()),
 			)
 			.unwrap();
 			let audio = broadcast
@@ -1022,7 +1021,12 @@ mod tests {
 				.unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
 			config.container = hang::catalog::Container::Legacy;
-			catalog.modify().unwrap().audio.renditions.insert(track.to_string(), config);
+			catalog
+				.modify()
+				.unwrap()
+				.audio
+				.renditions
+				.insert(track.to_string(), config);
 			let audio = moq_mux::container::Producer::new(
 				audio,
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
