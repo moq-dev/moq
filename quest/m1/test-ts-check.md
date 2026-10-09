@@ -1,4 +1,4 @@
-# [XS] Checks type-check the TypeScript under test/
+# [S] Checks type-check the TypeScript under test/
 
 ## Goal
 
@@ -13,6 +13,12 @@ still called the deleted `writeString`, and only its review caught it. Today
 `js/justfile`'s `check` runs each root workspace's `check` script.
 `test/drain` is a root workspace but has no `check` script or tsconfig, so it
 is skipped; `test/wasm` and `test/interop/clients/js-native` also lack a
-`check` script. Give each `test/` TypeScript workspace a `tsc --noEmit` check,
-and make sure the scoped `just check` picks it up when a `js/` package it
-imports changes.
+`check` script. Standalone harnesses such as `test/max-age/client.ts` and
+`test/interop/*.ts` sit outside any workspace tsconfig, and `sh/dispatch.sh`'s
+`js` scope skips a change that touches only `test/drain/`.
+
+- Type-check every `test/` TypeScript file, workspace or standalone, with
+  `tsc --noEmit`.
+- The scoped `just check` runs it when a harness or a `js/` package it imports
+  changes.
+- Prove coverage once with a deliberate type error in each kind of harness.
