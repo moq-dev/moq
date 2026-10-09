@@ -133,14 +133,15 @@ publishers feed current readers, through both relay sources. Rust exports must
 decode to a video frame through ffmpeg. The existing JS subscriber
 reconstructs the catalog and decodes the container.
 
-The released relay, publisher, and CLI decide FETCH support per draft: when
-they fetch from one another, every mixed cell must too; otherwise the draft's
-FETCH lanes are logged and skipped. Both Rust versions FETCH the group the
+Each `moq-net` library states whether a draft has FETCH (lite-05 onward
+today). A draft without it in both is logged and its FETCH lanes skipped; one
+the release supports and the checkout dropped fails. Both Rust versions FETCH the group the
 publisher's own JS subscriber observed and compare every frame's exact
 payload. JS publishers write one group after that subscriber's demand, and the
 opposite-source Rust CLI FETCHes it by the same observed ID.
 
-Every cell runs, and the run lists each failing cell before it fails.
+Every session cell runs, and the run counts the cells that ran and were
+skipped, then lists each failing cell before it fails.
 Checkout-only versions are logged and omitted. Removing a released version
 fails before sessions start. A maintainer-approved break belongs in
 `compat/planned-breaks.json` with its reason and the exact affected release

@@ -131,9 +131,11 @@ for source in current released js-current js-released; do
     echo "PASS catalog/container written by $source"
 done
 
-# Every cell runs, so one nightly names every break; the run fails at the end. A
-# cell a planned break covers is logged with that break's name instead.
+# Every session cell runs, so one nightly names every break; the run fails at the
+# end. A cell a planned break covers is logged with that break's name instead.
 failed=()
+ran=0
+skipped=0
 cell() {
     local lane="$1" version="$2" relay_source="$3" source="$4" planned
     shift 4
@@ -141,8 +143,10 @@ cell() {
     planned=$(bun "$DIR/compat/resolve.ts" skip "$DIR/compat/planned-breaks.json" "$lane" "$version" "$relay_source" "$source")
     if [[ -n "$planned" ]]; then
         echo "SKIP $name: planned break $planned"
+        skipped=$((skipped + 1))
         return
     fi
+    ran=$((ran + 1))
     echo "=== $name ==="
     if "$@"; then
         echo "PASS $name"
@@ -152,8 +156,6 @@ cell() {
     fi
 }
 
-# FETCH support differs by draft and by build, so the released binaries alone
-# decide it: when they fetch a group from one another, every mixed cell must too.
 fetch() {
     local relay="$1" pub="$2" sub="$3" js="$4" transport="$5" version="$6"
     RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
@@ -169,11 +171,17 @@ fetch() {
 # Fd 3, so a child reading stdin (ffmpeg does) cannot consume the version list.
 while read -r version <&3; do
     released_relay="$HARNESS_RUN/released/bin/moq-relay"
-    if fetch "$released_relay" "$RELEASED" "$RELEASED" "$HARNESS_RUN/js" "$HARNESS_RUN/js/transport.ts" "$version" >"$HARNESS_RUN/$version.fetch-baseline.log" 2>&1; then
-        released_fetch=true
-    else
-        released_fetch=false
-        echo "SKIP $version fetch and js-publish: the released binaries do not fetch from one another ($HARNESS_RUN/$version.fetch-baseline.log)"
+    # Each moq-net library states whether the draft has FETCH, so a FETCH cell that
+    # fails is a failure, never a skip. Dropping a released capability fails too.
+    current_fetch=$("$TARGET/compat-hang-current/debug/compat-container" fetch-supported "$version")
+    released_fetch=$("$TARGET/compat-hang-released/debug/compat-container" fetch-supported "$version")
+    if [[ "$released_fetch" == true && "$current_fetch" != true ]]; then
+        echo "FAIL $version: the checkout removed published FETCH"
+        failed+=("$version FETCH removed")
+    fi
+    if [[ "$released_fetch" != true || "$current_fetch" != true ]]; then
+        echo "SKIP $version fetch and js-publish: no FETCH on this draft in both libraries"
+        skipped=$((skipped + 8))
     fi
     for relay_source in current released; do
         if [[ "$relay_source" == current ]]; then relay="$TARGET/debug/moq-relay"; else relay="$released_relay"; fi
@@ -190,7 +198,7 @@ while read -r version <&3; do
             fi
             cell media "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
                 INTEROP_NATIVE_CLIENT="$other_js" INTEROP_COMPAT_TRANSPORT="$other_transport" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
-            [[ "$released_fetch" == true ]] || continue
+            [[ "$released_fetch" == true && "$current_fetch" == true ]] || continue
             # Drive JS publication from actual subscriber demand: the publisher's own JS
             # subscribes and observes the group, which the opposite Rust CLI then
             # FETCHes by ID. Reading the newest group races its live delivery.
@@ -204,6 +212,7 @@ while read -r version <&3; do
         done
     done
 done 3<"$HARNESS_RUN/shared"
+echo "session cells: $ran ran, $skipped skipped"
 if ((${#failed[@]})); then
     printf 'FAIL %s\n' "${failed[@]}" >&2
     exit 1
