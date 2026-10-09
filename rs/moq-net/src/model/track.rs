@@ -704,7 +704,7 @@ impl TrackState {
 			})
 	}
 
-	/// Where a new reader with no explicit start begins on an untimed track: its newest
+	/// Where [`Subscription::live`] begins on an untimed track: its newest
 	/// servable group below the exclusive `cap`.
 	///
 	/// A drift budget resolves a timed track's start, but nothing is ever stale on an
@@ -2057,11 +2057,12 @@ impl Producer {
 	/// The info is fixed at creation, so there's nothing to wait for (no
 	/// SUBSCRIBE_OK round trip). Pass `None` for [`Subscription::default`].
 	///
-	/// The read cursor starts at the group the subscription named (its floor), or 0.
-	/// [`Subscription::max_delay`] is what asks for data: delivery skips everything above
-	/// the floor that the budget convicts, so the default budget of zero delivers only
-	/// the latest group and a larger one reaches back over what it can still use. An
-	/// untimed track has nothing to convict, so it starts at its latest group.
+	/// The read cursor starts at the group the subscription named (its floor), lowered to
+	/// the live edge by [`Subscription::live`]. [`Subscription::max_delay`] is what asks
+	/// for data: delivery skips everything above the start that the budget convicts, so
+	/// the default budget of zero delivers only the latest group and a larger one reaches
+	/// back over what it can still use. An untimed track has nothing to convict, so `live`
+	/// starts at its latest group.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
 		let preferences = subscription.into().unwrap_or_default();
 
@@ -2462,16 +2463,28 @@ fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Durati
 	clamp_combined(combined, bound)
 }
 
-/// The read cursor's floor: the group the subscription named, or 0 (no floor).
+/// The read cursor's first group: the subscription's floor, lowered by
+/// [`Subscription::live`] to the live edge.
 ///
 /// A floor is the only thing a start contributes; [`Subscription::max_delay`] is what asks
-/// for data. Delivery walks everything at or above the floor and skips what the budget
+/// for data. Delivery walks everything at or above the result and skips what the budget
 /// convicts, so a zero budget (the default) delivers only the live edge, a larger one
 /// reaches back over what it can still use, and a floor above the live edge simply waits
 /// there (a resumed subscription naming where it left off). One bound decides both what
 /// is sent and what is expired, so the two cannot disagree.
-fn floor_of(subscription: &Subscription) -> u64 {
-	subscription.start.map(|start| start.group).unwrap_or(0)
+///
+/// On a timed track `live` therefore starts at 0, leaving the budget to trim. Nothing on an
+/// untimed track is ever stale, so `live` starts at its latest servable group below the
+/// requested end; `untimed_live` is that group, or `None` on a timed track.
+fn first_sequence(subscription: &Subscription, untimed_live: Option<u64>) -> u64 {
+	let floor = subscription.floor.map(|floor| floor.group);
+	match subscription.live {
+		true => {
+			let live = untimed_live.unwrap_or(0);
+			floor.map_or(live, |floor| floor.min(live))
+		}
+		false => floor.unwrap_or(0),
+	}
 }
 
 /// Clamp a drift budget to the publisher's retention window: nobody can wait for a late
@@ -2798,11 +2811,12 @@ impl Consumer {
 	/// [`Subscriber`] once the track info is available, or the track's abort error (or
 	/// [`Error::Dropped`]) if it is already closed.
 	///
-	/// The read cursor starts at the group the subscription named (its floor), or 0.
-	/// [`Subscription::max_delay`] is what asks for data: delivery skips everything above
-	/// the floor that the budget convicts, so the default budget of zero delivers only
-	/// the latest group and a larger one reaches back over what it can still use. An
-	/// untimed track has nothing to convict, so it starts at its latest group.
+	/// The read cursor starts at the group the subscription named (its floor), lowered to
+	/// the live edge by [`Subscription::live`]. [`Subscription::max_delay`] is what asks
+	/// for data: delivery skips everything above the start that the budget convicts, so
+	/// the default budget of zero delivers only the latest group and a larger one reaches
+	/// back over what it can still use. An untimed track has nothing to convict, so `live`
+	/// starts at its latest group.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
 		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
 
@@ -3453,10 +3467,10 @@ impl kio::Task for Fetching {
 ///
 /// - [`Self::set_groups`] limits **this subscriber's reads**, filtering exactly what
 ///   this handle returns without changing the publisher's demand.
-/// - [`Subscription::start`] / [`Subscription::end`], set via [`Self::update`],
-///   are a **request to the publisher**. They're aggregated across every live subscriber
-///   (earliest start, widest end), so they say what the publisher should send, not what
-///   this subscriber sees.
+/// - [`Subscription::live`], [`Subscription::floor`], and [`Subscription::end`], set via
+///   [`Self::update`], are a **request to the publisher**. They're aggregated across every
+///   live subscriber (anyone's `live`, the lowest floor, the widest end), so they say what
+///   the publisher should send, not what this subscriber sees.
 ///
 /// They stay separate because their scopes differ: a subscriber can't filter by the
 /// aggregate, since another subscriber can widen it, and the publisher can't honor a
@@ -3658,17 +3672,10 @@ struct Cursor {
 
 impl Cursor {
 	fn new(state: kio::Consumer<TrackState>, subscription: kio::Producer<Subscription>) -> Self {
-		// An explicit start says how far back to reach, so only an unfloored subscription
-		// jumps to an untimed track's latest group.
 		let min_sequence = {
 			let preferences = subscription.read();
-			match preferences.start {
-				Some(_) => floor_of(&preferences),
-				None => {
-					let cap = preferences.end.and_then(|end| Cap::from(end.group_end()).exclusive());
-					state.read().untimed_start(cap).unwrap_or(0)
-				}
-			}
+			let cap = preferences.end.and_then(|end| Cap::from(end.group_end()).exclusive());
+			first_sequence(&preferences, state.read().untimed_start(cap))
 		};
 		Self {
 			state,
@@ -3846,11 +3853,16 @@ impl Cursor {
 			self.datagram_index = found_index + 1;
 
 			let sequence = datagram.sequence;
-			let mid_group = self
-				.subscription
-				.read()
-				.start
-				.is_some_and(|start| start.group == sequence && start.frame > 0);
+			// A floor's frame only applies while the floor is where delivery starts. `live`
+			// reaches below it on a timed track; on an untimed one it may not, and the
+			// floor group's single-frame datagram is then delivered, best-effort anyway.
+			let mid_group = {
+				let subscription = self.subscription.read();
+				!subscription.live
+					&& subscription
+						.floor
+						.is_some_and(|floor| floor.group == sequence && floor.frame > 0)
+			};
 			if sequence >= self.min_sequence
 				&& super::subscription::before_end(sequence, self.end_sequence)
 				&& !mid_group
@@ -4008,7 +4020,7 @@ impl Subscriber {
 	/// skipped rather than handed over, so a single poll walks off a whole backlog. The
 	/// default is [`Duration::ZERO`], which takes the live
 	/// edge and writes the rest off; raise it to read history. [`Self::set_groups`] and
-	/// [`Subscription::start`] are filters, not exemptions: backfill needs a budget that
+	/// [`Subscription::floor`] are filters, not exemptions: backfill needs a budget that
 	/// covers it. [`Consumer::fetch_group`] is the way to ask for one old group outright.
 	/// The budget remains attached to a returned group: if it stalls while newer data
 	/// advances, its pending frame read ends with [`Error::Old`].
@@ -4210,7 +4222,7 @@ impl Subscriber {
 	///
 	/// A local filter, not a request: it doesn't tell the publisher anything, so the
 	/// skipped groups are still delivered and simply not returned. To ask the publisher
-	/// to start there instead, set [`Subscription::start`] via [`Self::update`].
+	/// to start there instead, set [`Subscription::floor`] via [`Self::update`].
 	/// See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	pub(crate) fn start_at(&mut self, sequence: u64) {
 		match &mut self.inner {
@@ -5061,7 +5073,8 @@ mod test {
 	#[test]
 	fn the_group_range_bounds_datagrams() {
 		let mut producer = track_producer("test", None);
-		let mut subscriber = producer.subscribe(Subscription::default().with_start(Position::group(5)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_live(false).with_floor(Position::group(5)));
 		subscriber.set_groups(..7);
 		for sequence in [4, 5, 7, 6] {
 			producer
@@ -5079,8 +5092,12 @@ mod test {
 	#[test]
 	fn a_mid_group_start_drops_the_start_groups_datagram() {
 		let mut producer = track_producer("test", None);
-		let mut mid = producer.subscribe(Subscription::default().with_start(Position { group: 5, frame: 1 }));
-		let mut whole = producer.subscribe(Subscription::default().with_start(Position::group(5)));
+		let mut mid = producer.subscribe(
+			Subscription::default()
+				.with_live(false)
+				.with_floor(Position { group: 5, frame: 1 }),
+		);
+		let mut whole = producer.subscribe(Subscription::default().with_live(false).with_floor(Position::group(5)));
 		for sequence in [5, 6] {
 			producer
 				.insert_datagram(sequence, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
@@ -6029,20 +6046,22 @@ mod test {
 		// The budget is the only thing that asks for data; a named start only bounds how
 		// far back it may reach. Naming group 1 at real time still delivers the live edge
 		// alone, since the zero budget calls everything older stale.
-		let named = Subscription::default().with_start(Position::group(1));
+		let named = Subscription::default().with_live(false).with_floor(Position::group(1));
 		let mut subscriber = producer.subscribe(named);
 		assert_eq!(drain(&mut subscriber), vec![4]);
 
 		// A budget reaching further back than the floor is cut off at it.
 		let floored = Subscription::default()
-			.with_start(Position::group(3))
+			.with_live(false)
+			.with_floor(Position::group(3))
 			.with_max_delay(Duration::from_secs(10));
 		let mut subscriber = producer.subscribe(floored);
 		assert_eq!(drain(&mut subscriber), vec![3, 4]);
 
 		// A floor below what the budget admits changes nothing.
 		let slack = Subscription::default()
-			.with_start(Position::group(1))
+			.with_live(false)
+			.with_floor(Position::group(1))
 			.with_max_delay(Duration::from_secs(2));
 		let mut subscriber = producer.subscribe(slack);
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
@@ -6058,7 +6077,8 @@ mod test {
 		// A resumed subscription names where it left off, which may not exist yet. The
 		// cursor sits at the floor rather than sliding back to what is cached.
 		let resumed = Subscription::default()
-			.with_start(Position::group(7))
+			.with_live(false)
+			.with_floor(Position::group(7))
 			.with_max_delay(Duration::from_secs(10));
 		let mut subscriber = producer.subscribe(resumed);
 		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
@@ -6679,13 +6699,15 @@ mod test {
 
 		// Asking to start at the beginning is a filter, not a request for reliability.
 		// Backfill needs a budget that covers it; without one the live edge still wins.
-		let mut subscriber = producer.subscribe(Subscription::default().with_start(Position::group(0)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_live(false).with_floor(Position::group(0)));
 		subscriber.start_at(0);
 		assert_eq!(drain(&mut subscriber), vec![3]);
 
 		let mut patient = producer.subscribe(
 			Subscription::default()
-				.with_start(Position::group(0))
+				.with_live(false)
+				.with_floor(Position::group(0))
 				.with_max_delay(Duration::from_secs(10)),
 		);
 		patient.start_at(0);
@@ -6823,8 +6845,45 @@ mod test {
 			append_untimed(&mut producer);
 		}
 
-		let mut subscriber = producer.subscribe(Subscription::default().with_start(Position::group(2)));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_live(false).with_floor(Position::group(2)));
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
+	}
+
+	/// `live` with a floor starts at whichever is lower: the floor when it sits below the
+	/// latest group, and the latest group (the untimed live edge) when the floor is above it.
+	#[test]
+	fn untimed_live_with_a_floor_starts_at_the_lower_of_the_two() {
+		let mut producer = untimed_producer();
+		for _ in 0..5 {
+			append_untimed(&mut producer);
+		}
+
+		let mut below = producer.subscribe(Subscription::default().with_floor(Position::group(2)));
+		assert_eq!(drain(&mut below), vec![2, 3, 4]);
+		let mut above = producer.subscribe(Subscription::default().with_floor(Position::group(7)));
+		assert_eq!(drain(&mut above), vec![4], "the live edge sits below the floor");
+	}
+
+	/// A floor above a quiet track's newest group waits there, while a `live` subscriber
+	/// gets that group at once. The aggregate keeps both: the floor and `live`.
+	#[test]
+	fn a_floor_above_the_live_edge_does_not_hide_it_from_live() {
+		let mut producer = track_producer("test", None);
+		for millis in 0..4 {
+			append_at(&mut producer, millis * 100);
+		}
+
+		let mut resumed = producer.subscribe(Subscription::default().with_live(false).with_floor(Position::group(4)));
+		let mut live = producer.subscribe(None);
+		assert_eq!(drain(&mut live), vec![3]);
+		assert_eq!(drain(&mut resumed), Vec::<u64>::new());
+		let combined = producer.subscription().unwrap();
+		assert_eq!((combined.live, combined.floor), (true, Some(Position::group(4))));
+
+		append_at(&mut producer, 400);
+		assert_eq!(drain(&mut live), vec![4]);
+		assert_eq!(drain(&mut resumed), vec![4]);
 	}
 
 	/// An unfloored untimed subscription with an end starts at the latest group below it,

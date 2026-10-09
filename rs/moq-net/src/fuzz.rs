@@ -345,9 +345,8 @@ impl LiteSample {
 				track: "video".into(),
 				priority: 2,
 				max_delay: std::time::Duration::from_secs(10),
-				start_group: None,
+				start: lite::Start::LIVE,
 				end_group: None,
-				start_frame: 0,
 				end_frame: None,
 			}
 			.encode(w, version)
@@ -529,17 +528,15 @@ impl Default for Messages {
 				track: "video".into(),
 				priority: 3,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
+				start: lite::Start::floored(crate::track::Position::group(1_000)),
 				end_group: None,
-				start_frame: 0,
 				end_frame: None,
 			},
 			lite_update: lite::SubscribeUpdate {
 				priority: 4,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
+				start: lite::Start::floored(crate::track::Position::group(1_000)),
 				end_group: Some(2_000),
-				start_frame: 0,
 				end_frame: None,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {

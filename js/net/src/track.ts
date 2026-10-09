@@ -10,6 +10,7 @@ import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer }
 import {
 	groupBounds,
 	hooks,
+	liveStart,
 	type Recv,
 	type TrackRequestOptions,
 	type TrackSequence,
@@ -143,13 +144,24 @@ export interface Subscription {
 	 */
 	maxDelay?: Milli;
 	/**
-	 * The lowest group the publisher may deliver (a floor), or omit for none.
+	 * Deliver from the live edge: the oldest group {@link maxDelay} has not expired, or the
+	 * latest group on an untimed track.
+	 *
+	 * Lowers the floor (`groups.start`) whenever the live edge sits below it, so a floor above
+	 * the live edge never hides the latest group from a subscriber that also wants it.
+	 * Defaults to `true` without a floor and `false` with one, so a floor alone is a resume.
+	 * Neither `live` nor a floor asks for nothing, which no wire carries.
+	 * Aggregated across subscribers as an OR.
+	 */
+	live?: boolean;
+	/**
+	 * The lowest group the publisher may deliver (a floor) as `start`, or omit it for none,
+	 * and the end of the requested range.
 	 *
 	 * A floor, not a request: only {@link maxDelay} asks for data, and the floor bounds how
-	 * far back it may reach. Omitting it and a floor of 0 differ only on an untimed track,
-	 * where nothing is ever stale: omitted starts at the latest group, and an explicit floor
-	 * replays from there. A floor above the live edge simply waits there (a resumed
-	 * subscription naming where it left off).
+	 * far back it may reach. A floor above the live edge simply waits there (a resumed
+	 * subscription naming where it left off), unless {@link live} lowers it. Aggregated across
+	 * subscribers as the lowest floor, where none is neutral.
 	 */
 	groups?: Groups;
 }
@@ -162,6 +174,7 @@ function subscriptionDefaults(subscription: Subscription = {}): Subscription {
 	return {
 		priority: priorityByte(subscription.priority ?? 0),
 		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? Milli.zero),
+		live: subscription.live ?? subscription.groups?.start === undefined,
 		groups: {
 			start: subscription.groups?.start === undefined ? undefined : { included: bounds.start },
 			end: bounds.end === undefined ? undefined : { excluded: bounds.end },
@@ -182,16 +195,23 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.maxDelay = Milli(Math.max(combined.maxDelay ?? Milli.zero, subscription.maxDelay ?? Milli.zero));
+		// Anyone wanting the live edge gets it, without lowering anyone's floor.
+		combined.live = combined.live || subscription.live;
 
-		// A floor only restricts, so a subscriber without one clears the aggregate:
-		// its budget may reach below any floor the others set.
+		// The lowest floor wins. A live-only subscriber has no floor, the neutral value, so it
+		// never clears another's: that starved the floored subscriber's resume.
 		const a = groupBounds(combined.groups ?? {});
 		const b = groupBounds(subscription.groups ?? {});
-		combined.groups = {
-			start:
-				combined.groups?.start === undefined || subscription.groups?.start === undefined
+		const start =
+			combined.groups?.start === undefined
+				? subscription.groups?.start === undefined
 					? undefined
-					: { included: Math.min(a.start, b.start) },
+					: b.start
+				: subscription.groups?.start === undefined
+					? a.start
+					: Math.min(a.start, b.start);
+		combined.groups = {
+			start: start === undefined ? undefined : { included: start },
 			end: a.end === undefined || b.end === undefined ? undefined : { excluded: Math.max(a.end, b.end) },
 		};
 	}
@@ -1180,26 +1200,31 @@ export class Subscriber {
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
-		// The cursor's floor is the group the subscription named, or 0. A floor is the
-		// only thing a start contributes; {@link Subscription.maxDelay} is what asks for
-		// data, and delivery skips everything above the floor that the budget convicts.
+		// The cursor starts at the group the subscription named (its floor), or 0, and
+		// `live` lowers it to the live edge. A floor is the only thing a start contributes;
+		// {@link Subscription.maxDelay} is what asks for data, and delivery skips everything
+		// above the start that the budget convicts, so on a timed track `live` starts at 0.
 		// Nothing on an untimed track is ever stale, so there the budget would replay the
-		// whole cache: an unfloored subscriber starts at the latest group instead.
-		const groups = state.update.peek()?.groups ?? {};
+		// whole cache: `live` starts at the latest group instead.
+		const subscription = state.update.peek();
+		const groups = subscription?.groups ?? {};
 		const bounds = groupBounds(groups);
-		const start = groups.start === undefined ? this.#untimedStart(bounds.end) : undefined;
-		this.#cursor.set({ start: start ?? bounds.start });
-		// Timedness is unknown until accept(), so an unfloored subscriber made before it
-		// settles its start then, against the groups that existed at that moment.
-		if (groups.start === undefined && !state.info.peek()) state.settle = () => this.#settleStart();
+		const floor = groups.start === undefined ? undefined : bounds.start;
+		const live = subscription?.live ?? floor === undefined;
+		const edge = live ? this.#untimedStart(bounds.end) : undefined;
+		this.#cursor.set({ start: liveStart(live, floor, edge ?? 0) });
+		// Timedness is unknown until accept(), so a live subscriber made before it settles
+		// its start then, against the groups that existed at that moment.
+		if (live && !state.info.peek()) state.settle = () => this.#settleStart(floor);
 	}
 
-	// Raise the floor of an unfloored subscriber made before accept(), once the track is
-	// known to be untimed.
-	#settleStart(): void {
+	// Raise the start of a live subscriber made before accept(), once the track is known to
+	// be untimed.
+	#settleStart(floor: number | undefined): void {
 		this.#state.settle = undefined;
-		const start = this.#untimedStart(this.#cursor.peek().end);
-		if (start === undefined) return;
+		const edge = this.#untimedStart(this.#cursor.peek().end);
+		if (edge === undefined) return;
+		const start = liveStart(true, floor, edge);
 		this.#cursor.update((cursor) => ({ ...cursor, start: Math.max(cursor.start, start) }));
 	}
 
@@ -1431,15 +1456,19 @@ export class Subscriber {
 	#tryRecvGroup(): Recv {
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
-		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+		// Groups below the floor stay buffered rather than dropped: a serving cursor lowers
+		// its floor again when the subscription gains `live` (see replaceGroups), and the
+		// cache window still evicts them.
+		let first = 0;
+		while (first < groups.length && groups[first].sequence < start) first++;
 		const drift = this.#drift();
 
 		for (;;) {
 			// The buffer is sequence-sorted, so an in-range group that arrives behind a
 			// beyond-cap one sorts in front of it and is never blocked by it.
-			const group = groups[0];
+			const group = groups[first];
 			if (!group || (end !== undefined && group.sequence >= end)) break;
-			groups.shift();
+			groups.splice(first, 1);
 			if (this.#isStale(group, drift)) {
 				group.close();
 				continue;
@@ -1447,7 +1476,7 @@ export class Subscriber {
 			return { kind: "group", group: this.#guard(group) };
 		}
 
-		const group = groups[0];
+		const group = groups[first];
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		if (closed === undefined && !this.#complete()) return { kind: "idle" };

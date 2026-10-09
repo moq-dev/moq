@@ -1842,14 +1842,12 @@ where
 		group_fetches: &mut TaskSet,
 	) -> Option<Idle> {
 		let subscription = target.subscription();
-		let start = subscription.as_ref().and_then(|s| s.start);
+		// moq-transport has no `live` field, so it folds into the floor: `live` with a
+		// floor subscribes from group 0, and each reader's cursor filters by age and floor.
+		let start = subscription.as_ref().and_then(|s| s.folded_floor());
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
 		let live = start.is_none();
-		let join = match subscribe_join(
-			subscription.as_ref().and_then(|s| s.start),
-			subscription.as_ref().and_then(|s| s.end),
-			self.version,
-		) {
+		let join = match subscribe_join(start, subscription.as_ref().and_then(|s| s.end), self.version) {
 			Ok(join) => join,
 			Err(err) => {
 				target.fail(err);
@@ -1886,10 +1884,7 @@ where
 			state.subscribes.insert(
 				request_id,
 				TrackState {
-					resume: subscription
-						.as_ref()
-						.and_then(|s| s.start)
-						.filter(|start| start.frame != 0),
+					resume: start.filter(|start| start.frame != 0),
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),
 					..TrackState::pending(track_name.to_owned(), broadcast_path.to_owned(), fill.clone(), joining)
@@ -9250,7 +9245,7 @@ mod joining_fetch_tests {
 			let track = consumer.track("video").unwrap();
 			let subscription = match start {
 				None => track.subscribe(None),
-				Some(start) => track.subscribe(track::Subscription::default().with_start(start)),
+				Some(start) => track.subscribe(track::Subscription::default().with_live(false).with_floor(start)),
 			};
 			let request = dynamic.requested_track().await.expect("no track requested");
 

@@ -31,6 +31,12 @@ export function groupBounds(groups: Groups = {}): { start: number; end?: number 
 	return { start: bound(groups.start, true) ?? 0, end: bound(groups.end, false) };
 }
 
+/** Where a read cursor starts: the floor, lowered by `live` to the live edge `edge`. */
+export function liveStart(live: boolean, floor: number | undefined, edge: number): number {
+	if (!live) return floor ?? 0;
+	return floor === undefined ? edge : Math.min(floor, edge);
+}
+
 /**
  * The announce-interest prefix a scope needs on a prefix-shaped wire: its literal head.
  * The peer echoes every suffix beneath it, and the caller filters what arrives.

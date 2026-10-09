@@ -709,10 +709,16 @@ where
 			// cover the group with no gap and no overlap.
 			let edge = live_edge(&cache);
 			let range = subscribe_range(&msg, edge, self.version);
-			subscription.start = range.start.map(|start| track::Position {
+			// A resolved start is a floor, including `Relative(1)` at frame 0 of the
+			// current group. That is not `live`: `live` with this serving budget asks a
+			// relay for the retained window. It is not an unfiltered {0, 0} either.
+			// No start at all (a relative filter before any group exists) is still the
+			// live edge, because there is no group to floor at yet.
+			subscription.floor = range.start.map(|start| track::Position {
 				group: start.group,
 				frame: start.object,
 			});
+			subscription.live = subscription.floor.is_none();
 			subscription.end = range.end.and_then(|end| match end.object {
 				Some(object) => track::Position::after(end.group, object),
 				None => track::Position::after_group(end.group),
@@ -4739,6 +4745,88 @@ mod serve_tests {
 		}
 	}
 
+	/// `Relative(1)` floors demand at the current group. It is not `live` (that asks a
+	/// relay for the retained window) and not an unfiltered start at {0, 0}.
+	#[moq_net_sim::test]
+	async fn relative_one_floors_demand_at_the_current_group() {
+		let h = serve(Version::Draft20);
+		for (sequence, payload) in [(0u64, &b"old-0"[..]), (1, &b"old-1"[..]), (2, &b"now-2"[..])] {
+			let mut group = h.track.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(timestamp(), payload).unwrap();
+			group.finish().unwrap();
+		}
+
+		let stream = Stream::open(&mut h.session.clone(), Version::Draft20).await.unwrap();
+		let mut serve = std::pin::pin!(
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::Relative(1), None))
+		);
+		// The bytes can land before the origin's query subscription catches the
+		// narrowed demand. Wait for both, or a stale `live` still looks like the bug.
+		serve_until(
+			serve.as_mut(),
+			"Relative(1) floored demand at the current group",
+			|| {
+				occurrences(&h.log, b"now-2") == 1
+					&& h.track.subscription().is_some_and(|subscription| {
+						!subscription.live && subscription.floor == Some(track::Position::group(2))
+					})
+			},
+		)
+		.await;
+
+		let subscription = h.track.subscription().expect("the subscribe registered demand");
+		assert!(!subscription.live, "Relative(1) is not the live flag: {subscription:?}");
+		assert_eq!(
+			subscription.floor,
+			Some(track::Position::group(2)),
+			"the floor is the current group, not the retained window"
+		);
+		assert_eq!(occurrences(&h.log, b"old-0"), 0);
+		assert_eq!(occurrences(&h.log, b"old-1"), 0);
+
+		h.track.finish().unwrap();
+		serve.await.unwrap();
+	}
+
+	/// Draft-20 Unfiltered stays a floor at {0, 0}, the whole retained cache, not `live`.
+	#[moq_net_sim::test]
+	async fn an_unfiltered_subscription_floors_demand_at_the_origin() {
+		let h = serve(Version::Draft20);
+		for (sequence, payload) in [(0u64, &b"old-0"[..]), (1, &b"old-1"[..]), (2, &b"now-2"[..])] {
+			let mut group = h.track.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(timestamp(), payload).unwrap();
+			group.finish().unwrap();
+		}
+
+		let stream = Stream::open(&mut h.session.clone(), Version::Draft20).await.unwrap();
+		let mut serve = std::pin::pin!(
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
+		);
+		serve_until(serve.as_mut(), "Unfiltered floored demand at the origin", || {
+			occurrences(&h.log, b"old-0") == 1
+				&& occurrences(&h.log, b"old-1") == 1
+				&& occurrences(&h.log, b"now-2") == 1
+				&& h.track.subscription().is_some_and(|subscription| {
+					!subscription.live && subscription.floor == Some(track::Position::group(0))
+				})
+		})
+		.await;
+
+		let subscription = h.track.subscription().expect("the subscribe registered demand");
+		assert!(
+			!subscription.live,
+			"Unfiltered is a floor at the origin, not live: {subscription:?}"
+		);
+		assert_eq!(subscription.floor, Some(track::Position::group(0)));
+
+		h.track.finish().unwrap();
+		serve.await.unwrap();
+	}
+
 	/// A Next Object subscription never receives the already-published head of the
 	/// current group: everything below the snapshot is outside the requested range.
 	#[moq_net_sim::test]
@@ -8066,10 +8154,13 @@ fn subscribe_range(msg: &ietf::Subscribe<'_>, edge: LiveEdge, version: Version) 
 /// The Locations a single Location Filter selects, resolved against the live edge.
 fn filter_range(filter: Filter, edge: LiveEdge) -> ServeRange {
 	match filter {
-		// No restriction. moq-lite starts at the beginning of the latest group, which is
-		// the join point it is built around; a subscription passes objects as they are
-		// published, so an absent filter is not a request to replay history.
-		Filter::Unfiltered => ServeRange::default(),
+		// Every Object, which the draft defines as an open ended absolute {0, 0}: the same
+		// start an explicit one asks for. A relay folding `live` into a floor sends it to
+		// reach back over what its readers may still use, and filters locally.
+		Filter::Unfiltered => ServeRange {
+			start: Some(Location { group: 0, object: 0 }),
+			end: None,
+		},
 		// `{Largest.Group, Largest.Object + 1}`. Everything below it, including the
 		// already-published head of the current group, is outside the requested range,
 		// so the join is mid-group by construction. The draft pairs this with a fill
@@ -8247,12 +8338,18 @@ mod range_tests {
 		assert_eq!(subscribe_range(&msg, EDGE, Version::Draft19), ServeRange::default());
 	}
 
-	/// An absent filter is "no restriction on what is forwarded", not a request for
-	/// history, so it joins at the live edge.
+	/// An absent filter is every Object, an open ended absolute {0, 0}, so it starts at the
+	/// origin like the explicit spelling the draft defines it as.
 	#[test]
-	fn an_unfiltered_subscription_stays_live() {
+	fn an_unfiltered_subscription_starts_at_the_origin() {
 		let msg = subscribe(Filter::Unfiltered);
-		assert_eq!(subscribe_range(&msg, EDGE, Version::Draft20), ServeRange::default());
+		assert_eq!(
+			subscribe_range(&msg, EDGE, Version::Draft20),
+			ServeRange {
+				start: Some(Location { group: 0, object: 0 }),
+				end: None,
+			}
+		);
 	}
 
 	/// Next Object starts one past the Largest Object, mid-group. Everything below it,

@@ -285,6 +285,7 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	expect(producer.subscription.peek()).toEqual({
 		priority: 0,
 		maxDelay: Milli(0),
+		live: false,
 		groups: { start: { included: 0 } },
 	});
 
@@ -294,6 +295,7 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	expect(await next).toEqual({
 		priority: 7,
 		maxDelay: Milli(250),
+		live: false,
 		groups: { start: { included: 2 }, end: { excluded: 9 } },
 	});
 });
@@ -379,6 +381,7 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(producer.subscription.peek()).toEqual({
 		priority: 7,
 		maxDelay: Milli(250),
+		live: false,
 		groups: { start: { included: 5 } },
 	});
 
@@ -387,12 +390,65 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(await narrowed).toEqual({
 		priority: 2,
 		maxDelay: Milli(100),
+		live: false,
 		groups: { start: { included: 10 }, end: { excluded: 20 } },
 	});
 
 	const none = producer.subscription.changed();
 	bounded.close();
 	expect(await none).toBeUndefined();
+});
+
+test("a live-only subscriber keeps another's floor and adds the live edge", () => {
+	const producer = new TrackProducer("test");
+	// A resume names where it left off, which is a floor alone.
+	const resumed = producer.subscribe({ groups: { start: { included: 4 } } });
+	expect(producer.subscription.peek()?.live).toBe(false);
+
+	// Clearing the floor starved the resume; keeping only the floor starved the live one.
+	const live = producer.subscribe();
+	expect(producer.subscription.peek()).toMatchObject({ live: true, groups: { start: { included: 4 } } });
+
+	// The floor and `live` together, as one subscriber.
+	const both = producer.subscribe({ live: true, groups: { start: { included: 2 } } });
+	expect(producer.subscription.peek()).toMatchObject({ live: true, groups: { start: { included: 2 } } });
+	for (const sub of [resumed, live, both]) sub.close();
+});
+
+test("a live subscriber starts below a floor above a quiet track's live edge", async () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI });
+	for (let sequence = 0; sequence < 4; sequence++) {
+		const group = new GroupProducer(sequence);
+		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(sequence * 100) });
+		group.close();
+		producer.writeGroup(group);
+	}
+
+	const resumed = producer.subscribe({ groups: { start: { included: 4 } } });
+	const live = producer.subscribe();
+	expect((await live.recvGroup())?.sequence).toBe(3);
+
+	const group = new GroupProducer(4);
+	group.close();
+	producer.writeGroup(group);
+	expect((await live.recvGroup())?.sequence).toBe(4);
+	expect((await resumed.recvGroup())?.sequence).toBe(4);
+});
+
+test("an untimed live subscriber starts at the lower of its floor and the latest group", async () => {
+	const producer = new TrackProducer("test");
+	producer.accept({});
+	for (let sequence = 0; sequence < 5; sequence++) {
+		const group = new GroupProducer(sequence);
+		group.close();
+		producer.writeGroup(group);
+	}
+
+	const below = producer.subscribe({ live: true, groups: { start: { included: 2 } } });
+	expect((await below.recvGroup())?.sequence).toBe(2);
+	const above = producer.subscribe({ live: true, groups: { start: { included: 7 } } });
+	expect((await above.recvGroup())?.sequence).toBe(4);
 });
 
 test("the producer aggregate is clamped without changing subscriber options", async () => {

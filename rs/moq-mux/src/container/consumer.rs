@@ -32,9 +32,10 @@ pub(crate) enum Event {
 /// skipped. A missing sequence gets the same tolerance: there is no way to tell a stream
 /// that lost the delivery race from one the cache evicted.
 ///
-/// Delivery starts at the [`Subscription::start`](moq_net::track::Subscription::start)
-/// floor when one is named, waiting for that group under the budget; without one it
-/// starts wherever the publisher does, adopted from the first served groups. From there
+/// Delivery starts at the [`Subscription::floor`](moq_net::track::Subscription::floor)
+/// when one is named without [`live`](moq_net::track::Subscription::live), waiting for
+/// that group under the budget; at the live edge it starts wherever the publisher does,
+/// adopted from the first served groups. From there
 /// the same budget is the one rule that catches the consumer up to the live edge, and
 /// history the publisher no longer serves expires like any other gap, since its reach
 /// sits a full budget behind the newest content.
@@ -121,13 +122,16 @@ impl<F: Container> Consumer<F> {
 	/// publisher preserves the same replay window.
 	pub fn new(track: moq_net::track::Subscriber, format: F) -> Self {
 		let subscription = track.subscription();
-		// Delivery starts at the subscription floor; without one it starts wherever
-		// the publisher does, adopted from the first arrivals (see poll_read). Either
-		// way the age budget is the one rule that catches the cursor up to the live
-		// edge from there. The budget is clamped to the track's retention window,
-		// since history the publisher no longer keeps can't be waited for and would
-		// otherwise stall the catch-up by the excess.
-		let start = subscription.start.map(|position| position.group);
+		// Delivery starts at the subscription floor; at the live edge, which may sit
+		// below any floor, it starts wherever the publisher does, adopted from the first
+		// arrivals (see poll_read). Either way the age budget is the one rule that
+		// catches the cursor up to the live edge from there. The budget is clamped to
+		// the track's retention window, since history the publisher no longer keeps
+		// can't be waited for and would otherwise stall the catch-up by the excess.
+		let start = subscription
+			.floor
+			.filter(|_| !subscription.live)
+			.map(|position| position.group);
 		let max_delay = subscription
 			.max_delay
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
@@ -1905,7 +1909,8 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
 			moq_net::track::Subscription::default()
-				.with_start(moq_net::track::Position::group(0))
+				.with_live(false)
+				.with_floor(moq_net::track::Position::group(0))
 				.with_max_delay(Duration::from_millis(500)),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));

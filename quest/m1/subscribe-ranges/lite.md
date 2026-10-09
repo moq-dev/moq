@@ -20,6 +20,5 @@ FETCH, answered through the model's ranges. Run `just drafts check` and
 
 ## Required
 
-- [lite-07 Live flag](/quest/m1/lite-live.md) - reshapes the same SUBSCRIBE first
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - the model this serves
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07's DROP for holes

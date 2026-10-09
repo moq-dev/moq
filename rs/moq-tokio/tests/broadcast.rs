@@ -1106,7 +1106,8 @@ async fn broadcast_route_migration() {
 
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
-		.with_start(moq_net::track::Position::group(1))
+		.with_live(false)
+		.with_floor(moq_net::track::Position::group(1))
 		.with_max_delay(Duration::from_secs(10));
 	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
 		.await

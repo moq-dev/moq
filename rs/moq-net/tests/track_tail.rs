@@ -109,7 +109,9 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 	} = connect(version).await;
 
 	let reader = moq_net_sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let subscription = moq_net::track::Subscription::default()
+			.with_live(false)
+			.with_floor(moq_net::track::Position::group(0));
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -259,7 +261,9 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 			_keep,
 		} = connect(version).await;
 
-		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let subscription = moq_net::track::Subscription::default()
+			.with_live(false)
+			.with_floor(moq_net::track::Position::group(0));
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -317,7 +321,9 @@ async fn a_lost_datagram_never_delays_the_end() {
 		} = connect(version).await;
 
 		let reader = moq_net_sim::spawn(async move {
-			let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+			let subscription = moq_net::track::Subscription::default()
+				.with_live(false)
+				.with_floor(moq_net::track::Position::group(0));
 			let mut sub = remote
 				.track("video")
 				.unwrap()

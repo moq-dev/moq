@@ -4,101 +4,130 @@ import type { Reader, Writer } from "../stream.ts";
 import type { Location } from "../track.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasGroupOrder, hasLargest, hasStreamCount, resolvesStart, Version } from "./version.ts";
+import {
+	hasFrameBounds,
+	hasGroupOrder,
+	hasLargest,
+	hasLive,
+	hasStreamCount,
+	resolvesStart,
+	Version,
+} from "./version.ts";
 
 /**
- * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
+ * Where a subscription may start, as SUBSCRIBE and SUBSCRIBE_UPDATE carry it: the live
+ * edge, a floor (`startGroup` qualified by `startFrame`), or both.
  *
- * Lite-06 writes the raw floor (`undefined` and 0 are the same absence of a constraint),
- * while a pre-06 wire encodes the sequence + 1 and gets a vacuous floor folded back to
- * absent: an explicit group 0 there means "replay from the beginning", which is not what
- * a floor of 0 asks for.
+ * Lite-07 carries both. Older versions have only `Group Start`, so `live` folds into it:
+ * lite-06 `Group Start` 0 with `Frame Start` 0 is `live` and any other pair a floor (`(0, N)`
+ * is a catalog resume), a pre-06 absent `Group Start` is `live`, and lite-01/02 carry none.
  */
-async function encodeStartGroup(w: Writer, version: Version, startGroup?: number) {
-	if (resolvesStart(version)) {
-		await w.u53(startGroup ?? 0);
+export interface Start {
+	/** Deliver from the live edge. */
+	live: boolean;
+	/** The floor's group, or undefined for no floor. */
+	startGroup?: number;
+	/** The floor's first frame within `startGroup`; 0 without a floor. */
+	startFrame: number;
+}
+
+/** `live` alone, which is what a version without `Group Start` asks for. */
+const LIVE: Start = { live: true, startFrame: 0 };
+
+/** The floor a version without `Live` carries: none for `live` alone, (0, 0) beside a floor. */
+function folded(start: Start): { startGroup?: number; startFrame: number } {
+	if (!start.live) return { startGroup: start.startGroup, startFrame: start.startFrame };
+	return start.startGroup === undefined ? { startFrame: 0 } : { startGroup: 0, startFrame: 0 };
+}
+
+/**
+ * Encode the start shared by SUBSCRIBE and SUBSCRIBE_UPDATE: everything on lite-07 and pre-06,
+ * and `Group Start` alone on lite-06, whose `Frame Start` trails the end group.
+ *
+ * Neither `live` nor a floor asks for nothing, so it has no encoding. A pre-06 `Group Start`
+ * cannot qualify a frame, so a floor partway through a group is refused rather than widened.
+ */
+async function encodeStart(w: Writer, version: Version, start: Start) {
+	if (!start.live && start.startGroup === undefined) throw new Error(EMPTY_START);
+	if (hasLive(version)) {
+		await w.bool(start.live);
+		await w.bool(start.startGroup !== undefined);
+		if (start.startGroup !== undefined) {
+			await w.u53(start.startGroup);
+			await w.u53(start.startFrame);
+		}
 		return;
 	}
-	await w.u53(startGroup !== undefined && startGroup > 0 ? startGroup + 1 : 0);
+	const floor = folded(start);
+	if (resolvesStart(version)) {
+		await w.u53(floor.startGroup ?? 0);
+		return;
+	}
+	if (floor.startFrame !== 0) throw new Error("frame bounds not supported for this version");
+	// The sequence + 1, so an explicit group 0 (replay from the beginning) is 1.
+	await w.u53(floor.startGroup !== undefined ? floor.startGroup + 1 : 0);
 }
 
-/**
- * Decode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
- *
- * The inverse of {@link encodeStartGroup}. Callers canonicalize with
- * {@link canonicalStartGroup} once the frame bounds are known.
- */
-async function decodeStartGroup(r: Reader, version: Version): Promise<number | undefined> {
+/** Decode what {@link encodeStart} writes; lite-06's trailing `Frame Start` is applied after. */
+async function decodeStart(r: Reader, version: Version): Promise<Start> {
+	if (hasLive(version)) {
+		const live = await r.bool();
+		if (!(await r.bool())) {
+			if (!live) throw new Error(EMPTY_START);
+			return LIVE;
+		}
+		return { live, startGroup: await r.u53(), startFrame: await r.u53() };
+	}
 	const value = await r.u53();
-	if (resolvesStart(version)) return value;
-	return value > 0 ? value - 1 : undefined;
+	if (resolvesStart(version)) return { live: false, startGroup: value, startFrame: 0 };
+	return value > 0 ? { live: false, startGroup: value - 1, startFrame: 0 } : LIVE;
 }
 
 /**
- * Canonicalize a decoded floor: a lite-06 `Group Start` of 0 with no frame offset is the
- * same absence of a constraint as no floor at all, so it decodes as undefined. Group 0
- * stays named only when a `Frame Start` actually qualifies it (a subscription can resume
- * partway through group 0: a catalog never leaves it).
- */
-function canonicalStartGroup(version: Version, startGroup: number | undefined, startFrame: number): number | undefined {
-	if (resolvesStart(version) && startGroup === 0 && startFrame === 0) return undefined;
-	return startGroup;
-}
-
-/**
- * Encode the trailing `Frame Start` / `Frame End` pair shared by SUBSCRIBE and
- * SUBSCRIBE_UPDATE. A no-op before lite-06, which has nowhere to put them.
+ * Encode the trailing frame fields shared by SUBSCRIBE and SUBSCRIBE_UPDATE: lite-06's
+ * `Frame Start` and lite-06+'s `Frame End`. A no-op before lite-06, which has nowhere to put
+ * them.
  */
 async function encodeFrameBounds(
 	w: Writer,
 	version: Version,
-	{
-		startGroup,
-		startFrame,
-		endGroup,
-		endFrame,
-	}: { startGroup?: number; startFrame: number; endGroup?: number; endFrame?: number },
+	{ start, endGroup, endFrame }: { start: Start; endGroup?: number; endFrame?: number },
 ) {
-	if ((startFrame !== 0 && startGroup === undefined) || (endFrame !== undefined && endGroup === undefined)) {
-		throw new Error("frame bound without a group bound");
-	}
+	if (endFrame !== undefined && endGroup === undefined) throw new Error("frame bound without a group bound");
 
 	if (!hasFrameBounds(version)) {
 		// Silently widening to the whole group would deliver frames we excluded.
-		if (startFrame !== 0 || endFrame !== undefined) {
-			throw new Error("frame bounds not supported for this version");
-		}
+		if (endFrame !== undefined) throw new Error("frame bounds not supported for this version");
 		return;
 	}
 
-	await w.u53(startFrame);
+	if (!hasLive(version)) await w.u53(folded(start).startFrame);
 	await w.u53(endFrame !== undefined ? endFrame + 1 : 0);
 }
 
 /**
- * Decode the trailing `Frame Start` / `Frame End` pair, defaulting to the whole group.
+ * Decode the trailing frame fields, defaulting to the whole group, and read a lite-06 start
+ * back: `(0, 0)` is `live`.
  *
- * A frame bound without the group bound it qualifies is a protocol violation: frames
- * are numbered per group, so there is nothing to count from.
+ * A frame bound without the group bound it qualifies is a protocol violation: frames are
+ * numbered per group, so there is nothing to count from.
  */
 async function decodeFrameBounds(
 	r: Reader,
 	version: Version,
-	startGroup?: number,
+	start: Start,
 	endGroup?: number,
-): Promise<{ startFrame: number; endFrame?: number }> {
-	if (!hasFrameBounds(version)) {
-		return { startFrame: 0 };
-	}
+): Promise<{ start: Start; endFrame?: number }> {
+	if (!hasFrameBounds(version)) return { start };
 
-	const startFrame = await r.u53();
+	if (!hasLive(version)) {
+		const startFrame = await r.u53();
+		start = start.startGroup === 0 && startFrame === 0 ? LIVE : { ...start, startFrame };
+	}
 	const endFrame = await r.u53();
+	if (endFrame !== 0 && endGroup === undefined) throw new Error("frame bound without a group bound");
 
-	if ((startFrame !== 0 && startGroup === undefined) || (endFrame !== 0 && endGroup === undefined)) {
-		throw new Error("frame bound without a group bound");
-	}
-
-	return { startFrame, endFrame: endFrame > 0 ? endFrame - 1 : undefined };
+	return { start, endFrame: endFrame > 0 ? endFrame - 1 : undefined };
 }
 
 /** Step over the retired `Ordered` byte on a version whose layout still has it. */
@@ -124,6 +153,9 @@ export function exclusiveGroupEnd(inclusive?: number): number | undefined {
 /** The error for a requested range the wire cannot carry; see {@link emptyRange}. */
 export const EMPTY_RANGE = "empty subscription range cannot be encoded";
 
+/** The error for a subscription with neither `live` nor a floor, which asks for nothing. */
+export const EMPTY_START = "a subscription needs live or a floor";
+
 /**
  * Inclusive last group a Subscribe message carries, from an exclusive model end.
  *
@@ -141,37 +173,37 @@ export function inclusiveGroupEnd(exclusive?: number): number | undefined {
  *
  * The wire has no encoding for one: its bounds are inclusive, so flooring the end would
  * either hand back the group the caller excluded (0 means unbounded) or invert the
- * range once the two bounds meet. An absent start is the live edge, so it only empties
- * the range when the end is 0.
+ * range once the two bounds meet. The live edge may sit below any floor, so with `live` the
+ * range is empty only when the end is 0.
  */
-export function emptyRange({ startGroup, endGroup }: { startGroup?: number; endGroup?: number }): boolean {
-	return endGroup !== undefined && (startGroup ?? 0) >= endGroup;
+export function emptyRange({
+	live,
+	startGroup,
+	endGroup,
+}: {
+	live?: boolean;
+	startGroup?: number;
+	endGroup?: number;
+}): boolean {
+	const lowest = (live ?? startGroup === undefined) ? 0 : (startGroup ?? 0);
+	return endGroup !== undefined && lowest >= endGroup;
 }
 
 export class SubscribeUpdate {
 	priority: number;
 	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
 	maxDelay: number;
-	startGroup?: number;
+	/** See {@link Subscribe.start}. */
+	start: Start;
 	endGroup?: number;
-	/** See {@link Subscribe.startFrame}. */
-	startFrame: number;
 	/** See {@link Subscribe.endFrame}. */
 	endFrame?: number;
 
-	constructor(props: {
-		priority: number;
-		maxDelay?: number;
-		startGroup?: number;
-		endGroup?: number;
-		startFrame?: number;
-		endFrame?: number;
-	}) {
+	constructor(props: { priority: number; maxDelay?: number; start?: Start; endGroup?: number; endFrame?: number }) {
 		this.priority = props.priority;
 		this.maxDelay = props.maxDelay ?? 0;
-		this.startGroup = props.startGroup;
+		this.start = props.start ?? LIVE;
 		this.endGroup = props.endGroup;
-		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 	}
 
@@ -185,7 +217,7 @@ export class SubscribeUpdate {
 				await w.u8(this.priority);
 				await padGroupOrder(w, version);
 				await w.u53(this.maxDelay);
-				await encodeStartGroup(w, version, this.startGroup);
+				await encodeStart(w, version, this.start);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await encodeFrameBounds(w, version, this);
 				break;
@@ -201,17 +233,11 @@ export class SubscribeUpdate {
 				const priority = await r.u8();
 				await skipGroupOrder(r, version);
 				const maxDelay = await r.u53();
-				const startGroup = await decodeStartGroup(r, version);
+				const start = await decodeStart(r, version);
 				const endGroup = (await r.u53()) || undefined;
 				const end = endGroup !== undefined ? endGroup - 1 : undefined;
-				const frames = await decodeFrameBounds(r, version, startGroup, end);
-				return new SubscribeUpdate({
-					priority,
-					maxDelay,
-					startGroup: canonicalStartGroup(version, startGroup, frames.startFrame),
-					endGroup: end,
-					...frames,
-				});
+				const frames = await decodeFrameBounds(r, version, start, end);
+				return new SubscribeUpdate({ priority, maxDelay, endGroup: end, ...frames });
 			}
 		}
 	}
@@ -239,15 +265,12 @@ export class Subscribe {
 	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
 	maxDelay: number;
 
-	startGroup?: number;
-	endGroup?: number;
-
 	/**
-	 * First frame to deliver within `startGroup`'s group; 0 is the whole group.
-	 * Lite-06+. It qualifies the named group, so it needs `startGroup` to name one
-	 * (defined, including 0: group 0 can host a mid-group resume).
+	 * Where delivery may start; see {@link Start}. A floor's `startFrame` is lite-06+ and
+	 * qualifies its group, group 0 included (a catalog can resume partway through it).
 	 */
-	startFrame: number;
+	start: Start;
+	endGroup?: number;
 
 	/**
 	 * Last frame to deliver (inclusive) within `endGroup`'s group, or undefined for the
@@ -262,9 +285,8 @@ export class Subscribe {
 		track: string;
 		priority: number;
 		maxDelay?: number;
-		startGroup?: number;
+		start?: Start;
 		endGroup?: number;
-		startFrame?: number;
 		endFrame?: number;
 	}) {
 		this.id = props.id;
@@ -273,9 +295,8 @@ export class Subscribe {
 		this.track = props.track;
 		this.priority = props.priority;
 		this.maxDelay = props.maxDelay ?? 0;
-		this.startGroup = props.startGroup;
+		this.start = props.start ?? LIVE;
 		this.endGroup = props.endGroup;
-		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
 	}
 
@@ -293,7 +314,7 @@ export class Subscribe {
 			default:
 				await padGroupOrder(w, version);
 				await w.u53(this.maxDelay);
-				await encodeStartGroup(w, version, this.startGroup);
+				await encodeStart(w, version, this.start);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await encodeFrameBounds(w, version, this);
 				break;
@@ -314,21 +335,11 @@ export class Subscribe {
 			default: {
 				await skipGroupOrder(r, version);
 				const maxDelay = await r.u53();
-				const startGroup = await decodeStartGroup(r, version);
+				const start = await decodeStart(r, version);
 				const endGroup = (await r.u53()) || undefined;
 				const end = endGroup !== undefined ? endGroup - 1 : undefined;
-				const frames = await decodeFrameBounds(r, version, startGroup, end);
-				return new Subscribe({
-					id,
-					broadcast,
-					epoch,
-					track,
-					priority,
-					maxDelay,
-					startGroup: canonicalStartGroup(version, startGroup, frames.startFrame),
-					endGroup: end,
-					...frames,
-				});
+				const frames = await decodeFrameBounds(r, version, start, end);
+				return new Subscribe({ id, broadcast, epoch, track, priority, maxDelay, endGroup: end, ...frames });
 			}
 		}
 	}

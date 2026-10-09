@@ -1209,10 +1209,11 @@ mod tests {
 			family.reclaim(&mut requested);
 			assert!(family.tracks.is_empty());
 
-			let subscribing = consumer
-				.track(name)
-				.unwrap()
-				.subscribe(track::Subscription::default().with_start(track::Position::group(floor)));
+			let subscribing = consumer.track(name).unwrap().subscribe(
+				track::Subscription::default()
+					.with_live(false)
+					.with_floor(track::Position::group(floor)),
+			);
 			family.adopt_pair(
 				&broadcast,
 				&mut requested,

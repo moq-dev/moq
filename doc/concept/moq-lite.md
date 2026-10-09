@@ -140,10 +140,12 @@ its scope can use.
 
 ## Subscriptions
 
-A subscriber names a broadcast and track. Delivery starts at the oldest group
-it can still use, which at the default budget is the latest one, so every group
-must begin at a point a fresh subscriber can decode from (a keyframe, a full
-JSON snapshot). Groups can also be fetched by sequence number, which is how the
+A subscriber names a broadcast and track. By default delivery starts at the
+live edge: the oldest group it can still use, which at the default budget is the
+latest one, so every group must begin at a point a fresh subscriber can decode
+from (a keyframe, a full JSON snapshot). A resumed subscriber names a floor
+instead, where it left off, and can ask for both, in which case the lower start
+wins. Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
@@ -152,7 +154,6 @@ Each subscription carries the knobs that decide behavior under congestion:
 | Knob | Effect |
 | --- | --- |
 | **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
-| **Order** | Which group to send first when several are pending. Newest first for live, oldest first for catch-up. |
 | **Max delay** | How far a non-latest group may fall behind the live edge before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 
 Max delay is measured on the media timeline, not the wall clock, so a backlog
@@ -163,8 +164,7 @@ publisher only ever sees the most tolerant budget across its subscribers.
 
 A track is timed or untimed: it declares a timescale or none, and a frame that
 doesn't match is refused. No receiver fills in an arrival time. An untimed
-group never falls past max delay, so a new subscriber starts at its latest
-group unless it names a start. Tracks from moq-lite before 05, or from
+group never falls past max delay, so its live edge is the latest group. Tracks from moq-lite before 05, or from
 moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
 untimed. No moq-lite version can declare an untimed track, so on 05 and later
 its frames go out stamped with their send time.
@@ -183,10 +183,10 @@ timestamps and always keeps the newest group. IETF carries the same idea as
 
 Put together, a conference might use:
 
-| Track | Priority | Order | Max delay |
-| --- | --- | --- | --- |
-| audio | 100 | ascending | 500 ms |
-| video | 50 | descending | 2 s |
+| Track | Priority | Max delay |
+| --- | --- | --- |
+| audio | 100 | 500 ms |
+| video | 50 | 2 s |
 
 Under light congestion video drops the tail of a group; under heavy congestion
 video stops and audio lags by at most 500 ms. No protocol change, just knobs.

@@ -123,7 +123,6 @@ encoding change; Max Age semantics in the lite draft change.
 ## Related
 
 - [Held group wakes](/quest/m1/held-group-wakes.md) - the `Wakes` entry this quest's wall-clock deadline rides on
-- [lite-07 Live flag](/quest/m1/lite-live.md) - its untimed `Live` start (the latest group) follows this rule instead: replay what is not stale
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors the failover rule in JS
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - relay memory past the expiry window, in the same cache
 - [Generated @moq/net](/quest/m1/rs2ts/README.md) - retires js/net's hand-written model

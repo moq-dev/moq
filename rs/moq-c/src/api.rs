@@ -588,7 +588,9 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 			.with_priority(subscription.priority)
 			.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us));
 		if subscription.group_start_present {
-			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
+			out = out
+				.with_live(false)
+				.with_floor(moq_net::track::Position::group(subscription.group_start));
 		}
 		if subscription.group_end_present {
 			out = out.with_end(moq_net::track::Position::group(subscription.group_end));
