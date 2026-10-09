@@ -9,8 +9,8 @@ and per node like the existing counters.
 
 ## Plan
 
-- Read both from [stats totals and prefix
-  tracks](/quest/m0/broadcast-epoch/stats-split.md), which lands first and
+- Read both from the stats totals and [prefix
+  tracks](/quest/m0/broadcast-epoch/prefix-tracks.md), which land first and
   retires the `publisher.json` rows they sit on today (decided in the
   2026-10-06 audit); [viewer lag histogram](/quest/m1/qos/lag-histogram.md)
   lands them on the egress side of its per-group totals and prefix tracks
@@ -35,4 +35,4 @@ Public API: none. Wire: none.
 ## Required
 
 - [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the `lag` histogram and `dropped` counters the dashboard reads
-- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the totals and prefix tracks the dashboard reads lag from
+- [Stats prefix tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) - the prefix tracks the dashboard reads lag from, beside the totals

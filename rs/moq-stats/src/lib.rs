@@ -20,12 +20,15 @@
 //! [`parse_node_path`]. Each announcement carries a fresh
 //! [`Epoch`](moq_net::Epoch) on its route, so a restarted node or a group
 //! returning from idle is a new broadcast at the same path; a reader tells
-//! them apart by the announced route's epoch. Each [`Tier`] carries `publisher.json`,
-//! `subscriber.json`, and `sessions.json` tracks of cumulative [`Traffic`] and
-//! [`Presence`] counters, plus `.json.z` siblings encoded with
-//! [`moq_json::snapshot`]; compute names with [`traffic_track`] /
-//! [`sessions_track`]. The full contract (paths, tracks, both encodings, and
-//! counter semantics) is at <https://doc.moq.dev/concept/stats>.
+//! them apart by the announced route's epoch. Every broadcast carries a
+//! `totals.json` track of each [`Tier`]'s [`Totals`] for the epoch, each tier
+//! carries `publisher.json` and `subscriber.json` tracks of per-path
+//! [`Traffic`], and a reader may request any auth root's
+//! `<root>/presence.json` track of [`Presence`]. Every track has a `.z`
+//! sibling encoded with [`moq_json::snapshot`]; compute names with
+//! [`totals_track`], [`traffic_track`], and [`presence_track`]. The full
+//! contract (paths, tracks, both encodings, and counter semantics) is at
+//! <https://doc.moq.dev/concept/stats>.
 
 pub mod aggregate;
 pub mod consume;
@@ -45,11 +48,46 @@ use moq_net::{AsPath, Path, PathOwned};
 /// One frame off a traffic track: cumulative counters keyed by broadcast path.
 pub type TrafficFrame = BTreeMap<String, Traffic>;
 
-/// One frame off a sessions track: connect/disconnect gauges keyed by auth root.
-pub type SessionsFrame = BTreeMap<String, Presence>;
+/// One frame off the totals track: each tier's [`Totals`], keyed by tier label
+/// (`""` for the default tier).
+pub type TotalsFrame = BTreeMap<String, Totals>;
+
+/// One frame off a presence track: one auth root's sessions, keyed by tier label
+/// (`""` for the default tier).
+pub type PresenceFrame = BTreeMap<String, Presence>;
+
+/// One tier's cumulative counters for a whole group: everything its entries
+/// sent, received, and connected since the group's epoch began, including
+/// entries that have since ended.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct Totals {
+	/// Egress: what this node sent.
+	pub publisher: Traffic,
+	/// Ingress: what this node received.
+	pub subscriber: Traffic,
+	/// Sessions connected under the group's auth roots.
+	pub sessions: Presence,
+}
+
+impl Totals {
+	/// Fold another readout into this one, counter by counter.
+	pub fn add(&mut self, other: Totals) {
+		self.publisher.add(other.publisher);
+		self.subscriber.add(other.subscriber);
+		self.sessions.add(other.sessions);
+	}
+}
 
 /// Suffix appended to a plain track name for its compressed sibling.
 pub const COMPRESSED_SUFFIX: &str = ".z";
+
+/// The totals track's plain name.
+pub(crate) const TOTALS: &str = "totals.json";
+
+/// The last segment of a presence track's plain name.
+const PRESENCE: &str = "presence.json";
 
 /// The traffic track name for a tier and role: `<role>.json` at the prefix root
 /// on the default tier (`publisher.json` / `subscriber.json`), `<tier>/<role>.json`
@@ -62,15 +100,49 @@ pub fn traffic_track(tier: &Tier, role: Role, compressed: bool) -> String {
 	name
 }
 
-/// The sessions track name for a tier: `sessions.json` on the default tier,
-/// `<tier>/sessions.json` on a named one, plus [`COMPRESSED_SUFFIX`] when
+/// The totals track name: `totals.json`, plus [`COMPRESSED_SUFFIX`] when
 /// `compressed`.
-pub fn sessions_track(tier: &Tier, compressed: bool) -> String {
-	let mut name = tier.track_name("sessions.json");
+pub fn totals_track(compressed: bool) -> String {
+	let mut name = TOTALS.to_string();
 	if compressed {
 		name.push_str(COMPRESSED_SUFFIX);
 	}
 	name
+}
+
+/// The presence track name for an auth root: `<root>/presence.json`, or
+/// `presence.json` for the empty root, plus [`COMPRESSED_SUFFIX`] when
+/// `compressed`. Served only while requested.
+pub fn presence_track(root: impl AsPath, compressed: bool) -> String {
+	let root = root.as_path();
+	let mut name = match root.is_empty() {
+		true => PRESENCE.to_string(),
+		false => format!("{}/{PRESENCE}", root.as_str()),
+	};
+	if compressed {
+		name.push_str(COMPRESSED_SUFFIX);
+	}
+	name
+}
+
+/// The auth root a presence track name requests, and whether it is the
+/// compressed flavor; `None` for any other name. The inverse of
+/// [`presence_track`].
+pub(crate) fn parse_presence_track(name: &str) -> Option<(PathOwned, bool)> {
+	let (plain, compressed) = match name.strip_suffix(COMPRESSED_SUFFIX) {
+		Some(plain) => (plain, true),
+		None => (name, false),
+	};
+	let root = match plain.strip_suffix(PRESENCE)? {
+		"" => "",
+		rest => rest.strip_suffix('/').filter(|root| !root.is_empty())?,
+	};
+	// Only a normalized root round-trips, so each root has exactly one name.
+	let path = Path::new(root);
+	if path.as_str() != root {
+		return None;
+	}
+	Some((path.to_owned(), compressed))
 }
 
 /// A parsed stats broadcast path: `<prefix>[/<group>]/node[/<node>]`.
@@ -198,7 +270,39 @@ mod tests {
 			traffic_track(&regional, Role::Publisher, false),
 			"region/sjc/publisher.json"
 		);
-		assert_eq!(sessions_track(&default, false), "sessions.json");
-		assert_eq!(sessions_track(&regional, true), "region/sjc/sessions.json.z");
+		assert_eq!(totals_track(false), "totals.json");
+		assert_eq!(totals_track(true), "totals.json.z");
+		assert_eq!(presence_track("acme/live", false), "acme/live/presence.json");
+		assert_eq!(presence_track("", true), "presence.json.z");
+	}
+
+	#[test]
+	fn presence_track_names_round_trip() {
+		for root in ["", "acme", "acme/live", "a.json", "x/presence.json", "publisher", "z"] {
+			for compressed in [false, true] {
+				let name = presence_track(root, compressed);
+				assert_eq!(
+					parse_presence_track(&name),
+					Some((PathOwned::from(root), compressed)),
+					"{name}"
+				);
+			}
+		}
+
+		// Names no root produces, including unnormalized ones, which would give
+		// one root two names.
+		for name in [
+			"publisher.json",
+			"acme/publisher.json",
+			"totals.json",
+			"xpresence.json",
+			"/presence.json",
+			"acme//presence.json",
+			"a//b/presence.json",
+			"/a/presence.json",
+			"presence.json.z.z",
+		] {
+			assert_eq!(parse_presence_track(name), None, "{name}");
+		}
 	}
 }
