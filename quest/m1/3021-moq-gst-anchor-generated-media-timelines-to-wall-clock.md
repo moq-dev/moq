@@ -17,7 +17,7 @@ only when it names a recognized absolute clock domain; otherwise relate the
 pipeline clock, base time, running time, and local SystemTime. An unidentified
 reference clock is not UTC. Every pad uses the same epoch rather than sampling
 its own. Do not define a GStreamer-specific catalog shape. Set the epoch
-through moq-mux's catalog clock (`Config::with_clock`, or an `Input` placed
+through moq-mux's catalog clock (`Config::with_clock`, or a `Timebase` placed
 with `place`): the clock is final once taken or published, and a
 `with_clock` catalog shifts every importer onto it.
 

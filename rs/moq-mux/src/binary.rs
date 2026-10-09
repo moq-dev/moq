@@ -501,7 +501,7 @@ mod test {
 	fn a_source_timestamp_is_published_unchanged() {
 		let (mut broadcast, catalog) = catalog();
 		let first = moq_net::Timestamp::from_secs(3600).unwrap();
-		catalog.input().anchor(first).unwrap();
+		catalog.timebase().anchor(first).unwrap();
 
 		let mut klv = catalog
 			.binary_stream(track(&mut broadcast, "klv"), Config::default())
@@ -593,7 +593,7 @@ mod test {
 
 		let before = catalog.clock().now();
 		let first = catalog
-			.input()
+			.timebase()
 			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
 			.unwrap();
 		stream.append(&b"after"[..]).unwrap();

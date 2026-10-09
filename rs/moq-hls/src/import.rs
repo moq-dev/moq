@@ -313,16 +313,16 @@ struct Sink {
 	/// The playlist's one timestamp base. Every rendition, and every importer replacing one on a
 	/// new `EXT-X-MAP`, shifts by its offset: separate offsets would shift each by its own first
 	/// fragment's arrival.
-	input: moq_mux::catalog::Input,
+	timebase: moq_mux::catalog::Timebase,
 }
 
 impl Sink {
 	fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer) -> Self {
-		let input = catalog.input();
+		let timebase = catalog.timebase();
 		Self {
 			broadcast,
 			catalog,
-			input,
+			timebase,
 		}
 	}
 
@@ -331,7 +331,7 @@ impl Sink {
 		// A reservation (not a bare clone) so this init's tracks publish together.
 		// The pass holds a separate reservation across every rendition; this one
 		// only covers the tracks this init segment declares.
-		Fmp4::new(self.broadcast.clone(), self.input.reserve()).with_select(select.clone())
+		Fmp4::new(self.broadcast.clone(), self.timebase.reserve()).with_select(select.clone())
 	}
 }
 
@@ -1568,7 +1568,7 @@ mod tests {
 		published(&consumer, &catalog).await
 	}
 
-	/// The import's input never withholds the catalog, and an importer replacing a rendition on a
+	/// The import's timebase never withholds the catalog, and an importer replacing a rendition on a
 	/// new `EXT-X-MAP` after that catalog is out shifts by the same offset as the first one: none,
 	/// since the first placed the clock. A fresh offset would shift it by its own arrival.
 	#[tokio::test]
@@ -1585,7 +1585,7 @@ mod tests {
 		first.decode(&fragments[0]).unwrap();
 		assert!(
 			matches!(catalogs.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(Some(_)))),
-			"the initial catalog is out while the input lives"
+			"the initial catalog is out while the timebase lives"
 		);
 		let before = published(&consumer, &catalog).await;
 

@@ -5,23 +5,23 @@ use super::{Producer, Reserved};
 
 /// One source's timestamp base on a catalog, shared by every importer reading it.
 ///
-/// Made via [`Producer::input`]. An importer publishes its source's own timestamps, shifted onto
+/// Made via [`Producer::timebase`]. An importer publishes its source's own timestamps, shifted onto
 /// the catalog's [`Clock`](crate::Clock) by one offset fixed on its first frame: zero when that
 /// frame places the clock (the catalog was not yet published, nor its clock taken), so the
 /// timestamps stay verbatim, and the gap between the clock's reading and the frame's timestamp
-/// otherwise. Every track of every importer minted from one input shares that offset, so
+/// otherwise. Every track of every importer minted from one timebase shares that offset, so
 /// renditions on one timestamp base (an HLS import's variants, or the importer replacing one on a
-/// new init segment) stay in sync, while separate inputs each get their own.
+/// new init segment) stay in sync, while separate timebases each get their own.
 ///
-/// [`Producer::reserve`] mints a fresh input per call, which is what a lone importer wants.
+/// [`Producer::reserve`] mints a fresh timebase per call, which is what a lone importer wants.
 /// Clones share the offset. Holding one never withholds the catalog: only a live [`Reserved`]
 /// does.
-pub struct Input<E: CatalogExt = ()> {
+pub struct Timebase<E: CatalogExt = ()> {
 	pub(super) catalog: Producer<E>,
 	offset: Arc<OnceLock<Offset>>,
 }
 
-impl<E: CatalogExt> Input<E> {
+impl<E: CatalogExt> Timebase<E> {
 	pub(super) fn new(catalog: Producer<E>) -> Self {
 		Self {
 			catalog,
@@ -29,26 +29,26 @@ impl<E: CatalogExt> Input<E> {
 		}
 	}
 
-	/// Begin reserving an importer's tracks, sharing this input's offset.
+	/// Begin reserving an importer's tracks, sharing this timebase's offset.
 	///
 	/// See [`Producer::reserve`] for how the reservation gates the catalog.
 	pub fn reserve(&self) -> Reserved<E> {
 		Reserved::new(self.clone())
 	}
 
-	/// Place this input's `pts` at the wall-clock instant `wall`, instead of at the arrival of its
+	/// Place this timebase's `pts` at the wall-clock instant `wall`, instead of at the arrival of its
 	/// first frame.
 	///
 	/// For a source whose timestamps say when they happened (a program clock, a shared epoch), so
 	/// two importers of one stream publish identical timestamps whenever each starts. Like a first
 	/// frame, this places the catalog's clock if it is not yet fixed and offsets onto it otherwise.
-	/// Refused once this input has an offset.
+	/// Refused once this timebase has an offset.
 	pub fn place(&self, pts: moq_net::Timestamp, wall: std::time::SystemTime) -> crate::Result<()> {
 		self.catalog.clone().anchor(&self.offset, pts, Some(wall))?;
 		Ok(())
 	}
 
-	/// Anchor on the first frame's timestamp `pts`, returning the input's offset.
+	/// Anchor on the first frame's timestamp `pts`, returning the timebase's offset.
 	///
 	/// The first call from any clone fixes the offset; every later one returns it unchanged.
 	pub(crate) fn anchor(&self, pts: moq_net::Timestamp) -> crate::Result<Offset> {
@@ -58,19 +58,19 @@ impl<E: CatalogExt> Input<E> {
 		}
 	}
 
-	/// The offset, once the input anchored.
+	/// The offset, once the timebase anchored.
 	pub(crate) fn offset(&self) -> Option<Offset> {
 		self.offset.get().copied()
 	}
 
-	/// Shift `pts` onto the catalog clock, anchoring on it if it is this input's first.
+	/// Shift `pts` onto the catalog clock, anchoring on it if it is this timebase's first.
 	pub(crate) fn shift(&self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
 		self.anchor(pts)?.apply(pts)
 	}
 }
 
-// Manual so an input is clonable regardless of whether `E` is.
-impl<E: CatalogExt> Clone for Input<E> {
+// Manual so a timebase is clonable regardless of whether `E` is.
+impl<E: CatalogExt> Clone for Timebase<E> {
 	fn clone(&self) -> Self {
 		Self {
 			catalog: self.catalog.clone(),
@@ -79,7 +79,7 @@ impl<E: CatalogExt> Clone for Input<E> {
 	}
 }
 
-/// The signed shift from one input's timestamps onto the catalog clock, in microseconds.
+/// The signed shift from one timebase's timestamps onto the catalog clock, in microseconds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Offset(i64);
 

@@ -290,7 +290,7 @@ impl<E: CatalogExt> Config<E> {
 	/// every container importer (fMP4, MPEG-TS, FLV, MKV) shifts its stream's timestamps onto it,
 	/// its first frame landing at the clock's reading on arrival. Without this, the catalog starts
 	/// a fresh clock, and the first importer to receive a frame before anything fixes the clock
-	/// places it there instead, keeping its own timestamps verbatim (see [`Input`](super::Input)).
+	/// places it there instead, keeping its own timestamps verbatim (see [`Timebase`](super::Timebase)).
 	pub fn with_clock(mut self, clock: crate::Clock) -> Self {
 		self.clock = Some(clock);
 		self
@@ -482,25 +482,25 @@ impl<E: CatalogExt> Producer<E> {
 		take(&self.current).clock
 	}
 
-	/// Anchor an input on its first timestamp `pts`, which happened at `wall` (or arrived now),
-	/// returning the input's offset.
+	/// Anchor a timebase on its first timestamp `pts`, which happened at `wall` (or arrived now),
+	/// returning the timebase's offset.
 	///
 	/// A clock nothing has fixed yet is placed so `pts` lands at that instant, and the offset is
-	/// zero. A fixed one stays, and the offset shifts `pts` onto it. Either way the input keeps the
+	/// zero. A fixed one stays, and the offset shifts `pts` onto it. Either way the timebase keeps the
 	/// offset, so every later frame from any of its importers shifts alike.
 	pub(super) fn anchor(
 		&mut self,
-		input: &std::sync::OnceLock<super::Offset>,
+		timebase: &std::sync::OnceLock<super::Offset>,
 		pts: moq_net::Timestamp,
 		wall: Option<std::time::SystemTime>,
 	) -> crate::Result<super::Offset> {
 		let mut guard = self.modify()?;
-		// Another clone of the input may have anchored first; the lock orders them. A placement
+		// Another clone of the timebase may have anchored first; the lock orders them. A placement
 		// is refused then, since it would not land where it says.
-		if let Some(offset) = input.get() {
+		if let Some(offset) = timebase.get() {
 			if wall.is_some() {
 				return Err(crate::Error::UnmappableTimestamp(
-					"the input already anchored on its first frame".to_string(),
+					"the timebase already anchored on its first frame".to_string(),
 				));
 			}
 			return Ok(*offset);
@@ -525,17 +525,17 @@ impl<E: CatalogExt> Producer<E> {
 			super::Offset::default()
 		};
 
-		input.set(offset).expect("set under the catalog lock");
+		timebase.set(offset).expect("set under the catalog lock");
 		guard.commit()?;
 		Ok(offset)
 	}
 
 	/// A timestamp base for one source, shared by every importer reading it.
 	///
-	/// Mint each importer's reservation from it with [`Input::reserve`](super::Input::reserve), so
-	/// they all shift by one offset. See [`Input`](super::Input).
-	pub fn input(&self) -> super::Input<E> {
-		super::Input::new(self.clone())
+	/// Mint each importer's reservation from it with [`Timebase::reserve`](super::Timebase::reserve), so
+	/// they all shift by one offset. See [`Timebase`](super::Timebase).
+	pub fn timebase(&self) -> super::Timebase<E> {
+		super::Timebase::new(self.clone())
 	}
 
 	/// Begin reserving the initial track set, returning a clonable [`Reserved`](super::Reserved).
@@ -546,10 +546,10 @@ impl<E: CatalogExt> Producer<E> {
 	/// snapshot instead of a half-converged one. Producers created directly on this catalog publish
 	/// incrementally.
 	///
-	/// Each call is a fresh [`Input`](super::Input): an importer handed it shifts its timestamps by
-	/// its own offset. Reserve through one input instead for importers sharing a timestamp base.
+	/// Each call is a fresh [`Timebase`](super::Timebase): an importer handed it shifts its timestamps by
+	/// its own offset. Reserve through one timebase instead for importers sharing a timestamp base.
 	pub fn reserve(&self) -> super::Reserved<E> {
-		self.input().reserve()
+		self.timebase().reserve()
 	}
 
 	/// Take a rendition name without withholding the catalog's initial snapshot.
@@ -1442,7 +1442,7 @@ mod test {
 
 		// The stream starts an hour in; the clock reads five seconds.
 		let first = moq_net::Timestamp::from_micros(3_600_000_000).unwrap();
-		let shifted = catalog.input().shift(first).unwrap();
+		let shifted = catalog.timebase().shift(first).unwrap();
 		assert!(
 			lateness(catalog.clock(), shifted) < Duration::from_secs(1),
 			"{shifted:?}"
@@ -1450,21 +1450,21 @@ mod test {
 		assert_eq!(catalog.snapshot().clock.map(|clock| clock.wall), advertised);
 	}
 
-	/// The first input to anchor on a clock nothing fixed places it, keeping its timestamps
-	/// verbatim; its clones share that, while another input offsets onto the placed clock.
+	/// The first timebase to anchor on a clock nothing fixed places it, keeping its timestamps
+	/// verbatim; its clones share that, while another timebase offsets onto the placed clock.
 	#[test]
 	fn the_first_input_places_the_clock() {
 		use std::time::{Duration, SystemTime};
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let input = catalog.input();
+		let timebase = catalog.timebase();
 
 		let first = moq_net::Timestamp::from_micros(3_600_000_000).unwrap();
 		assert_eq!(
-			input.clone().shift(first).unwrap(),
+			timebase.clone().shift(first).unwrap(),
 			first,
-			"the first input stays verbatim"
+			"the first timebase stays verbatim"
 		);
 		let clock = catalog.clock();
 		assert_eq!(catalog.snapshot().clock, Some(clock.wall()), "the anchor is advertised");
@@ -1477,18 +1477,18 @@ mod test {
 
 		// Its clones keep the offset, whatever they see first.
 		let later = moq_net::Timestamp::from_micros(3_601_000_000).unwrap();
-		assert_eq!(input.shift(later).unwrap(), later);
+		assert_eq!(timebase.shift(later).unwrap(), later);
 
-		// A separate input starting at zero lands at now, and the clock stays.
+		// A separate timebase starting at zero lands at now, and the clock stays.
 		let other = catalog
-			.input()
+			.timebase()
 			.shift(moq_net::Timestamp::from_micros(0).unwrap())
 			.unwrap();
 		assert!(lateness(clock, other) < Duration::from_secs(1), "{other:?}");
 		assert_eq!(
 			catalog.clock().wall(),
 			clock.wall(),
-			"a second input never moves the clock"
+			"a second timebase never moves the clock"
 		);
 	}
 
@@ -1500,7 +1500,7 @@ mod test {
 		let clock = catalog.clock();
 
 		let shifted = catalog
-			.input()
+			.timebase()
 			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
 			.unwrap();
 		assert_eq!(catalog.clock().wall(), clock.wall());
@@ -1526,7 +1526,7 @@ mod test {
 		let published = catalog.snapshot().clock;
 
 		let shifted = catalog
-			.input()
+			.timebase()
 			.shift(moq_net::Timestamp::from_micros(0).unwrap())
 			.unwrap();
 		assert_eq!(catalog.snapshot().clock, published);
@@ -1536,7 +1536,7 @@ mod test {
 		);
 	}
 
-	/// An input that knows when its timestamps happened places them there, on a clock it places
+	/// A timebase that knows when its timestamps happened places them there, on a clock it places
 	/// or one already fixed alike, so two importers of one stream publish identical timestamps.
 	#[test]
 	fn a_placed_input_lands_where_it_says() {
@@ -1548,10 +1548,10 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let input = catalog.input();
-		input.place(pts, wall).unwrap();
+		let timebase = catalog.timebase();
+		timebase.place(pts, wall).unwrap();
 		assert_eq!(
-			input.shift(later).unwrap(),
+			timebase.shift(later).unwrap(),
 			later,
 			"it placed the clock, so it stays verbatim"
 		);
@@ -1559,14 +1559,14 @@ mod test {
 		assert_eq!(placed.reading(wall), pts.as_micros() as i128);
 
 		// Placed again on the now fixed clock, the same mapping shifts by nothing.
-		let again = catalog.input();
+		let again = catalog.timebase();
 		again.place(pts, wall).unwrap();
 		assert_eq!(again.shift(later).unwrap(), later);
 		assert_eq!(catalog.clock().wall(), placed.wall());
 
-		// An input that already anchored keeps its offset.
+		// A timebase that already anchored keeps its offset.
 		assert!(matches!(
-			input.place(pts, wall),
+			timebase.place(pts, wall),
 			Err(crate::Error::UnmappableTimestamp(_))
 		));
 	}

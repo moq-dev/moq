@@ -1573,7 +1573,7 @@ async fn a_moov_with_nothing_selected_publishes() {
 		.with_select(crate::select::Broadcast::default());
 
 	fmp4.decode(&init).unwrap();
-	catalog.input().anchor(moq_net::Timestamp::ZERO).unwrap();
+	catalog.timebase().anchor(moq_net::Timestamp::ZERO).unwrap();
 	assert_eq!(clocks.drain().len(), 1, "the catalog publishes without a fragment");
 }
 

@@ -40,7 +40,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	/// The source's timestamp base: the first fragment anchors it, and every fragment's timestamp
 	/// shifts by its offset onto the catalog clock. The `tfdt` inside a fragment stays verbatim.
-	input: crate::catalog::Input<E>,
+	timebase: crate::catalog::Timebase<E>,
 
 	// Which track roles to publish. `None` imports every supported track.
 	select: Option<crate::select::Broadcast>,
@@ -144,7 +144,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		Self {
 			catalog: reserved.producer(),
-			input: reserved.input(),
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			select: None,
 			tracks: HashMap::default(),
@@ -896,7 +896,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// releasing the reservation, so the first snapshot carries the final clock; the moov
 			// declared every track, so any track's fragment releases it.
 			let earliest = min_timestamp.ok_or(Error::MissingTrun)?;
-			let offset = self.input.anchor(earliest)?;
+			let offset = self.timebase.anchor(earliest)?;
 			let timestamp = offset.apply(earliest)?;
 			let max_end = max_end.map(|end| offset.apply(end)).transpose()?;
 			self.initial_reservation = None;

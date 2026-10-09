@@ -95,7 +95,7 @@ These land with the next breaking release, not the 2026-09-23 train.
   `Config::with_clock`) shifts its timestamps onto it, so its first frame lands
   at now; a `with_clock` catalog no longer keeps an importer's timestamps
   verbatim. Importers sharing a timestamp base reserve through one
-  `catalog.input()`.
+  `catalog.timebase()`.
 - **moq-net owns its transport traits.** `moq_net::web_transport_trait` is
   gone, and `transport::poll::{Session, SendStream, RecvStream}` no longer
   extend `web_transport_trait::poll`. They carry their own `poll_*` methods,

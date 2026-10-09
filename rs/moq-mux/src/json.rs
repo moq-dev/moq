@@ -540,7 +540,7 @@ mod test {
 		let before = catalog.clock().now();
 		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
 		let first = catalog
-			.input()
+			.timebase()
 			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
 			.unwrap();
 		assert_eq!(catalog.snapshot().clock, published, "the clock never moves");

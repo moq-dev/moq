@@ -64,7 +64,7 @@ Decided 2026-10-05:
   the `broadcast::Producer` and importer state stays private, so two
   sessions, such as the truck's H.264 SD and H.265 HD URLs, can publish
   renditions of one broadcast. Two sessions on one catalog each shift onto
-  its clock (`catalog::Input`), so they land on one timeline.
+  its clock (`catalog::Timebase`), so they land on one timeline.
   A session end, a failure, and a timeline jump all return to the caller,
   which decides whether to retry. Reason: the truck deliberately exits
   for systemd so a stuck Starlink session surfaces, and an in-process retry

@@ -24,7 +24,7 @@ publish the source's own timestamps, mapped to the wall time the first frame
 arrived. The catalog clock never moves once something uses it: an importer that
 starts after a data track, a capture, another importer, or a pinned clock
 shifts its timestamps onto that clock instead, landing its first frame at now.
-A `catalog::Input` gives renditions on one timestamp base one shared shift. A
+A `catalog::Timebase` gives renditions on one timestamp base one shared shift. A
 timeline that rewinds ends the import. fMP4 export fixes its track
 set at the init segment, so a new rendition or a changed configuration ends the
 export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:

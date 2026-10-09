@@ -70,7 +70,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	/// The stream's timestamp base: the first media frame anchors it, and every frame shifts by its
 	/// offset onto the catalog clock.
-	input: crate::catalog::Input<E>,
+	timebase: crate::catalog::Timebase<E>,
 
 	/// Accumulated unparsed input. Whole tags are drained out; a trailing partial
 	/// tag is retained for the next [`decode`](Self::decode) call.
@@ -106,7 +106,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			catalog: reserved.producer(),
 			container,
-			input: reserved.input(),
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			header_seen: false,
@@ -469,7 +469,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Ok(());
 		}
 		// The first frame anchors the stream before the reservation below publishes.
-		let timestamp = self.input.shift(Timestamp::from_millis(pts_ms as u64)?)?;
+		let timestamp = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
@@ -492,7 +492,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Ok(());
 		}
 		// The first frame anchors the stream before the reservation below publishes.
-		let timestamp = self.input.shift(Timestamp::from_millis(timestamp)?)?;
+		let timestamp = self.timebase.shift(Timestamp::from_millis(timestamp)?)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;

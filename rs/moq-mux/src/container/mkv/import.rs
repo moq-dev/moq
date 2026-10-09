@@ -50,7 +50,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	/// The stream's timestamp base: the first block anchors it, and every block shifts by its
 	/// offset onto the catalog clock.
-	input: crate::catalog::Input<E>,
+	timebase: crate::catalog::Timebase<E>,
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
@@ -143,7 +143,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			catalog: reserved.producer(),
 			container,
-			input: reserved.input(),
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			consumed: 0,
@@ -437,7 +437,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// The first block anchors the stream. Anchor before releasing the reservation, so the
 		// first snapshot carries the final clock; Tracks declared every track, so any track's
 		// block releases it.
-		let timestamp = self.input.shift(Timestamp::from_nanos(pts_ns)?)?;
+		let timestamp = self.timebase.shift(Timestamp::from_nanos(pts_ns)?)?;
 		self.initial_reservation = None;
 
 		// Audio tracks: always treat as keyframes (matches fmp4 behavior).

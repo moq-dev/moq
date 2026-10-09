@@ -13,7 +13,7 @@
 //!
 //! A container importer publishes its stream's own timestamps. The first to receive a frame before
 //! anything fixes the clock places the mapping so that frame is live on arrival; any other shifts
-//! onto the clock (see [`catalog::Input`](crate::catalog::Input)).
+//! onto the clock (see [`catalog::Timebase`](crate::catalog::Timebase)).
 
 use std::time::{Duration, Instant, SystemTime};
 

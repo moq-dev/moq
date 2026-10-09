@@ -64,7 +64,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 
 	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
 	/// its offset onto the catalog clock.
-	input: crate::catalog::Input<E>,
+	timebase: crate::catalog::Timebase<E>,
 
 	/// The PAT, reassembled off PID 0.
 	pat: PatReader,
@@ -160,7 +160,7 @@ impl<E: catalog::Catalog> Import<E> {
 			broadcast,
 			catalog,
 			container,
-			input: reserved.input(),
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			pat: PatReader::default(),
 			pmt_sections: HashMap::new(),
@@ -213,9 +213,9 @@ impl<E: catalog::Catalog> Import<E> {
 		self
 	}
 
-	/// A reservation on this program's input, so every stream shifts by its offset.
+	/// A reservation on this program's timebase, so every stream shifts by its offset.
 	fn reserve(&self) -> crate::catalog::Reserved<E> {
-		self.input.reserve()
+		self.timebase.reserve()
 	}
 
 	/// The video hint for a decoded rendition: this importer's container, nothing else.
@@ -288,7 +288,7 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			if let Some(section) = self.sections.get_mut(&pid) {
-				let clock = self.last_pts.or(self.start_pts).zip(self.input.offset());
+				let clock = self.last_pts.or(self.start_pts).zip(self.timebase.offset());
 				let units = section.packet(&pkt, clock)?;
 				self.published |= units > 0;
 				self.liveness.delivered(pid, units);
@@ -686,7 +686,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let offset = match pes.pts {
 			Some(pts) => {
 				let pts = Timestamp::from_scale(pts, 90_000)?;
-				let offset = self.input.anchor(pts)?;
+				let offset = self.timebase.anchor(pts)?;
 				if self.start_pts.is_none() {
 					self.start_pts = Some(offset.apply(pts)?);
 				}
@@ -741,7 +741,7 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Publish the sections held for the input's offset, now that it is known. They are stamped
+	/// Publish the sections held for the timebase's offset, now that it is known. They are stamped
 	/// with the section clock at release: no timeline existed when they arrived.
 	fn release_sections(&mut self, offset: Offset) -> anyhow::Result<()> {
 		let pts = self.last_pts.or(self.start_pts);
@@ -790,7 +790,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		// Its PES start anchored the input. Release the reservation only now, so the first
+		// Its PES start anchored the timebase. Release the reservation only now, so the first
 		// snapshot carries the final clock: an Opus config comes from the PMT and would otherwise
 		// publish first. Every stream in the initial program reserved at its PMT, so any stream's
 		// PES releases it.
@@ -992,7 +992,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
-		self.release_sections(self.input.offset().unwrap_or_default())?;
+		self.release_sections(self.timebase.offset().unwrap_or_default())?;
 		for (pid, stream) in &mut self.streams {
 			let units = stream.finish()?;
 			self.liveness.delivered(pid.as_u16(), units);
@@ -1095,7 +1095,7 @@ fn list_programs(programs: &[u16]) -> String {
 struct Pending {
 	/// Raw 90 kHz PTS, before wrap-unwrapping.
 	pts: Option<u64>,
-	/// The input's offset, which the unwrapped PTS shifts by onto the catalog clock.
+	/// The timebase's offset, which the unwrapped PTS shifts by onto the catalog clock.
 	offset: Offset,
 	/// Raw 90 kHz DTS, before wrap-unwrapping. Present on reordered (B-frame) video; its
 	/// distance below the PTS is the reorder delay published as the catalog jitter.
@@ -1206,7 +1206,7 @@ struct SectionStream<E: catalog::Catalog> {
 	/// Held for its `Drop`, which clears this track's catalog entry.
 	_entry: VerbatimEntry<E>,
 	reassembler: SectionReassembler,
-	/// Sections completed before the input's offset was known, which they must absorb.
+	/// Sections completed before the timebase's offset was known, which they must absorb.
 	held: Vec<Vec<u8>>,
 }
 
@@ -1242,7 +1242,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	/// many. `clock` is the current media clock used to timestamp a section (its arrival on the
 	/// timeline; the splice time itself is inside the section bytes), paired with the offset the
 	/// media shifted by, which a SCTE-35 section absorbs too. Until this importer has one,
-	/// completed sections are held for [`release`](Self::release): the input may have its offset
+	/// completed sections are held for [`release`](Self::release): the timebase may have its offset
 	/// from another importer before this one sees a timestamp.
 	fn packet(&mut self, pkt: &[u8], clock: Option<(Timestamp, Offset)>) -> anyhow::Result<u64> {
 		self.reassembler.push(pkt, &mut self.held);
@@ -3169,7 +3169,7 @@ fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow
 }
 
 /// Convert a raw 90 kHz PTS to a [`Timestamp`] on the catalog clock, unwrapping the
-/// 33-bit field and shifting by the input's `offset`. Returns `None` when the PES carried no PTS.
+/// 33-bit field and shifting by the timebase's `offset`. Returns `None` when the PES carried no PTS.
 fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>, offset: Offset) -> anyhow::Result<Option<Timestamp>> {
 	let Some(raw) = pts else {
 		return Ok(None);
@@ -3901,7 +3901,7 @@ pub(super) mod test {
 		splice_onto_a_clock_in_use(CueAt::BeforePrivate).await;
 	}
 
-	/// An input another importer already anchored still holds a cue until this importer has a
+	/// A timebase another importer already anchored still holds a cue until this importer has a
 	/// timestamp to stamp it with.
 	#[tokio::test(start_paused = true)]
 	async fn a_splice_on_an_anchored_input_waits_for_its_media() {
@@ -3912,9 +3912,9 @@ pub(super) mod test {
 	enum CueAt {
 		AfterVideo,
 		BeforeVideo,
-		/// Ahead of a private PES at the first picture's PTS, which anchors the input.
+		/// Ahead of a private PES at the first picture's PTS, which anchors the timebase.
 		BeforePrivate,
-		/// Ahead of the first picture, on an input placed before the import starts.
+		/// Ahead of the first picture, on a timebase placed before the import starts.
 		BeforeVideoOnAnAnchoredInput,
 	}
 
@@ -3939,13 +3939,13 @@ pub(super) mod test {
 		// A capture took the clock, which reads ten seconds: the feed shifts nine seconds later.
 		let _capture = catalog.clock();
 		let anchored = matches!(at, CueAt::BeforeVideoOnAnAnchoredInput);
-		let input = catalog.input();
+		let timebase = catalog.timebase();
 		if anchored {
 			// The shift then depends on the wall clock, so only its consistency is checked.
 			let first = Timestamp::from_scale(picture(0), 90_000).unwrap();
-			input.place(first, std::time::SystemTime::now()).unwrap();
+			timebase.place(first, std::time::SystemTime::now()).unwrap();
 		}
-		let mut import = super::Import::new(broadcast, input.reserve());
+		let mut import = super::Import::new(broadcast, timebase.reserve());
 
 		let mut bytes = synth_pmt(
 			&[

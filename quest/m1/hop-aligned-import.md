@@ -32,7 +32,7 @@ a regression test.
   timestamp wrap (TS PTS wraps every 26.5 h) when they started on opposite
   sides of it.
 - Frame timestamps derive from the input alone too, and importers refuse a
-  rewind. Any offset its `catalog::Input` applies is input-derived for a
+  rewind. Any offset its `catalog::Timebase` applies is input-derived for a
   same-epoch importer, never from
   `clock.now()` (decided in the 2026-10-06 audit), so two instances shift
   identically.
@@ -43,7 +43,7 @@ a regression test.
   joining importer is offset by its arrival time. Decided in the 2026-10-05
   audit: redundant importers derive the wall anchor from the input (its PTS
   or PCR) or from the shared epoch, never from arrival, so two catalogs of
-  one stream are identical. They pass it through `catalog::Input::place`
+  one stream are identical. They pass it through `catalog::Timebase::place`
   rather than a second anchoring path (2026-10-06 audit). Rejected: narrowing
   the contract to exclude the catalog clock.
 - An importer announces only once it knows its tracks, so it never refuses a
