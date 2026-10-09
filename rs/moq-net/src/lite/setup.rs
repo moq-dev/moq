@@ -176,10 +176,10 @@ pub struct Setup {
 	/// Directional: it prices the sender's own egress, so both ends declare their own
 	/// and the two need not match. `None` means the default cost of 1.
 	pub cost: Option<u64>,
-	/// This endpoint's Hop ID, the identity it stamps onto forwarded
-	/// announcements. The peer uses it to serve this endpoint's subscriptions from
-	/// a route that does not flow through it (the same split horizon the announce
-	/// filter applies). `None` when the endpoint has no meaningful identity (a
+	/// This endpoint's Hop ID, the identity forwarded announcements name it by.
+	/// The peer uses it to serve this endpoint's subscriptions from a route that
+	/// does not flow through it (the same split horizon the announce filter
+	/// applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
 }

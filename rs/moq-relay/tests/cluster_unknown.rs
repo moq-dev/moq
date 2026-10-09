@@ -1,6 +1,6 @@
 //! Regression for an external publisher whose protocol does not declare a Hop ID.
-//! The relay stamps that publisher with a random Hop ID of the connection's own;
-//! reflected cluster paths must not replace it while propagating around a redundant mesh.
+//! The relay records that publisher as `Hop::UNKNOWN`; reflected cluster paths
+//! must not replace it while propagating around a redundant mesh.
 
 use std::time::Duration;
 
@@ -105,8 +105,8 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 }
 
 async fn publish_unknown(port: u16) -> Publisher {
-	// Draft-14 has no Cluster extension, so the accepting relay must name this
-	// external publisher with a stamp of its own.
+	// Draft-14 has no Cluster extension, so the accepting relay must represent
+	// this external publisher with the wire-defined UNKNOWN Hop ID.
 	publish_version(port, "moq-transport-14").await
 }
 
@@ -130,14 +130,14 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 		.map_err(|_| "routed timed out".to_string())?
 		.ok_or_else(|| "origin closed before the broadcast was announced".to_string())?;
 	let broadcast = consumer
-		.request_broadcast(PATH)
+		.request_broadcast(PATH, None)
 		.await
 		.map_err(|err| format!("broadcast unroutable: {err}"))?;
 
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the
 	// selected group's frame is still crossing the redundant mesh.
-	let subscription = moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1));
+	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1));
 	let mut track = tokio::time::timeout(
 		TIMEOUT,
 		broadcast.track("video").expect("track handle").subscribe(subscription),
@@ -226,7 +226,7 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 /// Every ingest version that can carry a broadcast must survive the same
 /// redundant mesh. The pre-fix failure set was exactly the versions that
 /// declare no origin identity (lite <= 03, moq-transport <= 16): their
-/// broadcasts entered with an UNKNOWN first hop, and the reflected copy replaced
+/// broadcasts enter with an UNKNOWN first hop, and the reflected copy replaced
 /// the live source instead of parking. The identity-carrying versions held
 /// even before the fix, so this pins both halves of the boundary.
 #[tokio::test]

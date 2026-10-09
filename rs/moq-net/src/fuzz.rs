@@ -224,6 +224,19 @@ pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::or
 	origin.excluding(peer)
 }
 
+/// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
+/// when the path is tracked. The stats producer bench marks a share of held
+/// paths changed this way, without a media frame. A later [`crate::stats::Registry::report`]
+/// drops the entry unless some guard still holds it. Not a public API.
+pub fn bump_publisher_bytes(
+	registry: &crate::stats::Registry,
+	path: impl crate::AsPath,
+	tier: &crate::stats::Tier,
+	n: u64,
+) {
+	registry.bump_publisher_bytes(path, tier, n);
+}
+
 /// Encode `announced` as a fresh [`AnnounceWriter`] stream.
 pub fn encode_announces(announced: &[Announced], compress: bool) -> Vec<u8> {
 	let mut writer = AnnounceWriter::new(compress);
@@ -331,7 +344,7 @@ impl LiteSample {
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),
 				priority: 2,
-				max_age: std::time::Duration::from_secs(10),
+				max_delay: std::time::Duration::from_secs(10),
 				start_group: None,
 				end_group: None,
 				start_frame: 0,
@@ -515,7 +528,7 @@ impl Default for Messages {
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),
 				priority: 3,
-				max_age: Duration::from_millis(500),
+				max_delay: Duration::from_millis(500),
 				start_group: Some(1_000),
 				end_group: None,
 				start_frame: 0,
@@ -523,7 +536,7 @@ impl Default for Messages {
 			},
 			lite_update: lite::SubscribeUpdate {
 				priority: 4,
-				max_age: Duration::from_millis(500),
+				max_delay: Duration::from_millis(500),
 				start_group: Some(1_000),
 				end_group: Some(2_000),
 				start_frame: 0,
@@ -878,6 +891,7 @@ pub fn seeds() -> Vec<Seed> {
 				fetch_type,
 				range_filters: false,
 				fill_timeout: false,
+				properties_wanted: true,
 			};
 			fetch.encode_bytes(*version).ok()
 		}) else {
@@ -1049,7 +1063,7 @@ impl FrameRecv {
 				let mut group = track.append_group().unwrap();
 				let info = frame::Info {
 					size: size as u64,
-					timestamp: crate::Timestamp::ZERO,
+					timestamp: Some(crate::Timestamp::ZERO),
 				};
 				let frame = group.create_frame_owned(info, &budget).unwrap();
 				groups.push(group);
@@ -1162,6 +1176,34 @@ mod tests {
 	use super::*;
 
 	use std::collections::BTreeSet;
+
+	/// The bump lands on the publisher side and survives a second drain while
+	/// an announce guard still holds the entry.
+	#[test]
+	fn bump_publisher_bytes_stays_while_announced() {
+		use futures::FutureExt;
+
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::default());
+		let _driver = driver;
+		let tier = crate::stats::Tier::new("t");
+		let session = registry.tier(tier.clone()).session("root");
+		let _broadcast = origin.publish("room/1", crate::origin::Route::default()).unwrap();
+		let mut cursor = origin.consume().with_stats(session).announced();
+		while cursor.next().now_or_never().flatten().is_some() {}
+
+		bump_publisher_bytes(&registry, "room/1", &tier, 5);
+		let mut report = crate::stats::Report::default();
+		registry.report(&mut report);
+		registry.report(&mut report);
+		let entry = report
+			.traffic
+			.iter()
+			.find(|entry| entry.path.as_str() == "room/1")
+			.expect("announced path");
+		assert_eq!(entry.publisher.bytes, 5);
+		assert_eq!(entry.tier, tier);
+	}
 
 	fn target(name: &str) -> Target {
 		TARGETS

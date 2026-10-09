@@ -20,6 +20,7 @@ pub struct Server {
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
 	versions: Versions,
+	limits: crate::session::Limits,
 }
 
 impl Server {
@@ -56,6 +57,12 @@ impl Server {
 	/// Set both publish and subscribe from one shared [`origin::Producer`].
 	pub fn with_origin(self, origin: origin::Producer) -> Self {
 		self.with_publisher(&origin).with_subscriber(origin)
+	}
+
+	/// Cap what each client can make its session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
+	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
+		self.limits = limits;
+		self
 	}
 
 	/// Restrict which protocol versions to accept, in preference order.
@@ -111,6 +118,7 @@ impl Server {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			limits: self.limits,
 			session: session.clone(),
 			setup_stream: None,
 			publish,
@@ -440,8 +448,8 @@ pub struct Handshake<S: crate::transport::poll::Session> {
 	role: Option<Role>,
 	origin: Option<crate::Hop>,
 	token: Option<setup::Token>,
-	/// The identity this session's routes are stamped with when the peer declares none
-	/// on the wire. Fresh per request unless the caller overrides it
+	/// The identity this session's routes are attributed to for split horizon when the
+	/// peer declares none on the wire; it never enters a hop chain. Fresh per request unless the caller overrides it
 	/// ([`Handshake::with_peer_hop`]).
 	assigned_hop: crate::Hop,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
@@ -522,6 +530,7 @@ where
 			// for GOAWAY. A server never advertises a path, hence `None`.
 			let (protocol, goaway, setup) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
+				limits: server.limits,
 				session: session.clone(),
 				setup: None,
 				request_id_max: None,
@@ -591,7 +600,11 @@ where
 			let parameters = match version {
 				Version::Ietf(v) => {
 					let mut parameters = ietf::Parameters::default();
-					parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
+					// The client's requests, admitted up to our limits and granted back as they close.
+					parameters.set_varint(
+						ietf::ParameterVarInt::MaxRequestId,
+						ietf::initial_max_request_id(server.limits.requests(), true),
+					);
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 					ietf::solicit::into_setup(&mut parameters, v);
 					ietf::hidden::into_setup(&mut parameters, v);
@@ -613,6 +626,7 @@ where
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
 					let start = lite::start(lite::Config {
 						runtime: runtime.clone(),
+						limits: server.limits,
 						session: session.clone(),
 						setup_stream: Some(stream),
 						publish,
@@ -634,6 +648,7 @@ where
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
 					let (protocol, goaway, setup) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
+						limits: server.limits,
 						session: session.clone(),
 						setup: Some(stream),
 						request_id_max,

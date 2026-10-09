@@ -23,10 +23,21 @@ leaving it open.
 Keep the token path working on the same listener, and keep pinned peers and
 CA roots meaning the same as on QUIC.
 
-[Relay client-CA validation](https://github.com/moq-dev/moq/pull/4912) refuses a
-listener TLS client CA on a stream-only relay (the `MtlsUnsupported` case in
-`rs/moq-tokio/src/server.rs`), since nothing checks it there. Once a `tls://`
-listener verifies the certificate, this quest lifts that refusal for a relay
-with a `tls://` listener and updates the refusal's test.
+A stream-only server refuses a listener client CA or pinned `tls.peers` (the
+`MtlsUnsupported` case in `rs/moq-tokio/src/server.rs`), since nothing checks
+them there. Once a `tls://` listener verifies the certificate, this quest lifts
+that refusal for a server with a `tls://` listener and updates the refusal's
+test.
+
+Decided 2026-10-08: request the certificate optionally, never require it,
+and only on the moq-ALPN TLS config, so once
+[the TCP acceptor](/quest/m2/one-port/tcp-demux.md) shares the port with
+HTTP and RTMPS, those clients are never asked for one. Whichever lands second
+keeps both working.
 
 Public API: relay config may gain a listener option. Wire: none.
+
+## Related
+
+- [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - carries `tls://` on the shared TCP port, where the certificate request stays on the moq ALPN
+- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - moves qmux in-tree; if it lands first, the peer-certificate accessor lands here instead of upstream

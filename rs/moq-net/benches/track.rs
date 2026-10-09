@@ -19,6 +19,10 @@
 //! `track_subscriber_join` measures a burst of viewers joining one track: each join
 //! registers in the subscription list, so any per-join walk of it shows up as a slope.
 //!
+//! `track_parked_read` appends past a backlog of reads parked on their drift budget:
+//! each append must wake only the reads it can expire, so waking the backlog shows up
+//! as a slope over it.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 use std::hint::black_box;
@@ -389,42 +393,85 @@ fn bench_subscriber_join(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Parked reads re-judge their reach, including the successor's abort waiter.
-/// Sweep readers and cached groups so added per-reader scans show up as a slope.
+/// Queues a parked read as woken, so the bench visits only what an append wakes.
+struct Woken {
+	read: usize,
+	queue: Arc<std::sync::Mutex<Vec<usize>>>,
+}
+
+impl std::task::Wake for Woken {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		self.queue.lock().unwrap().push(self.read);
+	}
+}
+
+/// One append past a backlog of parked reads, one per group like a publisher's parked
+/// group streams, re-polling whatever it wakes. Swept over the backlog so a per-append
+/// cost that grows with the parked reads shows up as a slope.
 fn bench_parked_read(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_parked_read");
-	for cached in [8, 64, 512] {
-		for readers in [1, 8, 64] {
-			let broadcast = broadcast::Info::default().produce();
-			let track = broadcast.create_track("bench", None).unwrap();
-			let mut head = track.append_group().unwrap();
-			head.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
-			for _ in 1..cached {
-				let mut next = track.append_group().unwrap();
-				next.write_frame(Timestamp::ZERO, Bytes::from_static(b"next")).unwrap();
-				next.finish().unwrap();
-			}
-			let waiters: Vec<_> = (0..readers).map(|_| kio::Waiter::noop()).collect();
-			let mut held: Vec<_> = waiters
-				.iter()
-				.map(|waiter| {
-					let mut sub = track.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(1)));
-					let Poll::Ready(Ok(Some(mut head))) = sub.poll_recv_group(waiter) else {
-						panic!("head is cached");
-					};
-					assert!(matches!(head.poll_read_frame(waiter), Poll::Ready(Ok(Some(_)))));
-					head
-				})
-				.collect();
-			group.throughput(Throughput::Elements(readers as u64));
-			group.bench_function(BenchmarkId::new(format!("cached_{cached}"), readers), |b| {
-				b.iter(|| {
-					for (head, waiter) in held.iter_mut().zip(&waiters) {
-						assert!(black_box(head.poll_read_frame(waiter)).is_pending());
+	group.throughput(Throughput::Elements(1));
+	for parked in [8, 64, 512] {
+		group.bench_function(BenchmarkId::from_parameter(parked), |b| {
+			b.iter_custom(|iterations| {
+				let broadcast = broadcast::Info::default().produce();
+				let track = broadcast.create_track("bench", None).unwrap();
+				// Long enough that no read expires, so every append measures the same backlog.
+				let mut sub = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+				let mut micros = 0;
+				let mut open = Vec::with_capacity(parked);
+				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+				let mut reads: Vec<_> = (0..parked)
+					.map(|read| {
+						let mut group = track.append_group().unwrap();
+						group
+							.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
+							.unwrap();
+						micros += 2500;
+						// Left open, so its read parks instead of ending.
+						open.push(group);
+
+						let woken = Woken {
+							read,
+							queue: queue.clone(),
+						};
+						let waiter = kio::Waiter::new(std::task::Waker::from(Arc::new(woken)));
+						let Poll::Ready(Ok(Some(mut read))) = sub.poll_recv_group(&waiter) else {
+							panic!("the group is cached");
+						};
+						assert!(matches!(read.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+						assert!(read.poll_read_frame(&waiter).is_pending());
+						(waiter, read)
+					})
+					.collect();
+
+				let mut woken = Vec::new();
+				let mut repoll = |reads: &mut Vec<(kio::Waiter, moq_net::group::Consumer)>| {
+					std::mem::swap(&mut woken, &mut *queue.lock().unwrap());
+					for read in woken.drain(..) {
+						let (waiter, read) = &mut reads[read];
+						assert!(black_box(read.poll_read_frame(waiter)).is_pending());
 					}
-				});
+				};
+				// Each append above woke the reads before it: park them again.
+				repoll(&mut reads);
+
+				let start = Instant::now();
+				for _ in 0..iterations {
+					let mut next = track.append_group().unwrap();
+					next.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
+						.unwrap();
+					next.finish().unwrap();
+					micros += 2500;
+					repoll(&mut reads);
+				}
+				start.elapsed()
 			});
-		}
+		});
 	}
 	group.finish();
 }

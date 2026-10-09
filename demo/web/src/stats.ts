@@ -5,7 +5,8 @@
  * `.stats/node/<node>` carrying JSON tracks that snapshot current activity. We
  * auto-discover all of those nodes (announcements under `.stats/node`), so this
  * works for a single relay and for a cluster alike, then aggregate each node and
- * let you drill into one.
+ * let you drill into one. A restarted relay announces a new epoch at the same
+ * path, which arrives as an end then a start, so its history starts over.
  *
  * Per-node tracks we read:
  *   publisher.json   egress  (relay -> downstream viewers)
@@ -146,6 +147,10 @@ discovery.run((effect) => {
 				nodeStats.mutate((s) => {
 					delete s[node];
 				});
+				// A restart ends the old epoch and starts a new one at the same path,
+				// counting from zero, so neither series may splice across it.
+				history.delete(node);
+				clusterMembership = "";
 			}
 		}
 	});

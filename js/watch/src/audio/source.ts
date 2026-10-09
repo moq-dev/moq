@@ -104,7 +104,10 @@ export class Source {
 	}
 
 	#runSelected(effect: Effect): void {
-		const available = effect.get(this.#out.available);
+		// A disabled rendition has no frames coming, so it is never selected, even by name.
+		const available = Object.fromEntries(
+			Object.entries(effect.get(this.#out.available)).filter(([, config]) => config.enabled !== false),
+		);
 		if (Object.keys(available).length === 0) return;
 
 		const target = effect.get(this.in.target);

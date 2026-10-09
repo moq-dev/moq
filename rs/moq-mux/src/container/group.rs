@@ -9,7 +9,7 @@ use super::{Container, Frame};
 /// subscribes to a track and juggles group ordering, age skipping, and rewinds, this one
 /// reads exactly the group it was handed, in arrival order, and ends. That is what a caller
 /// wants after a FETCH: a group already chosen by sequence, with no live subscription and no
-/// max age budget that could skip the very group being asked for.
+/// max delay budget that could skip the very group being asked for.
 ///
 /// A batch of frames decoded from one wire frame (a CMAF fragment carrying several samples) is
 /// handed back one frame at a time.
@@ -194,7 +194,9 @@ mod tests {
 		let format = Hang::new(&cmaf, crate::container::Kind::Video).unwrap();
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("video", None).unwrap();
+		// A CMAF track counts in its init's ticks.
+		let info = moq_net::track::Info::default().with_timescale(muxer.timescale());
+		let track = broadcast.create_track("video", info).unwrap();
 		let consumer = broadcast.consume();
 
 		// Buffer both samples into one moof+mdat, which is what this decodes.

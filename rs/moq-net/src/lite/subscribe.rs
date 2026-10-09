@@ -19,10 +19,10 @@ pub struct Subscribe<'a> {
 	pub epoch: Option<crate::Epoch>,
 	pub track: Cow<'a, str>,
 	pub priority: u8,
-	pub max_age: std::time::Duration,
+	pub max_delay: std::time::Duration,
 	/// The minimum group to deliver (a floor). On lite-06 the wire carries the raw
 	/// sequence and `None` is interchangeable with `Some(0)`: a floor of 0 constrains
-	/// nothing, and the start resolves from `max_age`. Pre-06 wires encode the
+	/// nothing, and the start resolves from `max_delay`. Pre-06 wires encode the
 	/// sequence + 1 and an absent start means the latest group.
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
@@ -36,12 +36,12 @@ pub struct Subscribe<'a> {
 }
 
 impl Version {
-	/// Whether this version's SUBSCRIBE carries the subscriber's max age preference.
+	/// Whether this version's SUBSCRIBE carries the subscriber's max delay preference.
 	///
 	/// Lite01/02 have no field for it, so a decoded `std::time::Duration::ZERO` there means
 	/// "not stated", not "real time". Callers that act on the budget must tell the
 	/// two apart or they will hold every legacy peer to the live edge.
-	pub(crate) fn carries_max_age(self) -> bool {
+	pub(crate) fn carries_max_delay(self) -> bool {
 		!matches!(self, Version::Lite01 | Version::Lite02)
 	}
 }
@@ -54,14 +54,14 @@ impl Message for Subscribe<'_> {
 		let track = Cow::Owned(r.string()?);
 		let priority = r.u8()?;
 
-		let (max_age, start_group, end_group) = match version {
+		let (max_delay, start_group, end_group) = match version {
 			Version::Lite01 | Version::Lite02 => (std::time::Duration::ZERO, None, None),
 			_ => {
 				skip_group_order(r, version)?;
-				let max_age = std::time::Duration::from_millis(r.varint()?);
+				let max_delay = std::time::Duration::from_millis(r.varint()?);
 				let start_group = decode_start_group(r, version)?;
 				let end_group = r.varint_opt()?;
-				(max_age, start_group, end_group)
+				(max_delay, start_group, end_group)
 			}
 		};
 
@@ -74,7 +74,7 @@ impl Message for Subscribe<'_> {
 			epoch,
 			track,
 			priority,
-			max_age,
+			max_delay,
 			start_group,
 			end_group,
 			start_frame,
@@ -93,7 +93,7 @@ impl Message for Subscribe<'_> {
 			Version::Lite01 | Version::Lite02 => {}
 			_ => {
 				pad_group_order(w, version)?;
-				w.varint(u64::try_from(self.max_age.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+				w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 				encode_start_group(w, version, self.start_group)?;
 				w.varint_opt(self.end_group)?;
 			}
@@ -228,7 +228,7 @@ fn encode_frame_bounds(
 #[derive(Clone, Debug)]
 pub struct SubscribeOk {
 	pub priority: u8,
-	pub max_age: std::time::Duration,
+	pub max_delay: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
 }
@@ -245,7 +245,7 @@ impl Message for SubscribeOk {
 			_ => {
 				w.u8(self.priority);
 				pad_group_order(w, version)?;
-				w.varint(u64::try_from(self.max_age.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+				w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 				w.varint_opt(self.start_group)?;
 				w.varint_opt(self.end_group)?;
 			}
@@ -258,26 +258,26 @@ impl Message for SubscribeOk {
 		match version {
 			Version::Lite01 => Ok(Self {
 				priority: r.u8()?,
-				max_age: std::time::Duration::ZERO,
+				max_delay: std::time::Duration::ZERO,
 				start_group: None,
 				end_group: None,
 			}),
 			Version::Lite02 => Ok(Self {
 				priority: 0,
-				max_age: std::time::Duration::ZERO,
+				max_delay: std::time::Duration::ZERO,
 				start_group: None,
 				end_group: None,
 			}),
 			_ => {
 				let priority = r.u8()?;
 				skip_group_order(r, version)?;
-				let max_age = std::time::Duration::from_millis(r.varint()?);
+				let max_delay = std::time::Duration::from_millis(r.varint()?);
 				let start_group = r.varint_opt()?;
 				let end_group = r.varint_opt()?;
 
 				Ok(Self {
 					priority,
-					max_age,
+					max_delay,
 					start_group,
 					end_group,
 				})
@@ -381,7 +381,7 @@ impl Message for SubscribeEnd {
 #[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
 	pub priority: u8,
-	pub max_age: std::time::Duration,
+	pub max_delay: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
 	/// See [`Subscribe::start_frame`].
@@ -401,7 +401,7 @@ impl Message for SubscribeUpdate {
 
 		let priority = r.u8()?;
 		skip_group_order(r, version)?;
-		let max_age = std::time::Duration::from_millis(r.varint()?);
+		let max_delay = std::time::Duration::from_millis(r.varint()?);
 		let start_group = decode_start_group(r, version)?;
 		let end_group = match r.varint()? {
 			0 => None,
@@ -413,7 +413,7 @@ impl Message for SubscribeUpdate {
 
 		Ok(Self {
 			priority,
-			max_age,
+			max_delay,
 			start_group,
 			end_group,
 			start_frame,
@@ -431,7 +431,7 @@ impl Message for SubscribeUpdate {
 
 		w.u8(self.priority);
 		pad_group_order(w, version)?;
-		w.varint(u64::try_from(self.max_age.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+		w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 
 		encode_start_group(w, version, self.start_group)?;
 
@@ -717,7 +717,7 @@ mod test {
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),
 			priority: 3,
-			max_age: std::time::Duration::from_millis(250),
+			max_delay: std::time::Duration::from_millis(250),
 			start_group: Some(7),
 			end_group: Some(9),
 			start_frame: 4,
@@ -871,7 +871,7 @@ mod test {
 	fn subscribe_ok_rejected_on_lite05() {
 		let resp = SubscribeResponse::Ok(SubscribeOk {
 			priority: 1,
-			max_age: std::time::Duration::ZERO,
+			max_delay: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
 		});

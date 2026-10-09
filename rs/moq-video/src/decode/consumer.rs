@@ -56,7 +56,7 @@ pub struct Options {
 	/// (skip aggressively); set it to your playout buffer for a softer skip.
 	/// Applied to the transport subscription and inherited by
 	/// [`moq_mux::container::Consumer`].
-	pub max_age: std::time::Duration,
+	pub max_delay: std::time::Duration,
 }
 
 impl Options {
@@ -106,7 +106,7 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
-					.with_max_age(options.max_age),
+					.with_max_delay(options.max_delay),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -264,7 +264,7 @@ mod tests {
 		// the second `next()` would then block forever waiting for a group that was
 		// skipped.
 		let mut export =
-			moq_mux::container::fmp4::Export::new(source, catalog).with_max_age(std::time::Duration::from_secs(30));
+			moq_mux::container::fmp4::Export::new(source, catalog).with_max_delay(std::time::Duration::from_secs(30));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 
@@ -349,7 +349,7 @@ mod tests {
 				// Wide enough to keep every group fresh: the age budget on its own
 				// delivers only the live edge, which would pass this test without
 				// `Start::Latest` doing anything.
-				max_age: std::time::Duration::from_secs(10),
+				max_delay: std::time::Duration::from_secs(10),
 				..Options::new()
 			},
 		)
@@ -430,7 +430,7 @@ mod tests {
 				},
 				// A budget that keeps every group fresh, so the start policy is the
 				// only thing deciding what is read.
-				max_age: std::time::Duration::from_secs(10),
+				max_delay: std::time::Duration::from_secs(10),
 				..Options::new()
 			},
 		)
@@ -459,7 +459,7 @@ mod tests {
 	/// Driven by `pollster` rather than tokio: the probe's guard is a plain
 	/// mutex, and holding one across an `.await` is what clippy rightly flags.
 	#[test]
-	fn max_age_reaches_the_subscription_and_not_the_decoder() {
+	fn max_delay_reaches_the_subscription_and_not_the_decoder() {
 		let _probe = probe::native_exclusive();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -492,14 +492,14 @@ mod tests {
 			output: crate::Output::Cpu,
 			scale_hint: Some(crate::Size::new(160, 120)),
 		};
-		let max_age = std::time::Duration::from_secs(10);
+		let max_delay = std::time::Duration::from_secs(10);
 		let mut consumer = pollster::block_on(Consumer::new(
 			&subscriber,
 			&catalog,
 			"video",
 			Options {
 				decoder: decoder.clone(),
-				max_age,
+				max_delay,
 				..Options::new()
 			},
 		))
@@ -507,7 +507,7 @@ mod tests {
 
 		let subscription = published.subscription().expect("the consumer subscribed");
 		assert_eq!(
-			subscription.max_age, max_age,
+			subscription.max_delay, max_delay,
 			"the age budget did not reach the publisher"
 		);
 
@@ -626,7 +626,7 @@ mod tests {
 					kind: Kind::Named(probe::BUFFERED_NAME.into()),
 					..Config::new()
 				},
-				max_age: std::time::Duration::from_secs(10),
+				max_delay: std::time::Duration::from_secs(10),
 				..Options::new()
 			},
 		)

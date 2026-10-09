@@ -70,7 +70,7 @@ impl Source {
 
 	/// Begin resolving the catalog broadcast (the one at this source's path).
 	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Requesting> {
-		self.origin.request_broadcast(&self.path)
+		self.origin.request_broadcast(&self.path, None)
 	}
 
 	/// Resolve a rendition's optional broadcast reference to an origin path.
@@ -110,7 +110,7 @@ impl Source {
 		&self,
 		rel: Option<&moq_net::path::Relative<'_>>,
 	) -> crate::Result<kio::Pending<moq_net::origin::Requesting>> {
-		Ok(self.origin.request_broadcast(&self.target(rel)?))
+		Ok(self.origin.request_broadcast(&self.target(rel)?, None))
 	}
 
 	/// The skipping counterpart to [`Self::request`], returning `None` when `rel` walks above
@@ -123,7 +123,7 @@ impl Source {
 		&self,
 		rel: Option<&moq_net::path::Relative<'_>>,
 	) -> Option<kio::Pending<moq_net::origin::Requesting>> {
-		Some(self.origin.request_broadcast(&self.resolve_reference(rel)?))
+		Some(self.origin.request_broadcast(&self.resolve_reference(rel)?, None))
 	}
 
 	/// Remove renditions whose broadcast reference escapes above the origin root.

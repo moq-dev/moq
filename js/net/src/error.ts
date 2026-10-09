@@ -38,6 +38,8 @@ export const SessionCode = Object.freeze(
 		ProtocolViolation: 0x3 as SessionCode,
 		/** A key-value pair was malformed or repeated more than allowed. */
 		KeyValueFormatting: 0x6 as SessionCode,
+		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements or subscriptions. */
+		TooManyRequests: 0x7 as SessionCode,
 		/** The peer did not close within the GOAWAY drain deadline. */
 		GoawayTimeout: 0x10 as SessionCode,
 		/** A control message took too long. */
@@ -96,6 +98,8 @@ export const StreamCode = Object.freeze(
 		Unroutable: 0x36 as StreamCode,
 		/** A group grew past its cache budget and was aborted. */
 		GroupTooLarge: 0x32 as StreamCode,
+		/** A frame's timedness or timestamp doesn't match its track's timescale. */
+		TimestampMismatch: 0x39 as StreamCode,
 	} as const),
 );
 
@@ -151,7 +155,7 @@ export interface StreamOptions {
  * This surfaces on every transport, so catch this type rather than feature-detecting
  * `WebTransportError`, which a non-browser runtime never defines and the WebSocket fallback
  * never throws. Local conditions with a code of their own subclass it ({@link TooFarBehind},
- * {@link FrameTooLarge}, {@link GroupTooLarge}, {@link NotFound}), so the same `code` check catches a condition
+ * {@link FrameTooLarge}, {@link GroupTooLarge}, {@link TimestampMismatch}, {@link NotFound}), so the same `code` check catches a condition
  * whether it was raised here or reported by the peer.
  *
  * ```ts
@@ -231,6 +235,25 @@ export class GroupTooLarge extends Stream {
 			message: "group too large: exceeded the cache budget",
 		});
 		this.name = "GroupTooLarge";
+	}
+}
+
+/**
+ * A frame's timedness doesn't match its track: a timestamp on a track with no timescale, or
+ * none on a track that has one.
+ *
+ * Raised locally by a frame or datagram write, and decoded from a moq-lite peer's
+ * `TIMESTAMP_MISMATCH` reset. Mirrors the Rust `Error::TimestampMismatch`.
+ *
+ * @public
+ */
+export class TimestampMismatch extends Stream {
+	constructor(options?: { cause?: unknown }) {
+		super(StreamCode.TimestampMismatch, {
+			...options,
+			message: "frame timestamp doesn't match track timescale",
+		});
+		this.name = "TimestampMismatch";
 	}
 }
 
@@ -376,6 +399,7 @@ export function fromTransport(err: unknown, options?: TransportErrorOptions): Er
 	if (code === StreamCode.TooFarBehind) return new TooFarBehind({ cause: err });
 	if (code === StreamCode.FrameTooLarge) return new FrameTooLarge({ cause: err });
 	if (code === StreamCode.GroupTooLarge) return new GroupTooLarge({ cause: err });
+	if (code === StreamCode.TimestampMismatch) return new TimestampMismatch({ cause: err });
 	return new Stream(code, { cause: err });
 }
 

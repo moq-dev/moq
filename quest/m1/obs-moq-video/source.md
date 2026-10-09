@@ -14,9 +14,12 @@ The MoQ source loads and plays supported video without FFmpeg's video libraries 
 - Remove the video FFmpeg includes and swscale linkage. Audio still decodes through libavcodec until the audio playback quest replaces it, so whichever of the two lands second removes the remaining FFmpeg includes, CMake discovery/linkage, unit stubs, compile recipe requirements, and the unused swresample linkage. Update OBS build/install docs and `doc/lib/cpp` together. libobs/Qt and native OS/GPU dependencies remain.
 - Validate new code with decoded pixels and moving timestamps, GPU copy/readback traces, and p50/p95 decode-to-presentation delay. Exercise CPU fallback, unsupported codec, GPU import failure, device loss, repeated start/stop, rendition change, and delayed terminal completion. Verify no SWScale imports (and no AVCodec/AVUtil/SWResample imports once audio playback has landed) using platform binary inspection. Load the artifact against the oldest supported OBS release and current stable release, using the repo's supported version policy at implementation time.
 
+Decided 2026-10-08: [Codecs](/quest/m1/ffi-shape/codec.md) lands first, so the source consumes the `video` decoder once instead of the decoder on `BroadcastConsumer` it removes.
+
 ## Required
 
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ before decode changes
+- [Codecs](/quest/m1/ffi-shape/codec.md) - the video decoder lands once, in the `video` namespace
 
 ## Related
 

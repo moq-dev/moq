@@ -5,7 +5,9 @@
 `rs/rs2ts` translates moq-net's lite codec into readable TypeScript inside
 js/net. The output is committed, a CI lane regenerates it and fails on
 drift, and the generated codec passes `just test interop --all` in place of
-the hand-written one.
+the hand-written one. The PR carries the line's go/no-go: the generated
+codec's bundle size and per-frame CPU against js/net's hand-written codec. A
+no-go stops the [line](/quest/m1/rs2ts/README.md) before the sans-IO work.
 
 ## Plan
 

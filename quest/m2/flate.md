@@ -10,7 +10,7 @@ the browser with `@moq/flate` and vice versa.
 ## Plan
 
 Decided in the 2026-09-30 audit: collapse the line into this quest and follow
-the `json` namespace pattern that [#4526](https://github.com/moq-dev/moq/pull/4526)
+the `json` namespace pattern that [#4519](https://github.com/moq-dev/moq/pull/4519)
 sets, rather than the per-wrapper siblings of the old bindings quest.
 
 `moq-flate` and `@moq/flate` own the snapshot and stream track modes
@@ -19,8 +19,10 @@ already owns the per-group window a caller could otherwise desynchronize.
 Bind those track modes, not the bare codec: a `frame()` call across the FFI
 boundary invites the window desync the track modes exist to prevent.
 
-#4526 removes moq-ffi's `publish_binary_*` and adds `MoqFlate*Producer::new`
-constructed from a track producer, as `json` does. What remains:
+Today moq-ffi publishes flate tracks through `publish_flate_snapshot` and
+`publish_flate_stream` on the broadcast. #4519 replaces those with
+`MoqFlate*Producer` constructors that wrap a track producer, as `json` does.
+What remains:
 
 - moq-ffi has no consume side for flate tracks. Add consumers mirroring the
   `json` ones so each wrapper can read what it writes.
@@ -31,7 +33,7 @@ constructed from a track producer, as `json` does. What remains:
   check that a wrapper-published group decodes with `@moq/flate`. Run
   `just test interop --all`.
 
-Public API: additive on top of #4526. Wire, catalog, and relay: none.
+Public API: additive on top of #4519. Wire, catalog, and relay: none.
 Compression stays invisible to `moq-net`; a compressed track is announced,
 routed, and cached like any other.
 

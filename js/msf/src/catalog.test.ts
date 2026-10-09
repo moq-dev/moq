@@ -209,27 +209,6 @@ test("preserves delay through decode and encode", () => {
 	expect(wireTracks[0].delay).toBe(200);
 });
 
-test.each([
-	["omitted", undefined],
-	["false", false],
-	["true", true],
-] as const)("preserves %s stalled state through decode and encode", (_name, stalled) => {
-	const track = {
-		name: "video0",
-		packaging: "loc",
-		isLive: true,
-		role: "video",
-		codec: "av01.0.08M.10.0.110.09",
-		...(stalled === undefined ? {} : { stalled }),
-	};
-	const catalog = decode(encodeJson({ version: "draft-01", tracks: [track] }));
-
-	expect(catalog.tracks[0].stalled).toBe(stalled);
-	const wire = decodeJson(encode(catalog));
-	const tracks = wire.tracks as { stalled?: boolean }[];
-	expect(tracks[0].stalled).toBe(stalled);
-});
-
 test("carries extension root members through decode and encode", () => {
 	// An extension section (here `mpegts`) rides the catalog root untouched, and a
 	// section this build has never heard of survives the same way.

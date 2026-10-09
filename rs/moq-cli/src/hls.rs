@@ -32,9 +32,9 @@ pub struct ExportArgs {
 	#[usage(flatten)]
 	pub tls: moq_tokio::tls::Listen,
 
-	/// Minimum media listed in each rendition's playlist window. Keep it within the
-	/// relay's group-cache retention, since segments are fetched from there on request.
-	/// A timeline durable in a catalog-named store lists everything it retains instead.
+	/// Minimum media listed in each rendition's playlist window, at most 256 segments.
+	/// Keep it within the relay's group-cache retention, since segments are fetched from
+	/// there on request.
 	#[usage(long, default = "16s")]
 	pub window: crate::duration::Duration,
 
@@ -43,8 +43,9 @@ pub struct ExportArgs {
 	pub cors: crate::web::Cors,
 }
 
-/// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`.
-pub async fn import(target: ImportTarget, playlist: String) -> anyhow::Result<()> {
+/// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
+/// announced under `epoch`.
+pub async fn import(target: ImportTarget, playlist: String, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
@@ -60,7 +61,7 @@ pub async fn import(target: ImportTarget, playlist: String) -> anyhow::Result<()
 		.with_bandwidth(bandwidth);
 	let catalog = moq_mux::catalog::Producer::new(&mut producer, config)?;
 	producer
-		.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default().with_epoch(epoch))
 		.context("failed to announce broadcast")?;
 
 	let playlist = playlist_url(&playlist)?;

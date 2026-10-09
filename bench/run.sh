@@ -6,10 +6,13 @@ set -euo pipefail
 # base/current delta. `--runtime` instead compares one multi-threaded Tokio
 # runtime with the same number of independent Tokio/epoll and io_uring workers
 # on the current tree. The current load generator drives every relay so the
-# workloads stay identical.
+# workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
 
 MODE=${1:-}
 case $MODE in
+    --audio)
+        BASE=
+        ;;
     --runtime)
         BASE=
         RUNTIME_ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
@@ -373,6 +376,42 @@ print_runtime_comparison() {
     done
 }
 
+run_audio_comparison() {
+    printf 'Building relay and audio load generator...\n'
+    CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
+    LOAD_BIN=$CURRENT_TARGET/release/moq-bench
+    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+
+    printf '\nAudio grouping: 50 fps, 200-byte frames, 0 / 100 / 200 ms groups\n'
+    printf 'shape\trecv-fps\tp99-ms\tCPU\tRSS-MiB\n'
+    local connections subscribers group_size label
+    for group_size in 0 4 9; do
+        for connections in 16 32; do
+            for subscribers in 2 8; do
+                label=room-$connections-$subscribers-$group_size
+                run_workload "$label" "$CURRENT_TARGET/release/moq-relay" audio '' 1 \
+                    --connections "$connections" --subscribe "$subscribers" --group-size "$group_size"
+                print_audio_sample "$label" audio
+            done
+        done
+        for connections in 65 201; do
+            label=fanout-$connections-$group_size
+            run_workload "$label" "$CURRENT_TARGET/release/moq-relay" audio-fanout '' 1 \
+                --connections "$connections" --group-size "$group_size"
+            print_audio_sample "$label" audio-fanout
+        done
+    done
+}
+
+print_audio_sample() {
+    local label=$1
+    local workload=$2
+    jq -r --arg shape "$label" '[
+        $shape, .recv_fps, .latency_p99_ms, (.cpu_cores // "n/a"),
+        (if .rss_bytes then .rss_bytes / 1048576 else "n/a" end)
+    ] | @tsv' "$RUN/relay/$label/$workload/summary.json"
+}
+
 run_runtime_comparison() {
     if [[ $(uname -s) != Linux ]]; then
         printf 'runtime comparison needs Linux for io_uring and /proc metrics\n' >&2
@@ -429,7 +468,10 @@ run_runtime_comparison() {
 
 cd "$ROOT"
 
-if [[ $MODE == --runtime ]]; then
+if [[ $MODE == --audio ]]; then
+    run_audio_comparison
+    exit 0
+elif [[ $MODE == --runtime ]]; then
     run_runtime_comparison
     exit 0
 elif [[ -n $BASE ]]; then

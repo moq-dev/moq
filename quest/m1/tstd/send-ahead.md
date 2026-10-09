@@ -9,7 +9,7 @@ so broadcast-sized CPBs fit out of the box.
 
 ## Plan
 
-Decided (2026-10-01). Found in [fixed-delay release](/quest/m1/tstd/delay.md)
+Decided (2026-10-01). Found in the fixed-delay release
 (#4645): frames are held until anchor + DTS + delay, and the schedule then
 sends each unit up to another delay ahead of its DTS, so a mid-group joiner
 trails the source by two delays. t0ms measured about 1.7 s of delivery at
@@ -31,7 +31,3 @@ carving alone should cut it by about one delay, not to 0.5 s.
   from two delays to one). `hrd9m` passes strict `tstd` at the 1 s default,
   and a delay below its buffer delay fails loud.
 - Ask t0ms to re-grade the CNN capture: latency should drop by about a delay.
-
-## Required
-
-- [Fixed-delay release](/quest/m1/tstd/delay.md) - the hold and schedule this merges into one budget

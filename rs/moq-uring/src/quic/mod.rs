@@ -102,6 +102,18 @@ pub struct Transport {
 	/// may have open at once. MoQ opens a stream per group, so busy endpoints
 	/// want this high.
 	pub max_streams: u64,
+	/// How much unread data one peer may have in flight across every stream,
+	/// in bytes. `None` leaves the 16 MiB default.
+	pub receive_window: Option<u64>,
+	/// How much unread data one peer may have in flight on a single stream,
+	/// in bytes. `None` leaves the 4 MiB default.
+	///
+	/// Keep it under [`receive_window`](Self::receive_window) so one stream
+	/// cannot fill the connection.
+	pub stream_receive_window: Option<u64>,
+	/// How much unacknowledged outgoing data to buffer, in bytes, whatever
+	/// the peer allows. `None` leaves the 16 MiB default.
+	pub send_window: Option<u64>,
 	/// Which congestion controller to run.
 	pub congestion: Congestion,
 	/// How often to send an ack-eliciting packet on an otherwise idle
@@ -124,6 +136,9 @@ impl Default for Transport {
 		Self {
 			idle_timeout: std::time::Duration::from_secs(10),
 			max_streams: 1024,
+			receive_window: None,
+			stream_receive_window: None,
+			send_window: None,
 			congestion: Congestion::default(),
 			keep_alive: None,
 			#[cfg(feature = "qlog")]

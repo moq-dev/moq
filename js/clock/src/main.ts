@@ -84,7 +84,7 @@ async function publish(config: Config) {
 
 	console.log("✅ Published broadcast:", config.broadcast);
 
-	void publishTrack(broadcast.createTrack(config.track));
+	void publishTrack(broadcast.createTrack(config.track, { timescale: Moq.Time.Timescale.MILLI }));
 	await connection.closed;
 }
 

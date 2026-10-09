@@ -46,7 +46,7 @@ async fn setup(version: &str) -> Setup {
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -71,10 +71,9 @@ async fn setup(version: &str) -> Setup {
 		}
 	});
 
-	moq_net_sim::timeout(TIMEOUT, track.demand().used())
+	moq_net_sim::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
-		.expect("no subscriber appeared")
-		.unwrap();
+		.expect("no subscriber appeared");
 
 	Setup {
 		pair,

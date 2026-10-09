@@ -20,7 +20,7 @@ use moq_mux::timeline::Entry;
 
 use super::Upstream;
 use super::rendition::{Kind, Rendition};
-use super::segments::{Discontinuities, Reference};
+use super::segments::{self, Discontinuities, Reference};
 
 /// The `(kind, name)` identity of a rendition. Video and audio are separate axes, so a video
 /// and an audio rendition may share a name without colliding.
@@ -67,8 +67,9 @@ struct Feed {
 	/// The publisher run every segment URL carries; late-created renditions inherit it.
 	generation: Option<Arc<str>>,
 	/// The playlist window duration applied on every push (see
-	/// [`Config::window`](super::Config::window)), or `None` when the source timeline is
-	/// authoritative and only its pops trim the playlists.
+	/// [`Config::window`](super::Config::window)), or `None` in
+	/// [`Config::history`](super::Config::history) mode, where only the source timeline's pops
+	/// trim the playlists.
 	window: Option<Duration>,
 }
 
@@ -218,13 +219,19 @@ impl Fanout {
 		feed.history
 			.push_back((index, entry.clone(), reference.clone(), discontinuity));
 		let window = feed.window;
-		while let Some(window) = window
-			&& feed.history.len() >= 2
-		{
-			let newest = &feed.history.back().unwrap().1;
-			let span =
-				(Duration::from(newest.pts) + newest.duration).saturating_sub(Duration::from(feed.history[1].1.pts));
-			if span < window {
+		while let Some(window) = window {
+			let rest = match feed.history.get(1) {
+				Some((_, second, ..)) => {
+					let newest = &feed.history.back().unwrap().1;
+					newest.end_time().saturating_sub(Duration::from(second.pts))
+				}
+				None => Duration::ZERO,
+			};
+			let starts = |(_, entry, reference, _): &(u64, Entry, Reference, u64)| {
+				segments::starts(reference, entry.keyframe, &entry.start)
+			};
+			let keeps_start = !starts(&feed.history[0]) || feed.history.iter().skip(1).any(starts);
+			if !segments::evicts(window, feed.history.len(), rest, keeps_start) {
 				break;
 			}
 			feed.history.pop_front();
@@ -333,6 +340,25 @@ impl Producer {
 				if current
 					.values()
 					.any(|rendition| rendition.poll_playable(waiter).is_ready())
+				{
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+		})
+		.await;
+	}
+
+	/// Resolve once at least one rendition is [advertised](Rendition::is_advertised), so a master
+	/// playlist can list it.
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	pub(crate) async fn advertised(&self) {
+		let _ = kio::wait(|waiter| {
+			self.state.poll_ref(waiter, |current| {
+				if current
+					.values()
+					.any(|rendition| rendition.poll_advertised(waiter).is_ready())
 				{
 					Poll::Ready(())
 				} else {

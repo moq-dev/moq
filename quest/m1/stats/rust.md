@@ -41,7 +41,15 @@
 - The media test publishes with `--stats` and plays with `--echo` against a
   publisher that solicits feedback. It asserts that the publisher's frame
   count matches what was sent and that the viewer's newest arrival advances.
+- Decided 2026-10-08: no E2EE refusal here. The CLI has no encrypted
+  broadcast yet, so [Encrypted native CLI](/quest/m1/e2ee/cli.md) refuses `--stats` and
+  `--echo` when it adds one: they would publish rendition IDs and per-track
+  counters in plaintext beside it.
 
 ## Required
 
 - [Schema](/quest/m1/stats/schema.md) - the sections and snapshot types
+
+## Related
+
+- [Encrypted native CLI](/quest/m1/e2ee/cli.md) - refuses stats and feedback on an encrypted broadcast

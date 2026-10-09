@@ -12,8 +12,9 @@ CSP is out of scope: neither site adds a policy.
 
 Decided in planning: the maintainer wants hosted mode dogfooded, not just the
 pin bump. No CSP on either site. The moq.dev change is a direct PR, since that
-repo has no quest tree. pronto/web is skipped: it renders video only and never
-loads a worklet.
+repo has no quest tree. The moq.pro side is part of its
+[package adoption](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/ship-dev.md).
+pronto/web is skipped: it renders video only and never loads a worklet.
 
 Guidance:
 

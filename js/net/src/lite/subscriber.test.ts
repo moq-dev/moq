@@ -187,35 +187,24 @@ test("an unidentified responder keeps hop 0 on a nonempty chain", async () => {
 	subscriber.close();
 });
 
-test("a received hop list naming no publisher is stamped per connection", async () => {
-	const first = async () => {
-		const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-		const announced = subscriber.announced();
-		await settle();
+test("a received hop list naming no publisher stays anonymous", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
 
-		await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
-		await send((w) =>
-			encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
-		);
-		const update = await announced.next();
-		expect(update).toMatchObject({ prefix: Path.from("room"), kind: "start" });
-		const hops = update?.route.hops ?? [];
-		expect(hops).toHaveLength(2);
-		expect(hops[0]).not.toBe(UNKNOWN_HOP);
-		// The 0 after the stamp keeps the unnamed publisher ranked as anonymous.
-		expect(hops[1]).toBe(UNKNOWN_HOP);
-		expect(update && isAnonymous(update.route)).toBe(true);
+	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
+	);
+	const update = await announced.next();
+	expect(update).toMatchObject({ prefix: Path.from("room"), kind: "start", route: { hops: [UNKNOWN_HOP] } });
+	expect(update && isAnonymous(update.route)).toBe(true);
 
-		announced.close();
-		subscriber.close();
-		return hops[0];
-	};
-
-	// A reconnect is a new connection, so the same unnamed publisher reads as a new one.
-	expect(await first()).not.toBe(await first());
+	announced.close();
+	subscriber.close();
 });
 
-test("a received chain starting with hop 0 keeps it behind the stamp", async () => {
+test("a received chain starting with hop 0 is forwarded unchanged", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
 	await settle();
@@ -230,9 +219,7 @@ test("a received chain starting with hop 0 keeps it behind the stamp", async () 
 	);
 	const update = await announced.next();
 	expect(update).toMatchObject({ prefix: Path.from("room"), kind: "start" });
-	const [stamp, ...rest] = update?.route.hops ?? [];
-	expect(stamp).not.toBe(UNKNOWN_HOP);
-	expect(rest).toEqual([UNKNOWN_HOP, PUBLISHER_A, PEER]);
+	expect(update?.route.hops).toEqual([UNKNOWN_HOP, PUBLISHER_A, PEER]);
 
 	announced.close();
 	subscriber.close();
@@ -257,11 +244,7 @@ test("a restart updates the route in place, even from another publisher", async 
 	// A reprice from the same publisher surfaces, which proves the identical restart above
 	// emitted nothing. The same publisher keeps sharing one broadcast.
 	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "restart", id: 0n, hops: [PUBLISHER_A], cost: { warm: 4n, cold: 4n } },
-			Version.DRAFT_06,
-		),
+		encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A], cost: 4n }, Version.DRAFT_06),
 	);
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "update" });
 	const same = subscriber.consume(room);
@@ -311,20 +294,16 @@ test("a restart that re-prices the same publisher emits the new route", async ()
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("room"),
 		kind: "start",
-		route: { hops: [PUBLISHER_A, PEER], cost: { warm: 0n, cold: 0n } },
+		route: { hops: [PUBLISHER_A, PEER], cost: 0n },
 	});
 
 	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "restart", id: 0n, hops: [PUBLISHER_A], cost: { warm: 4n, cold: 4n } },
-			Version.DRAFT_06,
-		),
+		encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A], cost: 4n }, Version.DRAFT_06),
 	);
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("room"),
 		kind: "update",
-		route: { hops: [PUBLISHER_A, PEER], cost: { warm: 4n, cold: 4n } },
+		route: { hops: [PUBLISHER_A, PEER], cost: 4n },
 	});
 
 	announced.close();
@@ -353,9 +332,8 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 });
 
 // A responder that withholds its Hop ID sends the reserved 0, and an empty chain means it
-// originated the path itself, so the advertisement names nobody and the connection stamps it.
-// A restart on the same connection keeps that stamp, so it is a reprice that updates in place
-// and keeps the shared broadcast, as does one that names a publisher.
+// originated the path itself, so the advertisement names nobody. A restart of it is a reprice
+// that updates in place and keeps the shared broadcast, as does one that names a publisher.
 test("a restart from an unidentified publisher updates in place", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
@@ -367,13 +345,7 @@ test("a restart from an unidentified publisher updates in place", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start" });
 	const held = subscriber.consume(room);
 
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "restart", id: 0n, hops: [], cost: { warm: 4n, cold: 4n } },
-			Version.DRAFT_06,
-		),
-	);
+	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [], cost: 4n }, Version.DRAFT_06));
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "update" });
 	expect(subscriber.consume(room).closed).toBe(held.closed);
 
@@ -786,6 +758,8 @@ interface FakeStream {
 	// Resolves once the subscriber waits on a read the test has not answered.
 	reading: Promise<void>;
 	aborted: Promise<unknown>;
+	// Resolves once the subscriber FINs its side.
+	finished: Promise<void>;
 	// Every chunk the subscriber wrote.
 	written: Uint8Array[];
 	// Hands the stream to the subscriber, for an open the session was told to park.
@@ -793,17 +767,21 @@ interface FakeStream {
 }
 
 // A session whose streams the test answers by hand and that never fails them on its own, so
-// only Subscriber.close() can end a wait. Opens numbered in `park` wait for `release()`.
-function fakeSession(park: number[] = []) {
+// only Subscriber.close() can end a wait. Opens numbered in `park` wait for `release()`, and
+// writes to those numbered in `stall` never get credit.
+function fakeSession(park: number[] = [], stall: number[] = []) {
 	const streams: FakeStream[] = [];
 	const quic = {
 		createBidirectionalStream: () => {
 			let inbound!: ReadableStreamDefaultController<Uint8Array>;
 			let onRead!: () => void;
 			let onAbort!: (reason: unknown) => void;
+			let onFinish!: () => void;
 			let release!: () => void;
 			const reading = new Promise<void>((resolve) => (onRead = resolve));
 			const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
+			const finished = new Promise<void>((resolve) => (onFinish = resolve));
+			const stalled = stall.includes(streams.length);
 			// No high water mark, so pull() means the subscriber is blocked on a read.
 			const readable = new ReadableStream<Uint8Array>(
 				{
@@ -816,12 +794,16 @@ function fakeSession(park: number[] = []) {
 			);
 			const written: Uint8Array[] = [];
 			const writable = new WritableStream<Uint8Array>({
-				write: (chunk) => void written.push(chunk),
+				write: (chunk) => {
+					written.push(chunk);
+					return stalled ? new Promise<void>(() => {}) : undefined;
+				},
+				close: () => onFinish(),
 				abort: (reason) => void onAbort(reason),
 			});
 			const opened = new Promise((resolve) => (release = () => resolve({ readable, writable })));
 			if (!park.includes(streams.length)) release();
-			streams.push({ inbound, reading, aborted, written, release });
+			streams.push({ inbound, reading, aborted, finished, written, release });
 			return opened;
 		},
 	} as unknown as WebTransport;
@@ -962,6 +944,35 @@ test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE
 		await drainUntil(() => aborted);
 		expect(aborted).toBe(true);
 		expect(streams[1].written).toEqual([]);
+	} finally {
+		subscriber.close();
+		warn.mockRestore();
+		jest.useRealTimers();
+	}
+});
+
+// A SUBSCRIBE write blocked on flow control may never let the setup settle, so the deadline
+// lets go of the held TRACK stream without waiting for it.
+test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its TRACK stream", async () => {
+	jest.useFakeTimers();
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const { quic, streams } = fakeSession([], [1]);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	try {
+		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+		await drainUntil(() => streams.length === 1);
+		await streams[0].reading;
+		await answerTrackInfo(streams[0]);
+		await drainUntil(() => streams.length === 2 && streams[1].written.length > 0);
+
+		let finished = false;
+		void streams[0].finished.then(() => {
+			finished = true;
+		});
+		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS);
+		await drainUntil(() => track.closed.peek() !== undefined);
+		await drainUntil(() => finished);
+		expect(finished).toBe(true);
 	} finally {
 		subscriber.close();
 		warn.mockRestore();

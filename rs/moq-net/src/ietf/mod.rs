@@ -38,6 +38,7 @@ mod track;
 mod version;
 
 use control::Control;
+pub(crate) use control::initial_max_request_id;
 pub use datagram::*;
 pub use fetch::*;
 pub use filter::*;

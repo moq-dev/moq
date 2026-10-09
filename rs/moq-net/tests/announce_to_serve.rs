@@ -53,7 +53,7 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 
 /// How a request for the path answers.
 async fn request(consumer: &origin::Consumer) -> Result<moq_net::broadcast::Consumer, String> {
-	consumer.request_broadcast(PATH).await.map_err(|err| match err {
+	consumer.request_broadcast(PATH, None).await.map_err(|err| match err {
 		Error::Unroutable => "unroutable".to_string(),
 		err => err.to_string(),
 	})

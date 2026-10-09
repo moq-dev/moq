@@ -167,6 +167,12 @@ impl<T: ObjectStore> Store<T> {
 						intended: info.timescale,
 					});
 				}
+				if parsed.epoch != info.epoch {
+					return Err(Error::EpochMismatch {
+						existing: parsed.epoch,
+						intended: info.epoch.clone(),
+					});
+				}
 				Ok(key)
 			}
 		}

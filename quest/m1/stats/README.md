@@ -11,7 +11,9 @@ its own connection. A dashboard reads both the same way a publisher does. One
 shared model turns either report into a health verdict, and a bounded
 preflight run reports which media layer of a broadcast is broken. Stats and
 feedback cost nothing on the network unless someone subscribes. Not here: the
-relay's `moq-stats` layout, which stays as it is; clock synchronization; any
+relay's `moq-stats` layout, which this line does not change (the
+[broadcast epoch](/quest/m0/broadcast-epoch/README.md) line reshapes it);
+clock synchronization; any
 requirement that a client report; and feedback as an input to billing,
 authorization, or route selection.
 
@@ -26,7 +28,7 @@ catalog keyed by rendition, not a stats track per rendition and not a sum per
 kind.
 
 - **Media stats leave moq-stats.** The relay is media-agnostic and keeps
-  `Traffic`, `Presence`, and `.stats/node/<node>` unchanged. Media stats are
+  `Traffic`, `Presence`, and `.stats/node/<node>` as this line found them. Media stats are
   hang tracks, discovered through the catalog, so no `Producer<E>`
   extension, `Merge` wrapper, or flattened generic is needed. One layout for
   relay and clients is given up on purpose.
@@ -124,8 +126,8 @@ connection view and the dashboard flow.
 
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters; whether a
-  combined per-broadcast verdict reads both is open in
-  [client health](/quest/m1/stats/health.md)
+- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters; the
+  combined per-broadcast verdict reading both lives in moq.pro's
+  [health badge](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/qos/badge.md)
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report

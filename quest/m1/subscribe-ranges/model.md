@@ -22,5 +22,9 @@ Guidance:
   (`fetch_group`, `requested_group`), moq-c (`poll_requested_group`), every
   binding wrapper and its `doc/lib` page, and `moq fetch` through
   `moq_relay::fetch_group` (added in the 2026-10-05 audit).
-- Max Age caps every range.
+- `max_delay` caps every range.
 - Benchmark range count and span as separate axes (AGENTS.md fan-out rule).
+
+## Required
+
+- [lite-07 Live flag](/quest/m1/lite-live.md) - reshapes the same `Subscription` first

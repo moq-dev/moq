@@ -57,7 +57,7 @@ test("the shared containment check covers every section carrying a broadcast ref
 
 test("watch refuses an oversized catalog update", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK);
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update(catalog(MAX_RENDITIONS + 1));
@@ -78,7 +78,7 @@ function referencing(broadcast: string): Root {
 async function watchRequested(root: Root) {
 	const origin = new Moq.Origin.Producer();
 	const broadcast = origin.createBroadcast(Moq.Path.from("room/alice"));
-	const track = broadcast.createTrack(TRACK);
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
 	broadcast.announce();
 	const request = origin.request(Moq.Path.from("room/alice"));
@@ -107,7 +107,7 @@ test("watch accepts a sibling reference under the same root and yields it unreso
 
 test("watch on a standalone broadcast refuses any parent reference", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK);
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update(referencing("../bob"));
@@ -118,7 +118,7 @@ test("watch on a standalone broadcast refuses any parent reference", async () =>
 
 test("watch subscribes and yields typed catalog updates", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK);
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update(catalog(1));

@@ -64,7 +64,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -211,7 +211,10 @@ async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<m
 
 	let consumer = subscriber.consume();
 	consumer.routed("bcast").await.expect("routed");
-	let remote = consumer.request_broadcast("bcast").await.expect("broadcast resolves");
+	let remote = consumer
+		.request_broadcast("bcast", None)
+		.await
+		.expect("broadcast resolves");
 	// Subscribing resolves only once the publisher serves the track, which it does
 	// only after seeing the subscription, so the reader runs concurrently.
 	let reader = moq_net_sim::spawn(async move {

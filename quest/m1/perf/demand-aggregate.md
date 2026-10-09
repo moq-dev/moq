@@ -15,7 +15,7 @@ readers, so `js/net/src/track.ts` keeps its fold.
 ## Plan
 
 - Shared state, no message passing (decided 2026-10-06). `Subscriptions`
-  becomes per-field counted ordered maps for `priority`, `max_age`, `start`,
+  becomes per-field counted ordered maps for `priority`, `max_delay`, `start`,
   and `end`, with a count for the `None` arm (no floor, unbounded) that absorbs
   `start` and `end`. Subscribe, update, and drop mutate it directly under the
   lock: remove the subscriber's old contribution, add the new one. Each

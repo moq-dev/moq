@@ -27,9 +27,10 @@ Decided:
   `tokio::time` (moq-net's runtime `Timer` went away in #4437).
 - Manual flush is per track: `Control::flush(name)` on the writer, beside the
   broadcast-wide `cut`, and `Recorder::flush()` on a timeline.
-- JS mirrors it: `@moq/hang`'s `Timeline.Recorder` gets the same idle
-  deadline and a `flush()`, so Rust and JS timelines stay one API. Without it,
-  an idle browser track keeps today's unbounded behavior (Codex on #4301).
+- Rust only (decided 2026-10-07): JS publishes no timeline yet, so its idle
+  deadline and `flush()` belong to
+  [JS per-track timelines](/quest/m1/archive/js-timelines.md), and this quest
+  does not wait on the port.
 - The bound covers closing a record, not upload latency: a slow object-store
   PUT still delays the durable commit, which the writer already serializes.
 - Tests inject `now` into the segmenter and run the writer on paused tokio
@@ -37,6 +38,6 @@ Decided:
   track after a finished group, a manual flush mid-group, and a publisher whose
   timestamps run ahead of or behind the wall clock.
 
-## Required
+## Related
 
-- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - the JS `Timeline.Recorder` this extends; the Rust per-track segmenter and writer are already on `main` (#4034)
+- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - carries the JS idle deadline and `flush()`

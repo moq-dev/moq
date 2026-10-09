@@ -10,7 +10,8 @@
 //! The decode loop runs only while at least one [`Listener`] exists: the first
 //! listener subscribes to the source and opens the decoder, dropping the last
 //! one tears both down. An idle broadcast costs nothing, exactly like the
-//! per-rung subscriptions this replaces.
+//! per-rung subscriptions this replaces. That includes the source track handle
+//! itself: holding one is interest in the track all the way to its publisher.
 
 use std::sync::{Arc, Mutex};
 
@@ -51,8 +52,11 @@ pub(crate) struct Feed {
 }
 
 struct Inner {
-	/// The source media track (subscribed only while listeners exist).
-	source: moq_net::track::Consumer,
+	/// The source broadcast, whose media track is looked up only while listeners
+	/// exist.
+	broadcast: moq_net::broadcast::Consumer,
+	/// The source media track's name.
+	name: String,
 	/// The source rendition's catalog entry (codec + container).
 	config: VideoConfig,
 	/// The decoder: which implementation, and where its frames live.
@@ -70,13 +74,15 @@ struct State {
 
 impl Feed {
 	pub(crate) fn new(
-		source: moq_net::track::Consumer,
+		broadcast: moq_net::broadcast::Consumer,
+		name: String,
 		config: VideoConfig,
 		decoder: moq_video::decode::Config,
 	) -> Self {
 		Self {
 			inner: Arc::new(Inner {
-				source,
+				broadcast,
+				name,
 				config,
 				decoder,
 				state: Mutex::new(State::default()),
@@ -181,7 +187,7 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	// Arrival order on purpose: group order doesn't matter here, since every group
 	// decodes independently from its own keyframe, so there is nothing for a sequence
 	// cursor to buy. Either one drops whatever falls behind the live edge.
-	let mut subscriber = inner.source.subscribe(None).await?;
+	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(None).await?;
 
 	while let Some(mut group) = subscriber.recv_group().await? {
 		// Sends only fail with zero receivers, which is fine: teardown aborts
