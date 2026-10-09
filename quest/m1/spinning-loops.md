@@ -24,8 +24,9 @@ Decided 2026-10-09 while reworking #5088:
   task. Three known sites need care: lite `FetchServeRun` reads a
   `FrameIngest` yield as "still short" and may `abort_unused`;
   `Announced::poll_serve` must re-queue the route through `route_waiter` and
-  yield in the outer loop too; and ietf `poll_datagrams`'s drain arm would
-  skip datagrams after a yield unless it returns `Poll`.
+  yield in the outer loop too; and ietf `poll_datagrams` still spins on a
+  datagram backlog after `TrackServe` yields, and its drain arm would skip
+  datagrams after a yield unless it returns `Poll`.
 
 ## Related
 
