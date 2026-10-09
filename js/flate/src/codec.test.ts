@@ -99,6 +99,30 @@ test("a frame larger than pako's chunk size round-trips", () => {
 	expect(new Decoder().frame(slice)).toEqual(payload);
 });
 
+// The bound holds for incompressible input, the worst case, at sizes straddling the 16 KiB block
+// boundary, and on a window already primed by earlier frames. Twin of the Rust test, since pako is a
+// separate implementation from the zlib the Rust side checks.
+test("the bound covers incompressible frames", () => {
+	// xorshift: incompressible enough to force stored blocks, and deterministic. Each frame is fresh
+	// noise; a repeat would match the window instead.
+	let state = 0x9e3779b9;
+	const noise = (len: number) => {
+		const out = new Uint8Array(len);
+		for (let i = 0; i < len; i++) {
+			state ^= state << 13;
+			state ^= state >>> 17;
+			state ^= state << 5;
+			out[i] = state & 0xff;
+		}
+		return out;
+	};
+
+	const encoder = new Encoder();
+	for (const len of [1, 2, 100, 16_383, 16_384, 16_385, 65_535, 65_536, 1 << 20, 3 << 20]) {
+		expect(encoder.frame(noise(len)).byteLength).toBeLessThanOrEqual(Encoder.bound(len));
+	}
+});
+
 test("cross-frame context shrinks a repeated frame", () => {
 	// A later frame identical to an earlier one compresses far smaller once the window holds it.
 	const encoder = new Encoder();

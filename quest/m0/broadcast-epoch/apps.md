@@ -23,6 +23,3 @@ switches to a republish within an RTT. Logs show the epoch.
 - moq-room is out (decided 2026-10-08): it only discovers participants, and
   the caller that publishes into a room mints the epoch.
 
-## Required
-
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - the `Restart` announce event the players follow

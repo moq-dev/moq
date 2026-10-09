@@ -336,7 +336,11 @@ async fn subscribe(
 			_ = &mut deadline => break,
 			update = announced.next() => {
 				let update = match update {
-					Some(moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) => update,
+					Some(
+						moq_net::announce::Event::Start(update)
+						| moq_net::announce::Event::Update(update)
+						| moq_net::announce::Event::Restart(update),
+					) => update,
 					Some(moq_net::announce::Event::End(_)) => continue,
 					None => break,
 				};
@@ -362,7 +366,11 @@ async fn subscribe(
 	// there is nothing to spread over.
 	while selected < want {
 		let update = match announced.next().await {
-			Some(moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) => update,
+			Some(
+				moq_net::announce::Event::Start(update)
+				| moq_net::announce::Event::Update(update)
+				| moq_net::announce::Event::Restart(update),
+			) => update,
 			Some(moq_net::announce::Event::End(_)) => continue,
 			None => break,
 		};

@@ -16,7 +16,7 @@ on the wire names an instance, so the relay's front always resolves without
 an epoch. A worker that announces its output's exact path with a fresh epoch
 to get one restarts the first viewer: the front resolved through the claim,
 and the epoch route wins the path and is announced as a `Restart`
-([Restart](/quest/m0/broadcast-epoch/restart.md)). A front on a drained
+(Restart). A front on a drained
 worker no longer needs this: under Restart a request joins a front only while
 its route still wins, on every version (re-scoped 2026-10-07). lite-07 only; older versions
 and moq-transport keep today's behavior.
@@ -34,7 +34,7 @@ Decisions (2026-10-07, proposed for the maintainer):
   `Request::accept` reads it from the accepted broadcast rather than taking
   it as an argument.
 - A front adopts the epoch it learns. Routes without an epoch never splice
-  (maintainer, 2026-10-08, in [Restart](/quest/m0/broadcast-epoch/restart.md)):
+  (maintainer, 2026-10-08, in Restart):
   a route change, including a per-path winner change under a prefix pool,
   reaches downstream as a `Restart` of the route, which unsets the cached
   copy of every broadcast nested under it. What that
@@ -87,10 +87,6 @@ new epoch.
 
 Public API: Rust and JS, the broadcast's epoch and what `accept` does with
 it. Wire: lite-07 TRACK_INFO gains `Epoch`.
-
-## Required
-
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - the join rule and sticky subscriptions this builds on
 
 ## Related
 

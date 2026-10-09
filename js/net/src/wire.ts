@@ -71,6 +71,21 @@ export interface Advertised {
 	readonly claim?: Path.Patterns;
 }
 
+/** What names a publisher instance: an advertisement's identity and epoch. */
+export interface Instance {
+	readonly identity: object;
+	readonly route: Pick<Route, "epoch">;
+}
+
+/**
+ * Whether two advertisements serve one publisher instance: the same epoch, or, without one,
+ * the same advertisement, since nothing says another serves the same bytes.
+ */
+export function sameInstance(a: Instance, b: Instance): boolean {
+	if (a.route.epoch !== undefined || b.route.epoch !== undefined) return a.route.epoch === b.route.epoch;
+	return a.identity === b.identity;
+}
+
 /**
  * Every originated advertisement per prefix, most preferred first. A reader takes the first
  * one its scope admits, so a cheaper route it cannot use never hides one it can.

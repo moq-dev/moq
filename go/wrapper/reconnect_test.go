@@ -37,11 +37,11 @@ func startRelay(t *testing.T, ctx context.Context, addr string) *relay {
 
 	r := &relay{server: server, addr: server.LocalAddr()}
 	go func() {
-		for req, err := range server.Requests(ctx) {
+		for req, err := range server.All(ctx) {
 			if err != nil {
 				return
 			}
-			session, err := req.Accept(ctx)
+			session, err := req.Accept(ctx, nil, nil)
 			if err != nil {
 				continue
 			}
@@ -186,7 +186,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 				return
 			default:
 			}
-			_ = track.WriteFrame(moq.Frame{Payload: fmt.Appendf(nil, "frame-%d", i), TimestampUs: us(0)})
+			_ = track.WriteFrame(moq.Frame{Payload: fmt.Appendf(nil, "frame-%d", i), Timestamp: ts(0)})
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()

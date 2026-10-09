@@ -94,5 +94,5 @@ Public API: `kio::coop::budget` (new). Wire: none.
 
 - [FFI runtime](/quest/m1/ffi-runtime.md) - FFI apps run on more than one thread
 - [Audio group duration](/quest/m1/audio-group-duration.md) - small audio frames stop minting a group each
-- [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - verifies the Go and Python interop cells once this lands, and fails a cell whose connection idles out
+- [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - verifies the Go, Python, and C++ interop cells once this lands, and fails a cell whose connection idles out
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - its pass count bounds passes per turn; this budget bounds one task's loop, so they compose

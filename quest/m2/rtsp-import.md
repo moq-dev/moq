@@ -63,8 +63,8 @@ Decided 2026-10-05:
 - The library ingests one session and never reconnects. The caller supplies
   the `broadcast::Producer` and importer state stays private, so two
   sessions, such as the truck's H.264 SD and H.265 HD URLs, can publish
-  renditions of one broadcast. Two sessions on one catalog need
-  [Shared import clock](/quest/m1/shared-clock.md) to land on one timeline.
+  renditions of one broadcast. Two sessions on one catalog each shift onto
+  its clock (`catalog::Timebase`), so they land on one timeline.
   A session end, a failure, and a timeline jump all return to the caller,
   which decides whether to retry. Reason: the truck deliberately exits
   for systemd so a stuck Starlink session surfaces, and an in-process retry
@@ -85,10 +85,6 @@ a new epoch, starting on a keyframe with its own catalog.
 Public API: the `moq-rtsp` crate and the `moq import rtsp` subcommand.
 Wire: none. Both are additive, so it is backported to `release` once it
 lands on main.
-
-## Required
-
-- [Shared import clock](/quest/m1/shared-clock.md) - two sessions importing into one caller broadcast share one timeline
 
 ## Related
 
