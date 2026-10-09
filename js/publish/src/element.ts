@@ -15,7 +15,7 @@ import * as Source from "./source";
 import { clearSourceState } from "./source-state";
 import * as Video from "./video";
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "announce"] as const;
+const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "renderer", "announce"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -65,6 +65,13 @@ function parsePreview(value: string | null): Preview.Mode {
 	return "source";
 }
 
+function parseBackend(value: string | null): Preview.Backend {
+	if (value === null) return "auto";
+	if (value === "auto" || value === "webgpu" || value === "2d") return value;
+	console.warn(`moq-publish: invalid renderer="${value}", expected "auto", "webgpu", or "2d"`);
+	return "auto";
+}
+
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
 // There's no destructor for web components so this is the best we can do.
@@ -82,6 +89,8 @@ export default class MoqPublish extends HTMLElement {
 		invisible: new Signal(false),
 		// What a <canvas> preview renders: the raw capture, or a decoded copy of the encoded video.
 		preview: new Signal<Preview.Mode>("source"),
+		// Which graphics API draws a <canvas> preview.
+		backend: new Signal<Preview.Backend>("auto"),
 		// When to advertise the broadcast: always, never, or only once a source is live.
 		announce: new Signal<AnnounceMode>("source"),
 	};
@@ -233,8 +242,15 @@ export default class MoqPublish extends HTMLElement {
 					encoder: this.video,
 					mode: this.controls.preview,
 					enabled: this.#videoEnabled,
+					backend: this.controls.backend,
 				});
 				effect.cleanup(() => renderer.close());
+
+				// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
+				// The observer above picks it up and this effect builds a renderer for it.
+				effect.run((inner) => {
+					if (inner.get(renderer.out.error) === "surface-lost") preview.replaceWith(preview.cloneNode());
+				});
 				return;
 			}
 
@@ -302,6 +318,8 @@ export default class MoqPublish extends HTMLElement {
 			this.controls.invisible.set(parseBoolean(newValue, false));
 		} else if (name === "preview") {
 			this.controls.preview.set(parsePreview(newValue));
+		} else if (name === "renderer") {
+			this.controls.backend.set(parseBackend(newValue));
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -439,6 +457,15 @@ export default class MoqPublish extends HTMLElement {
 
 	set preview(value: Preview.Mode) {
 		this.controls.preview.set(value);
+	}
+
+	/** Which graphics API draws a <canvas> preview, mirroring the `renderer` attribute. */
+	get backend(): Preview.Backend {
+		return this.controls.backend.peek();
+	}
+
+	set backend(value: Preview.Backend) {
+		this.controls.backend.set(value);
 	}
 
 	get announce(): AnnounceMode {
