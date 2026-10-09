@@ -138,9 +138,11 @@ impl Server {
 			version.into(),
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
-			start.goaway,
-			start.auth,
-			start.setup,
+			crate::session::Handles {
+				goaway: start.goaway,
+				auth: start.auth,
+				setup: start.setup,
+			},
 		))
 	}
 
@@ -585,9 +587,7 @@ where
 				version.into(),
 				None,
 				crate::driver::Protocol::Ietf(protocol),
-				goaway,
-				auth,
-				setup,
+				crate::session::Handles { goaway, auth, setup },
 			))
 		}
 		.maybe_boxed()
@@ -711,7 +711,12 @@ where
 			};
 
 			Ok(Session::new(
-				runtime, session, version, recv_bw, protocol, goaway, auth, setup,
+				runtime,
+				session,
+				version,
+				recv_bw,
+				protocol,
+				crate::session::Handles { goaway, auth, setup },
 			))
 		}
 		.maybe_boxed()

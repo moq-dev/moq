@@ -6,12 +6,12 @@ mod support;
 
 use std::time::Duration;
 
+use futures::StreamExt;
 use moq_net::{
 	Client, Error, Hop, Pattern, Patterns, Server, Session, SessionError, StreamError, Version,
 	auth::{self, Grant},
 	origin,
 };
-use futures::StreamExt;
 use support::harness::{now, spawn};
 use support::mock::{MockSession, create_mock_session_pair};
 

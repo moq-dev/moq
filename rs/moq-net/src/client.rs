@@ -219,9 +219,11 @@ impl Client {
 			version.into(),
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
-			start.goaway,
-			start.auth,
-			start.setup,
+			crate::session::Handles {
+				goaway: start.goaway,
+				auth: start.auth,
+				setup: start.setup,
+			},
 		))
 	}
 
@@ -308,9 +310,7 @@ impl Client {
 					v,
 					None,
 					crate::driver::Protocol::Ietf(protocol),
-					goaway,
-					auth,
-					setup,
+					crate::session::Handles { goaway, auth, setup },
 				));
 			}
 			Some(ALPN_16) => {
@@ -472,7 +472,12 @@ impl Client {
 		};
 
 		Ok(Session::new(
-			runtime, session, version, recv_bw, protocol, goaway, auth, setup,
+			runtime,
+			session,
+			version,
+			recv_bw,
+			protocol,
+			crate::session::Handles { goaway, auth, setup },
 		))
 	}
 }

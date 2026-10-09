@@ -313,6 +313,13 @@ impl Session {
 	}
 }
 
+/// The handles a protocol driver shares with its [`Session`].
+pub(super) struct Handles {
+	pub goaway: goaway::Handle,
+	pub auth: auth::Handle,
+	pub setup: Setup,
+}
+
 impl Session {
 	pub(super) fn new<S>(
 		runtime: crate::time::Clock,
@@ -320,13 +327,12 @@ impl Session {
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::driver::Protocol<S>,
-		goaway: goaway::Handle,
-		auth: auth::Handle,
-		setup: Setup,
+		handles: Handles,
 	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
 	{
+		let Handles { goaway, auth, setup } = handles;
 		let sample = snapshot(&session);
 
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.

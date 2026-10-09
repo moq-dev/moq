@@ -1289,7 +1289,9 @@ impl AnnounceRun {
 			}
 
 			match self.outgoing(&update.route, &absolute) {
-				Some((hops, cost)) => self.advertise(stream, suffix, hops, cost, update.route.epoch.clone(), &absolute)?,
+				Some((hops, cost)) => {
+					self.advertise(stream, suffix, hops, cost, update.route.epoch.clone(), &absolute)?
+				}
 				// The chain must not be forwarded (reflected, or full): retract
 				// whatever the peer holds.
 				None => self.retract(stream, suffix, &absolute)?,

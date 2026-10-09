@@ -1000,7 +1000,15 @@ test("a grant that shrinks while the subscription sets up refuses it", async () 
 		subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
 	});
 	const grant = new Signal<Grant | undefined>(scoped("room"));
-	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n), undefined, undefined, undefined, grant);
+	const subscriber = new Subscriber(
+		quic,
+		Version.DRAFT_05,
+		HopSchema.parse(1n),
+		undefined,
+		undefined,
+		undefined,
+		grant,
+	);
 
 	const track = subscriber.consume(Path.from("room/cam")).track("video").subscribe().ordered();
 	const next = track.nextGroup().catch((err: unknown) => err);
