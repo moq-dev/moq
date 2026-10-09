@@ -15,7 +15,7 @@ import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from
 import { Producer as GroupProducer } from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
-import { createMockTransportPair } from "./mock.ts";
+import { createMockTransportPair, textFrame } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -86,7 +86,7 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 				continue;
 			}
 			served++;
-			req.accept({ timescale: Timescale.MILLI }).writeString("hello");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 		}
 	})();
 
@@ -398,7 +398,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
 				requests++;
-				request.accept({ timescale: Timescale.MILLI }).writeString("hello");
+				request.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 			}
 		})();
 
@@ -591,7 +591,7 @@ test("integration: lite draft-05 datagrams not sent on a non-datagram transport"
 	const pump = (async () => {
 		for (let i = 0; !stop; i++) {
 			producer.appendDatagram(Timestamp.fromMillis(i), enc.encode("dgram"));
-			producer.writeString("group");
+			producer.writeFrame(textFrame("group"));
 			await sleep(2);
 		}
 	})();
@@ -672,7 +672,7 @@ test("integration: lite draft-05 missing datagram writer does not close streams"
 	const track = remote.track("video").subscribe().ordered();
 
 	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("dgram"));
-	producer.writeString("group");
+	producer.writeFrame(textFrame("group"));
 
 	expect(await track.readString()).toBe("group");
 
@@ -752,7 +752,7 @@ test("integration: lite draft-05 missing datagram reader does not close streams"
 	const track = remote.track("video").subscribe().ordered();
 
 	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("dgram"));
-	producer.writeString("group");
+	producer.writeFrame(textFrame("group"));
 
 	expect(await track.readString()).toBe("group");
 
@@ -789,7 +789,7 @@ test("integration: a group reset carries the peer's code to the subscriber", asy
 	const track = remote.track("video").subscribe().ordered();
 
 	const group = producer.appendGroup();
-	group.writeString("frame");
+	group.writeFrame(textFrame("frame"));
 
 	const consumer = await track.nextGroup();
 	if (!consumer) throw new Error("expected a group");
@@ -829,7 +829,7 @@ test("integration: a locally raised group error reaches the peer as its own code
 	const track = remote.track("video").subscribe().ordered();
 
 	const group = producer.appendGroup();
-	group.writeString("frame");
+	group.writeFrame(textFrame("frame"));
 
 	const consumer = await track.nextGroup();
 	if (!consumer) throw new Error("expected a group");
@@ -1025,7 +1025,7 @@ test.each(["frame", "FIN"])("integration: lite fetch waits for the publisher's f
 		// Let the in-memory peer process the request with no response available yet.
 		await sleep(0);
 		expect(settled).toBe(0);
-		if (answer === "frame") group.writeString("accepted");
+		if (answer === "frame") group.writeFrame(textFrame("accepted"));
 		else group.close();
 		const consumers = await Promise.all([a, b]);
 		for (const consumer of consumers) {
@@ -1250,7 +1250,7 @@ test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 				const req = await wireOf(broadcast).requested();
 				if (!req) break;
 				const track = req.accept({ timescale: Timescale.MILLI });
-				track.writeString("before");
+				track.writeFrame(textFrame("before"));
 				served.push(track);
 			}
 		})();
@@ -1268,7 +1268,7 @@ test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 		expect(reply[0]).toBe(0x05);
 		expect(reply[3]).toBe(0x03);
 
-		for (const producer of served) producer.writeString("after");
+		for (const producer of served) producer.writeFrame(textFrame("after"));
 		expect(await track.readString()).toBe("after");
 
 		broadcast.close();
@@ -1359,7 +1359,7 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 
 	const broadcast = publish(origin, Path.from("test"));
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	video.writeString("hello");
+	video.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const sub = remote.track("video").subscribe().ordered();
@@ -1406,7 +1406,7 @@ test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			served = req.accept({ timescale: Timescale.MILLI });
-			served.writeString("hello");
+			served.writeFrame(textFrame("hello"));
 		}
 	})();
 
@@ -1444,7 +1444,7 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	const broadcast = publish(origin, Path.from("test"));
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = video.appendGroup(); // deliberately left open: an indefinite group.
-	group.writeString("hello");
+	group.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const fetched = await remote.track("video").fetchGroup(group.sequence);
@@ -1483,7 +1483,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 
 	const broadcast = publish(origin, Path.from("test"));
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	video.writeString("hello");
+	video.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const a = remote.track("video").subscribe().ordered();
@@ -1494,7 +1494,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 
 	// Closing one leaves the shared upstream serving the other.
 	a.close();
-	video.writeString("more");
+	video.writeFrame(textFrame("more"));
 	expect(await b.readString()).toBe("more");
 	expect(video.demand().used.peek()).toBe(true);
 
@@ -1524,7 +1524,7 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 	const remote = wireOf(client).consume(Path.from("test"));
 
 	for (let i = 0; i < 8; i++) {
-		video.writeString(`hello-${i}`);
+		video.writeFrame(textFrame(`hello-${i}`));
 		const sub = remote.track("video").subscribe().ordered();
 		expect(await sub.readString()).toBe(`hello-${i}`);
 		await waitUntil(() => video.demand().used.peek());
@@ -1552,7 +1552,7 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	const broadcast = publish(origin, Path.from("test"));
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = video.appendGroup(); // open
-	group.writeString("hello");
+	group.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const f1 = await remote.track("video").fetchGroup(group.sequence);
@@ -1563,7 +1563,7 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 
 	// Closing one coalesced reader keeps the shared FETCH flowing for the other.
 	f1.close();
-	group.writeString("more");
+	group.writeFrame(textFrame("more"));
 	expect(await f2.readString()).toBe("more");
 	expect(group.demand().used.peek()).toBe(true);
 
@@ -1595,7 +1595,7 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 
 	for (let delay = 0; delay <= 12; delay++) {
 		const group = video.appendGroup(); // open
-		group.writeString("hello");
+		group.writeFrame(textFrame("hello"));
 
 		const f1 = await remote.track("video").fetchGroup(group.sequence);
 		expect(await f1.readString()).toBe("hello");
@@ -1605,7 +1605,7 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 		const f2 = await remote.track("video").fetchGroup(group.sequence);
 		expect(await f2.readString()).toBe("hello");
 
-		group.writeString("more");
+		group.writeFrame(textFrame("more"));
 		const more = await Promise.race([
 			f2.readString(),
 			new Promise<string>((resolve) => setTimeout(() => resolve("dropped"), 500)),
@@ -1636,7 +1636,7 @@ test("integration: lite fetch delivers every frame of a finite multi-frame group
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = video.appendGroup();
 	const count = 50;
-	for (let i = 0; i < count; i++) group.writeString(`f${i}`);
+	for (let i = 0; i < count; i++) group.writeFrame(textFrame(`f${i}`));
 	group.close(); // finite
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -1674,7 +1674,7 @@ async function runSubscribeWithoutWarmup(version: number) {
 	const broadcast = publish(origin, Path.from("test"));
 	const serving = (async () => {
 		const req = await wireOf(broadcast).requested();
-		if (req) req.accept({ timescale: Timescale.MILLI }).writeString("hello");
+		if (req) req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 	})();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -1753,7 +1753,7 @@ test("integration: an announced request waits for a late publisher", async () =>
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept({ timescale: Timescale.MILLI }).writeString(payload);
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(payload));
 		}
 	};
 
@@ -1810,7 +1810,7 @@ test("integration: an announced request consumes blind without discovery", async
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept({ timescale: Timescale.MILLI }).writeString("blind");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("blind"));
 		}
 	})();
 
@@ -1841,7 +1841,7 @@ test("integration: a republish is not served from the previous generation's cach
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept({ timescale: Timescale.MILLI }).writeString(payload);
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(payload));
 		}
 	};
 
@@ -1901,7 +1901,7 @@ async function runRepublishCycle(protocol: string, version?: number) {
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept({ timescale: Timescale.MILLI }).writeString(payload);
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(payload));
 		}
 	};
 
@@ -1973,7 +1973,7 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 		for (;;) {
 			const req = await wireOf(producer).requested();
 			if (!req) break;
-			req.accept({ timescale: Timescale.MILLI }).writeString("late");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("late"));
 		}
 	})();
 
@@ -2033,7 +2033,7 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 		for (;;) {
 			const req = await wireOf(producer).requested();
 			if (!req) break;
-			req.accept({ timescale: Timescale.MILLI }).writeString("ietf-late");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("ietf-late"));
 		}
 	})();
 
@@ -2080,7 +2080,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 				req.reject(new Error(`unexpected track: ${req.name}`));
 				continue;
 			}
-			req.accept({ timescale: Timescale.MILLI }).writeString("hello");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 		}
 	})();
 
@@ -2215,7 +2215,7 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept({ timescale: Timescale.MILLI }).writeString("found you");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("found you"));
 		}
 	})();
 
@@ -2343,7 +2343,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 			for (;;) {
 				const req = await wireOf(broadcast).requested();
 				if (!req) break;
-				req.accept({ timescale: Timescale.MILLI }).writeString("still here");
+				req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("still here"));
 			}
 		})();
 		return { client, server, serverOrigin, broadcast, serving };
@@ -2393,7 +2393,7 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 			for (;;) {
 				const req = await wireOf(broadcast).requested();
 				if (!req) break;
-				req.accept({ timescale: Timescale.MILLI }).writeString(payload);
+				req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(payload));
 			}
 		})();
 		return { client, server, serverOrigin, broadcast, serving };
@@ -2465,7 +2465,7 @@ test("a handle serves a request under live/** over the wire", async () => {
 	const serving = (async () => {
 		for await (const request of handle.requested()) {
 			const produced = new BroadcastProducer();
-			produced.createTrack("chat", { timescale: Timescale.MILLI }).writeString("hello");
+			produced.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 			request.accept(produced);
 		}
 	})();
@@ -2519,7 +2519,7 @@ async function runSessionDeath(
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept({ timescale: Timescale.MILLI }).appendGroup().writeString("head");
+			req.accept({ timescale: Timescale.MILLI }).appendGroup().writeFrame(textFrame("head"));
 		}
 	})();
 
@@ -2580,7 +2580,7 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			const producer = req.accept({ timescale: Timescale.MILLI });
-			producer.appendGroup().writeString("head");
+			producer.appendGroup().writeFrame(textFrame("head"));
 			served.push(producer);
 		}
 	})();
