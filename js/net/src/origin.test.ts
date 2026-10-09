@@ -1073,22 +1073,25 @@ test("createBroadcast is invisible to everyone until announce", async () => {
 	const first = request.active.peek();
 	expect(first).toBeDefined();
 
-	// Off the air for local consumers and peers alike.
+	// Off the air for local consumers and peers alike, which ends the request on it.
 	broadcast.unannounce();
 	expect(wireOf(consumer).routes(path)).toBe(false);
 	expect(wireOf(consumer).advertised.peek()?.has(path)).toBe(false);
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "end" });
 	expect(request.active.peek()).toBeUndefined();
+	expect(request.closed.peek()).toBeInstanceOf(Error);
 
-	// Back on the air through a fresh handle.
+	// Back on the air for a fresh request, through a fresh handle.
 	broadcast.announce();
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
-	const again = request.active.peek();
+	const fresh = consumer.request(path);
+	const again = fresh.active.peek();
 	expect(again).toBeDefined();
 	expect(again).not.toBe(first);
 
 	broadcast.close();
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "end" });
+	fresh.close();
 	request.close();
 	announced.close();
 	origin.close();
@@ -1503,9 +1506,9 @@ test("a request stays on its source when another instance wins", async () => {
 	origin.close();
 });
 
-// A request left on a replaced instance still hears that instance go: it lets go of the dead
-// front and follows the table again, and the origin closing reaches it like any other request.
-test("a request on a replaced instance follows the table once its source goes", async () => {
+// A request left on a replaced instance still hears that instance go: it ends with an error
+// rather than moving onto the winner, which may not hold the same bytes.
+test("a request on a replaced instance ends once its source goes", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("restarted");
@@ -1525,24 +1528,21 @@ test("a request on a replaced instance follows the table once its source goes", 
 
 	disposeOlder();
 	await settle();
-	const second = request.active.peek();
-	expect(second).toBeDefined();
-	expect(second).not.toBe(first);
-
-	origin.close();
 	expect(request.active.peek()).toBeUndefined();
 	expect(request.unroutable.peek()).toBe(true);
+	expect(request.closed.peek()).toBeInstanceOf(StreamError);
 
 	request.close();
 	disposeNewer();
 	keepOlder.close();
 	older.close();
 	newer.close();
+	origin.close();
 });
 
-// The winning source going while another waits is not a replacement to stay behind: the
-// request moves to the standby rather than keeping the dead front.
-test("a request moves to the standby when its winning source goes", async () => {
+// Without an epoch nothing says a standby serves the winner's bytes: the winner going ends the
+// request instead of handing it to the standby.
+test("a request ends when its winning source goes, even with a standby", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("standby");
@@ -1554,14 +1554,19 @@ test("a request moves to the standby when its winning source goes", async () => 
 	const disposeWinner = serve(origin, path, () => keepWinner.clone());
 	const request = consumer.request(path);
 	await settle();
-	const first = request.active.peek();
-	expect(first).toBeDefined();
+	expect(request.active.peek()).toBeDefined();
 
 	disposeWinner();
 	await settle();
-	expect(request.active.peek()).toBeDefined();
-	expect(request.active.peek()).not.toBe(first);
+	expect(request.active.peek()).toBeUndefined();
+	expect(request.closed.peek()).toBeInstanceOf(StreamError);
 
+	// A fresh request resolves the standby.
+	const fresh = consumer.request(path);
+	await settle();
+	expect(fresh.active.peek()).toBeDefined();
+
+	fresh.close();
 	request.close();
 	disposeStandby();
 	keepWinner.close();
@@ -2057,7 +2062,7 @@ test("a peer naming another epoch is refused rather than served a different inst
 	origin.close();
 });
 
-test("request pins its epoch while an unpinned sibling follows the newest publisher", () => {
+test("a newer epoch ends pinned and unpinned requests on the replaced publisher alike", () => {
 	const origin = new Producer();
 	const path = Path.from("room");
 	const first = origin.createBroadcast(path);
@@ -2072,8 +2077,13 @@ test("request pins its epoch while an unpinned sibling follows the newest publis
 	second.announce({ epoch: newerEpoch });
 	expect(pinned.active.peek()).toBeUndefined();
 	expect(pinned.unroutable.peek()).toBe(true);
-	// The unpinned handle names the publisher it actually resolved.
-	expect(unpinned.active.peek()?.epoch).toBe(newerEpoch);
+	// The replaced publisher closed: the unpinned request ends rather than move to the newer one.
+	expect(unpinned.active.peek()).toBeUndefined();
+	expect(unpinned.unroutable.peek()).toBe(true);
+	// A fresh unpinned request names the publisher it actually resolved.
+	const fresh = reader.request(path);
+	expect(fresh.active.peek()?.epoch).toBe(newerEpoch);
+	fresh.close();
 	const stale = reader.request(path, { epoch: EPOCH });
 	expect(stale.active.peek()).toBeUndefined();
 	expect(stale.unroutable.peek()).toBe(true);

@@ -213,7 +213,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 	throw new Error("timed out waiting for condition");
 }
 
-test("an announced request follows the reconnect loop", async () => {
+test("an announced request ends with its session, and a fresh one follows the reconnect", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 
@@ -241,19 +241,25 @@ test("an announced request follows the reconnect loop", async () => {
 		consume: clientOrigin,
 	});
 	const watched = clientOrigin.request(Path.from("late"), { announced: true });
+	let again: ReturnType<typeof clientOrigin.request> | undefined;
 
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
 		const first = watched.active.peek();
 
-		// The session dies: the handle drops the broadcast rather than clinging to a dead one.
+		// The session dies: the request ends rather than clinging to a dead broadcast, since the
+		// reconnect's announcement is another publisher instance.
 		sessions[0]?.abort();
-		await waitUntil(() => watched.active.peek() === undefined);
+		await waitUntil(() => watched.closed.peek() !== undefined);
+		expect(watched.active.peek()).toBeUndefined();
 
-		// The reconnect re-announces it, and the handle re-consumes on the new session.
-		await waitUntil(() => watched.active.peek() !== undefined);
-		expect(watched.active.peek()).not.toBe(first);
+		// A fresh request waits for the reconnect's announcement and consumes on the new session.
+		const fresh = clientOrigin.request(Path.from("late"), { announced: true });
+		again = fresh;
+		await waitUntil(() => fresh.active.peek() !== undefined);
+		expect(fresh.active.peek()).not.toBe(first);
 	} finally {
+		again?.close();
 		watched.close();
 		reload.close();
 		clientOrigin.close();

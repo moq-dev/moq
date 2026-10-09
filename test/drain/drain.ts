@@ -137,8 +137,6 @@ const viewer = new Moq.Connection({
 	consume: watched,
 	goaway: { handover: HANDOVER },
 });
-const request = watched.request(path, { announced: true });
-
 async function read(sub: Moq.Track.Subscriber, gen: number): Promise<void> {
 	try {
 		for (;;) {
@@ -163,8 +161,9 @@ async function read(sub: Moq.Track.Subscriber, gen: number): Promise<void> {
 }
 
 // Follow whichever broadcast the path routes to, as a player does: subscribe to the new one and
-// drop the old one each time the route changes.
-// Subscribed before the first peek, so no route change can land between reading it and listening.
+// drop the old one each time the route changes. A request ends once the publisher instance it
+// resolved stops serving, and without an epoch the other relay's route is another instance, so
+// a player requests again when its request ends.
 let current: { broadcast: Moq.Broadcast.Consumer; sub: Moq.Track.Subscriber } | undefined;
 const follow = (active: Moq.Broadcast.Consumer | undefined) => {
 	if (!active || active === current?.broadcast) return;
@@ -175,8 +174,24 @@ const follow = (active: Moq.Broadcast.Consumer | undefined) => {
 	current?.sub.close();
 	current = { broadcast: active, sub };
 };
-const unfollow = request.active.subscribe(follow);
-follow(request.active.peek());
+let stopped = false;
+let request: Moq.Origin.Requesting;
+let unfollow: () => void = () => {};
+const watch = () => {
+	request = watched.request(path, { announced: true });
+	// Subscribed before the first peek, so no route change can land between reading it and listening.
+	unfollow = request.active.subscribe(follow);
+	follow(request.active.peek());
+	const ended = request;
+	void ended.closed.then((err) => {
+		if (stopped || !err) return;
+		log(`request ended: ${err.message}`);
+		unfollow();
+		ended.close();
+		watch();
+	});
+};
+watch();
 
 const readOn = (gen: number) => [...seen.values()].filter((gens) => gens.has(gen)).length;
 const newestOn = (gen: number) => Math.max(-1, ...[...seen].filter(([, gens]) => gens.has(gen)).map(([seq]) => seq));
@@ -221,6 +236,7 @@ try {
 } catch (err) {
 	failure = err instanceof Error ? err : new Error(String(err));
 } finally {
+	stopped = true;
 	unfollow();
 	current?.sub.close();
 	clearInterval(ticker);
