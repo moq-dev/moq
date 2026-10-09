@@ -9,6 +9,7 @@ import {
 	hasAnnounceCompression,
 	hasAnnounceId,
 	hasAnnounceOk,
+	hasAnnounceRestart,
 	hasExcludeHop,
 	hasHidden,
 	hasRouteCost,
@@ -18,14 +19,17 @@ import {
 // Pre-lite-06 inner status values, carried inside the single ANNOUNCE_BROADCAST body.
 const STATUS_ENDED = 0;
 const STATUS_ACTIVE = 1;
-const STATUS_RESTART = 2;
+// The lite-05 draft's explicit `restart` status: a metadata update.
+const STATUS_UPDATE = 2;
 
 // lite-06 announce message types: an outer discriminator carried before the length
 // prefix, so each announcement is an independently-typed, length-delimited message
 // (mirroring SUBSCRIBE_START/END/DROP on the subscribe stream).
 const ANNOUNCE_START = 0;
 const ANNOUNCE_END = 1;
-const ANNOUNCE_RESTART = 2;
+const ANNOUNCE_UPDATE = 2;
+// lite-07: another publisher instance replaces the advertisement.
+const ANNOUNCE_RESTART = 3;
 
 export type { Cost };
 
@@ -39,19 +43,19 @@ export type Base = { distance: bigint; keep: number };
 /**
  * An announcement on the Announce Stream, advertising or retracting a broadcast.
  *
- * On lite-06+ these are three independently-typed messages (`ANNOUNCE_START`,
- * `ANNOUNCE_END`, `ANNOUNCE_RESTART`), each framed as `Type | Length | Body` like the
- * subscribe stream's responses. Each `active` (ANNOUNCE_START) implicitly assigns the
- * next announce id (a per-stream ordinal starting at 0); `endedId`/`restart` reference
- * that id instead of repeating the path. Older versions send a single ANNOUNCE_BROADCAST
- * message that retracts by path (`ended`).
+ * On lite-06+ these are independently-typed messages (`ANNOUNCE_START`, `ANNOUNCE_END`,
+ * `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`), each framed as
+ * `Type | Length | Body` like the subscribe stream's responses. Each `active`
+ * (ANNOUNCE_START) implicitly assigns the next announce id (a per-stream ordinal starting
+ * at 0); the others reference that id instead of repeating the path. Older versions send
+ * a single ANNOUNCE_BROADCAST message that retracts by path (`ended`).
  */
 export type AnnounceBroadcast =
 	/** A broadcast is now available, carrying the path suffix, the hop chain, and
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
 	 * `undefined` on a wire with no room for one. On lite-07, `suffix` follows the
 	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The epoch
-	 * (lite-07+) is fixed for the announcement's lifetime: a new one ends it and starts afresh. */
+	 * (lite-07+) changes only with a `restart`. */
 	| {
 			status: "active";
 			suffix: Path.Valid;
@@ -66,9 +70,13 @@ export type AnnounceBroadcast =
 	/** Lite06+: a broadcast is no longer available, retracted by announce id.
 	 * The id is retired; referencing it again is a protocol violation. */
 	| { status: "endedId"; id: bigint }
-	/** Lite06+: atomically replace the announcement with this id (e.g. a new hop
-	 * chain after a relay failover, or a route whose cost moved). The id stays live. */
-	| { status: "restart"; id: bigint; hops: Hop[]; cost?: Cost; hopBase?: Base }
+	/** Lite06+: atomically replace the metadata of the announcement with this id (e.g. a
+	 * new hop chain after a relay failover, or a route whose cost moved). The id stays live. */
+	| { status: "update"; id: bigint; hops: Hop[]; cost?: Cost; hopBase?: Base }
+	/** Lite07+: another publisher instance replaces the announcement with this id, under
+	 * the epoch given (or none). What the receiver resolved under its prefix is the old
+	 * instance. The id stays live. */
+	| { status: "restart"; id: bigint; epoch?: Epoch.Valid; hops: Hop[]; cost?: Cost; hopBase?: Base }
 	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
 	| { status: "skipped" };
 
@@ -217,8 +225,14 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 		case "endedId":
 			await w.u62(msg.id);
 			break;
+		case "update":
+			await w.u62(msg.id);
+			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
+			await encodeRouteCost(w, version, msg.cost);
+			break;
 		case "restart":
 			await w.u62(msg.id);
+			await encodeEpoch(w, version, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
@@ -231,13 +245,17 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 }
 
 // lite-06 outer message type for a given announcement.
-function announce06Type(msg: AnnounceBroadcast): number {
+function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 	switch (msg.status) {
 		case "active":
 			return ANNOUNCE_START;
 		case "endedId":
 			return ANNOUNCE_END;
+		case "update":
+			return ANNOUNCE_UPDATE;
 		case "restart":
+			// Older versions send an end and a start instead.
+			if (!hasAnnounceRestart(version)) throw new Error("announce restart not supported for this version");
 			return ANNOUNCE_RESTART;
 		case "ended":
 			throw new Error("ended-by-path not supported for this version");
@@ -256,17 +274,24 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 		}
 		case ANNOUNCE_END:
 			return { status: "endedId", id: await r.u62() };
-		case ANNOUNCE_RESTART: {
+		case ANNOUNCE_UPDATE: {
 			const id = await r.u62();
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "restart", id, ...hops, cost: await decodeRouteCost(r, version) };
+			return { status: "update", id, ...hops, cost: await decodeRouteCost(r, version) };
 		}
-		default:
-			// Skip the length-prefixed body so an earlier Lite06 build negotiating
-			// the same ALPN does not kill the announce stream.
-			await r.readAll();
-			return { status: "skipped" };
+		case ANNOUNCE_RESTART: {
+			// Unknown before lite-07: skipped below like any other.
+			if (!hasAnnounceRestart(version)) break;
+			const id = await r.u62();
+			const epoch = await decodeEpoch(r, version);
+			const hops = await decodeHopsBlock(r, version);
+			return { status: "restart", id, epoch, ...hops, cost: await decodeRouteCost(r, version) };
+		}
 	}
+	// Skip the length-prefixed body so an earlier Lite06 build negotiating
+	// the same ALPN does not kill the announce stream.
+	await r.readAll();
+	return { status: "skipped" };
 }
 
 // Pre-lite-06 single ANNOUNCE_BROADCAST body: an inner status byte, then path + hops.
@@ -284,6 +309,7 @@ async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Vers
 			await encodeHops(w, version, []);
 			break;
 		case "endedId":
+		case "update":
 		case "restart":
 		case "skipped":
 			// The id-referencing forms only exist on lite-06+.
@@ -293,9 +319,9 @@ async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Vers
 
 async function decodeLegacyBody(r: Reader, version: Version): Promise<AnnounceBroadcast> {
 	const status = await r.u8();
-	// On lite-05 a restart travels as a duplicate `active`, but the explicit restart
-	// status is accepted on decode and treated the same. Older versions never defined it.
-	const active = status === STATUS_ACTIVE || (status === STATUS_RESTART && hasAnnounceOk(version));
+	// On lite-05 an update travels as a duplicate `active`, but the explicit update status
+	// is accepted on decode and treated the same. Older versions never defined it.
+	const active = status === STATUS_ACTIVE || (status === STATUS_UPDATE && hasAnnounceOk(version));
 	if (status !== STATUS_ENDED && !active) {
 		throw new Error("invalid announce status");
 	}
@@ -308,7 +334,7 @@ async function decodeLegacyBody(r: Reader, version: Version): Promise<AnnounceBr
 export async function encodeAnnounceBroadcast(w: Writer, msg: AnnounceBroadcast, version: Version): Promise<void> {
 	if (hasAnnounceId(version)) {
 		// lite-06+: outer type discriminator, then a size-prefixed body (like the subscribe stream).
-		await w.u53(announce06Type(msg));
+		await w.u53(announce06Type(msg, version));
 		return Message.encode(w, (w) => encodeAnnounce06Body(w, msg, version));
 	}
 	return Message.encode(w, (w) => encodeLegacyBody(w, msg, version));

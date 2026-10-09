@@ -56,10 +56,6 @@ export bailed on "missed a decode deadline".
 Public API: none. Behavior: an epochless subscription now surfaces an
 upstream error instead of healing. Wire: none.
 
-## Required
-
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - reworks the same front and instance code, and supplies the `Restart` consumers recover on
-
 ## Closes
 
 - [#5052](https://github.com/moq-dev/moq/issues/5052) - export ts bails after re-requesting onto a replacement publisher

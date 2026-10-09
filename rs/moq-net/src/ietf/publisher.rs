@@ -321,9 +321,9 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 enum NamespaceEvent {
 	/// The session or stream ended, with the result to surface.
 	Closed(Result<(), Error>),
-	/// An origin-level route (un)announce and whether it is active, `None` once
-	/// the announce stream ends.
-	Update(Option<(crate::announce::Announce, bool)>),
+	/// An origin-level route (un)announce: whether it is active and whether it
+	/// restarts, `None` once the announce stream ends.
+	Update(Option<(crate::announce::Announce, bool, bool)>),
 	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
 	Retry,
 }
@@ -2480,7 +2480,9 @@ where
 		let mut initial = std::collections::BTreeMap::new();
 		while let Some(event) = announced.try_next() {
 			match event {
-				crate::announce::Event::Start(update) | crate::announce::Event::Update(update) => {
+				crate::announce::Event::Start(update)
+				| crate::announce::Event::Update(update)
+				| crate::announce::Event::Restart(update) => {
 					initial.insert(update.prefix.clone(), update);
 				}
 				crate::announce::Event::End(update) => {
@@ -2546,9 +2548,10 @@ where
 					if let Poll::Ready(next) = announced.poll_next(waiter) {
 						return Poll::Ready(NamespaceEvent::Update(next.map(|event| match event {
 							crate::announce::Event::Start(update) | crate::announce::Event::Update(update) => {
-								(update, true)
+								(update, true, false)
 							}
-							crate::announce::Event::End(update) => (update, false),
+							crate::announce::Event::Restart(update) => (update, true, true),
+							crate::announce::Event::End(update) => (update, false, false),
 						})));
 					}
 					if retry.poll(waiter).is_ready() {
@@ -2590,7 +2593,12 @@ where
 					stream.writer.finish()?;
 					return stream.writer.closed().await;
 				}
-				NamespaceEvent::Update(Some((update, active))) => {
+				NamespaceEvent::Update(Some((update, active, restart))) => {
+					// moq-transport has no restart: the peer sees the namespace end and start
+					// again, and resubscribes.
+					if restart {
+						self.apply_update(&mut ns, &prefix, update.clone(), false).await?;
+					}
 					self.apply_update(&mut ns, &prefix, update, active).await?;
 				}
 			}
@@ -7220,7 +7228,11 @@ mod tests {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+		// One epoch, so the second route re-prices the instance rather than restart it.
+		let epoch = crate::Epoch::mint();
+		let cam = origin
+			.announce("solo-cam", crate::origin::Route::default().with_epoch(epoch.clone()))
+			.unwrap();
 		settle().await;
 
 		// Refused with a wait far longer than any backoff the loop would take on its own.
@@ -7252,7 +7264,10 @@ mod tests {
 		// A cheaper second route makes the advertisement worth re-pricing, which is a
 		// path back into the reconciliation that does not go through the retry timer.
 		let _standby = origin
-			.announce("solo-cam", crate::origin::Route::default().with_cost(0))
+			.announce(
+				"solo-cam",
+				crate::origin::Route::default().with_epoch(epoch).with_cost(0),
+			)
 			.unwrap();
 
 		for _ in 0..100 {
@@ -7308,8 +7323,13 @@ mod tests {
 			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
 		}
 		.produce();
+		// One epoch, so the warm route re-prices the instance rather than restart it.
+		let epoch = crate::Epoch::mint();
 		let _cold = origin
-			.announce("cam", crate::origin::Route::default().with_cost(4))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+			)
 			.unwrap();
 		settle().await;
 
@@ -7340,7 +7360,7 @@ mod tests {
 
 		// We start carrying it: a free route outranks the cold one.
 		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_cost(0))
+			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
 			.unwrap();
 
 		// The request consumed id 1, so the update takes the next of our parity. The
@@ -7374,8 +7394,12 @@ mod tests {
 		const VERSION: Version = Version::Draft19;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let epoch = crate::Epoch::mint();
 		let _cold = origin
-			.announce("cam", crate::origin::Route::default().with_cost(4))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+			)
 			.unwrap();
 		settle().await;
 
@@ -7418,7 +7442,7 @@ mod tests {
 
 		// Repricing sends the REQUEST_UPDATE whose OK is counted.
 		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_cost(0))
+			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
 			.unwrap();
 
 		let res = moq_net_sim::timeout(Duration::from_secs(5), run)
@@ -7430,11 +7454,12 @@ mod tests {
 		assert!(log.closes().iter().any(|(c, _)| *c == code), "{:?}", log.closes());
 	}
 
-	/// A route from a different original publisher updates the advertisement in place,
-	/// like any other change: withdrawing it would make the namespace briefly vanish
-	/// downstream just because its publisher moved.
+	/// A route from a different original publisher under the same epoch (a replica)
+	/// updates the advertisement in place, like any other change within an instance:
+	/// withdrawing it would make the namespace briefly vanish downstream just because
+	/// its replica moved.
 	#[moq_net_sim::test]
-	async fn a_publisher_change_is_a_request_update() {
+	async fn a_replica_change_is_a_request_update() {
 		const VERSION: Version = Version::Draft19;
 
 		// Forward the update at once: the hold is not what this checks.
@@ -7445,10 +7470,14 @@ mod tests {
 		.produce();
 		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let publisher_b = crate::Hops::try_from(vec![crate::Hop::new(8).unwrap()]).unwrap();
+		let epoch = crate::Epoch::mint();
 		let _from_a = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_hops(publisher_a).with_cost(4),
+				crate::origin::Route::default()
+					.with_epoch(epoch.clone())
+					.with_hops(publisher_a)
+					.with_cost(4),
 			)
 			.unwrap();
 		settle().await;
@@ -7482,7 +7511,10 @@ mod tests {
 		let _from_b = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_hops(publisher_b).with_cost(0),
+				crate::origin::Route::default()
+					.with_epoch(epoch)
+					.with_hops(publisher_b)
+					.with_cost(0),
 			)
 			.unwrap();
 		let update = request_update(
@@ -7509,6 +7541,62 @@ mod tests {
 		assert_eq!(log.bi_opens(), 1, "no withdrawal and no second stream");
 	}
 
+	/// moq-transport has no restart: another source winning a namespace without an epoch
+	/// withdraws it and advertises it afresh, so the peer resubscribes.
+	#[moq_net_sim::test]
+	async fn a_restart_re_advertises_the_namespace() {
+		const VERSION: Version = Version::Draft19;
+
+		// Forward the restart at once: the hold is not what this checks.
+		let origin = crate::origin::Config {
+			update_hold: Duration::ZERO,
+			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+		}
+		.produce();
+		let _old = origin
+			.announce("cam", crate::origin::Route::default().with_cost(4))
+			.unwrap();
+		settle().await;
+
+		let ok = publish_namespace_ok(VERSION).await;
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok.clone(), ok]);
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			clustered(Some(false)),
+			VERSION,
+		);
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"cam") >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
+
+		let _new = origin
+			.announce("cam", crate::origin::Route::default().with_cost(0))
+			.unwrap();
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"cam") >= 2 {
+				break;
+			}
+			settle().await;
+		}
+
+		assert_eq!(occurrences(&log, b"cam"), 2, "advertised afresh");
+		assert_eq!(log.bi_opens(), 2, "on a fresh request stream");
+	}
+
 	/// A peer that refuses an update closes the stream, which withdraws the
 	/// advertisement. The namespace is then not held at all, so it comes back as a fresh
 	/// PUBLISH_NAMESPACE once the refusal's wait is out, not as another update on a
@@ -7518,8 +7606,12 @@ mod tests {
 		const VERSION: Version = Version::Draft19;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let epoch = crate::Epoch::mint();
 		let _cold = origin
-			.announce("cam", crate::origin::Route::default().with_cost(4))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+			)
 			.unwrap();
 		settle().await;
 
@@ -7552,7 +7644,7 @@ mod tests {
 		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
 
 		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_cost(0))
+			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
 			.unwrap();
 
 		for _ in 0..100 {

@@ -721,9 +721,12 @@ pub enum moq_announce_kind {
 	MOQ_ANNOUNCE_KIND_UPDATE = 1,
 	/// No route covers the prefix any more.
 	MOQ_ANNOUNCE_KIND_END = 2,
+	/// Another publisher instance now serves the prefix: drop what was resolved under
+	/// it and request afresh.
+	MOQ_ANNOUNCE_KIND_RESTART = 3,
 }
 
-/// An announce event from an origin: a route starting, updating, or ending.
+/// An announce event from an origin: a route starting, updating, ending, or restarting.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_event {
