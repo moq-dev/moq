@@ -117,8 +117,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
  *
  * Every session answers, discovery or not: subscribing to an unannounced path is always
  * legal, and a missing broadcast surfaces as a reset on the first track. The first session
- * to answer wins; when this session dies its answers are withdrawn so a later session
- * answers again, which is what makes a request span reconnects.
+ * to answer wins; when this session dies its answers are withdrawn, and the requests they
+ * resolved end with it, since a later session is another publisher instance.
  *
  * A path the table already routes is left alone. A request resolves to the table's route over
  * any blind answer, so answering one would only park a handle nothing reads.

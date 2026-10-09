@@ -586,17 +586,21 @@ test("withdrawing an answer wakes the requests table", async () => {
 	const second = new BroadcastProducer();
 	expect(wireOf(origin).answer(path, second.consume())).toBeUndefined();
 
-	// Withdrawing pokes the requests map, which is what a standby serving loop sleeps on.
+	// Withdrawing pokes the requests map, which is what a standby serving loop sleeps on. The
+	// request it answered ends: the next answer is another session, so another instance.
 	const woken = wireOf(origin).requests.changed();
 	withdraw?.();
 	await woken;
 	expect(request.active.peek()).toBeUndefined();
+	expect(request.closed.peek()).toBeInstanceOf(StreamError);
 
-	// The slot is vacant again, so a standby answers.
+	// A fresh request is vacant again, so a standby answers it.
+	const fresh = consumer.request(path);
 	const third = new BroadcastProducer();
 	expect(wireOf(origin).answer(path, third.consume())).toBeDefined();
-	expect(request.active.peek()).toBeDefined();
+	expect(fresh.active.peek()).toBeDefined();
 
+	fresh.close();
 	request.close();
 	origin.close();
 });

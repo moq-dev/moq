@@ -2254,7 +2254,7 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 	clientOrigin.close();
 });
 
-test("origin: a request is re-answered by the next session", async () => {
+test("origin: a blind request ends with its session, and the next session answers a fresh one", async () => {
 	const original = globalThis.WebTransport;
 	const reconnectUrl = new URL("https://example.com/re-request");
 
@@ -2285,13 +2285,17 @@ test("origin: a request is re-answered by the next session", async () => {
 		await until(() => request.active.peek() !== undefined);
 		const first = request.active.peek();
 
-		// The answering session dies: the answer is withdrawn, not the request.
+		// The answering session dies, and the request it answered ends with it: the next session
+		// is another publisher instance as far as anything here can tell.
 		servers[0]?.session.close();
-		await until(() => request.active.peek() === undefined);
+		await until(() => request.closed.peek() !== undefined);
+		expect(request.active.peek()).toBeUndefined();
 
-		// The next session answers the same standing request.
-		await until(() => request.active.peek() !== undefined);
-		expect(request.active.peek()).not.toBe(first);
+		// The next session answers a fresh request.
+		const fresh = clientOrigin.request(Path.from("standing"));
+		await until(() => fresh.active.peek() !== undefined);
+		expect(fresh.active.peek()).not.toBe(first);
+		fresh.close();
 	} finally {
 		request.close();
 		reload.close();
@@ -2392,7 +2396,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	clientOrigin.close();
 });
 
-test("origin: a standby session re-answers a request when the answerer dies", async () => {
+test("origin: a standby session answers a fresh request when the answerer dies", async () => {
 	const clientOrigin = new OriginProducer();
 
 	const setup = async (payload: string) => {
@@ -2420,21 +2424,21 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 	await until(() => request.active.peek() !== undefined);
 	const standby = await setup("from standby");
 
-	// The answering session dies while the standby stays connected: the withdrawal must
-	// wake the standby's serving loop, not wait for a brand-new session. The handoff can
-	// complete within one scheduler tick, so assert the front changed rather than racing
-	// to observe the vacant slot.
-	const before = request.active.peek();
+	// The answering session dies while the standby stays connected: the request it answered
+	// ends with it, and the standby answers a fresh one without waiting for a new session.
 	answerer.client.abort();
 	answerer.server.abort();
-	await until(() => request.active.peek() !== undefined && request.active.peek() !== before);
+	await until(() => request.closed.peek() !== undefined);
+	const fresh = clientOrigin.request(Path.from("blind"));
+	await until(() => fresh.active.peek() !== undefined);
 
-	const front = request.active.peek();
+	const front = fresh.active.peek();
 	const track = front?.track("chat").subscribe().ordered();
 	if (!track) throw new Error("expected a track from the standby");
 	expect(await track.readString()).toBe("from standby");
 
 	track.close();
+	fresh.close();
 	request.close();
 	standby.broadcast.close();
 	await standby.serving;

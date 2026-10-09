@@ -230,6 +230,45 @@ describe("blind resolution", () => {
 	});
 });
 
+describe("restart", () => {
+	it("follows a republish through its announcement", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("live.hang");
+		const first = publish(owner, name);
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		await settle();
+		const old = source.out.active.peek();
+		expect(old).toBeDefined();
+
+		// A republish replaces the old instance, which ends the request on it; the restart
+		// announcement is what requests the new one.
+		const second = publish(owner, name);
+		await settle();
+		const restarted = source.out.active.peek();
+		expect(restarted).toBeDefined();
+		expect(restarted).not.toBe(old);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		// The publisher goes offline: offline, not an error, until it is announced again.
+		second.close();
+		first.close();
+		await settle();
+		expect(source.out.active.peek()).toBeUndefined();
+		expect(source.out.error.peek()).toBeUndefined();
+
+		const third = publish(owner, name);
+		await settle();
+		const resumed = source.out.active.peek();
+		expect(resumed).toBeDefined();
+		expect(resumed).not.toBe(restarted);
+
+		third.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+});
+
 describe("refusal", () => {
 	for (const announced of [true, false]) {
 		it(`reports a refusal until a fresh request (announced: ${announced})`, async () => {
@@ -324,6 +363,41 @@ describe("cross-broadcast renditions", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["local"]);
 		} finally {
+			source.close();
+			owner.close();
+		}
+	});
+
+	it("follows a republished rendition broadcast through its announcement", async () => {
+		const owner = new Origin.Producer();
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("public/transcode.hang"),
+			enabled: true,
+			catalogFormat: "manual",
+		});
+		const rel = Path.normalizeRelative("../private/source");
+		const resolved: (Moq.Broadcast.Consumer | undefined)[] = [];
+		const effect = new Effect();
+		effect.run((nested) => {
+			resolved.push(source.relativeBroadcast(nested, rel));
+		});
+
+		try {
+			const first = publish(owner, Path.from("private/source"));
+			await settle();
+			const old = resolved.at(-1);
+			expect(old).toBeDefined();
+
+			// The republish ends the request on the old instance; its restart requests the new one.
+			publish(owner, Path.from("private/source"));
+			await settle();
+			const restarted = resolved.at(-1);
+			expect(restarted).toBeDefined();
+			expect(restarted).not.toBe(old);
+			first.close();
+		} finally {
+			effect.close();
 			source.close();
 			owner.close();
 		}

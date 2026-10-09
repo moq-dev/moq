@@ -103,7 +103,9 @@ const dispose = el.signals.run((effect) => {
 ```
 
 Call `dispose()` on unmount. The effect re-runs when the catalog or the
-active broadcast changes, so a reconnect resubscribes on its own.
+active broadcast changes, so a reconnect resubscribes on its own: the broadcast
+requests the path again whenever it is announced (a start or a restart), so
+following a restart is announcement-driven and needs a relay with discovery.
 
 ## Without the element
 
@@ -112,7 +114,8 @@ import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
 
 // Shared with every other component pointed at the same relay; the broadcast
-// handle reads from its origin and spans reconnects.
+// handle reads from its origin and requests again on each announcement, so it
+// follows reconnects and restarts.
 const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 const player = new Watch.Player({
     origin: connection.origin,

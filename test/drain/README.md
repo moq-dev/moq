@@ -35,7 +35,7 @@ deletes its own.
 - **The viewer** is `@moq/net` over WebSocket, following whichever broadcast the
   path routes to the way a player does: subscribe to the new one, drop the old.
   Without an epoch the other relay's route is another publisher instance, so the
-  viewer's request ends when its session closes and the viewer requests again.
+  viewer requests again when that route is announced as a restart.
 
 Once the viewer has read groups through A, the driver withdraws A from the name
 and sends it SIGTERM, which fires the same trigger an embedder's drain hook

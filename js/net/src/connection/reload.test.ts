@@ -290,16 +290,16 @@ test("a reload that gives up keeps requests pending until it is disposed", async
 		consume: origin,
 	});
 
-	// A reconnecting connection holds requests pending, which is the point: no session is
-	// attached yet and one is coming.
-	const request = origin.consume().request(Path.from("wanted"));
-	expect(request.unroutable.peek()).toBe(false);
+	let request = origin.consume().request(Path.from("wanted"));
 
 	try {
 		// These credentials will never work, but a new URL can recover the same loop, so a
-		// request stays pending through the gap rather than going unroutable.
+		// request stays pending through the gap rather than going unroutable. One a refused
+		// session answered before it closed ended with it, so ask afresh.
 		await waitUntil(() => reload.error.peek() !== undefined);
 		expect(reload.closed.peek()).toBeUndefined();
+		request.close();
+		request = origin.consume().request(Path.from("wanted"));
 		expect(request.unroutable.peek()).toBe(false);
 
 		reload.close();

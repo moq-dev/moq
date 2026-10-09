@@ -161,9 +161,10 @@ async function read(sub: Moq.Track.Subscriber, gen: number): Promise<void> {
 }
 
 // Follow whichever broadcast the path routes to, as a player does: subscribe to the new one and
-// drop the old one each time the route changes. A request ends once the publisher instance it
-// resolved stops serving, and without an epoch the other relay's route is another instance, so
-// a player requests again when its request ends.
+// drop the old one each time the route changes. A request stays on the publisher instance it
+// resolved, and without an epoch the other relay's route is another instance, so a player
+// requests again when the path is announced anew (a restart, or a start after its request
+// ended), never because its request ended.
 let current: { broadcast: Moq.Broadcast.Consumer; sub: Moq.Track.Subscriber } | undefined;
 const follow = (active: Moq.Broadcast.Consumer | undefined) => {
 	if (!active || active === current?.broadcast) return;
@@ -174,24 +175,28 @@ const follow = (active: Moq.Broadcast.Consumer | undefined) => {
 	current?.sub.close();
 	current = { broadcast: active, sub };
 };
-let stopped = false;
-let request: Moq.Origin.Requesting;
-let unfollow: () => void = () => {};
-const watch = () => {
-	request = watched.request(path, { announced: true });
-	// Subscribed before the first peek, so no route change can land between reading it and listening.
-	unfollow = request.active.subscribe(follow);
-	follow(request.active.peek());
-	const ended = request;
-	void ended.closed.then((err) => {
-		if (stopped || !err) return;
-		log(`request ended: ${err.message}`);
+let request = watched.request(path, { announced: true });
+// Subscribed before the first peek, so no route change can land between reading it and listening.
+let unfollow = request.active.subscribe(follow);
+follow(request.active.peek());
+
+const announced = watched.announced(Moq.Path.Pattern.literal(path), { hidden: true });
+void (async () => {
+	for (;;) {
+		const entry = await announced.next();
+		if (!entry) break;
+		if (!Moq.Path.hasPrefix(entry.prefix, path)) continue;
+		const renew = entry.kind === "restart" || (entry.kind === "start" && request.closed.peek() !== undefined);
+		if (!renew) continue;
+		log(`path ${entry.kind}: requesting again`);
+		const old = request;
 		unfollow();
-		ended.close();
-		watch();
-	});
-};
-watch();
+		request = watched.request(path, { announced: true });
+		unfollow = request.active.subscribe(follow);
+		follow(request.active.peek());
+		old.close();
+	}
+})();
 
 const readOn = (gen: number) => [...seen.values()].filter((gens) => gens.has(gen)).length;
 const newestOn = (gen: number) => Math.max(-1, ...[...seen].filter(([, gens]) => gens.has(gen)).map(([seq]) => seq));
@@ -236,7 +241,7 @@ try {
 } catch (err) {
 	failure = err instanceof Error ? err : new Error(String(err));
 } finally {
-	stopped = true;
+	announced.close();
 	unfollow();
 	current?.sub.close();
 	clearInterval(ticker);

@@ -161,8 +161,9 @@ class CoveringRoot {
  * path. The alternative, deriving each request over the whole `local`/`remote` maps, wakes
  * every open request on every unrelated change.
  *
- * `answer` outlives a session: the answering session clears it when it dies and the next one
- * answers again, which is what makes a request span reconnects.
+ * `answer` is one session's: when that session dies the request it resolved ends, since the
+ * next session is another publisher instance unless an epoch says otherwise. A slot still
+ * waiting is answered by the next session.
  *
  * `handles` holds the `closed` of each open {@link Requesting} on the path.
  *
@@ -1161,11 +1162,17 @@ export class Producer implements Table {
 
 		return () => {
 			if (slot.answer === front) {
-				slot.answer = undefined;
-				this.#state.refresh(path);
-				// The route signal only reaches this path's requesters; poke the map so every
-				// serving loop re-scans and one of them re-answers.
-				this.#state.requests.mutate(() => {});
+				// A request the answer resolved ends with its session: the next session is another
+				// publisher instance, since nothing (no epoch) says it serves the same bytes.
+				if (slot.route.peek()?.front === front) {
+					this.#state.drop(path, slot, unroutable());
+				} else {
+					slot.answer = undefined;
+					this.#state.refresh(path);
+					// The route signal only reaches this path's requesters; poke the map so every
+					// serving loop re-scans and one of them re-answers.
+					this.#state.requests.mutate(() => {});
+				}
 			}
 			front.close();
 		};
@@ -1276,8 +1283,8 @@ export class Requesting {
 	 * serving: it never moves onto another instance, which may not hold the same bytes. Routes
 	 * sharing an epoch are one instance, so it moves between them. Otherwise a session's blind
 	 * answer, which is assumed present rather than known live: a missing broadcast
-	 * surfaces as a reset on the first track subscription, not here; it drops back to
-	 * undefined when the answering session dies and resolves again when another answers.
+	 * surfaces as a reset on the first track subscription, not here; the request ends when the
+	 * answering session dies, like any instance that stops serving.
 	 *
 	 * Yours for as long as the request is open: it is a handle of this request's own, so
 	 * closing it ends your view of the path rather than the route everyone else reads.
@@ -1418,8 +1425,8 @@ export class Consumer {
 	 * routes (an announced local publish, or any feeding session's announcement), staying on
 	 * the publisher instance it resolved and ending with an error once that stops serving;
 	 * request again to follow a restart. When nothing routes the path, the request stands and
-	 * whichever attached session answers first provides a blind subscription instead,
-	 * re-answered across reconnects.
+	 * whichever attached session answers first provides a blind subscription instead, which
+	 * ends with that session.
 	 * With `announced: true`, an unrouted request waits while discovery is supported and
 	 * falls back to that blind behavior only when discovery is unavailable. Close the request
 	 * when done. On a closed origin it never resolves.
