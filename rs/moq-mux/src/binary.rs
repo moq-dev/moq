@@ -250,9 +250,10 @@ impl<E: CatalogExt> Stream<E> {
 	/// Append one payload to the log.
 	///
 	/// A payload that cannot be written ends the track (see
-	/// [`moq_flate::stream::Producer::append`]) and retires the catalog entry with it. A catalog
-	/// error publishing the measured bitrate is returned after the payload was written, so the track
-	/// stays open and a retry would duplicate it.
+	/// [`moq_flate::stream::Producer::append`]) and retires the catalog entry with it. A payload
+	/// refused with [`moq_net::Error::GroupTooLarge`] leaves both intact, since nothing was written.
+	/// A catalog error publishing the measured bitrate is returned after the payload was written, so
+	/// the track stays open and a retry would duplicate it.
 	pub fn append(&mut self, payload: impl Into<Timed<Bytes>>) -> crate::Result<()> {
 		let (payload, captured) = match &mut self.listing {
 			Some(listing) => listing.stamp(payload.into()),
@@ -261,6 +262,8 @@ impl<E: CatalogExt> Stream<E> {
 		};
 		let size = match self.inner.append(payload) {
 			Ok(size) => size,
+			// Refused before anything was written, so the log and its entry carry on.
+			Err(err @ moq_flate::Error::Net(moq_net::Error::GroupTooLarge)) => return Err(err.into()),
 			Err(err) => {
 				// The inner producer has already closed the track. Dropping the listing retires the
 				// catalog entry too: waiting for the handle to drop would keep advertising a track
@@ -656,6 +659,34 @@ mod test {
 		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(consumer.mode(), &Mode::Stream);
 		assert_eq!(drain(consumer), expected);
+	}
+
+	/// A payload past the group budget is refused before anything is written, so the log stays
+	/// advertised and the next payload still lands.
+	#[test]
+	fn an_oversized_payload_keeps_the_track_and_the_entry() {
+		let (mut broadcast, catalog) = catalog();
+		let mut samples = catalog
+			.binary_stream(track(&mut broadcast, "samples"), Config::default())
+			.unwrap();
+		let track = samples.consume();
+
+		let oversized = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
+		assert!(matches!(
+			samples.append(oversized),
+			Err(crate::Error::Flate(moq_flate::Error::Net(
+				moq_net::Error::GroupTooLarge
+			)))
+		));
+		assert!(catalog.snapshot().binary.tracks.contains_key("samples"));
+
+		samples.append(&b"after"[..]).unwrap();
+		let entry = entry(&catalog, "samples");
+		samples.finish().unwrap();
+		assert_eq!(
+			drain(Consumer::from_track(track, &entry).unwrap()),
+			vec![Bytes::from_static(b"after")]
+		);
 	}
 
 	#[test]
