@@ -53,6 +53,15 @@ let
       }
     );
 
+  # rustls-platform-verifier reads the system CA bundle. A scratch image has
+  # no /etc/ssl, so the package output references cacert and the image links
+  # the well-known path at this bundle. The symlink is what puts cacert in
+  # the runtime closure.
+  caBundle = ''
+    mkdir -p "$out/etc/ssl/certs"
+    ln -s ${final.cacert}/etc/ssl/certs/ca-bundle.crt "$out/etc/ssl/certs/ca-certificates.crt"
+  '';
+
   moqRelayArgs = crateInfo ../rs/moq-relay/Cargo.toml // {
     src = cleanCargoSource;
     cargoExtraArgs = "-p moq-relay --features jemalloc";
@@ -62,6 +71,7 @@ let
     # jemalloc's configure uses -O0 test builds, which conflict with
     # Nix's _FORTIFY_SOURCE hardening (requires -O).
     hardeningDisable = [ "fortify" ];
+    postInstall = caBundle;
   };
 
   moqCliArgs = crateInfo ../rs/moq-cli/Cargo.toml // {
@@ -74,6 +84,7 @@ let
     hardeningDisable = [ "fortify" ];
     # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
     meta.mainProgram = "moq";
+    postInstall = caBundle;
   };
 
   moqBenchArgs = crateInfo ../rs/moq-bench/Cargo.toml // {

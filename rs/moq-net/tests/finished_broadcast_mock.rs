@@ -47,7 +47,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -77,10 +77,9 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 		}
 	});
 
-	moq_net_sim::timeout(TIMEOUT, track.demand().used())
+	moq_net_sim::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
-		.expect("no subscriber appeared")
-		.unwrap();
+		.expect("no subscriber appeared");
 
 	// One frame and a textbook clean end, innermost first, with no await in between:
 	// nothing is served until the ending is done.

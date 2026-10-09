@@ -25,7 +25,7 @@ async def main():
         # The filter is relative to the literal prefix; prefixes stay origin-relative.
         async for event in client.announced("live/", filter="*/camera"):
             if not isinstance(event, moq.AnnounceEventStart):
-                continue  # AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive
+                continue  # AnnounceEventUpdate or AnnounceEventEnd
             announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
             broadcast = await client.request_broadcast(announcement.prefix)
@@ -77,95 +77,20 @@ async def main():
 asyncio.run(main())
 ```
 
-For already-encoded live output, call `audio.flush(timestamp_us)` after each `audio.write_frame` with the same broadcast-clock PTS. It samples the transport handoff for catalog jitter. File, pipe, and network imports should omit `flush`; raw-pixel and PCM encoders inside the binding measure their own output.
+## Things to know
 
-Call `audio.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a track from `publish_video` or `publish_video_on_track`, resume with a keyframe: a delta frame before it fails.
+The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
+one to one; the API reference has the names.
 
-The three advertising operations, as the other bindings spell them:
-`client.create_broadcast(path)` (or `OriginProducer.create_broadcast`) returns
-an unannounced producer, invisible to everyone; `broadcast.announce(route)` /
-`broadcast.unannounce()` own that exact-path advertisement, and
-`broadcast.close()` ends the broadcast for good (a second call is a no-op);
-`origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
-(`""` for everything). Hold the returned handle while the claim should stay
-advertised, and reject the requests you will not serve. A route is a
-capability, not an inventory. `announced(prefix, filter=...)` combines a literal
-root with an optional relative pattern and yields `AnnounceEvent`s:
-`AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
-carrying an `Announce` as `.announce`, whose `.prefix` stays relative to the
-origin and whose `.captures` reports what the pattern wildcards matched, or
-`AnnounceEventLive` once every route live at subscribe time has been delivered.
-Break on `AnnounceEventLive` to list what is live and stop.
-Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
-`hidden=True`.
+- **Context managers.** `async with` on a client or session awaits a graceful shutdown when the body exits cleanly, and cancels at once when it raises, so your exception survives.
+- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
+- **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestamp_us)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Decoded frames hold decoder buffers.** Drop each frame from `decode_video` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
+- **Closing.** `await session.shutdown()` gives finished tracks up to one second to deliver and raises if they did not. `cancel(code)` closes at once. Finish or abort live tracks first.
+- **Stats.** `session.stats()` reports `rtt_us`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero.
 
-Sessions reconnect with backoff when the transport drops and re-announce local
-broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
-with `session.status()` to log each reconnect; `moq.Backoff` tunes the pacing
-(`timeout_us=0` retries forever); and `moq.connect(..., max_streams=...)`
-raises the peer's inbound stream cap.
-
-The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
-a 200 ms head start. Pass `websocket_enabled=False` to `moq.connect` for a
-QUIC-only relay, or a `websocket_delay` `timedelta` to change the head start.
-
-Everything in the [shared feature list](/lib/#what-every-binding-can-do) is
-here: `moq.Server` with per-request accept/reject, `fetch_group` and
-`fetch_media_group`, `dynamic()` handlers for on-demand tracks and
-`dynamic(prefix)` for broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
-and a producer's `demand()`, a `TrackDemand` whose
-`used()`/`unused()` let capture idle when nobody is subscribed. `request.set_publish`/`set_consume` raise if the request is already
-answered, cancelled, or currently accepting. `session.bandwidth()` divides the connection's send estimate;
-pass it to `encode_video` / `encode_audio` or `reserve` a share for an
-app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. `str(err)` is the Rust error message. Catch `moq.Error.Busy` when a setter races an in-flight connect, listen, or accept.
-Each server request reports a `moq.Transport` enum, including QUIC, Iroh,
-WebSocket, TCP, and Unix sockets.
-
-`encode_audio` encodes raw PCM inside the binding. Its codec is an object,
-`moq.AudioCodec.opus()` or `moq.AudioCodec.aac()`, and
-`AudioEncoderOutput.frame_duration_us` sets the Opus frame length: 2500, 5000,
-10000, 20000 (the default), 40000, or 60000. 0 takes the codec's own frame,
-which AAC needs. AAC-LC encodes through the platform's encoder, so a host
-without one refuses it.
-
-Audio `channels` also names the speaker layout, by the WAVE convention: 1 is
-mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
-front left, front right, center, LFE, back, then side. Decoding remixes to the
-count you ask for; past 8 channels the samples pass through but can't be
-remixed.
-
-Each frame from `decode_video` owns its decoded picture until it is released,
-including after the consumer is cancelled. `frame.pixels(format)` converts it on
-demand: `VideoPixelFormat.I420`, or `VideoPixelFormat.RGBA` for four bytes a
-pixel. Drop frames promptly, since held frames hold decoder buffers. `resize`
-is best effort: only NVDEC has a built-in scaler, so read each frame's own
-`width()` and `height()` rather than assuming it took. `VideoDecoderOutput(surface=True)`
-keeps the decoder's surface for `frame.surface()` instead of downloading it. Only macOS
-has one, so `decode_video` fails as unsupported elsewhere.
-
-## Connection stats
-
-`session.stats()` returns a `ConnectionStats` snapshot. Each field is `None`
-when the transport backend does not report it (native QUIC reports all of them;
-browser WebTransport reports few or none) or before it is available, which is
-not the same as zero.
-
-| Field | Unit | Meaning |
-| --- | --- | --- |
-| `rtt_us` | microseconds | Smoothed round-trip time. |
-| `estimated_send_rate_bps` | bits per second | Send bandwidth from the congestion controller. |
-| `estimated_recv_rate_bps` | bits per second | Receive bandwidth from MoQ PROBE. |
-| `bytes_sent` | bytes | Total sent, including retransmissions and overhead. |
-| `bytes_received` | bytes | Total received, including duplicates and overhead. |
-| `bytes_lost` | bytes | Total lost, detected via retransmission or acknowledgement. |
-| `packets_sent` | datagrams | Total datagrams sent. |
-| `packets_received` | datagrams | Total datagrams received. |
-| `packets_lost` | datagrams | Total datagrams detected as lost. |
+## Reference
 
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
-
-Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
-
-Await `session.shutdown()` to drain finished tracks before disconnecting. It raises if delivery has not completed within one second. `cancel(code)` stays immediate. Session and client async context managers await shutdown on a clean exit and cancel on an error, so the body's exception survives; finish or abort live tracks first. IETF media streams are not drained yet.

@@ -166,9 +166,9 @@ test("SETUP rejects a path with malformed UTF-8", async () => {
 	await expect(decodeParam(PARAM_PATH, new Uint8Array([0xc3, 0x28]))).rejects.toThrow();
 });
 
-test("SETUP encode stops at the 64 KiB receive limit", async () => {
+test("SETUP encode stops at the 65,535-byte receive limit", async () => {
 	// Count, id, and a 4-byte length varint precede the path.
-	const atLimit = 64 * 1024 - 6;
+	const atLimit = 65_535 - 6;
 	const msg = new Setup({ path: "a".repeat(atLimit) });
 	expect((await roundTrip(msg)).path).toBe(msg.path);
 
@@ -178,7 +178,7 @@ test("SETUP encode stops at the 64 KiB receive limit", async () => {
 
 test("SETUP decode refuses an oversized length before reading the body", async () => {
 	// Only the prefix is present, so reading the body would fail with a different error.
-	const prefix = await bytes((w) => w.u53(64 * 1024 + 1), Version.DRAFT_05);
+	const prefix = await bytes((w) => w.u53(65_536), Version.DRAFT_05);
 	await expect(Setup.decode(new Reader(undefined, prefix, Version.DRAFT_05), Version.DRAFT_05)).rejects.toThrow(
 		"too large",
 	);

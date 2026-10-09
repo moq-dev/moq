@@ -137,7 +137,6 @@ export default class MoqBoy extends HTMLElement {
 			for (;;) {
 				const entry = await effect.race(announced.next());
 				if (!entry) break;
-				if (entry.kind === "live") continue;
 
 				// A broad route that cannot pin the game id names nothing to open.
 				const capture = entry.captures?.[0];

@@ -55,18 +55,22 @@ Interview paper trail (✅ marks the choice):
 
 Remaining:
 
-- Land each line's umbrella PR with `/quest-complete`, then delete its branch:
-  #4403 wildcard, #4034 archive, #4039 auth, #4079 cpp, #4519 ffi-shape,
-  #4080 obs-moq-video, #4133 qos (held until
-  [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed),
-  #4180 transport-upgrade, #4640 tstd. #4162 (audio-jitter-target), #4437 rs2ts
-  (with #4438 folded in), and #4653 (test-flakes-2) landed.
-- Fold #4255 (archive/track-timeline) into the archive branch before #4034
-  lands; as of the 2026-10-05 audit it has not happened and #4034 is a draft.
-- Before a line lands and its branch is deleted, merge or retarget every child
-  PR still based on it, or GitHub closes it with the branch. As of the
-  2026-10-05 audit: #4645 (tstd/delay, retarget to `main` after #4640),
-  #4732 (ffi-shape/request-accept), and #4675 (auth/request-token).
+- Land each line's umbrella PR with `/quest-complete`, then delete its branch.
+  Landed so far: #4403 wildcard, #4034 archive (with #4255 folded in), #4080
+  obs-moq-video, #4162 audio-jitter-target, #4180 transport-upgrade, #4437
+  rs2ts (with #4438 folded in), #4640 tstd, and #4653 test-flakes-2. As of
+  2026-10-08 four lines remain, and all four conflict with `main` and need
+  it merged in again.
+  - #4039 auth: its `wip-version.md` child landed on the line (#5004). The
+    line's UNAUTHORIZED stream code collides with `main`'s NOT_FETCHABLE
+    (0x3A) and moves to 0x3B before it lands.
+  - #4079 cpp: `main` merged in again and the `uniffi-bindgen-cpp` pin
+    bumped to `v0.11.0-kixelated.4`, whose generated files end with a newline.
+  - #4519 ffi-shape waits on
+    [Bindings](/quest/m0/broadcast-epoch/bindings.md).
+  - #4133 qos: lag-splice landed on the line (#5009). Its egress `lag`
+    histogram splits into its own quest requiring stats-split (decided
+    2026-10-08); follow the qos README for what the line lands without it.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.

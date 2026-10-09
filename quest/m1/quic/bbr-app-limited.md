@@ -4,7 +4,7 @@
 
 After minutes of keep-alive-only idle, a BBRv3 (`delay`) sender paces its
 next burst near the bandwidth it learned before, not at a trickle, and a
-regression test in the fork proves it.
+regression test in `moq-quic` proves it.
 
 ## Plan
 
@@ -20,18 +20,20 @@ minutes took 5.2 s at 50 ms RTT, against 0.5 s with CUBIC.
 The fix plausibly covers it. The fork's max-bw filter ages only on
 non-app-limited samples, and before #5 every other keep-alive was stamped
 non-app-limited. Nothing measures it, though. Add a virtual-time transport
-test in the fork: learn the bandwidth, idle on keep-alives for about five
+test in `rs/moq-quic`, which carries the fix: learn the bandwidth, idle on keep-alives for about five
 minutes, send 250 KB, and assert the pacing rate stays at or above about
-0.9x the earlier max bandwidth. Check that it fails on 1.3.0.
+0.9x the earlier max bandwidth. Check that it fails with #5's app-limited
+marking reverted, since the test lives in `moq-quic` and cannot run on 1.3.0.
 
 If it still stalls, find the remaining cause, such as ProbeRTT entered during
-the idle or a stale `bw_shortterm`, and fix it in the fork. Dropping the
+the idle or a stale `bw_shortterm`, and fix it in `moq-quic`. Dropping the
 estimate after a long idle is a policy change for the m2 study, not this
 quest.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
+Decided 2026-10-08: this does not wait for the
+[switch](/quest/m1/quic/fork/switch.md). The core and its BBR3 are already in
+`rs/moq-quic`, and local fixes there land on their own, as
+[input validation](/quest/m1/quic/fork/input-validation.md) does.
 
 ## Closes
 

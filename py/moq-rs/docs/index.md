@@ -106,7 +106,6 @@ asyncio.run(main())
    AnnounceEventStart
    AnnounceEventUpdate
    AnnounceEventEnd
-   AnnounceEventLive
 ```
 
 ## Data types

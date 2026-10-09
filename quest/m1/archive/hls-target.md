@@ -46,7 +46,3 @@ keeps the original target.
 ## Required
 
 - [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md) - the declared value the target is taken from
-
-## Related
-
-- [Per-track timelines](/quest/m1/archive/track-timeline.md) - the quest this blocks

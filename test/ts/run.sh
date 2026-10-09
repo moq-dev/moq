@@ -19,6 +19,8 @@
 #   ./run.sh --live                # grade PCR release timing off the live pipe
 #   ./run.sh --pair                # two exporters of one broadcast, grade table anchoring
 #   ./run.sh --open-gop            # open-GOP clip; its leading pictures must survive
+#   ./run.sh --hrd                 # 1080p video filling a broadcast-sized 9 Mbit CPB
+#   ./run.sh --delay 1s            # pass the exporter's --delay
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
 # on the stream's own PCR clock, which is the right basis for the IRD model it
@@ -62,6 +64,8 @@ WITH_EIT="" # add a synthetic EPG to the source and report which SI survived
 LIVE=""     # grade the exporter's stdout as it arrives, rather than a capture
 PAIR=""     # subscribe twice and grade the two captures against each other
 OPEN_GOP="" # publish open GOP with leading pictures, and grade them through the round-trip
+HRD=""      # publish video that fills a broadcast-sized CPB, as a contribution encoder does
+EXPORT=()   # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
 # exactly the thing under test.
@@ -123,6 +127,14 @@ while [[ $# -gt 0 ]]; do
             OPEN_GOP=1
             shift
             ;;
+        --hrd)
+            HRD=1
+            shift
+            ;;
+        --delay)
+            EXPORT=(--delay "$2")
+            shift 2
+            ;;
         *)
             PASSTHRU+=("$1")
             shift
@@ -150,6 +162,10 @@ if [[ -n "$PAIR" ]]; then
 fi
 
 # open-gop.py grades a capture against its source, which only the plain round-trip keeps.
+if [[ -n "$HRD" && -n "$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
+    echo "error: --hrd generates its own clip and cannot be combined with --open-gop, --source, or --analyze-only" >&2
+    exit 1
+fi
 if [[ -n "$OPEN_GOP" && -n "$ANALYZE_ONLY$LIVE$PAIR" ]]; then
     echo "error: --open-gop cannot be combined with --analyze-only, --live, or --pair" >&2
     exit 1
@@ -238,6 +254,17 @@ if [[ -n "$SOURCE" ]]; then
         sed 's/^/  tsp: /' "$HARNESS_RUN/tsp-cut.log" >&2 || true
         exit 1
     }
+elif [[ -n "$HRD" ]]; then
+    echo "### generating ~${DURATION}s 1080p clip filling a 9 Mbit CPB with ffmpeg"
+    # A contribution encoder's shape: CBR video whose HRD declares the whole buffer, kept
+    # near full by noise, so the source sends pictures most of a second ahead of their
+    # decode time and the export has to as well (moq-dev/moq#4645).
+    ffmpeg -y -hide_banner -loglevel error \
+        -f lavfi -i "testsrc2=size=1920x1080:rate=25,noise=alls=12:allf=t" \
+        -t "$DURATION" -an \
+        -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
+        -x264-params "keyint=25:min-keyint=25:scenecut=0:nal-hrd=cbr" -b:v 9M -maxrate 9M -bufsize 9M \
+        -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
 else
     echo "### generating ~${DURATION}s broadcast-like ${OPEN_GOP:+open-GOP }clip with ffmpeg"
     # CBR with a 20 ms PCR, like a contribution feed. Not cosmetic: `regulate`
@@ -300,15 +327,15 @@ harness_endpoint relay "$URL"
 # (a file has none left in it). It stops itself after its own window, so the
 # round-trip below still bounds the run.
 
-# SCHEDULE carries the rate pcr-timing.py's schedule check grades against. The
-# generated clip is muxed at $BITRATE, which is the rate the catalog records and the
-# exporter pads to. Left to estimate, the grader divides total bytes by the PCR span,
-# and any transient drags that off the true rate: an unpadded first half-second put it
-# ~3 % low over a 20 s window, which then read every correctly padded interval as off
-# schedule. A --source capture's rate is not known here, so for that the grader
-# estimates it and says so.
+# SCHEDULE carries the rate pcr-timing.py's schedule check grades against, and gates
+# on it. The generated clip is muxed at $BITRATE, which is the rate the catalog records
+# and the exporter pads to, on a constant-rate schedule from the first null packet on:
+# every interval is the bytes the rate implies, to one packet. Left to estimate, the
+# grader divides total bytes by the PCR span, and the unpadded start drags that off the
+# true rate. A --source capture's rate is not known here, so for that the grader
+# estimates it, says so, and only reports.
 SCHEDULE=()
-[[ -z "$SOURCE" ]] && SCHEDULE=(--mux-rate "$BITRATE")
+[[ -z "$SOURCE" ]] && SCHEDULE=(--mux-rate "$BITRATE" --schedule-pct-min 99)
 
 # Both halves matter and `wait` can only report one, so record each. The
 # exporter's own status is not incidental here: it decides whether the grader saw
@@ -319,7 +346,7 @@ grade_live() {
     # status we are here to record.
     set +e
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts 2>"$HARNESS_RUN/sub.log" |
+        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log" |
         python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
             ${SCHEDULE[@]+"${SCHEDULE[@]}"} ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$HARNESS_RUN/timing.out" 2>&1
     printf '%s\n' "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$HARNESS_RUN/timing.rc"
@@ -328,7 +355,7 @@ grade_live() {
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 capture() {
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
+        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
 }
 
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
@@ -339,7 +366,7 @@ capture_b() {
     # the media, because it has no shared history to derive them from.
     sleep "$PAIR_JOIN"
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
+        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
 }
 
 if [[ -n "$LIVE" ]]; then
@@ -522,11 +549,31 @@ fi
 # compliance.py grades rate in aggregate and over fixed windows, neither of which says
 # whether the bytes between consecutive PCRs are the ones the mux rate implies, so the
 # capture goes through pcr-timing.py as well. Its hard checks gate here as they do under
-# --live; pcr-schedule is a shape check, so it reports without gating unless --strict.
+# --live, and so does pcr-schedule when the rate is known (SCHEDULE).
 echo
 if ! python3 "$DIR/pcr-timing.py" "$SUB_TS" ${SCHEDULE[@]+"${SCHEDULE[@]}"} $STRICT; then
     echo >&2
     echo "error: PCR timing analysis failed (see round-trip logs below)" >&2
     dump_logs
     exit 1
+fi
+
+# pcr-schedule allows each PCR a packet of slack, but an IRD or a TR 101 290 probe holds
+# every PCR to within 500 ns of its byte position at the mux rate (PCR_accuracy_error).
+# TSDuck's pcrverify measures exactly that. The first seconds are skipped: the export
+# starts unpadded until the importer has measured the source's rate and recorded it.
+if [[ ${#SCHEDULE[@]} -gt 0 ]]; then
+    echo
+    echo "### PCR accuracy (tsp -P pcrverify, +/-500 ns at ${BITRATE} b/s)"
+    SKIP=$((3 * BITRATE / 8 / 188))
+    tsp -I file "$SUB_TS" -P skip "$SKIP" -P pcrverify --bitrate "$BITRATE" --absolute --jitter-max 13 \
+        -O drop >"$HARNESS_RUN/pcrverify.log" 2>&1 || true
+    VERDICT=$(grep -E "PCR OK, " "$HARNESS_RUN/pcrverify.log" | tail -1)
+    echo "  ${VERDICT:-no verdict}"
+    if [[ ! "$VERDICT" =~ ([0-9,]+)\ PCR\ OK,\ 0\ with ]]; then
+        echo >&2
+        echo "error: PCRs stray from their byte position (see $HARNESS_RUN/pcrverify.log)" >&2
+        dump_logs
+        exit 1
+    fi
 fi

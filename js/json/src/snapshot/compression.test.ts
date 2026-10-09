@@ -46,7 +46,7 @@ test("compressed snapshot per group round-trips", async () => {
 
 	// Deltas off: one compressed snapshot per group. A consumer joining after the fact
 	// collapses the backlog to the newest value (mirrors the Rust consumer).
-	expect(await drainCompressed(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([{ a: 2 }]);
+	expect(await drainCompressed(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ a: 2 }]);
 });
 
 test("compressed live consumer sees each update in order", async () => {
@@ -143,7 +143,7 @@ test("compressed deltas roll on the compressed budget", async () => {
 	};
 
 	const layout = new Track.Producer("layout");
-	const layoutSub = layout.subscribe({ maxAge: REPLAY_LATENCY }).ordered();
+	const layoutSub = layout.subscribe({ maxDelay: REPLAY_LATENCY }).ordered();
 	fill(layout);
 	expect(await groupCount(layoutSub)).toBeGreaterThan(1);
 

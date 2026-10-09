@@ -25,7 +25,6 @@ func ExampleClient_Announced() {
 	}
 	defer announced.Cancel()
 
-	// List what is live now, then stop.
 	for event, err := range announced.All(ctx) {
 		if err != nil {
 			if moq.IsShutdown(err) {
@@ -33,11 +32,8 @@ func ExampleClient_Announced() {
 			}
 			log.Fatal(err)
 		}
-		switch event := event.(type) {
-		case moq.AnnounceEventStart:
+		if event, ok := event.(moq.AnnounceEventStart); ok {
 			fmt.Println("broadcast:", event.Announce.Prefix)
-		case moq.AnnounceEventLive:
-			return
 		}
 	}
 }

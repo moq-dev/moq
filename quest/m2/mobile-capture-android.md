@@ -1,9 +1,9 @@
-# [XL] Android capture and encode
+# [XL] Android capture
 
 ## Goal
 
-`moq-video` captures and encodes on Android: Camera2 or CameraX for the
-camera, MediaProjection for the screen, and MediaCodec for encode and decode.
+`moq-video` captures on Android: Camera2 or CameraX for the camera and
+MediaProjection for the screen, feeding the existing MediaCodec encoder.
 
 ## Plan
 
@@ -11,9 +11,7 @@ Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit. MediaCo
 planning a second backend family. The remaining capture and native Surface
 integration needs NDK/JNI lifecycle, synchronization, and actual device proof.
 
-This is the Android SDK's media path, not a Rust-only extra. `moq-kit`'s
-Kotlin capture is the parallel stack the verdict retires once this lands.
-Frames cross `moq-ffi` as opaque `HardwareBuffer`/`Surface` handles rather than
+This is the Android SDK's media path, not a Rust-only extra. Frames cross `moq-ffi` as opaque `HardwareBuffer`/`Surface` handles rather than
 copies. Rust-native consumers benefit too (the same gap that made `iroh-live`
 reimplement the native layer).
 

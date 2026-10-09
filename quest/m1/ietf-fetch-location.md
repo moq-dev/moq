@@ -5,7 +5,10 @@
 On drafts 20 and later, a FETCH whose LOCATION_FILTER stays within one group
 is answered the way drafts 14 to 19 answer a standalone FETCH: from cache, with
 a miss fetched upstream, and an upstream refusal passed through. A range
-touching several groups is refused `NOT_SUPPORTED`, as on older drafts.
+touching several groups follows the same group-span rule as drafts 14 to 19,
+through the shared path: refused `NOT_SUPPORTED` until
+[moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) lifts that
+refusal for every draft.
 
 ## Plan
 
@@ -17,3 +20,7 @@ The codec already decodes and encodes the draft-20 layout as
 FETCH carrying Range Filters stays refused.
 
 Update the draft-20 note in `doc/concept/standard.md`.
+
+## Related
+
+- [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - lifts the one-group refusal in `run_fetch_stream` for every draft, draft-20 included

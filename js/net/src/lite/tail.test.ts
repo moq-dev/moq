@@ -21,7 +21,7 @@ import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, Version } from "./version.ts";
 
-// The subscription's max age, which is also how long it waits for a group that never arrives.
+// The subscription's max delay, which is also how long it waits for a group that never arrives.
 const GRACE = Milli(100);
 
 /** One lite-05+ frame: a zero timestamp delta, then the length-prefixed payload. */
@@ -52,10 +52,10 @@ function groupStream(subscriber: Subscriber, sequence: number) {
  * it answers TRACK_INFO, then writes whatever responses the test asks for on the subscribe
  * stream and FINs it when told.
  */
-async function subscribed(version: Version, maxAge = GRACE, groups?: Groups) {
+async function subscribed(version: Version, maxDelay = GRACE, groups?: Groups) {
 	const pair = createMockTransportPair(ALPN_05);
 	const subscriber = new Subscriber(pair.client, version, randomHop());
-	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ maxAge, groups });
+	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ maxDelay, groups });
 
 	const info = await Stream.accept(pair.server, version);
 	if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
@@ -186,7 +186,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const sub = await subscribed(version);
 			subscriber = sub.subscriber;
 			const { reader, respond, fin } = sub;
-			const ordered = reader.fork({ maxAge: GRACE }).ordered();
+			const ordered = reader.fork({ maxDelay: GRACE }).ordered();
 			await respond({ start: new SubscribeStart(0) });
 			const group = groupStream(subscriber, 1);
 			group.write("1.0");
@@ -219,7 +219,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	test.skipIf(version === Version.DRAFT_07)(
 		"a subscription ends without waiting once every group is accounted for",
 		async () => {
-			// A max age far past the test's patience: only the accounting may end it.
+			// A max delay far past the test's patience: only the accounting may end it.
 			const { subscriber, reader, respond, fin } = await subscribed(version, Milli(60_000));
 			await respond({ start: new SubscribeStart(0) });
 			await respond({ drop: new SubscribeDrop({ start: 0, end: 0, error: 0 }) });
@@ -277,8 +277,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test.skipIf(version === Version.DRAFT_07)("a lowered floor owes the groups it newly asked for", async () => {
-		const maxAge = Milli(60_000);
-		const { subscriber, respond, fin } = await subscribed(version, maxAge, { start: { included: 3 } });
+		const maxDelay = Milli(60_000);
+		const { subscriber, respond, fin } = await subscribed(version, maxDelay, { start: { included: 3 } });
 		await respond({ start: new SubscribeStart(3) });
 		const group = groupStream(subscriber, 3);
 		group.write("3.0");
@@ -289,7 +289,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const lower = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ maxAge, groups: { start: { included: 1 } } });
+			.subscribe({ maxDelay, groups: { start: { included: 1 } } });
 		await respond({ end: new SubscribeEnd(4, 1) });
 		await fin();
 		// Long enough for a subscription that owed nothing more to have ended.

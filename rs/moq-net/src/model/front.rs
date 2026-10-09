@@ -9,10 +9,16 @@
 //! sources, the tracks, the clock) and executes the actions; see
 //! `origin::run_front`.
 //!
-//! A path names one broadcast, whoever serves it, so any route covering the path
-//! may take over from another and its tracks resume where they stopped. A
-//! publisher reusing a name for different content is a bug; it publishes under a
-//! new name (an epoch) instead.
+//! The driver only offers a front routes that serve its broadcast: those with the
+//! epoch it first resolved, whose tracks resume where they stopped, or its first
+//! route alone when that had no epoch, since nothing says another serves the
+//! same bytes. A newer epoch supersedes the front, ending even the tracks in
+//! flight, so readers re-request the new broadcast rather than stall on the old.
+//!
+//! A front nothing needs retires: once every track is forgotten (after the linger,
+//! so a returning reader still finds the cache) and no consumer holds its broadcast,
+//! it ends, and the next request mints a fresh one. A front waiting for a route is
+//! not idle.
 //!
 //! Sources and tracks are named by ids and names, never handles, so a
 //! transition can be checked in a unit test by comparing the actions it emits.
@@ -88,6 +94,17 @@ pub(super) enum Event {
 	/// The driver let go of a track the machine asked it to [`Action::Forget`].
 	/// Not fed when a reader arrived first: [`Event::Used`] follows instead.
 	Forgotten { track: Arc<str> },
+	/// A newer publisher instance replaced the broadcast: every track ends now,
+	/// even one in flight, and readers re-request the path.
+	Superseded,
+	/// A consumer took hold of the front's broadcast: a request joined it, or the
+	/// driver declined an [`Action::Retire`] because one did.
+	Held,
+	/// The last consumer let go of the front's broadcast.
+	Unheld,
+	/// The front's broadcast closed, whether the driver closed it for an
+	/// [`Action::Retire`] or something else did: nobody can join it now.
+	Retired,
 	/// The origin is tearing down.
 	Closed,
 }
@@ -123,9 +140,13 @@ pub(super) enum Action {
 	Abort { track: Arc<str>, err: Error },
 	/// Arm (or clear) the deadline the front wants to be woken at.
 	Arm { at: Option<Instant> },
-	/// The front is over: reject the parked requesters with `err`, leave each
-	/// read track to end with the copy it is spliced from or still waiting on,
-	/// abort the rest with `err`, and drop every source.
+	/// Nothing needs the front: close its broadcast unless a consumer took hold of it
+	/// since, then feed back [`Event::Retired`], or [`Event::Held`] when one did.
+	Retire,
+	/// The front is over: leave the origin's front table first, so nothing joins it
+	/// as it ends, then reject the parked requesters with `err`, leave each read
+	/// track to end with the copy it is spliced from or still waiting on, abort the
+	/// rest with `err`, and drop every source.
 	End { err: Error },
 }
 
@@ -186,12 +207,17 @@ pub(super) struct Front {
 	linger: Duration,
 	/// The deadline last armed, so a step only re-arms on change.
 	armed: Option<Instant>,
+	/// Whether a consumer holds the front's broadcast. A front starts held by the
+	/// request that minted it.
+	held: bool,
+	/// An [`Action::Retire`] is out, awaiting its answer.
+	retiring: bool,
 	ended: bool,
 }
 
 impl Front {
-	/// A front with no source and no tracks; `linger` is how long an unread
-	/// track stays before it is forgotten.
+	/// A front with no source and no tracks, held by the request that minted it;
+	/// `linger` is how long an unread track stays before it is forgotten.
 	pub(super) fn new(linger: Duration) -> Self {
 		Self {
 			serving: None,
@@ -204,6 +230,8 @@ impl Front {
 			info: BTreeMap::new(),
 			linger,
 			armed: None,
+			held: true,
+			retiring: false,
 			ended: false,
 		}
 	}
@@ -216,6 +244,11 @@ impl Front {
 	/// Forget excluded routes that left the table (a reconnect is a fresh entry).
 	pub(super) fn retain_routes(&mut self, standing: impl Fn(u64) -> bool) {
 		self.excluded.retain(|route| standing(*route));
+	}
+
+	/// The route the attached source came through, if any.
+	pub(super) fn serving_route(&self) -> Option<u64> {
+		self.serving.map(|(_, candidate)| candidate.route)
 	}
 
 	/// The attached source, if any.
@@ -275,6 +308,13 @@ impl Front {
 			Event::Forgotten { track } => {
 				self.tracks.remove(&track);
 			}
+			Event::Superseded => self.supersede(&mut actions),
+			Event::Held => {
+				self.held = true;
+				self.retiring = false;
+			}
+			Event::Unheld => self.held = false,
+			Event::Retired => self.end(Error::Dropped, &mut actions),
 			Event::Closed => self.end(Error::Dropped, &mut actions),
 		}
 		if !self.ended {
@@ -283,8 +323,18 @@ impl Front {
 				self.armed = at;
 				actions.push(Action::Arm { at });
 			}
+			if !self.retiring && self.idle() {
+				self.retiring = true;
+				actions.push(Action::Retire);
+			}
 		}
 		actions
+	}
+
+	/// Whether nothing needs the front: no track is left, even a lingering one, no
+	/// consumer holds its broadcast, and it serves from a source with no route pending.
+	fn idle(&self) -> bool {
+		!self.held && self.tracks.is_empty() && self.serving.is_some() && self.upstream.is_none()
 	}
 
 	fn selected(&mut self, best: Option<Candidate>, serving_closing: bool, actions: &mut Vec<Action>) {
@@ -470,8 +520,9 @@ impl Front {
 		let spliced = track.state == (TrackState::Spliced { source });
 		if track.draining == Some(source) {
 			track.draining = None;
-			// A path is one broadcast, so a copy that completed ends the track whoever
-			// serves it now. One that failed leaves the track to the serving source.
+			// Every source of a front serves one broadcast, so a copy that completed ends
+			// the track whoever serves it now. One that failed leaves the track to the
+			// serving source.
 			if result.is_ok() && !track.ended {
 				track.state = TrackState::Idle;
 				track.ended = true;
@@ -618,6 +669,21 @@ impl Front {
 				_ => None,
 			})
 			.min()
+	}
+
+	/// Abort every track still going, then end: unlike a retraction, a newer
+	/// broadcast does not leave readers on the old one's copies.
+	fn supersede(&mut self, actions: &mut Vec<Action>) {
+		for (name, track) in &mut self.tracks {
+			if !track.ended {
+				track.ended = true;
+				actions.push(Action::Abort {
+					track: name.clone(),
+					err: Error::Unroutable,
+				});
+			}
+		}
+		self.end(Error::Unroutable, actions);
 	}
 
 	fn end(&mut self, err: Error, actions: &mut Vec<Action>) {
@@ -1118,6 +1184,103 @@ mod tests {
 		);
 	}
 
+	/// A front nobody holds stays while its track lingers, so a returning reader still
+	/// finds the cache, and retires once the track is forgotten.
+	#[test]
+	fn an_unread_front_retires_after_the_linger() {
+		let mut front = serving(remote(1), 100);
+		let t0 = Instant::now();
+		front.step(Event::Unused {
+			track: name("video"),
+			now: t0,
+		});
+		assert_actions(front.step(Event::Unheld), &[]);
+		assert_actions(
+			front.step(Event::Deadline { now: t0 + LINGER }),
+			&[Action::Forget { track: name("video") }],
+		);
+		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[Action::Retire]);
+		assert_actions(front.step(Event::Retired), &[Action::End { err: Error::Dropped }]);
+		assert!(front.ended());
+	}
+
+	/// A consumer holding the broadcast keeps a front with no track, since it may still
+	/// ask for one. A local source's unread track goes at once, so its front retires as
+	/// soon as the holder leaves.
+	#[test]
+	fn a_held_front_stays_without_tracks() {
+		let mut front = serving(local(1), 100);
+		front.step(Event::Unused {
+			track: name("video"),
+			now: Instant::now(),
+		});
+		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[]);
+		assert_actions(front.step(Event::Unheld), &[Action::Retire]);
+	}
+
+	/// A front waiting for a route is not idle, though nobody holds it: neither one
+	/// still resolving nor one whose source died while it asks another route.
+	#[test]
+	fn a_front_waiting_for_a_route_stays() {
+		let mut front = Front::new(LINGER);
+		front.step(Event::Selected {
+			best: Some(remote(1)),
+			serving_closing: false,
+		});
+		assert_actions(front.step(Event::Unheld), &[]);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 1,
+				result: Ok(100),
+			}),
+			&[Action::Resolve, Action::Retire],
+		);
+
+		let mut front = serving(local(1), 100);
+		front.step(Event::Unused {
+			track: name("video"),
+			now: Instant::now(),
+		});
+		front.step(Event::Forgotten { track: name("video") });
+		assert_actions(
+			front.step(Event::SourceClosed { source: 100 }),
+			&[Action::Detach { source: 100 }, Action::Reselect],
+		);
+		assert_actions(front.step(Event::Unheld), &[]);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Retire],
+		);
+	}
+
+	/// A request that joined before the driver could retire the front keeps it: the
+	/// driver feeds `Held` instead of `Retired`, and the front retires only once that
+	/// holder leaves too.
+	#[test]
+	fn a_request_racing_the_retire_keeps_the_front() {
+		let mut front = serving(local(1), 100);
+		front.step(Event::Unused {
+			track: name("video"),
+			now: Instant::now(),
+		});
+		front.step(Event::Forgotten { track: name("video") });
+		assert_actions(front.step(Event::Unheld), &[Action::Retire]);
+		assert_actions(front.step(Event::Held), &[]);
+		assert!(!front.ended());
+		assert_actions(front.step(Event::Unheld), &[Action::Retire]);
+		assert_actions(front.step(Event::Retired), &[Action::End { err: Error::Dropped }]);
+	}
+
 	/// A finished track stays for readers still draining it and for the linger
 	/// after the last one, is never spliced again, and is then forgotten.
 	#[test]
@@ -1352,6 +1515,8 @@ mod tests {
 			},
 			Event::Deadline { now: t0 + LINGER },
 			Event::Forgotten { track: name("v") },
+			Event::Unheld,
+			Event::Held,
 		];
 
 		fn walk(front: &Front, alphabet: &[Event], depth: usize, sequences: &mut usize) {
@@ -1397,6 +1562,10 @@ mod tests {
 					if let Action::Detach { source } = action {
 						assert_ne!(next.serving.map(|(s, _)| s), Some(*source));
 					}
+				}
+				// A retire is asked only of an idle front, and once until answered.
+				if actions.iter().any(|action| matches!(action, Action::Retire)) {
+					assert!(next.idle() && !front.retiring, "retired a front in use: {next:?}");
 				}
 				if depth > 1 {
 					walk(&next, alphabet, depth - 1, sequences);
@@ -1556,8 +1725,8 @@ mod tests {
 	}
 
 	/// The serving source closed and the front reselected, but the pump still reads the
-	/// closed source's copy. That copy ending cleanly ends the track: a path is one
-	/// broadcast, whoever serves it.
+	/// closed source's copy. That copy ending cleanly ends the track: every source of
+	/// the front serves one broadcast.
 	#[test]
 	fn a_closed_sources_clean_end_finishes_the_track() {
 		let mut front = serving(remote(1), 100);

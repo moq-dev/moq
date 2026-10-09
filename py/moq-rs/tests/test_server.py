@@ -10,18 +10,15 @@ import pytest
 
 
 async def routes(announced: moq.AnnounceConsumer):
-    """Yield each newly announced route, skipping the other events such as LIVE."""
+    """Yield each newly announced route, skipping updates and ends."""
     async for event in announced:
         if isinstance(event, moq.AnnounceEventStart):
             yield event.announce
 
 
 async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
-    """The next announce event that is not LIVE, which lands wherever the backlog ends."""
-    while True:
-        event = await asyncio.wait_for(anext(announced), timeout=5.0)
-        if not isinstance(event, moq.AnnounceEventLive):
-            return event
+    """The next announce event."""
+    return await asyncio.wait_for(anext(announced), timeout=5.0)
 
 
 def opus_head() -> bytes:

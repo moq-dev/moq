@@ -27,7 +27,7 @@ export interface Properties {
 
 	/// The track's Timescale, which declares the units of every object Timestamp on it.
 	///
-	/// `undefined` declares no timeline, so the subscriber times objects by arrival.
+	/// `undefined` declares no timeline, so the track and its objects are untimed.
 	timescale?: Timescale;
 
 	/// Publisher priority for a group header without its priority flag. The wire default is 128.

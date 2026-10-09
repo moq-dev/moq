@@ -3,12 +3,12 @@ use std::time::Duration;
 
 use super::*;
 use crate::frame::vulkan::tests::Producer;
-use crate::frame::vulkan::{Channels, Image, ImportError, Importer, Timeline};
+use crate::frame::vulkan::{Format, Slot as VulkanSlot, Timeline};
 use crate::{Frame as VideoFrame, Surface};
 
 /// A gradient with structure on both axes, so a pitch, plane, or channel-order
-/// bug moves the picture. Bytes are in `channels` order with alpha 255.
-fn gradient(size: Size, channels: Channels, shift: usize) -> Vec<u8> {
+/// bug moves the picture. Bytes are in `format` order with alpha 255.
+fn gradient(size: Size, format: Format, shift: usize) -> Vec<u8> {
 	let (w, h) = (size.width as usize, size.height as usize);
 	let mut pixels = vec![0u8; w * h * 4];
 	for y in 0..h {
@@ -19,9 +19,9 @@ fn gradient(size: Size, channels: Channels, shift: usize) -> Vec<u8> {
 				((x + y + shift) * 255 / (w + h)) as u8,
 			);
 			let i = (y * w + x) * 4;
-			pixels[i..i + 4].copy_from_slice(&match channels {
-				Channels::Rgba => [r, g, b, 255],
-				Channels::Bgra => [b, g, r, 255],
+			pixels[i..i + 4].copy_from_slice(&match format {
+				Format::Rgba8 => [r, g, b, 255],
+				Format::Bgra8 => [b, g, r, 255],
 			});
 		}
 	}
@@ -99,7 +99,7 @@ fn nvenc(size: Size, color: Color) -> crate::encode::Encoder {
 	crate::encode::Encoder::new(&config).expect("open NVENC")
 }
 
-/// Real hardware only, and loud about it: the opt-in `just rs vulkan-cuda`
+/// Real hardware only, and loud about it: the opt-in `just rs gpu`
 /// recipe runs this, and a machine without the GPU path fails rather than
 /// reporting a pass it did not earn.
 ///
@@ -119,17 +119,13 @@ async fn vulkan_cuda_convert_resize_encode() {
 	let sd = Size::new(160, 96);
 	let color = Color::Bt709Limited;
 	let mut producer = Producer::new(size).expect("no Vulkan NVIDIA device: this opt-in test needs one");
-	let importer = Importer::new(0, NonZeroUsize::new(1).unwrap()).expect("CUDA importer");
 	let converter = Converter::new(0, color, NonZeroUsize::new(3).unwrap()).expect("CUDA converter");
 	assert_eq!(converter.color(), color);
 
 	// Round one, RGBA: conversion, resize, and the pool bound.
-	let image = Image::rgba8(producer.uuid, size, producer.allocation_size).unwrap();
-	let slot = importer
-		.import(producer.export(), image, ())
-		.map_err(ImportError::into_parts)
-		.expect("import RGBA image");
-	let rgba = gradient(size, Channels::Rgba, 0);
+	let image = producer.contract(Format::Rgba8);
+	let slot = VulkanSlot::new(producer.export(), image, ()).expect("import RGBA image");
+	let rgba = gradient(size, Format::Rgba8, 0);
 	let expected = reference(&rgba, size, color);
 	producer.upload(&rgba, None, 1);
 	let (frame, completion) = slot.publish(Timeline::new(1, 2).unwrap()).unwrap();
@@ -201,19 +197,13 @@ async fn vulkan_cuda_convert_resize_encode() {
 	eprintln!("pool bound held at capacity 3");
 
 	drop((converted, scaled, frame));
-	let slot = tokio::time::timeout(std::time::Duration::from_secs(2), completion.wait())
-		.await
-		.expect("CUDA completion timed out")
-		.expect("completion worker stopped");
+	let slot = completion.wait().await.expect("completion worker stopped");
 	drop(slot);
 
 	// Round two, BGRA: the same picture in the other channel order converts to
 	// the same samples, and both renditions encode through NVENC in place.
-	let image = Image::bgra8(producer.uuid, size, producer.allocation_size).unwrap();
-	let mut slot = importer
-		.import(producer.export(), image, ())
-		.map_err(ImportError::into_parts)
-		.expect("import BGRA image");
+	let image = producer.contract(Format::Bgra8);
+	let mut slot = VulkanSlot::new(producer.export(), image, ()).expect("import BGRA image");
 	let mut hd = nvenc(size, color);
 	let mut sd_encoder = nvenc(sd, color);
 	assert_eq!(hd.name(), "nvenc");
@@ -228,7 +218,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 
 	for i in 0..8u64 {
 		let ready = 2 * i + 3;
-		let bgra = gradient(size, Channels::Bgra, i as usize * 4);
+		let bgra = gradient(size, Format::Bgra8, i as usize * 4);
 		producer.upload(&bgra, Some(ready - 1), ready);
 		let (frame, completion) = slot.publish(Timeline::new(ready, ready + 1).unwrap()).unwrap();
 
@@ -238,7 +228,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 			.convert(&frame)
 			.expect("convert BGRA");
 		if i == 0 {
-			let rgba = gradient(size, Channels::Rgba, 0);
+			let rgba = gradient(size, Format::Rgba8, 0);
 			let actual = converted.download_i420().unwrap();
 			let reference = reference(&rgba, size, color);
 			assert_eq!(actual.y(), reference.y(), "BGRA luma differs from RGBA");
@@ -270,7 +260,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 		}
 		for out in decoder.decode(packets[0].payload.clone(), timestamp, i == 0).unwrap() {
 			decoded = Some(out.surface.to_i420().unwrap().into_owned());
-			expected = Some(reference(&gradient(size, Channels::Rgba, i as usize * 4), size, color));
+			expected = Some(reference(&gradient(size, Format::Rgba8, i as usize * 4), size, color));
 		}
 
 		let packets = sd_encoder
@@ -280,10 +270,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 		assert_eq!(packets[0].timestamp, timestamp);
 		sd_packets += packets.len();
 
-		slot = tokio::time::timeout(std::time::Duration::from_secs(2), completion.wait())
-			.await
-			.expect("CUDA completion timed out")
-			.expect("completion worker stopped");
+		slot = completion.wait().await.expect("completion worker stopped");
 	}
 	assert_eq!(sd_packets, 8);
 
@@ -301,7 +288,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 	assert!(mae(decoded.u(), expected.u()) < 8, "decoded u corrupt");
 	assert!(mae(decoded.v(), expected.v()) < 8, "decoded v corrupt");
 
-	drop((hd, sd_encoder, slot, importer, converter));
+	drop((hd, sd_encoder, slot, converter));
 	eprintln!("encoders, importer, and converter torn down");
 }
 
@@ -377,9 +364,8 @@ async fn vulkan_cuda_three_view_workload() {
 
 	// One picture per tick phase, so the encoders see real motion instead of a
 	// frozen frame no P-slice has to code.
-	let pictures: Vec<Vec<u8>> = (0..8).map(|i| gradient(size, Channels::Rgba, i * 37)).collect();
+	let pictures: Vec<Vec<u8>> = (0..8).map(|i| gradient(size, Format::Rgba8, i * 37)).collect();
 
-	let importer = Importer::new(0, NonZeroUsize::new(VIEWS).unwrap()).expect("CUDA importer");
 	// Two live buffers per view (the converted frame and its scaled copy) plus
 	// one of slack, the sizing the `Converter` docs recommend.
 	let converter = Converter::new(0, color, NonZeroUsize::new(2 * VIEWS + 1).unwrap()).expect("CUDA converter");
@@ -387,11 +373,8 @@ async fn vulkan_cuda_three_view_workload() {
 	let mut views = Vec::new();
 	for _ in 0..VIEWS {
 		let mut producer = Producer::new(size).expect("no Vulkan NVIDIA device: this opt-in test needs one");
-		let image = Image::rgba8(producer.uuid, size, producer.allocation_size).unwrap();
-		let slot = importer
-			.import(producer.export(), image, ())
-			.map_err(ImportError::into_parts)
-			.expect("import view");
+		let image = producer.contract(Format::Rgba8);
+		let slot = VulkanSlot::new(producer.export(), image, ()).expect("import view");
 		producer.upload(&pictures[0], None, 1);
 		views.push((producer, Some(slot), nvenc(size, color), nvenc(sd, color), 1u64));
 	}
@@ -448,10 +431,7 @@ async fn vulkan_cuda_three_view_workload() {
 			bytes.1 += packets.iter().map(|p| p.payload.len()).sum::<usize>();
 
 			let (wall, cpu) = (std::time::Instant::now(), cpu_now());
-			let returned = tokio::time::timeout(Duration::from_secs(2), completion.wait())
-				.await
-				.expect("CUDA completion timed out")
-				.expect("completion worker stopped");
+			let returned = completion.wait().await.expect("completion worker stopped");
 			complete.wall.push(wall.elapsed());
 			complete.cpu.push(cpu_now() - cpu);
 
@@ -497,4 +477,135 @@ async fn vulkan_cuda_three_view_workload() {
 		bytes.1,
 		(bytes.0 + bytes.1) as f64 * 8.0 / elapsed.as_secs_f64() / 1e6,
 	);
+}
+
+/// Mean per-plane error a decoded NVENC rendition may show against the CPU reference.
+const ROUNDTRIP_TOLERANCE: u64 = 8;
+
+/// The CPU reference for an RGBA gradient at `shift`, converted and then scaled to `output`.
+fn expected(size: Size, shift: usize, color: Color, output: Size) -> I420 {
+	let full = reference(&gradient(size, Format::Rgba8, shift), size, color);
+	if output == size {
+		full
+	} else {
+		full.resize(output).unwrap()
+	}
+}
+
+/// Each capture moves the gradient half a width, so successive pictures differ
+/// by more than twice the round-trip tolerance and a stale one cannot pass.
+fn capture_shift(size: Size, capture: u64) -> usize {
+	capture as usize * size.width as usize / 2
+}
+
+/// The pictures this test feeds are far enough apart for the tolerance to tell
+/// them apart, at every rendition size. CPU only, so it guards the hardware
+/// test's premise on every run.
+#[test]
+fn auto_external_captures_are_distinguishable() {
+	let size = Size::new(320, 192);
+	for output in [size, Size::new(160, 96)] {
+		for capture in 1..6 {
+			let previous = expected(size, capture_shift(size, capture - 1), Color::Bt709Limited, output);
+			let current = expected(size, capture_shift(size, capture), Color::Bt709Limited, output);
+			for (plane, a, b) in [
+				("y", current.y(), previous.y()),
+				("u", current.u(), previous.u()),
+				("v", current.v(), previous.v()),
+			] {
+				let distance = mae(a, b);
+				assert!(
+					distance >= 2 * ROUNDTRIP_TOLERANCE,
+					"{output} capture {capture}: {plane} differs from the previous capture by only {distance}"
+				);
+			}
+		}
+	}
+}
+
+/// Producers declare only their device; both renditions import, convert, and scale inside NVENC.
+///
+/// Every decoded rendition of every capture, in both channel orders, matches
+/// the CPU conversion and resize of what the producer uploaded, so stale,
+/// black, or channel-swapped output fails.
+#[tokio::test]
+#[ignore = "requires a Linux NVIDIA GPU with Vulkan/CUDA external memory and NVENC"]
+async fn vulkan_cuda_auto_external_encode() {
+	let size = Size::new(320, 192);
+	let color = Color::Bt709Limited;
+	let mut producer = Producer::new(size).expect("NVIDIA Vulkan device required by opted-in test");
+	let device = producer.contract(Format::Rgba8).device;
+	let decode = crate::decode::Config {
+		kind: crate::decode::Kind::Software,
+		..crate::decode::Config::new()
+	};
+	let mut renditions = Vec::new();
+	for output in [size, Size::new(160, 96)] {
+		let mut config = crate::encode::Config::new(output.width, output.height, crate::Rate::new(30, 1).unwrap());
+		config.input = Some(device);
+		config.color = Some(color);
+		config
+			.probe()
+			.await
+			.expect("probe the declared input device before capture");
+		let encoder = crate::encode::Encoder::new(&config).expect("automatic external-image selection");
+		assert_eq!(encoder.name(), "nvenc");
+		let decoder = crate::decode::backend::open(crate::decode::backend::Codec::H264, &decode).unwrap();
+		renditions.push((encoder, decoder));
+	}
+
+	let mut capture = 0u64;
+	for format in [Format::Rgba8, Format::Bgra8] {
+		let mut slot = VulkanSlot::new(producer.export(), producer.contract(format), ()).unwrap();
+		for _ in 0..3 {
+			let ready = capture * 2 + 1;
+			let shift = capture_shift(size, capture);
+			producer.upload(
+				&gradient(size, format, shift),
+				(capture > 0).then_some(ready - 1),
+				ready,
+			);
+			let (image, completion) = slot.publish(Timeline::new(ready, ready + 1).unwrap()).unwrap();
+			let timestamp = moq_net::Timestamp::from_micros(capture * 33_333).unwrap();
+			let frame = VideoFrame::new(Surface::Vulkan(image), timestamp);
+			for (encoder, decoder) in &mut renditions {
+				let output = encoder.size();
+				encoder.cut().unwrap();
+				let encoded = encoder
+					.encode(&frame)
+					.expect("external image encoded entirely on the GPU");
+				assert_eq!(encoded.len(), 1, "one access unit for {output} capture {capture}");
+				let mut decoded = Vec::new();
+				for packet in encoded {
+					decoded.extend(
+						decoder
+							.decode(packet.payload, packet.timestamp, packet.keyframe)
+							.unwrap(),
+					);
+				}
+				assert_eq!(decoded.len(), 1, "one picture for {output} capture {capture}");
+				let actual = decoded[0].surface.to_i420().unwrap();
+				assert_eq!(actual.size(), output);
+				let expected = expected(size, shift, color, output);
+				for (plane, actual, expected) in [
+					("y", actual.y(), expected.y()),
+					("u", actual.u(), expected.u()),
+					("v", actual.v(), expected.v()),
+				] {
+					let error = mae(actual, expected);
+					eprintln!("{format:?} {output} capture {capture} {plane} mae={error}");
+					assert!(
+						error < ROUNDTRIP_TOLERANCE,
+						"{format:?} {output} capture {capture}: decoded {plane} differs from the reference by {error}"
+					);
+				}
+			}
+			drop(frame);
+			slot = completion
+				.wait()
+				.await
+				.expect("producer slot returned after both renditions");
+			capture += 1;
+		}
+	}
 }

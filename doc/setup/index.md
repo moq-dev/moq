@@ -63,6 +63,6 @@ broadcasts end in `.hang`.
 ## Next steps
 
 - [Install](/setup/install) the relay and CLI as packages instead of building them.
-- Publish from [OBS](/bin/obs), [GStreamer](/bin/gstreamer), or [RTMP/SRT/WebRTC](/bin/cli).
+- Publish from [OBS](/bin/obs), [GStreamer](/bin/gstreamer), or an [RTMP, SRT, or WebRTC gateway](/bin/#gateways).
 - Embed a player with the [web components](/lib/js/) or pick a [library](/lib/).
 - [Deploy](/setup/prod) a relay with real TLS and authentication.

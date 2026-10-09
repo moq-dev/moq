@@ -187,7 +187,7 @@ async fn fetch(broadcast: &broadcast::Producer, track: &str, sequence: u64) -> m
 	let mut frames = Vec::new();
 	while let Some(frame) = group.read_frame().await? {
 		frames.push((
-			frame.timestamp.convert(Timescale::MILLI).unwrap().value(),
+			frame.timestamp.unwrap().convert(Timescale::MILLI).unwrap().value(),
 			frame.payload,
 		));
 	}

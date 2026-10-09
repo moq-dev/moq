@@ -34,4 +34,4 @@ media tag, and a byte-identical round trip.
 
 ## Related
 
-- [AV1 metadata OBUs](/quest/m2/av1-metadata.md) - likewise
+- [Fail loud on dropped timed metadata](/quest/m1/drop-loud.md) - counts and warns on what import drops until this carriage lands

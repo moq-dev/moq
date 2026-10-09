@@ -13,9 +13,9 @@ minimal binary; this does not make `moq` the relay.
 
 ## Plan
 
-Decided in the 2026-10-05 audit: re-scoped to what remains, after
-[Auth client CA](/quest/m1/relay-auth-client-ca.md), which reworks the same
-`spawn_server` auth path.
+Decided in the 2026-10-05 audit: re-scoped to what remains. The `spawn_server`
+auth path now refuses only a LAN-only mesh with no auth source and stops
+startup on any other invalid auth config.
 
 - Drain: on SIGTERM the listener sends GOAWAY and waits `drain_timeout` like
   the relay, through a real `shutdown::Observer` instead of the disabled one.
@@ -28,14 +28,6 @@ Decided in the 2026-10-05 audit: re-scoped to what remains, after
 - Test: a listening import drains its viewers on SIGTERM within
   `drain_timeout`, and its sessions show up in stats.
 
-Decided in the 2026-09-30 audit: no longer waits on
-[`moq relay`](/quest/m3/moq-relay-subcommand.md).
-
-## Required
-
-- [Auth client CA](/quest/m1/relay-auth-client-ca.md) - reworks the same `spawn_server` auth path first
-
 ## Related
 
-- [`moq relay`](/quest/m3/moq-relay-subcommand.md) - the CLI later hosts the whole relay
 - [Drain handshakes](/quest/m1/drain-handshakes.md) - moves where the drain count is taken

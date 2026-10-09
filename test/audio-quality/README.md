@@ -114,7 +114,7 @@ on the delay, so the replay decides those again.
 `replay.ts` plays a trace through the player's own `Container.Consumer` and rings on a simulated
 clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a
 real `Sync` resolves from the playout target that consumer measures, and reads each quantum through
-the tap's classifier. The consumer makes the player's group ordering, max age skips, and
+the tap's classifier. The consumer makes the player's group ordering, max delay skips, and
 discontinuity resets again at that delay, and the ring follows the delay as it moves; a group's stream is taken to finish with its last recorded frame. Every
 frame is the trace's median spacing long, so a frame that never arrived stays missing audio, and
 rendering runs to the end of the observation, so an outage after the last arrival is heard. It

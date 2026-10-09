@@ -237,7 +237,7 @@ async fn run(config: &Config) -> Result<()> {
 		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
 	broadcast
-		.announce(Default::default())
+		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.context("failed to announce broadcast")?;
 
 	// Consume origin: viewer broadcasts under the viewer prefix.

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.1...moq-relay-v0.17.2) - 2026-10-06
+
+### Added
+
+- *(stats)* linger an empty group broadcast before unannouncing it (backport #4871)
+
 ## [0.17.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.0...moq-relay-v0.17.1) - 2026-10-05
 
 ### Fixed

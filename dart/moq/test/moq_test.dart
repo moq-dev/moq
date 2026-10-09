@@ -6,13 +6,11 @@ import 'package:test/test.dart';
 
 const timeout = Duration(seconds: 10);
 
-/// The next announce event that is not Live, which lands wherever the backlog ends.
+/// The next announce event.
 Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
-  while (true) {
-    final event = await announced.next().timeout(timeout);
-    if (event == null) throw StateError('announce stream ended');
-    if (event is! AnnounceEventLive) return event;
-  }
+  final event = await announced.next().timeout(timeout);
+  if (event == null) throw StateError('announce stream ended');
+  return event;
 }
 
 void main() {
@@ -61,7 +59,7 @@ void main() {
 
     final producer = track.appendGroup();
     producer.writeFrame(
-      frame: MoqFrame(payload: utf8.encode('dart round trip')),
+      frame: MoqFrame(payload: utf8.encode('dart round trip'), timestampUs: 0),
     );
     producer.finish();
 
@@ -212,28 +210,6 @@ void main() {
     final update = await nextRoute(announced) as AnnounceEventStart;
     expect(update.announce.prefix, 'room/alice/chat');
     expect(update.announce.captures, ['alice']);
-  });
-
-  test('announced yields Live once caught up', () async {
-    final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final consumer = origin.consume();
-
-    final empty = consumer.announced(config: MoqAnnounceConfig());
-    expect(await empty.next().timeout(timeout), isA<AnnounceEventLive>());
-    empty.cancel();
-    empty.dispose();
-
-    final broadcast = origin.createBroadcast(path: 'cam');
-    broadcast.announce(route: MoqRoute());
-    await consumer.announcedBroadcast(path: 'cam').available().timeout(timeout);
-
-    final announced = consumer.announced(config: MoqAnnounceConfig());
-    final first = await announced.next().timeout(timeout);
-    expect((first as AnnounceEventStart).announce.prefix, 'cam');
-    expect(await announced.next().timeout(timeout), isA<AnnounceEventLive>());
-    announced.cancel();
-    announced.dispose();
-    broadcast.close();
   });
 
   test('dynamic serves a request under a prefix', () async {

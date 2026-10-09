@@ -163,9 +163,6 @@ final class Moq {
       session.publish().createBroadcast(path: path);
 
   /// Stream announce events matching [options]; prefixes stay relative to the origin.
-  ///
-  /// A [AnnounceEventLive] follows the routes live at subscribe time, so a
-  /// listener can collect what is live and stop there.
   Stream<AnnounceEvent> announcements({
     AnnounceOptions options = const AnnounceOptions(),
   }) async* {

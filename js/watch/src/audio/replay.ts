@@ -2,7 +2,7 @@
  * Replay a recorded arrival trace through the player's consumer and rings on a simulated clock.
  *
  * Every frame is written into its group at the instant the trace says it arrived, and the player's
- * real `Container.Consumer` decides what to deliver, wait for, and skip, at the max age the delay
+ * real `Container.Consumer` decides what to deliver, wait for, and skip, at the max delay the delay
  * sets. Delivered frames go into the real ring, and a discontinuity resets it, the way the decoder
  * does. One render quantum is read every quantum's worth of that same clock, which is what the
  * AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
@@ -31,9 +31,9 @@ export const QUANTUM = 128;
 
 /**
  * The replay's own subscription passes every recorded group through: the recorder's relay already
- * applied a wire max age, so only the consumer's decisions are made again.
+ * applied a wire max delay, so only the consumer's decisions are made again.
  */
-const WIRE_MAX_AGE = Time.Milli(Number.MAX_SAFE_INTEGER);
+const WIRE_MAX_DELAY = Time.Milli(Number.MAX_SAFE_INTEGER);
 
 /** Any non-empty payload: an empty one is the legacy container's end marker. */
 const PAYLOAD = new Uint8Array(1);
@@ -190,9 +190,9 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	const sync = new Sync({ delay: options.delay });
 	const track = new Track.Producer("audio");
-	const consumer = new Container.Consumer(track.subscribe({ maxAge: WIRE_MAX_AGE }), {
+	const consumer = new Container.Consumer(track.subscribe({ maxDelay: WIRE_MAX_DELAY }), {
 		format: new Container.Legacy.Format("audio"),
-		maxAge: sync.out.maxAge,
+		maxDelay: sync.out.maxDelay,
 	});
 
 	// The decoder's "auto" target. A recorded frame has no payload to read an Opus duration from,

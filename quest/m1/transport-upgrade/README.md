@@ -3,15 +3,19 @@
 ## Goal
 
 A session that came up over the WebSocket fallback moves to QUIC once the
-QUIC handshake completes, without dropping a group. Today `https://` races
-QUIC against WebSocket, WebSocket wins whenever QUIC is slower than the head
+QUIC handshake completes, without dropping a group. `https://` races QUIC
+against WebSocket, and WebSocket wins whenever QUIC is slower than the head
 start plus a TCP+TLS+upgrade round trip (a lost Initial, a slow first
-WebTransport dial), and the loser is closed: the session then spends its whole
-life on a reliable transport that cannot shed load under congestion, and the
-"WebSocket won" memo removes QUIC's head start from every later connect in
-that process or page. The end state: when WebSocket wins, the QUIC dial keeps
+WebTransport dial). The end state: when WebSocket wins, the QUIC dial keeps
 going; if it lands, the reconnect loop attaches the QUIC session, hands the
-routes over, sends a GOAWAY on the WebSocket session, and drains it. When QUIC wins, WebSocket is closed immediately, as today.
+routes over, sends a GOAWAY on the WebSocket session, drains it, and forgets
+the "WebSocket won" memo. When QUIC wins, WebSocket is closed immediately.
+
+The Rust `moq_tokio::Connection` does this since #4180
+(`websocket_upgrades_to_quic`, `a_refused_upgrade_keeps_websocket` in
+`rs/moq-tokio/src/connection.rs`). What remains is the `js/net` half, where
+the loser is still closed and the memo never forgotten, plus the two
+children below.
 
 Non-goals: migrating between IPv6 and IPv4. That race is inside the QUIC dial,
 before any MoQ session exists, the loser has no claim to being the better path
@@ -38,17 +42,24 @@ GOAWAY handover landed with the drain line, but it does not resume tracks yet;
 the JS half requires [JS track handover](/quest/m1/js-group-handover.md) for
 that.
 
-Shared decisions:
+Shared decisions, which Rust implements and [JavaScript](/quest/m1/transport-upgrade/js.md) mirrors:
 
 - The race returns the winner plus the still-pending QUIC dial when WebSocket
-  wins. The QUIC handshake timeout bounds that dial; no extra deadline.
+  wins. The attempt's connect deadline bounds that dial; no extra deadline.
+- The swap waits for the peer's SETUP on the QUIC session
+  (`moq_net::Session::setup`) within that same deadline; until
+  then the WebSocket session gets no GOAWAY. A refused or stalled QUIC session
+  is dropped and WebSocket keeps serving. moq-lite-03 and -04 carry no server
+  SETUP, so they never upgrade. This crate's servers send SETUP after admission;
+  other servers may send it before admission and still refuse afterward.
 - On a successful upgrade the "WebSocket won" memo (`WEBSOCKET_WON` in
   `moq-tokio`, `websocketWon` in `js/net`) forgets the URL: QUIC works on this
   network, so the head start comes back. Otherwise a network where WebSocket
   narrowly beats QUIC would open two connections on every reconnect.
 - The old session gets `Goaway::new()` with the configured handover cap before
-  it enters draining. The relay refuses new requests on it from then on; the
-  front cancels its subscriptions once the new session feeds them.
+  it enters draining. The relay prices its routes at the drain cost and keeps
+  opening requests on it only until the new session's route wins; the front
+  cancels its subscriptions once the new session feeds them.
 - One-shot `connect()` returns one session and never upgrades; every
   `Connection` upgrades, reconnecting or not.
 - Publishing over the old session is announced again over the new one; the
@@ -58,5 +69,5 @@ Shared decisions:
 
 ## Required
 
-- [Rust](/quest/m1/transport-upgrade/rust.md) - moq-tokio keeps the QUIC dial after WebSocket wins and migrates through the existing Draining path
 - [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through the client-goaway handover
+- [Closed fallback](/quest/m1/transport-upgrade/closed-fallback.md) - a WebSocket session that closes right after connecting falls back to the pending QUIC dial instead of redialing

@@ -18,6 +18,8 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 	pub driver: Driver<S>,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
+	/// Whether the peer's SETUP arrived, read by [`crate::Session::setup`].
+	pub setup: crate::session::Setup,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -169,6 +171,9 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	pub peer_setup: Option<AcceptedSetup<S>>,
+
+	/// What the peer may make this session hold.
+	pub limits: crate::session::Limits,
 }
 
 /// Start a lite session.
@@ -188,6 +193,7 @@ where
 		version,
 		mut our_setup,
 		peer_setup,
+		limits,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -223,6 +229,10 @@ where
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+	let subscriptions =
+		crate::session::Slots::new(limits.subscriptions).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+	let announces =
+		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets
@@ -242,6 +252,16 @@ where
 	};
 	let peer_setup = peer_setup_slot;
 
+	// Lite-05+ records the peer's SETUP from its Setup Stream. Before that, only the
+	// legacy bidi handshake carries one, and it was read before the session started.
+	let setup = if version.has_setup_stream() {
+		crate::session::Setup::Lite(peer_setup.clone())
+	} else if setup_stream.is_some() {
+		crate::session::Setup::Read
+	} else {
+		crate::session::Setup::Never
+	};
+
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
 	// signal), the protocol tasks below hold the other. moq-lite lets either side
 	// name a redirect URI, unlike moq-transport.
@@ -258,8 +278,9 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
+		subscriptions,
 	});
-	let subscriber = Subscriber::new(SubscriberConfig {
+	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
 		origin: subscribe,
@@ -273,6 +294,7 @@ where
 		cost: our_cost,
 		going_away: goaway.going_away.clone(),
 	});
+	subscriber.announces = announces;
 
 	let driver = Driver {
 		local_close: Default::default(),
@@ -290,6 +312,7 @@ where
 		recv_bandwidth: recv_bw_consumer,
 		driver,
 		goaway: goaway_handle,
+		setup,
 	})
 }
 
@@ -674,6 +697,7 @@ mod tests {
 					version,
 					our_setup: Setup::default(),
 					peer_setup: None,
+					limits: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -712,6 +736,7 @@ mod tests {
 				version,
 				our_setup: Setup::default(),
 				peer_setup: None,
+				limits: Default::default(),
 			})
 			.unwrap();
 			let _ = started.driver.poll(&kio::Waiter::noop());

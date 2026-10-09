@@ -168,7 +168,6 @@ export class Broadcast {
 			for (;;) {
 				const entry = await effect.race(announced.next());
 				if (!entry) break;
-				if (entry.kind === "live") continue;
 				this.#announced.mutate((active) => {
 					if (!active) return;
 					if (entry.kind === "end") active.delete(entry.prefix);

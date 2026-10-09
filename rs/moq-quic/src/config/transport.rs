@@ -331,7 +331,7 @@ impl TransportConfig {
     /// How to construct new `congestion::Controller`s
     ///
     /// Typically the refcounted configuration of a `congestion::Controller`,
-    /// e.g. a `congestion::NewRenoConfig`.
+    /// e.g. a `congestion::NewRenoConfig`. Defaults to `congestion::Bbr3Config`.
     ///
     /// # Example
     /// ```
@@ -407,7 +407,7 @@ impl Default for TransportConfig {
             #[cfg(test)]
             deterministic_packet_numbers: false,
 
-            congestion_controller_factory: Arc::new(congestion::CubicConfig::default()),
+            congestion_controller_factory: Arc::new(congestion::Bbr3Config::default()),
 
             enable_segmentation_offload: true,
 

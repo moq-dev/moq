@@ -13,7 +13,7 @@ are gone.
 ## Plan
 
 Decided in the 2026-09-30 plan: the library shards and the runtime drives.
-The library does not own threads, so embedders (libmoq, moq-ffi) keep their
+The library does not own threads, so embedders (moq-ffi and the bindings over it) keep their
 own threading model.
 
 - `moq_sock::shard` (the group, claims, and steering filter) stays in

@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.4.11"
+version = "0.4.12"
 edition = "2024"
 rust-version.workspace = true
 publish = true
@@ -33,4 +33,6 @@ gst-plugin-version-helper = "0.8"
 
 [dev-dependencies]
 futures = { workspace = true }
+# Decodes the OpusHead the sink publishes, so the surround regression checks playback.
+moq-audio = { path = "../moq-audio", default-features = false }
 tokio = { workspace = true, features = ["test-util"] }

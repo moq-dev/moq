@@ -225,6 +225,9 @@ export class Broadcast {
 		// broadcast and new subscriptions land on the same producer.
 		const broadcast = origin.createBroadcast(name);
 		effect.cleanup(() => broadcast.close());
+		// One publisher instance per broadcast, kept across unannounce and announce, so a
+		// restart is a new broadcast rather than a resume into the old one.
+		const epoch = Moq.Epoch.mint();
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
 		this.net.set(broadcast);
@@ -249,6 +252,8 @@ export class Broadcast {
 				// that sole closed snapshot replayable so a viewer arriving after the ordinary media
 				// retention window can still bootstrap.
 				const track = broadcast.createTrack(name, {
+					// Each catalog snapshot is stamped when written.
+					timescale: Moq.Time.Timescale.MILLI,
 					maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
 					priority: Catalog.PRIORITY.catalog,
 				});
@@ -256,7 +261,7 @@ export class Broadcast {
 				this.catalog.serve(track, inner, { compression });
 			}
 
-			broadcast.announce();
+			broadcast.announce({ epoch });
 		});
 
 		// Static tracks fan out to every subscriber. Keep the encoder-facing handle demand-gated

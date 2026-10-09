@@ -203,7 +203,7 @@ async fn fetch(
 	let mut group = track.fetch_group(sequence, options).await?;
 	let mut frames = Vec::new();
 	while let Some(frame) = group.read_frame().await? {
-		frames.push((frame.timestamp.value(), frame.payload));
+		frames.push((frame.timestamp.unwrap().value(), frame.payload));
 	}
 	Ok(frames)
 }
@@ -251,7 +251,7 @@ async fn fetch_replays_original_groups() {
 	let track = broadcast.consume().track("video").unwrap();
 	let info = track.query().await.unwrap();
 	assert_eq!(info.priority, 1);
-	assert_eq!(info.timescale.as_u64(), 1000);
+	assert_eq!(info.timescale.unwrap().as_u64(), 1000);
 }
 
 #[tokio::test]

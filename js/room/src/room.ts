@@ -82,7 +82,6 @@ export class Room {
 		for (;;) {
 			const update = await effect.race(announced.next());
 			if (!update) break;
-			if (update.kind === "live") continue;
 
 			// The scope's `**` captures what lies beneath the prefix. A broad route
 			// that cannot pin that suffix names no participant to open.
