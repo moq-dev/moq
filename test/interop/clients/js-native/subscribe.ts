@@ -68,7 +68,7 @@ async function run(): Promise<void> {
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
 		let video: [string, Catalog.VideoConfig] | undefined;
 		while (!video) {
-			const root = await catalog.next();
+			const root = (await catalog.latest())?.value;
 			if (!root) throw new Error("catalog ended without a video track");
 			video = Object.entries(root.video?.renditions ?? {})[0];
 		}

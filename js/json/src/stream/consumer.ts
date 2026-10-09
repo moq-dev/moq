@@ -1,4 +1,5 @@
 import type * as Moq from "@moq/net";
+import type { Timed } from "@moq/net";
 import { race } from "@moq/signals";
 import { Decoder } from "./decoder.ts";
 import type { Config as CodecConfig } from "./encoder.ts";
@@ -20,7 +21,8 @@ export class Rolled extends Error {
 }
 
 /**
- * Consumes an ordered log of JSON records from a track, yielding every record in order.
+ * Consumes an ordered log of JSON records from a track, yielding every record in order with its
+ * frame's timestamp.
  *
  * A {@link Decoder} that owns its track, reading one record per frame. The log is a single group,
  * which is what makes the mode lossless: rolling to a second group means the records that would
@@ -53,8 +55,8 @@ export class Consumer<T> {
 		this.#decoder = new Decoder(config);
 	}
 
-	/** Get the next record, or `undefined` once the track ends. */
-	next(): Promise<T | undefined> {
+	/** Get the next record with its frame's timestamp, or `undefined` once the track ends. */
+	next(): Promise<Timed<T> | undefined> {
 		// One reader at a time. Two concurrent calls await the same `recvGroup`, so the second would
 		// take the first's group for a rolled log and fail a perfectly good one.
 		if (this.#reading) throw new Error("multiple calls to next not supported");
@@ -64,7 +66,7 @@ export class Consumer<T> {
 		});
 	}
 
-	async #read(): Promise<T | undefined> {
+	async #read(): Promise<Timed<T> | undefined> {
 		for (;;) {
 			if (!this.#group) {
 				const { group } = await this.#recvGroup();
@@ -83,7 +85,7 @@ export class Consumer<T> {
 			}
 
 			const frame = await this.#readFrame(this.#group);
-			if (frame) return this.#decoder.decode(frame.payload);
+			if (frame) return { value: this.#decoder.decode(frame.payload), at: frame.timestamp };
 
 			// The log's one group is exhausted. Keep reading the track so a clean end still
 			// reports the log as complete, and so a second group is caught as Rolled.
@@ -130,11 +132,12 @@ export class Consumer<T> {
 		return this.#pending;
 	}
 
-	async *[Symbol.asyncIterator](): AsyncIterator<T> {
+	/** Iterate over every record in order, until the track ends. */
+	async *[Symbol.asyncIterator](): AsyncIterator<Timed<T>> {
 		for (;;) {
-			const value = await this.next();
-			if (value === undefined) return;
-			yield value;
+			const record = await this.next();
+			if (record === undefined) return;
+			yield record;
 		}
 	}
 }

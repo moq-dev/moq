@@ -39,8 +39,8 @@ playhead needs the newest state at or before it.
 - Same names in the moq-mux wrappers, moq-ffi, and every binding.
 
 moq-ffi's json/flate consumers return the timestamp too, and the py, swift,
-kt, go, and dart wrappers and `doc/lib/*` follow. JS is
-[JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md).
+kt, go, and dart wrappers and `doc/lib/*` follow. `@moq/json` and `@moq/flate`
+already return `Timed<T>` with the same `next()` and `latest()`.
 
 Public API: breaking. Wire: none.
 

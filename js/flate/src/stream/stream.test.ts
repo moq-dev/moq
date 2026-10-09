@@ -13,11 +13,7 @@ const payloads = (count: number) => Array.from({ length: count }, (_, n) => new 
 async function drain(track: Track.Subscriber, compression: boolean): Promise<Uint8Array[]> {
 	const consumer = new Consumer({ track, compression: compression ? "deflate" : "none" });
 	const out: Uint8Array[] = [];
-	for (;;) {
-		const value = await consumer.next();
-		if (value === undefined) break;
-		out.push(value);
-	}
+	for await (const { value } of consumer) out.push(value);
 	return out;
 }
 
@@ -100,7 +96,7 @@ test("a second concurrent read is refused rather than served the first one's gro
 	const consumer = new Consumer({ track: track.subscribe() });
 	const first = consumer.next();
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
-	expect(await first).toEqual(payloads(1)[0]);
+	expect((await first)?.value).toEqual(payloads(1)[0]);
 });
 
 test("a second group is reported while the first is still open", async () => {
@@ -116,7 +112,7 @@ test("a second group is reported while the first is still open", async () => {
 	second.writeFrame({ payload: payloads(2)[1], timestamp: Time.Timestamp.now() });
 
 	const consumer = new Consumer({ track: track.subscribe({ maxDelay: REPLAY_LATENCY }) });
-	expect(await consumer.next()).toEqual(payloads(1)[0]);
+	expect((await consumer.next())?.value).toEqual(payloads(1)[0]);
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 
 	// Both mirrors are released. The read that lost the race would otherwise stay registered on the
@@ -177,7 +173,7 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 		for (let n = 0; n < 1000; n++) {
 			const next = consumer.next();
 			producer.append({ value: new Uint8Array([n & 0xff]) });
-			expect((await next)?.[0]).toBe(n & 0xff);
+			expect((await next)?.value[0]).toBe(n & 0xff);
 		}
 	});
 	expect(reactions).toBeLessThan(10);
@@ -186,24 +182,29 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 	producer.finish();
 });
 
-test("a payload without a timestamp goes out untimed", async () => {
+test("an untimed payload reads back untimed", async () => {
 	const track = new Track.Producer("test").accept({});
 	const producer = new Producer({ track });
 	producer.append({ value: new Uint8Array([1]) });
 	producer.finish();
 
-	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp).toBeUndefined();
+	const consumer = new Consumer({ track: track.subscribe() });
+	expect(await consumer.next()).toEqual({ value: new Uint8Array([1]), at: undefined });
+	expect(await consumer.next()).toBeUndefined();
 });
 
-test("each record keeps its capture timestamp", async () => {
-	const track = new Track.Producer("test");
-	const producer = new Producer({ track });
+test("each payload reads back with its capture timestamp", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const producer = new Producer({ track, compression: "deflate" });
 	producer.append({ value: new Uint8Array([1]), at: Time.Timestamp.fromMillis(1_000) });
 	producer.append({ value: new Uint8Array([2]), at: Time.Timestamp.fromMillis(2_000) });
 	producer.finish();
 
-	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_000);
-	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(2_000);
+	const consumer = new Consumer({ track: track.subscribe(), compression: "deflate" });
+	const read: [number, number | undefined][] = [];
+	for await (const { value, at } of consumer) read.push([value[0], at?.as(Time.Timescale.MILLI)]);
+	expect(read).toEqual([
+		[1, 1_000],
+		[2, 2_000],
+	]);
 });

@@ -11,7 +11,7 @@ async function drain(track: Track.Subscriber, compression: boolean): Promise<num
 	for (;;) {
 		const record = await consumer.next();
 		if (record === undefined) break;
-		out.push(record.n);
+		out.push(record.value.n);
 	}
 	return out;
 }
@@ -62,7 +62,7 @@ test("records with embedded newlines round-trip (JSON escapes the newline)", asy
 	for (;;) {
 		const record = await consumer.next();
 		if (record === undefined) break;
-		out.push(record);
+		out.push(record.value);
 	}
 	expect(out).toEqual([value, value, value, value]);
 });
@@ -84,7 +84,7 @@ test("a second group is reported while the first is still open", async () => {
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
 	// subscriber's default max delay budget once a newer group exists.
 	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxDelay: Time.Milli(30_000) }) });
-	expect(await consumer.next()).toEqual({ n: 0 });
+	expect((await consumer.next())?.value).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 
 	// Both mirrors are released. The read that lost the race would otherwise stay registered on the
@@ -108,7 +108,7 @@ test("a second concurrent read is refused rather than served the first one's gro
 	const consumer = new Consumer<Rec>({ track: track.subscribe() });
 	const first = consumer.next();
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
-	expect(await first).toEqual({ n: 0 });
+	expect((await first)?.value).toEqual({ n: 0 });
 });
 
 // Counts the reactions `run` attaches to promises still pending once it returns. A promise holds each
@@ -141,7 +141,7 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 		for (let n = 0; n < 1000; n++) {
 			const next = consumer.next();
 			producer.append({ value: { n } });
-			expect((await next)?.n).toBe(n);
+			expect((await next)?.value.n).toBe(n);
 		}
 	});
 	expect(reactions).toBeLessThan(10);
@@ -150,26 +150,31 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 	producer.finish();
 });
 
-test("a record without a timestamp goes out untimed", async () => {
+test("an untimed record reads back untimed", async () => {
 	const track = new Track.Producer("test").accept({});
 	const producer = new Producer<number>({ track });
 	producer.append({ value: 1 });
 	producer.finish();
 
-	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp).toBeUndefined();
+	const consumer = new Consumer<number>({ track: track.subscribe() });
+	expect(await consumer.next()).toEqual({ value: 1, at: undefined });
+	expect(await consumer.next()).toBeUndefined();
 });
 
-test("each record keeps its capture timestamp", async () => {
-	const track = new Track.Producer("test");
-	const producer = new Producer<number>({ track });
+test("each record reads back with its capture timestamp", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const producer = new Producer<number>({ track, compression: "deflate" });
 	producer.append({ value: 1, at: Time.Timestamp.fromMillis(1_000) });
 	producer.append({ value: 2, at: Time.Timestamp.fromMillis(2_000) });
 	producer.finish();
 
-	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_000);
-	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(2_000);
+	const consumer = new Consumer<number>({ track: track.subscribe(), compression: "deflate" });
+	const records: [number, number | undefined][] = [];
+	for await (const { value, at } of consumer) records.push([value, at?.as(Time.Timescale.MILLI)]);
+	expect(records).toEqual([
+		[1, 1_000],
+		[2, 2_000],
+	]);
 });
 
 // A record past the group budget is refused before anything is written, so the log carries on: the

@@ -268,7 +268,7 @@ export class Game {
 			for (;;) {
 				let status: GameStatus | undefined;
 				try {
-					status = await consumer.next();
+					status = (await consumer.latest())?.value;
 				} catch (err) {
 					console.warn("Invalid status JSON:", err);
 					continue;

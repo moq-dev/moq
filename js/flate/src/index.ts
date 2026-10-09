@@ -1,8 +1,8 @@
 /**
  * Opaque byte tracks over MoQ, optionally compressed with group-scoped DEFLATE, in two modes:
  *
- * - {@link Snapshot}: **lossy**. One value updated over time; a consumer only gets the most recent
- *   one. Older values are superseded and dropped.
+ * - {@link Snapshot}: **lossy**. One value updated over time; a newer value supersedes the older
+ *   ones, and a consumer can read every value it receives or skip to the most recent.
  * - {@link Stream}: **lossless**. An ordered append-log of self-contained payloads, delivered in
  *   order with nothing superseded. Bounded by the group cache: see {@link Stream} for what that
  *   costs a consumer that falls behind.

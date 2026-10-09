@@ -39,10 +39,10 @@ test("metadata updates keep the same track and reach an existing subscriber", as
 		await flush();
 		const track = net.consume().track(TRACK.user).subscribe();
 		const consumer = new Json.Snapshot.Consumer<{ name: string }>({ track });
-		expect((await consumer.next())?.name).toBe("Alice");
+		expect((await consumer.latest())?.value.name).toBe("Alice");
 		user.name.set("Bob");
 		await flush();
-		expect((await consumer.next())?.name).toBe("Bob");
+		expect((await consumer.latest())?.value.name).toBe("Bob");
 		track.close();
 	} finally {
 		effect.close();

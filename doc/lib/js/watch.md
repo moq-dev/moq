@@ -94,9 +94,9 @@ const dispose = el.signals.run((effect) => {
     const consumer = new Json.Snapshot.Consumer<unknown>({ track });
     effect.spawn(async () => {
         for (;;) {
-            const value = await effect.race(consumer.next());
-            if (value === undefined) break;
-            console.log("metadata", value);
+            const state = await effect.race(consumer.latest());
+            if (state === undefined) break;
+            console.log("metadata", state.value);
         }
     });
 });

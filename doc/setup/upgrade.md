@@ -241,6 +241,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   `TrackStream` accept a CMAF rendition's track at that timescale; a track you
   create yourself declares it with `track::Info::with_timescale`. Both decoders refuse a `trun` whose
   `data_offset` doesn't start at the next sample in the `mdat`.
+- **@moq/json and @moq/flate consumers return `Timed` values.** The snapshot
+  and stream consumers' `next()` and async iterator yield `{ value, at }`,
+  where `at` is the frame's timestamp and absent on an untimed track; read
+  `.value` for what they used to return. A snapshot consumer's `next()` now
+  yields every state in order. Call `latest()` for the old behavior, which
+  skips to the newest state.
 
 ## Wire
 

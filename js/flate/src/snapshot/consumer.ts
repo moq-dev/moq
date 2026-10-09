@@ -1,3 +1,4 @@
+import type { Timed } from "@moq/net";
 import * as Moq from "@moq/net";
 import { Decoder as Flate } from "../codec.ts";
 
@@ -5,11 +6,11 @@ import { isDeflate } from "../compression.ts";
 import type { Config as CodecConfig } from "./producer.ts";
 
 /**
- * Consumes an opaque value from a track, yielding the newest one.
+ * Consumes an opaque value from a track, yielding each with the timestamp of its frame.
  *
- * Jumps to the newest group and reads the value out of it, so a late joiner starts at the current
- * value rather than replaying superseded ones. Interoperable with the Rust
- * `moq_flate::snapshot::Consumer`, which collapses the same backlog.
+ * Two reads: {@link next} yields every value in group order, for a caller that picks the value
+ * matching a playhead, and {@link latest} jumps to the newest group, for a caller that only wants
+ * the current value. Interoperable with the Rust `moq_flate::snapshot::Consumer`.
  */
 export class Consumer {
 	#track: Moq.Track.Ordered;
@@ -27,20 +28,35 @@ export class Consumer {
 	}
 
 	/**
-	 * Get the next value, or `undefined` once the track ends.
+	 * Get the next value in group order, or `undefined` once the track ends.
+	 *
+	 * A group the subscription's `maxDelay` proves too old is skipped, and a group lost to a gap
+	 * resyncs from the next one, so a reader that falls behind still jumps ahead rather than
+	 * queueing forever.
+	 */
+	next(): Promise<Timed<Uint8Array> | undefined> {
+		return this.#read(false);
+	}
+
+	/**
+	 * Get the newest value, or `undefined` once the track ends.
 	 *
 	 * Every group is a complete value, so any older group is already superseded. Raising the read
 	 * floor to the newest sequence before each read does two things: it discards a backlog instead
 	 * of decoding every superseded value in turn, and it abandons a group a newer one has
-	 * superseded rather than waiting out its close. A snapshot reader's latency therefore never
-	 * grows with the queue, and never depends on a stale group's FIN arriving.
-	 *
-	 * This consumer owns its subscriber's read cursor, which is what lets it discard the backlog.
+	 * superseded rather than waiting out its close. A reader's latency therefore never grows with
+	 * the queue, and never depends on a stale group's FIN arriving.
 	 */
-	async next(): Promise<Uint8Array | undefined> {
+	latest(): Promise<Timed<Uint8Array> | undefined> {
+		return this.#read(true);
+	}
+
+	async #read(skip: boolean): Promise<Timed<Uint8Array> | undefined> {
 		for (;;) {
-			const latest = this.#track.latest();
-			if (latest !== undefined) this.#track.setGroups({ start: { included: latest } });
+			if (skip) {
+				const latest = this.#track.latest();
+				if (latest !== undefined) this.#track.setGroups({ start: { included: latest } });
+			}
 
 			let next: Awaited<ReturnType<Moq.Track.Ordered["readFrame"]>>;
 			try {
@@ -63,12 +79,12 @@ export class Consumer {
 				this.#flate = this.#decompress ? new Flate() : undefined;
 			}
 
-			return this.#flate ? this.#flate.frame(next.payload) : next.payload;
+			return { value: this.#flate ? this.#flate.frame(next.payload) : next.payload, at: next.timestamp };
 		}
 	}
 
-	/** Iterate over values until the track ends, each the newest at the time it is yielded. */
-	async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+	/** Iterate over every value in group order, as {@link next} yields them, until the track ends. */
+	async *[Symbol.asyncIterator](): AsyncIterator<Timed<Uint8Array>> {
 		for (;;) {
 			const value = await this.next();
 			if (value === undefined) return;

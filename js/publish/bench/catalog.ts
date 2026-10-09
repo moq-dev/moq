@@ -46,7 +46,7 @@ async function measure(tracks: number, viewers: number) {
 		};
 	});
 	// Initial configuration is outside the estimate traffic being measured.
-	for (const viewer of subscribers) await viewer.catalog.next();
+	for (const viewer of subscribers) await viewer.catalog.latest();
 	let latest = subscribers[0].subscriber.latest();
 	let publishes = 0;
 	let updates = 0;
@@ -56,7 +56,7 @@ async function measure(tracks: number, viewers: number) {
 		latest = next;
 		publishes++;
 		for (const viewer of subscribers) {
-			const root = await viewer.catalog.next();
+			const root = (await viewer.catalog.latest())?.value;
 			for (let index = 0; index < media.length; index++) {
 				// Model the player's changed latency floor with real subscription handles.
 				viewer.media[index].update({
