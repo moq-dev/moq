@@ -667,41 +667,43 @@ async fn the_pcr_wrap_continues_the_timeline() {
 }
 
 /// A flagged jump forward starts a group behind a break marker, and the count carries on by the
-/// jump, so the timeline never steps back.
+/// jump, so the timeline never steps back. The break is marked whether or not the splice is also a
+/// random access point, and only a group started by the break alone gives up random access.
 #[tokio::test(start_paused = true)]
 async fn a_flagged_jump_forward_starts_a_group_behind_a_break() {
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	paced(&mut mux, 0x100, 10_000 * MS, 50, 10, 4);
-	// A splice forward to thirty seconds, flagged, with no random access point at the break.
-	mux.packet(0x100, Flags::pcr(30_000 * MS).discontinuity());
-	mux.fill(0x101, 4);
-	paced(&mut mux, 0x100, 30_040 * MS, 50, 10, 4);
-	let data = mux.bytes();
-	let imported = import(&data, data.len(), None).await.unwrap();
-	assert_suffix(&data, &imported);
+	for random_access in [false, true] {
+		let mut mux = Mux::default();
+		program(&mut mux, 0x100);
+		paced(&mut mux, 0x100, 10_000 * MS, 50, 10, 4);
+		// A splice forward to thirty seconds, flagged.
+		let mut splice = Flags::pcr(30_000 * MS).discontinuity();
+		splice.random_access = random_access;
+		mux.packet(0x100, splice);
+		mux.fill(0x101, 4);
+		paced(&mut mux, 0x100, 30_040 * MS, 50, 10, 4);
+		let data = mux.bytes();
+		let imported = import(&data, data.len(), None).await.unwrap();
+		assert_suffix(&data, &imported);
 
-	let micros: Vec<u64> = imported.objects.iter().map(|object| object.micros).collect();
-	assert!(micros.windows(2).all(|pair| pair[0] <= pair[1]), "{micros:?}");
-	let groups = imported.groups();
-	let jump = groups
-		.iter()
-		.position(|group| header(&group[0].payload).discontinuity)
-		.expect("the break starts a group");
-	assert!(jump > 0);
-	let before = groups[jump - 1].last().unwrap().micros;
-	let after = groups[jump][0].micros;
-	assert!((11_959_000..11_960_000).contains(&before), "{before}");
-	assert!((29_999_000..30_000_000).contains(&after), "{after}");
-	assert_eq!(
-		groups[jump][0].group,
-		groups[jump - 1][0].group + 2,
-		"a skipped sequence marks the break"
-	);
-	assert!(
-		!imported.section().random_access,
-		"a group started by a break alone is not a random access point"
-	);
+		let micros: Vec<u64> = imported.objects.iter().map(|object| object.micros).collect();
+		assert!(micros.windows(2).all(|pair| pair[0] <= pair[1]), "{micros:?}");
+		let groups = imported.groups();
+		let jump = groups
+			.iter()
+			.position(|group| header(&group[0].payload).discontinuity)
+			.expect("the break starts a group");
+		assert!(jump > 0);
+		let before = groups[jump - 1].last().unwrap().micros;
+		let after = groups[jump][0].micros;
+		assert!((11_959_000..11_960_000).contains(&before), "{before}");
+		assert!((29_999_000..30_000_000).contains(&after), "{after}");
+		assert_eq!(
+			groups[jump][0].group,
+			groups[jump - 1][0].group + 2,
+			"a skipped sequence marks the break, random access {random_access}"
+		);
+		assert_eq!(imported.section().random_access, random_access);
+	}
 }
 
 /// A flagged step back is a restart: new content, which a timeline cannot step back into.

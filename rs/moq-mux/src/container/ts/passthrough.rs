@@ -21,7 +21,8 @@
 //!   split to meet the bound.
 //!
 //! Only the first of these makes a group a random access point, so any other start publishes
-//! [`random_access`](hang::catalog::M2ts::random_access) false from then on.
+//! [`random_access`](hang::catalog::M2ts::random_access) false from then on. A group the PCR
+//! discontinuity starts is behind a break even when it is also a random access point.
 //!
 //! Bytes before the first group are dropped: until the PMT, a PCR, and a group start have all
 //! been seen there is no group to put them in. The track is byte-identical to the input from its
@@ -256,6 +257,9 @@ struct Object {
 	payload: BytesMut,
 	/// Why this object starts a group, if it does.
 	start: Option<Start>,
+	/// Whether a flagged PCR jump comes before this object, which the track marks with a break
+	/// whatever else starts its group.
+	discontinuity: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -445,6 +449,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		let readable = pkt[1] & 0x80 == 0 && adaptation_valid(pkt);
 		let mut start = None;
 		let mut clock = false;
+		let mut discontinuity = false;
 		if readable && self.pcr_pid == Some(pid) {
 			if discontinuity_indicator(pkt) {
 				self.pending_break = true;
@@ -452,6 +457,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			if let Some(raw) = pcr(pkt) {
 				clock = true;
 				start = self.clock(pid, raw, at)?;
+				discontinuity = start == Some(Start::Discontinuity);
 			}
 		}
 		if readable && self.access_pid == Some(pid) && random_access_indicator(pkt) && self.can_start() {
@@ -464,7 +470,12 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			}
 			let mut payload = BytesMut::with_capacity(TsPacket::SIZE * 8);
 			payload.extend_from_slice(pkt);
-			self.open = Some(Object { at, payload, start });
+			self.open = Some(Object {
+				at,
+				payload,
+				start,
+				discontinuity,
+			});
 		} else if let Some(open) = self.open.as_mut() {
 			open.payload.extend_from_slice(pkt);
 		}
@@ -597,7 +608,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		});
 
 		if let Some(start) = start {
-			if start == Start::Discontinuity && self.group.is_some() {
+			if object.discontinuity && self.group.is_some() {
 				self.media.discontinuity()?;
 			}
 			if start != Start::RandomAccess {
