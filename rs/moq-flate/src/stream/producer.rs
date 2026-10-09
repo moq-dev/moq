@@ -1,6 +1,7 @@
 //! Publishing an ordered log of opaque payloads over a track.
 
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use bytes::Bytes;
 use moq_net::Timed;
@@ -95,6 +96,12 @@ impl Inner {
 	fn append(&mut self, payload: Timed<Bytes>) -> Result<usize> {
 		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
 		let payload = payload.value;
+
+		// A closed track refuses every append, so say so before the budget: `GroupTooLarge` promises
+		// the log is still writable.
+		if let Poll::Ready(err) = self.track.poll_closed(&kio::Waiter::noop()) {
+			return Err(err.into());
+		}
 
 		// Check before compressing: encoding advances the window, so a payload refused afterwards
 		// would leave the encoder ahead of every reader. The worst case is checked rather than the

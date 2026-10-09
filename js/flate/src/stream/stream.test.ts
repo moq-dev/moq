@@ -156,6 +156,25 @@ test("a failed write ends the log for a reader already inside the group", async 
 	expect(() => producer.append({ value: payloads(3)[2] })).toThrow();
 });
 
+// An ended log reports why it ended, even for a payload past the budget: `GroupTooLarge` would tell
+// the caller the log is still writable.
+test("an ended log refuses with its own error", () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track, compression: "deflate" });
+
+	const failure = new Error("write rejected");
+	const write = spyOn(Group.Producer.prototype, "writeFrame").mockImplementation(() => {
+		throw failure;
+	});
+	try {
+		expect(() => producer.append({ value: payloads(1)[0] })).toThrow(failure);
+	} finally {
+		write.mockRestore();
+	}
+
+	expect(() => producer.append({ value: new Uint8Array(Group.MAX_GROUP_CACHE_BYTES + 1) })).toThrow(failure);
+});
+
 // A payload past the group budget is refused before anything is written, so the log carries on: the
 // next payload lands and decodes, which with compression proves the window never moved. One past the
 // decoder's cap is refused the same way rather than ending the track.

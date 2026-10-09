@@ -53,6 +53,11 @@ export class Producer {
 	 * untimed track: it is never filled in.
 	 */
 	append({ value: payload, at }: Timed<Uint8Array>): void {
+		// A closed track refuses every append, so say so before the budget: `GroupTooLarge` promises
+		// the log is still writable.
+		const closed = this.#track.closed.peek();
+		if (closed !== undefined) throw closed ?? new Error("track is closed");
+
 		// Check before compressing: encoding advances the window, so a payload refused afterwards
 		// would leave the encoder ahead of every reader. The worst case is checked rather than the
 		// actual size for the same reason. Also checked before the group is opened, so a refused

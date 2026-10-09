@@ -350,6 +350,24 @@ mod test {
 		);
 	}
 
+	/// An ended log reports why it ended, even for a payload past the budget: `GroupTooLarge` would
+	/// tell the caller the log is still writable.
+	#[test]
+	fn an_ended_log_refuses_with_its_own_error() {
+		let track = rejecting_track();
+		let mut producer = Producer::new(track, Config::default());
+
+		let Err(written) = producer.append(&b"rejected"[..]) else {
+			panic!("the write should fail");
+		};
+
+		let huge = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
+		let Err(err) = producer.append(huge) else {
+			panic!("an append on an ended log should fail");
+		};
+		assert_eq!(err.to_string(), written.to_string());
+	}
+
 	/// A stream is one group. A publisher that rolls to a second one lost whatever would have
 	/// completed the first, so the read reports that rather than handing back the remainder as a
 	/// continuous log. Written by hand because this producer never rolls.
