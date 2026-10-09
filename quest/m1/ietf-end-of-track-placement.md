@@ -22,6 +22,8 @@ Decided 2026-10-08: both in one quest.
 
 Test in both languages: a track ending after group 5 object 5 delivers
 END_OF_TRACK at 5/5, and an END_OF_TRACK on its own stream does not claim
-END_OF_GROUP.
+END_OF_GROUP. Fastly's moq-relay-interop harness is external, so the PR
+notes the change for their next rerun of those two cells.
 
-Public API: none. Wire: none (placement and a header bit, not format).
+Public API: none. Wire: no format change, but a peer sees END_OF_TRACK at a
+different Location.
