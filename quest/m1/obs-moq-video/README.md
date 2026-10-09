@@ -6,7 +6,7 @@ Remove the MoQ OBS plugin's dependency on OBS/system FFmpeg ABI versions by deco
 
 ## Plan
 
-Portability and FFmpeg removal lead. The current MoQ source decodes video with libavcodec, libavutil, and libswscale, and audio with libavcodec (`moq_source_decode_audio_frame` in `cpp/obs/src/moq-source.cpp`). Its swresample linkage is unused. FFmpeg linkage goes away only once both the video source replacement and the audio decode replacement land. The stranded audio branch (#3498, merged only into `codex/obs-audio-receive-base`) is abandoned; the audio playback quest replans it on the generated C++. The plugin reaches codecs through the generated C++ package over moq-ffi (the migration quest linked below lands first); build `libmoq_ffi` statically with only the codec features needed here; OS frameworks and runtime GPU drivers remain valid dependencies. Verify plugin imports instead of promising a completely static OBS plugin.
+Portability and FFmpeg removal lead. The current MoQ source decodes video with libavcodec, libavutil, and libswscale, and audio with libavcodec (`moq_source_decode_audio_frame` in `cpp/obs/src/moq-source.cpp`). Its swresample linkage is unused. FFmpeg linkage goes away only once both the video source replacement and the audio decode replacement land. The stranded audio branch (#3498, merged only into `codex/obs-audio-receive-base`) is abandoned; the audio playback quest replans it on the generated C++. The plugin reaches codecs through the generated C++ package over moq-ffi, so codec surface is designed in moq-ffi and reaches the other bindings through the Cross-Package Sync table, not as OBS-only C symbols; build `libmoq_ffi` statically with only the codec features needed here; OS frameworks and runtime GPU drivers remain valid dependencies. Verify plugin imports instead of promising a completely static OBS plugin.
 
 Attempt GPU delivery immediately on macOS decode; other platforms keep the CPU path here. Prefer direct surface reuse, allow GPU conversion/blits, and automatically fall back to CPU delivery when import is unavailable or fails. Stats must show the actual decoder/encoder, delivery path, and fallback reason. Retaining a texture handle is insufficient unless pool ownership and synchronization also prevent reuse while work is in flight.
 
@@ -30,7 +30,6 @@ Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the 
 
 ## Related
 
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - every quest here starts from the plugin on the generated C++, so codec surface is designed in moq-ffi and reaches the other bindings through the Cross-Package Sync table, not as OBS-only C symbols
 - [Linux GPU decode](/quest/m2/obs-decode-linux.md) - present hardware-decoded frames without CPU readback; needs physical-hardware proof
 - [Windows GPU decode](/quest/m2/obs-decode-windows.md) - present D3D11 decoded textures without CPU readback; needs physical-hardware proof
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed compositor frames to VideoToolbox without a CPU round trip; needs physical-hardware proof

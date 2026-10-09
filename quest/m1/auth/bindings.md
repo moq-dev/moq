@@ -22,7 +22,7 @@ one without the plugin reconnecting.
   [Relay tokens](/quest/m1/auth/relay-refresh.md) adds.
 - No new libmoq API: the hand-written C ABI gets no more feature work. The
   generated C and C++ bindings get this from moq-ffi, and OBS reaches it
-  through [C++ through moq-ffi](/quest/m1/cpp/README.md); update `cpp/obs/src`
+  through the generated C++; update `cpp/obs/src`
   only if the plugin surfaces a token field.
 - Interop: the Python, Go, and C++ interop clients print their grant as the
   `auth granted publish=[...] subscribe=[...]` line and join `prints_grant` and
