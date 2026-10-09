@@ -163,8 +163,8 @@ async function read(sub: Moq.Track.Subscriber, gen: number): Promise<void> {
 // Follow whichever broadcast the path routes to, as a player does: subscribe to the new one and
 // drop the old one each time the route changes. A request stays on the publisher instance it
 // resolved, and without an epoch the other relay's route is another instance, so a player
-// requests again when the path is announced anew (a restart, or a start after its request
-// ended), never because its request ended.
+// requests again whenever the path is announced (a start or a restart), keeping its request when
+// the fresh one resolves the same broadcast, and never because its request ended.
 let current: { broadcast: Moq.Broadcast.Consumer; sub: Moq.Track.Subscriber } | undefined;
 const follow = (active: Moq.Broadcast.Consumer | undefined) => {
 	if (!active || active === current?.broadcast) return;
@@ -185,13 +185,19 @@ void (async () => {
 	for (;;) {
 		const entry = await announced.next();
 		if (!entry) break;
+		if (entry.kind === "end" || entry.kind === "update") continue;
 		if (!Moq.Path.hasPrefix(entry.prefix, path)) continue;
-		const renew = entry.kind === "restart" || (entry.kind === "start" && request.closed.peek() !== undefined);
-		if (!renew) continue;
+		const fresh = watched.request(path, { announced: true });
+		const same =
+			request.closed.peek() === undefined && request.active.peek()?.closed === fresh.active.peek()?.closed;
+		if (same) {
+			fresh.close();
+			continue;
+		}
 		log(`path ${entry.kind}: requesting again`);
 		const old = request;
 		unfollow();
-		request = watched.request(path, { announced: true });
+		request = fresh;
 		unfollow = request.active.subscribe(follow);
 		follow(request.active.peek());
 		old.close();

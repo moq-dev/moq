@@ -563,7 +563,20 @@ class OriginState {
 	 * answers. Without such a route the slot ends.
 	 */
 	failover(path: Path.Valid, slot: RequestSlot, source: object, epoch: Epoch.Valid | undefined): void {
-		if (this.serves(path, source, epoch, true)) return;
+		if (this.serves(path, source, epoch, true)) {
+			// Its own source serves again: a takeover still pending speaks for nobody.
+			slot.failover = undefined;
+			return;
+		}
+		// A local broadcast announced under the epoch serves the same bytes with no round trip.
+		const local = this.local.peek()?.get(path);
+		if (epoch !== undefined && local && this.advertisedLocal.peek()?.get(path)?.epoch === epoch) {
+			slot.failover = undefined;
+			slot.retired?.close();
+			slot.retired = undefined;
+			slot.route.set({ front: local, epoch, source: local });
+			return;
+		}
 		const entry =
 			epoch === undefined
 				? undefined

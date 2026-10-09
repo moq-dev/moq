@@ -231,11 +231,11 @@ describe("blind resolution", () => {
 });
 
 describe("restart", () => {
-	it("follows a republish through its announcement", async () => {
+	it.each([true, false])("follows a republish through its announcement (announced: %p)", async (announced) => {
 		const owner = new Origin.Producer();
 		const name = Path.from("live.hang");
 		const first = publish(owner, name);
-		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced, catalogFormat: "manual" });
 		await settle();
 		const old = source.out.active.peek();
 		expect(old).toBeDefined();
@@ -263,6 +263,41 @@ describe("restart", () => {
 		expect(resumed).not.toBe(restarted);
 
 		third.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+
+	it("moves to a more specific announcement of another instance", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("pool/job.hang");
+		const pool = owner.dynamic(Path.from("pool"), { epoch: Moq.Epoch.mint() });
+		const requests = pool.requested();
+		const upstream = new Moq.Broadcast.Producer();
+		void (async () => {
+			for await (const request of requests) request.accept(upstream);
+		})();
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		await settle();
+		const old = source.out.active.peek();
+		expect(old).toBeDefined();
+
+		// A newer publisher announces the exact path: a start, not a restart, for this name.
+		const exact = owner.createBroadcast(name);
+		exact.announce({ epoch: Moq.Epoch.mint() });
+		await settle();
+		const moved = source.out.active.peek();
+		expect(moved).toBeDefined();
+		expect(moved).not.toBe(old);
+
+		// The pool going leaves playback on the newer publisher.
+		pool.close();
+		await settle();
+		expect(source.out.active.peek()).toBe(moved);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		exact.close();
+		upstream.close();
 		source.close();
 		owner.close();
 		await settle();

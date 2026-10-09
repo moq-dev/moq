@@ -161,7 +161,6 @@ export class Broadcast {
 		this.#announced.set(undefined);
 
 		if (!effect.get(this.#wantAnnounced)) return;
-		if (!effect.get(this.in.announced)) return;
 
 		const origin = effect.get(this.in.origin);
 		if (!origin) return;
@@ -232,6 +231,8 @@ export class Broadcast {
 		origin: Moq.Origin.Table,
 		path: Moq.Path.Valid,
 	): Moq.Broadcast.Consumer | undefined {
+		// Restarts are only seen through announcements, whether or not the reference waits for one.
+		this.#wantAnnounced.set(true);
 		const generation = this.#generation(effect, path);
 		let entry = this.#references.get(path);
 		if (!entry || entry.origin !== origin || entry.generation !== generation) {
@@ -268,31 +269,36 @@ export class Broadcast {
 		const name = effect.get(this.in.name);
 		const announced = effect.get(this.in.announced);
 
-		// Bumped by an announcement covering the name that names a publisher the current request
-		// cannot reach: a restart, or a start once the request has ended. Each requests afresh.
-		const generation = new Signal(0);
-		let current: Moq.Origin.Requesting | undefined;
-		if (announced) {
-			const stream = origin.announced(Path.Pattern.literal(name), { hidden: true });
-			effect.cleanup(() => stream.close());
-			effect.spawn(async () => {
-				for (;;) {
-					const entry = await effect.race(stream.next());
-					if (!entry) break;
-					if (!Path.hasPrefix(entry.prefix, name)) continue;
-					const ended = current?.closed.peek() !== undefined;
-					if (entry.kind === "restart" || (entry.kind === "start" && ended)) {
-						generation.update((n) => n + 1);
-					}
+		const current = new Signal(origin.request(name, { announced }));
+		effect.cleanup(() => current.peek().close());
+
+		// Observed whether or not the first request waits for an announcement: announcements are
+		// the only restart signal. Each start or restart covering the name requests afresh, and
+		// the fresh request replaces the current one unless both resolve the same broadcast.
+		const stream = origin.announced(Path.Pattern.literal(name), { hidden: true });
+		effect.cleanup(() => stream.close());
+		effect.spawn(async () => {
+			for (;;) {
+				const entry = await effect.race(stream.next());
+				if (!entry) break;
+				if (entry.kind === "end" || entry.kind === "update") continue;
+				if (!Path.hasPrefix(entry.prefix, name)) continue;
+				const previous = current.peek();
+				const fresh = origin.request(name, { announced });
+				const was = previous.active.peek();
+				const now = fresh.active.peek();
+				const same = previous.closed.peek() === undefined && was?.closed === now?.closed;
+				if (same) {
+					fresh.close();
+					continue;
 				}
-			});
-		}
+				current.set(fresh);
+				previous.close();
+			}
+		});
 
 		effect.run((run) => {
-			run.get(generation);
-			const request = origin.request(name, { announced });
-			current = request;
-			run.cleanup(() => request.close());
+			const request = run.get(current);
 
 			// Whether the request ever resolved: ending after that is its publisher going offline,
 			// not a refusal.

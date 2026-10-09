@@ -1597,6 +1597,90 @@ test("a request on a replaced epoch fails over to another route of it", async ()
 	origin.close();
 });
 
+// A local broadcast announced under the held epoch is a replica too.
+test("a request on a replaced epoch fails over to a local replica of it", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("replicated");
+	const newer = Epoch.parse("01900000-0000-7000-8000-000000000002");
+
+	const primary = new BroadcastProducer();
+	const keepPrimary = primary.consume();
+	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), Route.normalize({ epoch: EPOCH }));
+	const local = origin.createBroadcast(path);
+	local.announce({ epoch: EPOCH, cost: 5n });
+	const request = consumer.request(path);
+	await settle();
+	const first = request.active.peek();
+	expect(first).toBeDefined();
+
+	const restarted = new BroadcastProducer();
+	const disposeRestarted = serve(origin, path, provider(restarted), Route.normalize({ epoch: newer }));
+	await settle();
+	expect(request.active.peek()).toBe(first);
+
+	disposePrimary();
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+	const failed = request.active.peek();
+	expect(failed).toBeDefined();
+	expect(failed).not.toBe(first);
+	expect(failed?.epoch).toBe(EPOCH);
+
+	const fresh = consumer.request(path);
+	await settle();
+	expect(fresh.active.peek()?.epoch).toBe(newer);
+
+	fresh.close();
+	request.close();
+	disposeRestarted();
+	local.close();
+	keepPrimary.close();
+	primary.close();
+	restarted.close();
+	origin.close();
+});
+
+// A takeover asked while the original source was briefly gone speaks for nobody once it is back:
+// its late refusal leaves the request on that source.
+test("a stale takeover's refusal leaves a request whose source came back", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("resumed");
+	const newer = Epoch.parse("01900000-0000-7000-8000-000000000002");
+
+	const local = origin.createBroadcast(path);
+	local.announce({ epoch: EPOCH });
+	const standby = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost: 5n }));
+	const asked = standby.requested();
+	const request = consumer.request(path);
+	await settle();
+	const first = request.active.peek();
+	expect(first).toBeDefined();
+
+	const restarted = new BroadcastProducer();
+	const disposeRestarted = serve(origin, path, provider(restarted), Route.normalize({ epoch: newer }));
+	await settle();
+	expect(request.active.peek()).toBe(first);
+
+	// The local broadcast steps away, so the standby is asked to take over; it comes back first.
+	local.unannounce();
+	const takeover = await asked.next();
+	local.announce({ epoch: EPOCH });
+	await settle();
+	takeover.value?.reject(new Error("too late"));
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+	expect(request.active.peek()).toBe(first);
+
+	request.close();
+	disposeRestarted();
+	standby.close();
+	local.close();
+	restarted.close();
+	origin.close();
+});
+
 test("a request ends when its winning source goes, even with a standby", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
