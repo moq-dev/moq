@@ -1,10 +1,33 @@
 {
 	"moq-lite-07-wip": {
-		"reason": "Approved under /recommended: this draft is unpublished and its wire may change. Remeasured against these releases: released moq-cli and @moq/net reject current lite-07-wip sessions (long buffer, invalid value). Compare stable lite and IETF drafts; reassess this measured exception when any affected release changes.",
+		"reason": "Approved under /recommended: this draft is unpublished and its wire may change. Remeasured against these releases: released moq-cli and @moq/net reject current lite-07-wip sessions (long buffer, invalid value). Compare stable lite drafts; reassess this measured exception when any affected release changes.",
 		"releases": {
 			"moq-cli": "0.14.2",
 			"moq-relay": "0.17.2",
 			"@moq/net": "0.4.2"
+		}
+	},
+	"catalog-archive": {
+		"reason": "Accepted by the maintainer (2026-10-09): #4034 reshaped the catalog `archive` entry in place (`timelines` replaced the required `track`), so released and current hang/@moq/hang reject each other's live catalogs (missing field `track` / `timelines`). Every media cell is cross-version.",
+		"releases": {
+			"moq-cli": "0.14.2",
+			"hang": "0.21.11",
+			"@moq/hang": "0.5.2"
+		},
+		"cells": {
+			"lanes": ["media"]
+		}
+	},
+	"lite-fetch-released-relay": {
+		"reason": "Known lite break, accepted to land the nightly (2026-10-09): a FETCH through the released relay from a current publisher hangs until the timeout on lite-05 and lite-06, while released-to-released and current-to-current pass. Follow-up quest planned.",
+		"releases": {
+			"moq-relay": "0.17.2"
+		},
+		"cells": {
+			"lanes": ["fetch"],
+			"versions": ["moq-lite-05", "moq-lite-06"],
+			"relay": "released",
+			"publisher": "current"
 		}
 	}
 }

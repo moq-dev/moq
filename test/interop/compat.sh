@@ -131,11 +131,18 @@ for source in current released js-current js-released; do
     echo "PASS catalog/container written by $source"
 done
 
-# Every cell runs, so one nightly names every break; the run fails at the end.
+# Every cell runs, so one nightly names every break; the run fails at the end. A
+# cell a planned break covers is logged with that break's name instead.
 failed=()
 cell() {
-    local name="$1"
-    shift
+    local lane="$1" version="$2" relay_source="$3" source="$4" planned
+    shift 4
+    local name="$version relay=$relay_source publisher=$source $lane"
+    planned=$(bun "$DIR/compat/resolve.ts" skip "$DIR/compat/planned-breaks.json" "$lane" "$version" "$relay_source" "$source")
+    if [[ -n "$planned" ]]; then
+        echo "SKIP $name: planned break $planned"
+        return
+    fi
     echo "=== $name ==="
     if "$@"; then
         echo "PASS $name"
@@ -156,14 +163,16 @@ fetch() {
 
 # Existing media drivers: current publisher -> released clients and the reverse,
 # through either relay. The relay offers only one version, so JS cannot silently
-# negotiate its preferred draft instead of the draft this cell names.
+# negotiate its preferred draft instead of the draft this cell names. Only moq-lite
+# drafts are listed: our clients and relays always prefer lite with each other, so
+# IETF between them is not compared here (`just test interop` covers IETF).
 while read -r version; do
     released_relay="$HARNESS_RUN/released/bin/moq-relay"
     if fetch "$released_relay" "$RELEASED" "$RELEASED" "$HARNESS_RUN/js" "$HARNESS_RUN/js/transport.ts" "$version" >"$HARNESS_RUN/$version.fetch-baseline.log" 2>&1; then
         released_fetch=true
     else
         released_fetch=false
-        echo "SKIP $version FETCH: the released binaries do not fetch from one another ($HARNESS_RUN/$version.fetch-baseline.log)"
+        echo "SKIP $version fetch and js-publish: the released binaries do not fetch from one another ($HARNESS_RUN/$version.fetch-baseline.log)"
     fi
     for relay_source in current released; do
         if [[ "$relay_source" == current ]]; then relay="$TARGET/debug/moq-relay"; else relay="$released_relay"; fi
@@ -178,20 +187,19 @@ while read -r version; do
                 own_js="$HARNESS_RUN/js" own_transport="$HARNESS_RUN/js/transport.ts"
                 other_js="$DIR/clients/js-native" other_transport="$DIR/compat/transport.ts"
             fi
-            name="$version relay=$relay_source publisher=$source"
-            cell "$name media" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+            cell media "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
                 INTEROP_NATIVE_CLIENT="$other_js" INTEROP_COMPAT_TRANSPORT="$other_transport" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
-            # Drive JS publication from actual subscriber demand. The CLI's newest-group
-            # read uses SUBSCRIBE here, independently of one-shot FETCH support.
-            cell "$name js-publish" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-                INTEROP_JS_PUBLISH_CLIENT="$publisher_js" INTEROP_READ_CURRENT=1 bash "$DIR/interop.sh" --publishers js-native --subscribers rust
-            if [[ "$released_fetch" == true ]]; then
-                # JS does not implement IETF FETCH in either direction, so both Rust
-                # sources fetch the same group and compare exact payloads. The
-                # publisher's own JS finds the group, so a catalog break fails only
-                # the media cell.
-                cell "$name fetch" fetch "$relay" "$pub" "$sub" "$own_js" "$own_transport" "$version"
-            fi
+            [[ "$released_fetch" == true ]] || continue
+            # Drive JS publication from actual subscriber demand: the publisher's own JS
+            # subscribes and observes the group, which the opposite Rust CLI then
+            # FETCHes by ID. Reading the newest group races its live delivery.
+            cell js-publish "$version" "$relay_source" "$source" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+                INTEROP_JS_PUBLISH_CLIENT="$publisher_js" INTEROP_NATIVE_CLIENT="$own_js" INTEROP_COMPAT_TRANSPORT="$own_transport" \
+                INTEROP_FETCH_DATA=1 bash "$DIR/interop.sh" --publishers js-native --subscribers rust
+            # Both Rust sources fetch the same group and compare exact payloads. The
+            # publisher's own JS finds the group, so a catalog break fails only the
+            # media cell.
+            cell fetch "$version" "$relay_source" "$source" fetch "$relay" "$pub" "$sub" "$own_js" "$own_transport" "$version"
         done
     done
 done <"$HARNESS_RUN/shared"

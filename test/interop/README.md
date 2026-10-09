@@ -117,28 +117,32 @@ token and assert its normalized root and permission scope. Current and released
 headers, checking the exact timestamp and payload. These are format checks,
 independent of a media decoder.
 
-The session lanes derive supported drafts from each CLI's `--connect-version`
-choices. The relay offers only the cell's version, and JavaScript checks the
-negotiated version. Current Rust media publishers feed released Rust and JS
-readers, then released publishers feed current readers, through both relay
-sources. Rust exports must decode to a video frame through ffmpeg. The existing
-JS subscriber reconstructs the catalog and decodes the container. JS publishers
-write one group after actual subscriber demand, and opposite-source Rust
-readers verify its bytes through a live subscription. Both Rust versions also
-FETCH the group a live subscriber is filling and compare every frame's exact
-payload. The released relay, publisher, and CLI decide FETCH support per draft:
-when they fetch from one another, every mixed cell must too; otherwise the
-draft's FETCH is logged and skipped. JS IETF FETCH is unsupported in both
-directions; Rust covers this operation.
+The session lanes take the moq-lite drafts from each CLI's `--connect-version`
+choices. IETF drafts are left out on purpose: our clients and relays always
+prefer moq-lite with each other, and `just test interop` covers IETF. The relay
+offers only the cell's version, and JavaScript checks the negotiated version.
+Current Rust media publishers feed released Rust and JS readers, then released
+publishers feed current readers, through both relay sources. Rust exports must
+decode to a video frame through ffmpeg. The existing JS subscriber
+reconstructs the catalog and decodes the container.
+
+The released relay, publisher, and CLI decide FETCH support per draft: when
+they fetch from one another, every mixed cell must too; otherwise the draft's
+FETCH lanes are logged and skipped. Both Rust versions FETCH the group the
+publisher's own JS subscriber observed and compare every frame's exact
+payload. JS publishers write one group after that subscriber's demand, and the
+opposite-source Rust CLI FETCHes it by the same observed ID.
 
 Every cell runs, and the run lists each failing cell before it fails.
 Checkout-only versions are logged and omitted. Removing a released version
-fails before sessions start. A maintainer-approved deliberate removal belongs
-in `compat/planned-breaks.json` as a protocol name mapped to its approval,
-reason, and the exact affected release versions. Every exception is logged.
-Entries become errors once an affected release changes or no longer offers the
-version, forcing removal or a fresh review. Future WIP drafts receive no
-automatic exception.
+fails before sessions start. A maintainer-approved break belongs in
+`compat/planned-breaks.json` with its reason and the exact affected release
+versions. Keyed by a protocol name it drops that version; with `cells` it
+skips only the named lanes, optionally narrowed to versions, a relay source,
+or a publisher source. Every skipped cell is logged with the break's name.
+Entries become errors once an affected release changes or no longer offers a
+listed version, forcing removal or a fresh review. Future WIP drafts receive
+no automatic exception.
 
 ## Media QA
 

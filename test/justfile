@@ -41,7 +41,7 @@ interop *args:
     just rs test -p moq-net --lib varint_interop ietf_datagram_interop --run-ignored all
     ./interop/interop.sh "$@"
 
-# Nightly main vs newest installable registry releases: tokens, pinned session
+# Nightly main vs newest installable registry releases: tokens, moq-lite session
 # versions, decoded catalogs/containers, and group FETCH. See interop/README.md.
 wire-compat:
     ./interop/compat.sh

@@ -21,37 +21,83 @@ export function versions(help: string): string[] {
 	return values;
 }
 
-/** One reviewed exception, bound to the releases whose incompatibility was measured. */
+/** The matrix cells a planned break covers; an omitted field matches every cell. */
+export interface Cells {
+	lanes: string[];
+	versions?: string[];
+	relay?: "current" | "released";
+	publisher?: "current" | "released";
+}
+
+/**
+ * One reviewed exception, bound to the releases whose incompatibility was measured. Keyed
+ * by protocol version it drops that version; with `cells` it skips only those cells.
+ */
 export interface PlannedBreak {
 	reason: string;
 	releases: Record<string, string>;
+	cells?: Cells;
 }
+
+/** One session cell of the matrix. */
+export interface Cell {
+	lane: string;
+	version: string;
+	relay: string;
+	publisher: string;
+}
+
+// moq-lite is what our clients and relays prefer with each other, so released-vs-current
+// compares only lite. IETF drafts are for third-party interop, covered by `just test interop`.
+const lite = (version: string) => version.startsWith("moq-lite-");
 
 /** Refuse removed released versions unless a maintainer acknowledged the exact releases. */
 export function matrix(
-	current: string[],
-	released: string[],
+	currentAll: string[],
+	releasedAll: string[],
 	skipped: Record<string, PlannedBreak>,
 	releases: Record<string, string> = {},
 ) {
-	for (const [version, exception] of Object.entries(skipped)) {
-		if (!released.includes(version) || !exception.reason?.trim() || !Object.keys(exception.releases).length) {
-			throw new Error(`invalid or stale planned break: ${version}`);
+	const current = currentAll.filter(lite);
+	const released = releasedAll.filter(lite);
+	for (const [name, exception] of Object.entries(skipped)) {
+		const versions = exception.cells ? (exception.cells.versions ?? []) : [name];
+		if (
+			!exception.reason?.trim() ||
+			!Object.keys(exception.releases).length ||
+			(exception.cells && !exception.cells.lanes.length) ||
+			versions.some((v) => !released.includes(v))
+		) {
+			throw new Error(`invalid or stale planned break: ${name}`);
 		}
-		for (const [name, expected] of Object.entries(exception.releases)) {
-			if (releases[name] !== expected)
-				throw new Error(
-					`stale planned break: ${version}, ${name} changed from ${expected} to ${releases[name]}`,
-				);
+		for (const [pkg, expected] of Object.entries(exception.releases)) {
+			if (releases[pkg] !== expected)
+				throw new Error(`stale planned break: ${name}, ${pkg} changed from ${expected} to ${releases[pkg]}`);
 		}
 	}
-	const missing = released.filter((v) => !current.includes(v) && !skipped[v]);
+	const dropped = (v: string) => !!skipped[v] && !skipped[v].cells;
+	const missing = released.filter((v) => !current.includes(v) && !dropped(v));
 	if (missing.length) throw new Error(`checkout removed published versions: ${missing.join(", ")}`);
 	return {
-		shared: released.filter((v) => current.includes(v) && !skipped[v]),
+		shared: released.filter((v) => current.includes(v) && !dropped(v)),
 		currentOnly: current.filter((v) => !released.includes(v)),
 		planned: skipped,
 	};
+}
+
+/** The planned break that skips `cell`, if any. */
+export function planned(skipped: Record<string, PlannedBreak>, cell: Cell): string | undefined {
+	for (const [name, { cells }] of Object.entries(skipped)) {
+		if (
+			cells?.lanes.includes(cell.lane) &&
+			(!cells.versions || cells.versions.includes(cell.version)) &&
+			(!cells.relay || cells.relay === cell.relay) &&
+			(!cells.publisher || cells.publisher === cell.publisher)
+		) {
+			return name;
+		}
+	}
+	return undefined;
 }
 
 async function registry(url: string) {
@@ -89,5 +135,9 @@ if (import.meta.main) {
 		);
 		console.log(JSON.stringify(result, null, 2));
 		writeFileSync(args[3], `${result.shared.join("\n")}\n`);
-	} else throw new Error("expected resolve or matrix");
+	} else if (command === "skip") {
+		const [file, lane, version, relay, publisher] = args;
+		const name = planned(JSON.parse(readFileSync(file, "utf8")), { lane, version, relay, publisher });
+		if (name) console.log(name);
+	} else throw new Error("expected resolve, matrix, or skip");
 }

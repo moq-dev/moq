@@ -11,11 +11,9 @@ export async function connect(props: Moq.Connection.ConnectProps) {
 	const hash = (await response.text()).trim();
 	if (!/^[a-f0-9]{64}$/i.test(hash)) throw new Error("malformed certificate fingerprint");
 	url.protocol = "https:";
-	// These three drafts share moql and select the precise version in SETUP. Later
-	// moq-transport drafts register `moqt-NN`, and later lite drafts their own name.
-	const protocol = /^(moq-lite-0[12]|moq-transport-14)$/.test(version)
-		? "moql"
-		: version.replace(/^moq-transport-/, "moqt-");
+	// Lite-01 and lite-02 share moql and select the precise version in SETUP; later
+	// lite drafts register their own name. The released comparison runs only lite.
+	const protocol = /^moq-lite-0[12]$/.test(version) ? "moql" : version;
 	const transport = new WebTransport(url, {
 		protocols: [protocol],
 		serverCertificateHashes: [{ algorithm: "sha-256", value: Uint8Array.from(Buffer.from(hash, "hex")) }],

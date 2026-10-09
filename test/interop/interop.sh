@@ -25,7 +25,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_NATIVE_CLIENT INTEROP_DECODE INTEROP_JS_PUBLISH_CLIENT INTEROP_COMPAT_TRANSPORT INTEROP_READ_CURRENT INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_NATIVE_CLIENT INTEROP_DECODE INTEROP_JS_PUBLISH_CLIENT INTEROP_COMPAT_TRANSPORT INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -511,6 +511,16 @@ run_native() {
     printf '%s\n' "$out" | grep -q '^received '
 }
 
+# Write a track name and the group a live JS subscriber saw on it to
+# $HARNESS_RUN/<broadcast>.track. Extra args go to subscribe.ts (e.g. --track).
+# shellcheck disable=SC2329  # reached from run_subscriber, which 'harness_spawn' invokes
+observe_group() {
+    local broadcast="$1"
+    shift
+    (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && node --import tsx subscribe.ts subscribe --url "$URL" --broadcast "$broadcast" \
+        --timeout "$TIMEOUT" --track-file "$HARNESS_RUN/$broadcast.track" "$@")
+}
+
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_subscriber() {
     local lang="$1" broadcast="$2" publisher="${3:-}"
@@ -521,8 +531,7 @@ run_subscriber() {
             if [[ "${INTEROP_FETCH_TRACK:-0}" == 1 ]]; then
                 # Discover the track from the decoded catalog, never today's naming
                 # convention, and a group live demand is filling.
-                (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && node --import tsx subscribe.ts subscribe --url "$URL" --broadcast "$broadcast" \
-                    --timeout "$TIMEOUT" --track-file "$HARNESS_RUN/$broadcast.track") || return
+                observe_group "$broadcast" || return
                 local track group binary index=0
                 { read -r track && read -r group; } <"$HARNESS_RUN/$broadcast.track" || return
                 # Both readers FETCH that group by its observed ID, which waits for it to finish.
@@ -549,9 +558,14 @@ assert outputs[0] == outputs[1], "current/released FETCH changed the immutable g
 PYCODE
                 return
             fi
-            if [[ "${INTEROP_READ_CURRENT:-0}" == 1 ]]; then
-                timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
-                    ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" fetch data >"$HARNESS_RUN/$broadcast.fetch"
+            if [[ "${INTEROP_FETCH_DATA:-0}" == 1 ]]; then
+                # The JS fixture writes one group on `data` once a subscriber wants it. A
+                # live subscriber observes it; the reader then FETCHes it by that ID.
+                observe_group "$broadcast" --track data || return
+                local track group
+                { read -r track && read -r group; } <"$HARNESS_RUN/$broadcast.track" || return
+                timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} \
+                    --broadcast "$broadcast" fetch "$track" --group "$group" >"$HARNESS_RUN/$broadcast.fetch" || return
                 [[ "$(cat "$HARNESS_RUN/$broadcast.fetch")" == "compat-fetch" ]]
                 return
             fi
