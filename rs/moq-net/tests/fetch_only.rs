@@ -86,19 +86,18 @@ fn frames(sequence: u64) -> Vec<Vec<u8>> {
 	(0..2).map(|frame| format!("{sequence}-{frame}").into_bytes()).collect()
 }
 
-/// Drafts whose FETCH we serve, and the newest, whose FETCH we refuse until draft-20
-/// FETCH lands: it must still not subscribe. Draft-17 is absent: its TRACK_STATUS answer
-/// cannot say whether the track is timed, so it still SUBSCRIBEs to learn the track.
-const VERSIONS: &[(&str, bool)] = &[
-	("moq-transport-14", true),
-	("moq-transport-15", true),
-	("moq-transport-16", true),
-	("moq-transport-18", true),
-	("moq-transport-19", true),
-	("moq-transport-22", false),
+/// Draft-17 is absent: its TRACK_STATUS answer cannot say whether the track is timed,
+/// so it still SUBSCRIBEs to learn the track.
+const VERSIONS: &[&str] = &[
+	"moq-transport-14",
+	"moq-transport-15",
+	"moq-transport-16",
+	"moq-transport-18",
+	"moq-transport-19",
+	"moq-transport-22",
 ];
 
-async fn direct(version: &str, served: bool) {
+async fn direct(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let (broadcast, subscribed) = publish_finished(&publisher);
@@ -110,11 +109,7 @@ async fn direct(version: &str, served: bool) {
 	let pair = connect_mock(options).await;
 
 	let remote = resolve(&client).await;
-	let fetched = fetch(&remote, 1).await;
-	match served {
-		true => assert_eq!(fetched.expect("fetch"), frames(1), "{version}"),
-		false => assert!(fetched.is_err(), "{version}: draft-20 FETCH is refused"),
-	}
+	assert_eq!(fetch(&remote, 1).await.expect("fetch"), frames(1), "{version}");
 	assert!(!subscribed.load(Ordering::SeqCst), "{version}: the fetch subscribed");
 
 	drop((remote, pair, broadcast, client, publisher));
@@ -124,8 +119,8 @@ async fn direct(version: &str, served: bool) {
 #[moq_net_sim::test]
 async fn a_fetch_learns_the_track_without_subscribing() {
 	let mut failures = Vec::new();
-	for (version, served) in VERSIONS {
-		if moq_net_sim::spawn(direct(version, *served)).await.is_err() {
+	for version in VERSIONS {
+		if moq_net_sim::spawn(direct(version)).await.is_err() {
 			failures.push(*version);
 		}
 	}
@@ -213,8 +208,8 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 #[moq_net_sim::test]
 async fn a_relay_fetches_without_subscribing_upstream() {
 	let mut failures = Vec::new();
-	for (version, served) in VERSIONS {
-		if *served && moq_net_sim::spawn(relayed(version)).await.is_err() {
+	for version in VERSIONS {
+		if moq_net_sim::spawn(relayed(version)).await.is_err() {
 			failures.push(*version);
 		}
 	}

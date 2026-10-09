@@ -693,7 +693,12 @@ async fn unusable_framerate_uses_the_standard_fallback_rate() {
 	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
 	assert_eq!(fragment.duration, std::time::Duration::from_secs_f64(1.0 / 30.0));
 	let timescale = moq_net::Timescale::new(90_000).unwrap();
-	let decoded = super::decode(fragment.data, None, timescale, crate::container::fmp4::Kind::Video).unwrap();
+	let decoded = super::decode(
+		fragment.data,
+		None,
+		super::Track::new(timescale, crate::container::fmp4::Kind::Video),
+	)
+	.unwrap();
 	assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
 }
 
@@ -1303,8 +1308,7 @@ fn video_payloads(fragment: &crate::container::fmp4::Fragment) -> Vec<Bytes> {
 	super::decode(
 		fragment.data.clone(),
 		None,
-		moq_net::Timescale::new(30_000).unwrap(),
-		super::Kind::Video,
+		super::Track::new(moq_net::Timescale::new(30_000).unwrap(), super::Kind::Video),
 	)
 	.expect("decode fragment")
 	.into_iter()
@@ -1860,8 +1864,7 @@ async fn split_parameter_sets_case(
 			super::decode(
 				fragment.data.clone(),
 				None,
-				moq_net::Timescale::new(30_000).unwrap(),
-				super::Kind::Video,
+				super::Track::new(moq_net::Timescale::new(30_000).unwrap(), super::Kind::Video),
 			)
 			.expect("decode fragment")
 		})
@@ -2203,7 +2206,7 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	let scale = moq_net::Timescale::new(timescale(&init).into()).unwrap();
 	let presented: Vec<u128> = fragments
 		.into_iter()
-		.flat_map(|fragment| super::decode(fragment.data, None, scale, super::Kind::Video).unwrap())
+		.flat_map(|fragment| super::decode(fragment.data, None, super::Track::new(scale, super::Kind::Video)).unwrap())
 		.map(|sample| sample.timestamp.as_micros())
 		.collect();
 	assert_eq!(presented, [10_000_000, 10_066_000, 10_033_000]);

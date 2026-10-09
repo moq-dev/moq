@@ -102,8 +102,8 @@ pub(super) enum Event {
 	Held,
 	/// The last consumer let go of the front's broadcast.
 	Unheld,
-	/// The driver closed the broadcast the machine asked it to [`Action::Retire`]:
-	/// nobody held it, and nobody can join it now.
+	/// The front's broadcast closed, whether the driver closed it for an
+	/// [`Action::Retire`] or something else did: nobody can join it now.
 	Retired,
 	/// The origin is tearing down.
 	Closed,
