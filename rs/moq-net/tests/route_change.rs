@@ -734,6 +734,125 @@ async fn redundant_pair_fails_over_when_the_incumbent_ends() {
 		.expect("timed out");
 }
 
+/// `P1` and `P2` both publish `live` to the relay `R`, `P2` priced to stand by, and
+/// `D` reads through `R`. `P1`'s session to `R` dies mid-group. When both name one
+/// epoch on a wire that carries it, `R` resumes on `P2` and `D` sees every frame once.
+/// Otherwise `D`'s track ends with the error: a re-request through `R` would be
+/// answered by `P2`, another instance, stitched onto what `D` already read.
+async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, resumes: bool) {
+	let version: Version = version.parse().unwrap();
+	let relay = produce_origin(3);
+	let downstream = produce_origin(4);
+	let mut replicas = Vec::new();
+	for (name, hop, cost) in [("P1", 1, None), ("P2", 2, Some(1_000))] {
+		let publisher = produce_origin(hop);
+		let broadcast = publisher.create_broadcast("live").unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let route = match &epoch {
+			Some(epoch) => origin::Route::default().with_epoch(epoch.clone()),
+			None => origin::Route::default(),
+		};
+		broadcast.announce(route).unwrap();
+		let link = priced_link(version, &publisher, &relay, cost).await;
+		replicas.push(Replica {
+			name,
+			origin: publisher,
+			broadcast,
+			track,
+			group: None,
+			link: Some(link),
+		});
+	}
+	let _r_to_d = link(version, &relay, &downstream).await;
+
+	let consumer = downstream.consume();
+	consumer.routed("live").await.unwrap();
+	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
+
+	let mut dead = None;
+	for sequence in 0..3 {
+		for replica in &mut replicas {
+			replica.group = Some(replica.track.append_group().unwrap());
+		}
+		for frame in 0..FRAMES {
+			if sequence == 1 && frame == FRAMES / 2 {
+				let replica = replicas.remove(0);
+				let link = replica.link.as_ref().unwrap();
+				link.server.abort(Error::Cancel);
+				link.client.abort(Error::Cancel);
+				dead = Some(replica);
+				settle().await;
+			}
+			let timestamp = Timestamp::from_micros(1_000_000 + sequence * 100_000 + frame * 1_000).unwrap();
+			for replica in &mut replicas {
+				let group = replica.group.as_mut().unwrap();
+				group
+					.write_frame(timestamp, tagged(replica.name, sequence, frame))
+					.unwrap();
+			}
+			if resumes || dead.is_none() {
+				let expected = (sequence, tagged(replicas[0].name, sequence, frame));
+				assert_eq!(next(&mut rx).await, expected, "{version}");
+			}
+		}
+		for replica in &mut replicas {
+			replica.group.take().unwrap().finish().unwrap();
+		}
+	}
+	settle().await;
+
+	if resumes {
+		assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
+	} else {
+		let mut failed = false;
+		while let Ok((group, frame)) = rx.try_recv() {
+			match frame {
+				Ok((_, frame)) => panic!(
+					"{version}: stitched onto the replacement at {group}:{}",
+					String::from_utf8_lossy(&frame)
+				),
+				Err(_) => failed = true,
+			}
+		}
+		assert!(failed, "{version}: the track did not end with the upstream error");
+	}
+	drop((dead, replicas));
+}
+
+#[moq_net_sim::test]
+async fn replaced_without_an_epoch_ends_lite_06() {
+	moq_net_sim::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06", None, false))
+		.await
+		.expect("timed out");
+}
+
+#[moq_net_sim::test]
+async fn replaced_without_an_epoch_ends_lite_07() {
+	moq_net_sim::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip", None, false))
+		.await
+		.expect("timed out");
+}
+
+/// The relay resumes a pair sharing an epoch, so nothing reaches `D`.
+#[moq_net_sim::test]
+async fn pair_behind_a_relay_fails_over_lite_07() {
+	let epoch = Some(moq_net::Epoch::mint());
+	moq_net_sim::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip", epoch, true))
+		.await
+		.expect("timed out");
+}
+
+/// lite-06 carries no epoch, so the relay cannot tell the pair is one broadcast.
+#[moq_net_sim::test]
+async fn pair_behind_a_relay_ends_lite_06() {
+	let epoch = Some(moq_net::Epoch::mint());
+	moq_net_sim::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06", epoch, false))
+		.await
+		.expect("timed out");
+}
+
 /// `P` serves `video` on demand and replaces its producer partway through the broadcast,
 /// the way a publisher restarts an encoder. `R` reads through `A`, whose route stays up,
 /// so the logical track resumes onto the replacement. The replacement continues the
