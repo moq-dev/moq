@@ -53,8 +53,8 @@ Decided with the maintainer on 2026-10-04 and 2026-10-05:
   in drafts 18 and 21. That registry is moq-lite's too, and lite codes
   below 32 carry moq-transport's meaning, so add the rows to the Session
   Error Codes table in `drafts/draft-lcurley-moq-lite.md` and to
-  `session_codes_round_trip`, as [Request
-  tokens](/quest/m1/auth/request-token.md) does for 0x13 and 0x17. No
+  `session_codes_round_trip`, as [Request-token
+  decode](/quest/m1/auth/request-token-decode.md) does for 0x13 and 0x17. No
   per-version mapping. Where a code is a real burden, the PROTOCOL_VIOLATION
   fallback in the Goal applies.
 - **Regression tests, not a CI job for the validator.** Add one session or
@@ -72,8 +72,8 @@ Decided with the maintainer on 2026-10-04 and 2026-10-05:
   now closes the session.
 - **Mirror in `js/net/src/ietf`** in the same PR.
 - Request tokens are out of scope here. AUTH_TOKEN_CACHE_OVERFLOW and the
-  request-token decode belong to [Request
-  tokens](/quest/m1/auth/request-token.md).
+  request-token decode belong to [Request-token
+  decode](/quest/m1/auth/request-token-decode.md).
 
 Where each case lives, mapped on 2026-10-04 (paths under
 `rs/moq-net/src/`):
@@ -126,5 +126,5 @@ behaviour moves closer to the drafts.
 
 ## Related
 
-- [Request tokens](/quest/m1/auth/request-token.md) - owns request-token decode and AUTH_TOKEN_CACHE_OVERFLOW
+- [Request-token decode](/quest/m1/auth/request-token-decode.md) - owns request-token decode and AUTH_TOKEN_CACHE_OVERFLOW
 - [moq-transport request codes](/quest/m2/ietf-request-codes.md) - the request-level half of the same validator report
