@@ -1537,7 +1537,7 @@ impl PatReader {
 }
 
 /// Whether every adaptation field fits inside the length its packet declares.
-fn adaptation_valid(pkt: &[u8; TsPacket::SIZE]) -> bool {
+pub(super) fn adaptation_valid(pkt: &[u8; TsPacket::SIZE]) -> bool {
 	if pkt[3] & 0x20 == 0 {
 		return true;
 	}
@@ -1587,10 +1587,10 @@ pub(super) fn payload(pkt: &[u8; TsPacket::SIZE]) -> Payload<'_> {
 /// Private sections (SCTE-35 table_id 0xFC and others) are not PES. This handles
 /// pointer_field alignment, sections split across packets (including a 3-byte
 /// header split, where section_length is not yet known), continuity-counter
-/// gaps, and adaptation-field discontinuities. Deliberately private and minimal:
-/// just enough to recover whole sections verbatim.
+/// gaps, and adaptation-field discontinuities. Deliberately minimal: just enough to
+/// recover whole sections verbatim.
 #[derive(Default)]
-struct SectionReassembler {
+pub(super) struct SectionReassembler {
 	/// Bytes of the section currently being reassembled. Its 3-byte header (and
 	/// thus section_length) may not all be present yet, so completeness is
 	/// re-checked as bytes arrive; empty means no section in progress.
@@ -1601,7 +1601,7 @@ struct SectionReassembler {
 
 impl SectionReassembler {
 	/// Consume one 188-byte TS packet, appending every completed section to `out`.
-	fn push(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
+	pub(super) fn push(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
 		let pkt: &[u8; 188] = pkt.try_into().expect("section packet must be 188 bytes");
 		match self.continuity.observe(pkt) {
 			Continuation::Duplicate => return,

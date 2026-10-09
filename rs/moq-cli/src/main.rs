@@ -652,6 +652,7 @@ fn spawn_import(
 			.with_bandwidth(bandwidth.clone());
 		let publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
+			..
 		}) = &import.source
 		{
 			let name = require_broadcast(name, "import ts --program all")?;

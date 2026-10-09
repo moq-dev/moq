@@ -40,4 +40,4 @@ nightly.
 
 ## Related
 
-- [TS passthrough](/quest/m1/ts-passthrough.md) - the passthrough lane named in the Goal
+- [TS passthrough export](/quest/m1/ts-passthrough-export.md) - the passthrough lane named in the Goal
