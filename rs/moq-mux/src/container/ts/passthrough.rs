@@ -21,8 +21,10 @@
 //!   split to meet the bound.
 //!
 //! Only the first of these makes a group a random access point, so any other start publishes
-//! [`random_access`](hang::catalog::M2ts::random_access) false from then on. A group the PCR
-//! discontinuity starts is behind a break even when it is also a random access point.
+//! [`random_access`](hang::catalog::M2ts::random_access) false from then on, as does any group
+//! carried while the layout allows no random access (more than one program or video stream). A
+//! group the PCR discontinuity starts is behind a break even when it is also a random access
+//! point.
 //!
 //! Bytes before the first group are dropped: until the PMT, a PCR, and a group start have all
 //! been seen there is no group to put them in. The track is byte-identical to the input from its
@@ -209,7 +211,8 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	/// Closed objects waiting on the next PCR for their timestamps.
 	queue: VecDeque<Object>,
 	group: Option<Group>,
-	/// Whether every group so far started at a random access point.
+	/// Whether every group so far started at a random access point, and the layout allowed random
+	/// access throughout.
 	all_random_access: bool,
 
 	mux_rate: Meter,
@@ -611,7 +614,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			if object.discontinuity && self.group.is_some() {
 				self.media.discontinuity()?;
 			}
-			if start != Start::RandomAccess {
+			if start != Start::RandomAccess || !self.single {
 				self.all_random_access = false;
 			}
 			if self.reservation.is_some() {
@@ -766,6 +769,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.access_pid = access_pid;
 		self.mapped = mapped;
 		self.single = single;
+		// The group in progress now carries what no random access point covers, and it stays cached.
+		if !single && self.started() {
+			self.all_random_access = false;
+		}
 		self.record()
 	}
 }

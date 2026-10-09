@@ -289,7 +289,7 @@ A group starts at:
 - the frame that would take a group past a size bound the publisher chooses below what a relay caches of one group; frames are never split to meet it.
 
 `randomAccess` is true only while the PAT lists one program, its PMT declares at most one video stream, and the clock PID is that PMT's `PCR_PID`, and only if every group so far has started at a `random_access_indicator`.
-The first group that starts any other way republishes the section with `randomAccess` false for the rest of the track.
+The first group that starts any other way, or that carries packets while that layout does not hold, republishes the section with `randomAccess` false for the rest of the track.
 With more programs or video streams the random access points can stagger, so a group start is not one for all of them.
 
 Both indicators sit in the adaptation field, which TS-level scrambling leaves in the clear, so a scrambled multiplex groups like its clear twin.

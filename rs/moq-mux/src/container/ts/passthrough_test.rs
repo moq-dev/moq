@@ -477,6 +477,23 @@ async fn two_programs_on_one_clock_publish_no_random_access() {
 	}
 }
 
+/// Groups started while a second program was on air stay cached, so dropping back to one program
+/// does not win random access back.
+#[tokio::test(start_paused = true)]
+async fn random_access_lost_to_a_second_program_stays_lost() {
+	let mut mux = Mux::default();
+	mux.pat(&[(1, 0x20), (2, 0x30)])
+		.pmt(0x20, 1, 0x100, &[(0x1b, 0x100)], 0)
+		.pmt(0x30, 2, 0x100, &[(0x1b, 0x200)], 0);
+	paced(&mut mux, 0x100, 0, 30, 10, 4);
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 1_200 * MS, 30, 10, 4);
+	let data = mux.bytes();
+	let imported = import(&data, data.len(), None).await.unwrap();
+	assert!(imported.groups().len() >= 6);
+	assert!(!imported.section().random_access);
+}
+
 #[tokio::test(start_paused = true)]
 async fn two_video_streams_in_one_program_publish_no_random_access() {
 	let mut mux = Mux::default();
