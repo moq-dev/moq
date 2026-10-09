@@ -808,6 +808,42 @@ impl TrackState {
 			.is_some_and(|reach| matches!(live.timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget))
 	}
 
+	/// [`Self::drifted`] under `cap`, parking `waiter` on exactly what else can move the
+	/// verdict: the successor's first frame or abort, and the edge crossing the deadline.
+	/// Parking on every track change instead wakes each of N parked reads per append.
+	///
+	/// The caller parks on a group landing above `sequence` first, in the way that fits
+	/// whether this track holds it.
+	fn poll_drifted(&self, sequence: u64, cap: Option<u64>, budget: Duration, waiter: &kio::Waiter) -> bool {
+		let reach = loop {
+			// An abort can change reach even after the successor is stamped.
+			// Register before judging, so a racing abort is observed or wakes us.
+			// An abort only closes the group, never touching the track, so one that
+			// landed before registering must re-select or the replacement goes unwatched.
+			let successor = loop {
+				let successor = self.first_servable(sequence.saturating_add(1), cap);
+				match successor {
+					Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
+					successor => break successor,
+				}
+			};
+			// Unbounded until a group lands above, or the successor presents its first frame.
+			let Some(successor) = successor else {
+				return false;
+			};
+			if let Some(reach) = successor.timestamp() {
+				break reach;
+			}
+			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
+				return false;
+			}
+		};
+		// Registered before the edge is resolved, so a write crossing the deadline is
+		// either seen here or wakes us.
+		self.cache.wakes().watch_deadline(reach, budget, waiter);
+		self.drifted(sequence, &self.drift_edge(cap), budget)
+	}
+
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
 	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]), not an
 	/// end-of-stream. The handler side (a rejection, or no [`Dynamic`] at all) lives
@@ -2903,17 +2939,14 @@ impl Consumer {
 
 	/// Poll for group `sequence` falling a full `budget` behind this track's live edge,
 	/// as a reader would judge it, whether the track holds it or not; see
-	/// `TrackState::is_stale`. Pending for good once the track closes.
+	/// `TrackState::drifted`. Parks in this track's expiry index, so only a change that can
+	/// make the group stale wakes it.
 	pub(crate) fn poll_stale(&self, sequence: u64, budget: Duration, waiter: &kio::Waiter) -> Poll<()> {
-		let res = self.state.poll(waiter, |state| {
-			match state.drifted(sequence, &state.drift_edge(None), budget) {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		});
-		match res {
-			Poll::Ready(Ok(())) => Poll::Ready(()),
-			_ => Poll::Pending,
+		let state = self.state.read();
+		state.cache.wakes().watch_held(sequence, waiter);
+		match state.poll_drifted(sequence, None, budget, waiter) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
 		}
 	}
 
@@ -3552,38 +3585,8 @@ impl group::Expiry for GroupExpiry {
 
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
-		let wakes = state.cache.wakes();
-		// Park on exactly what can move the verdict: a group landing above this one, the
-		// successor's first frame or abort, and the edge crossing the deadline. Parking on
-		// every track change instead wakes each of N parked reads per append.
-		wakes.watch_landing(self.sequence, waiter);
-		let reach = loop {
-			// An abort can change reach even after the successor is stamped.
-			// Register before judging, so a racing abort is observed or wakes us.
-			// An abort only closes the group, never touching the track, so one that
-			// landed before registering must re-select or the replacement goes unwatched.
-			let successor = loop {
-				let successor = state.first_servable(self.sequence.saturating_add(1), cap);
-				match successor {
-					Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
-					successor => break successor,
-				}
-			};
-			// Unbounded until a group lands above, or the successor presents its first frame.
-			let Some(successor) = successor else {
-				return false;
-			};
-			if let Some(reach) = successor.timestamp() {
-				break reach;
-			}
-			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
-				return false;
-			}
-		};
-		// Registered before the edge is resolved, so a write crossing the deadline is
-		// either seen here or wakes us.
-		wakes.watch_deadline(reach, budget, waiter);
-		state.is_stale(self.sequence, &state.drift_edge(cap), budget)
+		state.cache.wakes().watch_landing(self.sequence, waiter);
+		state.poll_drifted(self.sequence, cap, budget, waiter) && state.lookup.contains_key(&self.sequence)
 	}
 }
 

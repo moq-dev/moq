@@ -1,4 +1,5 @@
-//! Wakes for group reads parked on their subscription's drift budget.
+//! Wakes for group reads parked on their subscription's drift budget, and for groups held
+//! across a route switch until the serving copy leaves them behind.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +15,9 @@ use super::Timestamp;
 /// write presented, so the write that crosses a deadline wakes the reads behind it and
 /// nobody else. The successor itself is watched per group (its first frame, its abort),
 /// except for a group landing between the read and it, which reads park on by sequence.
+///
+/// A group held across a route switch parks in the serving copy's index the same way,
+/// although that copy need not hold it; see `track::Consumer::poll_stale`.
 ///
 /// Waking every parked read on every track change instead costs a backlog of N parked
 /// reads N wakes per append: an audio backlog of ~800 one-frame groups pins a runtime.
@@ -34,6 +38,10 @@ struct Parked {
 	deadlines: BTreeMap<u64, kio::WaiterList>,
 	/// Reads by their group's sequence, woken when a group lands above them.
 	landings: BTreeMap<u64, kio::WaiterList>,
+	/// `landings` for groups held from another copy. Kept apart because this track may
+	/// never have held them, so falling below its oldest group does not end them. Never
+	/// forgotten, but only the groups in flight at each route switch park here.
+	held: BTreeMap<u64, kio::WaiterList>,
 }
 
 impl Default for Wakes {
@@ -88,25 +96,28 @@ impl Wakes {
 			.register(waiter);
 	}
 
+	/// Park `waiter`, holding group `sequence` from another copy, until a group lands above it.
+	pub(crate) fn watch_held(&self, sequence: u64, waiter: &kio::Waiter) {
+		self.parked.lock().held.entry(sequence).or_default().register(waiter);
+	}
+
 	/// A servable group landed at `sequence`, so it succeeds every read from `below`, the
 	/// nearest servable group beneath it, up. Reads below `oldest`, the first group still
-	/// cached, can no longer expire and are forgotten.
+	/// cached, can no longer expire and are forgotten; held groups are not.
 	pub(crate) fn landed(&self, below: Option<u64>, sequence: u64, oldest: u64) {
 		let mut woken = Vec::new();
 		{
 			let mut parked = self.parked.lock();
+			let parked = &mut *parked;
 			while let Some(entry) = parked.landings.first_entry()
 				&& *entry.key() < oldest
 			{
 				entry.remove();
 			}
-			while let Some(at) = parked
-				.landings
-				.range(below.unwrap_or(0)..sequence)
-				.next()
-				.map(|(at, _)| *at)
-			{
-				woken.extend(parked.landings.remove(&at));
+			for parked in [&mut parked.landings, &mut parked.held] {
+				while let Some(at) = parked.range(below.unwrap_or(0)..sequence).next().map(|(at, _)| *at) {
+					woken.extend(parked.remove(&at));
+				}
 			}
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
@@ -119,7 +130,8 @@ impl Wakes {
 			self.earliest.store(u64::MAX, Ordering::Relaxed);
 			std::mem::take(&mut *parked)
 		};
-		for mut list in parked.deadlines.into_values().chain(parked.landings.into_values()) {
+		let lists = parked.deadlines.into_values().chain(parked.landings.into_values());
+		for mut list in lists.chain(parked.held.into_values()) {
 			list.wake();
 		}
 	}
