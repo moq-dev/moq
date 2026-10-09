@@ -226,7 +226,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "dependencies": {
         "@moq/pattern": "workspace:^",
         "@moq/qmux": "^0.3.3",
