@@ -268,6 +268,37 @@ describe("restart", () => {
 		await settle();
 	});
 
+	it("opens no request after teardown races a start", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("live.hang");
+		const published = publish(owner, name);
+
+		// Count every request the player opens and closes.
+		let open = 0;
+		const request = owner.request.bind(owner);
+		owner.request = (path, options) => {
+			const opened = request(path, options);
+			open += 1;
+			const close = opened.close.bind(opened);
+			let closed = false;
+			opened.close = () => {
+				if (!closed) open -= 1;
+				closed = true;
+				close();
+			};
+			return opened;
+		};
+
+		// The initial start settles just before teardown, so its continuation runs after it.
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		queueMicrotask(() => queueMicrotask(() => source.close()));
+		await settle();
+		expect(open).toBe(0);
+
+		published.close();
+		owner.close();
+	});
+
 	it("moves to a more specific announcement of another instance", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");

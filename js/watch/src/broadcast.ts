@@ -280,7 +280,8 @@ export class Broadcast {
 		effect.spawn(async () => {
 			for (;;) {
 				const entry = await effect.race(stream.next());
-				if (!entry) break;
+				// An event that settled just before teardown still resumes here: open nothing then.
+				if (!entry || effect.abort.aborted) break;
 				if (entry.kind === "end" || entry.kind === "update") continue;
 				if (!Path.hasPrefix(entry.prefix, name)) continue;
 				const previous = current.peek();
