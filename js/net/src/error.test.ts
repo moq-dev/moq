@@ -209,7 +209,9 @@ test("the code tables match the spec", () => {
 	expect(Number(SessionCode.Cancel)).toBe(0x0);
 	expect(Number(SessionCode.Unauthorized)).toBe(0x2);
 	expect(Number(SessionCode.GoawayTimeout)).toBe(0x10);
+	expect(Number(SessionCode.AuthTokenCacheOverflow)).toBe(0x13);
 	expect(Number(SessionCode.Version)).toBe(0x15);
+	expect(Number(SessionCode.UnknownAuthTokenAlias)).toBe(0x17);
 	expect(Number(StreamCode.Cancel)).toBe(0x1);
 	expect(Number(StreamCode.SessionClosed)).toBe(0x3);
 	expect(Number(StreamCode.TooFarBehind)).toBe(0x5);

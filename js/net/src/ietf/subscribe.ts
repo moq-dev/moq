@@ -300,7 +300,7 @@ export class SubscribeOk {
 				largest = { groupId, objectId };
 			}
 
-			properties.maxCacheDuration = (await Parameters.decode(r, version)).maxCacheDuration;
+			properties.maxCacheDuration = (await Parameters.decode(r, version, "subscribe-ok")).maxCacheDuration;
 		} else {
 			// v15+: parameters followed by Track Properties (draft-17+). LARGEST_OBJECT is
 			// required on every draft once the track has content, so rejecting it would tear

@@ -37,9 +37,9 @@ impl PublishNamespace<'_> {
 		}
 		let track_namespace = decode_namespace(r)?;
 
-		// The token is ignored: the session's grant is what authorizes the request.
+		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
-			0x03 => _authorization_token: Vec<super::Opaque>,
+			0x03 => _authorization_token: Vec<super::token::RequestToken>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
@@ -144,9 +144,9 @@ impl Message for PublishNamespaceUpdate {
 			}
 			_ => RequestId::decode(r, version)?,
 		};
-		// The token is ignored: the session's grant is what authorizes the request.
+		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
-			0x03 => _authorization_token: Vec<super::Opaque>,
+			0x03 => _authorization_token: Vec<super::token::RequestToken>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);

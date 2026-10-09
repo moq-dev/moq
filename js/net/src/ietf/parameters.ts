@@ -2,13 +2,14 @@ import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as Filter from "./filter.ts";
+import { AUTHORIZATION_TOKEN, tokenFromRequest } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /// Setup Option key constants (separate namespace from Message Parameters).
 export const SetupOption = {
 	Path: 1n,
 	MaxRequestId: 2n,
-	AuthorizationToken: 3n,
+	AuthorizationToken: AUTHORIZATION_TOKEN,
 	MaxAuthTokenCacheSize: 4n,
 	Authority: 5n,
 	Implementation: 7n,
@@ -221,8 +222,8 @@ const MSG_PARAM_ROUTE_COST = 0x40b58n;
 const MSG_PARAM_HIDDEN = 0x40b5en;
 
 // Bytes parameter IDs (odd)
-/// AUTHORIZATION TOKEN. Ignored: the session's grant is what authorizes a request.
-const MSG_PARAM_AUTHORIZATION_TOKEN = 0x03n;
+/// AUTHORIZATION TOKEN. Decoded, but grants nothing: the session's grant is what authorizes a request.
+const MSG_PARAM_AUTHORIZATION_TOKEN = AUTHORIZATION_TOKEN;
 const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 /// FILL_PARAMETERS, draft-20's request for a backfill.
@@ -254,6 +255,7 @@ function draft20(version: IetfVersion): boolean {
 
 /** True when this draft's definition of `message` includes `id`. */
 function allows(message: ControlMessage, version: IetfVersion, id: bigint): boolean {
+	const d14 = version === Version.DRAFT_14;
 	const d15 = version === Version.DRAFT_15;
 	const d16 = version === Version.DRAFT_16;
 	const d17 = version === Version.DRAFT_17;
@@ -294,6 +296,8 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				include
 			);
 		case "subscribe-ok":
+			// Draft-14 defines only MAX_CACHE_DURATION here.
+			if (d14) return id === MSG_PARAM_MAX_CACHE_DURATION;
 			return (id === MSG_PARAM_MAX_CACHE_DURATION && d15) || expires || largest || (order && d15);
 		case "subscribe-update":
 		case "request-update":
@@ -440,7 +444,9 @@ export class Parameters {
 		this.#repeated = new Map();
 	}
 
-	#repeat(id: bigint, value: Uint8Array) {
+	#repeat(id: bigint, value: Uint8Array, version: IetfVersion) {
+		// Every token decodes, so one this endpoint cannot use closes the session.
+		if (id === MSG_PARAM_AUTHORIZATION_TOKEN) tokenFromRequest(value, version);
 		const values = this.#repeated.get(id) ?? [];
 		values.push(value);
 		this.#repeated.set(id, values);
@@ -719,7 +725,9 @@ export class Parameters {
 	 * draft defines for a different message is ignored through draft-16 and closes the
 	 * session from draft-17 on. An id the draft does not define at all closes from
 	 * draft-16 on. Draft-14 and draft-15 ignore anything the message does not list.
-	 * Omitting `message` keeps the previous decode, which stores every id.
+	 * Omitting `message`, as a draft-14 request does, stores every id.
+	 *
+	 * Only a request may carry an AUTHORIZATION TOKEN, and every one decodes.
 	 */
 	static async decode(r: Reader, version: IetfVersion, message?: ControlMessage): Promise<Parameters> {
 		const count = await r.u53();
@@ -766,7 +774,7 @@ export class Parameters {
 					const size = await r.u53();
 					const bytes = await r.read(size);
 					if (MSG_PARAM_REPEATABLE.includes(id)) {
-						params.#repeat(id, bytes);
+						params.#repeat(id, bytes, version);
 					} else if (id === MSG_PARAM_LARGEST_OBJECT) {
 						if (params.#locations.has(id)) {
 							throw new Error(`duplicate message parameter id: ${id.toString()}`);
@@ -790,7 +798,7 @@ export class Parameters {
 
 			if (MSG_PARAM_REPEATABLE.includes(id)) {
 				const size = await r.u53();
-				params.#repeat(id, await r.read(size));
+				params.#repeat(id, await r.read(size), version);
 				continue;
 			}
 

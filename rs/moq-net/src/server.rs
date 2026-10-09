@@ -1188,7 +1188,7 @@ mod tests {
 		let delete = [0x0, 0x7]; // DELETE alias 7
 		let truncated = [0x3]; // USE_VALUE with no Token Type
 		for (raw, code) in [
-			(&delete[..], SessionError::ProtocolViolation),
+			(&delete[..], SessionError::UnknownAuthTokenAlias),
 			(&truncated[..], SessionError::KeyValueFormatting),
 		] {
 			let mut params = ietf::Parameters::default();

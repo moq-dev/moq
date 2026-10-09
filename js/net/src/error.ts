@@ -44,8 +44,12 @@ export const SessionCode = Object.freeze(
 		GoawayTimeout: 0x10 as SessionCode,
 		/** A control message took too long. */
 		Timeout: 0x11 as SessionCode,
+		/** A token registration would exceed the advertised token cache size, which is 0 when unadvertised. */
+		AuthTokenCacheOverflow: 0x13 as SessionCode,
 		/** No version could be negotiated. */
 		Version: 0x15 as SessionCode,
+		/** A token named an alias that was never registered. */
+		UnknownAuthTokenAlias: 0x17 as SessionCode,
 	} as const),
 );
 
@@ -296,9 +300,13 @@ export class RefusedRedirect extends Error {
  * @public
  */
 export class ProtocolViolation extends Error {
-	constructor(message: string, options?: { cause?: unknown }) {
+	/** The session code to close with: `ProtocolViolation` unless the draft names a more specific one. */
+	readonly code: SessionCode;
+
+	constructor(message: string, options?: { cause?: unknown; code?: SessionCode }) {
 		super(message, options);
 		this.name = "ProtocolViolation";
+		this.code = options?.code ?? SessionCode.ProtocolViolation;
 	}
 }
 

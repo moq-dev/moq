@@ -314,7 +314,7 @@ impl Message for Publish<'_> {
 				};
 				let forward = r.bool()?;
 				// parameters
-				Parameters::skip(r)?;
+				Parameters::skip_request(r)?;
 
 				Ok(Self {
 					request_id,
@@ -340,7 +340,7 @@ impl Message for Publish<'_> {
 				// OBJECT_DELIVERY_TIMEOUT is also legal in draft-15. The values are dropped.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64> where version == Version::Draft15 || Filter::is_draft20(version),
-					0x03 => _authorization_token: Vec<super::Opaque>,
+					0x03 => _authorization_token: Vec<super::token::RequestToken>,
 					0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft20(version),
 					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
@@ -440,7 +440,7 @@ impl Message for PublishOk {
 				let filter = Filter::decode(r, version)?;
 
 				// no parameters
-				Parameters::skip(r)?;
+				Parameters::skip_response(r)?;
 
 				Ok(Self {
 					request_id,

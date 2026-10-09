@@ -46,9 +46,18 @@ pub enum SessionError {
 	#[error("control message timeout")]
 	Timeout,
 
+	/// A token registration would exceed the advertised `MAX_AUTH_TOKEN_CACHE_SIZE`, which is
+	/// 0 when unadvertised.
+	#[error("auth token cache overflow")]
+	AuthTokenCacheOverflow,
+
 	/// No version could be negotiated.
 	#[error("version negotiation failed")]
 	Version,
+
+	/// A token named an alias that was never registered.
+	#[error("unknown auth token alias")]
+	UnknownAuthTokenAlias,
 
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	#[error("app code={0}")]
@@ -71,7 +80,9 @@ impl SessionError {
 			Self::TooManyRequests => 0x7,
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
+			Self::AuthTokenCacheOverflow => 0x13,
 			Self::Version => 0x15,
+			Self::UnknownAuthTokenAlias => 0x17,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -92,7 +103,9 @@ impl SessionError {
 			0x7 => Self::TooManyRequests,
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
+			0x13 => Self::AuthTokenCacheOverflow,
 			0x15 => Self::Version,
+			0x17 => Self::UnknownAuthTokenAlias,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -549,7 +562,7 @@ impl From<StreamError> for Error {
 impl From<&Error> for SessionError {
 	fn from(err: &Error) -> Self {
 		match err {
-			Error::Session(err) => err.clone(),
+			Error::Session(err) | Error::Decode(coding::DecodeError::Session(err)) => err.clone(),
 			// App codes share the 64+ range in both registries.
 			Error::Stream(StreamError::App(app)) => Self::App(*app),
 			// A stream-scoped code has no meaning in this registry; don't forward the number.
@@ -595,6 +608,7 @@ impl From<&Error> for StreamError {
 			Error::Session(_) => Self::Internal,
 			Error::Cancel | Error::Closed => Self::Cancel,
 			Error::SessionClosed => Self::Session(SessionError::Cancel),
+			Error::Decode(coding::DecodeError::Session(err)) => Self::Session(err.clone()),
 			Error::Old => Self::Old,
 			Error::Evicted => Self::Evicted,
 			Error::Lagged => Self::TooFarBehind,
@@ -659,7 +673,9 @@ mod tests {
 			SessionError::TooManyRequests,
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,
+			SessionError::AuthTokenCacheOverflow,
 			SessionError::Version,
+			SessionError::UnknownAuthTokenAlias,
 			SessionError::App(0),
 			SessionError::App(404),
 		];
@@ -675,7 +691,9 @@ mod tests {
 		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
 		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
+		assert_eq!(SessionError::AuthTokenCacheOverflow.to_code(), 0x13);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
+		assert_eq!(SessionError::UnknownAuthTokenAlias.to_code(), 0x17);
 
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
 		// of being given a meaning. A peer on the old placeholders (0x20-0x22) lands here.
