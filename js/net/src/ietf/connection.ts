@@ -6,7 +6,7 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
+import { error, fromClose, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -267,7 +267,7 @@ export class Connection implements Established {
 	// The peer broke the protocol, so losing the stream is not enough: nothing stops it
 	// repeating the violation on the next one.
 	#violated(err: ProtocolViolation) {
-		this.#close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
+		this.#close({ closeCode: err.code, reason: err.message });
 	}
 
 	async #run(early: Reader[]): Promise<void> {

@@ -241,7 +241,7 @@ test("Cluster: a negotiated PUBLISH_NAMESPACE may carry AUTHORIZATION_TOKEN", as
 				await wr.u62(1n);
 				await Namespace.encode(wr, Path.from("alice.hang"));
 				const params = Cluster.intoParams(advert);
-				params.bytes.set(0x03n, new Uint8Array([1, 2, 3])); // AUTHORIZATION_TOKEN
+				params.bytes.set(0x03n, new Uint8Array([0x03, 0x00, 0xaa])); // AUTHORIZATION_TOKEN: USE_VALUE, type 0
 				await params.encode(wr, version);
 			});
 		},

@@ -222,6 +222,8 @@ export async function decodeParams(
 	try {
 		params = await Parameters.decode(r, version, message);
 	} catch (err) {
+		// Keep a violation's own code, such as a request token's.
+		if (err instanceof ProtocolViolation) throw err;
 		throw new ProtocolViolation(reason(err), { cause: err });
 	}
 

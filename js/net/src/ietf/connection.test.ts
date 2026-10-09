@@ -497,3 +497,60 @@ for (const [version, alpn] of [
 		});
 	}
 }
+
+/** A SUBSCRIBE for `room/video` whose only parameter is an AUTHORIZATION TOKEN holding `token`. */
+function subscribeWithToken(version: IetfVersion, token: readonly number[]): Uint8Array {
+	const ascii = (text: string) => [...new TextEncoder().encode(text)];
+	// Request ID, then the namespace and track name.
+	const head = [0, 1, 4, ...ascii("room"), 5, ...ascii("video")];
+	// Draft-14 carries priority, group order, forward, and a Largest Object filter inline.
+	const fields = version === Version.DRAFT_14 ? [0x80, 0x02, 0x01, 0x02] : [];
+	const body = [...head, ...fields, 1, 0x03, token.length, ...token];
+	return new Uint8Array([0x03, 0, body.length, ...body]);
+}
+
+/**
+ * A request's AUTHORIZATION TOKEN decodes by the SETUP option's rules, so one this endpoint
+ * cannot use closes the session with the draft's code. Draft-14 carries the request on the
+ * control stream, a strict draft on its own stream.
+ */
+for (const [version, alpn] of [
+	[Version.DRAFT_14, ALPN.DRAFT_14],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	for (const [name, token, code] of [
+		["REGISTER", [0x01, 0x07, 0x00], SessionCode.AuthTokenCacheOverflow],
+		["DELETE", [0x00, 0x07], SessionCode.UnknownAuthTokenAlias],
+		["USE_ALIAS", [0x02, 0x07], SessionCode.UnknownAuthTokenAlias],
+		["USE_VALUE without a type", [0x03], SessionCode.KeyValueFormatting],
+		["an unknown alias type", [0x04, 0x00], SessionCode.KeyValueFormatting],
+	] as const) {
+		test(`a request token with ${name} closes ${alpn}`, async () => {
+			const logged = spyOn(console, "error").mockImplementation(() => void 0);
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.server, { version });
+			const connection = new Connection({
+				url: new URL("https://example.com"),
+				quic: pair.server,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: false,
+			});
+			try {
+				const stream =
+					version === Version.DRAFT_14
+						? await Stream.accept(pair.client, version)
+						: await Stream.open(pair.client, { version });
+				if (!stream) throw new Error("no control stream");
+				await stream.writer.write(subscribeWithToken(version, token));
+
+				const info = await pair.client.closed;
+				expect(info.closeCode).toBe(code);
+			} finally {
+				logged.mockRestore();
+				connection.abort();
+			}
+		});
+	}
+}
