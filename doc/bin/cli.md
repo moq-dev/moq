@@ -242,13 +242,13 @@ Each run of `moq` announces a fresh
 The RTMP, SRT, and WHIP ingests mint one per connection instead, and
 `import ts --program all` one per program.
 
-Epochs cross a connection only on moq-lite 07, which is opt-in. There, a
-restarted process takes the name at once, as long as its host's clock is not
-behind the old run's: subscriptions to the old run end with
-`Unroutable`, and a viewer's next subscribe reaches the new run instead of
-waiting for its group numbers to catch up. On older versions and moq-transport
-the relay sees no epoch and keeps a subscription on the route it first resolved
-through, so viewers of a restarted process wait until the old session closes.
+A restarted process takes the name at once: viewers see the broadcast restart,
+and their next subscribe reaches the new run instead of waiting for its group
+numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
+opt-in, and order by the host's clock there, so a host whose clock runs behind
+the old run's waits for it to close. Older versions and moq-transport carry no
+epoch, so a restart from another session is the newest route at an equal cost,
+or a better one.
 
 On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them

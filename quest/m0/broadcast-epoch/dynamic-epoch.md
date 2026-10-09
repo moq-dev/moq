@@ -34,7 +34,7 @@ refusing an epoch change in `update` (forces drop and re-claim for no
 benefit), and ending served broadcasts on an epoch change (more model code,
 and the handler can already do it).
 
-Aligned 2026-10-08 with [Restart](/quest/m0/broadcast-epoch/restart.md), which
+Aligned 2026-10-08 with Restart, which
 replaced the hard switch: downstream subscriptions are not ended by the
 model; the `Restart` tells them to drop the old copy and resubscribe.
 
@@ -48,6 +48,3 @@ model; the `Restart` tells them to drop the old copy and resubscribe.
   docs and tests; otherwise fix the gap at its source.
 - Keep the same-epoch repricing case in the same test, proving handles survive.
 
-## Required
-
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - the `Restart` event and the no-splice rule this update reuses

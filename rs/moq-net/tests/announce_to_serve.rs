@@ -44,6 +44,7 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 		let (kind, announce) = match event {
 			Event::Start(announce) => ("Start", announce),
 			Event::Update(announce) => ("Update", announce),
+			Event::Restart(announce) => ("Restart", announce),
 			Event::End(announce) => ("End", announce),
 		};
 		seen.push(format!("{kind} {}", announce.prefix));

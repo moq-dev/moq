@@ -12,7 +12,7 @@ is announced again, like a player going offline and back online.
 ## Plan
 
 Decided in planning (2026-10-06, after #4955 found that no quest covered
-`moqsrc`), re-scoped onto [Restart](/quest/m0/broadcast-epoch/restart.md)
+`moqsrc`), re-scoped onto Restart
 (2026-10-07):
 
 - **Follow announcements.** `moqsrc` follows the path's announcements
@@ -81,6 +81,3 @@ EOS, and an ended broadcast holds its pads until the next `Start`.
 Public API: no new property, but an ended broadcast no longer sends EOS on
 its pads. Wire: none.
 
-## Required
-
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - delivers the `Restart` announce event and sticky subscriptions this follows

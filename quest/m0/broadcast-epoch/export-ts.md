@@ -93,10 +93,6 @@ renamed. New: `ts::Export::follow`, and `linger` and `stitch` on
 `moq_srt::Config`. CLI: new `--stitch` on `export ts` and SRT egress, and `--linger`
 no longer follows a replacement. Wire: none.
 
-## Required
-
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - the announce event and epoch the export follows
-
 ## Related
 
 - [No stitch](/quest/m0/broadcast-epoch/no-stitch.md) - stops moq-net hiding a replacement from the export

@@ -2257,8 +2257,9 @@ mod tests {
 	}
 
 	/// An encoder reconnecting under the same key while its stale connection is still
-	/// open replaces the stale broadcast at once: each connection is its own epoch, so
-	/// viewers re-request instead of stalling on the old one.
+	/// open restarts the broadcast at once: each connection is its own epoch, so a
+	/// fresh request reaches the reconnect, while the stale viewer stays on the old one
+	/// until it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_publish() {
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -2290,21 +2291,26 @@ mod tests {
 			.await
 			.unwrap();
 
+		let mut announced = consumer.announced();
 		let fresh_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
-		let ended = tokio::time::timeout(Duration::from_secs(5), async {
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while !matches!(announced.next().await, Some(moq_net::announce::Event::Restart(_))) {}
+		})
+		.await
+		.expect("the reconnect restarts the broadcast");
+
+		let stale_viewer = tokio::time::timeout(Duration::from_millis(200), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
-					Ok(None) => panic!("the stale broadcast ended cleanly"),
-					Err(err) => return err,
+					other => return other.map(|_| ()),
 				}
 			}
 		})
-		.await
-		.expect("the stale viewer stalled");
-		assert!(matches!(ended, moq_net::Error::Unroutable), "{ended:?}");
+		.await;
+		assert!(stale_viewer.is_err(), "the stale viewer ended: {stale_viewer:?}");
 		assert!(!stale_client.is_finished(), "the stale connection is still open");
 
 		let fresh = consumer.request_broadcast("live/cam0", None).await.unwrap();
