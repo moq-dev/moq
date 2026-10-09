@@ -25,6 +25,11 @@ groups not supported") in `run_fetch_stream`
 refusal of a filter bounded by it ("FETCH relative to Largest Object not
 supported"): no filter, a relative start, or an absolute start with no end.
 
+The same FETCH-end path sets End of Track only when the read hits FIN, so a
+bounded FETCH that ends exactly at the track's last object reports
+`end_of_track: false` (found while landing #4971; it predates it). Set it from
+the track's known end, and test a FETCH ending on the final object.
+
 ## Required
 
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - the range requests this answers
