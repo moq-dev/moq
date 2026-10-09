@@ -177,33 +177,6 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
-	/// Record the encode duration before publishing its frames so the catalog can report a stall.
-	pub fn observe_lag(&mut self, lag: std::time::Duration) -> Result<(), Error> {
-		match &mut self.codecs {
-			Codecs::H264 { import, .. } => import.observe_lag(lag)?,
-			Codecs::H265 { import, .. } => import.observe_lag(lag)?,
-		}
-		Ok(())
-	}
-
-	/// Re-evaluate stall from source silence while waiting for the next frame.
-	pub fn tick(&mut self) -> Result<(), Error> {
-		match &mut self.codecs {
-			Codecs::H264 { import, .. } => import.tick()?,
-			Codecs::H265 { import, .. } => import.tick()?,
-		}
-		Ok(())
-	}
-
-	/// The camera is released; this rendition is never stalled while idle.
-	pub fn idle(&mut self) -> Result<(), Error> {
-		match &mut self.codecs {
-			Codecs::H264 { import, .. } => import.idle()?,
-			Codecs::H265 { import, .. } => import.idle()?,
-		}
-		Ok(())
-	}
-
 	/// Mark a break in the published timeline: whatever is published next does not continue
 	/// what came before.
 	///
@@ -648,29 +621,22 @@ fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Erro
 	producer.discontinuity()
 }
 
-// Keep observing silence while source setup or an encode is pending. The work
-// future stays pinned across ticks, so a slow operation is never restarted.
+// Race source setup or an encode against the last viewer leaving, so an unwatched track
+// stops waiting promptly.
 #[cfg(feature = "capture")]
-async fn wait_capture<E: CatalogExt, T>(
-	producer: &mut Producer<E>,
+async fn wait_capture<T>(
 	demand: &moq_net::track::Demand,
 	work: impl std::future::Future<Output = Result<T, Error>>,
 ) -> Result<Option<T>, Error> {
-	let mut work = std::pin::pin!(work);
-	let mut timer = tokio::time::interval(hang::catalog::stalled::DEFAULT_INTERVAL);
-	loop {
-		tokio::select! {
-			biased;
-			res = demand.unused() => {
-				if let Err(err) = res {
-					log_track_ended(err);
-				}
-				producer.idle()?;
-				return Ok(None);
+	tokio::select! {
+		biased;
+		res = demand.unused() => {
+			if let Err(err) = res {
+				log_track_ended(err);
 			}
-			_ = timer.tick() => producer.tick()?,
-			res = &mut work => return res.map(Some),
+			Ok(None)
 		}
+		res = work => res.map(Some),
 	}
 }
 
@@ -710,7 +676,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		}
 
 		// Open the camera and an encoder sized to its negotiated mode.
-		let Some(mut camera) = wait_capture(producer, demand, source.open(capture)).await? else {
+		let Some(mut camera) = wait_capture(demand, source.open(capture)).await? else {
 			continue;
 		};
 		// Capture timestamps use a private monotonic timeline. Sample both clocks
@@ -733,7 +699,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// No cut on reopen: a fresh encoder opens with a keyframe on every backend,
 		// so the viewer whose subscription reopened the camera can decode from the
 		// first frame regardless, and a backend that cannot cut still captures.
-		let Some(mut encoder) = wait_capture(producer, demand, Sink::open(&encoder_config)).await? else {
+		let Some(mut encoder) = wait_capture(demand, Sink::open(&encoder_config)).await? else {
 			continue;
 		};
 		// A reopen can land on another backend than the probe did, so the controls
@@ -761,7 +727,6 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 			// Race the next frame against the last viewer leaving so we release the
 			// camera promptly when demand drops. `biased` checks demand first so an
 			// unwatched track stops before reading another frame.
-			let interval = hang::catalog::stalled::interval_from_fps(Some(framerate.as_f64()));
 			let frame = tokio::select! {
 				biased;
 				res = demand.unused() => {
@@ -779,14 +744,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 				}
 				// A read error is terminal for this selection (the source is gone
 				// or was refused); `None` just ends the stream, so reopen below.
-				// Timing out is a quiet camera: mark the rendition stalled and wait again.
-				frame = tokio::time::timeout(interval, camera.read()) => match frame {
-					Ok(frame) => frame?,
-					Err(_) => {
-						producer.tick()?;
-						continue;
-					}
-				},
+				frame = camera.read() => frame?,
 			};
 
 			let Some(mut frame) = frame else { break };
@@ -796,12 +754,9 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 				// Never refused: `Control::cut` stops counting once this encoder is known to.
 				encoder.cut().await?;
 			}
-			let started = Instant::now();
-			let Some(encoded) = wait_capture(producer, demand, encoder.encode(frame)).await? else {
+			let Some(encoded) = wait_capture(demand, encoder.encode(frame)).await? else {
 				break;
 			};
-			let lag = started.elapsed();
-			producer.observe_lag(lag)?;
 			for unit in encoded.iter().filter(|unit| unit.keyframe) {
 				forced.keyframe(unit.timestamp);
 			}
@@ -811,7 +766,6 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
 		drop(camera);
 		drop(encoder);
-		producer.idle()?;
 		capture_stopped(producer)?;
 		tracing::info!("capture stopped; released source");
 	}
@@ -1511,7 +1465,7 @@ mod tests {
 			use moq_mux::container::Container as _;
 
 			// Off Apple, encoding waits on an OS thread. Keep Tokio from auto-advancing
-			// the paused clock to a stall deadline while that thread answers.
+			// the paused clock to a timer deadline while that thread answers.
 			let (hold, released) = tokio::sync::oneshot::channel::<()>();
 			let clock = tokio::task::spawn_blocking(move || {
 				let _ = released.blocking_recv();

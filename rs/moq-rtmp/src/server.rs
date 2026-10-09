@@ -42,7 +42,7 @@ use crate::rml::time::RtmpTimestamp;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use hang::catalog::{AudioCodec, VideoCodecKind, VideoConfig};
+use hang::catalog::{AudioCodec, AudioCodecKind, VideoCodecKind, VideoConfig};
 use moq_mux::catalog::{CatalogFormat, Stream as CatalogStream};
 use moq_mux::container::flv::{Export as FlvExport, Import as FlvImport};
 use moq_mux::select;
@@ -646,7 +646,7 @@ impl<S: Stream> Publish<S> {
 			.map_err(|e| anyhow::anyhow!("rtmp accept publish: {e:?}"))?;
 		self.work.extend(results);
 
-		tracing::info!(peer = %self.peer, %path, "rtmp publish accepted");
+		tracing::info!(peer = %self.peer, %path, epoch = %publisher.epoch, "rtmp publish accepted");
 
 		let result = pump(
 			&mut self.stream,
@@ -793,7 +793,7 @@ impl<S: Stream> Play<S> {
 
 		// Resolve the catalog and reject the play up front if the client can't handle its
 		// codecs, before telling the viewer playback started.
-		let mut catalog = moq_mux::catalog::Consumer::new(&broadcast, CatalogFormat::default())
+		let mut check = moq_mux::catalog::Consumer::new(&broadcast, CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init catalog check: {e}"))?;
 		let catalog = tokio::select! {
@@ -803,7 +803,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			catalog = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut catalog)) => {
+			catalog = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut check)) => {
 				match catalog {
 					Ok(Ok(Some(catalog))) => catalog,
 					Ok(Ok(None)) => {
@@ -818,6 +818,7 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
+		drop(check);
 		let select = match play_selection(&catalog, &self.capabilities) {
 			Ok(select) => select,
 			Err(reason) => {
@@ -826,14 +827,19 @@ impl<S: Stream> Play<S> {
 			}
 		};
 
-		// The export re-resolves the broadcast (and any sibling broadcast a rendition's
-		// catalog `broadcast` field references) through the origin.
-		let mut export = FlvExport::new(moq_mux::Source::new(origin.consume(), path.as_str()))
+		// The capability check consumed its snapshot, so the export follows a fresh
+		// subscription narrowed to what the client can play. It resolves through the
+		// same source as the tracks, so a publisher that reconnected since the check
+		// doesn't split the catalog from its media.
+		let source = moq_mux::Source::new(origin.consume(), path.as_str());
+		let stream = source
+			.catalog::<()>(CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
+			.select(select);
+		let mut export = FlvExport::new(source, stream)
 			.with_max_delay(self.latency)
-			.with_multitrack(self.capabilities.multitrack)
-			.with_select(select);
+			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
 		// broadcast that never produces a playable FLV header looks successful to the
@@ -914,23 +920,23 @@ impl<S: Stream> Play<S> {
 	}
 }
 
-/// Narrow a play to the video the client can decode, or refuse it.
+/// Narrow a play to what the client can decode, or refuse it.
 ///
 /// A multitrack client receives every rendition, so it must play them all. A
-/// single-track client receives the best video rendition it can play.
+/// single-track client receives the best rendition of each kind it can play.
 fn play_selection(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	capabilities: &ClientCapabilities,
 ) -> std::result::Result<select::Broadcast, String> {
-	let playable = |config: &VideoConfig| plays_video(capabilities, config.codec.kind());
-	let refused = if capabilities.multitrack {
-		catalog.video.renditions.values().find(|config| !playable(config))
-	} else if catalog.video.renditions.values().any(playable) {
+	let video_playable = |config: &VideoConfig| plays_video(capabilities, config.codec.kind());
+	let video_refused = if capabilities.multitrack {
+		catalog.video.renditions.values().find(|config| !video_playable(config))
+	} else if catalog.video.renditions.values().any(video_playable) {
 		None
 	} else {
 		catalog.video.ranked().next().map(|(_, config)| config)
 	};
-	if let Some(config) = refused {
+	if let Some(config) = video_refused {
 		return Err(match video_fourcc(config.codec.kind(), capabilities.multitrack) {
 			Some(fourcc) => format!(
 				"client did not advertise required RTMP FourCC {}",
@@ -940,22 +946,26 @@ fn play_selection(
 		});
 	}
 
-	// Audio is still the first rendition by name for a single-track client.
-	let limit = if capabilities.multitrack { usize::MAX } else { 1 };
-	for config in catalog.audio.renditions.values().take(limit) {
-		let Some(fourcc) = audio_fourcc(&config.codec, capabilities.multitrack) else {
-			continue;
-		};
-		if !capabilities.supports_audio(&fourcc) {
-			return Err(format!(
+	let audio_playable = |config: &hang::catalog::AudioConfig| plays_audio(capabilities, &config.codec);
+	let audio_refused = if capabilities.multitrack {
+		catalog.audio.renditions.values().find(|config| !audio_playable(config))
+	} else if catalog.audio.renditions.values().any(audio_playable) {
+		None
+	} else {
+		catalog.audio.ranked().next().map(|(_, config)| config)
+	};
+	if let Some(config) = audio_refused {
+		return Err(match audio_fourcc(&config.codec, capabilities.multitrack) {
+			Some(fourcc) => format!(
 				"client did not advertise required RTMP FourCC {}",
 				fourcc_label(&fourcc)
-			));
-		}
+			),
+			None => format!("RTMP can't carry audio codec {}", config.codec),
+		});
 	}
 
 	let mut video = select::Video::default();
-	let mut any = false;
+	let mut any_video = false;
 	for kind in [
 		VideoCodecKind::H264,
 		VideoCodecKind::H265,
@@ -964,12 +974,58 @@ fn play_selection(
 	] {
 		if plays_video(capabilities, kind) {
 			video = video.codec(kind);
-			any = true;
+			any_video = true;
 		}
 	}
 	// An empty codec list would select every codec, so a client that plays none gets no video.
-	let select = select::Broadcast::default().audio(select::Audio::default());
-	Ok(if any { select.video(video) } else { select })
+	let mut select = select::Broadcast::default();
+	if any_video {
+		select = select.video(video);
+	}
+
+	let mut audio = select::Audio::default();
+	let mut any_audio = false;
+	for kind in playable_audio_kinds(capabilities) {
+		audio = audio.codec(kind);
+		any_audio = true;
+	}
+	// Same as video: an empty list would keep codecs the client never advertised.
+	if any_audio {
+		select = select.audio(audio);
+	}
+	Ok(select)
+}
+
+/// Whether a client with `capabilities` can play `codec` over FLV.
+fn plays_audio(capabilities: &ClientCapabilities, codec: &AudioCodec) -> bool {
+	match audio_fourcc(codec, capabilities.multitrack) {
+		Some(fourcc) => capabilities.supports_audio(&fourcc),
+		// Every client plays AAC and MP3 by their legacy CodecIDs; nothing else goes without a FourCC.
+		None => matches!(codec, AudioCodec::AAC(_) | AudioCodec::Mp3),
+	}
+}
+
+/// Codec families this client can play.
+///
+/// AAC and MP3 need no FourCC on a single-track client.
+fn playable_audio_kinds(capabilities: &ClientCapabilities) -> Vec<AudioCodecKind> {
+	let samples = [
+		AudioCodec::AAC(hang::catalog::AAC { profile: 2 }),
+		AudioCodec::Mp3,
+		AudioCodec::Opus,
+		AudioCodec::Ac3,
+		AudioCodec::Ec3,
+	];
+	let mut kinds = Vec::new();
+	for codec in samples {
+		if plays_audio(capabilities, &codec) {
+			let kind = codec.kind();
+			if !kinds.contains(&kind) {
+				kinds.push(kind);
+			}
+		}
+	}
+	kinds
 }
 
 /// Whether a client with `capabilities` can play `kind` over FLV.
@@ -1201,11 +1257,11 @@ async fn pump<S: Stream>(
 /// pings, `deleteStream`) so a long playback stays healthy. The read and write
 /// halves run independently, so media keeps flowing regardless of when the viewer
 /// next sends anything.
-async fn play_pump<S: Stream>(
+async fn play_pump<S: Stream, C: CatalogStream>(
 	stream: &mut S,
 	session: &mut ServerSession,
 	work: &mut VecDeque<ServerSessionResult>,
-	export: &mut FlvExport,
+	export: &mut FlvExport<C>,
 	mut tags: flv::TagReader,
 	stream_id: u32,
 	peer: SocketAddr,
@@ -1387,13 +1443,17 @@ struct Publisher {
 	// A clone of the importer's producer, so an end can close the broadcast
 	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
+	// This connection's publisher instance, so an encoder reconnecting under the
+	// same key replaces this broadcast at once instead of resuming into it.
+	epoch: moq_net::Epoch,
 }
 
 impl Publisher {
-	/// Open a broadcast at `path` and prime the importer with the FLV file
-	/// header, so subsequent tags decode against an initialized demuxer.
+	/// Open a broadcast at `path` under a fresh epoch and prime the importer with
+	/// the FLV file header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
-		let mut broadcast = origin.publish(path, moq_net::origin::Route::default())?;
+		let epoch = moq_net::Epoch::mint();
+		let mut broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
@@ -1404,6 +1464,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			broadcast: handle,
+			epoch,
 		})
 	}
 
@@ -1740,7 +1801,7 @@ mod tests {
 
 		let consumer = origin.consume();
 		consumer.routed("live/cam0").await.unwrap();
-		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().query().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -1908,6 +1969,82 @@ mod tests {
 
 		// Multitrack carries every rendition, so one the client can't decode refuses the play.
 		let multitrack = ClientCapabilities::new(CAPS_EX_MULTITRACK, hevc, FourCcSupport::default());
+		assert!(play_selection(&catalog, &multitrack).is_err());
+	}
+
+	/// A single-track client gets the best audio rendition it can play, not the first by name.
+	/// A multitrack client must still play every rendition.
+	#[test]
+	fn play_selection_picks_the_best_playable_audio() {
+		fn audio(codec: AudioCodec, bitrate: u64) -> hang::catalog::AudioConfig {
+			let mut config = hang::catalog::AudioConfig::new(codec, 48_000, 2);
+			config.bitrate = Some(bitrate);
+			config
+		}
+
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		// Name order would check Opus first and refuse a legacy client that can play the AAC.
+		catalog
+			.audio
+			.renditions
+			.insert("a".to_string(), audio(AudioCodec::Opus, 128_000));
+		catalog.audio.renditions.insert(
+			"b".to_string(),
+			audio(AudioCodec::AAC(hang::catalog::AAC { profile: 2 }), 64_000),
+		);
+
+		let legacy = ClientCapabilities::default();
+		let select = play_selection(&catalog, &legacy).expect("aac is playable");
+		let mut kept = catalog.clone();
+		select.retain(&mut kept);
+		assert_eq!(
+			kept.audio.renditions.keys().map(String::as_str).collect::<Vec<_>>(),
+			["b"]
+		);
+
+		// Nothing the client can play: cite the best rendition, not the first name.
+		let mut unsupported = moq_mux::catalog::hang::Catalog::default();
+		unsupported
+			.audio
+			.renditions
+			.insert("a".to_string(), audio(AudioCodec::Opus, 32_000));
+		unsupported
+			.audio
+			.renditions
+			.insert("b".to_string(), audio(AudioCodec::Ac3, 128_000));
+		let err = play_selection(&unsupported, &legacy).expect_err("no playable audio");
+		assert!(err.contains("ac-3"), "{err}");
+
+		// An advertised enhanced codec is kept, but not a sibling codec the client never
+		// advertised, even at a higher bitrate: an AC-3 decoder can't play E-AC-3.
+		let mut ac3 = moq_mux::catalog::hang::Catalog::default();
+		ac3.audio
+			.renditions
+			.insert("a".to_string(), audio(AudioCodec::Ac3, 128_000));
+		ac3.audio
+			.renditions
+			.insert("b".to_string(), audio(AudioCodec::Ec3, 256_000));
+		let support = FourCcSupport {
+			any: false,
+			fourccs: vec![*b"ac-3"],
+		};
+		let select = play_selection(&ac3, &ClientCapabilities::new(0, FourCcSupport::default(), support)).unwrap();
+		let mut kept = ac3.clone();
+		select.retain(&mut kept);
+		assert_eq!(
+			kept.audio.renditions.keys().map(String::as_str).collect::<Vec<_>>(),
+			["a"]
+		);
+
+		// Multitrack still requires every rendition.
+		let multitrack = ClientCapabilities::new(
+			CAPS_EX_MULTITRACK,
+			FourCcSupport::default(),
+			FourCcSupport {
+				any: false,
+				fourccs: vec![*b"Opus"],
+			},
+		);
 		assert!(play_selection(&catalog, &multitrack).is_err());
 	}
 
@@ -2117,6 +2254,65 @@ mod tests {
 		};
 		publish.reject("test rejection").await.unwrap();
 		client.abort();
+	}
+
+	/// An encoder reconnecting under the same key while its stale connection is still
+	/// open replaces the stale broadcast at once: each connection is its own epoch, so
+	/// viewers re-request instead of stalling on the old one.
+	#[tokio::test]
+	async fn a_reconnect_replaces_the_stale_publish() {
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let server_task = tokio::spawn(async move {
+			while let Some(request) = server.accept().await {
+				let Request::Publish(publish) = request else {
+					panic!("expected a publish request");
+				};
+				let origin = origin.clone();
+				tokio::spawn(async move { publish.accept(&origin, "live/cam0").await });
+			}
+		});
+
+		let stale_client = tokio::spawn(async move {
+			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
+		});
+		tokio::time::timeout(Duration::from_secs(5), consumer.routed("live/cam0"))
+			.await
+			.expect("stale publish timed out")
+			.unwrap();
+		let stale = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let mut catalog = stale
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+
+		let fresh_client = tokio::spawn(async move {
+			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
+		});
+		let ended = tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				match catalog.recv_group().await {
+					Ok(Some(_)) => continue,
+					Ok(None) => panic!("the stale broadcast ended cleanly"),
+					Err(err) => return err,
+				}
+			}
+		})
+		.await
+		.expect("the stale viewer stalled");
+		assert!(matches!(ended, moq_net::Error::Unroutable), "{ended:?}");
+		assert!(!stale_client.is_finished(), "the stale connection is still open");
+
+		let fresh = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected publish");
+
+		stale_client.abort();
+		fresh_client.abort();
+		server_task.abort();
 	}
 
 	/// The connect `_result` should advertise the enhanced-RTMP codecs we ingest

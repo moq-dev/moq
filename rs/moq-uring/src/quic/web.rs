@@ -740,6 +740,10 @@ impl web_transport_trait::poll::Session for Session {
 		let mut deadline = self.conn.owner().after(CLOSE_GRACE);
 		let reason = reason.to_string();
 		let mut conn = self.conn.clone();
+		// The caller may drop every handle right after this, so the task holds
+		// the H3 control and QPACK streams itself: RFC 9114 makes closing one a
+		// connection error, which a browser reports instead of the capsule.
+		let web = web.clone();
 		self.conn.owner().spawn(async move {
 			let mut offset = 0;
 			kio::wait(|waiter| {
@@ -767,6 +771,8 @@ impl web_transport_trait::poll::Session for Session {
 			})
 			.await;
 			conn.close_code(http3, &reason);
+			// Only now, so the critical streams end with the connection.
+			drop(web);
 		});
 	}
 

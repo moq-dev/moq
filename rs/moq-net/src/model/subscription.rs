@@ -50,28 +50,24 @@ pub struct Subscription {
 	/// stalled group is bounded by its stamped successor the same way. Wall-clock
 	/// reclamation of idle content is the cache's own policy, not this budget's.
 	///
-	/// Protocols whose wire can't carry a timestamp (pre-Lite05 moq-lite, moq-transport
-	/// without the Timestamp property) have their frames stamped on receipt, which makes
-	/// the measure burst-blind on the receiving side: thirty seconds of backlog delivered
-	/// in three reads as three. The publisher's copy is stamped as it produces, so the
-	/// gate there still holds; it is just the coarser of the two.
+	/// An untimed track (pre-Lite05 moq-lite, or moq-transport without TIMESCALE) has no
+	/// media time, so none of its groups is ever stale, and a new subscriber with no
+	/// [`Self::start`] begins at its latest group instead of replaying the cache.
 	pub max_delay: Duration,
-	/// The lowest [`Position`] the publisher may deliver, or `None` to join where the
-	/// publisher starts.
+	/// The lowest [`Position`] the publisher may deliver, or `None` for no floor.
 	///
 	/// A floor, not a request: only [`Self::max_delay`] asks for data, and the floor bounds
-	/// how far back it may reach. `None` is not a floor of group 0. The first group served
-	/// to an unfloored subscriber becomes its floor, so a group created below that group
-	/// is not delivered. An explicit floor, including group 0, still delivers a later
-	/// group at or above it while the budget considers it fresh. A floor above the live
-	/// edge simply waits there (a resumed subscription naming where it left off).
+	/// how far back it may reach. `None` and a floor of group 0 mean the same thing on a
+	/// timed track, since nothing sits below group 0. On an untimed track, which no budget
+	/// can measure, `None` starts at the latest group and a floor is honored as given.
+	/// Delivery starts at the oldest group at or above the floor that the budget still
+	/// considers fresh, so a floor above the live edge simply waits there (a resumed
+	/// subscription naming where it left off).
 	///
-	/// Aggregated across every live subscriber: the loosest explicit floor wins, and a
-	/// subscriber without one leaves that floor in place. All of them unfloored stays
-	/// unfloored. It says what the publisher sends, not what any one subscriber sees.
-	/// Each subscriber's read cursor still filters its own view.
-	/// [`crate::track::Subscriber::set_groups`] is that cursor; setting one does not imply
-	/// the other. See [Local cursor vs wire
+	/// Aggregated across every live subscriber (the loosest floor wins, and any subscriber
+	/// without one clears it), so it says what the publisher sends, not what any one
+	/// subscriber sees. [`crate::track::Subscriber::set_groups`] is the local read cursor;
+	/// setting one does not imply the other. See [Local cursor vs wire
 	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub start: Option<Position>,
 	/// First [`Position`] the publisher should *not* deliver, or `None` for no end.
@@ -166,9 +162,8 @@ impl Subscription {
 			max_delay: self.max_delay.max(combined.max_delay),
 			// Bounds fold as whole positions. Two subscribers starting in the same group
 			// are separated only by their frame, so folding group and frame independently
-			// would invent a bound neither asked for. An omitted floor does not clear an
-			// explicit one: the loosest explicit floor wins.
-			start: min_some(self.start, combined.start),
+			// would invent a bound neither asked for.
+			start: min_floored(self.start, combined.start),
 			end: max_unbounded(self.end, combined.end),
 		};
 
@@ -305,12 +300,12 @@ pub(super) fn before_end(sequence: u64, end: Option<u64>) -> bool {
 }
 
 // Combining two optional bounds comes in two families, and they disagree on what `None`
-// means. `_some` treats it as the neutral element (the other side wins). `_unbounded`
-// treats it as absorbing (the result is `None` too). A start uses the neutral family:
-// omitting one joins where the publisher starts, and the loosest explicit floor still
-// wins. An end uses the absorbing family: one subscriber with no end keeps the aggregate
-// open. Picking the wrong family silently narrows or widens what the publisher sends, so
-// the suffix, not the `min`/`max`, is the part to read.
+// means. `_some` treats it as the neutral element (the other side wins), for intersecting
+// two ranges that each restrict independently. `_floored` / `_unbounded` treat it as
+// absorbing (the result is `None` too), for aggregating across subscribers, where one
+// subscriber asking for everything makes the aggregate everything. Picking the wrong
+// family silently narrows or widens what the publisher sends, so the suffix, not the
+// `min`/`max`, is the part to read.
 
 /// The higher of two optional bounds, `None` neutral.
 pub(super) fn max_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
@@ -321,12 +316,13 @@ pub(super) fn max_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	}
 }
 
-/// The lower of two optional floors, `None` neutral. The mirror of [`max_some`].
-pub(super) fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+/// The lower of two optional floors, `None` absorbing (no floor). The mirror of
+/// [`max_unbounded`]: both bounds only ever *restrict*, so a subscriber without one keeps
+/// the aggregate unrestricted.
+pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
-		(Some(a), None) | (None, Some(a)) => Some(a),
-		(None, None) => None,
+		(None, _) | (_, None) => None,
 	}
 }
 
@@ -418,13 +414,10 @@ mod tests {
 		let combined = combine(&[catchup.clone(), older_catchup]).unwrap();
 		assert_eq!(combined.start, Some(Position::group(5)));
 
-		// An omitted floor joins where the publisher starts. It leaves an explicit floor
-		// in place; each subscriber's own cursor still filters what it reads.
+		// A subscriber with no floor at all clears the aggregate: its budget may reach
+		// below any floor the others set.
 		let unfloored = Subscription::default();
-		let combined = combine(&[catchup, unfloored.clone()]).unwrap();
-		assert_eq!(combined.start, Some(Position::group(10)));
-
-		let combined = combine(&[unfloored.clone(), unfloored]).unwrap();
+		let combined = combine(&[catchup, unfloored]).unwrap();
 		assert_eq!(combined.start, None);
 	}
 

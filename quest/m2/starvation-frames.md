@@ -45,6 +45,10 @@ Decided in the 2026-09-30 audit: moved to m2. The group-granularity sampler
 from the parent quest answers the m1 question, and this waits on the m2 ACK
 hook.
 
+Decided 2026-10-08: the group-granularity sampler is the egress lag histogram
+from the QoS line, which so far exists only on its line branch, so that quest
+is Required.
+
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity
 tracking of the same run; a reset mid-group attributing only the
@@ -56,3 +60,5 @@ unsupported.
 
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   hook this samples through
+- [Egress lag histogram](/quest/m1/qos/lag-histogram.md) - the
+  group-granularity sampler and starvation histogram this refines

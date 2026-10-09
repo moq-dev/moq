@@ -1,8 +1,10 @@
-# [M] moq-quic releases an endpoint's socket on close
+# [M] moq-tokio's QUIC endpoint releases its socket on close
 
 ## Goal
 
-A `moq-quic` endpoint can close its UDP socket, and report when it has, without
+moq-tokio's QUIC endpoint (quinn's async layer, which the hard fork imports
+into moq-tokio; `moq-quic` is the sans-IO core and owns no socket) can close
+its UDP socket, and report when it has, without
 waiting for every connection handle to drop. moq-tokio then deletes the
 closable socket wrapper that #4087 added to make `Listener::close` release the
 port.
@@ -17,7 +19,7 @@ sends are dropped and receives end. Test it there and replace moq-tokio's wrappe
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - the endpoint is in-tree
+- [Hard fork](/quest/m1/quic/fork/README.md) - imports the endpoint into moq-tokio
 
 ## Related
 

@@ -16,9 +16,10 @@ The bytes are opaque: the tracks frame them onto a [`@moq/net`](../net) track an
 
 ```ts
 import { Snapshot, Stream } from "@moq/flate";
+import { Time } from "@moq/net";
 
 const thumbnail = new Snapshot.Producer({ track, compression: "deflate" });
-thumbnail.update(jpeg);
+thumbnail.update({ value: jpeg, at: Time.Timestamp.now() });
 
 const log = new Stream.Consumer({ track: subscriber, compression: "deflate" });
 for (;;) {
@@ -28,6 +29,8 @@ for (;;) {
 ```
 
 Compression is opt-in per track (`compression: "none" | "deflate"`, default `"none"`); a consumer must set the same value as the producer.
+
+Producers take `{ value, at }`, where `at` is the capture time written as the frame timestamp. Nothing fills in now: a timed track needs `at` on every write, and an untimed track takes none.
 
 ## Codec
 

@@ -454,20 +454,9 @@ impl Pad {
 				(track, true, name)
 			}
 			"audio/x-opus" => {
-				// Opus: GStreamer carries channels/rate in caps (not an OpusHead), and valid Opus caps
-				// always include them. Require them rather than guessing a stereo/48k default that could
-				// misadvertise the stream.
-				let channels: i32 = structure.get("channels").context("Opus caps missing channels")?;
-				let rate: i32 = structure.get("rate").context("Opus caps missing rate")?;
-				ensure!(channels > 0, "Opus caps has non-positive channel count {channels}");
-				ensure!(
-					channels <= 2,
-					"multichannel Opus is not supported yet (channels={channels})"
-				);
-				ensure!(rate > 0, "Opus caps has non-positive sample rate {rate}");
-				let config = moq_mux::codec::opus::Config::new(rate as u32, channels as u32);
-				// Opus builds its config from caps (not an OpusHead init buffer), so it constructs the codec
-				// importer directly and lifts it into a `Track` via `.into()`.
+				// The OpusHead lives in the caps. There is no init buffer in the stream, so a
+				// head built from channels and rate alone would drop a surround mapping.
+				let config = opus_catalog(structure)?;
 				let name = Self::track_name(&broadcast, requested, ".opus");
 				let request = broadcast
 					.reserve_track(name.clone())
@@ -477,7 +466,7 @@ impl Pad {
 					moq_mux::codec::opus::Import::new(
 						producer,
 						catalog.reserve(),
-						Self::audio_config(config.into(), container),
+						Self::audio_config(config, container),
 					)?
 					.into(),
 					true,
@@ -789,6 +778,206 @@ impl Pad {
 	}
 }
 
+/// The mapping fields on an `audio/x-opus` caps structure. Absent fields stay absent:
+/// a present field of the wrong type is refused rather than treated as missing.
+struct OpusDeclared {
+	family: Option<u8>,
+	streams: Option<u8>,
+	coupled: Option<u8>,
+	table: Option<Vec<u8>>,
+}
+
+impl OpusDeclared {
+	fn any(&self) -> bool {
+		self.family.is_some() || self.streams.is_some() || self.coupled.is_some() || self.table.is_some()
+	}
+}
+
+/// Build the catalog config for `audio/x-opus` caps.
+///
+/// `streamheader` is the OpusHead itself, including pre-skip and gain the mapping
+/// fields cannot carry, so it wins when present. The fields must still agree with
+/// it. Without a header, mono and stereo keep the family 0 head built from
+/// channels and rate; anything else has to name its mapping, and a table that
+/// does not describe those channels is refused.
+fn opus_catalog(structure: &gst::StructureRef) -> Result<hang::catalog::AudioConfig> {
+	let channels = opus_count(structure, "channels", "channel count")?;
+	let rate = opus_count(structure, "rate", "sample rate")?;
+	let declared = opus_declared(structure)?;
+
+	if let Some(head) = opus_stream_head(structure)? {
+		// RFC 7845 lets a later minor version append fields, so bytes after the head are kept.
+		let parsed = moq_mux::codec::opus::Config::parse(&mut head.as_ref())
+			.context("Opus caps streamheader is not an OpusHead")?;
+		ensure!(
+			parsed.channel_count == channels,
+			"Opus caps channels {channels} contradict the OpusHead's {}",
+			parsed.channel_count
+		);
+		opus_head_agrees(&parsed, &declared)?;
+		// Keep the header bytes. Re-encoding would rewrite a version this parser accepts.
+		let mut audio: hang::catalog::AudioConfig = parsed.into();
+		audio.description = Some(head);
+		return Ok(audio);
+	}
+
+	let config = opus_from_fields(rate, channels, &declared)?;
+	// `From` drops a head it cannot encode. Refuse that here instead of publishing
+	// a surround track with no description.
+	config.encode().context("Opus caps do not make an OpusHead")?;
+	Ok(config.into())
+}
+
+fn opus_count(structure: &gst::StructureRef, field: &str, what: &str) -> Result<u32> {
+	let value: i32 = structure
+		.get(field)
+		.with_context(|| format!("Opus caps missing {field}"))?;
+	ensure!(value > 0, "Opus caps has non-positive {what} {value}");
+	Ok(value as u32)
+}
+
+fn opus_declared(structure: &gst::StructureRef) -> Result<OpusDeclared> {
+	Ok(OpusDeclared {
+		family: opus_optional_u8(structure, "channel-mapping-family")?,
+		streams: opus_optional_u8(structure, "stream-count")?,
+		coupled: opus_optional_u8(structure, "coupled-count")?,
+		table: opus_mapping_table(structure)?,
+	})
+}
+
+fn opus_optional_u8(structure: &gst::StructureRef, field: &str) -> Result<Option<u8>> {
+	if !structure.has_field(field) {
+		return Ok(None);
+	}
+	let value: i32 = structure
+		.get(field)
+		.with_context(|| format!("Opus caps {field} is not an int"))?;
+	u8::try_from(value)
+		.with_context(|| format!("Opus caps {field} {value} is out of range"))
+		.map(Some)
+}
+
+fn opus_mapping_table(structure: &gst::StructureRef) -> Result<Option<Vec<u8>>> {
+	if !structure.has_field("channel-mapping") {
+		return Ok(None);
+	}
+	let values: gst::Array = structure
+		.get("channel-mapping")
+		.context("Opus caps channel-mapping is not an array")?;
+	let mut table = Vec::with_capacity(values.len());
+	for entry in values.as_slice() {
+		let value: i32 = entry.get().context("Opus caps channel-mapping entry is not an int")?;
+		let value =
+			u8::try_from(value).with_context(|| format!("Opus caps channel-mapping entry {value} is out of range"))?;
+		table.push(value);
+	}
+	Ok(Some(table))
+}
+
+/// The first `streamheader` buffer, which is the OpusHead. Later buffers are tags.
+fn opus_stream_head(structure: &gst::StructureRef) -> Result<Option<Bytes>> {
+	if !structure.has_field("streamheader") {
+		return Ok(None);
+	}
+	let headers: gst::Array = structure
+		.get("streamheader")
+		.context("Opus caps streamheader is not a buffer list")?;
+	let first = headers.first().context("Opus caps streamheader is empty")?;
+	let buffer: gst::Buffer = first.get().context("Opus caps streamheader is not buffers")?;
+	let map = buffer.map_readable().context("failed to map Opus streamheader")?;
+	Ok(Some(Bytes::copy_from_slice(map.as_slice())))
+}
+
+/// Refuse mapping fields that disagree with a parsed OpusHead.
+fn opus_head_agrees(head: &moq_mux::codec::opus::Config, declared: &OpusDeclared) -> Result<()> {
+	let (family, streams, coupled, table) = match &head.mapping {
+		Some(mapping) => (
+			mapping.family(),
+			mapping.streams(),
+			mapping.coupled(),
+			Some(mapping.table()),
+		),
+		// Family 0 is one stream, coupled only when stereo, and has no table.
+		None => (
+			0,
+			1,
+			u8::try_from(head.channel_count).unwrap_or(0).saturating_sub(1),
+			None,
+		),
+	};
+	if let Some(got) = declared.family {
+		ensure!(
+			got == family,
+			"Opus caps channel-mapping-family {got} contradicts the OpusHead family {family}"
+		);
+	}
+	if let Some(got) = declared.streams {
+		ensure!(got == streams, "Opus caps stream-count {got} contradicts the OpusHead");
+	}
+	if let Some(got) = declared.coupled {
+		ensure!(got == coupled, "Opus caps coupled-count {got} contradicts the OpusHead");
+	}
+	if let Some(got) = &declared.table {
+		match table {
+			Some(expected) => ensure!(
+				got.as_slice() == expected,
+				"Opus caps channel-mapping contradicts the OpusHead"
+			),
+			None => anyhow::bail!("Opus caps channel-mapping contradicts a family 0 OpusHead"),
+		}
+	}
+	Ok(())
+}
+
+/// A head from the mapping fields alone.
+fn opus_from_fields(rate: u32, channels: u32, declared: &OpusDeclared) -> Result<moq_mux::codec::opus::Config> {
+	let family = declared.family.unwrap_or(0);
+	if family == 0 && declared.table.is_none() {
+		if channels > 2 {
+			if declared.any() {
+				anyhow::bail!("Opus caps channel mapping family 0 does not allow {channels} channels");
+			}
+			anyhow::bail!(
+				"multichannel Opus caps omit channel-mapping-family, stream-count, coupled-count, and channel-mapping"
+			);
+		}
+		if let Some(streams) = declared.streams {
+			ensure!(streams == 1, "Opus caps stream-count {streams} contradicts family 0");
+		}
+		if let Some(coupled) = declared.coupled {
+			ensure!(
+				u32::from(coupled) + 1 == channels,
+				"Opus caps coupled-count {coupled} contradicts family 0"
+			);
+		}
+		return Ok(moq_mux::codec::opus::Config::new(rate, channels));
+	}
+
+	let family = declared
+		.family
+		.context("multichannel Opus caps omit channel-mapping-family")?;
+	let streams = declared.streams.context("multichannel Opus caps omit stream-count")?;
+	let coupled = declared.coupled.context("multichannel Opus caps omit coupled-count")?;
+	let table = declared
+		.table
+		.as_deref()
+		.context("multichannel Opus caps omit channel-mapping")?;
+	ensure!(
+		table.len() == channels as usize,
+		"Opus caps channels {channels} contradict the channel-mapping"
+	);
+	let mapping = moq_mux::codec::opus::Mapping::new(moq_mux::codec::opus::mapping::Config {
+		family,
+		streams,
+		coupled,
+		table,
+	})
+	.context("Opus caps channel mapping")?;
+	let mut config = moq_mux::codec::opus::Config::new(rate, channels);
+	config.mapping = Some(mapping);
+	Ok(config)
+}
+
 /// Media types moqsink can build a producer for, plus `application/octet-stream` for opaque data.
 /// Checked synchronously at the CAPS event so an unsupported type is rejected with NotNegotiated. The
 /// structural fields (byte-stream/au, AAC mpegversion/stream-format) are pinned by the pad template,
@@ -1016,6 +1205,243 @@ mod tests {
 		assert!(pad.is_failed(), "Opus without channels fails the pad");
 	}
 
+	fn opus_mapping(family: u8, streams: u8, coupled: u8, table: &[u8]) -> moq_mux::codec::opus::Mapping {
+		moq_mux::codec::opus::Mapping::new(moq_mux::codec::opus::mapping::Config {
+			family,
+			streams,
+			coupled,
+			table,
+		})
+		.unwrap()
+	}
+
+	fn opus_caps(channels: i32, mapping: Option<(i32, i32, i32, gst::Array)>, head: Option<gst::Buffer>) -> gst::Caps {
+		let mut builder = gst::Caps::builder("audio/x-opus")
+			.field("rate", 48_000i32)
+			.field("channels", channels);
+		if let Some((family, streams, coupled, table)) = mapping {
+			builder = builder
+				.field("channel-mapping-family", family)
+				.field("stream-count", streams)
+				.field("coupled-count", coupled)
+				.field("channel-mapping", table);
+		}
+		if let Some(head) = head {
+			builder = builder.field("streamheader", gst::Array::new([head]));
+		}
+		builder.build()
+	}
+
+	fn published_opus(
+		catalog: &moq_mux::catalog::Producer,
+		track: &str,
+	) -> (hang::catalog::AudioConfig, moq_mux::codec::opus::Config) {
+		let audio = catalog.snapshot().audio.renditions.get(track).unwrap().clone();
+		let description = audio.description.clone().expect("opus description");
+		let parsed = moq_mux::codec::opus::Config::parse(&mut description.as_ref()).unwrap();
+		(audio, parsed)
+	}
+
+	// Six channels with no mapping is not a guessable layout. The pad refuses it.
+	#[test]
+	fn surround_opus_without_a_mapping_fails_the_pad() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let outcome = pad.observe_caps(&broadcast, &catalog, producer_options(&opus_caps(6, None, None), None));
+		assert!(
+			matches!(outcome, CapsOutcome::Failed(ref reason) if reason.contains("omit")),
+			"missing mapping fields are refused, got {outcome:?}"
+		);
+		assert!(pad.is_failed());
+	}
+
+	// The published head is the table the caps named, not the Vorbis layout a channel count would imply.
+	#[test]
+	fn surround_opus_publishes_the_mapping_its_caps_name() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let table = gst::Array::new([0i32, 1, 2, 3, 4, 5]);
+		let outcome = pad.observe_caps(
+			&broadcast,
+			&catalog,
+			producer_options(&opus_caps(6, Some((1, 6, 0, table)), None), Some("discrete")),
+		);
+		assert!(matches!(outcome, CapsOutcome::Active(_)), "{outcome:?}");
+
+		let (audio, head) = published_opus(&catalog, "discrete");
+		assert_eq!(audio.channel_count, 6);
+		let mapping = head.mapping.expect("family 1 mapping");
+		assert_eq!(mapping.family(), 1);
+		assert_eq!((mapping.streams(), mapping.coupled()), (6, 0));
+		assert_eq!(mapping.table(), &[0, 1, 2, 3, 4, 5]);
+
+		let decoder = moq_audio::decode::Decoder::new(&audio, &moq_audio::decode::Config::new()).unwrap();
+		assert_eq!(decoder.layout().channels(), 6);
+	}
+
+	// A header and fields that disagree would publish one layout and decode another.
+	#[test]
+	fn surround_opus_refuses_a_mapping_that_contradicts_the_header() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let vorbis = opus_mapping(1, 4, 2, &[0, 4, 1, 2, 3, 5]);
+		let mut config = moq_mux::codec::opus::Config::new(48_000, 6);
+		config.mapping = Some(vorbis);
+		let head = gst::Buffer::from_slice(config.encode().unwrap());
+		// The header is 5.1 (4 streams, 2 coupled). The fields claim six mono streams.
+		let table = gst::Array::new([0i32, 1, 2, 3, 4, 5]);
+		let outcome = pad.observe_caps(
+			&broadcast,
+			&catalog,
+			producer_options(&opus_caps(6, Some((1, 6, 0, table)), Some(head)), None),
+		);
+		assert!(
+			matches!(outcome, CapsOutcome::Failed(ref reason) if reason.contains("contradict")),
+			"a mapping that disagrees with the OpusHead is refused, got {outcome:?}"
+		);
+	}
+
+	// RFC 7845: a later minor version may append fields. The head still publishes, byte for byte.
+	#[test]
+	fn opus_head_with_a_newer_minor_version_publishes_unchanged() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let mut bytes = moq_mux::codec::opus::Config::new(48_000, 2).encode().unwrap().to_vec();
+		bytes[8] = 2;
+		bytes.extend_from_slice(&[0xAA, 0xBB]);
+		let head = gst::Buffer::from_slice(bytes.clone());
+		let outcome = pad.observe_caps(
+			&broadcast,
+			&catalog,
+			producer_options(&opus_caps(2, None, Some(head)), Some("extended")),
+		);
+		assert!(matches!(outcome, CapsOutcome::Active(_)), "{outcome:?}");
+		let (audio, _) = published_opus(&catalog, "extended");
+		assert_eq!(audio.description.as_deref(), Some(bytes.as_slice()));
+	}
+
+	/// `opusenc` 5.1 caps, plus the packets it produced.
+	fn opusenc_surround() -> (gst::Caps, Vec<Bytes>) {
+		use gst::prelude::*;
+		use std::sync::{Arc, Mutex};
+
+		let pipeline = gst::parse::launch(
+			"audiotestsrc num-buffers=3 samplesperbuffer=960 ! \
+			 audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=6,channel-mask=(bitmask)0x3f ! \
+			 opusenc name=enc ! fakesink",
+		)
+		.expect("opusenc pipeline")
+		.downcast::<gst::Pipeline>()
+		.expect("pipeline");
+		let src = pipeline
+			.by_name("enc")
+			.expect("opusenc")
+			.static_pad("src")
+			.expect("opusenc src");
+
+		let caps = Arc::new(Mutex::new(None));
+		let packets = Arc::new(Mutex::new(Vec::new()));
+		let caps_probe = caps.clone();
+		let packets_probe = packets.clone();
+		src.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+			if caps_probe.lock().unwrap().is_none() {
+				*caps_probe.lock().unwrap() = pad.current_caps();
+			}
+			if let Some(buffer) = info.buffer() {
+				let map = buffer.map_readable().expect("map opus packet");
+				packets_probe
+					.lock()
+					.unwrap()
+					.push(Bytes::copy_from_slice(map.as_slice()));
+			}
+			gst::PadProbeReturn::Ok
+		})
+		.expect("probe");
+
+		pipeline.set_state(gst::State::Playing).expect("play");
+		let msg = pipeline.bus().expect("bus").timed_pop_filtered(
+			gst::ClockTime::from_seconds(5),
+			&[gst::MessageType::Eos, gst::MessageType::Error],
+		);
+		let _ = pipeline.set_state(gst::State::Null);
+		let Some(msg) = msg else {
+			panic!("opusenc pipeline timed out");
+		};
+		if let gst::MessageView::Error(err) = msg.view() {
+			panic!("opusenc pipeline: {} ({:?})", err.error(), err.debug());
+		}
+		assert_eq!(
+			msg.type_(),
+			gst::MessageType::Eos,
+			"opusenc pipeline ended on {:?}",
+			msg.type_()
+		);
+
+		let caps = caps.lock().unwrap().clone().expect("opusenc caps");
+		let packets = packets.lock().unwrap().clone();
+		assert!(!packets.is_empty(), "opusenc produced no packets");
+		(caps, packets)
+	}
+
+	// The regression: a real 5.1 opusenc stream publishes the family 1 head its caps
+	// carry, and moq-audio decodes that head to six channels.
+	#[test]
+	fn opusenc_surround_publishes_a_family_1_head_that_decodes_to_six_channels() {
+		gst::init().unwrap();
+		let (caps, packets) = opusenc_surround();
+		let structure = caps.structure(0).expect("structure");
+		assert_eq!(structure.get::<i32>("channels").unwrap(), 6);
+		assert_eq!(structure.get::<i32>("channel-mapping-family").unwrap(), 1);
+
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let outcome = pad.observe_caps(&broadcast, &catalog, producer_options(&caps, Some("surround")));
+		assert!(matches!(outcome, CapsOutcome::Active(_)), "{outcome:?}");
+
+		let (audio, head) = published_opus(&catalog, "surround");
+		let headers: gst::Array = structure.get("streamheader").expect("streamheader");
+		let buffer: gst::Buffer = headers.first().unwrap().get().unwrap();
+		let map = buffer.map_readable().unwrap();
+		assert_eq!(
+			audio.description.as_deref(),
+			Some(map.as_slice()),
+			"the published OpusHead is the caps streamheader, not a synthesized one"
+		);
+		let mapping = head.mapping.expect("family 1");
+		assert_eq!(mapping.family(), 1);
+		assert_eq!(audio.channel_count, 6);
+		assert_eq!(mapping.table().len(), 6);
+
+		pad.observe_segment(time_segment());
+		for (index, packet) in packets.iter().enumerate() {
+			assert_eq!(
+				pad.push_buffer(
+					packet.clone(),
+					Some(gst::ClockTime::from_mseconds(20 * index as u64)),
+					None,
+					None,
+					Instant::now(),
+				)
+				.unwrap(),
+				PushOutcome::Published
+			);
+		}
+
+		let mut decoder = moq_audio::decode::Decoder::new(&audio, &moq_audio::decode::Config::new()).unwrap();
+		assert_eq!(decoder.layout().channels(), 6);
+		let mut decoded_samples = false;
+		for packet in &packets {
+			let decoded = decoder.decode(packet).expect("decode the published opus packet");
+			assert_eq!(decoded.samples.len() % 6, 0);
+			decoded_samples |= !decoded.samples.is_empty();
+		}
+		assert!(decoded_samples, "the 5.1 packets decoded to silence");
+	}
+
 	// A pad with caps but no TIME segment drops buffers and reports the missing timeline exactly once,
 	// so the element surfaces it on the bus instead of dropping every frame in silence.
 	#[test]
@@ -1168,7 +1594,7 @@ mod tests {
 			"the payload goes out untouched"
 		);
 		assert_eq!(
-			std::time::Duration::from(frame.timestamp).as_micros(),
+			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
 			40_000,
 			"the frame carries the PTS mapped through the segment"
 		);
@@ -1180,7 +1606,10 @@ mod tests {
 		let mut group = subscriber.next_group().await.unwrap().expect("a second group");
 		let frame = group.read_frame().await.unwrap().expect("a frame in the second group");
 		assert_eq!(frame.payload.as_ref(), b"second");
-		assert_eq!(std::time::Duration::from(frame.timestamp).as_micros(), 80_000);
+		assert_eq!(
+			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			80_000
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1248,7 +1677,7 @@ mod tests {
 			.subscribe(None)
 			.await
 			.expect("subscribe to the opaque track");
-		assert_eq!(subscriber.info().timescale, moq_net::Timescale::MICRO);
+		assert_eq!(subscriber.info().timescale, Some(moq_net::Timescale::MICRO));
 		assert_eq!(
 			subscriber.info().max_age,
 			Some(std::time::Duration::from_secs(5)),
@@ -1290,7 +1719,10 @@ mod tests {
 		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 		let frame = group.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(frame.payload.as_ref(), b"no pts", "the unstamped buffer was published");
-		assert_eq!(std::time::Duration::from(frame.timestamp).as_micros(), 25_000);
+		assert_eq!(
+			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			25_000
+		);
 	}
 
 	#[test]
@@ -1333,6 +1765,45 @@ mod tests {
 			Instant::now(),
 		)
 		.unwrap();
+	}
+
+	// An H.265 camera whose SPS VUI zeroes the colour fields on 4:2:0 (`matrix_coeffs` 0, which
+	// ITU-T H.265 E.3.1 forbids there; a Viewtron IP-PTZ-440 sends it) still resolves its rendition
+	// instead of failing the pad with "h265: failed to parse SPS NAL unit".
+	#[test]
+	fn h265_with_zeroed_vui_colour_resolves_the_rendition() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let caps = gst::Caps::builder("video/x-h265")
+			.field("stream-format", "byte-stream")
+			.field("alignment", "au")
+			.build();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&caps, Some("camera")));
+		pad.observe_segment(time_segment());
+		let vps: &[u8] = &[
+			0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+			0x03, 0x00, 0x5d, 0x95, 0x98, 0x09,
+		];
+		let sps: &[u8] = &[
+			0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+			0x96, 0xa0, 0x03, 0xc0, 0x80, 0x11, 0x07, 0xcb, 0x8a, 0xad, 0x3b, 0xa2, 0x4b, 0xb9, 0x08, 0x00, 0x00, 0x03,
+			0x00, 0x20, 0x05, 0x26, 0x5c, 0x00, 0x33, 0x7f, 0x98, 0x01,
+		];
+		let pps: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x62, 0x40];
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa];
+		let mut au = Vec::new();
+		for nal in [vps, sps, pps, idr] {
+			au.extend_from_slice(&[0, 0, 0, 1]);
+			au.extend_from_slice(nal);
+		}
+		let outcome = pad
+			.push_buffer(Bytes::from(au), Some(gst::ClockTime::ZERO), None, None, Instant::now())
+			.unwrap();
+		assert_eq!(outcome, PushOutcome::Published);
+		assert!(!pad.is_failed());
+		let config = catalog.snapshot().video.renditions.get("camera").cloned().unwrap();
+		assert_eq!((config.coded_width, config.coded_height), (Some(1920), Some(1080)));
 	}
 
 	// A real IDR AU emits a frame to the published track (not just a rendition off the SPS).

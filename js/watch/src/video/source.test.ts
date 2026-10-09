@@ -173,8 +173,8 @@ describe("Source error signal", () => {
 	});
 });
 
-describe("Source stalled rendition selection", () => {
-	it("moves to an unstalled rendition when the selected one is throttled", async () => {
+describe("Source disabled rendition selection", () => {
+	it("moves to an enabled rendition when the selected one is disabled, and back", async () => {
 		const state = mutableBroadcast({
 			low: config("avc1.64001e", { bitrate: 1_000_000 }),
 			high: config("avc1.640028", { bitrate: 2_000_000 }),
@@ -191,56 +191,67 @@ describe("Source stalled rendition selection", () => {
 			video: {
 				renditions: {
 					low: config("avc1.64001e", { bitrate: 1_000_000 }),
-					high: config("avc1.640028", { bitrate: 2_000_000, stalled: true }),
+					high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
 				},
 			},
 		});
 		await settle();
 		expect(source.out.track.peek()).toBe("low");
+
+		state.catalog.set({
+			video: {
+				renditions: {
+					low: config("avc1.64001e", { bitrate: 1_000_000 }),
+					high: config("avc1.640028", { bitrate: 2_000_000 }),
+				},
+			},
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
 		source.close();
 	});
 
-	it("keeps a stalled manual target while an unstalled rendition exists", async () => {
+	it("never selects a disabled manual target", async () => {
 		const source = new Source({
 			broadcast: mockBroadcast({
 				low: config("avc1.64001e", { bitrate: 1_000_000 }),
-				high: config("avc1.640028", { bitrate: 2_000_000, stalled: true }),
+				high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
 			}),
 			target: { name: "high" },
 			supported: async () => true,
 		});
 
 		await settle();
-		expect(source.out.track.peek()).toBe("high");
-		expect(Object.keys(source.out.available.peek())).toEqual(["low", "high"]);
+		expect(source.out.track.peek()).toBe("low");
 		source.close();
 	});
 
-	it("selects the lowest rendition when every supported rendition is stalled", async () => {
+	it("selects nothing when every rendition is disabled", async () => {
 		const source = new Source({
 			broadcast: mockBroadcast({
+				high: config("avc1.640028", { bitrate: 2_000_000, enabled: false }),
+				low: config("avc1.64001e", { bitrate: 1_000_000, enabled: false }),
+			}),
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBeUndefined();
+		expect(source.out.config.peek()).toBeUndefined();
+		source.close();
+	});
+
+	it("ignores a legacy stalled flag", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				low: config("avc1.64001e", { bitrate: 1_000_000 }),
 				high: config("avc1.640028", { bitrate: 2_000_000, stalled: true }),
-				low: config("avc1.64001e", { bitrate: 1_000_000, stalled: true }),
 			}),
 			supported: async () => true,
 		});
 
 		await settle();
-		expect(source.out.track.peek()).toBe("low");
-		source.close();
-	});
-
-	it("uses coded dimensions when stalled renditions omit bitrate", async () => {
-		const source = new Source({
-			broadcast: mockBroadcast({
-				high: config("avc1.640028", { codedWidth: 1920, codedHeight: 1080, stalled: true }),
-				low: config("avc1.64001e", { codedWidth: 854, codedHeight: 480, stalled: true }),
-			}),
-			supported: async () => true,
-		});
-
-		await settle();
-		expect(source.out.track.peek()).toBe("low");
+		expect(source.out.track.peek()).toBe("high");
 		source.close();
 	});
 
@@ -265,7 +276,7 @@ describe("Source stalled rendition selection", () => {
 				renditions: {
 					high: config("avc1.640028", {
 						bitrate: 1_500_000,
-						stalled: true,
+						label: "Main camera",
 						codedWidth: 1280,
 						codedHeight: 720,
 					}),
@@ -276,7 +287,7 @@ describe("Source stalled rendition selection", () => {
 
 		expect(probes).toBe(1);
 		expect(Number(source.out.config.peek()?.bitrate)).toBe(1_500_000);
-		expect(source.out.config.peek()?.stalled).toBe(true);
+		expect(source.out.config.peek()?.label).toBe("Main camera");
 		source.close();
 	});
 
@@ -305,4 +316,48 @@ describe("Source stalled rendition selection", () => {
 			expect(source.out.available.peek()).toEqual({});
 			source.close();
 		}));
+});
+
+describe("Source rendition rank", () => {
+	it("breaks an exact tie by name, not catalog order", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				e: config("avc1.640028", { codedWidth: 1280, codedHeight: 720, bitrate: 3_000_000 }),
+				d: config("avc1.64001e", { codedWidth: 1280, codedHeight: 720, bitrate: 3_000_000 }),
+			}),
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("d");
+		source.close();
+	});
+
+	it("ranks a known zero bitrate above an unknown one", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				unknown: config("avc1.640028", { codedWidth: 1280, codedHeight: 720 }),
+				zero: config("avc1.64001e", { codedWidth: 1280, codedHeight: 720, bitrate: 0 }),
+			}),
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("zero");
+		source.close();
+	});
+
+	it("prefers a known picture over a higher bitrate with no size", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				a: config("avc1.640028", { bitrate: 9_000_000 }),
+				b: config("avc1.64001e", { codedWidth: 640, codedHeight: 360, bitrate: 1_000_000 }),
+			}),
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("b");
+		source.close();
+	});
 });

@@ -24,8 +24,9 @@ requirement, so this waits until the T-STD line settles.
   moves to its own PID, because a discontinuity flag on the PCR PID would
   declare a time-base break. Loss is still detected within a group.
 - Once anchored identically, both legs must make the same skip decision and
-  lay out the same slots. t0ms's `two_legs_render_a_skip_the_same_way` stays
-  ignored in #4645 until this lands. With the audio late, it also showed a
+  lay out the same slots. t0ms's `two_legs_render_a_skip_the_same_way`
+  (`rs/moq-mux/src/container/ts/export_timing_test.rs`) stays ignored until
+  this lands. With the audio late, it also showed a
   PES header byte that differs at the skip; find and fix that.
 - Test with mocked time:
   - two legs, joined a second apart, give byte-identical output including

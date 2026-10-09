@@ -23,8 +23,8 @@ async function drain(track: Track.Subscriber, compression: boolean): Promise<Uin
 test("one single-frame group per update", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track });
-	producer.update(bytes(1));
-	producer.update(bytes(2));
+	producer.update({ value: bytes(1) });
+	producer.update({ value: bytes(2) });
 	producer.finish();
 
 	// Two updates => two self-contained groups, so a consumer never needs an older one: a reader
@@ -49,7 +49,7 @@ test("a live consumer sees each update", async () => {
 	const consumer = new Consumer({ track: track.subscribe() });
 
 	for (let n = 0; n < 3; n++) {
-		producer.update(bytes(n));
+		producer.update({ value: bytes(n) });
 		expect(await consumer.next()).toEqual(bytes(n));
 	}
 	producer.finish();
@@ -59,7 +59,7 @@ test("compressed roundtrip", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
 	const payload = new TextEncoder().encode("the quick brown fox".repeat(64));
-	producer.update(payload);
+	producer.update({ value: payload });
 	producer.finish();
 
 	expect(await drain(track.subscribe(), true)).toEqual([payload]);
@@ -71,7 +71,7 @@ test("compression shrinks the frame on the wire", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
 	const payload = new TextEncoder().encode("the quick brown fox".repeat(64));
-	producer.update(payload);
+	producer.update({ value: payload });
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
@@ -82,7 +82,7 @@ test("compression shrinks the frame on the wire", async () => {
 test("a finished track ends the consumer", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track });
-	producer.update(bytes(7));
+	producer.update({ value: bytes(7) });
 	producer.finish();
 
 	const consumer = new Consumer({ track: track.subscribe() });
@@ -97,7 +97,7 @@ test("a backlog collapses to the newest value", async () => {
 	const producer = new Producer({ track });
 	const consumer = new Consumer({ track: track.subscribe() });
 
-	for (let n = 0; n < 10; n++) producer.update(bytes(n));
+	for (let n = 0; n < 10; n++) producer.update({ value: bytes(n) });
 	producer.finish();
 
 	expect(await consumer.next()).toEqual(bytes(9));
@@ -139,13 +139,23 @@ test("an aborted track surfaces its error instead of spinning", async () => {
 	await expect(consumer.next()).rejects.toThrow("subscription aborted");
 });
 
+test("a payload without a timestamp goes out untimed", async () => {
+	const track = new Track.Producer("test").accept({});
+	const producer = new Producer({ track });
+	producer.update({ value: bytes(1) });
+	producer.finish();
+
+	const frame = await (await track.subscribe().ordered().nextGroup())?.readFrame();
+	expect(frame?.timestamp).toBeUndefined();
+});
+
 test("a capture timestamp is written as the frame timestamp", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track });
 	const captured = Time.Timestamp.fromMillis(1_234);
-	producer.update(bytes(1), captured);
+	producer.update({ value: bytes(1), at: captured });
 	producer.finish();
 
 	const frame = await (await track.subscribe().ordered().nextGroup())?.readFrame();
-	expect(frame?.timestamp.as(Time.Timescale.MILLI)).toBe(1_234);
+	expect(frame?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_234);
 });

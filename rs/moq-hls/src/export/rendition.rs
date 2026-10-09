@@ -90,6 +90,11 @@ struct Run {
 	init: Option<Arc<Init>>,
 	/// Bumped by every restart, so an init build that straddles one isn't cached for the new run.
 	epoch: u64,
+	/// The window [`resets`](segments::Producer::resets) during which a listed segment started
+	/// where a player can, so the master keeps advertising the rendition even once a GOP past
+	/// [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts that segment. Stale once the window
+	/// is cleared (a new generation, a timeline skip or rewind, a replaced sibling publisher).
+	startable: Option<u64>,
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
@@ -192,7 +197,7 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	config.jitter = None;
 	config.delay = None;
 	config.label = None;
-	config.stalled = None;
+	config.enabled = true;
 	// Publishers estimate it and republish once it settles. The rendition keeps the fMP4
 	// timescale it was built with, and the framerate is refreshed in place like the bitrate.
 	config.framerate = None;
@@ -206,6 +211,7 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 	config.jitter = None;
 	config.delay = None;
 	config.label = None;
+	config.enabled = true;
 	config
 }
 
@@ -408,7 +414,11 @@ impl Rendition {
 			end: entry.end_time(),
 			discontinuity,
 		};
-		self.live.push(row, window);
+		let starts = self.is(reference) && row.starts_sync();
+		let resets = self.live.push(row, window);
+		if starts {
+			self.latch(resets);
+		}
 		self.trim();
 	}
 
@@ -476,6 +486,7 @@ impl Rendition {
 			generation,
 			init: None,
 			epoch: run.epoch + 1,
+			startable: None,
 		};
 	}
 
@@ -633,6 +644,59 @@ impl Rendition {
 	pub(crate) fn is_playable(&self) -> bool {
 		self.media.sync(&self.live);
 		self.live.is_playable()
+	}
+
+	/// Whether the multivariant playlist advertises this rendition, i.e. a player can start it.
+	///
+	/// Audio starts on any segment. Video starts only at a group start that is a sync point,
+	/// so it waits until a listed segment begins at one rather than send a stock player to
+	/// media it cannot decode. The window keeps its newest such segment, and a GOP too long for
+	/// that still stays advertised for the rest of the publisher run.
+	pub(crate) fn is_advertised(&self) -> bool {
+		self.poll_advertised(&kio::Waiter::noop()).is_ready()
+	}
+
+	/// Poll until [`is_advertised`](Self::is_advertised), for the master route's long-poll.
+	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.kind == Kind::Audio {
+			return self.poll_playable(waiter);
+		}
+		self.media.sync(&self.live);
+		if self.run().startable == Some(self.live.resets()) {
+			return self.poll_playable(waiter);
+		}
+		let startable = self.live.poll_rows(waiter, |rows| {
+			for row in rows {
+				let mut content = self.resolve(row);
+				if content == Content::Pending {
+					// Wake when the oldest unresolved row resolves, since it may be the sync start.
+					if self.poll_resolved(waiter, row).is_pending() {
+						return Poll::Pending;
+					}
+					content = self.resolve(row);
+				}
+				match content {
+					// Another rendition's boundary only resolves to frames by snapping to a sync start.
+					Content::Frames { .. } if !self.is(&row.reference) || row.starts_sync() => return Poll::Ready(()),
+					Content::Failed => return Poll::Pending,
+					_ => {}
+				}
+			}
+			Poll::Pending
+		});
+		let Poll::Ready(resets) = startable else {
+			return Poll::Pending;
+		};
+		// Tagged with the scanned window, so a clear racing this store leaves it stale.
+		self.latch(resets);
+		Poll::Ready(())
+	}
+
+	/// Record a start listed in window `resets`. Resets only grow, so a delayed latch for an
+	/// older window never replaces a newer one.
+	fn latch(&self, resets: u64) {
+		let mut run = self.run.lock().expect("run lock poisoned");
+		run.startable = run.startable.max(Some(resets));
 	}
 
 	/// This rendition's DASH representation: its master-level metadata plus its track's
@@ -937,6 +1001,12 @@ impl Rendition {
 		self.segment(&tag, segment).await
 	}
 
+	/// What the listed segment numbered `segment` holds on this rendition.
+	pub(crate) fn listed_content(&self, segment: u64) -> Option<Content> {
+		let tag = listed_tag(&self.live.window().segments);
+		Some(self.resolve(&self.live.row(&tag, segment)?))
+	}
+
 	/// Fetch the listed segment starting at `time`, under the tag its rows carry.
 	pub(crate) async fn listed_segment_at(&self, time: u64) -> Result<Option<Bytes>> {
 		let tag = listed_tag(&self.live.window().segments);
@@ -1047,10 +1117,14 @@ fn is_cache_miss(err: &moq_net::Error) -> bool {
 	matches!(
 		err,
 		moq_net::Error::NotFound
+			| moq_net::Error::NotFetchable
 			| moq_net::Error::Old
 			| moq_net::Error::Evicted
 			| moq_net::Error::Stream(
-				moq_net::StreamError::NotFound | moq_net::StreamError::Old | moq_net::StreamError::Evicted
+				moq_net::StreamError::NotFound
+					| moq_net::StreamError::NotFetchable
+					| moq_net::StreamError::Old
+					| moq_net::StreamError::Evicted
 			)
 	)
 }
@@ -1100,7 +1174,12 @@ mod tests {
 
 	#[test]
 	fn a_cache_miss_that_crossed_a_session_is_still_a_cache_miss() {
-		for local in [moq_net::Error::NotFound, moq_net::Error::Old, moq_net::Error::Evicted] {
+		for local in [
+			moq_net::Error::NotFound,
+			moq_net::Error::NotFetchable,
+			moq_net::Error::Old,
+			moq_net::Error::Evicted,
+		] {
 			assert!(is_cache_miss(&local), "{local:?} locally");
 			let lite = over_lite(&local);
 			assert!(is_cache_miss(&lite), "{local:?} over lite ({lite:?})");

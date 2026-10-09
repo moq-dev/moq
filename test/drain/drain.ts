@@ -109,14 +109,17 @@ await new Promise<void>((resolve, reject) => {
 // ── publisher on B ────────────────────────────────────────────────────────────
 const published = new Moq.Origin.Producer();
 const broadcast = published.createBroadcast(path);
-const track = broadcast.createTrack(trackName);
+const track = broadcast.createTrack(trackName, { timescale: Moq.Time.Timescale.MILLI });
 broadcast.announce();
 const publisher = new Moq.Connection({ url: new URL(`http://127.0.0.1:${bPort}/`), publish: published.consume() });
 
 let lastPublished = -1;
 const ticker = setInterval(() => {
 	const group = track.appendGroup();
-	group.writeString(String(group.sequence));
+	group.writeFrame({
+		payload: new TextEncoder().encode(String(group.sequence)),
+		timestamp: Moq.Time.Timestamp.now(),
+	});
 	group.close();
 	lastPublished = group.sequence;
 }, GROUP_INTERVAL_MS);

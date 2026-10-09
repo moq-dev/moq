@@ -64,7 +64,7 @@ test("arrival capture refuses an unsupported container", () => {
 test("the observer shares playback demand and closes without ending playback", async () => {
 	const origin = new Origin.Producer();
 	const published = origin.createBroadcast(Path.from("tone.hang"));
-	const track = published.createTrack("audio");
+	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	published.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), announced: false, catalogFormat: "manual" });
 	const capture = new Capture({
@@ -101,7 +101,7 @@ test("the observer shares playback demand and closes without ending playback", a
 async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<string | undefined> {
 	const origin = new Origin.Producer();
 	const published = origin.createBroadcast(Path.from("tone.hang"));
-	const track = published.createTrack("audio");
+	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	published.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), announced: false, catalogFormat: "manual" });
 	const capture = new Capture({

@@ -9,6 +9,12 @@ the AudioContext clock while video paces against a wall clock anchored at the
 earliest arrival, so a ring that re-buffers or skips drifts against video until
 the next re-anchor.
 
+Acceptance includes the 2026-10-07 audit's skip case: a video-only latency
+skip (`js/watch/src/video/decoder.ts`, `sync.reset()` on a video
+discontinuity) must not move audio's timeline. Today it re-anchors the shared
+`Sync` while the audio ring stays on the old one. Folded in here rather than
+fixed separately, since audio driving the clock removes the shared anchor.
+
 ## Plan
 
 Moved from m0 to m1 in the 2026-09-30 audit: it waits on the whole jitter
@@ -21,7 +27,7 @@ spread, and one is nominated as the clock source. `SyncInput`
 and a third track joins without another pair of inputs; `Sync.register`
 already keeps one jitter entry per track and grows into the handles. The
 measured target per track comes from the [Audio jitter
-target](/quest/m0/audio-jitter-target/README.md) line: each decoder registers
+target](/quest/m1/audio-jitter-target/README.md) line: each decoder registers
 its own target through `Sync.register`, and `probe` stays in `SyncInput` unread
 so that line lands on `main`. This quest folds the registrations into the
 handles and drops `probe`. `SyncInput` is a published `@moq/watch` shape, so
@@ -55,7 +61,7 @@ Recommendations for the implementation:
 
 ## Required
 
-- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the estimator this sits on, and the per-track targets this shape carries
+- [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the estimator this sits on, and the per-track targets this shape carries
 
 ## Related
 

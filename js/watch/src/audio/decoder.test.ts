@@ -223,6 +223,13 @@ async function play(initial: Delay) {
 		play,
 		// Remove the rendition from the catalog, then restore it.
 		remove: () => catalog.set({}),
+		// Keep the rendition in the catalog with `enabled: false`, as a muted publisher does.
+		disable: () =>
+			catalog.set({
+				audio: { renditions: { audio: Catalog.AudioConfigSchema.parse({ ...audio, enabled: false }) } },
+			}),
+		// The rendition the source selected.
+		track: () => source.out.track.peek(),
 		restore: (patch: Record<string, unknown> = {}) =>
 			catalog.set({ audio: { renditions: { audio: Catalog.AudioConfigSchema.parse({ ...audio, ...patch }) } } }),
 		// Serve another broadcast from the next subscription, its timeline starting over.
@@ -375,6 +382,30 @@ describe("Decoder across a rendition's absence", () => {
 			expect(playback.subscriptions()).toBe(2);
 			expect(playback.rings()).toEqual([ring]);
 			expect(playback.inserted().slice(before)).toEqual(timestamps.slice(3));
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("deselects a disabled rendition and keeps one graph across disable and enable", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play(12);
+			expect(playback.track()).toBe("audio");
+
+			playback.disable();
+			await microtasks();
+			expect(playback.track()).toBeUndefined();
+			expect(contexts).toHaveLength(1);
+
+			playback.restore();
+			await microtasks();
+			expect(playback.track()).toBe("audio");
+			await playback.play(6);
+
+			expect(contexts).toHaveLength(1);
+			expect(contexts[0].calls.close).toBe(0);
+			expect(playback.subscriptions()).toBe(2);
 		} finally {
 			playback.close();
 		}

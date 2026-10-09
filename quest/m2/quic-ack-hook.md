@@ -26,7 +26,7 @@ fn poll_acked(&mut self, cx: &mut Context, offset: u64) -> Poll<Result<Option<Ac
 ```
 
 It is ready with `Some` once every byte below `offset` has been acknowledged.
-`Acked` carries the ACK-delay-corrected receive instant from noq. It resolves
+`Acked` carries the ACK-delay-corrected receive instant from `moq-quic`. It resolves
 with an error once the stream is reset by either side or the session closes,
 so a waiter never hangs on bytes the peer will never acknowledge. The default
 implementation is ready with `Ok(None)` immediately: `None` means the backend

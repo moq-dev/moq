@@ -302,7 +302,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	const encoder = new TextEncoder();
 
 	const params = new Ietf.SetupOptions();
-	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
+	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(false));
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Ietf.solicitIntoSetup(params);
 	Ietf.hiddenIntoSetup(params);

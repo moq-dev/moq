@@ -56,10 +56,14 @@ test("metadata clears when entries disappear or broadcast becomes inactive", asy
 		hang: { user: { track: TRACK.user }, preview: { track: TRACK.preview } },
 	});
 	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
-	const user = new Json.Snapshot.Producer({ track: net.createTrack(TRACK.user) });
-	const preview = new Json.Snapshot.Producer({ track: net.createTrack(TRACK.preview) });
-	user.update({ name: "Alice" });
-	preview.update({ info: { video: true } });
+	const user = new Json.Snapshot.Producer({
+		track: net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI }),
+	});
+	const preview = new Json.Snapshot.Producer({
+		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
+	});
+	user.update({ value: { name: "Alice" }, at: Net.Time.Timestamp.now() });
+	preview.update({ value: { info: { video: true } }, at: Net.Time.Timestamp.now() });
 	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
 	try {
 		await flush();

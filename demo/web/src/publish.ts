@@ -391,7 +391,7 @@ let activeMeta: Json.Snapshot.Producer<unknown> | undefined;
 
 const setMeta = (value: unknown) => {
 	currentMeta = value;
-	activeMeta?.update(value);
+	activeMeta?.update({ value, at: Net.Time.Timestamp.now() });
 };
 
 const meta = new Signals.Effect();
@@ -401,11 +401,14 @@ meta.run((effect) => {
 	if (!net) return;
 
 	// A day-long cache so a viewer joining long after the last edit still replays the value.
-	const track = net.createTrack(META_TRACK, { maxAge: Net.Time.Milli(86_400_000) });
+	const track = net.createTrack(META_TRACK, {
+		timescale: Net.Time.Timescale.MILLI,
+		maxAge: Net.Time.Milli(86_400_000),
+	});
 	effect.cleanup(() => track.close());
 
 	const producer = new Json.Snapshot.Producer<unknown>({ track });
-	producer.update(currentMeta);
+	producer.update({ value: currentMeta, at: Net.Time.Timestamp.now() });
 	activeMeta = producer;
 	effect.cleanup(() => {
 		if (activeMeta === producer) activeMeta = undefined;

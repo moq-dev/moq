@@ -175,14 +175,14 @@ mod tests {
 			.expect("output catalog timed out")
 			.expect("read output catalog")
 			.expect("output catalog ended");
-		let track_name = catalog.audio.renditions.keys().next().expect("output Opus rendition");
+		let (track_name, config) = catalog.audio.renditions.iter().next().expect("output Opus rendition");
 		let track = output_consumer
 			.track(track_name)
 			.expect("output Opus track")
 			.subscribe(None)
 			.await
 			.expect("subscribe to output Opus track");
-		let mut opus = Track::opus(track);
+		let mut opus = Track::opus(track, config).expect("output Opus container");
 		let frame = tokio::time::timeout(TIMEOUT, opus.next())
 			.await
 			.expect("output Opus packet timed out")

@@ -33,6 +33,8 @@ just test ts --with-eit         # add a synthetic EPG first, report which SI sur
 just test ts --live             # grade PCR release timing off the live pipe
 just test ts --pair             # two exporters of one broadcast, grade table anchoring
 just test ts --open-gop         # open-GOP clip; its leading pictures must survive
+just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
+just test ts --delay 1s         # pass the exporter's --delay
 ```
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
@@ -43,8 +45,11 @@ runs (see [CI](#ci)).
 The default arm runs `pcr-timing.py` over its capture too, after `compliance.py`,
 for the PCR checks `compliance.py` leaves to it: the value interval (hard), and
 whether the bytes between consecutive PCRs are the ones the mux rate implies
-([`pcr-schedule`](#byte-schedule), a shape check that reports without gating
-unless `--strict`).
+([`pcr-schedule`](#byte-schedule), which gates whenever the rate is known, as the
+generated clip's is). With the rate known it also runs TSDuck's `pcrverify` past
+the first three seconds, failing on any PCR more than 500 ns off its byte position
+at the rate: the `PCR_accuracy_error` an IRD or a TR 101 290 probe reports, which
+`pcr-schedule`'s packet of slack lets through.
 
 The live arm passes only when the grader's verdict *and* the publisher's exit status
 are clean. The grader can only speak for what reached it, and the sample floor
@@ -83,7 +88,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated), except into a PCR that signals `discontinuity_indicator` |
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
 | `service-descriptors` | shape | an SDT naming the service is present |
-| `tstd` | shape | the full T-STD buffer model: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
+| `tstd` | hard | the full T-STD buffer model: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
 
 Every timing check reads the stream's own PCR, so a PCR emitted on the wrong
 clock rate stays internally consistent and passes them all. `duration-fidelity`
@@ -211,10 +216,10 @@ buffer, and even at 0.1 s a four-packet audio burst overflows TB.
 
 ### Gate
 
-`tstd` is a shape check, so `just test ts` reports it without failing. `export
-ts` output does not pass yet: some video access units arrive after their DTS, and
-audio runs far enough ahead, in bursts, to overflow both TB and B. The change that
-makes the exporter release on a fixed delay promotes `tstd` to a hard check.
+`tstd` is a hard check: `just test ts` fails on any buffer overflow or underflow.
+`export ts` passes it since its jitter buffer and constant-rate schedule (#4645).
+A stream with no audio or video to model, or no access unit inside a modelled time
+base, only warns, since there is nothing to grade.
 
 ## PCR timing (`pcr-timing.py`)
 
@@ -235,6 +240,12 @@ A constant-rate stream makes a fourth claim, graded by `pcr-schedule`: that the
 bytes between consecutive PCRs are the bytes the mux rate implies for that
 interval.
 
+From a pipe, `pcr-rate` also grades the PCR clock's rate against the arrival
+clock, as the least-squares slope over each time base after the start-up third:
+within 30 ppm (`--rate-ppm`), the tolerance ISO 13818-1 2.4.2.1 gives a system
+clock. `release` cannot see a clock running at a steady wrong rate, which keeps
+its intervals and only adds to the drift.
+
 ```bash
 # live: every domain, reading the exporter directly
 moq --connect http://localhost:4443 --broadcast live.hang export ts \
@@ -249,10 +260,11 @@ because every check is graded against the stream's **own** PCR values. If two
 consecutive PCRs are 25 ms apart in value then they must be ~25 ms apart in
 arrival, whatever clock rate the stream is running at. The price of that basis is
 the same one `compliance.py` pays: a PCR emitted at the wrong rate stays
-internally consistent, so absolute rate is not what this grades. `pcr-schedule`
-is the exception when it is given `--mux-rate`, which pins the rate the way
-`duration-fidelity` does; without it, it estimates the rate from the capture and
-grades only how evenly the bytes are laid over the PCRs.
+internally consistent, so absolute rate is not what this grades, except against
+the arrival clock in `pcr-rate`. `pcr-schedule` is the other exception when it is
+given `--mux-rate`, which pins the rate the way `duration-fidelity` does; without
+it, it estimates the rate from the capture and grades only how evenly the bytes
+are laid over the PCRs.
 
 | Check | Severity | What it verifies |
 |---|---|---|
@@ -275,7 +287,7 @@ the total and reports the rate over the tail of the sample beside it. A sender
 that buffers builds a standing lag once and then runs at the media rate: the lag
 is a constant offset no receiver can see, and it cannot grow past the latency
 budget the sender is allowed to hold, so set `--drift-ms` to that budget
-(`export ts --max-age`, 500 ms by default). A pipe that is not running at the
+(`export ts --delay`, 500 ms by default). A pipe that is not running at the
 media rate never stops accumulating and so breaches any fixed bound given a long
 enough sample. The tail rate is what tells the two apart, and it needs a sample
 longer than the lag takes to build: measured against the grid-sliced exporter,
@@ -340,17 +352,26 @@ Give the rate whenever it is known. The estimate is total bytes over total time,
 so a transient biases every interval by the same amount: over a 20 s live window,
 the exporter's unpadded first half-second pulled it ~3 % low and read every padded
 interval after it as off schedule. `run.sh` passes the generated clip's rate
-(`--bitrate`), and lets the grader estimate for `--source`.
+(`--bitrate`) with `--schedule-pct-min 99`, and lets the grader estimate, and only
+report, for `--source`.
 
-The generated clip is a weak fixture for this check. It compresses to almost
-nothing, so padding dominates and no keyframe outgrows its slot: measured against
-the exporter this check was written for, 92-97 % of intervals were on schedule
-over three 20 s runs, the misses being near-empty intervals from the unpadded
-start. A real constant-rate capture is the case that
-discriminates. A 60 s cut of a 9.95 Mb/s broadcast clip round-tripped through the
-same harness came back with a median of 1,316 B between PCRs against 31,081 B
-nominal and 3.1 % of intervals within tolerance, while its aggregate rate was
-within 16 b/s of nominal:
+With the rate given, the intervals before the first null packet are not graded. The
+exporter pads only once its catalog records the rate, which import measures over the
+source's first two seconds, so a subscriber that starts with the publisher begins
+unpadded; the report counts those intervals as `unpadded_lead`.
+
+At the default 10 Mb/s the generated clip compresses to almost nothing, so padding
+dominates and no keyframe outgrows its 31 kB slot. At 2 Mb/s its 13-19 kB keyframes
+outgrow a 6 kB slot, so the exporter has to spread each over the slots before its
+DTS; CI runs that too (`just test ts --bitrate 2000000`). `--hrd` goes further: a
+1080p encode with a 9 Mbit NAL HRD kept near full by noise, the shape of a
+contribution encoder's output, which sends pictures most of a second ahead of their
+decode time and loads the decoder buffer past 60 % at the default delay (the recipe
+moq-dev/moq#4645 graded with; CI runs it too). A real constant-rate
+capture discriminates further. A 60 s cut of a 9.95 Mb/s broadcast clip
+round-tripped through the harness before the export kept a schedule came back with
+a median of 1,316 B between PCRs against 31,081 B nominal and 3.1 % of intervals
+within tolerance, while its aggregate rate was within 16 b/s of nominal:
 
 ```bash
 just test ts --source cap.ts --duration 60 # reports the schedule, estimating the rate
@@ -562,9 +583,10 @@ exporter re-emits SI on its own repetition cadence rather than the source's.
 
 ## CI
 
-`.github/workflows/interop.yml` runs `just test ts`, `just test ts --open-gop`,
-`just test ts-eit`, and `just test ts-tstd` after the interop matrix (nightly, on
-demand, and on PRs touching `test/ts/`).
+`.github/workflows/interop.yml` runs `just test ts`, `just test ts --bitrate
+2000000`, `just test ts --hrd`, `just test ts --open-gop`, `just test ts-eit`, and
+`just test ts-tstd` after the interop matrix (nightly, on demand, and on PRs
+touching `test/ts/`).
 `ts-eit` is `eit-roundtrip.sh`: it builds the sparse-schedule and
 pending-version fixtures from a generated clip, round-trips them through a
 relay, and censuses the capture, so a break in the generators or in the SI

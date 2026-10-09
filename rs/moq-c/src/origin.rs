@@ -295,7 +295,7 @@ impl Origin {
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Resolves to an error when no announced route can serve the path.
-		let pending = consumer.request_broadcast(path.as_str());
+		let pending = consumer.request_broadcast(path.as_str(), None);
 
 		// `biased` so a pending close always wins over a ready broadcast.
 		let broadcast = tokio::select! {

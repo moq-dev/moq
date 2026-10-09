@@ -1,7 +1,10 @@
 import { Reader, Writer } from "../stream.ts";
 
-/** The largest message body either side accepts, matching the Rust implementation. */
-const MAX_SIZE = 64 * 1024 * 1024;
+/**
+ * The largest message body either side accepts, matching the Rust implementation: the
+ * same ceiling as SETUP, checked at the length prefix before the body is buffered.
+ */
+const MAX_SIZE = 0xffff;
 
 // Encodes a message with a varint size prefix, refusing a body the peer would reject.
 export async function encode(writer: Writer, f: (w: Writer) => Promise<void>, max = MAX_SIZE) {

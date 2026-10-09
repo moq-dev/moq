@@ -137,7 +137,14 @@ export class Connection implements Established {
 
 		this.hop = randomHop();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish);
-		this.#subscriber = new Subscriber(this.#quic, this.#version, this.hop, this.#probe, this.#peerSetup);
+		this.#subscriber = new Subscriber(
+			this.#quic,
+			this.#version,
+			this.hop,
+			this.#probe,
+			this.#peerSetup,
+			this.#goaway,
+		);
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
 		void this.#run();

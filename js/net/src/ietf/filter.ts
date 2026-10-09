@@ -4,6 +4,7 @@
  * @module
  */
 
+import { ProtocolViolation } from "../error.ts";
 import type { Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -48,6 +49,24 @@ export function isDraft20(version: IetfVersion): boolean {
 	);
 }
 
+/**
+ * Whether this is draft-22 or newer.
+ *
+ * Draft-22 replaced the length-inferred field list with a Location Filter Type that names
+ * the fields that follow, so the value carries no Length.
+ */
+export function isDraft22(version: IetfVersion): boolean {
+	return isDraft20(version) && version !== Version.DRAFT_20 && version !== Version.DRAFT_21;
+}
+
+/** The Location Filter Type of draft-22. */
+const TYPE_NONE = 0x0n;
+const TYPE_RELATIVE_START = 0x1n;
+const TYPE_ABSOLUTE_START = 0x2n;
+const TYPE_ABSOLUTE_GROUP_END = 0x3n;
+const TYPE_ABSOLUTE_RANGE = 0x4n;
+const TYPE_NEXT_OBJECT = 0x5n;
+
 /** Whether the Range Filters (draft-19) exist on this draft. */
 export function hasRangeFilters(version: IetfVersion): boolean {
 	return isDraft20(version) || version === Version.DRAFT_19;
@@ -88,9 +107,115 @@ function endDelta(startGroup: bigint, endGroup: bigint): bigint {
 	return endGroup - startGroup;
 }
 
-/** Encode a filter as its raw parameter value. Unfiltered encodes to zero bytes. */
+/**
+ * Encode a filter as its raw parameter value, without the Length that frames it through
+ * draft-21. Unfiltered encodes to zero bytes on draft-20 and draft-21.
+ */
 export function encode(filter: Filter, version: IetfVersion): Uint8Array {
+	if (isDraft22(version)) return encodeTyped(filter, version);
 	return isDraft20(version) ? encodeFields(filter, version) : encodeTag(filter, version);
+}
+
+/** Encode LOCATION_FILTER's value as it follows the parameter type from draft-17 on. */
+export function encodeParam(filter: Filter, version: IetfVersion): Uint8Array {
+	const value = encode(filter, version);
+	// Draft-22's Location Filter Type says where the value ends, so it needs no Length.
+	return isDraft22(version) ? value : encodeLengthPrefixed(value, version);
+}
+
+/** Read LOCATION_FILTER's value as it follows the parameter type from draft-17 on. */
+export async function decodeParam(r: Reader, version: IetfVersion): Promise<Filter> {
+	if (!isDraft22(version)) {
+		return decode(await r.read(await r.u53()), version);
+	}
+	const type = await r.u62();
+	const fields: bigint[] = [];
+	for (let i = typedFieldCount(type); i > 0; i--) {
+		fields.push(await r.u62());
+	}
+	return fromTyped(type, fields);
+}
+
+function encodeTyped(filter: Filter, version: IetfVersion): Uint8Array {
+	switch (filter.kind) {
+		case "unfiltered":
+			return varint(TYPE_NONE, version);
+		case "nextObject":
+			return varint(TYPE_NEXT_OBJECT, version);
+		case "relative":
+			return concat([varint(TYPE_RELATIVE_START, version), varint(filter.groups, version)]);
+		case "absolute": {
+			const type =
+				filter.endGroup === undefined
+					? TYPE_ABSOLUTE_START
+					: filter.endObject === undefined
+						? TYPE_ABSOLUTE_GROUP_END
+						: TYPE_ABSOLUTE_RANGE;
+			const parts = [
+				varint(type, version),
+				varint(filter.startGroup, version),
+				varint(filter.startObject, version),
+			];
+			if (filter.endGroup !== undefined) {
+				parts.push(varint(endDelta(filter.startGroup, filter.endGroup), version));
+				if (filter.endObject !== undefined) {
+					parts.push(varint(filter.endObject, version));
+				}
+			}
+			return concat(parts);
+		}
+	}
+}
+
+/** How many fields follow a draft-22 Location Filter Type. */
+function typedFieldCount(type: bigint): number {
+	switch (type) {
+		case TYPE_NONE:
+		case TYPE_NEXT_OBJECT:
+			return 0;
+		case TYPE_RELATIVE_START:
+			return 1;
+		case TYPE_ABSOLUTE_START:
+			return 2;
+		case TYPE_ABSOLUTE_GROUP_END:
+			return 3;
+		case TYPE_ABSOLUTE_RANGE:
+			return 4;
+		default:
+			throw new ProtocolViolation(`unknown Location Filter Type: ${type}`);
+	}
+}
+
+/** Build a filter from a draft-22 Location Filter Type and the fields it named. */
+function fromTyped(type: bigint, fields: bigint[]): Filter {
+	switch (type) {
+		case TYPE_NONE:
+			return { kind: "unfiltered" };
+		case TYPE_NEXT_OBJECT:
+			return { kind: "nextObject" };
+		case TYPE_RELATIVE_START:
+			return { kind: "relative", groups: fields[0] };
+		default: {
+			const [startGroup, startObject, delta, endObject] = fields;
+			const endGroup = delta === undefined ? undefined : startGroup + delta;
+			if (endGroup !== undefined && endGroup > 0xffff_ffff_ffff_ffffn) {
+				throw new ProtocolViolation("LOCATION_FILTER end group exceeds 2^64 - 1");
+			}
+			return { kind: "absolute", startGroup, startObject, endGroup, endObject };
+		}
+	}
+}
+
+/** Read a draft-22 filter from the front of `data`, returning what follows it. */
+function readTyped(data: Uint8Array, version: IetfVersion): [Filter, Uint8Array] {
+	let [type, rest] = unvarint(data, version);
+	const fields: bigint[] = [];
+	for (let i = typedFieldCount(type); i > 0; i--) {
+		const [field, next] = unvarint(rest, version);
+		fields.push(field);
+		rest = next;
+	}
+	return [fromTyped(type, fields), rest];
 }
 
 function encodeFields(filter: Filter, version: IetfVersion): Uint8Array {
@@ -152,8 +277,13 @@ function encodeTag(filter: Filter, version: IetfVersion): Uint8Array {
 	}
 }
 
-/** Decode a filter from its raw parameter value. */
+/** Decode a filter from its raw parameter value, which must be consumed whole. */
 export function decode(data: Uint8Array, version: IetfVersion): Filter {
+	if (isDraft22(version)) {
+		const [filter, rest] = readTyped(data, version);
+		expectEmpty(rest);
+		return filter;
+	}
 	return isDraft20(version) ? decodeFields(data, version) : decodeTag(data, version);
 }
 
@@ -264,8 +394,8 @@ function expectEmpty(rest: Uint8Array): void {
 export interface Fill {
 	/**
 	 * The range to fill. `undefined` means the Location Filter was omitted, which inherits
-	 * the subscription's own filter; `unfiltered` (a zero length filter) means the whole
-	 * track up to Largest Object.
+	 * the subscription's own filter; `unfiltered` (a zero length filter, or type 0x00 from
+	 * draft-22) means the whole track up to Largest Object.
 	 */
 	filter?: Filter;
 
@@ -280,8 +410,11 @@ export interface Fill {
 /** LOCATION_FILTER, the only parameter we act on inside a fill. */
 const FILL_LOCATION_FILTER = 0x21n;
 
+type Framing = "byte" | "varint" | "bytes";
+
 /**
- * The parameters draft-20 allows inside FILL_PARAMETERS, and how each frames its value.
+ * The parameters draft-20 allows inside FILL_PARAMETERS besides LOCATION_FILTER, and how
+ * each frames its value.
  *
  * Tabulated rather than derived, because neither shortcut is right. The Key-Value-Pair rule
  * keys framing off the id's parity, but the Range Filters (0x25-0x28) carry an explicit
@@ -289,20 +422,9 @@ const FILL_LOCATION_FILTER = 0x21n;
  * than a varint, so reading it as one misparses any value with a leading 1-bit. Either
  * mistake desyncs every parameter after it.
  */
-/**
- * Maps each to whether it carries a length prefix.
- *
- * The Key-Value-Pair rule keys the framing off the id's parity, but the Range Filters
- * (0x25-0x28) are written with an explicit `Length` field despite two of them having even
- * ids. Their own definition wins, so the framing is tabulated rather than derived: reading
- * 0x26 or 0x28 as a bare varint would desync every parameter after it.
- */
-type Framing = "byte" | "varint" | "bytes";
-
 const FILL_ALLOWED = new Map<bigint, Framing>([
 	[0x0an, "varint"], // FILL_TIMEOUT
 	[0x20n, "byte"], // SUBSCRIBER_PRIORITY, a uint8
-	[FILL_LOCATION_FILTER, "bytes"],
 	[0x22n, "byte"], // GROUP_ORDER, a uint8
 	[0x25n, "bytes"], // SUBGROUP_FILTER
 	[0x26n, "bytes"], // OBJECTID_FILTER, length prefixed despite an even id
@@ -317,7 +439,8 @@ const FILL_ALLOWED = new Map<bigint, Framing>([
  */
 export function encodeFill(fill: Fill, version: IetfVersion): Uint8Array {
 	// An omitted filter inherits the subscription's, so the scope is empty. An explicit
-	// unfiltered still encodes, as a zero length filter meaning the whole track.
+	// unfiltered still encodes, as a zero length filter (type 0x00 from draft-22) meaning
+	// the whole track.
 	if (fill.filter === undefined) {
 		return varint(0n, version);
 	}
@@ -325,7 +448,7 @@ export function encodeFill(fill: Fill, version: IetfVersion): Uint8Array {
 		varint(1n, version),
 		// The first type in a scope is not delta encoded, so this is the raw id.
 		varint(FILL_LOCATION_FILTER, version),
-		encodeLengthPrefixed(encode(fill.filter, version), version),
+		encodeParam(fill.filter, version),
 	]);
 }
 
@@ -346,6 +469,21 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		prev = key;
 		rest = afterType;
 
+		// Its framing depends on the draft, so the filter reads itself.
+		if (key === FILL_LOCATION_FILTER) {
+			if (filter !== undefined) {
+				throw new Error("duplicate LOCATION_FILTER inside FILL_PARAMETERS");
+			}
+			if (isDraft22(version)) {
+				[filter, rest] = readTyped(rest, version);
+			} else {
+				let value: Uint8Array;
+				[value, rest] = readLengthPrefixed(rest, version);
+				filter = decode(value, version);
+			}
+			continue;
+		}
+
 		const framing = FILL_ALLOWED.get(key);
 		if (framing === undefined) {
 			throw new Error(`parameter ${key} is not allowed inside FILL_PARAMETERS`);
@@ -363,23 +501,14 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		}
 		if (framing === "byte") {
 			if (rest.length < 1) throw new Error("truncated value inside FILL_PARAMETERS");
+			if (key === 0x22n && rest[0] !== 1 && rest[0] !== 2) {
+				throw new ProtocolViolation(`invalid group order: ${rest[0]}`);
+			}
 			rest = rest.slice(1);
 			continue;
 		}
 
-		const [length, afterLength] = unvarint(rest, version);
-		if (BigInt(afterLength.length) < length) {
-			throw new Error("truncated value inside FILL_PARAMETERS");
-		}
-		const value = afterLength.slice(0, Number(length));
-		rest = afterLength.slice(Number(length));
-
-		if (key === FILL_LOCATION_FILTER) {
-			if (filter !== undefined) {
-				throw new Error("duplicate LOCATION_FILTER inside FILL_PARAMETERS");
-			}
-			filter = decode(value, version);
-		}
+		[, rest] = readLengthPrefixed(rest, version);
 	}
 
 	if (rest.length !== 0) {
@@ -387,6 +516,15 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 	}
 
 	return { filter, rangeFilters };
+}
+
+/** Split a length-prefixed value off the front of `data`, returning it and what follows. */
+function readLengthPrefixed(data: Uint8Array, version: IetfVersion): [Uint8Array, Uint8Array] {
+	const [length, afterLength] = unvarint(data, version);
+	if (BigInt(afterLength.length) < length) {
+		throw new Error("truncated value inside FILL_PARAMETERS");
+	}
+	return [afterLength.slice(0, Number(length)), afterLength.slice(Number(length))];
 }
 
 function encodeLengthPrefixed(value: Uint8Array, version: IetfVersion): Uint8Array {

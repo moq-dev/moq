@@ -299,36 +299,28 @@ function extractAudioSpecificConfig(esds: Uint8Array): Uint8Array | undefined {
 }
 
 /**
- * Extract just the base media decode time from a data segment (moof + mdat).
- * This is a lighter-weight function when you only need the timestamp.
- *
- * @param segment - The moof + mdat data
- * @param init - Parsed init segment (provides timescale)
- * @returns The base media decode time in microseconds
- */
-export function decodeTimestamp(segment: Uint8Array, init: InitSegment): Time.Micro {
-	const boxes = readIsoBoxes(toArrayBuffer(segment), { readers: DATA_READERS }) as ParsedIsoBox[];
-
-	// Find moof > traf > tfdt for base media decode time
-	const tfdt = findBox(boxes, isBoxType<TrackFragmentBaseMediaDecodeTimeBox & ParsedIsoBox>("tfdt"));
-	const baseDecodeTime = tfdt?.baseMediaDecodeTime ?? 0;
-
-	// Convert to microseconds
-	return ((baseDecodeTime * 1_000_000) / init.timescale) as Time.Micro;
-}
-
-/**
  * Parse a data segment (moof + mdat) to extract raw samples.
  *
  * Sample duration/size/flags fall back through trun → tfhd → trex (init segment)
  * per ISO/IEC 14496-12 §8.8.7. The init segment's trex defaults are required for
  * fragments where the encoder only set them once in moov (e.g. gstreamer passthrough).
  *
+ * The moq-net `timestamp` is the broadcast timeline: the fragment's earliest sample presents at
+ * it. `tfdt` and the composition offsets only place the samples relative to each other, since a
+ * publisher may move a passthrough track to another timeline without rewriting the payload.
+ * An untimed frame (`undefined`) has no broadcast time, so its samples present at the time
+ * `tfdt` gives them.
+ *
  * @param segment - The moof + mdat data
  * @param init - Parsed init segment (provides timescale and trex defaults)
+ * @param timestamp - The moq-net frame timestamp carrying this segment, if its track is timed
  * @returns Array of decoded samples
  */
-export function decodeDataSegment(segment: Uint8Array, init: InitSegment): Sample[] {
+export function decodeDataSegment(
+	segment: Uint8Array,
+	init: InitSegment,
+	timestamp: Time.Timestamp | undefined,
+): Sample[] {
 	// Cast to ParsedIsoBox[] since the library's return type changes with readers
 	const boxes = readIsoBoxes(toArrayBuffer(segment), { readers: DATA_READERS }) as ParsedIsoBox[];
 
@@ -342,9 +334,12 @@ export function decodeDataSegment(segment: Uint8Array, init: InitSegment): Sampl
 	const defaultSize = tfhd?.defaultSampleSize ?? init.defaultSampleSize;
 	const defaultFlags = tfhd?.defaultSampleFlags ?? init.defaultSampleFlags;
 
-	// Find moof > traf > trun for sample info
-	const trun = findBox(boxes, isBoxType<TrackRunBox & ParsedIsoBox>("trun"));
-	if (!trun) {
+	// Find moof > traf > trun for sample info. A traf may split its samples across several runs,
+	// which continue one decode timeline and one mdat.
+	const traf = findBox(boxes, isBoxType<ParsedIsoBox>("traf"));
+	// biome-ignore lint/suspicious/noExplicitAny: ISO box structure varies
+	const truns = ((traf as any)?.boxes ?? []).filter(isBoxType<TrackRunBox & ParsedIsoBox>("trun"));
+	if (truns.length === 0) {
 		throw new Error("No trun box found in data segment");
 	}
 
@@ -361,70 +356,96 @@ export function decodeDataSegment(segment: Uint8Array, init: InitSegment): Sampl
 		throw new Error("No data in mdat box");
 	}
 
-	const samples: Sample[] = [];
+	// Samples are read from the mdat front to back, so each run must start where the previous one
+	// ended. A run's dataOffset counts from the moof's first byte (CMAF's default-base-is-moof).
+	if (tfhd?.baseDataOffset !== undefined) {
+		throw new Error("tfhd base_data_offset is unsupported: CMAF data offsets count from the moof");
+	}
+	let position = 0;
+	let moofStart: number | undefined;
+	let mdatDataStart: number | undefined;
+	for (const box of boxes) {
+		const size = box.largesize ?? box.size;
+		if (box.type === "moof") moofStart ??= position;
+		if (box === mdat) mdatDataStart = position + size - mdatData.byteLength;
+		position += size;
+	}
+	if (moofStart === undefined || mdatDataStart === undefined || mdatDataStart < moofStart) {
+		throw new Error("mdat must follow the moof");
+	}
+	const dataStart = mdatDataStart - moofStart;
 
-	// trun.dataOffset is an offset from the base data offset (typically moof start) to the first sample.
-	// For simple CMAF segments where moof is followed immediately by mdat, this equals moof.size + 8.
-	// Since mdat.data is the mdat payload (excluding the 8-byte header), we need to compute the
-	// offset within mdatData. For now, we assume samples start at the beginning of mdat.data
-	// when dataOffset is not specified or when it points to the start of mdat payload.
-	// TODO: For complex cases with base_data_offset in tfhd, this needs additional handling.
+	const samples: Sample[] = [];
+	const ptss: number[] = [];
+
 	let dataOffset = 0;
 	let decodeTime = baseDecodeTime;
 
-	for (let i = 0; i < trun.sampleCount; i++) {
-		const sample: TrackRunSample = trun.samples[i] ?? {};
-
-		const sampleSize = sample.sampleSize ?? defaultSize;
-		const sampleDuration = sample.sampleDuration ?? defaultDuration;
-
-		// Validate sample size - must be positive to produce valid data
-		if (sampleSize <= 0) {
-			throw new Error(`Invalid sample size ${sampleSize} for sample ${i} in trun`);
-		}
-
-		// Duration 0 is valid for single-sample CMAF fragments where duration
-		// is implicit. Negative duration would indicate corrupt data.
-		if (sampleDuration < 0) {
-			throw new Error(`Invalid sample duration ${sampleDuration} for sample ${i} in trun`);
-		}
-
-		// Bounds check before slicing to prevent reading past mdat data
-		if (dataOffset + sampleSize > mdatData.length) {
+	for (const trun of truns) {
+		if (trun.dataOffset !== undefined && trun.dataOffset !== dataStart + dataOffset) {
 			throw new Error(
-				`Sample ${i} would overflow mdat: offset=${dataOffset}, size=${sampleSize}, mdatLength=${mdatData.length}`,
+				`trun data_offset ${trun.dataOffset} doesn't start at the next sample (${dataStart + dataOffset})`,
 			);
 		}
 
-		const sampleFlags =
-			i === 0 && trun.firstSampleFlags !== undefined
-				? trun.firstSampleFlags
-				: (sample.sampleFlags ?? defaultFlags);
-		const compositionOffset = sample.sampleCompositionTimeOffset ?? 0;
+		for (let i = 0; i < trun.sampleCount; i++) {
+			const sample: TrackRunSample = trun.samples[i] ?? {};
 
-		// Extract sample data
-		const data = new Uint8Array(mdatData.slice(dataOffset, dataOffset + sampleSize));
-		dataOffset += sampleSize;
+			const sampleSize = sample.sampleSize ?? defaultSize;
+			const sampleDuration = sample.sampleDuration ?? defaultDuration;
 
-		// Calculate presentation timestamp in microseconds
-		// PTS = (decode_time + composition_offset) * 1_000_000 / timescale
-		const pts = decodeTime + compositionOffset;
-		const timestamp = Math.round((pts * 1_000_000) / init.timescale);
-		const duration = Math.round((sampleDuration * 1_000_000) / init.timescale);
+			// Validate sample size - must be positive to produce valid data
+			if (sampleSize <= 0) {
+				throw new Error(`Invalid sample size ${sampleSize} for sample ${i} in trun`);
+			}
 
-		// Check if keyframe (sample_is_non_sync_sample flag is bit 16)
-		// If flag is 0, treat as keyframe for safety. Audio never reports one: every
-		// audio sample is a sync sample, and the group start is the consumer's to mark.
-		const keyframe = init.kind === "video" && (sampleFlags === 0 || (sampleFlags & 0x00010000) === 0);
+			// Duration 0 is valid for single-sample CMAF fragments where duration
+			// is implicit. Negative duration would indicate corrupt data.
+			if (sampleDuration < 0) {
+				throw new Error(`Invalid sample duration ${sampleDuration} for sample ${i} in trun`);
+			}
 
-		samples.push({
-			data,
-			timestamp,
-			keyframe,
-			duration,
-		});
+			// Bounds check before slicing to prevent reading past mdat data
+			if (dataOffset + sampleSize > mdatData.length) {
+				throw new Error(
+					`Sample ${i} would overflow mdat: offset=${dataOffset}, size=${sampleSize}, mdatLength=${mdatData.length}`,
+				);
+			}
 
-		decodeTime += sampleDuration;
+			const sampleFlags =
+				i === 0 && trun.firstSampleFlags !== undefined
+					? trun.firstSampleFlags
+					: (sample.sampleFlags ?? defaultFlags);
+			const compositionOffset = sample.sampleCompositionTimeOffset ?? 0;
+
+			// Extract sample data
+			const data = new Uint8Array(mdatData.slice(dataOffset, dataOffset + sampleSize));
+			dataOffset += sampleSize;
+
+			ptss.push(decodeTime + compositionOffset);
+			const duration = Math.round((sampleDuration * 1_000_000) / init.timescale);
+
+			// Check if keyframe (sample_is_non_sync_sample flag is bit 16)
+			// If flag is 0, treat as keyframe for safety. Audio never reports one: every
+			// audio sample is a sync sample, and the group start is the consumer's to mark.
+			const keyframe = init.kind === "video" && (sampleFlags === 0 || (sampleFlags & 0x00010000) === 0);
+
+			// Set below, once the earliest presentation time is known.
+			samples.push({ data, timestamp: 0, keyframe, duration });
+
+			decodeTime += sampleDuration;
+		}
+	}
+
+	// A loop, not `Math.min(...ptss)`: a long fragment's sample count can exceed the argument limit.
+	let earliest = 0;
+	if (timestamp !== undefined) {
+		earliest = Number.POSITIVE_INFINITY;
+		for (const pts of ptss) earliest = Math.min(earliest, pts);
+	}
+	const anchor = timestamp?.asMicros() ?? 0;
+	for (const [i, sample] of samples.entries()) {
+		sample.timestamp = Math.round(anchor + ((ptss[i] - earliest) * 1_000_000) / init.timescale);
 	}
 
 	return samples;

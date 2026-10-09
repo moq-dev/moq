@@ -2,9 +2,9 @@
 
 ## Goal
 
-`max_age` means the same thing in Rust and js/net, for both publisher
-retention (`track::Info::max_age`) and a subscriber's budget
-(`Subscription::max_age`). A group other than the newest is stale once either
+Publisher retention (`track::Info::max_age`) and a subscriber's budget
+(`Subscription::max_delay`) apply the same
+staleness rule in Rust and js/net. A group other than the newest is stale once either
 its wall-clock age since its successor arrived at this hop, or its media-time
 age (the live edge minus its reach), reaches the budget. The newest group is
 never stale. An untimed group has no media time, so the wall clock alone
@@ -13,7 +13,7 @@ judges it.
 That one rule also gives up a resumed group no route continues after a
 failover, on untimed tracks too, and lets an untimed track's start replay
 what isn't stale instead of jumping to the latest group. The pool's (Rust) or
-cache window's (JS) wall-clock idle bound stays separate from `max_age`.
+cache window's (JS) wall-clock idle bound stays separate from both.
 
 ## Plan
 
@@ -34,28 +34,31 @@ Decided (2026-10-06, maintainer):
   arrival once N+1 shows up. If the successor aborts, the clock falls to the
   next servable successor's arrival, or stops if there is none.
 - Accepted: during a total upstream stall, a reader still on a superseded
-  group is skipped forward after `max_age`, where media time alone would let
-  it wait. That reader is `max_age` of real time behind live, and the newest
+  group is skipped forward after its budget, where media time alone would let
+  it wait. That reader is its budget of real time behind live, and the newest
   group is never evicted.
 - Applies to both retention and subscriber budgets, which share `is_stale`
   in `rs/moq-net/src/model/track.rs` today.
-- Supersedes two earlier decisions: the [untimed
-  model](/quest/m1/untimed-model.md)'s 2026-10-01 rejection of `max_age` on
+- Supersedes two earlier decisions: the untimed model's ([#4822](https://github.com/moq-dev/moq/pull/4822))
+  2026-10-01 rejection of `max_age` on
   max(wall, pts), whose worry was a congestion stall (answered by starting the
   clock at the successor), and the retired untimed-failover quest's no-clock
   rule, which this rule replaces.
-- Blocked readers need a deadline wake. `TrackState::poll_stale` re-checks
-  only when the track state changes, and after a failover the successor may
-  be the last change, so a lazily checked wall term never fires for a reader
-  parked in `Recover::poll` or a subscriber waiting on a superseded group.
-  Arm a wake at successor arrival + budget on those reader paths, re-armed
-  when the successor changes.
+- Blocked readers need a deadline wake. `track::Consumer::poll_stale`
+  re-checks only when the track state changes, and after a failover the
+  successor may be the last change, so a lazily checked wall term never fires
+  for a reader parked in `Recover::poll` or a subscriber waiting on a
+  superseded group. Arm a wake at successor arrival + budget on those reader
+  paths, re-armed when the successor changes. Decided 2026-10-08: one wake
+  mechanism. The deadline rides the held group's `expiry::Wakes` entry from
+  [Held group wakes](/quest/m1/held-group-wakes.md), not a wake of its own;
+  whichever lands second adds its trigger to that entry.
 - The swept benchmark measures cost and picks between evaluating the wall
   term on a timer and evaluating it lazily on access, for retention only. It
   no longer decides the semantics.
 - Ranked in the clock chain right after the untimed model, because that
   model ships the failover regression below until this lands.
-- Docs update inline: `track::Info::max_age` and `Subscription` docs,
+- Docs update inline: `track::Info::max_age` and `Subscription::max_delay` docs,
   js/net's `Info.maxAge` doc, `doc/concept`, the relay config docs, the
   Expiration section and Max Age field definitions in
   `drafts/draft-lcurley-moq-lite.md` (which today exclude wall-clock
@@ -94,8 +97,12 @@ Facts, and work carried over:
   about to fill the group isn't cut short. A FETCH reader has no budget and
   stays as it is.
 - Start resolution: the untimed model starts an untimed track at the latest
-  group. Replace that special case with the normal rule, replaying the
-  cached groups that aren't stale.
+  group (`TrackState::untimed_start`). Replace that special case with the
+  normal rule, replaying the cached groups that aren't stale. Until then a
+  reader rejoining an untimed track starts at a stale cached group and reads
+  on from there, so `rejoin_during_the_cancel_skips_the_cache`
+  (`rs/moq-net/tests/rejoin.rs`) checks only the versions whose tracks arrive
+  timed. Make it check every version again.
 
 Tests, with mocked time:
 
@@ -113,14 +120,10 @@ Tests, with mocked time:
 Public API: no signature change; `max_age` behaviour changes. Wire: no
 encoding change; Max Age semantics in the lite draft change.
 
-## Required
-
-- [Untimed model](/quest/m1/untimed-model.md) - introduces untimed groups and the failover stall this fixes
-
 ## Related
 
-- [Subscriber max-delay](https://github.com/moq-dev/moq/pull/4917) - renames the subscriber budget to `max_delay`; the rule applies under either name
+- [Held group wakes](/quest/m1/held-group-wakes.md) - the `Wakes` entry this quest's wall-clock deadline rides on
+- [lite-07 Live flag](/quest/m1/lite-live.md) - its untimed `Live` start (the latest group) follows this rule instead: replay what is not stale
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors the failover rule in JS
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - relay memory past the expiry window, in the same cache
-- [Cache shard](/quest/m2/cache-shard.md) - the pool's shared counters under many workers
 - [Generated @moq/net](/quest/m1/rs2ts/README.md) - retires js/net's hand-written model

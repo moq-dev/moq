@@ -31,8 +31,7 @@ Decided while planning the follow-ups of
   AUTH_ERROR. Rust `SessionError` and JS `SessionCode` round-trip it, so a
   session closed for an unsupported feature stops reading as INTERNAL_ERROR.
 - **The message ceiling is not this quest's** (decided in the 2026-10-06
-  audit): [Request caps](/quest/m0/request-caps.md) (#4820) caps lite
-  messages at 65,535 bytes, moq-transport's 16-bit control Message Length, so
+  audit): request caps (#4820) caps lite messages at 65,535 bytes, moq-transport's 16-bit control Message Length, so
   a grant too large for AUTH_OK is too large on both wires. This quest only
   answers that case with NOT_SUPPORTED.
 - **Compatibility.** An old peer that receives 0x30 treats it as an
@@ -50,5 +49,4 @@ code.
 
 ## Related
 
-- [Request caps](/quest/m0/request-caps.md) - owns the 65,535-byte lite message ceiling that makes a grant too large for AUTH_OK
 - [AUTH violations](/quest/m1/auth/violations.md) - AUTH protocol violations close the session on the same path (AUTH endings landed in #4550)

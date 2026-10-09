@@ -1,19 +1,23 @@
-# [M] Every source of playback latency is reportable, not just measurable in a test
+# [M] A viewer's share of playback latency is reportable, not just measurable in a test
 
 ## Goal
 
-A running session can report where its end-to-end audio delay went, stage by
-stage, through the public API in both languages. The numbers a user reads when
-debugging their own latency are the numbers the harness grades, because they
-come from the same place.
+A running viewer can report where its share of the audio delay went (jitter
+buffer, decode, render, and output device), stage by stage, through the
+public API in both languages. The numbers a user reads when debugging their
+own latency are the numbers the harness grades, because they come from the
+same place. Publisher and network stages, and an end-to-end total, wait for
+a clock that spans the whole path; none exists today.
 
 ## Plan
 
 The audio quality harness (`test/audio-quality/`) landed on ad-hoc debug
 probes, which was the right trade to get it running. This quest promotes them.
 
-- Take the stage schema the harness already defines (capture, encode, publish
-  flush, network, jitter buffer, decode, render) and expose it as fields of
+- Decided 2026-10-08: scope to the viewer's stages. No clock spans
+  publisher to viewer, so the harness reports end-to-end as null.
+- Take the viewer stages of the schema the harness already defines
+  (`jitter_buffer`, `decode`, `render`, `device`) and expose them as fields of
   the hang stats and feedback snapshots (`rs/hang/src/stats.rs`,
   `rs/hang/src/echo.rs`, and their `@moq/hang` mirrors), rather than a
   second readout: an observable value a stats or `.echo` track already
@@ -23,13 +27,11 @@ probes, which was the right trade to get it running. This quest promotes them.
   each exported item: a stage nobody outside can act on stays internal.
 - Switch the harness over, deleting the probes it replaces. A ledger with no
   consumer is how this drifts from reality.
-- The stages must sum to the measured end-to-end delay within a stated
-  tolerance, and that identity is itself a test. It only holds on the harness's
-  terms: one duration unit, every timestamp on a named clock, and stages as
-  exclusive spans that cannot both claim the same milliseconds. Inherit those
-  from the schema rather than restating them. An unaccounted remainder is the
-  bug this whole line exists to find, so it gets a name and a number rather
-  than being absorbed into a neighbouring stage.
+- Keep the harness's terms: one duration unit, every timestamp on a named
+  clock, and stages as exclusive spans that cannot both claim the same
+  milliseconds. Inherit those from the schema rather than restating them,
+  so the sum-to-end-to-end identity (with its named `unaccounted`
+  remainder) can be added once a spanning clock exists.
 
 ## Required
 

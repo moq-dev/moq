@@ -234,9 +234,9 @@ media-features:
 test *args:
     RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --locked --all-targets "$@"
 
-# Exercise Vulkan -> CUDA -> NVENC on Linux/NVIDIA hardware.
-vulkan-cuda:
-    sh/rs/vulkan-cuda.sh
+# Exercise the ignored hardware tests for every GPU vendor on this Linux host.
+gpu:
+    sh/rs/gpu.sh
 
 # The media tasks run against a recorder rather than a device (see
 # `rs/moq-cli/src/play/fake.rs`), so this needs no speaker or display.
@@ -347,3 +347,8 @@ bench-playback:
 [positional-arguments]
 bench-rtmp *args:
     cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"
+
+# One relay's stats tick, plus the decode table. `--test` runs each tick once; decode ignores it and prints its whole table.
+[positional-arguments]
+bench-stats *args:
+    cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode -- "$@"

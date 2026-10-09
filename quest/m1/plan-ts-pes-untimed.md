@@ -11,12 +11,10 @@ recorded reason to keep today's behaviour.
 
 Today the importer stamps a PES without a PTS at the track's live edge, or
 at 0 before the first frame. `drafts/draft-lcurley-moq-mpegts.md` says 0.
-Both are invented times, which
-[moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) rules
-out for moq-net itself.
+Both are invented times, which the untimed model ([#4822](https://github.com/moq-dev/moq/pull/4822)) rules out for
+moq-net itself.
 
-Timedness is per track since 2026-10-05 ([untimed
-model](/quest/m1/untimed-model.md)): a timed track refuses an untimed
+Timedness is per track since 2026-10-05: a timed track refuses an untimed
 frame, so a PES without a PTS can only go out untimed on an untimed track.
 Weigh that in the carriage decision.
 
@@ -39,7 +37,3 @@ container contract.
 
 Test plan for the implementation quest: importer to encoded track to
 exporter, for a PES without a PTS and for one with a real PTS of 0.
-
-## Required
-
-- [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - a frame must be able to carry no timestamp

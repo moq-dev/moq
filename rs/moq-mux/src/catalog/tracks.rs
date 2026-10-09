@@ -224,7 +224,7 @@ impl From<hang::catalog::VideoConfig> for VideoHint {
 	///
 	/// Total by construction: every field the hint can hold is taken from the config, so there is no
 	/// per-field copy for a caller to forget. Fields with no hint slot (`broadcast`, `description`,
-	/// `stalled`) are set through the catalog directly.
+	/// `enabled`) are set through the catalog directly.
 	fn from(config: hang::catalog::VideoConfig) -> Self {
 		Self {
 			label: config.label,
@@ -895,7 +895,8 @@ mod tests {
 			sample_rate: 48_000,
 			channel_count: 2,
 		}
-		.into();
+		.try_into()
+		.unwrap();
 		config.jitter = Some(Duration::ZERO);
 		assert!(crate::codec::aac::Import::new(track, reserved, config).is_err());
 		assert!(catalog.snapshot().audio.renditions.is_empty());

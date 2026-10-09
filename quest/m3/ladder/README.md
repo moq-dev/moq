@@ -18,8 +18,7 @@ state.
 Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer for the
 publisher-side ladder.
 
-The catalog and player half is the rendition `enabled` flag
-([enabled flag](/quest/m1/catalog-enabled.md)), which replaces the `stalled`
+The catalog and player half is the rendition `enabled` flag, which replaced the `stalled`
 state shipped in [moq#2865](https://github.com/moq-dev/moq/pull/2865):
 `enabled: false` means no frames are coming and a viewer must not select the
 rendition. Routing, decoder, and presentation identities are split so a
@@ -47,17 +46,17 @@ controller only consumes that tiebreak.
 
 ### Adaptive bands
 
-`moq_transcode::Rung::bitrate` (`rs/moq-transcode/src/ladder.rs:14-17`) stays
+`moq_transcode::Rung::bitrate` (`rs/moq-transcode/src/ladder.rs`) stays
 the configured maximum and never follows the instantaneous target. For a
 rendition with configured maximum `max` and the next lower rendition's
 `lower`:
 
 ```text
-stall = (max + 2 * lower) / 3
+disable = (max + 2 * lower) / 3
 ```
 
 The lowest rendition takes `lower = 0`, so its boundary is `max / 3`. An
-encoder may adapt within `[stall, max]`; below the boundary the rung is
+encoder may adapt within `[disable, max]`; below the boundary the rung is
 disabled (`enabled: false`) and stops encoding, and it is enabled again only
 once a target at or above the same boundary is successfully applied. Catalog state follows the last target the encoder
 *accepted*, not the one the controller requested, so a transient rate-control
@@ -89,4 +88,4 @@ encoders on every target change.
 
 ## Related
 
-- [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the other sender that reserves but never follows its grant
+- [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the other sender that reserves but never follows its grant

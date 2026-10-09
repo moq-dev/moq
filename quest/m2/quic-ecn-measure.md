@@ -6,7 +6,7 @@ A written verdict on classic ECN between relays: whether a marking
 bottleneck reduces the rate before its queue overflows instead of after,
 with the numbers, and whether Linode's and OVH's networks preserve ECT(0)
 and CE between relays. No code lands; the verdict is recorded in
-[L4S on the backbone](/quest/m2/quic-ecn.md), which acts on it.
+[L4S on the backbone](/quest/m3/quic-ecn.md), which acts on it.
 
 ## Plan
 
@@ -38,7 +38,7 @@ from 1.3.1 is a defective baseline, not evidence that classic ECN cannot help.
   the marking response is only a lab result.
 
 Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
-[L4S on the backbone](/quest/m2/quic-ecn.md).
+[L4S on the backbone](/quest/m3/quic-ecn.md).
 
 Decided in the 2026-10-06 audit: no longer waits on the hard fork. No code
 lands here, and the pinned moq-noq-proto 2.0.1 already carries the classic

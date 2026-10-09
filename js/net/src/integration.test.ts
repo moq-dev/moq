@@ -15,7 +15,7 @@ import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from
 import { Producer as GroupProducer } from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
-import { createMockTransportPair } from "./mock.ts";
+import { createMockTransportPair, textFrame } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -86,7 +86,7 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 				continue;
 			}
 			served++;
-			req.accept().writeString("hello");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 		}
 	})();
 
@@ -160,8 +160,13 @@ test("integration: lite subscription options and updates reach the publisher", a
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
 			if (!request) return;
-			const producer = request.accept();
-			if (request.subscription.groups?.start?.included === 1) resolveProducer?.(producer);
+			const producer = request.accept({ timescale: Timescale.MILLI });
+			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
+			const check = (subscription = producer.subscription.peek()) => {
+				if (subscription?.groups?.start?.included === 1) resolveProducer?.(producer);
+			};
+			check();
+			producer.subscription.subscribe(check);
 		}
 	})();
 
@@ -217,8 +222,13 @@ test("integration: lite carries a fractional maxDelay as a whole millisecond", a
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
 			if (!request) return;
-			const producer = request.accept();
-			if (request.subscription.groups?.start?.included === 1) resolveProducer?.(producer);
+			const producer = request.accept({ timescale: Timescale.MILLI });
+			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
+			const check = (subscription = producer.subscription.peek()) => {
+				if (subscription?.groups?.start?.included === 1) resolveProducer?.(producer);
+			};
+			check();
+			producer.subscription.subscribe(check);
 		}
 	})();
 
@@ -267,7 +277,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -317,7 +327,7 @@ test("integration: lite refuses an empty requested range on open and on update",
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -361,6 +371,54 @@ test("integration: lite draft-06", async () => {
 	// Exercises announce ids: every active assigns an ordinal on the wire.
 	await runPublishSubscribeFlow(Lite.ALPN_06);
 });
+
+// A subscriber learns a track's properties over a TRACK stream before it subscribes. The
+// publisher holds the track for that stream until the subscriber closes it, which it does once
+// its SUBSCRIBE is answered, so a publisher starting the track on demand sees one request and one
+// demand edge per viewer rather than one for each stream with a gap in between.
+test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
+	"integration: %s demand holds across a subscription's TRACK and SUBSCRIBE",
+	async (protocol) => {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		const broadcast = publish(origin, Path.from("test"));
+		const demand = broadcast.demand();
+		const edges: boolean[] = [];
+		const dispose = demand.used.subscribe((used) => edges.push(used));
+		let requests = 0;
+		const serving = (async () => {
+			for (;;) {
+				const request = await wireOf(broadcast).requested();
+				if (!request) return;
+				requests++;
+				request.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
+			}
+		})();
+
+		const remote = wireOf(client).consume(Path.from("test"));
+		const track = remote.track("video").subscribe().ordered();
+		expect(await track.readString()).toBe("hello");
+		await sleep(50);
+		expect(edges).toEqual([true]);
+		expect(requests).toBe(1);
+
+		track.close();
+		await withTimeout(demand.unused(), 1000, "demand outlived the reader");
+		expect(edges).toEqual([true, false]);
+
+		dispose();
+		remote.close();
+		broadcast.close();
+		await serving;
+		client.abort();
+		server.abort();
+	},
+);
 
 test("integration: lite draft-06 announce lifecycle", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06);
@@ -531,7 +589,7 @@ test("integration: lite draft-05 datagrams not sent on a non-datagram transport"
 	const pump = (async () => {
 		for (let i = 0; !stop; i++) {
 			producer.appendDatagram(Timestamp.fromMillis(i), enc.encode("dgram"));
-			producer.writeString("group");
+			producer.writeFrame(textFrame("group"));
 			await sleep(2);
 		}
 	})();
@@ -612,7 +670,7 @@ test("integration: lite draft-05 missing datagram writer does not close streams"
 	const track = remote.track("video").subscribe().ordered();
 
 	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("dgram"));
-	producer.writeString("group");
+	producer.writeFrame(textFrame("group"));
 
 	expect(await track.readString()).toBe("group");
 
@@ -622,38 +680,58 @@ test("integration: lite draft-05 missing datagram writer does not close streams"
 	server.abort();
 });
 
-test("integration: ietf does not deliver datagrams", async () => {
-	const enc = new TextEncoder();
-	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_19);
-	const origin = new OriginProducer();
+for (const [name, protocol, version] of [
+	["draft-14", "", Ietf.Version.DRAFT_14],
+	["draft-15", Ietf.ALPN.DRAFT_15, undefined],
+	["draft-16", Ietf.ALPN.DRAFT_16, undefined],
+	["draft-17", Ietf.ALPN.DRAFT_17, undefined],
+	["draft-18", Ietf.ALPN.DRAFT_18, undefined],
+	["draft-19", Ietf.ALPN.DRAFT_19, undefined],
+	["draft-20", Ietf.ALPN.DRAFT_20, undefined],
+	["draft-21", Ietf.ALPN.DRAFT_21, undefined],
+	["draft-22", Ietf.ALPN.DRAFT_22, undefined],
+] as const) {
+	for (const timed of [true, false]) {
+		test(`integration: ietf ${name} delivers ${timed ? "timed" : "untimed"} datagrams`, async () => {
+			const enc = new TextEncoder();
+			const dec = new TextDecoder();
+			const pair = createMockTransportPair(protocol);
+			const origin = new OriginProducer();
 
-	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
-		accept(pair.server, url, { publish: origin.consume() }),
-	]);
+			const [client, server] = await Promise.all([
+				connect(url, { transport: pair.client }),
+				accept(pair.server, url, { version, publish: origin.consume() }),
+			]);
 
-	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const broadcast = publish(origin, Path.from("test"));
+			const producer = broadcast.createTrack("video", timed ? { timescale: Timescale.MILLI } : {});
 
-	const remote = wireOf(client).consume(Path.from("test"));
-	const track = remote.track("video").subscribe().ordered();
-	const datagrams = remote.track("video").subscribe();
+			const remote = wireOf(client).consume(Path.from("test"));
+			const track = remote.track("video").subscribe().ordered();
+			const datagrams = remote.track("video").subscribe();
 
-	producer.insertDatagram(7, Timestamp.fromMillis(0), enc.encode("dgram"));
-	producer.writeString("group");
+			// A group first, so the subscription is serving and its alias is bound on both ends.
+			producer.writeFrame({ payload: enc.encode("group"), timestamp: timed ? Timestamp.now() : undefined });
+			expect(await track.readString()).toBe("group");
 
-	expect(await track.readString()).toBe("group");
+			producer.insertDatagram(7, timed ? Timestamp.fromMillis(1234) : undefined, enc.encode("dgram"));
+			const datagram = await withTimeout(datagrams.recvDatagram(), 1000, "no datagram arrived");
+			expect(datagram?.sequence).toBe(7);
+			expect(dec.decode(datagram?.payload)).toBe("dgram");
+			// Drafts 14-16 cannot declare TIMESCALE, so their datagrams arrive untimed.
+			if (timed && !["draft-14", "draft-15", "draft-16"].includes(name)) {
+				expect(datagram?.timestamp?.as(Timescale.MILLI)).toBe(1234);
+			} else {
+				expect(datagram?.timestamp).toBeUndefined();
+			}
 
-	const datagram = datagrams.recvDatagram();
-	datagram.catch(() => {});
-	const outcome = await Promise.race([datagram, sleep(50).then(() => "timeout" as const)]);
-	expect(outcome).toBe("timeout");
-
-	broadcast.close();
-	remote.close();
-	client.abort();
-	server.abort();
-});
+			broadcast.close();
+			remote.close();
+			client.abort();
+			server.abort();
+		});
+	}
+}
 
 test("integration: lite draft-05 missing datagram reader does not close streams", async () => {
 	const enc = new TextEncoder();
@@ -672,7 +750,7 @@ test("integration: lite draft-05 missing datagram reader does not close streams"
 	const track = remote.track("video").subscribe().ordered();
 
 	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("dgram"));
-	producer.writeString("group");
+	producer.writeFrame(textFrame("group"));
 
 	expect(await track.readString()).toBe("group");
 
@@ -709,7 +787,7 @@ test("integration: a group reset carries the peer's code to the subscriber", asy
 	const track = remote.track("video").subscribe().ordered();
 
 	const group = producer.appendGroup();
-	group.writeString("frame");
+	group.writeFrame(textFrame("frame"));
 
 	const consumer = await track.nextGroup();
 	if (!consumer) throw new Error("expected a group");
@@ -749,7 +827,7 @@ test("integration: a locally raised group error reaches the peer as its own code
 	const track = remote.track("video").subscribe().ordered();
 
 	const group = producer.appendGroup();
-	group.writeString("frame");
+	group.writeFrame(textFrame("frame"));
 
 	const consumer = await track.nextGroup();
 	if (!consumer) throw new Error("expected a group");
@@ -842,7 +920,7 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const group0 = producer.appendGroup();
 	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
@@ -859,11 +937,11 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 
 	const first = await fetched.readFrame();
 	expect(dec.decode(first?.payload)).toBe("alpha");
-	expect(first?.timestamp.asMillis()).toBe(10);
+	expect(first?.timestamp?.asMillis()).toBe(10);
 
 	const second = await fetched.readFrame();
 	expect(dec.decode(second?.payload)).toBe("beta");
-	expect(second?.timestamp.asMillis()).toBe(15);
+	expect(second?.timestamp?.asMillis()).toBe(15);
 
 	expect(await fetched.readFrame()).toBeUndefined();
 
@@ -883,7 +961,7 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 	const broadcast = publish(origin, Path.from("test"));
 	let serving: Promise<void> | undefined;
 	if (missing === "gap") {
-		const producer = broadcast.createTrack("video");
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const group = new GroupProducer(1);
 		producer.writeGroup(group);
 		group.close();
@@ -892,7 +970,7 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
-				request.accept().close();
+				request.accept({ timescale: Timescale.MILLI }).close();
 			}
 		})();
 	}
@@ -927,7 +1005,7 @@ test.each(["frame", "FIN"])("integration: lite fetch waits for the publisher's f
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	const remote = wireOf(client).consume(Path.from("test"));
 	try {
@@ -945,7 +1023,7 @@ test.each(["frame", "FIN"])("integration: lite fetch waits for the publisher's f
 		// Let the in-memory peer process the request with no response available yet.
 		await sleep(0);
 		expect(settled).toBe(0);
-		if (answer === "frame") group.writeString("accepted");
+		if (answer === "frame") group.writeFrame(textFrame("accepted"));
 		else group.close();
 		const consumers = await Promise.all([a, b]);
 		for (const consumer of consumers) {
@@ -974,7 +1052,7 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const group0 = producer.appendGroup();
 	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
@@ -1018,7 +1096,7 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	// Open the group and write one frame, but leave it open (in-progress).
 	const group0 = producer.appendGroup();
@@ -1034,7 +1112,7 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 	group0.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
 	const second = await fetched.readFrame();
 	expect(dec.decode(second?.payload)).toBe("beta");
-	expect(second?.timestamp.asMillis()).toBe(15);
+	expect(second?.timestamp?.asMillis()).toBe(15);
 
 	group0.close();
 	expect(await fetched.readFrame()).toBeUndefined();
@@ -1116,7 +1194,7 @@ test("integration: lite draft-05 fetch uses the republished track's timescale", 
 	// A millisecond timescale would round this to 1000us.
 	const fetched = await remote.track("video").fetchGroup(0);
 	const frame = await fetched.readFrame();
-	expect(frame?.timestamp.asMicros()).toBe(1234);
+	expect(frame?.timestamp?.asMicros()).toBe(1234);
 
 	first.close();
 	second.close();
@@ -1169,8 +1247,8 @@ test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 			for (;;) {
 				const req = await wireOf(broadcast).requested();
 				if (!req) break;
-				const track = req.accept();
-				track.writeString("before");
+				const track = req.accept({ timescale: Timescale.MILLI });
+				track.writeFrame(textFrame("before"));
 				served.push(track);
 			}
 		})();
@@ -1188,7 +1266,7 @@ test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 		expect(reply[0]).toBe(0x05);
 		expect(reply[3]).toBe(0x03);
 
-		for (const producer of served) producer.writeString("after");
+		for (const producer of served) producer.writeFrame(textFrame("after"));
 		expect(await track.readString()).toBe("after");
 
 		broadcast.close();
@@ -1278,8 +1356,8 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video");
-	video.writeString("hello");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	video.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const sub = remote.track("video").subscribe().ordered();
@@ -1325,8 +1403,8 @@ test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			served = req.accept();
-			served.writeString("hello");
+			served = req.accept({ timescale: Timescale.MILLI });
+			served.writeFrame(textFrame("hello"));
 		}
 	})();
 
@@ -1362,9 +1440,9 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = video.appendGroup(); // deliberately left open: an indefinite group.
-	group.writeString("hello");
+	group.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const fetched = await remote.track("video").fetchGroup(group.sequence);
@@ -1402,8 +1480,8 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video");
-	video.writeString("hello");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	video.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const a = remote.track("video").subscribe().ordered();
@@ -1414,7 +1492,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 
 	// Closing one leaves the shared upstream serving the other.
 	a.close();
-	video.writeString("more");
+	video.writeFrame(textFrame("more"));
 	expect(await b.readString()).toBe("more");
 	expect(video.demand().used.peek()).toBe(true);
 
@@ -1439,12 +1517,12 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const remote = wireOf(client).consume(Path.from("test"));
 
 	for (let i = 0; i < 8; i++) {
-		video.writeString(`hello-${i}`);
+		video.writeFrame(textFrame(`hello-${i}`));
 		const sub = remote.track("video").subscribe().ordered();
 		expect(await sub.readString()).toBe(`hello-${i}`);
 		await waitUntil(() => video.demand().used.peek());
@@ -1470,9 +1548,9 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = video.appendGroup(); // open
-	group.writeString("hello");
+	group.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const f1 = await remote.track("video").fetchGroup(group.sequence);
@@ -1483,7 +1561,7 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 
 	// Closing one coalesced reader keeps the shared FETCH flowing for the other.
 	f1.close();
-	group.writeString("more");
+	group.writeFrame(textFrame("more"));
 	expect(await f2.readString()).toBe("more");
 	expect(group.demand().used.peek()).toBe(true);
 
@@ -1510,12 +1588,12 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const remote = wireOf(client).consume(Path.from("test"));
 
 	for (let delay = 0; delay <= 12; delay++) {
 		const group = video.appendGroup(); // open
-		group.writeString("hello");
+		group.writeFrame(textFrame("hello"));
 
 		const f1 = await remote.track("video").fetchGroup(group.sequence);
 		expect(await f1.readString()).toBe("hello");
@@ -1525,7 +1603,7 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 		const f2 = await remote.track("video").fetchGroup(group.sequence);
 		expect(await f2.readString()).toBe("hello");
 
-		group.writeString("more");
+		group.writeFrame(textFrame("more"));
 		const more = await Promise.race([
 			f2.readString(),
 			new Promise<string>((resolve) => setTimeout(() => resolve("dropped"), 500)),
@@ -1553,10 +1631,10 @@ test("integration: lite fetch delivers every frame of a finite multi-frame group
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = video.appendGroup();
 	const count = 50;
-	for (let i = 0; i < count; i++) group.writeString(`f${i}`);
+	for (let i = 0; i < count; i++) group.writeFrame(textFrame(`f${i}`));
 	group.close(); // finite
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -1594,7 +1672,7 @@ async function runSubscribeWithoutWarmup(version: number) {
 	const broadcast = publish(origin, Path.from("test"));
 	const serving = (async () => {
 		const req = await wireOf(broadcast).requested();
-		if (req) req.accept().writeString("hello");
+		if (req) req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 	})();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -1673,7 +1751,7 @@ test("integration: an announced request waits for a late publisher", async () =>
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept().writeString(payload);
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(payload));
 		}
 	};
 
@@ -1730,7 +1808,7 @@ test("integration: an announced request consumes blind without discovery", async
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept().writeString("blind");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("blind"));
 		}
 	})();
 
@@ -1761,7 +1839,7 @@ test("integration: a republish is not served from the previous generation's cach
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept().writeString(payload);
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(payload));
 		}
 	};
 
@@ -1821,7 +1899,7 @@ async function runRepublishCycle(protocol: string, version?: number) {
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept().writeString(payload);
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(payload));
 		}
 	};
 
@@ -1893,7 +1971,7 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 		for (;;) {
 			const req = await wireOf(producer).requested();
 			if (!req) break;
-			req.accept().writeString("late");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("late"));
 		}
 	})();
 
@@ -1953,7 +2031,7 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 		for (;;) {
 			const req = await wireOf(producer).requested();
 			if (!req) break;
-			req.accept().writeString("ietf-late");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("ietf-late"));
 		}
 	})();
 
@@ -2000,7 +2078,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 				req.reject(new Error(`unexpected track: ${req.name}`));
 				continue;
 			}
-			req.accept().writeString("hello");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 		}
 	})();
 
@@ -2093,7 +2171,7 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 
 	// The client publishes; consuming its own path through the shared origin is local, no wire.
 	const mine = publish(shared, Path.from("from-client"));
-	mine.createTrack("chat");
+	mine.createTrack("chat", { timescale: Timescale.MILLI });
 	const reader = shared.consume();
 	const loopback = await routed(reader, Path.from("from-client"));
 	if (!loopback) throw new Error("expected a local route");
@@ -2135,7 +2213,7 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept().writeString("found you");
+			req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("found you"));
 		}
 	})();
 
@@ -2263,7 +2341,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 			for (;;) {
 				const req = await wireOf(broadcast).requested();
 				if (!req) break;
-				req.accept().writeString("still here");
+				req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame("still here"));
 			}
 		})();
 		return { client, server, serverOrigin, broadcast, serving };
@@ -2313,7 +2391,7 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 			for (;;) {
 				const req = await wireOf(broadcast).requested();
 				if (!req) break;
-				req.accept().writeString(payload);
+				req.accept({ timescale: Timescale.MILLI }).writeFrame(textFrame(payload));
 			}
 		})();
 		return { client, server, serverOrigin, broadcast, serving };
@@ -2362,7 +2440,7 @@ test("create then announce is discoverable on the wire", async () => {
 
 	const announced = client.announced();
 	const broadcast = origin.createBroadcast(Path.from("later"));
-	broadcast.createTrack("chat");
+	broadcast.createTrack("chat", { timescale: Timescale.MILLI });
 
 	const pending = announced.next();
 	broadcast.announce();
@@ -2385,7 +2463,7 @@ test("a handle serves a request under live/** over the wire", async () => {
 	const serving = (async () => {
 		for await (const request of handle.requested()) {
 			const produced = new BroadcastProducer();
-			produced.createTrack("chat").writeString("hello");
+			produced.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 			request.accept(produced);
 		}
 	})();
@@ -2439,7 +2517,7 @@ async function runSessionDeath(
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			req.accept().appendGroup().writeString("head");
+			req.accept({ timescale: Timescale.MILLI }).appendGroup().writeFrame(textFrame("head"));
 		}
 	})();
 
@@ -2499,8 +2577,8 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			const producer = req.accept();
-			producer.appendGroup().writeString("head");
+			const producer = req.accept({ timescale: Timescale.MILLI });
+			producer.appendGroup().writeFrame(textFrame("head"));
 			served.push(producer);
 		}
 	})();

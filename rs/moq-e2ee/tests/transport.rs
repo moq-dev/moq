@@ -63,7 +63,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	}
 	let epoch = route.epoch.unwrap_or_else(|| generation.epoch().clone());
 	let generation = cred.generation(epoch);
-	let remote = consumer.request_broadcast(&path).await.unwrap();
+	let remote = consumer.request_broadcast(&path, None).await.unwrap();
 	let subscriber = remote
 		.track(name.as_str())
 		.unwrap()

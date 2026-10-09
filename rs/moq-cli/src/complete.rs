@@ -344,7 +344,7 @@ mod tests {
 		// A stage offers its own flags, and none of the globals it would refuse.
 		let staged = complete("moq --connect http://x/y import fmp4 -- export fmp4 --").await;
 		assert!(!staged.is_empty(), "a later stage completed nothing");
-		for global in ["--connect", "--hop", "--broadcast"] {
+		for global in ["--connect", "--epoch", "--broadcast"] {
 			assert!(
 				!staged.iter().any(|candidate| candidate == global),
 				"{global} leaked into a stage that refuses it: {staged:?}"

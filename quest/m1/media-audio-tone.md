@@ -21,3 +21,4 @@ loaded check.
 
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - shares the loaded-check validation
 - [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - shares the media fixture, but tracks a separate failure
+- [Forced channel count](/quest/m1/publish-audio-channel-count.md) - another source of audio gaps on the JS publish path; rule it in or out first

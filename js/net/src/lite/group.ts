@@ -74,11 +74,11 @@ function unzigzag(v: bigint): bigint {
  *
  * A non-zero `scale` means every frame is prefixed with a zigzag-delta timestamp (the lite-05
  * FRAME format), decoded into a Timestamp at that scale. Scale 0 (pre-lite-05) carries no
- * timestamp, so frames are wall-clock stamped on arrival.
+ * timestamp, so frames arrive untimed.
  */
 export function frameDecoder(scale: number): (c: Cursor) => netGroup.Frame {
 	if (scale === 0) {
-		return (c) => ({ payload: c.read(c.u53()), timestamp: Time.Timestamp.now() });
+		return (c) => ({ payload: c.read(c.u53()) });
 	}
 
 	const timescale = Time.Timescale(scale);

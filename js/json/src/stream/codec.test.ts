@@ -1,9 +1,10 @@
-import { expect, test } from "bun:test";
-import { Group, Error as NetError, Track } from "@moq/net";
+import { expect, spyOn, test } from "bun:test";
+import { Encoder as Flate } from "@moq/flate";
+import { Group, Track } from "@moq/net";
 import * as z from "@zod/mini";
 import { Desync } from "../error.ts";
 import { Decoder } from "./decoder.ts";
-import { Encoder } from "./encoder.ts";
+import { deflateBound, Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
 
 type Rec = { n: number };
@@ -109,7 +110,7 @@ test("a rejected record ends the track without opening a group", async () => {
 	const subscriber = track.subscribe().ordered();
 	const producer = new Producer<unknown>({ track });
 
-	expect(() => producer.append(undefined)).toThrow("not representable as JSON");
+	expect(() => producer.append({ value: undefined })).toThrow("not representable as JSON");
 
 	// Nothing was appended, so the log has no group for a consumer to enter and wait in.
 	expect(subscriber.latest()).toBeUndefined();
@@ -160,11 +161,11 @@ test("a rejected record leaves the producer able to retry", () => {
 
 	// Closing the track makes every write fail, standing in for any post-appendGroup rejection.
 	track.close();
-	expect(() => producer.append({ n: 1 })).toThrow();
+	expect(() => producer.append({ value: { n: 1 } })).toThrow();
 
 	// The retry fails on the same closed track, but it must fail for that reason rather than the
 	// encoder having latched itself shut.
-	expect(() => producer.append({ n: 2 })).not.toThrow("compression desynchronized");
+	expect(() => producer.append({ value: { n: 2 } })).not.toThrow("compression desynchronized");
 });
 
 test("a failed write on the very first record still ends the track", async () => {
@@ -175,15 +176,23 @@ test("a failed write on the very first record still ends the track", async () =>
 	const subscriber = track.subscribe().ordered();
 	const producer = new Producer<string>({ track });
 
-	// Serializes past the group cache limit, so `appendGroup` succeeds and `writeFrame` rejects it.
-	const oversized = "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1);
-	expect(() => producer.append(oversized)).toThrow(NetError.FrameTooLarge);
+	// The budget check refuses anything the group would, so stub the write to stand in for any
+	// rejection past it: `appendGroup` succeeds and `writeFrame` throws.
+	const failure = new Error("write rejected");
+	const write = spyOn(Group.Producer.prototype, "writeFrame").mockImplementation(() => {
+		throw failure;
+	});
+	try {
+		expect(() => producer.append({ value: "x" })).toThrow(failure);
+	} finally {
+		write.mockRestore();
+	}
 
 	// The consumer is handed the group that was already published, and reading it surfaces the
 	// abort. Without ending the track that group stays open and empty, so this read hangs instead.
 	const group = await subscriber.nextGroup();
 	expect(group).toBeDefined();
-	await expect(group?.readFrame()).rejects.toThrow(NetError.FrameTooLarge);
+	await expect(group?.readFrame()).rejects.toThrow(failure);
 });
 
 test("stream schema validates on both sides", () => {
@@ -199,4 +208,27 @@ test("a lost compressed stream frame has a typed error", () => {
 	const encoder = new Encoder<Rec>({ compression: "deflate" });
 	encoder.encode({ n: 1 });
 	expect(() => encoder.encode({ n: 2 })).toThrow(Desync);
+});
+
+// The bound holds for incompressible input, the worst case, at sizes straddling the 16 KiB block
+// boundary, and on a window already primed by earlier frames. Twin of the Rust test, since pako is a
+// separate implementation from the zlib the Rust side checks.
+test("deflate bound covers incompressible frames", () => {
+	// xorshift: incompressible enough to force stored blocks, and deterministic.
+	let state = 0x9e3779b9;
+	const noise = (len: number) => {
+		const out = new Uint8Array(len);
+		for (let i = 0; i < len; i++) {
+			state ^= state << 13;
+			state ^= state >>> 17;
+			state ^= state << 5;
+			out[i] = state & 0xff;
+		}
+		return out;
+	};
+
+	const flate = new Flate();
+	for (const len of [1, 2, 100, 16_383, 16_384, 16_385, 65_535, 65_536, 1 << 20, 3 << 20]) {
+		expect(flate.frame(noise(len)).byteLength).toBeLessThanOrEqual(deflateBound(len));
+	}
 });

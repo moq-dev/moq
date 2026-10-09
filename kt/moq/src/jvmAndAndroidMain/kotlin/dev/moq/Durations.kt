@@ -45,17 +45,17 @@ val VideoDecoderOutput.maxDelay: Duration?
 val AudioEncoderOutput.frameDuration: Duration
     get() = frameDurationUs.toLong().microseconds
 
-/** Presentation timestamp. */
-val Frame.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
+/** Presentation timestamp, or null for an untimed frame. */
+val Frame.timestamp: Duration?
+    get() = timestampUs?.toLong()?.microseconds
 
 /** Presentation timestamp. */
 val MediaFrame.timestamp: Duration
     get() = timestampUs.toLong().microseconds
 
-/** Presentation timestamp. */
-val Datagram.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
+/** Presentation timestamp, or null for an untimed datagram. */
+val Datagram.timestamp: Duration?
+    get() = timestampUs?.toLong()?.microseconds
 
 /** Presentation timestamp of the first sample. */
 val AudioFrame.timestamp: Duration

@@ -12,5 +12,6 @@ export {
 	Session,
 	Stream,
 	type StreamOptions,
+	TimestampMismatch,
 	TooFarBehind,
 } from "./error.ts";

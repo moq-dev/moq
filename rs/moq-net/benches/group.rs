@@ -75,7 +75,7 @@ fn bench_write(c: &mut Criterion) {
 				|(mut ctx, mut buf)| {
 					for _ in 0..n {
 						let frame = frame::Frame {
-							timestamp: Timestamp::ZERO,
+							timestamp: Some(Timestamp::ZERO),
 							payload: payload.clone(),
 						};
 						// A full buffer hands the frame back: flush, then take it.

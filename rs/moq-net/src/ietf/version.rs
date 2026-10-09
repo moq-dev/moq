@@ -73,12 +73,12 @@ mod tests {
 		buf
 	}
 
-	/// Draft-21 and draft-22 are editorial: they restructure the document and drop the
-	/// Connection URL, Stream Cancellation, and Examples sections, leaving every codepoint
-	/// and field layout as draft-20 defined them. So they have to encode byte for byte the
-	/// same, and this pins that rather than trusting each version branch to fall forward.
+	/// Draft-21 is editorial: it restructures the document and drops the Connection URL,
+	/// Stream Cancellation, and Examples sections, leaving every codepoint and field layout
+	/// as draft-20 defined them. So it has to encode byte for byte the same, and this pins
+	/// that rather than trusting each version branch to fall forward.
 	#[test]
-	fn draft21_and_draft22_match_draft20_on_the_wire() {
+	fn draft21_matches_draft20_on_the_wire() {
 		let properties = Properties {
 			max_cache_duration: None,
 			timescale: Some(Timescale::new(90_000).unwrap()),
@@ -137,6 +137,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: false,
 		};
 
 		let group = GroupHeader {
@@ -147,32 +148,41 @@ mod tests {
 			flags: GroupFlags::default(),
 		};
 
-		for version in [Version::Draft21, Version::Draft22] {
-			assert_eq!(
-				message(&subscribe, Version::Draft20),
-				message(&subscribe, version),
-				"SUBSCRIBE {version}"
-			);
-			assert_eq!(
-				message(&subscribe_ok, Version::Draft20),
-				message(&subscribe_ok, version),
-				"SUBSCRIBE_OK {version}"
-			);
-			assert_eq!(
-				message(&publish, Version::Draft20),
-				message(&publish, version),
-				"PUBLISH {version}"
-			);
-			assert_eq!(
-				message(&fetch, Version::Draft20),
-				message(&fetch, version),
-				"FETCH {version}"
-			);
-			assert_eq!(
-				field(&group, Version::Draft20),
-				field(&group, version),
-				"SUBGROUP_HEADER {version}"
-			);
-		}
+		let (old, new) = (Version::Draft20, Version::Draft21);
+		assert_eq!(message(&subscribe, old), message(&subscribe, new), "SUBSCRIBE");
+		assert_eq!(message(&subscribe_ok, old), message(&subscribe_ok, new), "SUBSCRIBE_OK");
+		assert_eq!(message(&publish, old), message(&publish, new), "PUBLISH");
+		assert_eq!(message(&fetch, old), message(&fetch, new), "FETCH");
+		assert_eq!(field(&group, old), field(&group, new), "SUBGROUP_HEADER");
+	}
+
+	/// Draft-22's only wire change is LOCATION_FILTER, which drops its Length for a Location
+	/// Filter Type. So a SUBSCRIBE differs from draft-20 in those bytes alone.
+	#[test]
+	fn draft22_changes_only_the_location_filter() {
+		let subscribe = Subscribe {
+			request_id: RequestId(1),
+			track_namespace: Path::new("broadcast"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
+			forward: true,
+			range_filters: false,
+		};
+
+		// Draft-20 spells Next Object as a Length of 2 and two zero fields; draft-22 as type 0x05.
+		let old = message(&subscribe, Version::Draft20);
+		let at = old
+			.windows(4)
+			.position(|w| w == [0x01, 0x02, 0x00, 0x00])
+			.expect("draft-20 LOCATION_FILTER");
+		let mut expected = old[..at].to_vec();
+		expected.extend_from_slice(&[0x01, 0x05]);
+		expected.extend_from_slice(&old[at + 4..]);
+
+		assert_eq!(message(&subscribe, Version::Draft22), expected);
 	}
 }

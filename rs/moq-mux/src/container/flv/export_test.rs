@@ -10,6 +10,15 @@ use hang::catalog::{AudioCodec, VideoCodec};
 
 use super::{Export, Import};
 
+/// Open an FLV export on the hang catalog of `source`.
+async fn open_export(source: crate::Source) -> Export<crate::catalog::Consumer> {
+	let catalog = source
+		.catalog::<()>(crate::catalog::CatalogFormat::default())
+		.await
+		.expect("catalog");
+	Export::new(source, catalog)
+}
+
 /// A drift budget no test timeline comes close to, so the exporter reads every group.
 ///
 /// The media track's full retention window, so an exporter started after publishing
@@ -113,7 +122,7 @@ fn synth_flv() -> Vec<u8> {
 }
 
 /// Drive the exporter to completion, dropping an already-finished importer to signal EOS.
-async fn drain_export(mut exporter: Export, importer: Import) -> Vec<u8> {
+async fn drain_export<S: crate::catalog::Stream>(mut exporter: Export<S>, importer: Import) -> Vec<u8> {
 	let mut exported = Vec::new();
 	let mut importer = Some(importer);
 	for _ in 0..64 {
@@ -139,7 +148,7 @@ async fn export_roundtrips_through_import() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
 	let exported = drain_export(exporter, importer).await;
 
 	// The export must be a real FLV stream.
@@ -177,9 +186,8 @@ async fn export_emits_sequence_headers_and_frames() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer))
+	let exporter = open_export(crate::source::announced(&consumer))
 		.await
-		.unwrap()
 		.with_max_delay(RECORDING_MAX_DELAY);
 	let exported = drain_export(exporter, importer).await;
 
@@ -260,7 +268,7 @@ async fn export_roundtrips_enhanced() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -324,7 +332,7 @@ async fn export_roundtrips_mp3() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
 	let exported = drain_export(exporter, importer).await;
 
 	// The audio is muxed as a legacy SoundFormat 2 (MP3) tag, no sequence header.
@@ -378,7 +386,7 @@ async fn export_roundtrips_av1() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
 	let exported = drain_export(exporter, importer).await;
 	let tags = parse_tags(&exported);
 
@@ -434,7 +442,7 @@ async fn export_roundtrips_ac3() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
 	let exported = drain_export(exporter, importer).await;
 	let tags = parse_tags(&exported);
 	assert!(
@@ -469,7 +477,7 @@ async fn export_roundtrips_eac3() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
 	let exported = drain_export(exporter, importer).await;
 	let tags = parse_tags(&exported);
 	assert!(
@@ -594,7 +602,7 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 
 /// Drive the exporter to completion, dropping the producer handles on the first
 /// stall so it can reach end-of-stream (the already-published groups stay readable).
-async fn drain_to_end(mut exporter: Export, keepalive: Keepalive) -> Vec<u8> {
+async fn drain_to_end<S: crate::catalog::Stream>(mut exporter: Export<S>, keepalive: Keepalive) -> Vec<u8> {
 	let mut exported = Vec::new();
 	let mut keepalive = Some(keepalive);
 	for _ in 0..64 {
@@ -615,9 +623,8 @@ async fn drain_to_end(mut exporter: Export, keepalive: Keepalive) -> Vec<u8> {
 async fn export_multitrack_roundtrips_all_renditions() {
 	let (consumer, descriptions, keepalive) = build_multitrack_broadcast();
 
-	let exporter = Export::new(crate::source::announced(&consumer))
+	let exporter = open_export(crate::source::announced(&consumer))
 		.await
-		.unwrap()
 		.with_multitrack(true);
 	let exported = drain_to_end(exporter, keepalive).await;
 
@@ -675,7 +682,7 @@ async fn export_multitrack_roundtrips_all_renditions() {
 async fn export_without_multitrack_keeps_best_rendition() {
 	let (consumer, descriptions, keepalive) = build_multitrack_broadcast();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
 	let exported = drain_to_end(exporter, keepalive).await;
 
 	// No multitrack framing: the single video track is a legacy AVC tag.
@@ -700,6 +707,95 @@ async fn export_without_multitrack_keeps_best_rendition() {
 		Some(descriptions[1].as_slice()),
 		"the larger rendition wins"
 	);
+}
+
+/// Single-track FLV serves the best audio rendition it can carry, not the first by name.
+///
+/// The weaker rendition sorts first. A higher sample rate at a lower bitrate loses to the
+/// higher bitrate, and an uncarryable rendition does not hide the one FLV can mux.
+#[tokio::test(start_paused = true)]
+async fn export_without_multitrack_keeps_best_audio_rendition() {
+	use hang::catalog::{AAC, AudioCodec, AudioConfig, Container};
+	use moq_net::Timestamp;
+
+	use crate::container::Producer;
+
+	// AAC-LC, 48000 Hz, stereo. Higher rate, lower bitrate.
+	const WEAK_ASC: [u8; 2] = [0x11, 0x90];
+	// AAC-LC, 44100 Hz, stereo. Lower rate, higher bitrate.
+	const STRONG_ASC: [u8; 2] = [0x12, 0x10];
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut tracks = Vec::new();
+
+	{
+		let mut publish = |name: &str, config: AudioConfig| {
+			let track = producer.create_track(name, None).unwrap();
+			catalog
+				.modify()
+				.unwrap()
+				.audio
+				.renditions
+				.insert(track.name().to_string(), config);
+			let mut audio = Producer::new(
+				track,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+			);
+			audio
+				.write(crate::container::Frame {
+					timestamp: Timestamp::from_millis(0).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(&[0xde, 0xad]),
+					keyframe: true,
+				})
+				.unwrap();
+			audio.finish().unwrap();
+			tracks.push(audio);
+		};
+
+		// Name order is the uncarryable rendition, then the higher-rate lower-bitrate one.
+		let mut flac = AudioConfig::new(AudioCodec::Flac, 48_000, 2);
+		flac.container = Container::Legacy;
+		flac.bitrate = Some(256_000);
+		publish("a", flac);
+
+		let mut weak = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		weak.container = Container::Legacy;
+		weak.bitrate = Some(64_000);
+		weak.description = Some(Bytes::from_static(&WEAK_ASC));
+		publish("m", weak);
+
+		let mut strong = AudioConfig::new(AAC { profile: 2 }, 44_100, 2);
+		strong.container = Container::Legacy;
+		strong.bitrate = Some(128_000);
+		strong.description = Some(Bytes::from_static(&STRONG_ASC));
+		publish("z", strong);
+	}
+
+	catalog.finish().unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exported = drain_to_end(exporter, (producer, catalog, tracks)).await;
+
+	let mut bcast2 = moq_net::broadcast::Info::new().produce();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
+	let mut imp2 = Import::new(bcast2, cat2.reserve());
+	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
+	imp2.finish().unwrap();
+
+	let snap = cat2.snapshot();
+	assert_eq!(
+		snap.audio.renditions.len(),
+		1,
+		"only one audio rendition without multitrack"
+	);
+	let audio = snap.audio.renditions.values().next().unwrap();
+	assert_eq!(
+		audio.sample_rate, 44_100,
+		"the higher bitrate wins over the higher sample rate"
+	);
+	assert_eq!(audio.description.as_deref(), Some(&STRONG_ASC[..]));
 }
 
 /// A selection narrows what the export may carry, and a single-track export
@@ -729,10 +825,13 @@ async fn export_picks_the_best_selected_rendition() {
 	let select = crate::select::Broadcast::default()
 		.video(crate::select::Video::default().name(small))
 		.audio(crate::select::Audio::default());
-	let exporter = Export::new(crate::source::announced(&consumer))
+	let source = crate::source::announced(&consumer);
+	let catalog = source
+		.catalog::<()>(crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap()
-		.with_select(select);
+		.select(select);
+	let exporter = Export::new(source, catalog);
 	let exported = drain_to_end(exporter, keepalive).await;
 
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
@@ -784,7 +883,7 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 
-	let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let mut exporter = open_export(crate::source::announced(&consumer)).await;
 	assert!(
 		tokio::time::timeout(Duration::from_millis(100), exporter.next())
 			.await
@@ -843,6 +942,120 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 	assert!(frame.windows(5).any(|w| w == [0, 0, 0, 1, 0x65]));
 }
 
+/// A single-track export switches to a better audio rendition that appears before the
+/// header goes out.
+#[tokio::test(start_paused = true)]
+async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
+	use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
+
+	use crate::container::Producer;
+
+	// AAC-LC, 48000 Hz, stereo, at a low bitrate.
+	const WEAK_ASC: [u8; 2] = [0x11, 0x90];
+	// AAC-LC, 44100 Hz, stereo, at a higher bitrate.
+	const STRONG_ASC: [u8; 2] = [0x12, 0x10];
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+
+	fn audio(
+		producer: &mut moq_net::broadcast::Producer,
+		catalog: &mut crate::catalog::Producer,
+		name: &str,
+		asc: &'static [u8],
+		sample_rate: u32,
+		bitrate: u64,
+	) -> Producer<crate::catalog::hang::Container> {
+		let track = producer.create_track(name, None).unwrap();
+		let mut config = AudioConfig::new(AAC { profile: 2 }, sample_rate, 2);
+		config.container = Container::Legacy;
+		config.bitrate = Some(bitrate);
+		config.description = Some(Bytes::from_static(asc));
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert(track.name().to_string(), config);
+		Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		)
+	}
+
+	// The weak rendition sorts first by name, so only the ranking can pick the strong one.
+	let _weak = audio(&mut producer, &mut catalog, "a", &WEAK_ASC, 48_000, 64_000);
+
+	// Annex-B video (no description) keeps the header pending until its keyframe.
+	let video = producer.create_track(producer.unique_name(".avc3"), None).unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.container = Container::Legacy;
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(video.name().to_string(), config);
+	let _video = Producer::new(
+		video,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+
+	let mut exporter = open_export(crate::source::announced(&consumer)).await;
+	assert!(
+		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+			.await
+			.is_err(),
+		"the header waits on the video config"
+	);
+
+	// The better audio rendition shows up before any header went out, then video resolves.
+	let _strong = audio(&mut producer, &mut catalog, "z", &STRONG_ASC, 44_100, 128_000);
+	let description = avcc_level(0x1e);
+	let large = producer.create_track(producer.unique_name(".avc1"), None).unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1e,
+		inline: false,
+	});
+	config.container = Container::Legacy;
+	config.description = Some(Bytes::from(description));
+	config.coded_width = Some(1920);
+	config.coded_height = Some(1080);
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(large.name().to_string(), config);
+	let _large = Producer::new(
+		large,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+
+	let header = tokio::time::timeout(Duration::from_millis(100), exporter.next())
+		.await
+		.expect("the header resolves")
+		.unwrap()
+		.unwrap();
+	let audio: Vec<_> = parse_tags(&header)
+		.into_iter()
+		.filter(|tag| tag.tag_type == super::TAG_AUDIO)
+		.collect();
+	assert_eq!(audio.len(), 1, "one audio sequence header");
+	assert!(
+		audio[0].body.ends_with(&STRONG_ASC),
+		"the sequence header carries the better rendition's config"
+	);
+}
+
 struct ParsedTag {
 	tag_type: u8,
 	timestamp: u32,
@@ -884,7 +1097,7 @@ async fn export_preserves_timestamps() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -965,7 +1178,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	audio.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = open_export(crate::source::announced(&consumer)).await;
 	let exported = drain_exporter_chunks(exporter, 6).await;
 	let tags = parse_tags(&exported);
 
@@ -996,7 +1209,10 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 }
 
 /// Poll `exporter` into `out` until it ends or goes idle; `None` if it went idle.
-async fn drain_until_idle(exporter: &mut Export, out: &mut Vec<u8>) -> Option<anyhow::Result<()>> {
+async fn drain_until_idle<S: crate::catalog::Stream>(
+	exporter: &mut Export<S>,
+	out: &mut Vec<u8>,
+) -> Option<anyhow::Result<()>> {
 	loop {
 		match tokio::time::timeout(Duration::from_millis(100), exporter.next()).await {
 			Ok(Ok(Some(chunk))) => out.extend_from_slice(&chunk),
@@ -1054,9 +1270,8 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	video.write(frame(0, &[0, 0, 0, 1, 0x65], true)).unwrap();
 	audio.write(frame(0, &[0xde, 0xad], true)).unwrap();
 
-	let mut exporter = Export::new(crate::source::announced(&consumer))
+	let mut exporter = open_export(crate::source::announced(&consumer))
 		.await
-		.unwrap()
 		.with_max_delay(RECORDING_MAX_DELAY);
 	let mut exported = Vec::new();
 	assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
@@ -1082,7 +1297,7 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	assert_eq!(audio_frames, 2, "the leaving track's tail went out");
 }
 
-async fn drain_exporter_chunks(mut exporter: Export, chunks: usize) -> Vec<u8> {
+async fn drain_exporter_chunks<S: crate::catalog::Stream>(mut exporter: Export<S>, chunks: usize) -> Vec<u8> {
 	let mut exported = Vec::new();
 	for _ in 0..chunks {
 		match tokio::time::timeout(Duration::from_millis(100), exporter.next()).await {

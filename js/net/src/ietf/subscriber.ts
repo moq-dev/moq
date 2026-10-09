@@ -1,7 +1,9 @@
-import { race, Signal } from "@moq/signals";
+import { type GetPromise, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
+import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import {
 	closeError,
 	controlTimeout,
@@ -13,20 +15,21 @@ import {
 	sessionCause,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import type { Cursor, Reader, Stream } from "../stream.ts";
+import { type Cursor, Reader, type Stream, UnexpectedEnd } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, type Timescale, Timestamp } from "../time.ts";
+import { Milli, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
+import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
-import { Frame, type Group as GroupMessage } from "./object.ts";
+import { decodeObjectTime, Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -54,6 +57,11 @@ import { Version } from "./version.ts";
 // concurrent QUIC streams (Chrome ~100); past the cap openBi() silently
 // blocks. The timeout turns that into a clear error.
 const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
+
+// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
+// candidate outranks it, while the route stays selectable as the last path. Matches Rust
+// Cost::DRAIN: cost is the whole mechanism, not a separate state.
+const DRAIN_COST: Cost = 2n ** 62n - 1n;
 
 // A live subscription, as the track alias its data streams name resolves to.
 type Subscription = {
@@ -123,16 +131,12 @@ export class Subscriber {
 	#aliases = new TrackAliases<Subscription>();
 
 	// Units for each track's object Timestamps, from the TIMESCALE Track Property in
-	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so the publisher
-	// opted out of timestamps and its frames are stamped on arrival instead.
+	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so its frames
+	// arrive untimed.
 	#timescales = new Map<bigint, Timescale>();
 
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
-
-	// A random Hop ID of this connection's own, written as the first hop of any path that
-	// names no publisher, so a publisher that reconnects reads as a new one.
-	#stamp = randomHop();
 
 	// Paths with a legacy PUBLISH_NAMESPACE request in flight, reserved synchronously.
 	// The count below is only taken once the OK is written, and two requests that both
@@ -154,6 +158,13 @@ export class Subscriber {
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
 
+	// What the peer's SETUP declared about being solicited (MoQ Solicit), `undefined`
+	// when it declared nothing.
+	#solicit?: boolean;
+
+	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
+	#goaway?: GetPromise<Drain>;
+
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
 		this.#localClose = true;
@@ -169,6 +180,8 @@ export class Subscriber {
 		quic,
 		cluster,
 		hidden = false,
+		solicit,
+		goaway,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -178,11 +191,41 @@ export class Subscriber {
 		cluster?: Cluster.Hops;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** What the peer's SETUP declared about being solicited (MoQ Solicit). */
+		solicit?: boolean;
+		/** Settles when the peer sends GOAWAY. */
+		goaway?: GetPromise<Drain>;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
 		this.#cluster = cluster;
 		this.#hidden = hidden;
+		this.#solicit = solicit;
+		this.#goaway = goaway;
+		// A draining peer usually stops publishing namespaces, so reprice from the signal
+		// itself. Waiting for another message would leave the route primary until close.
+		if (goaway) void goaway.then(() => this.#drainAnnounced());
+	}
+
+	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
+	// session's route outranks this one, deliberately past draft-19 section 10.4's SHOULD
+	// NOT: refusing them would fail requests that land before the replacement is up.
+	#goingAway(): boolean {
+		return this.#goaway?.peek() !== undefined;
+	}
+
+	// What a route costs once the peer has asked us to leave.
+	#priced(route: Route): Route {
+		if (!this.#goingAway()) return route;
+		if (route.cost === DRAIN_COST) return route;
+		return { ...route, cost: DRAIN_COST };
+	}
+
+	// Reprice every live advertisement. Idempotent, since the signal stays set.
+	#drainAnnounced(): void {
+		for (const [path, info] of this.#announced) {
+			this.#updateAnnounce(path, info.route);
+		}
 	}
 
 	/**
@@ -197,16 +240,10 @@ export class Subscriber {
 		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
 	}
 
-	/**
-	 * The route an advertisement carries; one without a path is free. A path that names no
-	 * publisher, or none at all, gets this connection's stamp in front of a 0.
-	 */
+	/** The route an advertisement carries; one without a path is anonymous and free. */
 	#route(advert: Cluster.Advert | undefined): Route {
-		if (advert === undefined) return { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
-		// A full chain, or a stamp colliding with an entry (a 1-in-2^53 draw), keeps the
-		// path as sent.
-		const hops = stampHops(advert.hops, this.#stamp) ?? [...advert.hops];
-		return { hops, cost: { warm: advert.cost, cold: advert.cost } };
+		if (advert === undefined) return { hops: [UNKNOWN_HOP], cost: Cost.zero };
+		return { hops: advert.hops, cost: advert.cost };
 	}
 
 	/**
@@ -215,7 +252,9 @@ export class Subscriber {
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
-	 * that only answers are both discovered.
+	 * that only answers are both discovered. A draft-14 or draft-15 peer that declared no
+	 * MoQ Solicit is not asked for the empty prefix, so an unscoped subscriber only hears
+	 * what that peer tells.
 	 *
 	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
@@ -251,9 +290,12 @@ export class Subscriber {
 	 * first. A second one is the same namespace said twice, not news.
 	 */
 	#attachAnnounce(path: Path.Valid, route: Route) {
+		route = this.#priced(route);
 		const existing = this.#announced.get(path);
 		if (existing) {
 			existing.count += 1;
+			// A second advertisement after GOAWAY still must not win selection.
+			if (this.#goingAway()) this.#updateAnnounce(path, existing.route);
 			return;
 		}
 		this.#announced.set(path, { count: 1, route });
@@ -273,6 +315,7 @@ export class Subscriber {
 	 * the first hop now says, so the shared consume stays.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
+		route = this.#priced(route);
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;
@@ -320,6 +363,20 @@ export class Subscriber {
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
 		const version = this.#session.version;
+
+		// A zero-field track namespace was a protocol violation until draft-16 allowed
+		// it. A peer that never declared MoQ Solicit is not ours: it may enforce that, and
+		// it tells us unasked anyway, so send nothing and stay registered for its
+		// unsolicited PUBLISH_NAMESPACE. Returning would drop this consumer before one
+		// could land. A peer that declared Solicit only tells when asked, so it still is.
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
+		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
+			// No request stream ends this wait, so the session's end has to.
+			const ends: PromiseLike<unknown>[] = [announced.closed];
+			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
+			await Promise.race(ends);
+			return;
+		}
 
 		// Suffixes live on this stream, so a repeat is recognized as an update to the
 		// advertisement rather than a second one, which would leak the count.
@@ -807,6 +864,9 @@ export class Subscriber {
 			throw new RangeError("max cache duration exceeds safe milliseconds");
 		}
 		request.accept({
+			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
+			// and the track must not claim one when served onward.
+			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
@@ -1076,27 +1136,36 @@ export class Subscriber {
 		};
 
 		try {
-			// FIRST_OBJECT clear says this stream starts partway through the group, which the
-			// draft lets a publisher do to answer a filter. Nothing above here can use it: the
-			// objects that would arrive are not decodable without the missing head, and a group
-			// is the unit an application resyncs on. Drop it and pick up at the next group, the
-			// same degradation as a publisher that no longer holds the head.
+			// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
+			// through the group. The first Object ID is absolute either way, and IDs start
+			// at 0, so a clear bit on object 0 is still the whole group. Any other first ID,
+			// or a stream with no object, has a hole at the front: drop it and pick up at
+			// the next group.
 			//
-			// This only saves reading a stream we would throw away. The bit is the publisher's
-			// claim, so what is enforced is the object ids themselves: `Frame.decode` holds every
-			// object to starting at 0 and incrementing by 1, whatever the header said and on the
-			// drafts that have no such bit to read.
+			// Drafts before the bit cannot say this in the header. A non-zero delta on the
+			// first object is the same hole, and the catch below drops that stream too. A
+			// later gap, or a header that claimed the group starts at object 0, still fails
+			// it: `Frame.decode` refuses every non-zero delta.
 			if (!group.flags.firstObject) {
-				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
-				stream.stop(new Error("a group must start at object 0"));
-				return;
+				let id: bigint | undefined;
+				try {
+					id = await stream.peekU62();
+				} catch (err: unknown) {
+					if (!(err instanceof UnexpectedEnd)) throw err;
+				}
+				if (id !== 0n) {
+					console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+					stream.stop(new Error("a group must start at object 0"));
+					return;
+				}
 			}
 
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
 			// header priority inherits it (draft-21 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
-			const decode = (c: Cursor) => Frame.decode(c, group.flags, this.#timescales.get(group.trackAlias));
+			const timescale = this.#timescales.get(group.trackAlias);
+			const decode = (c: Cursor) => Frame.decode(c, group.flags, timescale);
 			for (;;) {
 				// Every object already buffered is written without an await, so the reader wakes
 				// once per batch rather than once per object. Only the group's own stream ends it:
@@ -1124,15 +1193,31 @@ export class Subscriber {
 				}
 				if (frame.payload === undefined) break;
 
-				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp ?? Timestamp.now() });
+				// A track that declared TIMESCALE stamps every object, so one without a Timestamp is
+				// malformed rather than something to invent a time for.
+				if (timescale !== undefined && frame.timestamp === undefined) {
+					throw new StreamError(StreamCode.MalformedTrack, {
+						message: `object without a Timestamp on a track with TIMESCALE: group=${group.groupId}`,
+					});
+				}
+				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
 			}
 
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
-			if (e instanceof ProtocolViolation) {
-				// The publisher broke the track's end, which no later group can repair.
+			// The producer is still unopened only when the first object failed. On a draft
+			// with no FIRST_OBJECT bit, that non-zero delta is a headless group: drop the
+			// stream and leave the subscription up for the next group. Delivering the
+			// object would renumber a P-frame as the keyframe the group opens with.
+			if (producer === undefined && e instanceof ObjectIdGap && !hasFirstObjectBit(this.#session.version)) {
+				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+				stream.stop(new Error("a group must start at object 0"));
+				return;
+			}
+			if (e instanceof ProtocolViolation || (e instanceof StreamError && e.code === StreamCode.MalformedTrack)) {
+				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);
 				track.close(e);
 			} else {
@@ -1147,6 +1232,94 @@ export class Subscriber {
 			stream.stop(e);
 		} finally {
 			read();
+		}
+	}
+
+	/**
+	 * Receive QUIC datagrams, each an OBJECT_DATAGRAM for one of our subscriptions.
+	 *
+	 * Returns at once on a transport without datagrams, and once the datagram stream ends or
+	 * fails. A malformed datagram throws a {@link ProtocolViolation}, which ends the session.
+	 *
+	 * @internal
+	 */
+	async runDatagrams(): Promise<void> {
+		if (!this.#quic || DatagramStream.maxDatagramSize(this.#quic) === 0) return;
+		const reader = DatagramStream.datagramReader(this.#quic);
+		if (!reader) return;
+
+		try {
+			for (;;) {
+				// The stream errors once the session closes, which ends this loop like any other.
+				const next = await reader.read().catch(() => undefined);
+				if (!next || next.done) return;
+				await this.#recvDatagram(next.value);
+			}
+		} finally {
+			reader.releaseLock();
+		}
+	}
+
+	/**
+	 * Deliver one OBJECT_DATAGRAM as a datagram on its subscription's track: a single-frame
+	 * group at the Group ID.
+	 *
+	 * One the model cannot carry is dropped like any lost datagram: an Object past ID 0 (the
+	 * group would need a second object), a status other than Normal, an alias that is not
+	 * bound yet (the draft lets us drop rather than buffer), or no Timestamp on a track that
+	 * declared a timescale.
+	 */
+	async #recvDatagram(data: Uint8Array): Promise<void> {
+		const version = this.#session.version;
+		const datagram = await ObjectDatagram.decode(data, version);
+		const { trackAlias: alias, groupId: sequence } = datagram;
+
+		if ((datagram.objectId ?? 0) !== 0) {
+			console.debug(`dropping a datagram past object 0: alias=${alias} group=${sequence}`);
+			return;
+		}
+		let payload: Uint8Array;
+		if ("status" in datagram.body) {
+			if (datagram.body.status !== 0) {
+				console.debug(
+					`dropping a datagram status: alias=${alias} group=${sequence} status=${datagram.body.status}`,
+				);
+				return;
+			}
+			payload = new Uint8Array();
+		} else {
+			payload = datagram.body.payload;
+		}
+
+		const subscription = this.#aliases.peek(alias);
+		if (!subscription) {
+			console.debug(`dropping a datagram for an unbound alias: alias=${alias} group=${sequence}`);
+			return;
+		}
+
+		// Like a subgroup object: a track that declared no timescale is untimed.
+		const timescale = this.#timescales.get(alias);
+		let timestamp: Timestamp | undefined;
+		if (timescale !== undefined && datagram.properties !== undefined) {
+			try {
+				timestamp = await new Reader(undefined, datagram.properties, version).decode((c) =>
+					decodeObjectTime(c, timescale),
+				);
+			} catch (err: unknown) {
+				throw new ProtocolViolation(`malformed OBJECT_DATAGRAM properties: ${reason(error(err))}`, {
+					cause: err,
+				});
+			}
+		}
+		if (timescale !== undefined && timestamp === undefined) {
+			console.debug(`dropping an unstamped datagram: alias=${alias} group=${sequence}`);
+			return;
+		}
+
+		try {
+			subscription.track.insertDatagram(sequence, timestamp, payload);
+		} catch (err: unknown) {
+			console.debug(`dropping datagram: alias=${alias} group=${sequence} error=${reason(error(err))}`);
 		}
 	}
 }

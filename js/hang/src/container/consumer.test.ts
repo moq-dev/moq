@@ -28,9 +28,14 @@ function encodeLegacyFrame(timestamp: Time.Micro, payload: Uint8Array): Uint8Arr
 	return data;
 }
 
+/** A moq-net timestamp of `ticks` at the test track's timescale. */
+function at(ticks: number): Time.Timestamp {
+	return new Time.Timestamp(ticks, Time.Timescale(TIMESCALE));
+}
+
 /** A one-byte CMAF sample at `timestamp` ticks, lasting one 3000-tick (33_333µs) frame. */
-function encodeCmafFrame(data: number, timestamp: number, sequence: number): Uint8Array {
-	return encodeDataSegment({
+function cmafFrame(data: number, timestamp: number, sequence: number): Group.Frame {
+	const payload = encodeDataSegment({
 		kind: "video",
 		data: new Uint8Array([data]),
 		timestamp,
@@ -38,6 +43,7 @@ function encodeCmafFrame(data: number, timestamp: number, sequence: number): Uin
 		keyframe: true,
 		sequence,
 	});
+	return { payload, timestamp: at(timestamp) };
 }
 
 /** Yield long enough for the consumer's spawned group readers to drain what's been written. */
@@ -388,7 +394,7 @@ test("CmafFormat decodes a valid keyframe segment", () => {
 		sequence: 0,
 	});
 
-	const result = format.decode(segment);
+	const result = format.decode(segment, at(0));
 
 	expect(result).toHaveLength(1);
 	expect(result[0].payload).toEqual(new Uint8Array([0xca, 0xfe]));
@@ -418,7 +424,7 @@ test("CmafFormat never reports an audio keyframe", () => {
 		sequence: 0,
 	});
 
-	const result = format.decode(segment);
+	const result = format.decode(segment, at(0));
 	expect(result).toHaveLength(1);
 	expect(result[0].keyframe).toBe(false);
 });
@@ -448,7 +454,7 @@ test("CmafFormat decodes a delta frame segment", () => {
 		sequence: 1,
 	});
 
-	const result = format.decode(segment);
+	const result = format.decode(segment, at(3000));
 
 	expect(result).toHaveLength(1);
 	expect(result[0].keyframe).toBe(false);
@@ -466,13 +472,13 @@ test("CmafFormat converts timescale units to microseconds", () => {
 		sequence: 0,
 	});
 
-	const result = format.decode(segment);
+	const result = format.decode(segment, at(TIMESCALE));
 	expect(result[0].timestamp).toBe(1_000_000 as Time.Micro);
 });
 
 test("CmafFormat throws on corrupt segment", () => {
 	const format = new CmafFormat(TEST_INIT);
-	expect(() => format.decode(new Uint8Array([0x00, 0x01, 0x02]))).toThrow();
+	expect(() => format.decode(new Uint8Array([0x00, 0x01, 0x02]), at(0))).toThrow();
 });
 
 // --- Consumer ---
@@ -834,6 +840,36 @@ test("Consumer skips an empty LOC payload", async () => {
 	consumer.close();
 });
 
+test("Consumer skips the duration marker the LOC producer writes", async () => {
+	const track = new Track.Producer("test");
+	const producer = new LocProducer(track);
+	producer.encode(new Uint8Array([0xde, 0xad]), 0 as Time.Micro, true);
+	producer.encode(new Uint8Array([0xbe, 0xef]), 10_000 as Time.Micro, false);
+	producer.encode(new Uint8Array([0xca, 0xfe]), 20_000 as Time.Micro, true);
+	producer.close();
+
+	const consumer = new Consumer(replay(track), { format: new LocFormat("video"), maxDelay: 500 as Time.Milli });
+	await settle();
+	const first = await consumer.next();
+	expect(first?.frame?.payload).toEqual(new Uint8Array([0xde, 0xad]));
+	expect(first?.frame?.keyframe).toBe(true);
+	const second = await consumer.next();
+	expect(second?.frame?.payload).toEqual(new Uint8Array([0xbe, 0xef]));
+	const boundary = await consumer.next();
+	expect(boundary?.frame).toBeUndefined();
+	expect(boundary?.end).toBe(20_000 as Time.Micro);
+	const keyframe = await consumer.next();
+	expect(keyframe?.frame).toBeUndefined();
+	expect(keyframe?.end).toBeUndefined();
+	const next = await consumer.next();
+	expect(next?.frame?.payload).toEqual(new Uint8Array([0xca, 0xfe]));
+	expect(next?.frame?.keyframe).toBe(true);
+	const tail = await consumer.next();
+	expect(tail?.frame).toBeUndefined();
+	expect(tail?.end).toBe(30_000 as Time.Micro);
+	consumer.close();
+});
+
 test("Consumer preserves empty Legacy and LOC data frames", async () => {
 	for (const kind of ["legacy", "loc"]) {
 		const track = new Track.Producer("data");
@@ -1049,7 +1085,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 			keyframe: true,
 			sequence: 0,
 		}),
-		timestamp: Time.Timestamp.now(),
+		timestamp: at(0),
 	});
 	group.writeFrame({
 		payload: encodeDataSegment({
@@ -1060,7 +1096,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 			keyframe: false,
 			sequence: 0,
 		}),
-		timestamp: Time.Timestamp.now(),
+		timestamp: at(3000),
 	});
 	group.close();
 	track.writeGroup(group);
@@ -1075,6 +1111,25 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 	consumer.close();
 });
 
+test("Consumer with CmafFormat times an untimed track from tfdt", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), {
+		format: new CmafFormat(TEST_INIT),
+		maxDelay: 500 as Time.Milli,
+	});
+
+	const group = new Group.Producer(0);
+	group.writeFrame({ payload: cmafFrame(0xca, TIMESCALE, 0).payload });
+	group.writeFrame({ payload: cmafFrame(0xbe, TIMESCALE + 3000, 1).payload });
+	group.close();
+	track.writeGroup(group);
+	track.close();
+
+	const frames = await drainFrames(consumer, 200);
+	expect(frames.map((f) => f.timestamp)).toEqual([1_000_000, 1_033_333] as Time.Micro[]);
+	consumer.close();
+});
+
 test("CmafFormat decodes the per-sample duration", () => {
 	const format = new CmafFormat(TEST_INIT);
 	const segment = encodeDataSegment({
@@ -1086,7 +1141,7 @@ test("CmafFormat decodes the per-sample duration", () => {
 		sequence: 0,
 	});
 
-	const [frame] = format.decode(segment);
+	const [frame] = format.decode(segment, at(0));
 	// 3000 ticks / 90000 timescale * 1_000_000 = 33333µs
 	expect(frame.duration).toBe(33_333 as Time.Micro);
 });
@@ -1196,7 +1251,7 @@ test("Consumer delivers a PTS-contiguous next group whose sequence jumped (CMAF)
 			keyframe: true,
 			sequence: 0,
 		}),
-		timestamp: Time.Timestamp.now(),
+		timestamp: at(0),
 	});
 	a.close();
 	track.writeGroup(a);
@@ -1222,7 +1277,7 @@ test("Consumer delivers a PTS-contiguous next group whose sequence jumped (CMAF)
 			keyframe: true,
 			sequence: 1,
 		}),
-		timestamp: Time.Timestamp.now(),
+		timestamp: at(3045),
 	});
 
 	const result = await Promise.race([
@@ -1257,7 +1312,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 			keyframe: true,
 			sequence: 0,
 		}),
-		timestamp: Time.Timestamp.now(),
+		timestamp: at(0),
 	});
 	a.close();
 	track.writeGroup(a);
@@ -1281,7 +1336,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 			keyframe: true,
 			sequence: 1,
 		}),
-		timestamp: Time.Timestamp.now(),
+		timestamp: at(90_000),
 	});
 
 	const gap = await Promise.race([
@@ -1303,7 +1358,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 			keyframe: true,
 			sequence: 2,
 		}),
-		timestamp: Time.Timestamp.now(),
+		timestamp: at(3000),
 	});
 
 	const result = await pending;
@@ -1326,19 +1381,19 @@ test("Consumer delivers a contiguous group after one that completed out of order
 	// A (seq 1_000_000) stays open so it remains the active group.
 	const a = new Group.Producer(1_000_000);
 	track.writeGroup(a);
-	a.writeFrame({ payload: encodeCmafFrame(0x01, 0, 0), timestamp: Time.Timestamp.now() });
+	a.writeFrame(cmafFrame(0x01, 0, 0));
 
 	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x01]));
 
 	// A's second frame stays buffered so A can't be duration-skipped. A ends at 6000 ticks (66_666µs).
-	a.writeFrame({ payload: encodeCmafFrame(0x02, 3000, 1), timestamp: Time.Timestamp.now() });
+	a.writeFrame(cmafFrame(0x02, 3000, 1));
 	await settle();
 
 	// B (seq 1_045_000) starts at A's end and is CLOSED while A is still active, so B's own finally
 	// block sees sequence !== #active and never records anything. B ends at 9000 ticks (100_000µs).
 	const b = new Group.Producer(1_045_000);
 	track.writeGroup(b);
-	b.writeFrame({ payload: encodeCmafFrame(0x03, 6000, 2), timestamp: Time.Timestamp.now() });
+	b.writeFrame(cmafFrame(0x03, 6000, 2));
 	b.close();
 	await settle();
 
@@ -1352,7 +1407,7 @@ test("Consumer delivers a contiguous group after one that completed out of order
 	const pending = consumer.next();
 	const c = new Group.Producer(1_090_000);
 	track.writeGroup(c);
-	c.writeFrame({ payload: encodeCmafFrame(0x04, 9000, 3), timestamp: Time.Timestamp.now() });
+	c.writeFrame(cmafFrame(0x04, 9000, 3));
 
 	const result = await Promise.race([pending, settle(300).then(() => "timeout" as const)]);
 	expect(result).not.toBe("timeout");
@@ -1374,7 +1429,7 @@ test("Consumer plays the head once a waited-out gap exceeds the budget (CMAF)", 
 	// A (seq 1000): one frame, ends at 3000 ticks (33_333µs).
 	const a = new Group.Producer(1000);
 	track.writeGroup(a);
-	a.writeFrame({ payload: encodeCmafFrame(0x01, 0, 0), timestamp: Time.Timestamp.now() });
+	a.writeFrame(cmafFrame(0x01, 0, 0));
 	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x01]));
 	a.close();
 	expect((await consumer.next())?.frame).toBeUndefined(); // #active falls back to the 1001 phantom
@@ -1386,7 +1441,7 @@ test("Consumer plays the head once a waited-out gap exceeds the budget (CMAF)", 
 	// could only ever arrive far beyond the 100ms budget, so B plays from its first frame.
 	const b = new Group.Producer(2000);
 	track.writeGroup(b);
-	b.writeFrame({ payload: encodeCmafFrame(0x02, 90_000, 1), timestamp: Time.Timestamp.now() });
+	b.writeFrame(cmafFrame(0x02, 90_000, 1));
 
 	const result = await Promise.race([pending, settle(300).then(() => "timeout" as const)]);
 	expect(result).not.toBe("timeout");
@@ -1409,7 +1464,7 @@ test("Consumer waits on a gap within the budget, then plays the head once it exc
 	// A (seq 1000): one frame, ends at 3000 ticks (33_333µs).
 	const a = new Group.Producer(1000);
 	track.writeGroup(a);
-	a.writeFrame({ payload: encodeCmafFrame(0x01, 0, 0), timestamp: Time.Timestamp.now() });
+	a.writeFrame(cmafFrame(0x01, 0, 0));
 	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x01]));
 	a.close();
 	expect((await consumer.next())?.frame).toBeUndefined();
@@ -1417,7 +1472,7 @@ test("Consumer waits on a gap within the budget, then plays the head once it exc
 	// B (seq 2000) starts at 6000 ticks (66_667µs): a gap, but only 33ms past A's end.
 	const b = new Group.Producer(2000);
 	track.writeGroup(b);
-	b.writeFrame({ payload: encodeCmafFrame(0x02, 6000, 1), timestamp: Time.Timestamp.now() });
+	b.writeFrame(cmafFrame(0x02, 6000, 1));
 
 	const pending = consumer.next();
 	const early = await Promise.race([pending, settle(50).then(() => "waiting" as const)]);
@@ -1425,7 +1480,7 @@ test("Consumer waits on a gap within the budget, then plays the head once it exc
 
 	// B alone grows past the budget (up to 12_000 ticks, 100ms past A's end and beyond).
 	for (let i = 1; i <= 3; i++) {
-		b.writeFrame({ payload: encodeCmafFrame(0x02, 6000 + i * 3000, 1 + i), timestamp: Time.Timestamp.now() });
+		b.writeFrame(cmafFrame(0x02, 6000 + i * 3000, 1 + i));
 		await settle(10);
 	}
 
@@ -1570,7 +1625,7 @@ test("Consumer reports continuity across a PTS-contiguous group id jump (CMAF)",
 
 	const a = new Group.Producer(1_000_000);
 	track.writeGroup(a);
-	a.writeFrame({ payload: encodeCmafFrame(0x01, 0, 0), timestamp: Time.Timestamp.now() });
+	a.writeFrame(cmafFrame(0x01, 0, 0));
 	a.close();
 
 	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x01]));
@@ -1579,7 +1634,7 @@ test("Consumer reports continuity across a PTS-contiguous group id jump (CMAF)",
 	// Sequence jumps +90_000 but the first PTS meets A's end, so nothing is missing.
 	const b = new Group.Producer(1_090_000);
 	track.writeGroup(b);
-	b.writeFrame({ payload: encodeCmafFrame(0x02, 3000, 1), timestamp: Time.Timestamp.now() });
+	b.writeFrame(cmafFrame(0x02, 3000, 1));
 
 	const result = await consumer.next();
 	expect(result?.frame?.payload).toEqual(new Uint8Array([0x02]));

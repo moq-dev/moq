@@ -9,11 +9,15 @@ one operator's network is cluster-routing's. This includes whether a boundary
 may fold a large customer cluster's nodes into one advertised node, and how
 that keeps loop safety. Produce a
 reviewed design and scoped implementation quests, not a protocol
-implementation. Cloudflare, moq.pro, and self-hosted relays can retain their
-own business policy; no RTT/loss-driven repricing or automatic performance
-failover is authorized by this work.
+implementation. Each operator, such as moq.pro or a self-hosted relay,
+retains its own business policy; no RTT/loss-driven repricing or automatic
+performance failover is authorized by this work.
 
 ## Plan
+
+Decided 2026-10-08: parked and speculative. It needs a second operator
+running lite-07 cluster routing to have a boundary at all; delete it if none
+appears.
 
 Costs reflect SKU, directional egress economics, provider affinity, and marginal
 transfer savings. A hosting provider is not necessarily a policy domain:

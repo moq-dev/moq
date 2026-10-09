@@ -25,7 +25,7 @@ test("every payload survives in order", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track });
 	const expected = payloads(5);
-	for (const payload of expected) producer.append(payload);
+	for (const payload of expected) producer.append({ value: payload });
 	producer.finish();
 
 	expect(await drain(track.subscribe(), false)).toEqual(expected);
@@ -35,7 +35,7 @@ test("compressed roundtrip in order", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
 	const expected = payloads(20);
-	for (const payload of expected) producer.append(payload);
+	for (const payload of expected) producer.append({ value: payload });
 	producer.finish();
 
 	expect(await drain(track.subscribe(), true)).toEqual(expected);
@@ -44,7 +44,7 @@ test("compressed roundtrip in order", async () => {
 test("the whole log rides one group, never rolled", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
-	for (const payload of payloads(50)) producer.append(payload);
+	for (const payload of payloads(50)) producer.append({ value: payload });
 	producer.finish();
 
 	const subscriber = track.subscribe().ordered();
@@ -56,7 +56,7 @@ test("the shared window shrinks repetitive payloads", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
 	const payload = new TextEncoder().encode("the quick brown fox".repeat(16));
-	for (let n = 0; n < 8; n++) producer.append(payload);
+	for (let n = 0; n < 8; n++) producer.append({ value: payload });
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
@@ -94,7 +94,7 @@ test("a second concurrent read is refused rather than served the first one's gro
 	// group for a second one and fail a perfectly good log. Rust gets this from `&mut self`.
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track });
-	producer.append(payloads(1)[0]);
+	producer.append({ value: payloads(1)[0] });
 	producer.finish();
 
 	const consumer = new Consumer({ track: track.subscribe() });
@@ -135,13 +135,13 @@ test("an undecodable payload ends the log for a reader already inside the group"
 	// failure rather than park on a group nothing will ever finish.
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
-	producer.append(payloads(1)[0]);
+	producer.append({ value: payloads(1)[0] });
 
 	const consumer = new Consumer({ track: track.subscribe(), compression: "deflate" });
 	expect(await consumer.next()).toBeDefined();
 
 	const oversized = new Uint8Array(DEFAULT_MAX_FRAME_SIZE + 1);
-	expect(() => producer.append(oversized)).toThrow("limit");
+	expect(() => producer.append({ value: oversized })).toThrow("limit");
 
 	// Surfaces the terminal error rather than hanging on the still-open group.
 	await expect(consumer.next()).rejects.toThrow("limit");
@@ -176,7 +176,7 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 	const reactions = await pendingReactions(async () => {
 		for (let n = 0; n < 1000; n++) {
 			const next = consumer.next();
-			producer.append(new Uint8Array([n & 0xff]));
+			producer.append({ value: new Uint8Array([n & 0xff]) });
 			expect((await next)?.[0]).toBe(n & 0xff);
 		}
 	});
@@ -186,14 +186,24 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 	producer.finish();
 });
 
-test("each record keeps its capture timestamp", async () => {
-	const track = new Track.Producer("test");
+test("a payload without a timestamp goes out untimed", async () => {
+	const track = new Track.Producer("test").accept({});
 	const producer = new Producer({ track });
-	producer.append(new Uint8Array([1]), Time.Timestamp.fromMillis(1_000));
-	producer.append(new Uint8Array([2]), Time.Timestamp.fromMillis(2_000));
+	producer.append({ value: new Uint8Array([1]) });
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(1_000);
-	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(2_000);
+	expect((await group?.readFrame())?.timestamp).toBeUndefined();
+});
+
+test("each record keeps its capture timestamp", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track });
+	producer.append({ value: new Uint8Array([1]), at: Time.Timestamp.fromMillis(1_000) });
+	producer.append({ value: new Uint8Array([2]), at: Time.Timestamp.fromMillis(2_000) });
+	producer.finish();
+
+	const group = await track.subscribe().ordered().nextGroup();
+	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_000);
+	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(2_000);
 });

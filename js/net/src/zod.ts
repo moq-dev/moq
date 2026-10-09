@@ -1,5 +1,5 @@
 /**
- * Helpers for reading and writing Zod-validated JSON frames on a track or group.
+ * Helpers for reading Zod-validated JSON frames from a track or group.
  *
  * @module
  */
@@ -16,10 +16,4 @@ export async function read<T = unknown>(
 	const next = await source.readJson();
 	if (next === undefined) return undefined; // only treat undefined as EOF, not other falsy values
 	return schema.parse(next);
-}
-
-/** Validate a value against the schema, then write it as a JSON frame. */
-export function write<T = unknown>(source: track.Producer | group.Producer, value: T, schema: z.ZodMiniType<T>) {
-	const valid = schema.parse(value);
-	source.writeJson(valid);
 }

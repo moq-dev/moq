@@ -58,6 +58,10 @@ work no child does:
   each language's module, linked from every binding page.
 - The bindings section of the following release's upgrade page: old call to
   new call per language.
+- `MoqGroupRequest` gains `demand()` in moq-ffi and every wrapper, matching
+  Rust's `group::Request::demand`, so a group server can see when nobody
+  still wants the group (decided in #4868; the bullet was lost when #4946
+  removed `net.md`).
 - `just test interop --all` green on the finished line.
 
 ## Required
