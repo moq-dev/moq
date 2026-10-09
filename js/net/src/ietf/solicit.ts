@@ -37,9 +37,9 @@ export function solicitFromSetup(params: SetupOptions): boolean | undefined {
 /**
  * Declare that advertisements to us must be solicited.
  *
- * Unconditional, and true of every session: we send SUBSCRIBE_NAMESPACE for each prefix
- * we want, so there is nothing an unsolicited PUBLISH_NAMESPACE could tell us that we
- * will not have asked for.
+ * Declared unless the session's `extensions` declines it: we send SUBSCRIBE_NAMESPACE for
+ * each prefix we want, so there is nothing an unsolicited PUBLISH_NAMESPACE could tell us
+ * that we will not have asked for.
  *
  * @internal
  */

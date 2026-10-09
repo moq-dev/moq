@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -298,7 +299,7 @@ test("uni streams before SETUP are held until it lands", async () => {
 	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
 	await new Setup({ parameters }).encode(setup, version);
 
-	const { control, early, solicit, hidden, cluster } = await exchangeSetup(pair.server, version, "test");
+	const { control, early, solicit, hidden, cluster } = await exchangeSetup(pair.server, version, "test", offered());
 	expect(early.length).toBe(2);
 
 	let closed = false;
@@ -348,7 +349,7 @@ test("malformed uni stream before SETUP fails the handshake", async () => {
 	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
 	await new Setup({ parameters }).encode(setup, version);
 
-	await expect(exchangeSetup(pair.server, version, "test")).rejects.toThrow("leading-ones varint");
+	await expect(exchangeSetup(pair.server, version, "test", offered())).rejects.toThrow("leading-ones varint");
 });
 
 /** An early stream that ends partway through its type died; it is skipped like an empty one. */
@@ -367,7 +368,7 @@ test("truncated uni stream before SETUP is skipped", async () => {
 	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
 	await new Setup({ parameters }).encode(setup, version);
 
-	const { early } = await exchangeSetup(pair.server, version, "test");
+	const { early } = await exchangeSetup(pair.server, version, "test", offered());
 	expect(early.length).toBe(0);
 });
 

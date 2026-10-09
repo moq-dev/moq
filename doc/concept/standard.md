@@ -43,6 +43,8 @@ ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
 before a `SUBSCRIBE_NAMESPACE` is caught up, and
 [probe](/draft/moq-probe) for bandwidth estimation.
+Both libraries offer solicit and auth unless a side's `extensions` setting
+declines one, which connects it as a peer that does not speak that extension.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension. It encrypts
 application payloads, so relays still forward named tracks they cannot read.
 See [Encryption](/concept/hang#encryption).

@@ -14,6 +14,7 @@ export {
 	type WebTransportProps,
 } from "./connect.ts";
 export type { Established } from "./established.ts";
+export type { Extensions } from "./extensions.ts";
 export { Connection, type ConnectionProps } from "./pool.ts";
 export type { Probe, Stats } from "./stats.ts";
 export type { Transport } from "./transport.ts";
