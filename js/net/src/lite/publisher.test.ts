@@ -1840,7 +1840,7 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	// Left open, so the fetch is still serving when the grant shrinks.
 	const group = new GroupProducer(0);
-	group.writeString("first");
+	group.writeFrame(textFrame("first"));
 	track.writeGroup(group);
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
