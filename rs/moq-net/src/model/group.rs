@@ -911,6 +911,16 @@ impl Producer {
 		self.alive.access.tick(now)
 	}
 
+	/// Hold the group as a live track's latest until the guard drops.
+	pub(crate) fn cache_protect(&self) -> cache::Protection {
+		cache::Protection::new(&self.alive.access)
+	}
+
+	/// Whether a live track holds the group as its latest.
+	pub(crate) fn cache_protected(&self) -> bool {
+		self.alive.access.is_protected()
+	}
+
 	/// Enter the group into the evictable population: demoted from the live edge,
 	/// or inserted behind it. Idempotent; a no-op once the group is closed.
 	pub(crate) fn cache_demote(&self) {

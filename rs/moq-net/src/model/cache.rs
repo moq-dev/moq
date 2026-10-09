@@ -672,6 +672,8 @@ pub(crate) struct Charge {
 pub(crate) struct Access {
 	stamp: AtomicU64,
 	expires: AtomicU64,
+	// Live tracks holding the group as their latest; see [`Protection`].
+	protected: AtomicUsize,
 }
 
 impl Access {
@@ -679,7 +681,13 @@ impl Access {
 		Self {
 			stamp: AtomicU64::new(stamp),
 			expires: AtomicU64::new(u64::MAX),
+			protected: AtomicUsize::new(0),
 		}
+	}
+
+	/// Whether a live track holds the group as its latest.
+	pub(crate) fn is_protected(&self) -> bool {
+		self.protected.load(Ordering::Relaxed) > 0
 	}
 
 	/// The stamp, tie-breaking bits included.
@@ -712,6 +720,25 @@ impl Access {
 		// `fetch_max` keeps the stamp monotone, and its prior value makes the
 		// paired mean update exact even for back-to-back accesses.
 		self.stamp.fetch_max(target, Ordering::Relaxed)
+	}
+}
+
+/// A live track holding a group as its latest, for as long as this lives.
+///
+/// Tracks can share a group (a warm copy adopts the relay copy's), so the group itself
+/// counts these: an ended track sharing it must not expire another track's live edge.
+pub(crate) struct Protection(Arc<Access>);
+
+impl Protection {
+	pub(crate) fn new(access: &Arc<Access>) -> Self {
+		access.protected.fetch_add(1, Ordering::Relaxed);
+		Self(access.clone())
+	}
+}
+
+impl Drop for Protection {
+	fn drop(&mut self) {
+		self.0.protected.fetch_sub(1, Ordering::Relaxed);
 	}
 }
 
