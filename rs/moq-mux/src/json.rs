@@ -34,8 +34,7 @@
 //! A value timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
 //! and the entry advertises how late values reach the transport as its `jitter` and `delay`, the
 //! way a media rendition does. A capture [`Instant`](std::time::Instant) converts with
-//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock, read at write time since an
-//! importer's first frame re-anchors it:
+//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock:
 //!
 //! ```no_run
 //! # fn example(
@@ -524,11 +523,11 @@ mod test {
 		assert_eq!(drain(consumer), vec![json!({ "live": true })]);
 	}
 
-	/// A track created before an importer's first frame stamps on the clock that frame anchors, not
-	/// the one the catalog started with.
+	/// A track registered before an importer's first frame fixes the clock, so an importer starting
+	/// an hour in shifts onto it: the track keeps stamping on the clock it started with.
 	#[test]
-	fn a_write_follows_the_anchored_clock() {
-		let (mut broadcast, mut catalog) = catalog();
+	fn an_importer_joins_the_data_tracks_clock() {
+		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
 			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
 			.unwrap();
@@ -537,9 +536,15 @@ mod test {
 			.unwrap();
 		let mut subscribers = [status.consume(), chat.consume()];
 
+		let published = catalog.snapshot().clock;
+		let before = catalog.clock().now();
 		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
-		let first = moq_net::Timestamp::from_secs(3600).unwrap();
-		catalog.anchor(first).unwrap();
+		let first = catalog
+			.timebase()
+			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
+			.unwrap();
+		assert_eq!(catalog.snapshot().clock, published, "the clock never moves");
+		assert!(before <= first, "the importer lands at now: {before:?} {first:?}");
 		status.update(&json!({ "live": true })).unwrap();
 		chat.append(Timed::from(&json!({ "n": 1 })).at(catalog.clock().now()))
 			.unwrap();

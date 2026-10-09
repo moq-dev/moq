@@ -9,8 +9,20 @@ package dev.moq
 
 // Session + connection handles. `Server` is not aliased: `dev.moq.Server` is the
 // listen facade (see Server.kt), which exposes the raw handle as `server`.
-/** A MoQ client: configure the TLS/bind knobs, then connect to a relay. */
+/** A MoQ client built from a [ClientConfig]: connect it to a relay. */
 typealias Client = uniffi.moq.MoqClient
+/** Client configuration: bind address, versions, TLS, QUIC, WebSocket, reconnect pacing, and origins. */
+typealias ClientConfig = uniffi.moq.MoqClientConfig
+/** Certificate trust and the mTLS identity for a [ClientConfig]. */
+typealias ClientTls = uniffi.moq.MoqClientTls
+/** Server configuration: bind address, versions, TLS identity, QUIC, and origins. */
+typealias ServerConfig = uniffi.moq.MoqServerConfig
+/** The served TLS identity for a [ServerConfig]: PEM files or generated hostnames. */
+typealias ServerTls = uniffi.moq.MoqServerTls
+/** QUIC transport tuning, such as the peer's inbound stream cap. */
+typealias QuicConfig = uniffi.moq.MoqQuicConfig
+/** The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start. */
+typealias WebSocketConfig = uniffi.moq.MoqWebSocketConfig
 /** A live pub/sub session with a relay, exposing publish and consume origins. */
 typealias Session = uniffi.moq.MoqSession
 /** An incoming session awaiting a decision: accept it to handshake, or reject it. */
@@ -75,18 +87,6 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Media (codec-aware) producers and consumers.
-/** The write side of a media track; discontinuity() marks a break between pre-framed payloads. */
-typealias MediaProducer = uniffi.moq.MoqMediaProducer
-/** The write side of a media track fed a raw byte stream, with frame boundaries inferred. */
-typealias MediaStreamProducer = uniffi.moq.MoqMediaStreamProducer
-/** The write side of a container, which publishes each track it describes. */
-typealias ContainerProducer = uniffi.moq.MoqContainerProducer
-/** The write side of a container fed a raw byte stream. */
-typealias ContainerStreamProducer = uniffi.moq.MoqContainerStreamProducer
-/** The read side of a media track: yields frames with codec metadata in decode order. */
-typealias MediaConsumer = uniffi.moq.MoqMediaConsumer
-/** A finite fetched media group: yields container-decoded frames until the group ends. */
-typealias MediaGroupConsumer = uniffi.moq.MoqMediaGroupConsumer
 /** A demand-observable raw-audio track producer with explicit timeline re-anchoring after idle gaps. */
 typealias AudioProducer = uniffi.moq.MoqAudioProducer
 /** The read side of a raw-audio track: yields decoded PCM frames. */
@@ -95,48 +95,12 @@ typealias AudioConsumer = uniffi.moq.MoqAudioConsumer
 typealias VideoConsumer = uniffi.moq.MoqVideoConsumer
 /** The write side of a raw-video track; pixels written here are encoded inside the FFI boundary. */
 typealias VideoProducer = uniffi.moq.MoqVideoProducer
-/** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
-typealias CatalogConsumer = uniffi.moq.MoqCatalogConsumer
-/** Publishes lossy latest-value JSON snapshots. */
-typealias JsonSnapshotProducer = uniffi.moq.MoqJsonSnapshotProducer
-/** Consumes reconstructed latest-value JSON snapshots. */
-typealias JsonSnapshotConsumer = uniffi.moq.MoqJsonSnapshotConsumer
-/** Publishes a lossless stream of JSON records. */
-typealias JsonStreamProducer = uniffi.moq.MoqJsonStreamProducer
-/** Consumes a lossless stream of JSON records. */
-typealias JsonStreamConsumer = uniffi.moq.MoqJsonStreamConsumer
 
 // Data types.
-/** A broadcast's catalog: its tracks and their properties, plus any application sections. */
-typealias Catalog = uniffi.moq.MoqCatalog
 /** A datagram-delivered frame, tagged with a per-track sequence number. */
 typealias Datagram = uniffi.moq.MoqDatagram
 /** A payload plus the timestamp it should be presented at. */
 typealias Frame = uniffi.moq.MoqFrame
-/** A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts. */
-typealias MediaFrame = uniffi.moq.MoqMediaFrame
-/** The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming). */
-typealias Video = uniffi.moq.MoqVideo
-/** Caller-provided catalog fields for a video track. */
-typealias VideoHint = uniffi.moq.MoqVideoHint
-/** A single audio codec an importer can parse. */
-typealias AudioFormat = uniffi.moq.MoqAudioFormat
-/** A single video codec an importer can parse. */
-typealias VideoFormat = uniffi.moq.MoqVideoFormat
-/** A container that publishes its own tracks. */
-typealias ContainerFormat = uniffi.moq.MoqContainerFormat
-/** Catalog properties shared by every video rendition; absent fields clear those properties. */
-typealias VideoProperties = uniffi.moq.MoqVideoProperties
-/** An audio codec, its required init bytes, and an optional label. */
-typealias AudioInit = uniffi.moq.MoqAudioInit
-/** A video codec, optional init bytes, a label, and catalog hints. */
-typealias VideoInit = uniffi.moq.MoqVideoInit
-/** A container format and its leading bytes. */
-typealias ContainerInit = uniffi.moq.MoqContainerInit
-/** The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container. */
-typealias Audio = uniffi.moq.MoqAudio
-/** A width and height pair, in pixels. */
-typealias Dimensions = uniffi.moq.MoqDimensions
 /** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and static production and link cost (lower wins). */
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, group ordering, and range. */
@@ -189,14 +153,10 @@ typealias ErrorScope = uniffi.moq.MoqErrorScope
 typealias ProtocolKind = uniffi.moq.MoqProtocolKind
 /** A protocol failure: scope, verbatim wire code, kind, and a diagnostic message. */
 typealias ProtocolError = uniffi.moq.MoqProtocolError
-/** Configures a lossy latest-value JSON track. */
-typealias JsonSnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
-/** Configures a lossless JSON stream track. */
-typealias JsonStreamConfig = uniffi.moq.MoqJsonStreamConfig
 
-// NOTE: a few types are intentionally NOT aliased. `MoqContainer` (sealed) and
-// `MoqException` (sealed) need subtype access (`MoqContainer.Loc`,
-// `MoqException.Closed`), which Kotlin 2.0.21 can't resolve through a typealias.
-// Reference those as `uniffi.moq.MoqContainer` / `uniffi.moq.MoqException`. Enums
+// NOTE: Kotlin 2.0.21 can't resolve a sealed type's subtypes through a typealias.
+// `MoqException` is intentionally NOT aliased, so reference `uniffi.moq.MoqException.Closed`
+// directly. `dev.moq.media.Container` aliases `MoqContainer` for signatures, but its
+// variants still need the full name (`uniffi.moq.MoqContainer.Loc`). Enums
 // (AudioFormat) are fine: entry access through the alias works. Objects
 // (AudioCodec) expose constructors through the alias (`AudioCodec.opus()`).

@@ -11,5 +11,5 @@ def test_exports_core_classes():
 
 
 def test_client_constructs():
-    client = moq_ffi.MoqClient()
+    client = moq_ffi.MoqClient(moq_ffi.MoqClientConfig())
     assert client is not None

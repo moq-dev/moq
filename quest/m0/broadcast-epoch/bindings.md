@@ -25,10 +25,11 @@ audio timeline re-anchor `reset_epoch` are renamed so "epoch" has one meaning.
 
 Decided in the 2026-09-30 audit: libmoq is frozen (renamed `rs/moq-c`), so C and C++ consumers get epochs from moq-ffi.
 
-Decided in the 2026-10-05 audit: this lands before the
-[FFI shape](/quest/m1/ffi-shape/README.md) line (#4519), which reshapes the
-same wrappers and keeps `epoch()` today. It rebases onto this quest and
-adopts the epoch surface and the rename, so the wrappers break once each.
+Reversed 2026-10-09 by the maintainer: the
+[FFI shape](/quest/m1/ffi-shape/README.md) line (#4519) landed first, so this
+builds on its reshaped wrappers (`MoqClientConfig`, the `media` namespace)
+instead. Its `epoch()` rename should still reach the same binding release as
+the line's [Codecs](/quest/m1/ffi-shape/codec.md), so the wrappers break once.
 
 ## Required
 

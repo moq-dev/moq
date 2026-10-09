@@ -23,8 +23,8 @@ timescale as untimed and `@moq/publish` declares milliseconds):
   flate tracks, moq-room chat (`chat::info`), and moq-stats' JSON tracks
   (`create_track(name, None)`). Find the rest by `Info::default()`,
   `create_track(_, None)`, and `accept(None)`. moq-ffi and moq-c media tracks
-  already pin microseconds. The shared timeline itself is
-  [Shared import clock](/quest/m1/shared-clock.md)'s.
+  already pin microseconds. The shared timeline itself is the catalog clock
+  every importer shifts onto (`catalog::Timebase`).
 - This quest only declares the timescale. Who stamps a frame, and with which
   clock, is [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md)'s
   (decided 2026-10-08); writers keep stamping as they do today until it

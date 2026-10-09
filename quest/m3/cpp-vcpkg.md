@@ -24,13 +24,11 @@ CI on Windows, macOS, and Linux.
   tarball fails the nightly, not the user.
 - Curated `microsoft/vcpkg` is out of scope; it wants source builds.
 - Decided 2026-10-08: the tarballs this needs are the first C++ package
-  release, which #4079 adds as its own quest (`quest/m1/cpp-release.md`).
-  Once that file is on `main`, it replaces the line README as this quest's
-  Required entry.
+  release, which #4079 adds as its own quest.
 
 ## Required
 
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the release tarballs the port fetches
+- [First C++ package release](/quest/m1/cpp-release.md) - the tarballs the port fetches
 
 ## Related
 
