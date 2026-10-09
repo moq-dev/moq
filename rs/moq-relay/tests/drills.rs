@@ -30,6 +30,11 @@ use std::time::Duration;
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Ceiling for anything a drill waits on. Every wait is bounded, so a broken
 /// handoff fails as a timeout with a message instead of hanging the suite.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -419,7 +424,7 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let publish_session = tokio::time::timeout(
 		TIMEOUT,
 		client(&url)
@@ -542,7 +547,7 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let mut publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
 
 	let subscriber = moq_tokio::origin::spawn();
@@ -662,7 +667,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let first = moq_tokio::origin::spawn();
 	let broadcast = first.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let first_session = tokio::time::timeout(
 		TIMEOUT,
 		client(&url)
@@ -703,7 +708,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let second = moq_tokio::origin::spawn();
 	let broadcast = second.create_broadcast("live").expect("re-create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("re-create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("re-create track");
 	let second_session = tokio::time::timeout(
 		TIMEOUT,
 		client(&url)
@@ -960,7 +965,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let url = publish_path.url.clone();
 	let publish_session = tokio::time::timeout(
 		TIMEOUT,

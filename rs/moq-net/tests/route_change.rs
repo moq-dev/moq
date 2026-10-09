@@ -20,6 +20,11 @@ use futures::{StreamExt, channel::mpsc};
 use moq_net::{Error, Hop, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Frames per group.
@@ -98,7 +103,7 @@ impl Topology {
 		let subscriber = produce_origin(4);
 
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast
 			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 			.unwrap();
@@ -464,7 +469,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<Deliver
 		produce_origin(5),
 	);
 	let broadcast = p.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast
 		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();
@@ -568,7 +573,7 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 	for (name, hop, cost) in [("P1", 1, 1), ("P2", 2, 5)] {
 		let publisher = produce_origin(hop);
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast
 			.announce(origin::Route::default().with_epoch(epoch.clone()).with_cost(cost))
 			.unwrap();
@@ -679,7 +684,7 @@ async fn producer_replaced(version: &str) {
 	let (tx, mut producers) = mpsc::unbounded();
 	moq_net_sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {
-			if tx.unbounded_send(request.accept(None)).is_err() {
+			if tx.unbounded_send(request.accept(timed())).is_err() {
 				return;
 			}
 		}

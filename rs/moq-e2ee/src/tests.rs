@@ -22,6 +22,11 @@ use crate::protect::{nonce, open, protect};
 use crate::{group, track};
 use moq_net::Epoch;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const VECTORS: &str = include_str!("../../../drafts/moq-e2ee-00.json");
 
 fn vectors() -> Value {
@@ -286,7 +291,7 @@ fn subscribe_all() -> moq_net::track::Subscription {
 fn net_track(name: &Name) -> moq_net::track::Producer {
 	moq_net::broadcast::Info::new()
 		.produce()
-		.create_track(name.as_str(), None)
+		.create_track(name.as_str(), timed())
 		.unwrap()
 }
 
@@ -452,7 +457,7 @@ fn wrong_track_name_is_identity() {
 	let generation = test_generation();
 	let net = moq_net::broadcast::Info::new()
 		.produce()
-		.create_track("not-a-physical-name", None)
+		.create_track("not-a-physical-name", timed())
 		.unwrap();
 	assert_eq!(
 		generation.produce(net.clone()).map(|_| ()).unwrap_err().to_string(),

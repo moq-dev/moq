@@ -63,10 +63,6 @@ Swift wrappers default them to 0.
 Public API: breaking. Wire: none here; absence on the wire lands
 with the untimed implementation quests.
 
-## Required
-
-- [An undeclared Rust timescale means untimed](/quest/m1/rust-untimed-default.md) - each track declares its timescale first, so a publisher that stops stamping writes onto a track that already says whether it is timed
-
 ## Related
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - moves the data producers this changes into `json` and `flate` namespaces in the same merge, so this is ready once #4519 lands rather than waiting on the codec child (2026-10-06 audit)

@@ -20,6 +20,11 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use futures::FutureExt;
 use moq_net::{Timestamp, broadcast, frame, group, track};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// A small, fixed payload shared across every frame. Cloning a `Bytes` is a
 /// refcount bump (no allocation), so the benchmark isolates the per-frame control
 /// overhead rather than payload allocation.
@@ -50,7 +55,7 @@ struct Ctx {
 /// Build a fresh, empty group via the public producer path.
 fn fresh_group() -> Ctx {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let track = broadcast.create_track("bench", None).unwrap();
+	let track = broadcast.create_track("bench", timed()).unwrap();
 	let group = track.append_group().unwrap();
 	Ctx {
 		_broadcast: broadcast,
@@ -198,7 +203,7 @@ struct TrackCtx {
 /// Build a track holding N cached groups, each with a single small frame.
 fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let track = broadcast.create_track("bench", None).unwrap();
+	let track = broadcast.create_track("bench", timed()).unwrap();
 	for _ in 0..n {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();

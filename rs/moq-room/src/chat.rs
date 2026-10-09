@@ -56,7 +56,9 @@ impl Deadline {
 
 /// Track settings for the latest chat window.
 pub fn info() -> track::Info {
-	track::Info::default().with_priority(PRIORITY)
+	track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_priority(PRIORITY)
 }
 
 /// Publishes chat messages; drive `poll_expire` or `expire` to retire them while idle.

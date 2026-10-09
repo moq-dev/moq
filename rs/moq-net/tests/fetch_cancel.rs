@@ -10,8 +10,13 @@ mod support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Timestamp, Version, origin, track};
+use moq_net::{Hop, Timestamp, Version, origin};
 use support::harness::peer;
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -59,7 +64,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 		futures::future::Either::Right(_) => panic!("nothing answered the track"),
 	};
 	let groups = request.dynamic();
-	let _track = request.accept(track::Info::default());
+	let _track = request.accept(timed());
 	let request = match futures::future::select(std::pin::pin!(groups.requested_group()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
@@ -77,7 +82,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			.expect("the pending fetch is still open");
 		}
 		Stage::MidResponse => {
-			let mut group = request.accept(None).unwrap();
+			let mut group = request.accept(timed()).unwrap();
 			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
 
 			let mut fetched = waiting.await.unwrap();
@@ -105,7 +110,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			assert_eq!(payloads, [&b"head"[..], &b"tail"[..]], "{ctx}");
 		}
 		Stage::Drained => {
-			let mut group = request.accept(None).unwrap();
+			let mut group = request.accept(timed()).unwrap();
 			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
 			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"tail")).unwrap();
 
@@ -178,12 +183,12 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 		futures::future::Either::Right(_) => panic!("nothing answered the track"),
 	};
 	let groups = request.dynamic();
-	let _track = request.accept(track::Info::default());
+	let _track = request.accept(timed());
 	let request = match futures::future::select(std::pin::pin!(groups.requested_group()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
-	let mut group = request.accept(None).unwrap();
+	let mut group = request.accept(timed()).unwrap();
 	group
 		.write_frame(Timestamp::ZERO, Bytes::from_static(b"segment"))
 		.unwrap();

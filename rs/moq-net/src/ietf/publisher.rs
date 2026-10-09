@@ -3219,7 +3219,11 @@ mod group_priority_test {
 		let log = crate::lite::test_transport::Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
@@ -3240,7 +3244,7 @@ mod group_priority_test {
 			msg,
 			200,
 			consumer,
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 			Version::Draft14,
 			GroupSlice::default(),
 		);
@@ -3259,7 +3263,7 @@ mod group_priority_test {
 	/// every moq-transport peer.
 	#[moq_net_sim::test]
 	async fn group_header_carries_the_publisher_priority() {
-		let header = serve_group_header(track::Info::default().with_priority(hang_audio_priority())).await;
+		let header = serve_group_header(track::Info::timed().with_priority(hang_audio_priority())).await;
 		assert_eq!(
 			header.publisher_priority,
 			priority::to_wire(hang_audio_priority()),
@@ -3275,7 +3279,7 @@ mod group_priority_test {
 	/// not 255, the least urgent value a peer like moxygen would deprioritize.
 	#[moq_net_sim::test]
 	async fn group_header_defaults_to_the_midpoint() {
-		let header = serve_group_header(track::Info::default()).await;
+		let header = serve_group_header(track::Info::timed()).await;
 		assert_eq!(header.publisher_priority, 128);
 	}
 
@@ -3285,7 +3289,7 @@ mod group_priority_test {
 	async fn drafts_14_through_16_send_no_timestamp_without_timescale() {
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
 			let stamped = ietf::Properties::sends_timescale(version);
-			let (header, mut buf) = serve_group(version, Some(Timescale::default())).await;
+			let (header, mut buf) = serve_group(version, Some(Timescale::MILLI)).await;
 			assert_eq!(header.flags.has_extensions, stamped, "{version}");
 			assert_eq!(
 				crate::coding::decode_varint(&mut buf, version).unwrap(),
@@ -3297,7 +3301,7 @@ mod group_priority_test {
 				let mut ext = bytes::Bytes::from(ext);
 				assert!(
 					crate::coding::decode_buf(&mut ext, version, |r, v| {
-						ietf::decode_object_time(r, Timescale::default(), v)
+						ietf::decode_object_time(r, Timescale::MILLI, v)
 					})
 					.unwrap()
 					.is_some(),
@@ -3327,7 +3331,11 @@ mod group_priority_test {
 		let log = crate::lite::test_transport::Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(None);
 
 		let mut group = track.append_group().unwrap();
@@ -3370,7 +3378,7 @@ mod group_priority_test {
 			RequestId(0),
 			Version::Draft14,
 			ServeRange::default(),
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 		);
 		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
@@ -3394,7 +3402,11 @@ mod group_priority_test {
 	async fn group_waiting_for_stream_credit_expires() {
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_open_uni(gate.consume());
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -3412,7 +3424,7 @@ mod group_priority_test {
 			},
 			0,
 			group,
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 			Version::Draft19,
 			GroupSlice::default(),
 		);
@@ -3437,7 +3449,11 @@ mod group_priority_test {
 	async fn unacknowledged_fin_expires_with_the_group() {
 		let session = SinkSession::new(Default::default()).with_unacked_fin();
 		let log = session.log.clone();
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -3455,7 +3471,7 @@ mod group_priority_test {
 			},
 			0,
 			group,
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 			Version::Draft19,
 			GroupSlice::default(),
 		);
@@ -3481,7 +3497,11 @@ mod group_priority_test {
 	async fn blocked_final_transport_chunk_expires_with_the_group() {
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_uni(gate.consume());
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		let mut frame = old
@@ -3503,7 +3523,7 @@ mod group_priority_test {
 			},
 			0,
 			group,
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 			Version::Draft19,
 			GroupSlice::default(),
 		);
@@ -3547,7 +3567,11 @@ mod subscribe_cursor_test {
 		let log = Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		for sequence in 0..4 {
 			let mut group = track.create_group(group::Info { sequence }).unwrap();
 			group
@@ -3565,7 +3589,7 @@ mod subscribe_cursor_test {
 			RequestId(1),
 			Version::Draft14,
 			ServeRange::default(),
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 		);
 		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
@@ -3603,7 +3627,7 @@ mod serve_tests {
 	fn serve(version: Version) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let session = ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
@@ -4370,7 +4394,7 @@ mod serve_tests {
 					Version::Draft16 | Version::Draft17 => ietf::Properties::default(),
 					// Only draft-20 can carry the opt-out.
 					_ if !wanted && Filter::is_draft20(version) => ietf::Properties::default(),
-					_ => track_properties(&track::Info::default(), true),
+					_ => track_properties(&track::Info::timed(), true),
 				};
 				assert_eq!(
 					ok,
@@ -4409,7 +4433,7 @@ mod serve_tests {
 		ietf::encode_object_time(
 			&mut Encoder::new(&mut properties, version.into()),
 			stamp,
-			track::Info::default().timescale.expect("a timed track"),
+			track::Info::timed().timescale.expect("a timed track"),
 			version,
 		)
 		.unwrap();
@@ -5996,7 +6020,11 @@ mod serve_tests {
 		async fn serve_slice(slice: GroupSlice) -> Vec<u8> {
 			let log = Log::default();
 			let session = SinkSession::new(log.clone());
-			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			for payload in [b"aa", b"bb", b"cc", b"dd"] {
 				group.write_frame(timestamp(), payload.as_slice()).unwrap();
@@ -6009,7 +6037,7 @@ mod serve_tests {
 				header(),
 				0,
 				consumer,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 				Version::Draft20,
 				slice,
 			);
@@ -6099,7 +6127,11 @@ mod tests {
 	/// subscription must preserve everything the producer still retains.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
-		let producer = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let producer = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		for millis in [0, 1000] {
 			let mut group = producer.append_group().unwrap();
 			group
@@ -8169,7 +8201,11 @@ mod range_tests {
 	/// Clamping it to the live edge would serve a group outside the requested range.
 	#[moq_net_sim::test]
 	async fn a_future_start_is_not_clamped_to_the_live_edge() {
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		track
 			.create_group(group::Info { sequence: 7 })
 			.unwrap()
@@ -8320,7 +8356,11 @@ mod range_tests {
 	/// one exists, so the earlier group is deliberately left unfinished here.
 	#[test]
 	fn an_empty_newest_group_walks_back_for_the_largest() {
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
 		for _ in 0..3 {
 			first
@@ -8347,7 +8387,11 @@ mod range_tests {
 	/// order rather than decrementing by one.
 	#[test]
 	fn the_walkback_crosses_a_gap_in_the_numbering() {
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
 		first
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())

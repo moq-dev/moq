@@ -2,6 +2,11 @@
 
 use std::time::Duration;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Inputs for [`connect_test`].
@@ -113,7 +118,9 @@ async fn connect_test(config: ConnectTest<'_>) {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -605,7 +612,9 @@ async fn iroh_connect_test(version: Option<&str>) {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -826,7 +835,9 @@ async fn noq_client_close_drains_finished_track() {
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
 			broadcast.announce(Default::default()).expect("failed to announce");
-			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+			let mut track = broadcast
+				.create_track("video", timed())
+				.expect("failed to create track");
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
@@ -938,7 +949,9 @@ async fn noq_client_close_drains_migrated_predecessor() {
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
 			broadcast.announce(Default::default()).expect("failed to announce");
-			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+			let mut track = broadcast
+				.create_track("video", timed())
+				.expect("failed to create track");
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
@@ -1079,7 +1092,9 @@ async fn noq_client_close_keeps_predecessor_handover() {
 			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
 			broadcast.announce(Default::default()).expect("failed to announce");
 			// Never finished, so the predecessor serving it cannot drain.
-			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+			let mut track = broadcast
+				.create_track("video", timed())
+				.expect("failed to create track");
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);

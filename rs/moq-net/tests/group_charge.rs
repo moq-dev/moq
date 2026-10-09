@@ -27,6 +27,11 @@ thread_local! {
 	static LIVE: Cell<usize> = const { Cell::new(0) };
 }
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 struct Counting;
 
 // Accounting only. Every call forwards to the system allocator unchanged.
@@ -63,7 +68,7 @@ fn measure() -> (usize, u64) {
 	info.pool = pool.clone();
 
 	let broadcast = info.produce();
-	let track = broadcast.create_track("chat", None).unwrap();
+	let track = broadcast.create_track("chat", timed()).unwrap();
 
 	// Warm up outside the measurement so the track's own one-time allocations and
 	// any lazy statics aren't billed to the groups.

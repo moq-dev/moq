@@ -19,7 +19,8 @@
 //! #     catalog: &moq_mux::catalog::Producer,
 //! #     jpeg: bytes::Bytes,
 //! # ) -> moq_mux::Result<()> {
-//! let track = broadcast.create_track("thumbnail", None)?;
+//! let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+//! let track = broadcast.create_track("thumbnail", info)?;
 //! let config = moq_mux::binary::Config::default().with_mime("image/jpeg");
 //! let mut thumbnail = catalog.binary_snapshot(track, config)?;
 //! thumbnail.update(jpeg)?;
@@ -389,6 +390,11 @@ mod test {
 
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn catalog() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -397,7 +403,7 @@ mod test {
 
 	/// Create the moq-net track a data producer publishes on, as a caller does for a media track.
 	fn track(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> moq_net::track::Producer {
-		broadcast.create_track(name, None).unwrap()
+		broadcast.create_track(name, timed()).unwrap()
 	}
 
 	fn entry(catalog: &crate::catalog::Producer, name: &str) -> BinaryConfig {
@@ -706,7 +712,7 @@ mod test {
 			.binary_snapshot(track(&mut broadcast, "data"), Config::default())
 			.unwrap();
 
-		assert!(broadcast.create_track("data", None).is_err());
+		assert!(broadcast.create_track("data", timed()).is_err());
 	}
 
 	/// A data track listed in an application's own section, beside its own per-track fields.

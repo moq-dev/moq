@@ -16,6 +16,11 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wait until the FFI runtime has polled work spawned ahead of this call.
@@ -1070,7 +1075,7 @@ async fn fetches_cached_group_without_subscribing() {
 #[tokio::test]
 async fn fetches_cached_media_group_and_decodes_container() {
 	let broadcast = moq_net::broadcast::Info::new().produce();
-	let track = broadcast.create_track("media", None).unwrap();
+	let track = broadcast.create_track("media", timed()).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 	let mut media = moq_mux::container::Producer::new(
 		track,
@@ -1120,7 +1125,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 #[tokio::test]
 async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 	let broadcast = moq_net::broadcast::Info::new().produce();
-	let _track = broadcast.create_track("media", None).unwrap();
+	let _track = broadcast.create_track("media", timed()).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 
 	let result = consumer
@@ -1758,7 +1763,7 @@ async fn announced_hides_dot_paths_unless_asked() {
 #[tokio::test]
 async fn resolve_rejects_a_reference_without_an_origin() {
 	let broadcast = moq_net::broadcast::Info::new().produce();
-	let _audio = broadcast.create_track("audio", None).unwrap();
+	let _audio = broadcast.create_track("audio", timed()).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 
 	// An absent or empty reference still names this broadcast, so it needs no origin. A reference

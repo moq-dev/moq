@@ -695,6 +695,11 @@ fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 mod tests {
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
@@ -1000,7 +1005,7 @@ mod tests {
 		let mut announced = egress.announced();
 		let pub_source = pub_origin.create_broadcast("demo/x").unwrap();
 		pub_source.announce(Default::default()).unwrap();
-		let pub_track = pub_source.create_track("video", None).unwrap();
+		let pub_track = pub_source.create_track("video", timed()).unwrap();
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
@@ -1008,7 +1013,7 @@ mod tests {
 		let sub_origin = moq_tokio::origin::spawn().with_stats(regional_ctx.clone());
 		let sub_source = sub_origin.create_broadcast("demo/x").unwrap();
 		sub_source.announce(Default::default()).unwrap();
-		let sub_track = sub_source.create_track("audio", None).unwrap();
+		let sub_track = sub_source.create_track("audio", timed()).unwrap();
 
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;

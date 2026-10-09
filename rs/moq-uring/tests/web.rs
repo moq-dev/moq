@@ -34,6 +34,11 @@ const PAYLOAD: &[u8] = b"hello over webtransport";
 const CLOSE_CODE: u32 = 42;
 const CLOSE_REASON: &str = "bye";
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Build the uring server endpoint serving `h3`.
 fn h3_endpoint(handle: &moq_uring::Handle, certs: &support::Certs) -> quic::Endpoint {
 	let mut server = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
@@ -221,7 +226,7 @@ fn lite_session_over_webtransport() {
 
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("data", None).expect("create track");
+	let track = broadcast.create_track("data", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)

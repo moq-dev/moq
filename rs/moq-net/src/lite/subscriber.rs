@@ -460,8 +460,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(());
 		};
 
-		// Datagrams are lite-05+, which always negotiates a timescale; default defensively.
-		let scale = entry.timescale.unwrap_or_default();
+		// Datagrams are lite-05+, which always negotiates a timescale; fall back to milliseconds defensively.
+		let scale = entry.timescale.unwrap_or(crate::Timescale::MILLI);
 		let timestamp =
 			Timestamp::new(dg.timestamp, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 
@@ -1629,13 +1629,17 @@ mod tests {
 					cost: None,
 					going_away: Default::default(),
 				});
-				let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+				let track = track::Producer::new(
+					std::sync::Arc::new(crate::broadcast::Info::default()),
+					"video",
+					crate::track::Info::timed(),
+				);
 				let mut consumer = track.consume().subscribe(None).await.unwrap();
 				subscriber.subscribes.lock().insert(
 					7,
 					TrackEntry {
 						producer: track,
-						timescale: Some(Timescale::default()),
+						timescale: Some(Timescale::MILLI),
 						tail: Default::default(),
 					},
 				);
@@ -1680,13 +1684,17 @@ mod tests {
 				going_away: Default::default(),
 			});
 
-			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+			let mut track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"video",
+				crate::track::Info::timed(),
+			);
 			track.finish_at(3).unwrap();
 			subscriber.subscribes.lock().insert(
 				7,
 				TrackEntry {
 					producer: track.clone(),
-					timescale: Some(Timescale::default()),
+					timescale: Some(Timescale::MILLI),
 					tail: Default::default(),
 				},
 			);
@@ -1752,7 +1760,7 @@ mod tests {
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let request = broadcast.reserve_track("video").unwrap();
-			let serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::default()));
+			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
 			let mut group = serving.serving.create_group(group::Info { sequence: 2 }).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
 			group.finish().unwrap();
@@ -1805,7 +1813,7 @@ mod tests {
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("video").unwrap();
-		let serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::default()));
+		let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
 		let mut reader = broadcast
 			.consume()
 			.track("video")
@@ -1895,13 +1903,15 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		// The broadcast keeps only a weak handle, so the map below owns the only strong
 		// `track::Producer`: dropping it is what ends the track.
-		let producer = broadcast.create_track("datagrams", None).unwrap();
+		let producer = broadcast
+			.create_track("datagrams", crate::track::Info::timed())
+			.unwrap();
 		let mut received = producer.subscribe(None);
 		subscriber.subscribes.lock().insert(
 			7,
 			TrackEntry {
 				producer,
-				timescale: Some(Timescale::default()),
+				timescale: Some(Timescale::MILLI),
 				tail: Default::default(),
 			},
 		);
@@ -2080,14 +2090,12 @@ mod tests {
 		};
 
 		let broadcast = crate::broadcast::Info::new().produce();
-		let mut producer = broadcast.create_track("catalog.json", None).unwrap();
+		let mut producer = broadcast
+			.create_track("catalog.json", crate::track::Info::timed())
+			.unwrap();
 		let mut sub = Sub::None;
-		let mut establish = std::pin::pin!(serve.establish(
-			&mut producer,
-			&mut sub,
-			Subscription::default(),
-			Some(Timescale::default()),
-		));
+		let mut establish =
+			std::pin::pin!(serve.establish(&mut producer, &mut sub, Subscription::default(), Some(Timescale::MILLI),));
 
 		// Parked on the first write: the stream is open and nothing has been sent yet.
 		assert!(futures::poll!(establish.as_mut()).is_pending());
@@ -2146,7 +2154,9 @@ mod tests {
 				going_away: Default::default(),
 			});
 			let broadcast = crate::broadcast::Info::new().produce();
-			let producer = broadcast.create_track("catalog.json", None).unwrap();
+			let producer = broadcast
+				.create_track("catalog.json", crate::track::Info::timed())
+				.unwrap();
 
 			Self {
 				serve: TrackServe {
@@ -2194,7 +2204,7 @@ mod tests {
 				&mut sub,
 				Some(mid_group_demand()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.expect("an older peer must not fail the subscribe");
@@ -2227,7 +2237,7 @@ mod tests {
 					&mut sub,
 					Some(mid_group_demand()),
 					true,
-					Some(Timescale::default()),
+					Some(Timescale::MILLI),
 				)
 				.await
 				.unwrap();
@@ -2297,7 +2307,7 @@ mod tests {
 
 		let empty = Subscription::default().with_end(Position::group(0));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 
@@ -2318,7 +2328,7 @@ mod tests {
 				&mut sub,
 				Some(Subscription::default()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -2327,7 +2337,7 @@ mod tests {
 
 		let empty = Subscription::default().with_end(Position::group(0));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 
@@ -2350,7 +2360,7 @@ mod tests {
 			.with_start(Position::group(5))
 			.with_end(Position::group(5));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 
@@ -2371,7 +2381,7 @@ mod tests {
 				&mut sub,
 				Some(Subscription::default()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -2382,7 +2392,7 @@ mod tests {
 			.with_start(Position::group(5))
 			.with_end(Position::group(5));
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 
@@ -2427,7 +2437,7 @@ mod tests {
 				&mut sub,
 				Some(Subscription::default()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -2440,7 +2450,7 @@ mod tests {
 				&mut sub,
 				Some(mid_group_demand()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.expect("a downstream frame offset must not tear down an older upstream");
@@ -2469,7 +2479,7 @@ mod tests {
 
 		// Establish from group 3; the peer's START is considered in flight.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert!(applies(&sub), "a fresh subscription accepts its START");
@@ -2485,7 +2495,7 @@ mod tests {
 						.with_end(Position::group(9)),
 				),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -2493,7 +2503,7 @@ mod tests {
 
 		// The start moves: a buffered START is stale while it sits elsewhere.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert!(!applies(&sub), "a moved start must invalidate a buffered START");
@@ -2501,7 +2511,7 @@ mod tests {
 		// The start returns: the declaration matches the demand again, so the
 		// publisher's skip (it sends no replacement START) must land.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert!(applies(&sub), "demand returning restores the START");
@@ -2520,21 +2530,21 @@ mod tests {
 
 		// Establish from group 5: the floor tracks the request until START lands.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(5), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(5), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(5));
 
 		// Forward: a reader waiting in [5, 8) must fail over, not stall.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(8));
 
 		// Backward: the reopened range must stop being a permanent miss.
 		h.serve
-			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::MILLI))
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(3));
@@ -2547,7 +2557,7 @@ mod tests {
 				&mut sub,
 				Some(Subscription::default()),
 				true,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 			)
 			.await
 			.unwrap();
@@ -2954,7 +2964,7 @@ mod tests {
 		let assigned = crate::Hop::new(777).unwrap();
 
 		let local = origin.publish("room/host", origin::Route::default()).unwrap();
-		let track = local.create_track("video", None).unwrap();
+		let track = local.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -4856,9 +4866,10 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					// it. The track::Info only takes effect if the track isn't accepted yet
 					// (a fetch with no live subscription); otherwise the group inherits the
 					// accepted timescale. Relay-served FETCH is lite-05+, so `timescale` is
-					// `Some`; fall back to the default scale defensively rather than
+					// `Some`; fall back to milliseconds defensively rather than
 					// panicking.
-					let group_info = track::Info::default().with_timescale(self.timescale.unwrap_or_default());
+					let group_info =
+						track::Info::default().with_timescale(self.timescale.unwrap_or(crate::Timescale::MILLI));
 					// The joined fetches pick the group up from the cache only when next
 					// polled, so their demand outlives the request until then.
 					let joined = request.result.clone();

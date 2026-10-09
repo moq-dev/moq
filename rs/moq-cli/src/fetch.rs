@@ -158,6 +158,11 @@ mod tests {
 	use crate::args::{Command, Invocation};
 	use crate::test_env::EnvGuard;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// The frames of each finished group on the `data` track.
 	fn frames(sequence: u64) -> [Vec<u8>; 2] {
 		[
@@ -182,7 +187,7 @@ mod tests {
 			let broadcast = origin.create_broadcast("demo").expect("broadcast");
 			broadcast.announce(Default::default()).expect("announce");
 
-			let data = broadcast.create_track("data", None).expect("data track");
+			let data = broadcast.create_track("data", timed()).expect("data track");
 			for sequence in 0..3 {
 				let mut group = data.append_group().expect("group");
 				for frame in frames(sequence) {
@@ -190,8 +195,8 @@ mod tests {
 				}
 				group.finish().expect("finish");
 			}
-			let empty = broadcast.create_track("empty", None).expect("empty track");
-			let live = broadcast.create_track("live", None).expect("live track");
+			let empty = broadcast.create_track("empty", timed()).expect("empty track");
+			let live = broadcast.create_track("live", timed()).expect("live track");
 			let mut open = live.append_group().expect("open group");
 			open.write_frame(moq_net::Timestamp::ZERO, b"first".as_ref())
 				.expect("frame");
@@ -245,7 +250,7 @@ mod tests {
 				.create_broadcast(".hidden")
 				.expect("hidden broadcast");
 			hidden.announce(Default::default()).expect("announce hidden");
-			let secret = hidden.create_track("data", None).expect("hidden track");
+			let secret = hidden.create_track("data", timed()).expect("hidden track");
 			let mut group = secret.append_group().expect("group");
 			group
 				.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())

@@ -66,10 +66,15 @@ mod test {
 
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn producer(config: ProducerConfig) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
@@ -91,7 +96,7 @@ mod test {
 
 	/// A track whose timestamp conversion rejects every frame after its group is published.
 	fn rejecting_track() -> moq_net::track::Producer {
-		let mut info = moq_net::track::Info::default();
+		let mut info = timed();
 		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
 
 		moq_net::broadcast::Info::new()
@@ -361,7 +366,7 @@ mod test {
 	fn a_fresh_consumer_adopts_the_offset_without_skipping_history() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_op_ratio(0));
 
@@ -468,7 +473,7 @@ mod test {
 		] {
 			let track = moq_net::broadcast::Info::new()
 				.produce()
-				.create_track("test", None)
+				.create_track("test", timed())
 				.unwrap();
 			let mut consumer = consumer(track.subscribe(None), false);
 			let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_op_ratio(0));
@@ -656,7 +661,7 @@ mod test {
 	fn cut_finishes_the_group_and_the_next_edit_restates() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", None)
+			.create_track("test", timed())
 			.unwrap();
 		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
 		let mut groups = track.subscribe(replay);

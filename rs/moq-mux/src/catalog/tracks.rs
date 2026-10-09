@@ -71,7 +71,8 @@ use super::hang::{Catalog, CatalogExt};
 /// #     broadcast: &mut moq_net::broadcast::Producer,
 /// #     catalog: &moq_mux::catalog::Producer<Ext>,
 /// # ) -> moq_mux::Result<()> {
-/// let track = broadcast.create_track("telemetry", None)?;
+/// let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+/// let track = broadcast.create_track("telemetry", info)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: BinaryConfig::new(Mode::Stream), sysid: 1 };
 /// let mut telemetry = catalog.binary_stream(track, entry)?;
@@ -725,6 +726,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Drop for Rendition<E, C> {
 mod tests {
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn video_track() -> (moq_net::broadcast::Producer, super::super::Producer, VideoTrack) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
@@ -1373,7 +1379,7 @@ mod tests {
 		fn measures_a_custom_track() {
 			let (broadcast, catalog) = produce();
 			let reserved = catalog.reserve();
-			let net = broadcast.create_track("gps", None).unwrap();
+			let net = broadcast.create_track("gps", timed()).unwrap();
 			let mut track = reserved
 				.track(
 					net,

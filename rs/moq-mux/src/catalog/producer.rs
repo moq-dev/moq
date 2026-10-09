@@ -339,7 +339,7 @@ impl<E: CatalogExt> Producer<E> {
 		// The MSF track is the same catalog in another encoding, so it takes the same
 		// priority. Leaving it at the default would rank a subscriber reading MSF
 		// below every media track on a relay's upstream leg.
-		let msf_info = moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog);
+		let msf_info = hang::Catalog::default_track_info();
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.

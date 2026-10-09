@@ -42,6 +42,11 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use moq_net::{Hop, Timestamp, Version, broadcast, cache, group, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// The lite draft production negotiates, the next one (opt-in), and the newest
 /// IETF draft.
 const VERSIONS: [&str; 3] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
@@ -241,7 +246,7 @@ impl Cluster {
 				let broadcast = origin
 					.publish(path(publisher * shape.broadcasts + index), Default::default())
 					.unwrap();
-				this.tracks.push(broadcast.create_track(TRACK, None).unwrap());
+				this.tracks.push(broadcast.create_track(TRACK, timed()).unwrap());
 				this._broadcasts.push(broadcast);
 			}
 
@@ -551,7 +556,7 @@ impl DashRoom {
 				let path = format!(".stats/{project}/node/{node}");
 				let broadcast = cluster.relays[node].publish(path.as_str(), Default::default()).unwrap();
 				for name in &names {
-					tracks.push(broadcast.create_track(name.as_str(), None).unwrap());
+					tracks.push(broadcast.create_track(name.as_str(), timed()).unwrap());
 				}
 				broadcasts.push(broadcast);
 				paths.push(path);

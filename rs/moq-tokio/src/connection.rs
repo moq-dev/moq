@@ -1532,6 +1532,11 @@ fn terminal(state: &State) -> Error {
 mod tests {
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Updating with an empty CLI preserves a standing TOML value over typed defaults.
 	#[test]
 	fn cli_does_not_clobber_toml_backoff() {
@@ -2486,7 +2491,7 @@ mod tests {
 		let origin = crate::origin::spawn();
 		let broadcast = origin.create_broadcast("cam").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let write = |payload: &'static [u8]| {
 			let mut group = track.append_group().unwrap();
 			group.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
@@ -2587,7 +2592,7 @@ mod tests {
 		let origin = crate::origin::spawn();
 		let broadcast = origin.create_broadcast("cam").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let write = |payload: &'static [u8]| {
 			let mut group = track.append_group().unwrap();
 			group.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
@@ -2685,7 +2690,7 @@ mod tests {
 		let origin = crate::origin::spawn();
 		let broadcast = origin.create_broadcast("cam").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 
 		let mut fallback = Fallback::start(&origin, Quic::Open).await;
 
@@ -2765,7 +2770,7 @@ mod tests {
 		let origin = crate::origin::spawn();
 		let broadcast = origin.create_broadcast("cam").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let (addr_a, mut accepted_a, _task_a) = serve(origin.clone()).await;
 		let (addr_b, mut accepted_b, _task_b) = serve(origin.clone()).await;
 

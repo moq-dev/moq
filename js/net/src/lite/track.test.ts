@@ -47,7 +47,7 @@ test("TrackInfo round-trips on draft-05", async () => {
 });
 
 test("TrackInfo for Rust's default Info matches cross-language wire bytes", async () => {
-	// Rust's `Info::default()` is millisecond-timed; JS has no default timescale.
+	// Neither language has a default timescale; an untimed track declares milliseconds on lite-05.
 	const model = infoDefaults({ timescale: Timescale.MILLI });
 	const info = new TrackInfo({ ...model, timescale: model.timescale ?? undefined });
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(

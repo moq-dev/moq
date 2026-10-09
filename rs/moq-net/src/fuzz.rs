@@ -1053,7 +1053,12 @@ impl FrameRecv {
 		let mut info = broadcast::Info::new();
 		info.pool = cache::Pool::unbounded();
 		let broadcast = info.produce();
-		let track = broadcast.create_track("frames", None).unwrap();
+		let track = broadcast
+			.create_track(
+				"frames",
+				crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
+			)
+			.unwrap();
 		let budget = budget.map(frame::Budget::new).unwrap_or_default();
 		let payload = bytes::Bytes::from(vec![0u8; size]);
 

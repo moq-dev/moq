@@ -120,8 +120,11 @@ impl Catalog<()> {
 	///
 	/// Keeps the bare `moq_net` retention rather than the media one: the catalog is
 	/// snapshot mode, so the useful value is the live edge, which is always kept.
+	/// Timed in milliseconds, so snapshots share the broadcast clock with media.
 	pub fn default_track_info() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_priority(PRIORITY.catalog)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_priority(PRIORITY.catalog)
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so

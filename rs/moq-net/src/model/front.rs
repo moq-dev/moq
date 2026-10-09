@@ -713,7 +713,7 @@ mod tests {
 	}
 
 	fn info() -> track::Info {
-		track::Info::default()
+		track::Info::timed()
 	}
 
 	fn name(s: &str) -> Arc<str> {
@@ -1103,7 +1103,7 @@ mod tests {
 		});
 		let other = track::Info {
 			max_age: Some(Duration::from_secs(1)),
-			..track::Info::default()
+			..track::Info::timed()
 		};
 		// The source it replaced keeps feeding the track (the audit's F3)...
 		assert_actions(

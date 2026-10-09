@@ -104,6 +104,11 @@ impl Sessions {
 
 #[cfg(test)]
 mod tests {
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -173,7 +178,7 @@ mod tests {
 		let mut announced = egress.announced();
 		let source = feed_origin.create_broadcast(path).unwrap();
 		source.announce(origin::Route::default()).unwrap();
-		let track = source.clone().create_track("video", None).unwrap();
+		let track = source.clone().create_track("video", timed()).unwrap();
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);

@@ -21,6 +21,11 @@ use crate::container::ts::{Export, catalog as tscat, stats};
 use crate::container::{Frame, Kind, Producer};
 use moq_net::Timestamp;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const SC: &[u8] = &[0, 0, 0, 1];
 // Reusable H.264 parameter-set and slice NALs (NAL type = first byte & 0x1f).
 const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
@@ -2503,14 +2508,14 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	let name = track.name().to_string();
 
 	// SI snapshot tracks, one group each: an SDT (2s) and a NIT (10s).
-	let mut sdt_track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	let mut sdt_track = broadcast.create_track("0x0011-0x42.si", timed()).unwrap();
 	sdt_track
 		.write_frame(
 			Timestamp::ZERO,
 			Bytes::from(make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8])),
 		)
 		.unwrap();
-	let mut nit_track = broadcast.create_track("0x0010-0x40.si", None).unwrap();
+	let mut nit_track = broadcast.create_track("0x0010-0x40.si", timed()).unwrap();
 	nit_track
 		.write_frame(
 			Timestamp::ZERO,
@@ -2818,7 +2823,7 @@ fn publish_sdt(
 	broadcast: &mut moq_net::broadcast::Producer,
 	catalog: &mut crate::catalog::Producer<tscat::Ext>,
 ) -> moq_net::track::Producer {
-	let mut track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	let mut track = broadcast.create_track("0x0011-0x42.si", timed()).unwrap();
 	track
 		.write_frame(
 			Timestamp::ZERO,
@@ -3864,7 +3869,7 @@ async fn stale_si_entry_does_not_block_output() {
 	.unwrap();
 
 	// A track that exists (the subscription resolves) but never produces a group.
-	let ghost = broadcast.create_track("ghost.si", None).unwrap();
+	let ghost = broadcast.create_track("ghost.si", timed()).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
@@ -4902,11 +4907,11 @@ async fn repointed_si_entry_resubscribes() {
 	)
 	.unwrap();
 
-	let mut track_a = broadcast.create_track("a.si", None).unwrap();
+	let mut track_a = broadcast.create_track("a.si", timed()).unwrap();
 	track_a
 		.write_frame(Timestamp::ZERO, Bytes::from(sdt_a.clone()))
 		.unwrap();
-	let mut track_b = broadcast.create_track("b.si", None).unwrap();
+	let mut track_b = broadcast.create_track("b.si", timed()).unwrap();
 	track_b
 		.write_frame(Timestamp::ZERO, Bytes::from(sdt_b.clone()))
 		.unwrap();
@@ -5036,7 +5041,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 	)
 	.unwrap();
 
-	let mut si_track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	let mut si_track = broadcast.create_track("0x0011-0x42.si", timed()).unwrap();
 	si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(sdt_v1.clone()))
 		.unwrap();
@@ -5145,7 +5150,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 	.unwrap();
 
 	let si_name = format!("{pid:#06x}-{table_id:#04x}.si");
-	let si_track = broadcast.create_track(si_name.as_str(), None).unwrap();
+	let si_track = broadcast.create_track(si_name.as_str(), timed()).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
