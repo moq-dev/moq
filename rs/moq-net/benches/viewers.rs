@@ -16,6 +16,11 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
 use moq_net::{Hop, Timestamp, broadcast, kio, origin};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// `(viewers, broadcasts)` shapes: viewers spread round-robin over the broadcasts.
 const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (1_000, 100), (10_000, 100)];
 
@@ -71,7 +76,7 @@ impl Room {
 		let _sources = (0..broadcasts)
 			.map(|i| {
 				let broadcast = producer.publish(format!("room/{i}"), origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", None).unwrap();
+				let track = broadcast.create_track("video", timed()).unwrap();
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
 				group.finish().unwrap();

@@ -31,6 +31,11 @@ mod linux {
 
 	const ALPN: &str = "moq-lite-05";
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	struct Ablation {
 		name: &'static str,
 		config: udp::Config,
@@ -105,7 +110,7 @@ mod linux {
 
 			let broadcast = pub_origin.create_broadcast("bench").expect("create broadcast");
 			broadcast.announce(Default::default()).expect("create broadcast");
-			let track = broadcast.create_track("data", None).expect("create track");
+			let track = broadcast.create_track("data", timed()).expect("create track");
 
 			let certs = support::certs().expect("certificates");
 			let mut server_config =

@@ -24,6 +24,11 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use futures::FutureExt;
 use moq_net::{Epoch, Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio, origin, track};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
 
@@ -576,7 +581,7 @@ fn bench_handoff(c: &mut Criterion) {
 					let mut total = Duration::ZERO;
 					for _ in 0..iterations {
 						let incumbent = producer.publish("room/live", origin::Route::default()).unwrap();
-						let track = incumbent.create_track("video", None).unwrap();
+						let track = incumbent.create_track("video", timed()).unwrap();
 						let mut first = track.append_group().unwrap();
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
 						first.finish().unwrap();
@@ -587,7 +592,7 @@ fn bench_handoff(c: &mut Criterion) {
 
 						let started = std::time::Instant::now();
 						let standby = producer.create_broadcast("room/live").unwrap();
-						let track = standby.create_track("video", None).unwrap();
+						let track = standby.create_track("video", timed()).unwrap();
 						let mut second = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 						second.write_frame(Timestamp::ZERO, b"two".as_ref()).unwrap();
 						second.finish().unwrap();
@@ -633,7 +638,7 @@ fn bench_relay(c: &mut Criterion) {
 			runtime.spawn(moq_net::time::run(driver));
 			let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
 			let sources: Vec<_> = (0..tracks)
-				.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
+				.map(|i| broadcast.create_track(format!("{i}"), timed()).unwrap())
 				.collect();
 			let mut subscriptions = runtime.block_on(async {
 				let resolved = producer.consume().request_broadcast("room/live", None).await.unwrap();
@@ -743,7 +748,7 @@ impl Generation {
 		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
 		let mut held = Vec::with_capacity(tracks);
 		for i in 0..tracks {
-			let track = broadcast.create_track(format!("{i}"), None).unwrap();
+			let track = broadcast.create_track(format!("{i}"), timed()).unwrap();
 			let mut written = track.append_group().unwrap();
 			written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
 			written.finish().unwrap();
