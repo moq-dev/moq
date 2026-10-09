@@ -187,6 +187,8 @@ test("next skips the groups the max delay abandons", async () => {
 
 	expect(await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
 	expect(await drain(track.subscribe({ maxDelay: Time.Milli(500) }))).toEqual([{ n: 2 }, { n: 3 }]);
+	// The default of zero keeps only the newest group.
+	expect(await drain(track.subscribe())).toEqual([{ n: 3 }]);
 });
 
 test("live consumer sees each update", async () => {

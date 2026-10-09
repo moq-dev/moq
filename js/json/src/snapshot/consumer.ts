@@ -18,6 +18,7 @@ const GAPS: Moq.StreamCode[] = [
  * yields each reconstructed value with the timestamp of the frame that produced it. Two reads:
  * {@link next} yields every state in order, for a caller that picks the state matching a playhead,
  * and {@link latest} skips to the newest state, for a caller that only wants the current value.
+ * What {@link latest} skips is gone, so a later {@link next} resumes after it.
  * When something else already owns the track, use the {@link Decoder} directly.
  */
 export class Consumer<T> {
@@ -35,9 +36,12 @@ export class Consumer<T> {
 	/**
 	 * Get the next state in order, or `undefined` once the track ends.
 	 *
-	 * Yields one state per frame and finishes a group before starting the next. A group the
-	 * subscription's `maxDelay` proves too old is skipped, and a group lost to a gap resyncs from
-	 * the next one, so a reader that falls behind still jumps ahead rather than queueing forever.
+	 * Yields one state per frame and finishes a group before starting the next, buffering every
+	 * state the reader has not reached yet. On a timed track, a group the subscription's `maxDelay`
+	 * proves too old is skipped: the default of zero keeps only the newest group, so a playhead
+	 * reader sets `maxDelay` to how far it trails the live edge. An untimed track never proves a
+	 * group stale, so a reader that falls behind replays the whole backlog; use {@link latest} to
+	 * skip it. A group lost to a gap resyncs from the next one.
 	 */
 	next(): Promise<Timed<T> | undefined> {
 		return this.#read(false);

@@ -32,6 +32,12 @@ for await (const { value, at } of consumer) {
 }
 ```
 
+`next()` buffers every state it has not yielded. On a timed track it skips a
+group once the subscription's `maxDelay` proves it stale, and the default of
+zero keeps only the newest group, so subscribe with a `maxDelay` covering how
+far the playhead trails the live edge. An untimed track skips nothing; a reader
+that cannot keep up calls `latest()` instead.
+
 A stream rides one group, so the whole log shares `@moq/net`'s group budget:
 32 MiB of payload and 8192 records. An append that might not fit is refused
 before anything is written and leaves the log intact. Once the budget is spent,

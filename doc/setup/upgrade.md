@@ -246,7 +246,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   where `at` is the frame's timestamp and absent on an untimed track; read
   `.value` for what they used to return. A snapshot consumer's `next()` now
   yields every state in order. Call `latest()` for the old behavior, which
-  skips to the newest state.
+  skips to the newest state. A caller that passes the result on as `any` or
+  `unknown` (logging, `JSON.stringify`, a generic setter) still compiles but
+  now gets the wrapper and every intermediate state, so search for each
+  `next()` and `for await` over a snapshot consumer rather than relying on
+  type errors.
 
 ## Wire
 
