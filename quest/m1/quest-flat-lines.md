@@ -64,11 +64,10 @@ Remaining:
   - #4039 auth: its `wip-version.md` child landed on the line (#5004). The
     line's UNAUTHORIZED stream code collides with `main`'s NOT_FETCHABLE
     (0x3A) and moves to 0x3B before it lands.
-  - #4079 cpp: the generated-newline fork tags exist
-    (`v0.11.0-kixelated.3` and `.4`); bump the line's `uniffi-bindgen-cpp`
-    pin from `.2`, then check `OBS (macOS)`.
-  - #4519 ffi-shape waits on
-    [Bindings](/quest/m0/broadcast-epoch/bindings.md).
+  - #4079 cpp: `main` merged in again and the `uniffi-bindgen-cpp` pin
+    bumped to `v0.11.0-kixelated.4`, whose generated files end with a newline.
+  - #4519 ffi-shape: lands now (maintainer, 2026-10-09) with the C++ port
+    #4079 left it; Bindings, Codecs, and the rest PR straight to `main`.
   - #4133 qos: closed without landing (2026-10-09). Every change it had over
     `main` is the egress `lag` histogram, which
     [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) ports from the

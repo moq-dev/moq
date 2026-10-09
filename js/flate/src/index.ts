@@ -4,8 +4,8 @@
  * - {@link Snapshot}: **lossy**. One value updated over time; a consumer only gets the most recent
  *   one. Older values are superseded and dropped.
  * - {@link Stream}: **lossless**. An ordered append-log of self-contained payloads, delivered in
- *   order with nothing superseded. Bounded by the group cache: see {@link Stream} for what that
- *   costs a consumer that falls behind.
+ *   order with nothing superseded. Bounded by the group budget: see {@link Stream} for what happens
+ *   once it is spent.
  *
  * Pick {@link Snapshot} when consumers care about "what is the value now" (a poster image, a
  * serialized state blob) and {@link Stream} when they care about every payload (an event log, a

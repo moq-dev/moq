@@ -28,8 +28,7 @@ already carries the full pattern grant.
   [FFI shape](/quest/m1/ffi-shape/README.md) (#4697) puts in place of every
   `MoqClient` setter, mirroring `moq_tokio::connect::Config`, not a new
   `set_tokens` setter (mirrored in the wrappers, and reaching the
-  generated C and C++ bindings and OBS through
-  [C++ through moq-ffi](/quest/m1/cpp/README.md)) and `js/net`'s `connect`
+  generated C and C++ bindings and OBS through the generated C++) and `js/net`'s `connect`
   options field follow. Decided in the 2026-09-30 audit: no new libmoq API,
   since it gets no more feature work.
 - Credential refresh belongs with token presentation. Resolve the configured

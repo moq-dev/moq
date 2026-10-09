@@ -17,7 +17,3 @@ found eight late entries under moq-hang-03:
   the published body and changelog, as #5067 did for hang; do not rely on an
   illustrative list.
 - Skip drafts that have never been published. Run `just drafts check`.
-
-## Related
-
-- [Publishing opens the next section](/quest/m2/drafts-next-section.md) - stops the backlog from coming back

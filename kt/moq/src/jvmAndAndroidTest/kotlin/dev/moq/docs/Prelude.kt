@@ -3,6 +3,8 @@
 // names a missing symbol or the wrong arity fails the check. Never executed.
 package dev.moq.docs
 
+import dev.moq.media.*
+
 val opusInit: ByteArray get() = TODO()
 val packet: ByteArray get() = TODO()
 val pts: ULong get() = TODO()
