@@ -1011,14 +1011,12 @@ where
 		// REQUEST_UPDATE refreshing the request's token. A token-bearing update's verify is raced
 		// against serving and the old grant's deadline (never a bare await), so media keeps
 		// flowing and the old deadline still fires when the acceptor is slow. While a verdict is
-		// pending the loop keeps reading so a cancellation still ends the request, stashing a
-		// further token-bearing update to answer once the verdict resolves. The stash is a FIFO
-		// bounded by MAX_REQUEST_UPDATES (counting the one being verified): draft-18 section
-		// 10.9.1 still requires one answer per update, so an earlier buffered renewal must not
-		// be dropped by a later one.
+		// pending the loop keeps reading so a cancellation still ends the request, stashing every
+		// further update, token or not, to handle once the verdict resolves: draft-17+ answers
+		// carry no Request ID, so they must go out in the order the updates arrived. The stash is
+		// a FIFO bounded by MAX_REQUEST_UPDATES (counting the one being verified).
 		let mut pending: Option<(crate::auth::RequestVerdict, RequestId)> = None;
-		let mut stashed: std::collections::VecDeque<(RequestId, crate::setup::Token)> =
-			std::collections::VecDeque::new();
+		let mut stashed: std::collections::VecDeque<super::request_stream::Update> = std::collections::VecDeque::new();
 
 		// What one turn of the loop resolved to.
 		enum Turn {
@@ -1037,9 +1035,14 @@ where
 		loop {
 			// Drain one stashed update before reading the next, so answers stay in order.
 			if pending.is_none()
-				&& let Some((request_id, token)) = stashed.pop_front()
+				&& let Some(update) = stashed.pop_front()
 			{
-				pending = Some((self.verify_renewal(&namespace, token), request_id));
+				if let Err(err) = self
+					.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut pending, update)
+					.await
+				{
+					return Some(Err(err));
+				}
 				continue;
 			}
 
@@ -1153,38 +1156,16 @@ where
 						}
 					}
 				}
+				// An update behind a pending verdict waits its turn, so its answer follows the
+				// verdict's.
+				Turn::Update(update) if pending.is_some() => {
+					if let Some(err) = self.stash_update(&mut stashed, update) {
+						return Some(Err(err));
+					}
+				}
 				Turn::Update(update) => {
-					if update.unsupported {
-						let result = if answer {
-							self.write_subscribe_error(
-								&mut stream.writer,
-								update.request_id,
-								&Error::Unsupported,
-								"REQUEST_UPDATE parameters not supported",
-							)
-							.await
-						} else {
-							Ok(())
-						};
-						return Some(result.and(Err(Error::Unsupported)));
-					}
-					if let Some(priority) = update.priority {
-						let mut subscription = serve.track.subscription();
-						subscription.priority = super::priority::from_wire(priority);
-						if let Err(err) = serve.track.update(subscription) {
-							return Some(Err(err));
-						}
-					}
-					if let Some(err) = self
-						.handle_renewal_update(
-							stream,
-							&namespace,
-							&request_grant,
-							&mut pending,
-							&mut stashed,
-							update.request_id,
-							update.authorization_token,
-						)
+					if let Err(err) = self
+						.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut pending, update)
 						.await
 					{
 						return Some(Err(err));
@@ -1194,48 +1175,59 @@ where
 		}
 	}
 
-	/// Handle a REQUEST_UPDATE's token on an in-flight subscription: ack a token-less or
-	/// union-authorized one, stash it while a verdict is already pending, or start verifying it.
+	/// Apply one REQUEST_UPDATE on an in-flight subscription, with no verdict pending: refuse
+	/// unsupported parameters, apply a priority, then start verifying a renewal's token, or
+	/// answer at once. A token-less update, or any update on a union-authorized request (which
+	/// holds no grant to renew), owes one answer so the peer's MAX_REQUEST_UPDATES credit is
+	/// restored.
 	///
-	/// Returns `Some(err)` only when the request must end (the session was closed, a write failed,
-	/// or the stash overflowed); `None` continues the subscription.
-	#[allow(clippy::too_many_arguments)]
-	async fn handle_renewal_update(
+	/// An error ends the request.
+	async fn apply_subscription_update(
 		&self,
 		stream: &mut Stream<S, Version>,
+		serve: &mut TrackServe<S>,
 		namespace: &crate::PathOwned,
 		request_grant: &Option<crate::auth::RequestGrant>,
 		pending: &mut Option<(crate::auth::RequestVerdict, RequestId)>,
-		stashed: &mut std::collections::VecDeque<(RequestId, crate::setup::Token)>,
-		request_id: RequestId,
-		token: Option<crate::ietf::token::RequestToken>,
-	) -> Option<Error> {
-		// A token-less REQUEST_UPDATE is an ordinary priority/forward change, and a
-		// union-authorized request holds no grant to renew. Either way it owes one answer so the
-		// peer's MAX_REQUEST_UPDATES credit is restored.
-		let (Some(token), true) = (token, request_grant.is_some()) else {
-			if self.version == Version::Draft14 {
-				return None;
+		update: super::request_stream::Update,
+	) -> Result<(), Error> {
+		// Draft 14 answers no update. Drafts 15 and 16 answer on the control stream, naming the
+		// update's own Request ID; later drafts name none.
+		let answer = self.version != Version::Draft14;
+		if update.unsupported {
+			if answer {
+				self.write_subscribe_error(
+					&mut stream.writer,
+					update.request_id,
+					&Error::Unsupported,
+					"REQUEST_UPDATE parameters not supported",
+				)
+				.await?;
 			}
-			return self.write_request_ok(&mut stream.writer, request_id).await.err();
-		};
-		// A renewal arriving while a verdict is already pending is stashed (bounded) and answered
-		// in order once the verdict resolves.
-		if pending.is_some() {
-			return self.stash_renewal(stashed, request_id, token.0);
+			return Err(Error::Unsupported);
 		}
-		*pending = Some((self.verify_renewal(namespace, token.0), request_id));
-		None
+		if let Some(priority) = update.priority {
+			let mut subscription = serve.track.subscription();
+			subscription.priority = super::priority::from_wire(priority);
+			serve.track.update(subscription)?;
+		}
+		if let (Some(token), true) = (update.authorization_token, request_grant.is_some()) {
+			*pending = Some((self.verify_renewal(namespace, token.0), update.request_id));
+			return Ok(());
+		}
+		if answer {
+			self.write_request_ok(&mut stream.writer, update.request_id).await?;
+		}
+		Ok(())
 	}
 
-	/// Stash a renewal behind a pending verdict, enforcing the update-count ceiling. Returns
+	/// Stash an update behind a pending verdict, enforcing the update-count ceiling. Returns
 	/// `Some(err)` when the ceiling is exceeded (a session close on draft-19+, else ending the
 	/// request), `None` once stashed.
-	fn stash_renewal(
+	fn stash_update(
 		&self,
-		stashed: &mut std::collections::VecDeque<(RequestId, crate::setup::Token)>,
-		request_id: RequestId,
-		token: crate::setup::Token,
+		stashed: &mut std::collections::VecDeque<super::request_stream::Update>,
+		update: super::request_stream::Update,
 	) -> Option<Error> {
 		// Outstanding counts the one being verified (1) plus those already queued.
 		let outstanding = stashed.len() as u64 + 1;
@@ -1255,7 +1247,7 @@ where
 			// request, never the session.
 			return Some(Error::ProtocolViolation);
 		}
-		stashed.push_back((request_id, token));
+		stashed.push_back(update);
 		None
 	}
 
@@ -7385,14 +7377,15 @@ mod serve_tests {
 		log.writes.lock().unwrap().clone()
 	}
 
-	/// The wire bytes of one REQUEST_OK keyed to `request_id`, the draft-15/16 accept answer.
+	/// The wire bytes of one REQUEST_OK answering `request_id`: keyed to it on draft-15/16,
+	/// unkeyed on draft-17+.
 	async fn request_ok_bytes(version: Version, request_id: RequestId) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
-				request_id: Some(request_id),
+				request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(request_id),
 				active: None,
 			})
 			.await
@@ -7995,6 +7988,71 @@ mod serve_tests {
 			h.log.closes().is_empty(),
 			"token-less updates must not close the session"
 		);
+	}
+
+	/// An update that arrives while a renewal's verdict is pending is answered after the
+	/// renewal, never before it: from draft 17 an answer names no Request ID, so its order is
+	/// all that ties it to its update. The renewal is refused, so its REQUEST_ERROR is the first
+	/// answer either way, and the token-less update behind it is never answered ahead of it.
+	#[moq_net_sim::test]
+	async fn an_update_behind_a_pending_renewal_is_answered_in_order() {
+		for version in [Version::Draft16, Version::Draft18] {
+			let (auth, mut requests, _cred) = auth_covering_other();
+			let mut script = subscribe_update_token_rid(version, 0x40).await;
+			script.extend(subscribe_update_bare_rid(version, 0x41).await);
+			let h = serve_with_auth(version, auth, script);
+			let rt = h.publisher.runtime.clone();
+
+			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
+			group.finish().unwrap();
+			settle().await;
+
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let release = Release::default();
+			let acceptor = {
+				let release = release.clone();
+				async move {
+					let first = requests.next().await.unwrap();
+					let _held = first.accept(grant_all_expiring(&rt, None));
+					let renewal = requests.next().await.unwrap();
+					release.notified().await;
+					renewal.reject(crate::SessionError::Unauthorized, "no");
+					std::future::pending::<()>().await
+				}
+			};
+			let mut acceptor = std::pin::pin!(acceptor);
+			let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
+
+			// Both updates are read while the renewal is held.
+			for _ in 0..200 {
+				let _ = futures::poll!(acceptor.as_mut());
+				assert!(futures::poll!(serving.as_mut()).is_pending(), "{version}: ended early");
+				settle().await;
+			}
+			let ok = request_ok_bytes(version, RequestId(0x41)).await;
+			let held = h.log.writes.lock().unwrap().clone();
+			assert!(
+				!held.windows(ok.len()).any(|window| window == ok.as_slice()),
+				"{version}: the update behind the pending renewal was answered first"
+			);
+			let before = held.len();
+
+			release.notify_one();
+			for _ in 0..200 {
+				let _ = futures::poll!(acceptor.as_mut());
+				if futures::poll!(serving.as_mut()).is_ready() {
+					break;
+				}
+				settle().await;
+			}
+			let written = h.log.writes.lock().unwrap()[before..].to_vec();
+			let error = request_error_bytes(version, RequestId(0x40), "renewal not granted").await;
+			assert!(
+				written.starts_with(&error),
+				"{version}: the renewal's REQUEST_ERROR is the first answer"
+			);
+		}
 	}
 
 	/// Before draft-17 a token-less REQUEST_UPDATE is answered keyed to its own request id
