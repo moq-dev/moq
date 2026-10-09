@@ -283,8 +283,7 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			if let Some(section) = self.sections.get_mut(&pid) {
-				let offset = self.input.offset().unwrap_or_default();
-				let units = section.packet(&pkt, self.last_pts, offset)?;
+				let units = section.packet(&pkt, self.last_pts, self.input.offset())?;
 				self.published |= units > 0;
 				self.liveness.delivered(pid, units);
 				continue;
@@ -696,6 +695,9 @@ impl<E: catalog::Catalog> Import<E> {
 				self.last_pts = unwrap_pts(&mut self.media_unwrap, pes.pts, offset)?;
 			}
 		}
+		if pes.pts.is_some() {
+			self.release_sections(offset)?;
+		}
 
 		if is_clock {
 			// A clock-only stream never flushes, but sections are stamped with its PTS, so it
@@ -722,6 +724,16 @@ impl<E: catalog::Catalog> Import<E> {
 
 		if complete {
 			self.flush(pid)?;
+		}
+		Ok(())
+	}
+
+	/// Publish the sections held for the input's offset, now that it is known.
+	fn release_sections(&mut self, offset: Offset) -> anyhow::Result<()> {
+		for (pid, section) in &mut self.sections {
+			let units = section.release(self.last_pts, offset)?;
+			self.published |= units > 0;
+			self.liveness.delivered(*pid, units);
 		}
 		Ok(())
 	}
@@ -964,6 +976,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
+		self.release_sections(self.input.offset().unwrap_or_default())?;
 		for (pid, stream) in &mut self.streams {
 			let units = stream.finish()?;
 			self.liveness.delivered(pid.as_u16(), units);
@@ -1177,6 +1190,8 @@ struct SectionStream<E: catalog::Catalog> {
 	/// Held for its `Drop`, which clears this track's catalog entry.
 	_entry: VerbatimEntry<E>,
 	reassembler: SectionReassembler,
+	/// Sections completed before the input's offset was known, which they must absorb.
+	held: Vec<Vec<u8>>,
 }
 
 impl<E: catalog::Catalog> SectionStream<E> {
@@ -1203,18 +1218,27 @@ impl<E: catalog::Catalog> SectionStream<E> {
 			track,
 			_entry: entry,
 			reassembler: SectionReassembler::default(),
+			held: Vec::new(),
 		})
 	}
 
 	/// Consume one 188-byte TS packet, publishing each completed section and returning how
 	/// many. `pts` is the current media clock used to timestamp a section (its arrival on the
 	/// timeline; the splice time itself is inside the section bytes), if one is running.
-	/// `offset` is what the media shifted by, which a SCTE-35 section absorbs too.
-	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>, offset: Offset) -> anyhow::Result<u64> {
-		let mut sections = Vec::new();
-		self.reassembler.push(pkt, &mut sections);
-		let published = sections.len() as u64;
-		for mut section in sections {
+	/// `offset` is what the media shifted by, which a SCTE-35 section absorbs too; until it is
+	/// known, completed sections are held for [`release`](Self::release).
+	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>, offset: Option<Offset>) -> anyhow::Result<u64> {
+		self.reassembler.push(pkt, &mut self.held);
+		match offset {
+			Some(offset) => self.release(pts, offset),
+			None => Ok(0),
+		}
+	}
+
+	/// Publish every held section shifted by `offset`, returning how many.
+	fn release(&mut self, pts: Option<Timestamp>, offset: Offset) -> anyhow::Result<u64> {
+		let published = self.held.len() as u64;
+		for mut section in std::mem::take(&mut self.held) {
 			adjust_splice(&mut section, offset);
 			self.emit(section, pts)?;
 		}
@@ -3844,6 +3868,17 @@ pub(super) mod test {
 	/// lands on the exported picture it names, and the section still verifies.
 	#[tokio::test(start_paused = true)]
 	async fn a_splice_follows_its_media_onto_a_clock_in_use() {
+		splice_onto_a_clock_in_use(false).await;
+	}
+
+	/// A cue arriving before any PES waits for the offset the media takes, rather than
+	/// publishing unshifted.
+	#[tokio::test(start_paused = true)]
+	async fn a_startup_splice_follows_its_media_onto_a_clock_in_use() {
+		splice_onto_a_clock_in_use(true).await;
+	}
+
+	async fn splice_onto_a_clock_in_use(cue_first: bool) {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 
@@ -3871,6 +3906,10 @@ pub(super) mod test {
 			],
 			true,
 		);
+		let cue_packet = packet(true, 0, 0, &splice_insert(picture(5)));
+		if cue_first {
+			bytes.extend_from_slice(&cue_packet);
+		}
 		for k in 0..20 {
 			bytes.extend_from_slice(&audio_pes_packet(
 				VIDEO_PID,
@@ -3878,8 +3917,8 @@ pub(super) mod test {
 				picture(k),
 				&annexb_au(k % 10 == 0),
 			));
-			if k == 0 {
-				bytes.extend_from_slice(&packet(true, 0, 0, &splice_insert(picture(5))));
+			if k == 0 && !cue_first {
+				bytes.extend_from_slice(&cue_packet);
 			}
 		}
 		import.decode(&bytes).unwrap();
