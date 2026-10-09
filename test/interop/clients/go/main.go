@@ -29,8 +29,8 @@ import (
 
 const readChunk = 64 * 1024
 
-// ContainerConsumer max age: how much reordering the jitter buffer tolerates.
-const maxAge = time.Second
+// ContainerConsumer max delay: how much reordering the jitter buffer tolerates.
+const maxDelay = time.Second
 
 // Synthetic audio: a 48 kHz mono tone, encoded as Opus.
 const (
@@ -202,7 +202,7 @@ func subscribe(ctx context.Context, url, broadcast string, timeout time.Duration
 		break
 	}
 
-	media, err := moqmedia.NewContainerConsumer(ctx, consumer, moqmedia.ContainerConfig{Name: name, Container: video.Container, Subscription: &moq.Subscription{MaxAge: maxAge}})
+	media, err := moqmedia.NewContainerConsumer(ctx, consumer, moqmedia.ContainerConfig{Name: name, Container: video.Container, Subscription: &moq.Subscription{MaxDelay: maxDelay}})
 	if err != nil {
 		return err
 	}

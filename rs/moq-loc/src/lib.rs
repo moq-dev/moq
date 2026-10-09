@@ -23,10 +23,10 @@
 //! encode. Public properties are not handled here. They belong in the MoQ
 //! object header and are stripped by the transport layer.
 //!
-//! Varint encoding is QUIC-style throughout via [`moq_net::VarInt`].
+//! Varint encoding is QUIC-style throughout via [`moq_net::varint`].
 
 use bytes::{Buf, Bytes, BytesMut};
-use moq_net::{BoundsExceeded, DecodeError, EncodeError, VarInt};
+use moq_net::{BoundsExceeded, DecodeError, EncodeError, varint};
 
 /// Property IDs recognized by this implementation.
 const PROP_TIMESCALE: u64 = 0x08;
@@ -104,7 +104,7 @@ impl From<EncodeError> for Error {
 /// Consumes the properties_length prefix, walks the bounded property block,
 /// and returns the remainder as `payload`.
 pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
-	let properties_length: u64 = VarInt::decode_quic(&mut buf)?.into();
+	let properties_length = varint::decode_quic(&mut buf)?;
 	let properties_length: usize = properties_length.try_into().map_err(|_| Error::MalformedProperties)?;
 
 	if properties_length > buf.remaining() {
@@ -119,7 +119,7 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 	let mut first = true;
 
 	while props.has_remaining() {
-		let delta: u64 = VarInt::decode_quic(&mut props)?.into();
+		let delta = varint::decode_quic(&mut props)?;
 		let abs = if first {
 			first = false;
 			delta
@@ -129,7 +129,7 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 		prev_type = abs;
 
 		if abs % 2 == 0 {
-			let value: u64 = VarInt::decode_quic(&mut props)?.into();
+			let value = varint::decode_quic(&mut props)?;
 			match abs {
 				PROP_TIMESTAMP | PROP_TIMESTAMP_DRAFT03 => timestamp = Some(value),
 				PROP_TIMESCALE => {
@@ -141,7 +141,7 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 				_ => {}
 			}
 		} else {
-			let len: u64 = VarInt::decode_quic(&mut props)?.into();
+			let len = varint::decode_quic(&mut props)?;
 			let len: usize = len.try_into().map_err(|_| Error::MalformedProperties)?;
 			if len > props.remaining() {
 				return Err(Error::MalformedProperties);
@@ -167,11 +167,11 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 /// catalog timescale to interpret `timestamp`.
 pub fn encode(timestamp: u64, payload: &[u8]) -> Result<Bytes, Error> {
 	let mut props = BytesMut::with_capacity(16);
-	VarInt::try_from(PROP_TIMESTAMP)?.encode_quic(&mut props)?;
-	VarInt::try_from(timestamp)?.encode_quic(&mut props)?;
+	varint::encode_quic(PROP_TIMESTAMP, &mut props)?;
+	varint::encode_quic(timestamp, &mut props)?;
 
 	let mut out = BytesMut::with_capacity(props.len() + payload.len() + 8);
-	VarInt::try_from(props.len() as u64)?.encode_quic(&mut out)?;
+	varint::encode_quic(props.len() as u64, &mut out)?;
 	out.extend_from_slice(&props);
 	out.extend_from_slice(payload);
 
@@ -184,7 +184,7 @@ mod tests {
 
 	/// Test helper: write a u64 as a QUIC varint into `buf`.
 	fn write_varint(buf: &mut BytesMut, value: u64) {
-		VarInt::try_from(value).unwrap().encode_quic(buf).unwrap();
+		varint::encode_quic(value, buf).unwrap();
 	}
 
 	#[test]

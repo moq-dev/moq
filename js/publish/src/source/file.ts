@@ -1,18 +1,7 @@
 import * as Util from "@moq/hang/util";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
-import {
-	ALL_FORMATS,
-	AudioSampleSink,
-	BlobSource,
-	Input,
-	type InputAudioTrack,
-	type InputVideoTrack,
-	type VideoSample,
-	VideoSampleSink,
-} from "mediabunny";
-import type * as Audio from "../audio";
-import type * as Video from "../video";
+import type { InputAudioTrack, InputVideoTrack, VideoSample } from "mediabunny";
 import { Timeline } from "./timeline";
 import type { Media } from "./types";
 
@@ -138,6 +127,9 @@ export class File {
 
 	async #decodeMedia(file: globalThis.File, effect: Effect) {
 		const signal = effect.abort;
+		// Keep the picker and image path available without downloading the media demuxers.
+		const { ALL_FORMATS, AudioSampleSink, BlobSource, Input, VideoSampleSink } = await import("mediabunny");
+		if (signal.aborted) return;
 
 		const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
 		effect.cleanup(() => input.dispose());
@@ -175,9 +167,34 @@ export class File {
 		// One timeline for both tracks, so they restart together and stay in sync across loops.
 		const timeline = new Timeline(now(), duration);
 
-		const source = {
-			video: video && videoOk ? videoSource(video, timeline, frameRate, signal) : undefined,
-			audio: audio && audioOk ? audioSource(audio, timeline, signal) : undefined,
+		const source: Media = {
+			video:
+				video && videoOk
+					? {
+							frames: pace(
+								new VideoSampleSink(video),
+								timeline,
+								video.rotation === 0 ? (sample) => sample.toVideoFrame() : rotator(video),
+								signal,
+							),
+							frameRate,
+						}
+					: undefined,
+			audio:
+				audio && audioOk
+					? {
+							samples: pace(
+								new AudioSampleSink(audio),
+								timeline,
+								(sample) => sample.toAudioData(),
+								signal,
+							),
+							sampleRate: audio.sampleRate,
+							channelCount: audio.numberOfChannels,
+							// A file is whatever the user picked, so leave the Opus tuning to the encoder.
+							kind: "auto",
+						}
+					: undefined,
 		};
 
 		if (signal.aborted) return;
@@ -272,33 +289,6 @@ function pace<S extends Sample, T>(
 			await samples.return();
 		},
 	});
-}
-
-function videoSource(
-	track: InputVideoTrack,
-	timeline: Timeline,
-	frameRate: number | undefined,
-	signal: AbortSignal,
-): Video.FrameSource {
-	const sink = new VideoSampleSink(track);
-	const convert = track.rotation === 0 ? (sample: VideoSample) => sample.toVideoFrame() : rotator(track);
-
-	return {
-		frames: pace(sink, timeline, convert, signal),
-		frameRate,
-	};
-}
-
-function audioSource(track: InputAudioTrack, timeline: Timeline, signal: AbortSignal): Audio.SampleSource {
-	const sink = new AudioSampleSink(track);
-
-	return {
-		samples: pace(sink, timeline, (sample) => sample.toAudioData(), signal),
-		sampleRate: track.sampleRate,
-		channelCount: track.numberOfChannels,
-		// A file is whatever the user picked, so leave the Opus tuning to the encoder.
-		kind: "auto",
-	};
 }
 
 // Phone footage is usually stored sideways with rotation metadata, which toVideoFrame() ignores

@@ -130,7 +130,7 @@ mod test {
 		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("expected a frame");
 		};
-		assert_eq!(frame.timestamp.as_micros(), captured.as_micros());
+		assert_eq!(frame.timestamp.unwrap().as_micros(), captured.as_micros());
 		assert_eq!(size, frame.payload.len());
 		assert!(size < payload.len(), "the size is the compressed frame");
 		assert_eq!(drain(consume(track, true)), vec![payload]);

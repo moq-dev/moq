@@ -41,13 +41,15 @@ func optFromMicros(us *uint64) *time.Duration {
 }
 
 // Frame is a raw track frame: a payload and its presentation timestamp.
+// Timestamp is nil on a frame read from an untimed track; a raw track published
+// here is timed, so writing one needs it.
 type Frame struct {
 	Payload   []byte
-	Timestamp time.Duration
+	Timestamp *time.Duration
 }
 
 func (f Frame) ffi() (ffi.MoqFrame, error) {
-	us, err := micros("timestamp", f.Timestamp)
+	us, err := optMicros("timestamp", f.Timestamp)
 	return ffi.MoqFrame{Payload: f.Payload, TimestampUs: us}, err
 }
 
@@ -55,13 +57,14 @@ func frameFromFFI(f *ffi.MoqFrame) *Frame {
 	if f == nil {
 		return nil
 	}
-	return &Frame{Payload: f.Payload, Timestamp: fromMicros(f.TimestampUs)}
+	return &Frame{Payload: f.Payload, Timestamp: optFromMicros(f.TimestampUs)}
 }
 
-// Datagram is a best-effort track datagram as received: sequence number, timestamp, and payload.
+// Datagram is a best-effort track datagram as received: sequence number, timestamp
+// (nil from an untimed track), and payload.
 type Datagram struct {
 	Sequence  uint64
-	Timestamp time.Duration
+	Timestamp *time.Duration
 	Payload   []byte
 }
 
@@ -69,24 +72,24 @@ func datagramFromFFI(d *ffi.MoqDatagram) *Datagram {
 	if d == nil {
 		return nil
 	}
-	return &Datagram{Sequence: d.Sequence, Timestamp: fromMicros(d.TimestampUs), Payload: d.Payload}
+	return &Datagram{Sequence: d.Sequence, Timestamp: optFromMicros(d.TimestampUs), Payload: d.Payload}
 }
 
-// Subscription holds subscriber-side delivery preferences: priority, the max age
-// of a non-latest group before it is skipped (zero skips at once), and an
-// optional group range (GroupStart a floor, GroupEnd exclusive).
+// Subscription holds subscriber-side delivery preferences: priority, the max delay
+// a non-latest group may fall behind before it is skipped (zero skips at once), and
+// an optional group range (GroupStart a floor, GroupEnd exclusive).
 type Subscription struct {
 	Priority   uint8
-	MaxAge     time.Duration
+	MaxDelay   time.Duration
 	GroupStart *uint64
 	GroupEnd   *uint64
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {
-	maxAge, err := micros("max age", s.MaxAge)
+	maxDelay, err := micros("max delay", s.MaxDelay)
 	return ffi.MoqSubscription{
 		Priority:   s.Priority,
-		MaxAgeUs:   maxAge,
+		MaxDelayUs: maxDelay,
 		GroupStart: s.GroupStart,
 		GroupEnd:   s.GroupEnd,
 	}, err
@@ -102,7 +105,8 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 
 // TrackInfo holds publisher-side track properties: priority, how long a
 // non-latest group is cached (nil for no limit), and the timescale in ticks per
-// second (nil for microseconds). A zero Priority is the least urgent, not the
+// second (nil uses microseconds when publishing, and means the source declared no
+// timeline on a received track). A zero Priority is the least urgent, not the
 // default; set 127 for the midpoint a nil TrackInfo uses.
 type TrackInfo struct {
 	Priority  uint8

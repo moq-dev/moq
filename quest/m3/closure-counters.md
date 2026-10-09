@@ -1,30 +1,34 @@
-# [S] Keep aggregate closure counters monotonic
+# [XS] Document aggregate closure counters on rejoin
 
 ## Goal
 
-`moq_stats::aggregate` has one stated, tested rule for what a consumer reads
-when a departed node returns: a same-lifetime rejoin never regresses a closure
-counter, and a genuine restart is either floored to the last value or an
-explicit fresh segment. The rule is documented as a consumer-facing contract.
+`moq_stats::aggregate` documents, and one test pins, what a same-epoch
+rejoin within the grace does to the `*_ended` counters that `Traffic`'s
+`Mergeable::retire` advanced on departure: they may regress. A restart is not
+this case: since #4904 it announces a new epoch, whose counters add to the
+old one's kept contribution (`rs/moq-stats/src/aggregate.rs`).
 
 ## Plan
 
-Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer.
+Decided by [#4874](https://github.com/moq-dev/moq/pull/4874) (recorded in the
+2026-10-06 audit): the restart and after-grace contract. A node returning
+within `Config::grace` with lower counters regresses the merged counter, the
+same fresh-segment rule a single node's restart follows; after the grace its
+contribution folds into one retired total. `return_within_grace_resumes_counters`
+and `return_after_grace_counts_twice` pin it.
 
-The stickiness fix ([moq#3625](https://github.com/moq-dev/moq/pull/3625))
-keeps a departed node's last `Traffic` contribution and drops `Presence`
-immediately. Its review raised an open P2: retiring the gauges advances the
-open/closed pairs, so the next raw frame from the same node can show a lower
-`*_closed` value and regress a monotonic reading.
+`retire` raises `announces_ended`, `broadcasts_ended`, and
+`subscriptions_ended` to their `*_started` on departure, so the next raw frame
+from the same node, rejoining within the grace with its boot-lifetime
+counters intact, can show a lower `*_ended` value. The stickiness fix
+([moq#3625](https://github.com/moq-dev/moq/pull/3625)) review raised it as a
+P2.
 
-Two directions were discussed, without a decision:
-
-- Retire gauges on departure (current), accepting a closure-counter regression
-  on rejoin.
-- Keep the last gauges as a floor, which suppresses a still-live node's gauges
-  after a transient reader failure.
-
-Settle which counters must be monotonic and over what lifetime, and whether the
-fresh-segment contract already permits a per-node closure reset or only a
-cumulative traffic regression. The answer is a consumer-facing contract, so
-document it in `moq-stats` rather than leaving it as an aggregate detail.
+Decided 2026-10-08: keep the current behavior (retire on departure, accept an
+`*_ended` regression on a same-epoch rejoin within the grace), since the
+regression is bounded by the closures retire assumed, it ends once the node's
+own counters pass them, and no consumer has asked for anything else. Rejected: keeping
+the retired values as a floor until the node's own counters pass them, which
+suppresses a still-live node's closures after a transient reader failure.
+Document it in the consumer-facing contract and add one test of a rejoin
+within the grace.

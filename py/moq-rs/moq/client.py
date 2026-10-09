@@ -13,7 +13,7 @@ from moq_ffi import (
     MoqWebSocketConfig,
 )
 
-from ._records import Backoff, _opt_us
+from ._records import Backoff, _opt_us, _strs
 from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
@@ -79,12 +79,12 @@ class Client:
         # announced here is discoverable via announced() (loopback).
         self._config = MoqClientConfig(
             bind=bind,
-            versions=list(versions),
+            versions=_strs(versions, "versions"),
             tls=MoqClientTls(
                 insecure=not tls_verify,
-                roots=list(tls_roots),
+                roots=_strs(tls_roots, "tls_roots"),
                 system_roots=tls_system_roots,
-                fingerprints=list(tls_fingerprints),
+                fingerprints=_strs(tls_fingerprints, "tls_fingerprints"),
                 cert=tls_cert,
                 key=tls_key,
             ),

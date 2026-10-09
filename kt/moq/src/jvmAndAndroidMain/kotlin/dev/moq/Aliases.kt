@@ -51,7 +51,7 @@ typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
 typealias Announce = uniffi.moq.MoqAnnounce
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
- * [AnnounceEventEnd], or [AnnounceEventLive].
+ * or [AnnounceEventEnd].
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 // Kotlin cannot reach a sealed class's subtypes through its typealias, so each
@@ -62,8 +62,6 @@ typealias AnnounceEventStart = uniffi.moq.MoqAnnounceEvent.Start
 typealias AnnounceEventUpdate = uniffi.moq.MoqAnnounceEvent.Update
 /** No route covers the prefix any more; carries its last route. */
 typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
-/** Every route live at subscribe time has been delivered; what follows is live changes. */
-typealias AnnounceEventLive = uniffi.moq.MoqAnnounceEvent.Live
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
@@ -103,7 +101,7 @@ typealias VideoProducer = uniffi.moq.MoqVideoProducer
 typealias Datagram = uniffi.moq.MoqDatagram
 /** A payload plus the timestamp it should be presented at. */
 typealias Frame = uniffi.moq.MoqFrame
-/** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and advertised costs (warm cost, lower wins, plus undiscounted cold defaulting to cost). */
+/** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and static production and link cost (lower wins). */
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, group ordering, and range. */
 typealias Subscription = uniffi.moq.MoqSubscription
@@ -156,9 +154,9 @@ typealias ProtocolKind = uniffi.moq.MoqProtocolKind
 /** A protocol failure: scope, verbatim wire code, kind, and a diagnostic message. */
 typealias ProtocolError = uniffi.moq.MoqProtocolError
 
-// NOTE: a few types are intentionally NOT aliased. `MoqContainer` (sealed) and
-// `MoqException` (sealed) need subtype access (`MoqContainer.Loc`,
-// `MoqException.Closed`), which Kotlin 2.0.21 can't resolve through a typealias.
-// Reference those as `uniffi.moq.MoqContainer` / `uniffi.moq.MoqException`. Enums
+// NOTE: Kotlin 2.0.21 can't resolve a sealed type's subtypes through a typealias.
+// `MoqException` is intentionally NOT aliased, so reference `uniffi.moq.MoqException.Closed`
+// directly. `dev.moq.media.Container` aliases `MoqContainer` for signatures, but its
+// variants still need the full name (`uniffi.moq.MoqContainer.Loc`). Enums
 // (AudioFormat) are fine: entry access through the alias works. Objects
 // (AudioCodec) expose constructors through the alias (`AudioCodec.opus()`).

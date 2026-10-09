@@ -1,5 +1,4 @@
 use std::num::NonZeroUsize;
-use std::ops::RangeInclusive;
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -25,7 +24,7 @@ use crate::{Error, Result};
 ///
 /// use moq_archive::store::list::Query;
 ///
-/// let query = Query::segments("timeline.z")?
+/// let query = Query::segments("video.timeline.z")?
 ///     .page_size(NonZeroUsize::new(100).unwrap());
 /// # Ok::<(), moq_archive::Error>(())
 /// ```
@@ -76,12 +75,7 @@ pub mod list {
 			Ok(Self::new().prefix(path::track_prefix(track)?))
 		}
 
-		/// List group objects for one track.
-		pub fn groups(track: &str) -> Result<Self> {
-			Ok(Self::new().prefix(path::groups_prefix(&Path::ROOT, track)?))
-		}
-
-		/// List timeline segment objects for one track.
+		/// List segment objects for one track.
 		pub fn segments(track: &str) -> Result<Self> {
 			Ok(Self::new().prefix(path::segments_prefix(&Path::ROOT, track)?))
 		}
@@ -89,11 +83,6 @@ pub mod list {
 		/// Start strictly after this recording object.
 		pub fn after(self, key: &Key) -> Result<Self> {
 			Ok(self.offset(key.path(&Path::ROOT)?))
-		}
-
-		/// List group objects beginning at the exclusive lexical offset for `group`.
-		pub fn groups_from(track: &str, group: u64) -> Result<Self> {
-			Ok(Self::groups(track)?.offset(path::groups_offset(&Path::ROOT, track, group)?))
 		}
 
 		pub(crate) fn next(&self, page_token: String) -> Self {
@@ -178,6 +167,12 @@ impl<T: ObjectStore> Store<T> {
 						intended: info.timescale,
 					});
 				}
+				if parsed.epoch != info.epoch {
+					return Err(Error::EpochMismatch {
+						existing: parsed.epoch,
+						intended: info.epoch.clone(),
+					});
+				}
 				Ok(key)
 			}
 		}
@@ -189,30 +184,46 @@ impl<T: ObjectStore> Store<T> {
 		Info::decode(&self.get_bytes(&path).await?)
 	}
 
-	/// Create a range-named groups object. A collision is accepted only when the bytes match.
-	pub async fn put_groups(&self, track: &str, object: &Object) -> Result<Key> {
-		let key = Key::groups(track, object.bounds()?)?;
-		self.put_segment(&key, object.encode()?).await?;
-		Ok(key)
-	}
-
-	/// Fetch a groups object and require its table to match the filename bounds.
-	pub async fn get_groups(&self, track: &str, range: RangeInclusive<u64>) -> Result<Object> {
-		let path = self.path(&Key::groups(track, range.clone())?)?;
-		Object::decode_groups(self.get_bytes(&path).await?, range)
-	}
-
-	/// Create a timeline object at `segments/<segment>`. A collision is accepted only when the bytes match.
+	/// Create the object at `segments/<segment>`. A collision is accepted only when the bytes match.
 	pub async fn put_segments(&self, track: &str, segment: u64, object: &Object) -> Result<Key> {
 		let key = Key::segments(track, segment)?;
 		self.put_segment(&key, object.encode()?).await?;
 		Ok(key)
 	}
 
-	/// Fetch and validate a timeline object.
+	/// Fetch and decode the object at `segments/<segment>`.
 	pub async fn get_segments(&self, track: &str, segment: u64) -> Result<Object> {
 		let path = self.path(&Key::segments(track, segment)?)?;
 		Object::decode(self.get_bytes(&path).await?)
+	}
+
+	/// Each recorded track's timeline track, found by listing the track directories a [`Writer`]
+	/// creates: a timeline is named by [`hang::timeline::default_name`]. One listing of the
+	/// prefix's directories plus a HEAD per timeline, so following a long recording doesn't list
+	/// its objects. A timeline whose `.info` isn't stored yet, such as one still enrolling, is left
+	/// out until it is.
+	///
+	/// For replaying a recording without its catalog; a catalog's `archive` entry names the same map.
+	///
+	/// [`Writer`]: crate::Writer
+	pub async fn timelines(&self) -> Result<std::collections::BTreeMap<String, String>> {
+		let listed = self.inner.list_with_delimiter(self.list_path(None).as_ref()).await?;
+		let mut timelines = std::collections::BTreeMap::new();
+		for directory in listed.common_prefixes {
+			let encoded = directory
+				.filename()
+				.ok_or_else(|| Error::Directory(directory.to_string()))?;
+			let track = crate::path::decode_track(encoded)?;
+			let Some(indexed) = track.strip_suffix(hang::timeline::SUFFIX) else {
+				continue;
+			};
+			match self.inner.head(&self.path(&Key::info(&track)?)?).await {
+				Ok(_) => timelines.insert(indexed.to_string(), track),
+				Err(object_store::Error::NotFound { .. }) => continue,
+				Err(err) => return Err(err.into()),
+			};
+		}
+		Ok(timelines)
 	}
 
 	/// Delete the object at `key`.
@@ -343,112 +354,15 @@ mod tests {
 	use std::num::NonZeroUsize;
 
 	use futures::TryStreamExt;
-	use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
+	use object_store::ObjectStoreExt;
 	use object_store::memory::InMemory;
 	use object_store::path::Path;
-	use object_store::{
-		CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
-		PutOptions, PutPayload, PutResult,
-	};
 
 	use super::*;
 	use crate::ID_MAX;
+	use crate::mock::Mock;
 	use crate::path::encode_track;
 	use crate::segment::{Frame, Group};
-
-	/// In-memory store with a trivial offset-based paginated listing implementation.
-	/// Page tokens are decimal indexes into the filtered, sorted key list.
-	#[derive(Debug, Clone)]
-	struct PaginatedMemory {
-		inner: InMemory,
-	}
-
-	impl std::fmt::Display for PaginatedMemory {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "PaginatedMemory")
-		}
-	}
-
-	#[async_trait::async_trait]
-	impl ObjectStore for PaginatedMemory {
-		async fn put_opts(
-			&self,
-			location: &Path,
-			payload: PutPayload,
-			opts: PutOptions,
-		) -> object_store::Result<PutResult> {
-			self.inner.put_opts(location, payload, opts).await
-		}
-
-		async fn put_multipart_opts(
-			&self,
-			location: &Path,
-			opts: PutMultipartOptions,
-		) -> object_store::Result<Box<dyn MultipartUpload>> {
-			self.inner.put_multipart_opts(location, opts).await
-		}
-
-		async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
-			self.inner.get_opts(location, options).await
-		}
-
-		fn delete_stream(
-			&self,
-			locations: BoxStream<'static, object_store::Result<Path>>,
-		) -> BoxStream<'static, object_store::Result<Path>> {
-			self.inner.delete_stream(locations)
-		}
-
-		fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-			self.inner.list(prefix)
-		}
-
-		async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-			self.inner.list_with_delimiter(prefix).await
-		}
-
-		async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
-			self.inner.copy_opts(from, to, options).await
-		}
-	}
-
-	#[async_trait::async_trait]
-	impl PaginatedListStore for PaginatedMemory {
-		async fn list_paginated(
-			&self,
-			prefix: Option<&str>,
-			opts: PaginatedListOptions,
-		) -> object_store::Result<PaginatedListResult> {
-			let mut metas: Vec<ObjectMeta> = self.inner.list(None).try_collect().await?;
-			metas.sort_by(|a, b| a.location.as_ref().cmp(b.location.as_ref()));
-			if let Some(prefix) = prefix {
-				metas.retain(|meta| meta.location.as_ref().starts_with(prefix));
-			}
-			if let Some(offset) = opts.offset.as_deref() {
-				metas.retain(|meta| meta.location.as_ref() > offset);
-			}
-			let start: usize = match opts.page_token {
-				Some(token) => token.parse().map_err(|err| object_store::Error::Generic {
-					store: "PaginatedMemory",
-					source: Box::new(err),
-				})?,
-				None => 0,
-			};
-			let remaining = &metas[start.min(metas.len())..];
-			let take = opts.max_keys.unwrap_or(remaining.len()).min(remaining.len());
-			let objects = remaining[..take].to_vec();
-			let next = start.saturating_add(take);
-			let page_token = (next < metas.len()).then(|| next.to_string());
-			Ok(PaginatedListResult {
-				result: ListResult {
-					objects,
-					common_prefixes: Vec::new(),
-					extensions: Default::default(),
-				},
-				page_token,
-			})
-		}
-	}
 
 	fn memory() -> Store<InMemory> {
 		Store::new(InMemory::new(), "rec")
@@ -462,27 +376,23 @@ mod tests {
 	}
 
 	fn one_group(sequence: u64, payload: &'static [u8]) -> Object {
-		Object {
-			groups: vec![Group {
-				sequence,
-				frames: vec![frame(sequence, payload)],
-			}],
-		}
+		Object::new(vec![Group {
+			sequence,
+			frames: vec![frame(sequence, payload)],
+		}])
 	}
 
 	fn two_groups() -> Object {
-		Object {
-			groups: vec![
-				Group {
-					sequence: 5,
-					frames: vec![frame(0, b"a")],
-				},
-				Group {
-					sequence: 7,
-					frames: vec![frame(1, b"bb")],
-				},
-			],
-		}
+		Object::new(vec![
+			Group {
+				sequence: 5,
+				frames: vec![frame(0, b"a")],
+			},
+			Group {
+				sequence: 6,
+				frames: vec![frame(1, b"bb")],
+			},
+		])
 	}
 
 	async fn names(store: &Store<InMemory>, query: &Query) -> BTreeSet<String> {
@@ -506,7 +416,7 @@ mod tests {
 			.inner()
 			.put(
 				&path,
-				br#"{ "timescale": 1000, "priority": 1, "version": 1 }"#.as_ref().into(),
+				br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#.as_ref().into(),
 			)
 			.await
 			.unwrap();
@@ -517,7 +427,31 @@ mod tests {
 			.bytes()
 			.await
 			.unwrap();
-		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 1 }"#);
+		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#);
+	}
+
+	#[tokio::test]
+	async fn malformed_or_unsupported_existing_info_is_refused_and_kept() {
+		let store = memory();
+		let info = Info::new(0, 1_000).unwrap();
+		for (track, existing, check) in [
+			(
+				"v1",
+				&br#"{"version":1,"priority":0,"timescale":1000}"#[..],
+				(|err| matches!(err, Error::Version(1))) as fn(&Error) -> bool,
+			),
+			("junk", b"not json", |err| matches!(err, Error::Json(_))),
+			("zero", br#"{"version":2,"priority":0,"timescale":0}"#, |err| {
+				matches!(err, Error::Timescale(0))
+			}),
+		] {
+			let path = store.path(&Key::info(track).unwrap()).unwrap();
+			store.inner().put(&path, existing.to_vec().into()).await.unwrap();
+			let err = store.put_info(track, &info).await.unwrap_err();
+			assert!(check(&err), "{track}: {err}");
+			let kept = store.inner().get(&path).await.unwrap().bytes().await.unwrap();
+			assert_eq!(&kept[..], existing, "{track} is not rewritten");
+		}
 	}
 
 	#[tokio::test]
@@ -542,38 +476,24 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn groups_put_get_and_identical_collision() {
+	async fn segments_put_get_and_identical_collision() {
 		let store = memory();
 		let object = two_groups();
-		let range = object.bounds().unwrap();
-		let key = store.put_groups("video", &object).await.unwrap();
-		assert_eq!(key, Key::groups("video", range.clone()).unwrap());
+		let key = store.put_segments("video", 3, &object).await.unwrap();
+		assert_eq!(key, Key::segments("video", 3).unwrap());
 		assert_eq!(
 			store.path(&key).unwrap().as_ref(),
-			"rec/video/groups/0000000000000000007.0000000000000000005"
+			"rec/video/segments/0000000000000000003"
 		);
-		assert_eq!(store.get_groups("video", range).await.unwrap(), object);
-		store.put_groups("video", &object).await.unwrap();
-	}
+		assert_eq!(store.get_segments("video", 3).await.unwrap(), object);
+		store.put_segments("video", 3, &object).await.unwrap();
 
-	#[tokio::test]
-	async fn groups_collision_with_different_bytes_fails() {
-		let store = memory();
-		store.put_groups("video", &two_groups()).await.unwrap();
-		let other = Object {
-			groups: vec![
-				Group {
-					sequence: 5,
-					frames: vec![frame(0, b"X")],
-				},
-				Group {
-					sequence: 7,
-					frames: vec![frame(1, b"bb")],
-				},
-			],
-		};
+		let other = Object::new(vec![Group {
+			sequence: 5,
+			frames: vec![frame(0, b"X")],
+		}]);
 		assert!(matches!(
-			store.put_groups("video", &other).await,
+			store.put_segments("video", 3, &other).await,
 			Err(Error::Conflict(_))
 		));
 	}
@@ -592,11 +512,11 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn listing_names_build_a_range_index() {
+	async fn listing_names_every_object() {
 		let store = memory();
 		store.put_info("video", &Info::new(0, 1).unwrap()).await.unwrap();
-		store.put_groups("video", &one_group(1, b"a")).await.unwrap();
-		store.put_groups("video", &one_group(3, b"b")).await.unwrap();
+		store.put_segments("video", 1, &one_group(1, b"a")).await.unwrap();
+		store.put_segments("video", 3, &one_group(3, b"b")).await.unwrap();
 		store.put_segments("timeline.z", 2, &one_group(0, b"t")).await.unwrap();
 
 		let listed: Vec<_> = store.list(&Query::new()).try_collect().await.unwrap();
@@ -607,8 +527,8 @@ mod tests {
 			vec![
 				Key::segments("timeline.z", 2).unwrap(),
 				Key::info("video").unwrap(),
-				Key::groups("video", 1..=1).unwrap(),
-				Key::groups("video", 3..=3).unwrap(),
+				Key::segments("video", 1).unwrap(),
+				Key::segments("video", 3).unwrap(),
 			]
 		);
 	}
@@ -648,7 +568,7 @@ mod tests {
 	async fn listing_query_is_recording_relative() {
 		let store = memory();
 		store.put_info("video", &Info::new(0, 1).unwrap()).await.unwrap();
-		store.put_groups("video", &one_group(1, b"a")).await.unwrap();
+		store.put_segments("video", 1, &one_group(1, b"a")).await.unwrap();
 		store.put_info("video-alt", &Info::new(0, 1).unwrap()).await.unwrap();
 
 		let query = Query::track("video").unwrap();
@@ -657,7 +577,7 @@ mod tests {
 			paths,
 			BTreeSet::from([
 				"video/.info".to_string(),
-				"video/groups/0000000000000000001.0000000000000000001".to_string(),
+				"video/segments/0000000000000000001".to_string(),
 			])
 		);
 		assert_eq!(
@@ -702,16 +622,6 @@ mod tests {
 	#[tokio::test]
 	async fn paginated_query_preserves_every_supported_option() {
 		let store = memory();
-		let groups = Query::groups_from("video", 5).unwrap();
-		assert_eq!(
-			store.paginated_prefix(groups.prefix.as_ref()).as_deref(),
-			Some("rec/video/groups/")
-		);
-		assert_eq!(
-			store.paginated_options(&groups).offset.as_deref(),
-			Some("rec/video/groups/0000000000000000005")
-		);
-
 		let query = Query::segments("timeline.z")
 			.unwrap()
 			.after(&Key::segments("timeline.z", 1).unwrap())
@@ -818,7 +728,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn paginated_listing_walks_pages_and_excludes_siblings() {
-		let store = Store::new(PaginatedMemory { inner: InMemory::new() }, "rec");
+		let store = Store::new(Mock::memory(), "rec");
 		for segment in 0..3 {
 			store
 				.put_segments("timeline.z", segment, &one_group(segment, b"t"))
@@ -827,7 +737,6 @@ mod tests {
 		}
 		store
 			.inner()
-			.inner
 			.put(
 				&Path::from("rec-other/video/.info"),
 				Bytes::from_static(b"sibling").into(),
@@ -896,6 +805,35 @@ mod tests {
 		assert_eq!(paged, streamed);
 	}
 
+	#[tokio::test]
+	async fn empty_prefix_lists_the_whole_store() {
+		let store = Store::new(Mock::memory(), "");
+		store.put_info("catalog.json", &Info::new(0, 1).unwrap()).await.unwrap();
+		store.put_segments("video", 4, &one_group(4, b"a")).await.unwrap();
+		assert_eq!(store.paginated_prefix(None), None);
+
+		let expected =
+			std::collections::HashSet::from([Key::info("catalog.json").unwrap(), Key::segments("video", 4).unwrap()]);
+		let streamed: std::collections::HashSet<Key> = store
+			.list(&Query::new())
+			.map_ok(|entry| entry.key)
+			.try_collect()
+			.await
+			.unwrap();
+		assert_eq!(streamed, expected);
+		let page = store.list_paginated(&Query::new()).await.unwrap();
+		assert_eq!(
+			page.entries
+				.into_iter()
+				.map(|entry| entry.key)
+				.collect::<std::collections::HashSet<_>>(),
+			expected
+		);
+		assert!(page.next.is_none());
+		let page = store.list_paginated(&Query::segments("video").unwrap()).await.unwrap();
+		assert_eq!(page.entries.len(), 1);
+	}
+
 	#[test]
 	fn directory_results_are_not_silently_dropped() {
 		let store = memory();
@@ -913,9 +851,7 @@ mod tests {
 	async fn id_endpoints_are_valid_keys() {
 		let store = memory();
 		let object = one_group(ID_MAX, b"z");
-		store.put_groups("v", &object).await.unwrap();
 		store.put_segments("t", ID_MAX, &object).await.unwrap();
-		assert_eq!(store.get_groups("v", ID_MAX..=ID_MAX).await.unwrap(), object);
 		assert_eq!(store.get_segments("t", ID_MAX).await.unwrap(), object);
 	}
 
@@ -927,8 +863,8 @@ mod tests {
 		let info = Info::new(3, 90_000).unwrap();
 		store.put_info("audio", &info).await.unwrap();
 		let object = two_groups();
-		store.put_groups("audio", &object).await.unwrap();
+		store.put_segments("audio", 0, &object).await.unwrap();
 		assert_eq!(store.get_info("audio").await.unwrap(), info);
-		assert_eq!(store.get_groups("audio", 5..=7).await.unwrap(), object);
+		assert_eq!(store.get_segments("audio", 0).await.unwrap(), object);
 	}
 }

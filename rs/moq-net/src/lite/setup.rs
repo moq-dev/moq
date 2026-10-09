@@ -55,7 +55,7 @@ impl ProbeLevel {
 	/// transport whose figures exist by the time the session starts. QUIC and TCP
 	/// both qualify: their RTT comes from the handshake, which has already happened.
 	pub fn detect<S: crate::transport::poll::Session>(session: &S) -> Self {
-		use web_transport_trait::Stats as _;
+		use crate::transport::Stats as _;
 		let stats = session.stats();
 		match stats.estimated_send_rate().is_some() || stats.rtt().is_some() {
 			true => Self::Report,
@@ -176,10 +176,10 @@ pub struct Setup {
 	/// Directional: it prices the sender's own egress, so both ends declare their own
 	/// and the two need not match. `None` means the default cost of 1.
 	pub cost: Option<u64>,
-	/// This endpoint's Hop ID, the identity it stamps onto forwarded
-	/// announcements. The peer uses it to serve this endpoint's subscriptions from
-	/// a route that does not flow through it (the same split horizon the announce
-	/// filter applies). `None` when the endpoint has no meaningful identity (a
+	/// This endpoint's Hop ID, the identity forwarded announcements name it by.
+	/// The peer uses it to serve this endpoint's subscriptions from a route that
+	/// does not flow through it (the same split horizon the announce filter
+	/// applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
 }
@@ -187,7 +187,7 @@ pub struct Setup {
 impl Message for Setup {
 	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_setup_stream() {
 			return Err(DecodeError::Version);
 		}
@@ -222,7 +222,7 @@ impl Message for Setup {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if !version.has_setup_stream() {
 			return Err(EncodeError::Version);
 		}
@@ -283,6 +283,11 @@ impl PeerSetup {
 		Ok(())
 	}
 
+	/// Poll until the peer's SETUP arrives.
+	pub fn poll_seen(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		self.poll_get(waiter, |_| ())
+	}
+
 	/// Poll for the peer's advertised probe level, waiting until its SETUP arrives.
 	pub fn poll_probe_level(&self, waiter: &kio::Waiter) -> std::task::Poll<ProbeLevel> {
 		self.poll_get(waiter, |setup| setup.probe)
@@ -322,10 +327,11 @@ mod tests {
 	use super::*;
 
 	fn round_trip(msg: &Setup) -> Setup {
-		let mut buf = bytes::BytesMut::new();
-		msg.encode(&mut buf, Version::Lite05).unwrap();
+		let mut buf = Vec::new();
+		msg.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
+			.unwrap();
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
 		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
 		got
 	}
@@ -397,10 +403,13 @@ mod tests {
 			(Version::Lite06, &[0x05, 0x01, 0x04, 0x02, 0x40, 0x64][..]),
 			(Version::Lite07, &[0x04, 0x01, 0x04, 0x01, 0x64][..]),
 		] {
-			let mut buf = Vec::new();
-			msg.encode(&mut buf, version).unwrap();
+			let buf = msg.encode_bytes(version).unwrap();
 			assert_eq!(buf, wire, "{version}");
-			assert_eq!(Setup::decode(&mut &buf[..], version).unwrap(), msg, "{version}");
+			assert_eq!(
+				Setup::decode_slice(&buf, version).unwrap(),
+				(msg.clone(), buf.len()),
+				"{version}"
+			);
 		}
 	}
 
@@ -419,9 +428,9 @@ mod tests {
 			path: Some("a".repeat(at_limit + 1)),
 			..Default::default()
 		};
-		let mut buf = bytes::BytesMut::new();
+		let mut buf = Vec::new();
 		assert!(matches!(
-			msg.encode(&mut buf, Version::Lite05),
+			msg.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05),
 			Err(EncodeError::TooLarge)
 		));
 		assert!(buf.is_empty());
@@ -455,14 +464,18 @@ mod tests {
 		let version = Version::Lite05;
 		let mut params = Parameters::default();
 		params.set_varint(super::PARAM_HOP, 0, version).unwrap();
-		let mut body = bytes::BytesMut::new();
-		params.encode(&mut body, version).unwrap();
+		let mut body = Vec::new();
+		params
+			.encode(&mut Encoder::new(&mut body, version.into()), version)
+			.unwrap();
 		// Frame the body with the Message Length prefix `Setup::decode` expects.
-		let mut buf = bytes::BytesMut::new();
-		(body.len() as u64).encode(&mut buf, version).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, version.into())
+			.varint(body.len() as u64)
+			.unwrap();
 		buf.extend_from_slice(&body);
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, version).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, version, Setup::decode).unwrap();
 		assert_eq!(got.hop, None);
 	}
 
@@ -496,14 +509,18 @@ mod tests {
 		let mut params = Parameters::default();
 		params.set_varint(PARAM_PROBE, 99, Version::Lite05).unwrap();
 		let mut body = Vec::new();
-		params.encode(&mut body, Version::Lite05).unwrap();
+		params
+			.encode(&mut Encoder::new(&mut body, Version::Lite05.into()), Version::Lite05)
+			.unwrap();
 
-		let mut buf = bytes::BytesMut::new();
-		body.len().encode(&mut buf, Version::Lite05).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Lite05.into())
+			.varint(body.len() as u64)
+			.unwrap();
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
 		assert_eq!(got.probe, ProbeLevel::Increase);
 	}
 
@@ -526,14 +543,18 @@ mod tests {
 			let mut params = Parameters::default();
 			params.set_varint(PARAM_ROLE, code, Version::Lite05).unwrap();
 			let mut body = Vec::new();
-			params.encode(&mut body, Version::Lite05).unwrap();
+			params
+				.encode(&mut Encoder::new(&mut body, Version::Lite05.into()), Version::Lite05)
+				.unwrap();
 
-			let mut buf = bytes::BytesMut::new();
-			body.len().encode(&mut buf, Version::Lite05).unwrap();
+			let mut buf = Vec::new();
+			Encoder::new(&mut buf, Version::Lite05.into())
+				.varint(body.len() as u64)
+				.unwrap();
 			buf.extend_from_slice(&body);
 
 			let mut slice = &buf[..];
-			let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
+			let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
 			assert_eq!(got.role, None, "role code {code} should decode as bidirectional");
 		}
 	}
@@ -541,9 +562,9 @@ mod tests {
 	#[test]
 	fn rejects_before_lite05() {
 		let msg = Setup::default();
-		let mut buf = bytes::BytesMut::new();
+		let mut buf = Vec::new();
 		assert!(matches!(
-			msg.encode(&mut buf, Version::Lite04),
+			msg.encode(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04),
 			Err(EncodeError::Version)
 		));
 	}
@@ -556,15 +577,19 @@ mod tests {
 		params.set_bytes(0xbeef, b"whatever".to_vec());
 
 		let mut body = Vec::new();
-		params.encode(&mut body, Version::Lite05).unwrap();
+		params
+			.encode(&mut Encoder::new(&mut body, Version::Lite05.into()), Version::Lite05)
+			.unwrap();
 
 		// Wrap with the message size prefix the Message impl expects.
-		let mut buf = bytes::BytesMut::new();
-		body.len().encode(&mut buf, Version::Lite05).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Lite05.into())
+			.varint(body.len() as u64)
+			.unwrap();
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
 		assert_eq!(got.path.as_deref(), Some("/foo"));
 	}
 }

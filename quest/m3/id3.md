@@ -43,5 +43,4 @@ generic.
 
 ## Related
 
-- [SEI sidecars](/quest/m2/sei.md) - the separate codec metadata
-  contract
+- [Fail loud on dropped timed metadata](/quest/m1/drop-loud.md) - counts and warns on what import drops until this carriage lands

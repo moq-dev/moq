@@ -29,7 +29,7 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// Route is the hop chain a broadcast takes to reach an origin, and its costs: warm Cost plus undiscounted Cold (nil Cold means Cost).
+	// Route is the hop chain a broadcast takes to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
@@ -37,7 +37,7 @@ type (
 	// [OriginConsumer.RequestBroadcast].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
-	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive.
+	// AnnounceEventUpdate, or AnnounceEventEnd.
 	AnnounceEvent = ffi.MoqAnnounceEvent
 	// AnnounceEventStart reports a route now covering a prefix that had none.
 	AnnounceEventStart = ffi.MoqAnnounceEventStart
@@ -45,10 +45,7 @@ type (
 	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
 	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
 	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
-	// AnnounceEventLive reports that every route live at subscribe time has been
-	// delivered; what follows is live changes. Yielded once.
-	AnnounceEventLive = ffi.MoqAnnounceEventLive
-	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max age, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
+	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
 	VideoSurface = ffi.MoqVideoSurface

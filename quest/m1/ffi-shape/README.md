@@ -67,6 +67,10 @@ work no child does:
   `subscribe` to `consume`, Go's `All(ctx)` iterators and `ConnectionStatus*`
   constants, Kotlin and Dart `announced().updates()`, config records in place
   of setters and named parameters).
+- `MoqGroupRequest` gains `demand()` in moq-ffi and every wrapper, matching
+  Rust's `group::Request::demand`, so a group server can see when nobody
+  still wants the group (decided in #4868; the bullet was lost when #4946
+  removed `net.md`).
 - `just test interop --all` green on the finished line.
 
 ## Required

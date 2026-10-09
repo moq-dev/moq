@@ -186,7 +186,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 				return
 			default:
 			}
-			_ = track.WriteFrame(moq.Frame{Payload: fmt.Appendf(nil, "frame-%d", i)})
+			_ = track.WriteFrame(moq.Frame{Payload: fmt.Appendf(nil, "frame-%d", i), Timestamp: ts(0)})
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()

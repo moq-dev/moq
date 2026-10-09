@@ -142,7 +142,7 @@ case "$action" in
         if wants '(moq-wasm|moq-mux|moq-ffi)'; then just rs wasm-fix; fi
         ;;
     test)
-        # A selection can hold nothing testable (moq-wasm has no host tests), and
+        # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
         just rs test "${flags[@]}"
@@ -169,6 +169,10 @@ case "$action" in
         # selected, since cargo rejects a feature of a package outside the
         # selection; a change to anything they reach selects moq-cli anyway.
         if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture"); fi
+        # Apple UDP batching is opt-in; compile its implementation and tests on macOS.
+        if [[ "$(uname -s)" == Darwin ]] && wants moq-sock; then
+            flags+=(--features moq-sock/fast-apple-datapath)
+        fi
         cargo check --locked "${flags[@]}" --all-targets
         ;;
     *)

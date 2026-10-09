@@ -29,7 +29,7 @@ extension BackoffDuration on MoqBackoff {
 /// Duration views over the subscription knobs.
 extension SubscriptionDuration on MoqSubscription {
   /// Upper bound on buffering before a stalled group is skipped.
-  Duration get maxAge => Duration(microseconds: maxAgeUs);
+  Duration get maxDelay => Duration(microseconds: maxDelayUs);
 }
 
 /// Duration views over the publisher-side track settings.
@@ -41,12 +41,14 @@ extension TrackInfoDuration on MoqTrackInfo {
 
 /// Duration view over a raw frame's presentation time.
 extension FrameDuration on MoqFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
+  /// Presentation timestamp, or null for an untimed frame.
+  Duration? get timestamp =>
+      timestampUs == null ? null : Duration(microseconds: timestampUs!);
 }
 
 /// Duration view over a datagram's presentation time.
 extension DatagramDuration on MoqDatagram {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
+  /// Presentation timestamp, or null for an untimed datagram.
+  Duration? get timestamp =>
+      timestampUs == null ? null : Duration(microseconds: timestampUs!);
 }

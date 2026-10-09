@@ -80,6 +80,12 @@ pub struct Policy {
 	/// What a session presenting a verified certificate is granted, rooted at `/`;
 	/// empty refuses it.
 	pub mtls: Permissions,
+	/// Mark every session presenting a verified certificate as a cluster
+	/// [peer](Grant::peer), for a mesh whose relays dial each other with mTLS.
+	pub mtls_peer: bool,
+	/// Mark every certificate's peer as [upstream](Grant::upstream) too. Requires
+	/// [`mtls_peer`](Self::mtls_peer).
+	pub mtls_upstream: bool,
 	/// The tier stamped on every grant.
 	pub tier: Option<String>,
 	/// How often the relay re-checks each grant; `None` never re-checks. The contract
@@ -135,7 +141,7 @@ impl Policy {
 		if jwt.is_some() && request.tls.is_some() {
 			return Err(Refusal::TokenAndCertificate);
 		}
-		let (permissions, expires) = if let Some(jwt) = jwt {
+		let (permissions, expires, certificate) = if let Some(jwt) = jwt {
 			let claims = self.verify(jwt).await?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
 				crate::Error::RootMismatch(path) => Refusal::RootMismatch {
@@ -145,17 +151,17 @@ impl Policy {
 				crate::Error::NoAccess(path) => Refusal::NoAccess { path },
 				other => Refusal::InvalidToken(other.to_string()),
 			})?;
-			(permissions, claims.expires)
+			(permissions, claims.expires, false)
 		} else if let Some(peer) = &request.tls {
 			if self.mtls.is_empty() {
 				return Err(Refusal::NoMtlsGrant);
 			}
-			(authorize(&self.mtls, &request.path)?, peer.expires)
+			(authorize(&self.mtls, &request.path)?, peer.expires, true)
 		} else {
 			if self.public.is_empty() {
 				return Err(Refusal::NoPublicGrant);
 			}
-			(authorize(&self.public, &request.path)?, None)
+			(authorize(&self.public, &request.path)?, None, false)
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
@@ -166,6 +172,8 @@ impl Policy {
 		};
 		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
+		grant.peer = certificate && self.mtls_peer;
+		grant.upstream = certificate && self.mtls_upstream;
 		Ok(grant)
 	}
 
@@ -331,9 +339,12 @@ pub struct Server {
 
 impl Server {
 	/// A server answering with `policy`, refusing one that asks for a re-check without
-	/// a bound, bounds grants past the clock's range, or caps sessions without the
-	/// re-check that ages out a dead relay's.
+	/// a bound, bounds grants past the clock's range, caps sessions without the
+	/// re-check that ages out a dead relay's, or marks an upstream that is not a peer.
 	pub fn new(policy: Policy) -> crate::Result<Self> {
+		if policy.mtls_upstream && !policy.mtls_peer {
+			return Err(crate::Error::UpstreamWithoutPeer);
+		}
 		if policy.revalidate.is_some() && policy.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
 		}
@@ -824,9 +835,50 @@ mod tests {
 		// A certificate without a bound gets none by default, like 0.14.
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
 		assert_eq!(grant.expires, None);
+		// A certificate is a client unless the policy says it is a relay.
+		assert!(!grant.peer);
 
 		// The certificate does not stand in for a public grant.
 		assert_eq!(policy.decide(&request("/")).await.unwrap_err(), Refusal::NoPublicGrant);
+	}
+
+	/// `mtls_peer` and `mtls_upstream` mark a certificate's grant, and only a certificate's.
+	#[tokio::test]
+	async fn mtls_peer_marks_only_certificates() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			public: rules(&["**"], &["**"]),
+			mtls: rules(&["**"], &["**"]),
+			mtls_peer: true,
+			..Default::default()
+		};
+		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
+		assert!(grant.peer && !grant.upstream);
+
+		let policy = Policy {
+			mtls_upstream: true,
+			..policy
+		};
+		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
+		assert!(grant.peer && grant.upstream);
+		grant.validate().unwrap();
+		let grant = policy.decide(&request("/")).await.unwrap();
+		assert!(!grant.peer && !grant.upstream);
+		let jwt = sign(&key, "", &["**"], &[], None);
+		let grant = policy.decide(&with_token(request("/"), &jwt)).await.unwrap();
+		assert!(!grant.peer && !grant.upstream);
+	}
+
+	/// An upstream that is not a peer would answer grants every relay refuses.
+	#[test]
+	fn a_server_refuses_an_upstream_that_is_not_a_peer() {
+		let policy = Policy {
+			mtls: rules(&["**"], &["**"]),
+			mtls_upstream: true,
+			..Default::default()
+		};
+		assert!(matches!(Server::new(policy), Err(Error::UpstreamWithoutPeer)));
 	}
 
 	/// A certificate would override a JWT meant to narrow it, and a JWT would narrow or

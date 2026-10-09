@@ -189,7 +189,7 @@ func (t *TrackConsumer) Info() (TrackInfo, error) {
 }
 
 // Update changes this subscriber's delivery preferences. It fails only on a
-// negative MaxAge.
+// negative MaxDelay.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {

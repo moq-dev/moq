@@ -4,16 +4,7 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import {
-	closeError,
-	error,
-	fromClose,
-	ProtocolViolation,
-	SessionCode,
-	StreamCode,
-	StreamError,
-	sessionCause,
-} from "../error.ts";
+import { closeError, error, fromClose, ProtocolViolation, SessionCode, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
@@ -146,7 +137,14 @@ export class Connection implements Established {
 
 		this.hop = randomHop();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish);
-		this.#subscriber = new Subscriber(this.#quic, this.#version, this.hop, this.#probe, this.#peerSetup);
+		this.#subscriber = new Subscriber(
+			this.#quic,
+			this.#version,
+			this.hop,
+			this.#probe,
+			this.#peerSetup,
+			this.#goaway,
+		);
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
 		void this.#run();
@@ -320,7 +318,7 @@ export class Connection implements Established {
 
 			this.#runUni(stream)
 				.then(() => {
-					stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+					stream.stop(StreamCode.Cancel);
 				})
 				.catch((err: unknown) => {
 					stream.stop(err);

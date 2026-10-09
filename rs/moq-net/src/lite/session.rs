@@ -18,6 +18,8 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 	pub driver: Driver<S>,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
+	/// Whether the peer's SETUP arrived, read by [`crate::Session::setup`].
+	pub setup: crate::session::Setup,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -72,7 +74,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		}
 		let mut index = 0;
 		while index < pending.len() {
-			let kind = match pending[index].poll_decode_peek::<u64>(&mut cx) {
+			let kind = match pending[index].poll_varint_peek(&mut cx) {
 				Poll::Pending => {
 					index += 1;
 					continue;
@@ -169,6 +171,9 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	pub peer_setup: Option<AcceptedSetup<S>>,
+
+	/// What the peer may make this session hold.
+	pub limits: crate::session::Limits,
 }
 
 /// Start a lite session.
@@ -188,6 +193,7 @@ where
 		version,
 		mut our_setup,
 		peer_setup,
+		limits,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -223,6 +229,10 @@ where
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+	let subscriptions =
+		crate::session::Slots::new(limits.subscriptions).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+	let announces =
+		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets
@@ -242,6 +252,16 @@ where
 	};
 	let peer_setup = peer_setup_slot;
 
+	// Lite-05+ records the peer's SETUP from its Setup Stream. Before that, only the
+	// legacy bidi handshake carries one, and it was read before the session started.
+	let setup = if version.has_setup_stream() {
+		crate::session::Setup::Lite(peer_setup.clone())
+	} else if setup_stream.is_some() {
+		crate::session::Setup::Read
+	} else {
+		crate::session::Setup::Never
+	};
+
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
 	// signal), the protocol tasks below hold the other. moq-lite lets either side
 	// name a redirect URI, unlike moq-transport.
@@ -258,8 +278,9 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
+		subscriptions,
 	});
-	let subscriber = Subscriber::new(SubscriberConfig {
+	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
 		origin: subscribe,
@@ -273,6 +294,7 @@ where
 		cost: our_cost,
 		going_away: goaway.going_away.clone(),
 	});
+	subscriber.announces = announces;
 
 	let driver = Driver {
 		local_close: Default::default(),
@@ -290,6 +312,7 @@ where
 		recv_bandwidth: recv_bw_consumer,
 		driver,
 		goaway: goaway_handle,
+		setup,
 	})
 }
 
@@ -621,19 +644,23 @@ mod tests {
 	use super::*;
 	use crate::coding::Encode;
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_setup_does_not_wait_on_an_early_stream_header() {
 		let version = Version::Lite05;
 		let mut setup = Vec::new();
-		DataType::Setup.encode(&mut setup, version).unwrap();
-		Setup::default().encode(&mut setup, version).unwrap();
+		DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
+		Setup::default()
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
 		let mut session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
 		let accepted = accept_setup(&mut session, version).await.unwrap();
 		assert_eq!(accepted.early.len(), 1);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_setup_refuses_two_incomplete_setup_streams() {
 		use futures::FutureExt;
 		let mut session =
@@ -644,20 +671,24 @@ mod tests {
 		));
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn duplicate_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for complete in [false, true] {
 				let mut first = Vec::new();
-				DataType::Setup.encode(&mut first, version).unwrap();
+				DataType::Setup
+					.encode(&mut crate::coding::Encoder::new(&mut first, version.into()), version)
+					.unwrap();
 				if complete {
-					Setup::default().encode(&mut first, version).unwrap();
+					Setup::default()
+						.encode(&mut crate::coding::Encoder::new(&mut first, version.into()), version)
+						.unwrap();
 				}
 				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 					.with_incoming_unis(vec![first.clone(), first]);
 				let log = session.log.clone();
 				let mut started = start(Config {
-					runtime: crate::time::Clock::tokio(),
+					runtime: crate::time::Clock::sim(),
 					session,
 					setup_stream: None,
 					publish: None,
@@ -666,6 +697,7 @@ mod tests {
 					version,
 					our_setup: Setup::default(),
 					peer_setup: None,
+					limits: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -681,16 +713,21 @@ mod tests {
 
 	/// A SETUP that ends before its body decodes leaves nothing to wait on, since the
 	/// Setup Stream is already claimed.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn truncated_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut truncated = Vec::new();
-			DataType::Setup.encode(&mut truncated, version).unwrap();
+			DataType::Setup
+				.encode(
+					&mut crate::coding::Encoder::new(&mut truncated, version.into()),
+					version,
+				)
+				.unwrap();
 			let session =
 				crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![truncated]);
 			let log = session.log.clone();
 			let mut started = start(Config {
-				runtime: crate::time::Clock::tokio(),
+				runtime: crate::time::Clock::sim(),
 				session,
 				setup_stream: None,
 				publish: None,
@@ -699,6 +736,7 @@ mod tests {
 				version,
 				our_setup: Setup::default(),
 				peer_setup: None,
+				limits: Default::default(),
 			})
 			.unwrap();
 			let _ = started.driver.poll(&kio::Waiter::noop());

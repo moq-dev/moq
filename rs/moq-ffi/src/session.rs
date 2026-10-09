@@ -415,7 +415,8 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 struct Client {
 	fingerprints: Vec<Vec<u8>>,
-	versions: Vec<moq_net::Version>,
+	/// Offered as ALPNs to WebTransport and then enforced by moq-net, so the two agree.
+	versions: moq_net::Versions,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -455,7 +456,10 @@ impl Client {
 				.iter()
 				.map(|hex| decode_hex(hex))
 				.collect::<Result<_, _>>()?,
-			versions: parse_versions(&versions)?,
+			versions: match versions.is_empty() {
+				true => moq_net::Versions::default(),
+				false => parse_versions(&versions)?.into(),
+			},
 			publish,
 			consume,
 		})
@@ -465,20 +469,16 @@ impl Client {
 		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
 
 		let transport = match self.fingerprints.is_empty() {
-			true => crate::transport::connect(url).await,
-			false => crate::transport::connect_with_hashes(url, self.fingerprints.clone()).await,
+			true => crate::transport::connect(url, &self.versions).await,
+			false => crate::transport::connect_with_hashes(url, &self.versions, self.fingerprints.clone()).await,
 		}
 		.map_err(|err| MoqError::Connect(format!("{err}")))?;
-
-		let mut client = moq_net::Client::new();
-		if !self.versions.is_empty() {
-			client = client.with_versions(self.versions.clone().into());
-		}
 
 		// Run the driver on the microtask queue. The driver
 		// holds no session clone, so dropping the last handle still closes the
 		// transport and ends that task.
-		let (session, driver) = client
+		let (session, driver) = moq_net::Client::new()
+			.with_versions(self.versions.clone())
 			.with_publisher(&publish)
 			.with_subscriber(subscribe.clone())
 			.connect(web_async::time::Instant::now(), transport)

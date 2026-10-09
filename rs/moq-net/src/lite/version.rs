@@ -227,6 +227,30 @@ impl Version {
 		}
 	}
 
+	/// Whether the stream error table has NOT_FETCHABLE, for a FETCH that reached a
+	/// datagram. Added in lite-07; earlier versions say NOT_FOUND instead.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_not_fetchable(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether announcements and track requests carry the publisher epoch, the
+	/// identity that says two routes serve the same bytes. Added in lite-07.
+	/// Older versions carry nothing, so a received route has no epoch and is
+	/// never resumed through another route.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_epoch(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry the route cost: the marginal cost of pulling
 	/// the broadcast via this route, accumulated per link. Added in lite-06.
 	/// Older versions carry nothing, so a received route stays at zero and ranks

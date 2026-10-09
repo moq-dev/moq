@@ -30,7 +30,7 @@ async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
             if not isinstance(event, moq.AnnounceEventStart):
-                continue  # AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive
+                continue  # AnnounceEventUpdate or AnnounceEventEnd
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request_broadcast(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
@@ -98,7 +98,7 @@ async def main():
             safe_path = request.path.split("?", 1)[0]
             safe_url = request.url.split("?", 1)[0] if request.url else None
             print(f"  + {request.transport} {safe_path} from {safe_url}")
-            sessions.append(await request.accept(publish=None, consume=None))
+            sessions.append(await request.accept())
 
 
 asyncio.run(main())
@@ -222,18 +222,18 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd` carrying an `Announce`, or `AnnounceEventLive` once caught up); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`, each carrying an `Announce`); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits until something serves the path)
   - `.request_broadcast(path) → BroadcastConsumer` (awaitable; announced now or a dynamic fallback, else raises)
 
 ### Types
 
 - **`media.Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
-- **`Frame`**. `.payload: bytes`, `.timestamp: timedelta`. The unit of every write and every raw read.
+- **`Frame`**. `.payload: bytes`, `.timestamp: timedelta | None`. The unit of every write and every raw read; `None` only on a frame read from an untimed track.
 - **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: timedelta`, `.keyframe: bool`. Returned by media subscriptions. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
-- **`Datagram`**. `.sequence: int`, `.timestamp: timedelta`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
-- **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
-- **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.stalled`, `.framerate`, `.description`. A true `.stalled` recommends temporarily avoiding the rendition without making it unavailable.
+- **`Datagram`**. `.sequence: int`, `.timestamp: timedelta | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
+- **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
+- **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.
 - **`TrackInfo`**. Publisher track properties: priority, cache window, and timescale.
 - **`media.Dimensions`**. `.width: int`, `.height: int`.

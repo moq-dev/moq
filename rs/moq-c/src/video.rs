@@ -139,9 +139,9 @@ pub struct moq_video_encoder_frame {
 pub struct moq_video_decoder_output {
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// microseconds. Same congestion-control knob as
-	/// `moq_consume_video`'s `max_age_us`. 0 = skip aggressively
+	/// `moq_consume_video`'s `max_delay_us`. 0 = skip aggressively
 	/// (the moq-mux default); set to your playout buffer for a softer skip.
-	pub max_age_us: u64,
+	pub max_delay_us: u64,
 	/// `moq_video_pixel_format` discriminant. Unknown values fail
 	/// [`moq_decode_video`] rather than decoding into an assumed layout.
 	pub format: u32,
@@ -913,7 +913,7 @@ pub unsafe extern "C" fn moq_decode_video(
 
 		let mut options = moq_video::decode::Options::new();
 		options.start = moq_video::decode::Start::Latest;
-		options.max_age = Duration::from_micros(raw.max_age_us);
+		options.max_delay = Duration::from_micros(raw.max_delay_us);
 		// The C caller takes packed pixels, so let a backend that can decode
 		// straight to the CPU do that rather than downloading afterwards.
 		options.decoder.output = moq_video::Output::Cpu;
@@ -968,7 +968,7 @@ pub unsafe extern "C" fn moq_decode_video_frame(id: u32, dst: *mut moq_video_fra
 		let frame = State::lock().video.frame(id)?;
 		let pixels = frame.pixels()?;
 		*dst = moq_video_frame {
-			// The decoded Timestamp is bounded by a QUIC VarInt, so its microseconds fit.
+			// The decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
 			timestamp_us: frame.frame.timestamp.as_micros() as u64,
 			width: pixels.width,
 			height: pixels.height,

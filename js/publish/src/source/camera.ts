@@ -21,7 +21,7 @@ export interface CameraProps extends Inputs<CameraInput> {
 type CameraOutput = {
 	// The live camera track, or undefined while disabled or denied.
 	source: Signal<Media | undefined>;
-	/** A terminal getUserMedia failure, cleared when a new capture attempt begins. */
+	/** A terminal capture failure, cleared when a new capture attempt begins. */
 	error: Signal<Error | undefined>;
 };
 
@@ -81,6 +81,10 @@ export class Camera {
 		const constraints = effect.get(this.constraints);
 
 		if (!this.#retry.begin(effect, [device, constraints])) {
+			// `failure` is set only when nothing remains, so a backoff stays quiet.
+			const failure = this.#retry.spent();
+			if (failure) this.#out.error.set(failure);
+
 			// Waiting out a backoff, or out of budget entirely, with the same settings. Either way
 			// a change to what is plugged in is new information worth acting on now, so watch the
 			// device list here and not while healthy, where a rerun would restart a working capture
@@ -139,7 +143,7 @@ export class Camera {
 
 			// A track that arrives dead already fired "ended", so nothing would ever rerun us.
 			if (!source || source.readyState === "ended") {
-				this.#retry.failed();
+				this.#retry.ended();
 				return;
 			}
 

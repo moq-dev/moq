@@ -23,7 +23,6 @@ Decided in planning:
 - Scope:
   - moq-ffi, default and `--no-default-features`, as cdylib and staticlib
   - moq-c, moq-relay, and moq-cli
-  - the moq-wasm module, raw, gzip, and brotli
   - the consumer cost of the JS entries: `@moq/net`, `@moq/watch/element`
     with and without `/ui`, and `@moq/publish/element`. Measure them the way
     a consumer sees them: bundled and minified from the built packages,
@@ -31,9 +30,10 @@ Decided in planning:
   - the packaged outputs nightly already builds. `nightly.yml` runs the
     Python, Kotlin, and Swift release builds, so read their wheel, AAR, and
     xcframework sizes instead of rebuilding them.
-- Out of scope: Docker images, and per-target release assets nightly doesn't
-  build. The Docker quest measures its images once. Add others only if one of
-  them regresses unnoticed.
+- Out of scope: moq-wasm, which [Remove moq-wasm](/quest/m1/rs2ts/remove-wasm.md)
+  deletes (decided 2026-10-08), Docker images, and per-target release assets
+  nightly doesn't build. The Docker quest measures its images once. Add
+  others only if one of them regresses unnoticed.
 - The job summary also carries `cargo bloat --crates` for the ffi build and a
   metafile breakdown for the publish element, so the cause of a jump is
   visible without a local rebuild. `cargo bloat` needs symbols, so build that

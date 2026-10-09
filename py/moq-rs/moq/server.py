@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 from moq_ffi import MoqQuicConfig, MoqRequest, MoqServer, MoqServerConfig, MoqServerTls, MoqTransport
 
+from ._records import _strs
 from .origin import OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
@@ -18,7 +19,7 @@ Transport = MoqTransport
 class Request:
     """Wraps MoqRequest, an incoming session that can be accepted or rejected.
 
-    Use `await request.accept(publish=None, consume=None)` to complete the handshake, or
+    Use `await request.accept()` to complete the handshake, or
     `await request.reject(code)` to reject with an application error code.
 
     Dropping a Request without responding closes the underlying connection
@@ -97,7 +98,7 @@ class Server:
                 if request.path == "/admin":
                     await request.reject(403)
                     continue
-                session = await request.accept(publish=None, consume=None)  # hold to keep the connection alive
+                session = await request.accept()  # hold to keep the connection alive
 
     Exiting the context manager stops accepting new sessions and releases the
     listening socket before it returns, so the address can be bound again
@@ -134,8 +135,12 @@ class Server:
 
         self._config = MoqServerConfig(
             bind=bind,
-            versions=list(versions),
-            tls=MoqServerTls(cert=list(tls_cert), key=list(tls_key), generate=list(tls_generate)),
+            versions=_strs(versions, "versions"),
+            tls=MoqServerTls(
+                cert=_strs(tls_cert, "tls_cert"),
+                key=_strs(tls_key, "tls_key"),
+                generate=_strs(tls_generate, "tls_generate"),
+            ),
             quic=MoqQuicConfig(max_streams=max_streams),
             publish=None if publish is None else publish._inner,
             consume=None if consume is None else consume._inner,
@@ -210,12 +215,12 @@ class Server:
                 if request.path == "/admin":
                     await request.reject(403)
                     continue
-                session = await request.accept(publish=None, consume=None)
+                session = await request.accept()
         """
         session_tasks: set[asyncio.Task] = set()
 
         async def serve_session(request: Request) -> None:
-            session = await request.accept(publish=None, consume=None)
+            session = await request.accept()
             await session.closed()
 
         try:

@@ -175,9 +175,9 @@ impl Consumer {
 /// The receive-side GOAWAY signal handed to a subscriber.
 ///
 /// Carries the flag and the channel together because a subscriber needs both: an
-/// atomic load before opening a request stream (the hot path, which is why the
-/// flag is not merely a read of the channel), and a wakeup for the per-source
-/// tasks, which have to react to a peer that drains and then goes quiet.
+/// atomic load when pricing each received announcement (the hot path, which is
+/// why the flag is not merely a read of the channel), and a wakeup for the
+/// per-source tasks, which have to react to a peer that drains and then goes quiet.
 #[derive(Clone)]
 pub(crate) struct GoingAway {
 	flag: Arc<AtomicBool>,
@@ -239,7 +239,7 @@ pub(crate) struct Protocol {
 	trigger: kio::Consumer<Option<Goaway>>,
 	/// Written by the driver's receive path when a GOAWAY is decoded.
 	received: kio::Producer<Option<Goaway>>,
-	/// Set alongside `received`; checked before opening new request streams.
+	/// Set alongside `received`; reprices this session's routes to the drain cost.
 	pub going_away: GoingAway,
 }
 
@@ -287,14 +287,14 @@ pub(crate) struct Enforce<S: crate::transport::poll::Session> {
 	session: S,
 	/// The armed deadline, or `None` when the GOAWAY carried no timeout (ready
 	/// immediately: there is nothing to enforce).
-	deadline: Option<(crate::runtime::Deadline<crate::time::Clock>, Duration)>,
+	deadline: Option<(crate::time::Deadline, Duration)>,
 }
 
 impl<S: crate::transport::poll::Session> Enforce<S> {
 	pub fn new(runtime: &crate::time::Clock, session: S, timeout: Option<Duration>) -> Self {
 		Self {
 			session,
-			deadline: timeout.map(|timeout| (crate::runtime::Deadline::after(runtime, timeout), timeout)),
+			deadline: timeout.map(|timeout| (crate::time::Deadline::after(runtime, timeout), timeout)),
 		}
 	}
 
@@ -473,7 +473,7 @@ mod tests {
 	}
 
 	/// The consumer reports the recorded GOAWAY both synchronously and by polling.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn consumer_observes_the_recorded_goaway() {
 		let (handle, protocol) = Handle::new(true);
 		let consumer = handle.consumer();
@@ -491,7 +491,7 @@ mod tests {
 
 	/// A session that closes without a GOAWAY resolves `recv` rather than parking
 	/// forever, so a caller watching for one can stop.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn recv_resolves_when_the_session_closes() {
 		let (handle, protocol) = Handle::new(true);
 		let consumer = handle.consumer();

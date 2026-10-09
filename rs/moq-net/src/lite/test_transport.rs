@@ -16,7 +16,7 @@ use std::{
 	task::{Context, Poll},
 };
 
-use web_transport_trait::poll;
+use crate::transport::poll;
 
 #[derive(Debug, Clone, Default)]
 pub struct SinkError;
@@ -29,7 +29,7 @@ impl std::fmt::Display for SinkError {
 
 impl std::error::Error for SinkError {}
 
-impl web_transport_trait::Error for SinkError {
+impl crate::transport::Error for SinkError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		Some((0, "closed".to_string()))
 	}
@@ -41,13 +41,37 @@ impl web_transport_trait::Error for SinkError {
 pub struct Log {
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
+	/// Every write, FIN and reset on every send stream, in call order. See [`Self::trail`].
+	trail: Arc<Mutex<Vec<(usize, Sent)>>>,
+	/// Hands each send stream its id in the trail.
+	streams: Arc<AtomicUsize>,
 	stops: Arc<Mutex<Vec<u32>>>,
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
 }
 
+/// One thing a send stream did, as recorded in [`Log::trail`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sent {
+	Write(Vec<u8>),
+	Finish,
+	Reset(u32),
+}
+
 impl Log {
+	/// What every send stream did, in call order, tagged with the stream's id (its
+	/// creation order). Unlike [`Self::writes`] and [`Self::resets`], this keeps the
+	/// order across streams, so a test can check one stream's message against
+	/// another stream's FIN or reset.
+	pub fn trail(&self) -> Vec<(usize, Sent)> {
+		self.trail.lock().unwrap().clone()
+	}
+
+	fn record(&self, stream: usize, sent: Sent) {
+		self.trail.lock().unwrap().push((stream, sent));
+	}
+
 	pub fn resets(&self) -> Vec<u32> {
 		self.resets.lock().unwrap().clone()
 	}
@@ -84,6 +108,8 @@ impl Log {
 
 pub struct SinkSend {
 	pub log: Log,
+	/// This stream's id in [`Log::trail`].
+	id: usize,
 	/// Writes park until this flips to true; `None` writes immediately. See
 	/// [`SinkSession::gated_bi`].
 	gate: Option<kio::Consumer<bool>>,
@@ -100,6 +126,7 @@ pub struct SinkSend {
 impl SinkSend {
 	pub fn new(log: Log) -> Self {
 		Self {
+			id: log.streams.fetch_add(1, Ordering::Relaxed),
 			log,
 			gate: None,
 			park: kio::Park::default(),
@@ -111,6 +138,7 @@ impl SinkSend {
 	/// A send stream whose writes park until `gate` flips to true.
 	pub fn gated(log: Log, gate: kio::Consumer<bool>) -> Self {
 		Self {
+			id: log.streams.fetch_add(1, Ordering::Relaxed),
 			log,
 			gate: Some(gate),
 			park: kio::Park::default(),
@@ -134,6 +162,7 @@ impl poll::SendStream for SinkSend {
 			}
 		}
 		self.log.writes.lock().unwrap().extend_from_slice(buf);
+		self.log.record(self.id, Sent::Write(buf.to_vec()));
 		Poll::Ready(Ok(buf.len()))
 	}
 
@@ -144,6 +173,7 @@ impl poll::SendStream for SinkSend {
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		self.finished = true;
+		self.log.record(self.id, Sent::Finish);
 		Ok(())
 	}
 
@@ -151,6 +181,7 @@ impl poll::SendStream for SinkSend {
 	/// still has unacknowledged data, which is exactly the case that loses a final message.
 	fn reset(&mut self, code: u32) {
 		self.log.resets.lock().unwrap().push(code);
+		self.log.record(self.id, Sent::Reset(code));
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -197,7 +228,7 @@ impl std::fmt::Display for ResetError {
 
 impl std::error::Error for ResetError {}
 
-impl web_transport_trait::Error for ResetError {
+impl crate::transport::Error for ResetError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}
@@ -331,7 +362,7 @@ impl poll::Session for DeadStreamSession {
 		Poll::Pending
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
+	fn stats(&self) -> impl crate::transport::Stats {
 		SinkStats::default()
 	}
 }
@@ -449,13 +480,7 @@ impl poll::Session for SinkSession {
 			return Poll::Pending;
 		};
 
-		let send = SinkSend {
-			log: self.log.clone(),
-			gate: Some(gate),
-			park: kio::Park::default(),
-			finished: false,
-			unacked_fin: false,
-		};
+		let send = SinkSend::gated(self.log.clone(), gate);
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
@@ -465,13 +490,7 @@ impl poll::Session for SinkSession {
 		};
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
-		let send = SinkSend {
-			log: self.log.clone(),
-			gate: Some(gate),
-			park: kio::Park::default(),
-			finished: false,
-			unacked_fin: false,
-		};
+		let send = SinkSend::gated(self.log.clone(), gate);
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
@@ -515,7 +534,7 @@ impl poll::Session for SinkSession {
 		Poll::Pending
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
+	fn stats(&self) -> impl crate::transport::Stats {
 		*self.stats.lock().unwrap()
 	}
 }
@@ -542,7 +561,7 @@ impl SinkStats {
 	}
 }
 
-impl web_transport_trait::Stats for SinkStats {
+impl crate::transport::Stats for SinkStats {
 	fn estimated_send_rate(&self) -> Option<u64> {
 		self.estimated_send_rate
 	}
@@ -808,7 +827,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Pending
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
+	fn stats(&self) -> impl crate::transport::Stats {
 		SinkStats::default()
 	}
 }

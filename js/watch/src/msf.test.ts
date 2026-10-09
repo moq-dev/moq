@@ -62,22 +62,6 @@ test("rounds a fractional MSF delay up, and drops zero", () => {
 	expect(hang.audio?.renditions.early?.delay).toBeUndefined();
 });
 
-test("preserves stalled video renditions", () => {
-	const catalog: Msf.Catalog = {
-		tracks: [
-			{
-				name: "video",
-				packaging: "loc",
-				role: "video",
-				codec: "vp09.00.10.08",
-				stalled: true,
-			},
-		],
-	};
-
-	expect(toHang(catalog).video?.renditions.video?.stalled).toBe(true);
-});
-
 test("keeps loc packaging as the loc container", () => {
 	const catalog: Msf.Catalog = {
 		tracks: [

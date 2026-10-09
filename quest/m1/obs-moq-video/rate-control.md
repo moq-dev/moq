@@ -24,8 +24,8 @@ whether a second binding wants it. Verify against a shaped uplink and with
 
 ## Required
 
-- [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ first
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ first
 
 ## Related
 
-- [Audio follows the grant](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the shared rate policy audio adopts; OBS audio still reserves only
+- [Audio follows the grant](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the shared rate policy audio adopts; OBS audio still reserves only

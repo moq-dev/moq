@@ -6,6 +6,7 @@ from datetime import timedelta
 from typing import cast
 
 import moq
+import moq_ffi
 import pytest
 
 
@@ -16,18 +17,15 @@ def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProd
 
 
 async def routes(announced: moq.AnnounceConsumer):
-    """Yield each newly announced route, skipping the other events such as LIVE."""
+    """Yield each newly announced route, skipping updates and ends."""
     async for event in announced:
         if isinstance(event, moq.AnnounceEventStart):
             yield event.announce
 
 
 async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
-    """The next announce event that is not LIVE, which lands wherever the backlog ends."""
-    while True:
-        event = await asyncio.wait_for(anext(announced), timeout=5.0)
-        if not isinstance(event, moq.AnnounceEventLive):
-            return event
+    """The next announce event."""
+    return await asyncio.wait_for(anext(announced), timeout=5.0)
 
 
 def opus_head() -> bytes:
@@ -394,6 +392,22 @@ async def test_publish_track_info_and_subscription():
     assert frame is not None
     assert frame.payload == b"ready"
     track.finish()
+
+
+def test_track_info_keeps_native_default_priority():
+    """A partially configured TrackInfo keeps moq-ffi's default priority of 127."""
+    native = moq_ffi.MoqTrackInfo().priority
+    assert moq.TrackInfo()._ffi().priority == native
+    assert moq.TrackInfo(max_age=timedelta(seconds=2))._ffi().priority == native
+    assert moq.TrackInfo(timescale=90_000)._ffi().priority == native
+
+
+def test_string_sequences_refuse_a_bare_string():
+    """A bare str would split into characters, so the config refuses it up front."""
+    with pytest.raises(TypeError, match="tls_roots"):
+        moq.Client("https://localhost:4443", tls_roots="ca.pem")
+    with pytest.raises(TypeError, match="versions"):
+        moq.Server(versions="moq-lite-03")
 
 
 async def test_fetch_group_and_serve_dynamic_miss():
@@ -782,7 +796,7 @@ async def test_raw_multiple_frames():
 
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
-        subscription = moq.Subscription(max_age=timedelta(seconds=1))
+        subscription = moq.Subscription(max_delay=timedelta(seconds=1))
         raw_consumer = await broadcast_consumer.subscribe_track("commands", subscription)
 
         messages = [
@@ -808,7 +822,7 @@ async def test_raw_producer_consume_direct():
     """Consume a raw track directly from the producer, no origin/broadcast plumbing."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("direct")
-    consumer = track.consume(moq.Subscription(max_age=timedelta(seconds=1)))
+    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1)))
 
     track.write_frame(b"hello")
     track.write_frame(b"world")
@@ -865,7 +879,7 @@ async def test_raw_group_sequence():
 
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
-        raw_consumer = await broadcast_consumer.subscribe_track("seq", moq.Subscription(max_age=timedelta(seconds=1)))
+        raw_consumer = await broadcast_consumer.subscribe_track("seq", moq.Subscription(max_delay=timedelta(seconds=1)))
 
         sent_sequences = []
         for i in range(3):
@@ -896,7 +910,7 @@ async def test_default_iteration_is_sequence_order():
     broadcast = create_announced(origin, "track/ordering")
     raw = broadcast.publish_track("ordering")
 
-    subscription = moq.Subscription(max_age=timedelta(seconds=1))
+    subscription = moq.Subscription(max_delay=timedelta(seconds=1))
     seq_consumer = raw.consume(subscription)
     arr_consumer = raw.consume(subscription)
 
@@ -952,7 +966,7 @@ async def test_read_frame_one_per_group():
     """read_frame() returns the first frame of each successive group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")
-    consumer = track.consume(moq.Subscription(max_age=timedelta(seconds=1)))
+    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1)))
 
     track.write_frame(b"ready")
     track.write_frame(b"running")
@@ -996,7 +1010,7 @@ async def test_read_frame_skips_remaining_frames_in_group():
     """read_frame() only returns the first frame of a multi-frame group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("mixed")
-    consumer = track.consume(moq.Subscription(max_age=timedelta(seconds=1)))
+    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1)))
 
     group = track.append_group()
     group.write_frame(b"first")
@@ -1110,7 +1124,7 @@ def test_optional_binding_records_use_none_defaults():
     decoder = moq.AudioDecoderOutput(format=moq.AudioSampleFormat.F32)
     assert decoder.sample_rate is None
     assert decoder.channels is None
-    assert decoder.max_age_us is None
+    assert decoder.max_delay_us is None
 
 
 def test_encode_audio_with_opus_object():
@@ -1212,29 +1226,6 @@ async def test_broadcast_is_reachable_only_while_announced():
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
     announced.cancel()
     track.finish()
-    broadcast.close()
-
-
-async def test_announced_yields_live_once_caught_up():
-    """LIVE ends the backlog: at once on an empty origin, after existing routes otherwise."""
-    origin = moq.OriginProducer()
-    consumer = origin.consume()
-
-    empty = consumer.announced()
-    assert isinstance(await asyncio.wait_for(anext(empty), timeout=5.0), moq.AnnounceEventLive)
-    empty.cancel()
-
-    broadcast = create_announced(origin, "cam")
-    await asyncio.wait_for(consumer.announced_broadcast("cam"), timeout=5.0)
-
-    listed = []
-    async with consumer.announced() as announced:
-        async for event in announced:
-            if isinstance(event, moq.AnnounceEventLive):
-                break
-            assert isinstance(event, moq.AnnounceEventStart)
-            listed.append(event.announce.prefix)
-    assert listed == ["cam"]
     broadcast.close()
 
 

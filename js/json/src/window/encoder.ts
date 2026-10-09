@@ -129,6 +129,15 @@ export class Encoder<T> {
 		return this.#start + this.#window.length;
 	}
 
+	/**
+	 * Discard group-local state, so the next edit opens a new group with a header.
+	 *
+	 * Call this whenever the caller closes the current group behind the encoder's back.
+	 */
+	reset(): void {
+		this.#resyncGroup();
+	}
+
 	/** Discard group-local state after an encoded frame did not reach the wire. */
 	#resyncGroup(): void {
 		this.#flate = undefined;

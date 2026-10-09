@@ -142,7 +142,6 @@ broadcast, and producers advertise it in the catalog.
    AnnounceEventStart
    AnnounceEventUpdate
    AnnounceEventEnd
-   AnnounceEventLive
 ```
 
 ## Data types

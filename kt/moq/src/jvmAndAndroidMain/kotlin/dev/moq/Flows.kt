@@ -120,9 +120,7 @@ fun GroupConsumer.frames(): Flow<Frame> = flow {
 }
 
 /**
- * Stream of announce events, as `announced(config).updates()`. An
- * [AnnounceEventLive] follows the routes live at subscribe time, so a collector
- * can gather what is live and stop.
+ * Stream of announce events, as `announced(config).updates()`.
  *
  * Collect it once: the handle is cancelled when collection ends, however it ends.
  */

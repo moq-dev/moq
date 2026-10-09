@@ -13,7 +13,10 @@ use std::{
 	hash::Hash,
 };
 
-use crate::{Error, Hop, Hops, Path, PathOwned, coding::Encode, coding::Sizer};
+use crate::{
+	Error, Hop, Hops, Path, PathOwned,
+	coding::{Form, varint},
+};
 
 use super::{HopsRef, PathRef, Version};
 
@@ -287,16 +290,9 @@ impl AnnounceEncoder {
 		self.tails.remove(reversed(&entry.hops), id);
 	}
 
-	fn size<T: Encode<Version>>(&self, value: &T) -> usize {
-		let mut sizer = Sizer::default();
-		value
-			.encode(&mut sizer, self.version)
-			.expect("sizing an encodable value");
-		sizer.size
-	}
-
 	/// The wire form of `suffix`, sized from its parts so only the winner is built.
 	fn path_ref(&self, suffix: &PathOwned, next: u64) -> PathRef<'static> {
+		let form: Form = self.version.into();
 		let literal = || PathRef::literal(suffix.clone());
 		let Some((keep, id)) = self.heads.longest(suffix.parts()) else {
 			return literal();
@@ -308,8 +304,8 @@ impl AnnounceEncoder {
 
 		let base = next - id;
 		let keep = keep as u64;
-		let size = self.size(&base) + self.size(&keep) + self.size(&rest);
-		match size < self.size(&0u64) * 2 + self.size(suffix) {
+		let size = varint_size(base, form) + varint_size(keep, form) + string_size(&rest, form);
+		match size < varint_size(0, form) * 2 + string_size(suffix, form) {
 			true => PathRef { base, keep, rest },
 			false => literal(),
 		}
@@ -317,6 +313,7 @@ impl AnnounceEncoder {
 
 	/// The wire form of `hops`, sized from its parts so only the winner is built.
 	fn hops_ref(&self, hops: &Hops, next: u64) -> HopsRef {
+		let form: Form = self.version.into();
 		let literal = || HopsRef::literal(hops.clone());
 		let Some((keep, id)) = self.tails.longest(reversed(hops)) else {
 			return literal();
@@ -325,10 +322,11 @@ impl AnnounceEncoder {
 
 		let base = next - id;
 		let keep = keep as u64;
-		let chain =
-			|hops: &[Hop]| self.size(&(hops.len() as u64)) + hops.iter().map(|hop| self.size(hop)).sum::<usize>();
-		let size = self.size(&base) + chain(head) + self.size(&keep);
-		match size < self.size(&0u64) * 2 + chain(hops.as_slice()) {
+		let chain = |hops: &[Hop]| {
+			varint_size(hops.len() as u64, form) + hops.iter().map(|hop| varint_size(hop.id(), form)).sum::<usize>()
+		};
+		let size = varint_size(base, form) + chain(head) + varint_size(keep, form);
+		match size < varint_size(0, form) * 2 + chain(hops.as_slice()) {
 			true => HopsRef {
 				base,
 				literal: Hops::try_from(head.to_vec()).expect("a prefix of a valid chain is valid"),
@@ -339,9 +337,21 @@ impl AnnounceEncoder {
 	}
 }
 
+/// The bytes `value` takes as a varint in `form`.
+fn varint_size(value: u64, form: Form) -> usize {
+	varint::size(value, form).expect("sizing a value in varint range")
+}
+
+/// The bytes `path` takes on the wire: a varint length, then the string.
+fn string_size(path: &Path<'_>, form: Form) -> usize {
+	let len = path.as_str().len();
+	varint_size(len as u64, form) + len
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::coding::Encode;
 
 	const VERSION: Version = Version::Lite07;
 
@@ -498,7 +508,7 @@ mod tests {
 	/// resolved values match the input.
 	fn start(encoder: &mut AnnounceEncoder, decoder: &mut AnnounceDecoder, suffix: &str, ids: &[u64]) -> (u64, usize) {
 		let (id, wire_path, wire_hops) = encoder.start(Path::new(suffix).to_owned(), hops(ids));
-		let size = encoder.size(&wire_path) + encoder.size(&wire_hops);
+		let size = wire_path.encode_bytes(VERSION).unwrap().len() + wire_hops.encode_bytes(VERSION).unwrap().len();
 		let (got_path, got_hops) = decoder.start(wire_path, wire_hops).unwrap();
 		assert_eq!(got_path.as_str(), suffix);
 		assert_eq!(got_hops, hops(ids));
@@ -556,6 +566,37 @@ mod tests {
 		assert_eq!(wire_hops, chain(2, &[5], 1));
 	}
 
+	/// Hop 100 is 2 bytes as a QUIC varint and 1 byte as leading-ones. Sharing that
+	/// single hop from 128 announcements back costs 4 bytes in both forms (the base
+	/// is 2 bytes either way). The literal chain is 5 bytes in QUIC and 4 in
+	/// leading-ones, so QUIC would compress and leading-ones ties. A tie stays literal.
+	#[test]
+	fn a_tie_stays_literal_where_hop_100_sizes_differ() {
+		let quic = Form::Quic;
+		let leading = Form::LeadingOnes { seven: true };
+		assert_eq!(varint_size(100, quic), 2);
+		assert_eq!(varint_size(100, leading), 1);
+
+		let base = 128;
+		let compressed = |form| varint_size(base, form) + varint_size(0, form) + varint_size(1, form);
+		let literal = |form| varint_size(0, form) * 2 + varint_size(1, form) + varint_size(100, form);
+		assert!(compressed(quic) < literal(quic));
+		assert_eq!(compressed(leading), literal(leading));
+
+		let mut encoder = AnnounceEncoder::new(VERSION);
+		let mut decoder = AnnounceDecoder::default();
+		start(&mut encoder, &mut decoder, "origin", &[100]);
+		for n in 1..128 {
+			let suffix = format!("f{n}");
+			start(&mut encoder, &mut decoder, &suffix, &[1]);
+		}
+		let (_, wire_path, wire_hops) = encoder.start(Path::new("again").to_owned(), hops(&[100]));
+		assert_eq!(wire_hops, HopsRef::literal(hops(&[100])));
+		let (got_path, got_hops) = decoder.start(wire_path, wire_hops).unwrap();
+		assert_eq!(got_path.as_str(), "again");
+		assert_eq!(got_hops, hops(&[100]));
+	}
+
 	#[test]
 	fn encoder_sends_literal_when_nothing_is_shared() {
 		let mut encoder = AnnounceEncoder::new(VERSION);
@@ -581,7 +622,7 @@ mod tests {
 
 	/// A compressed stream pinned byte for byte: `js/net/src/lite/announce.test.ts`
 	/// decodes the same hex, so a codec change on either side breaks both.
-	const GOLDEN: &str = "001600000a726f6f6d2f612f63616d00029111a222000000000d0102036d69630101b3330100000209000101c04444010000010101000c020101620201c05555010000";
+	const GOLDEN: &str = "001600000a726f6f6d2f612f63616d0000029111a2220000000d0102036d6963000101b33301000208000101c044440100010101000c02010162000201c055550100";
 
 	fn golden() -> Vec<crate::fuzz::Announced> {
 		use crate::fuzz::Announced;
@@ -604,7 +645,7 @@ mod tests {
 
 	/// The literal lite-07 stream `js/net` writes for the same announcements, which
 	/// never picks a base.
-	const JS_LITERAL: &str = "001600000a726f6f6d2f612f63616d00029111a222000000001600000a726f6f6d2f612f6d69630002b333a222000000020b000002c04444a2220000000101010013000006726f6f6d2f620002c05555a222000000";
+	const JS_LITERAL: &str = "001600000a726f6f6d2f612f63616d0000029111a2220000001600000a726f6f6d2f612f6d6963000002b333a2220000020a000002c04444a22200000101010013000006726f6f6d2f62000002c05555a2220000";
 
 	#[test]
 	fn js_literal_stream_decodes() {

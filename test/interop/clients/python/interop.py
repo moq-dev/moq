@@ -22,7 +22,7 @@ from datetime import timedelta
 import moq
 
 READ_CHUNK = 64 * 1024
-MAX_AGE = timedelta(seconds=1)  # container consumer congestion-control / lookahead window
+MAX_DELAY = timedelta(seconds=1)  # container consumer congestion-control / lookahead window
 
 # Synthetic audio: a 48 kHz mono tone, encoded as Opus.
 AUDIO_TRACK = "tone"
@@ -108,7 +108,7 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         video = catalog.video[track_name]
 
         media = await moq.media.ContainerConsumer.subscribe(
-            consumer, track_name, video.container, subscription=moq.Subscription(max_age=MAX_AGE)
+            consumer, track_name, video.container, subscription=moq.Subscription(max_delay=MAX_DELAY)
         )
 
         total = 0

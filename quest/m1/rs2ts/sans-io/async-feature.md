@@ -24,4 +24,3 @@ Wire: none.
 ## Required
 
 - [Sans-IO lite session](/quest/m1/rs2ts/sans-io/lite.md) - the session builds without a runtime
-- [Sans-IO model](/quest/m1/rs2ts/sans-io/model.md) - the model builds without a runtime

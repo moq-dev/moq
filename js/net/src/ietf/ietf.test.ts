@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
@@ -983,28 +984,36 @@ test("PublishDone v17: no requestId", async () => {
 
 // --- SubscribeUpdate tests ---
 
-test("SubscribeUpdate v14: round trip", async () => {
-	const msg = new Subscribe.SubscribeUpdate({ requestId: 5n });
+// The first field is the update's own Request ID. requestId is the subscription
+// (drafts 14 and 15) or the existing request (draft 16), and a round trip that
+// only carries one id cannot tell them apart.
+test("SubscribeUpdate drafts 14 to 16 round-trip the target separately from the update", async () => {
+	const own = 10n;
+	const target = 4n;
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const) {
+		const msg = new Subscribe.SubscribeUpdate({ requestId: target, ownRequestId: own });
 
-	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
-	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_14);
+		const encoded = await encodeVersioned(msg, version);
+		const reader = new Reader(undefined, encoded, version);
+		await reader.u16();
+		expect(await reader.u62()).toBe(own);
+		expect(await reader.u62()).toBe(target);
 
-	expect(decoded.requestId).toBe(5n);
-});
-
-test("SubscribeUpdate v15: round trip", async () => {
-	const msg = new Subscribe.SubscribeUpdate({ requestId: 10n });
-
-	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
-	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_15);
-
-	expect(decoded.requestId).toBe(10n);
+		const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, version);
+		expect(decoded.requestId).toBe(target);
+		const again = await encodeVersioned(decoded, version);
+		expect(Array.from(again)).toEqual(Array.from(encoded));
+	}
 });
 
 test("SubscribeUpdate v17: round trip with requiredRequestIdDelta", async () => {
 	const msg = new Subscribe.SubscribeUpdate({ requestId: 42n });
 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const reader = new Reader(undefined, encoded, Version.DRAFT_17);
+	await reader.u16();
+	expect(await reader.u62()).toBe(42n);
+
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_17);
 
 	expect(decoded.requestId).toBe(42n);
@@ -1412,6 +1421,30 @@ test("RequestOk v18: no requestId (regression: don't treat Draft18 as legacy)", 
 	expect(decoded.requestId).toBe(undefined);
 });
 
+// A REQUEST_UPDATE_OK or TRACK_STATUS_OK must carry LARGEST_OBJECT once the track has
+// objects, so a REQUEST_OK with one decodes. The Location is length-prefixed until draft-17.
+test("RequestOk: accepts LARGEST_OBJECT", async () => {
+	const versions = [
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+		Version.DRAFT_20,
+		Version.DRAFT_21,
+		Version.DRAFT_22,
+	] as const;
+	for (const version of versions) {
+		const body =
+			version === Version.DRAFT_15 || version === Version.DRAFT_16
+				? [0x07, 0x01, 0x09, 0x02, 0x05, 0x03]
+				: [0x01, 0x09, 0x05, 0x03];
+		const bytes = new Uint8Array([0x00, body.length, ...body]);
+		const decoded = await decodeVersioned(bytes, RequestOk.decode, version);
+		expect(decoded.parameters.largest).toEqual({ groupId: 5n, objectId: 3n });
+	}
+});
+
 test("RequestError v18: no requestId, retry_interval still present", async () => {
 	const msg = new RequestError({
 		errorCode: 500,
@@ -1533,6 +1566,73 @@ test("SubscribeNamespace: draft-18 omits subscribe options", async () => {
 		expect(decoded.requestId).toBe(4n);
 		expect(decoded.namespace).toBe("example/meeting" as Path.Valid);
 	}
+});
+
+// FORWARD is legal on SUBSCRIBE_NAMESPACE through draft-17. A value other than 0 or 1
+// still closes the session. Draft-18 dropped it from this message.
+test("SubscribeNamespace: FORWARD follows the draft", async () => {
+	const legacy = (version: IetfVersion, value: number) => {
+		const body = [0x01];
+		if (version === Version.DRAFT_17) body.push(0x00);
+		body.push(0x00, 0x01, 0x01, 0x10, value);
+		return framed(body);
+	};
+
+	for (const version of [Version.DRAFT_16, Version.DRAFT_17] as const) {
+		const decoded = await decodeVersioned(
+			legacy(version, 0),
+			SubscribeNamespace.SubscribeNamespaceLegacy.decode,
+			version,
+		);
+		expect(decoded.requestId).toBe(1n);
+		await expect(
+			decodeVersioned(legacy(version, 2), SubscribeNamespace.SubscribeNamespaceLegacy.decode, version),
+		).rejects.toThrow(ProtocolViolation);
+	}
+
+	await expect(
+		decodeVersioned(
+			framed([0x01, 0x00, 0x01, 0x10, 0x00]),
+			SubscribeNamespace.SubscribeNamespace.decode,
+			Version.DRAFT_18,
+		),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+// EXPIRES is a draft-16 message parameter, but not on SUBSCRIBE. Draft-16 ignores it and
+// still reads the parameter after it. Draft-18 closes the session.
+test("Parameters: a known parameter on the wrong message", async () => {
+	const block = new Uint8Array([0x02, 0x08, 0x05, 0x18, 0x07]);
+	const ignored = await Parameters.decode(
+		new Reader(undefined, block, Version.DRAFT_16),
+		Version.DRAFT_16,
+		"subscribe",
+	);
+	expect(ignored.subscriberPriority).toBe(7);
+	expect(ignored.expires).toBeUndefined();
+
+	await expect(
+		Parameters.decode(new Reader(undefined, block, Version.DRAFT_18), Version.DRAFT_18, "subscribe"),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+// TRACK_NAMESPACE_PREFIX updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only, so a
+// subscription's REQUEST_UPDATE carrying it closes the session instead of being acked.
+test("Parameters: TRACK_NAMESPACE_PREFIX is not a subscription update parameter", async () => {
+	// One parameter: TRACK_NAMESPACE_PREFIX (0x34), a one-field namespace "a".
+	const block = new Uint8Array([0x01, 0x34, 0x01, 0x01, 0x61]);
+	await expect(
+		Parameters.decode(new Reader(undefined, block, Version.DRAFT_18), Version.DRAFT_18, "request-update"),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+test("Subscribe: SUBGROUP_DELIVERY_TIMEOUT follows its draft", async () => {
+	const body = framed([...TRACK_HEAD, 0x01, 0x06, 0x00]);
+	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow(
+		ProtocolViolation,
+	);
+	const decoded = await decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_18);
+	expect(decoded.trackName).toBe("video");
 });
 
 test("Group: draft-18 sets FIRST_OBJECT bit, draft-17 does not", async () => {
@@ -1857,21 +1957,48 @@ test("Subscribe: FORWARD=0 decodes", async () => {
 });
 
 // A draft-20 FETCH names the track up front and carries its range in LOCATION_FILTER.
-test("Fetch v20: decodes every legal parameter", async () => {
+// Groups 128 through 130: the group takes two bytes, so draft-20's Length (4) and
+// draft-22's Location Filter Type (0x03) differ, and reading one as the other misframes
+// every parameter after it.
+for (const [version, locationFilter] of [
+	[Version.DRAFT_20, [0x01, 0x04, 0x80, 0x80, 0x00, 0x02]],
+	[Version.DRAFT_21, [0x01, 0x04, 0x80, 0x80, 0x00, 0x02]],
+	[Version.DRAFT_22, [0x01, 0x03, 0x80, 0x80, 0x00, 0x02]],
+] as const) {
+	test(`Fetch ${version}: decodes every legal parameter`, async () => {
+		const body = framed([
+			...TRACK_HEAD,
+			0x07, // Number of Parameters
+			...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
+			...[0x07, 0x64], // FILL_TIMEOUT (0x0A)
+			...[0x16, 0x40], // SUBSCRIBER_PRIORITY (0x20)
+			...locationFilter, // LOCATION_FILTER (0x21)
+			...[0x01, 0x01], // GROUP_ORDER (0x22)
+			...[0x04, 0x02, 0x00, 0x05], // OBJECTID_FILTER (0x26)
+			...[0x0f, 0x00], // INCLUDE_PROPERTIES (0x35)
+		]);
+
+		const msg = await decodeVersioned(body, Fetch.decode, version);
+		expect(msg.requestId).toBe(1n);
+	});
+}
+
+// Draft-22's LOCATION_FILTER is a Location Filter Type with no Length, so Next Object is the
+// single byte 0x05 and the parameter after it starts right behind it.
+test("Subscribe draft-22: Next Object is 0x21 0x05", async () => {
 	const body = framed([
 		...TRACK_HEAD,
-		0x07, // Number of Parameters
-		...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
-		...[0x07, 0x64], // FILL_TIMEOUT (0x0A)
-		...[0x16, 0x40], // SUBSCRIBER_PRIORITY (0x20)
-		...[0x01, 0x03, 0x04, 0x00, 0x02], // LOCATION_FILTER (0x21)
-		...[0x01, 0x01], // GROUP_ORDER (0x22)
-		...[0x04, 0x02, 0x00, 0x05], // OBJECTID_FILTER (0x26)
-		...[0x0f, 0x00], // INCLUDE_PROPERTIES (0x35)
+		0x04, // Number of Parameters
+		...[0x10, 0x01], // FORWARD (0x10) = 1
+		...[0x10, 0x40], // SUBSCRIBER_PRIORITY (0x20) = 64
+		...[0x01, 0x05], // LOCATION_FILTER (0x21): Next Object
+		...[0x01, 0x02], // GROUP_ORDER (0x22) = Descending
 	]);
 
-	const msg = await decodeVersioned(body, Fetch.decode, Version.DRAFT_20);
-	expect(msg.requestId).toBe(1n);
+	const msg = await decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_22);
+	expect(msg.filter).toEqual({ kind: "nextObject" });
+	expect(msg.subscriberPriority).toBe(64);
+	expect(await encodeVersioned(msg, Version.DRAFT_22)).toEqual(body);
 });
 
 // The tagged forms through draft-19, with a token.
@@ -1918,3 +2045,77 @@ test("Subscribe v16: rejects INCLUDE_PROPERTIES", async () => {
 	const body = framed([...TRACK_HEAD, 0x01, 0x35, 0x01, 0x00]);
 	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow();
 });
+
+for (const version of [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	for (const kind of [0x20n, 0x21n, 0x9dn, 0x11cn]) {
+		test(`SETUP ${version}: repeated unknown option ${kind}`, async () => {
+			const { stream, written } = createTestWritableStream();
+			const writer = new Writer(stream, version);
+			if (version <= Version.DRAFT_16) await writer.u53(2);
+			await writer.u62(kind);
+			for (let i = 0; i < 2; i++) {
+				if (i > 0) await writer.u62(version <= Version.DRAFT_15 ? kind : 0n);
+				if (kind % 2n === 0n) await writer.u62(1n);
+				else {
+					await writer.u53(1);
+					await writer.u8(1);
+				}
+			}
+			await writer.close();
+			await writer.closed;
+			await SetupOptions.decode(new Reader(undefined, concatChunks(written), version), version);
+		});
+	}
+}
+
+for (const version of [
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	test(`SETUP ${version}: known options cannot repeat`, async () => {
+		for (const bytes of [new Uint8Array([4, 1, 0, 2]), new Uint8Array([7, 1, 97, 0, 1, 98])]) {
+			await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(
+				/duplicate/,
+			);
+		}
+	});
+	test(`SETUP ${version}: repeated unknown options still require complete values`, async () => {
+		const bytes = new Uint8Array([0x21, 1, 97, 0, 2, 98]);
+		await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow();
+	});
+	test(`GROUP_ORDER ${version}: only ascending and descending are legal`, async () => {
+		for (const value of [0, 3, 255]) {
+			const bytes = new Uint8Array([1, 0x22, value]);
+			await expect(Parameters.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(
+				/group order/,
+			);
+		}
+		for (const value of [1, 2]) {
+			const bytes = new Uint8Array([1, 0x22, value]);
+			const params = await Parameters.decode(new Reader(undefined, bytes, version), version);
+			expect(params.groupOrder).toBe(value);
+		}
+	});
+}
+
+for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16]) {
+	test(`legacy GROUP_ORDER ${version}: zero keeps the publisher preference`, async () => {
+		const bytes = new Uint8Array([1, 0x22, 0]);
+		const params = await Parameters.decode(new Reader(undefined, bytes, version), version);
+		expect(params.groupOrder).toBe(0);
+	});
+}

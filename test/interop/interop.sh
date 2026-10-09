@@ -11,7 +11,8 @@
 # It stands up a moq-relay, then for each publisher language publishes an H.264
 # broadcast and confirms every subscriber sees data flowing before the timeout.
 # Every publisher but the Rust CLI also carries audio. The browser subscriber
-# verifies rendered WebCodecs output, player pause/resume, and that audio.
+# verifies rendered WebCodecs output, player pause/resume, and that audio, then
+# that a session the relay refuses hands Chromium the close code and reason.
 set -euo pipefail
 
 INTEROP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -678,6 +679,25 @@ else
         start_publisher "$pub" "$broadcast"
         run_round "$pub" "$broadcast" "$PUB_PID"
     done
+
+    # The relay refuses a token on its public rules, and Chromium has to read the close code and
+    # reason it sends. Chromium is the strict peer here, so no Rust client stands in for it.
+    if needs js; then
+        echo "=== browser close code ==="
+        if is_broken js; then
+            echo "  FAIL  refused session (browser client unavailable)"
+            overall=1
+        else
+            started=$SECONDS
+            if (cd "$CLIENTS/js" && bun close.ts --url "$URL" --timeout "$TIMEOUT") >"$HARNESS_RUN/close.log" 2>&1; then
+                echo "  PASS  refused session ($((SECONDS - started))s)"
+            else
+                echo "  FAIL  refused session ($((SECONDS - started))s)"
+                sed 's/^/        /' "$HARNESS_RUN/close.log" >&2 || true
+                overall=1
+            fi
+        fi
+    fi
 fi
 
 if [[ "$overall" -eq 0 ]]; then

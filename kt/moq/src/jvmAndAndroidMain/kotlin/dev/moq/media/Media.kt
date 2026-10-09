@@ -31,7 +31,7 @@ typealias CatalogConsumer = uniffi.moq.MoqMediaCatalogConsumer
 typealias Catalog = uniffi.moq.MoqCatalog
 /** A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts. */
 typealias MediaFrame = uniffi.moq.MoqMediaFrame
-/** The catalog description of a video track, including whether the publisher recommends temporarily avoiding it. */
+/** The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming). */
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
 typealias VideoHint = uniffi.moq.MoqVideoHint
@@ -49,7 +49,7 @@ typealias AudioInit = uniffi.moq.MoqAudioInit
 typealias VideoInit = uniffi.moq.MoqVideoInit
 /** A container format and its leading bytes. */
 typealias ContainerInit = uniffi.moq.MoqContainerInit
-/** The catalog description of an audio track: codec, sample rate, channels, and container. */
+/** The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container. */
 typealias Audio = uniffi.moq.MoqAudio
 /** A width and height pair, in pixels. */
 typealias Dimensions = uniffi.moq.MoqDimensions

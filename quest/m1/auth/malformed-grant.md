@@ -51,10 +51,11 @@ out-of-range `Expires`, and assert that the session closes with
 PROTOCOL_VIOLATION. If a shared vector is easy, add them to the interop suite
 as well, since both sides must agree.
 
-The auth line branch also plans AUTH violations
-(`quest/m1/auth/violations.md`), a wider sweep of every AUTH read path that
-lists this lite decode gap. Whichever lands second drops the overlap.
+This quest owns the lite AUTH_OK decode gap; the wider
+[AUTH violations](/quest/m1/auth/violations.md) sweep covers every other AUTH
+read path (decided 2026-10-07, folding the overlap #4868 planned).
 
 ## Related
 
+- [AUTH violations](/quest/m1/auth/violations.md) - the sweep of every other AUTH read path
 - [In-band auth](/quest/m1/auth/README.md) - the line this blocks

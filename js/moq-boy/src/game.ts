@@ -302,13 +302,13 @@ export class Game {
 		const viewerBroadcast = origin.createBroadcast(
 			Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`),
 		);
-		viewerBroadcast.announce();
+		viewerBroadcast.announce({ epoch: Moq.Epoch.mint() });
 		effect.cleanup(() => {
 			viewerBroadcast.close();
 			this.viewerId.set(undefined);
 		});
 
-		const track = viewerBroadcast.createTrack("command");
+		const track = viewerBroadcast.createTrack("command", { timescale: Moq.Time.Timescale.MILLI });
 		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 		effect.cleanup(() => producer.finish());
 		effect.run(this.#runCommandTrack.bind(this, track, producer));
@@ -324,6 +324,6 @@ export class Game {
 		const command = effect.get(this.#command);
 		if (!command) return;
 
-		producer.update({ ...command.cmd, timestamps: command.timestamps });
+		producer.update({ value: { ...command.cmd, timestamps: command.timestamps }, at: Moq.Time.Timestamp.now() });
 	}
 }

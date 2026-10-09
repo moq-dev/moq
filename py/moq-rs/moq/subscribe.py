@@ -289,7 +289,7 @@ class BroadcastConsumer:
         ``await moq.media.catalog(broadcast)`` followed by
         ``catalog.audio[name]``). Only Opus and AAC-LC tracks are supported;
         AAC is decode only, since nothing here encodes it.
-        Use ``output.max_age_us`` to
+        Use ``output.max_delay_us`` to
         control how aggressively stalled groups get skipped. That's
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``min_buffer_us`` jitter-buffer floor, which is a

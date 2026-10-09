@@ -45,7 +45,9 @@ Decided 2026-10-01:
   sharing it under a fresh epoch, per
   [Broadcast epochs](/quest/m0/broadcast-epoch/README.md), with a fresh
   catalog, tracks, and importers starting on a keyframe. The CLI publishes
-  each run (each reconnect) under a fresh epoch. Decided 2026-10-02 and
+  each run (each reconnect) under a fresh epoch, so `moq import rtsp` refuses
+  `--epoch` (`takes_epoch` is false for it, as for the other gateways); test
+  the refusal. Decided 2026-10-02 and
   2026-10-05; shifting timestamps onto the existing catalog clock behind a
   `discontinuity()` marker was rejected.
 - Credentials ride the URL's userinfo, as every RTSP tool takes them. retina
@@ -84,8 +86,6 @@ Public API: the `moq-rtsp` crate and the `moq import rtsp` subcommand.
 Wire: none. Both are additive, so it is backported to `release` once it
 lands on main.
 
-The moq.pro guide link below resolves once moq.pro#2210 merges.
-
 ## Required
 
 - [Shared import clock](/quest/m1/shared-clock.md) - two sessions importing into one caller broadcast share one timeline
@@ -93,7 +93,6 @@ The moq.pro guide link below resolves once moq.pro#2210 merges.
 ## Related
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - the fresh epoch a caller and the CLI mint for each restarted broadcast
-- [Import at the first frame](/quest/m1/import-first-frame.md) - a lone session's catalog publishes at its first frame
 - [moq.pro's Pronto truck](https://github.com/moq-dev/moq.pro/blob/main/pronto/truck/src/camera.rs) - the prior art this generalizes
 - [moq.pro: Pronto truck on moq-rtsp](https://github.com/moq-dev/moq.pro/blob/main/quest/m3/truck-rtsp.md) - runs the library entry point under its own supervisor
 - [moq.pro: Camera (RTSP) guide](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rtsp-guide.md) - documents `moq import rtsp` for customers once a release ships it

@@ -99,6 +99,9 @@ pub enum Error {
 	#[error("grant names nothing; the session is refused")]
 	UselessGrant,
 
+	#[error("grant marks an upstream that is not a peer")]
+	UpstreamWithoutPeer,
+
 	#[error("grant asks to be revalidated but never expires")]
 	UnboundedRevalidate,
 

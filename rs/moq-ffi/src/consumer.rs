@@ -12,7 +12,7 @@ pub(crate) fn timestamp_us(timestamp: moq_net::Timestamp) -> Result<u64, MoqErro
 }
 
 fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
-	let timestamp_us = timestamp_us(frame.timestamp)?;
+	let timestamp_us = frame.timestamp.map(timestamp_us).transpose()?;
 	Ok(MoqFrame {
 		payload: frame.payload.to_vec(),
 		timestamp_us,
@@ -34,9 +34,9 @@ pub struct MoqSubscription {
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaContainerConsumer`]'s jitter buffer.
 	#[uniffi(default = 0)]
-	pub max_age_us: u64,
+	pub max_delay_us: u64,
 	/// The lowest group to deliver (a floor), or null for none. A floor is not a
-	/// request: `max_age_us` is what asks for data, and delivery starts at the oldest
+	/// request: `max_delay_us` is what asks for data, and delivery starts at the oldest
 	/// group at or above the floor within that budget (the latest group at the default
 	/// budget of 0).
 	#[uniffi(default = None)]
@@ -65,7 +65,7 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 	fn from(s: MoqSubscription) -> Self {
 		moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_max_age(std::time::Duration::from_micros(s.max_age_us))
+			.with_max_delay(std::time::Duration::from_micros(s.max_delay_us))
 			.with_start(s.group_start.map(moq_net::track::Position::group))
 			.with_end(s.group_end.map(moq_net::track::Position::group))
 	}
@@ -187,7 +187,7 @@ impl MoqBroadcastConsumer {
 
 pub(crate) fn map_fetch_error(err: moq_net::Error) -> MoqError {
 	match err {
-		moq_net::Error::NotFound => MoqError::NotFound,
+		moq_net::Error::NotFound | moq_net::Error::NotFetchable => MoqError::NotFound,
 		moq_net::Error::Unsupported | moq_net::Error::Version => MoqError::Unsupported,
 		err => err.into(),
 	}
@@ -340,7 +340,7 @@ impl TrackInner {
 		};
 		Poll::Ready(Ok(Some(MoqDatagram {
 			sequence: datagram.sequence,
-			timestamp_us: timestamp_us(datagram.timestamp)?,
+			timestamp_us: datagram.timestamp.map(timestamp_us).transpose()?,
 			payload: datagram.payload.to_vec(),
 		})))
 	}

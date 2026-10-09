@@ -91,8 +91,7 @@ impl Muxer {
 			transform: None,
 			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
 			timescale: moq_net::Timescale::new(catalog_timescale_audio(config)?).map_err(Error::from)?,
-			// Fallback for a duration-less trailing sample (~1024 samples per frame).
-			default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
+			default_frame: super::audio_default_frame(config),
 			opus: matches!(config.codec, hang::catalog::AudioCodec::Opus),
 			kind: Kind::Audio(config.clone()),
 		})
@@ -189,7 +188,7 @@ impl Muxer {
 					out.push(frame);
 					continue;
 				};
-				let payload = transform.transform(frame.payload.clone())?;
+				let payload = transform.transform(frame.payload.clone(), frame.keyframe)?;
 				// Track the transform's record even after it is first set: a mid-stream
 				// reconfiguration rebuilds the avcC/hvcC with new parameter sets.
 				if let Some(d) = transform.codec_private()
@@ -385,7 +384,7 @@ mod tests {
 
 		// Decode it back: timestamps survive at the muxer's timescale (framerate * 1000).
 		let timescale = moq_net::Timescale::new(30_000).unwrap();
-		let decoded = super::super::decode(fragment, timescale, crate::container::fmp4::Kind::Video).unwrap();
+		let decoded = super::super::decode(fragment, None, timescale, crate::container::fmp4::Kind::Video).unwrap();
 		assert_eq!(decoded.len(), 2);
 		assert_eq!(decoded[0].timestamp.as_micros(), 10_000_000);
 		assert!(decoded[0].keyframe);
@@ -575,6 +574,7 @@ mod tests {
 		};
 		let decoded = super::super::decode(
 			muxer.fragment(0, &[frame]).unwrap(),
+			None,
 			timescale,
 			crate::container::fmp4::Kind::Video,
 		)
@@ -605,6 +605,7 @@ mod tests {
 		};
 		let decoded = super::super::decode(
 			muxer.fragment(0, &[frame]).unwrap(),
+			None,
 			timescale,
 			crate::container::fmp4::Kind::Video,
 		)
@@ -680,6 +681,7 @@ mod tests {
 
 		let decoded = super::super::decode(
 			muxer.fragment(0, &[frame]).unwrap(),
+			None,
 			timescale,
 			crate::container::fmp4::Kind::Video,
 		)
@@ -766,7 +768,7 @@ mod tests {
 		let fragment = muxer.fragment(0, &frames).unwrap();
 
 		let timescale = moq_net::Timescale::new(48_000).unwrap();
-		let decoded = super::super::decode(fragment, timescale, crate::container::fmp4::Kind::Video).unwrap();
+		let decoded = super::super::decode(fragment, None, timescale, crate::container::fmp4::Kind::Video).unwrap();
 		assert_eq!(decoded.len(), 4);
 		for f in &decoded {
 			assert_eq!(
@@ -800,7 +802,7 @@ mod tests {
 		let fragment = muxer.fragment(0, &frames).unwrap();
 
 		let timescale = moq_net::Timescale::new(48_000).unwrap();
-		let decoded = super::super::decode(fragment, timescale, crate::container::fmp4::Kind::Video).unwrap();
+		let decoded = super::super::decode(fragment, None, timescale, crate::container::fmp4::Kind::Video).unwrap();
 		let first = decoded[0].duration.unwrap().as_micros();
 		assert_eq!(first, 20_000, "the pause is a discontinuity, not a 2405 second sample");
 	}

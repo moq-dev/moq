@@ -81,7 +81,6 @@ impl Room {
 			let (update, active) = match ready!(self.announced.poll_next(waiter)) {
 				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true),
 				Some(announce::Event::End(update)) => (update, false),
-				Some(announce::Event::Live) => continue,
 				None => return Poll::Ready(None),
 			};
 			let path = update.prefix;
@@ -100,7 +99,7 @@ impl Room {
 				}));
 			}
 
-			let mut request = self.origin.request_broadcast(&path).into_inner();
+			let mut request = self.origin.request_broadcast(&path, None).into_inner();
 			match kio::Task::poll(&mut request, waiter) {
 				Poll::Ready(Ok(broadcast)) => {
 					return Poll::Ready(Some(Event {

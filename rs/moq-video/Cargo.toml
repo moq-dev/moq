@@ -45,10 +45,17 @@ mediacodec = ["dep:ndk"]
 # zero-copy transcode path. Everything is dlopen'd at runtime, so a build with
 # this on still links GPU-less and starts driverless, falling back to the next
 # encoder or decoder.
-nvidia = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
+nvidia = ["dep:ash", "dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # Vendored, statically linked software H.264 encode/decode. Enabled by default,
 # but separable from native codecs for hardware-only and minimal builds.
 openh264 = ["dep:openh264", "dep:openh264-sys2"]
+# Software VP8 and VP9 decode through libvpx, on every platform. Off by default
+# because libvpx comes from the build host: libvpx-native-sys finds it through
+# pkg-config (or `VPX_LIB_DIR` + `VPX_VERSION`) and ships pregenerated bindings,
+# so no libclang is needed. Set `VPX_STATIC=1` to link the archive rather than
+# libvpx.so, which is what the Nix dev shell does. Decodes 8-bit 4:2:0 only (VP8,
+# and VP9 profile 0); anything else is refused rather than converted.
+vpx = ["dep:libvpx-native-sys"]
 # Intel/AMD VAAPI hardware codecs (Linux): the H.264 encoder and decoder. Off by
 # default because moq-vaapi's build script runs bindgen over its vendored libva
 # headers, so the build host needs libclang. At runtime libva is dlopen'd: the
@@ -110,6 +117,9 @@ fast_image_resize = "6"
 hang = { workspace = true }
 # The capture publish's control handle.
 kio = { workspace = true, optional = true }
+# libvpx bindings for the `vpx` feature. The library itself comes from the build
+# host; see the feature above.
+libvpx-native-sys = { version = "5.0.17", optional = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Vendored, statically linked software H.264 fallback (no system dependency).
@@ -154,9 +164,10 @@ objc2-video-toolbox = "0.3.2"
 ndk = { version = "0.9", optional = true, default-features = false, features = ["media", "api-level-26"] }
 
 [target.'cfg(target_os="linux")'.dependencies]
+ash = { workspace = true, optional = true }
 # xdg-desktop-portal ScreenCast and Camera negotiation for the `pipewire` feature
 # (pure Rust, zbus over DBus). The ScreenCast portal owns source selection: the
-# user picks a monitor in a compositor dialog, and we get back a PipeWire fd +
+# user picks a monitor or window in a compositor dialog, and we get back a PipeWire fd +
 # node id to stream from. The Camera portal grants a sandboxed app a PipeWire
 # remote that exposes the cameras.
 ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast", "camera"] }

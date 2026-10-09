@@ -1,0 +1,16 @@
+# moq-net's test executor: single-threaded, deterministic, with simulated time.
+#
+# A workspace member so it shares the root lockfile. Never published: moq-net takes
+# it as a path-only dev-dependency, which `cargo publish` strips.
+[package]
+name = "moq-net-sim"
+version = "0.0.0"
+license = "MIT OR Apache-2.0"
+publish = false
+edition = "2024"
+rust-version.workspace = true
+
+[dependencies]
+futures = { workspace = true }
+kio = { workspace = true }
+moq-net-sim-macros = { path = "macros" }

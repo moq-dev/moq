@@ -20,12 +20,11 @@ const REQUESTED: &str = ".dash/nobody";
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
-/// Drain every event the cursor has pending, as `kind prefix` lines, skipping the
-/// live marker.
+/// Drain every event the cursor has pending, as `kind prefix` lines.
 fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 	use moq_net::announce::Event;
 	let mut seen = Vec::new();
@@ -34,7 +33,6 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 			Event::Start(announce) => ("Start", announce),
 			Event::Update(announce) => ("Update", announce),
 			Event::End(announce) => ("End", announce),
-			Event::Live => continue,
 		};
 		seen.push(format!("{kind} {}", announce.prefix));
 	}
@@ -65,16 +63,16 @@ async fn covering(version: Option<&str>) -> Vec<String> {
 
 	let served = publisher.create_broadcast(SERVED).unwrap();
 	served.announce(Default::default()).unwrap();
-	tokio::time::sleep(SETTLE).await;
+	moq_net_sim::sleep(SETTLE).await;
 	log.push(format!("served: {:?}", drain(&mut announced)));
 
 	let below = publisher.create_broadcast(format!("{REQUESTED}/cam")).unwrap();
 	below.announce(Default::default()).unwrap();
-	tokio::time::sleep(SETTLE).await;
+	moq_net_sim::sleep(SETTLE).await;
 	log.push(format!("below: {:?}", drain(&mut announced)));
 
 	if let Some(pair) = pair {
-		let closed = tokio::time::timeout(SETTLE, pair.client.closed()).await;
+		let closed = moq_net_sim::timeout(SETTLE, pair.client.closed()).await;
 		log.push(format!("session open: {}", closed.is_err()));
 	}
 
@@ -83,15 +81,13 @@ async fn covering(version: Option<&str>) -> Vec<String> {
 
 const EXPECTED: &[&str] = &["served: [\"Start \"]", "below: [\"Start cam\"]"];
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn local_cursor_sees_the_covering_route_at_its_root() {
-	tokio::time::pause();
 	assert_eq!(covering(None).await, EXPECTED);
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn remote_lite_peer_hears_the_covering_route() {
-	tokio::time::pause();
 	let mut expected = EXPECTED.to_vec();
 	expected.push("session open: true");
 	for version in [
@@ -105,9 +101,8 @@ async fn remote_lite_peer_hears_the_covering_route() {
 	}
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn remote_ietf_peer_hears_the_covering_route() {
-	tokio::time::pause();
 	let mut expected = EXPECTED.to_vec();
 	expected.push("session open: true");
 	for version in [

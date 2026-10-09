@@ -2,11 +2,14 @@
 
 ## Goal
 
-An external [`Surface::Vulkan`](/quest/m2/gpu-surface.md) exported as a
+An external `Surface::Vulkan` exported as a
 DMA-BUF with a DRM format modifier, from a producer that synchronizes
 explicitly through a timeline, encodes through VA-API on Intel (iHD) without a
 CPU round trip. An ignored hardware test proves it on an Arrow Lake iGPU, and
-`Kind::Auto` picks VA-API for a surface on an Intel device.
+`Kind::Auto` picks VA-API for a surface on an Intel device, through the same
+seam as [Vulkan encode](/quest/m2/vulkan-encode.md): `encode::Config::input`
+and a VA-API candidate with `vulkan: true` in
+`rs/moq-video/src/encode/backend/mod.rs`.
 
 This is the by-design proof that the surface is not shaped around one vendor:
 the same type reaches CUDA, Vulkan Video, and VA-API.
@@ -41,9 +44,12 @@ sync_file import, so an explicit-sync producer races it.
   resize share it so a DMA-BUF moves between them without a copy. Choosing a
   node per surface makes `device()` per-node, so keep decode, resize, and
   encode on one node per DMA-BUF. Decided 2026-10-05: the producer puts the
-  render node's `dev_t` in the [surface](/quest/m2/gpu-surface.md), read from
+  render node's `dev_t` in the surface, read from
   its own `VK_EXT_physical_device_drm`, and VA-API opens that node. It is
   the one device identity [GPU health](/quest/m2/gpu-health.md) keys by too.
+  It landed in #4975 as `frame::vulkan::Device { device_uuid, driver_uuid,
+  render_node: Option<u64> }`. VA-API refuses a surface with no
+  `render_node`, since it has no other way to pick a node.
   Rejected: mapping the surface's UUID to a node on the VA-API side, which
   needs a Vulkan instance there.
 
@@ -53,13 +59,13 @@ sync_file import, so an explicit-sync producer races it.
 
 Test: an ignored hardware test in `just rs gpu`'s Intel branch renders on the
 iGPU with Vulkan, exports a DMA-BUF image and an explicit-sync timeline, and
-encodes H.264 at two sizes; the output decodes, and the slots recycle.
+encodes H.264 at two sizes; the output decodes, and the slots recycle. On
+the two-node host, also check that a surface carrying `renderD129`'s
+`dev_t`, or `MOQ_VAAPI_DEVICE` naming it, opens that node rather than the
+first render node: the second-node check moved here from
+[Video hardware validation](/quest/m3/video-hardware.md) (2026-10-06 audit).
 
-Public API: none beyond the surface quest's. Wire: none.
-
-## Required
-
-- [One external GPU image for every encoder](/quest/m2/gpu-surface.md) - the surface VA-API imports
+Public API: none; the surface landed in #4975. Wire: none.
 
 ## Related
 

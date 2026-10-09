@@ -77,7 +77,7 @@ impl Credential {
 		self.0.kid
 	}
 
-	/// The opaque broadcast path for a semantic broadcast name; instances publish at `<path>/<epoch>`.
+	/// The opaque broadcast path for a semantic broadcast name; each instance announces its epoch on the route.
 	///
 	/// # Errors
 	///

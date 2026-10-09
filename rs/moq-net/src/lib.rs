@@ -96,7 +96,6 @@ mod test_interop;
 mod util;
 mod version;
 
-mod runtime;
 pub mod server;
 pub mod session;
 pub mod stats;
@@ -104,7 +103,7 @@ pub mod time;
 pub mod transport;
 
 pub use client::*;
-pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
+pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 pub use driver::Driver;
 pub use epoch::{Epoch, InvalidEpoch};
 pub use error::*;
@@ -118,9 +117,6 @@ pub use version::*;
 
 // Re-export the bytes crate
 pub use bytes;
-
-// Re-export the transport trait, since it bounds the Client/Server entry points.
-pub use web_transport_trait;
 
 // Re-export the kio crate, since it appears in the public API (e.g. poll_* waiters).
 pub use kio;

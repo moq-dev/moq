@@ -7,6 +7,7 @@ with ``timedelta`` fields and convert at the boundary.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -36,34 +37,52 @@ def _from_us(us: int) -> timedelta:
     return timedelta(microseconds=us)
 
 
+def _strs(value: Sequence[str], name: str) -> list[str]:
+    # A str is itself a Sequence[str], so list() would split it into characters.
+    if isinstance(value, str):
+        raise TypeError(f"{name} takes a sequence of strings, not a str: {value!r}")
+    return list(value)
+
+
+def _opt_from_us(us: int | None) -> timedelta | None:
+    return None if us is None else _from_us(us)
+
+
 @dataclass(frozen=True)
 class Frame:
-    """A raw track frame: a payload and its presentation timestamp."""
+    """A raw track frame: a payload and its presentation timestamp.
+
+    ``timestamp`` is ``None`` on a frame read from an untimed track. A raw track
+    published here is timed, so writing one needs it.
+    """
 
     payload: bytes
-    timestamp: timedelta = timedelta(0)
+    timestamp: timedelta | None = timedelta(0)
 
     def _ffi(self) -> MoqFrame:
-        return MoqFrame(payload=self.payload, timestamp_us=_to_us(self.timestamp, "timestamp"))
+        return MoqFrame(payload=self.payload, timestamp_us=_opt_us(self.timestamp, "timestamp"))
 
     @staticmethod
     def _from_ffi(frame: MoqFrame) -> Frame:
-        return Frame(payload=frame.payload, timestamp=_from_us(frame.timestamp_us))
+        return Frame(payload=frame.payload, timestamp=_opt_from_us(frame.timestamp_us))
 
 
 @dataclass(frozen=True)
 class Datagram:
-    """A best-effort track datagram as received: sequence number, timestamp, and payload."""
+    """A best-effort track datagram as received: sequence number, timestamp, and payload.
+
+    ``timestamp`` is ``None`` on a datagram read from an untimed track.
+    """
 
     sequence: int
-    timestamp: timedelta
+    timestamp: timedelta | None
     payload: bytes
 
     @staticmethod
     def _from_ffi(datagram: MoqDatagram) -> Datagram:
         return Datagram(
             sequence=datagram.sequence,
-            timestamp=_from_us(datagram.timestamp_us),
+            timestamp=_opt_from_us(datagram.timestamp_us),
             payload=datagram.payload,
         )
 
@@ -72,20 +91,20 @@ class Datagram:
 class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
-    ``max_age`` is how old a non-latest group may get before it is skipped; zero skips
-    at once. ``group_start`` is a floor and ``group_end`` an exclusive end, ``None`` for
+    ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
+    zero skips at once. ``group_start`` is a floor and ``group_end`` an exclusive end, ``None`` for
     no bound.
     """
 
     priority: int = 0
-    max_age: timedelta = timedelta(0)
+    max_delay: timedelta = timedelta(0)
     group_start: int | None = None
     group_end: int | None = None
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
             priority=self.priority,
-            max_age_us=_to_us(self.max_age, "max_age"),
+            max_delay_us=_to_us(self.max_delay, "max_delay"),
             group_start=self.group_start,
             group_end=self.group_end,
         )
@@ -99,11 +118,13 @@ def _subscription(subscription: Subscription | None) -> MoqSubscription | None:
 class TrackInfo:
     """Publisher-side track properties, mirroring moq-net's ``track::Info``.
 
-    ``max_age`` is how long the publisher caches a non-latest group, ``None`` for no
-    limit. ``timescale`` is ticks per second, ``None`` for microseconds.
+    ``priority`` defaults to 127, the middle of the range. ``max_age`` is how long the
+    publisher caches a non-latest group, ``None`` for no limit. ``timescale`` is ticks
+    per second: ``None`` uses microseconds when publishing, and means the source
+    declared no timeline on a received track.
     """
 
-    priority: int = 0
+    priority: int = 127
     max_age: timedelta | None = None
     timescale: int | None = None
 

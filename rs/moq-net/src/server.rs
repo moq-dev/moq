@@ -1,7 +1,7 @@
 //! Accepting a MoQ session, including the paused handshake that inspects the
 //! peer's SETUP before granting origins.
 
-use web_transport_trait::{MaybeSend, MaybeSync};
+use crate::transport::{MaybeSend, MaybeSync};
 
 use crate::origin;
 use crate::time::{Clock, Instant};
@@ -20,6 +20,7 @@ pub struct Server {
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
 	versions: Versions,
+	limits: crate::session::Limits,
 }
 
 impl Server {
@@ -56,6 +57,12 @@ impl Server {
 	/// Set both publish and subscribe from one shared [`origin::Producer`].
 	pub fn with_origin(self, origin: origin::Producer) -> Self {
 		self.with_publisher(&origin).with_subscriber(origin)
+	}
+
+	/// Cap what each client can make its session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
+	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
+		self.limits = limits;
+		self
 	}
 
 	/// Restrict which protocol versions to accept, in preference order.
@@ -111,6 +118,7 @@ impl Server {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			limits: self.limits,
 			session: session.clone(),
 			setup_stream: None,
 			publish,
@@ -128,6 +136,7 @@ impl Server {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			start.goaway,
+			start.setup,
 		))
 	}
 
@@ -334,7 +343,7 @@ impl Server {
 		// Legacy bidi SETUP exchange (IETF 14-16, lite 01/02). Read the client's
 		// SETUP to choose the version; `ok()` sends the server SETUP and starts.
 		let mut stream = Stream::accept(&mut session, encoding).await?;
-		let mut client: setup::Client = stream.reader.decode().await?;
+		let client: setup::Client = stream.reader.decode().await?;
 
 		let version = client
 			.versions
@@ -348,7 +357,7 @@ impl Server {
 		// in its SETUP just like lite-05.
 		let (path, token, request_id_max, peer_declared) = match version {
 			Version::Ietf(v) => {
-				let params = ietf::Parameters::decode(&mut client.parameters, v)?;
+				let (params, _) = ietf::Parameters::decode_slice(&client.parameters, v)?;
 				let path = match params.get_bytes(ietf::ParameterBytes::Path) {
 					Some(bytes) => Some(
 						std::str::from_utf8(bytes)
@@ -439,8 +448,8 @@ pub struct Handshake<S: crate::transport::poll::Session> {
 	role: Option<Role>,
 	origin: Option<crate::Hop>,
 	token: Option<setup::Token>,
-	/// The identity this session's routes are stamped with when the peer declares none
-	/// on the wire. Fresh per request unless the caller overrides it
+	/// The identity this session's routes are attributed to for split horizon when the
+	/// peer declares none on the wire; it never enters a hop chain. Fresh per request unless the caller overrides it
 	/// ([`Handshake::with_peer_hop`]).
 	assigned_hop: crate::Hop,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
@@ -519,8 +528,9 @@ where
 
 			// The client's SETUP was read at the pause; hand the stream back
 			// for GOAWAY. A server never advertises a path, hence `None`.
-			let (protocol, goaway) = ietf::start(ietf::Config {
+			let (protocol, goaway, setup) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
+				limits: server.limits,
 				session: session.clone(),
 				setup: None,
 				request_id_max: None,
@@ -545,6 +555,7 @@ where
 				None,
 				crate::driver::Protocol::Ietf(protocol),
 				goaway,
+				setup,
 			))
 		}
 		.maybe_boxed()
@@ -589,7 +600,11 @@ where
 			let parameters = match version {
 				Version::Ietf(v) => {
 					let mut parameters = ietf::Parameters::default();
-					parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
+					// The client's requests, admitted up to our limits and granted back as they close.
+					parameters.set_varint(
+						ietf::ParameterVarInt::MaxRequestId,
+						ietf::initial_max_request_id(server.limits.requests(), true),
+					);
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 					ietf::solicit::into_setup(&mut parameters, v);
 					ietf::hidden::into_setup(&mut parameters, v);
@@ -605,12 +620,13 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway) = match version {
+			let (recv_bw, protocol, goaway, setup) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
 					let start = lite::start(lite::Config {
 						runtime: runtime.clone(),
+						limits: server.limits,
 						session: session.clone(),
 						setup_stream: Some(stream),
 						publish,
@@ -624,13 +640,15 @@ where
 						start.recv_bandwidth,
 						crate::driver::Protocol::Lite(Box::new(start.driver)),
 						start.goaway,
+						start.setup,
 					)
 				}
 				Version::Ietf(v) => {
 					let stream = stream.with_version(v);
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-					let (protocol, goaway) = ietf::start(ietf::Config {
+					let (protocol, goaway, setup) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
+						limits: server.limits,
 						session: session.clone(),
 						setup: Some(stream),
 						request_id_max,
@@ -646,11 +664,13 @@ where
 						peer_declared: Some(peer_declared),
 						early_unis: Vec::new(),
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, setup)
 				}
 			};
 
-			Ok(Session::new(runtime, session, version, recv_bw, protocol, goaway))
+			Ok(Session::new(
+				runtime, session, version, recv_bw, protocol, goaway, setup,
+			))
 		}
 		.maybe_boxed()
 	}
@@ -831,7 +851,7 @@ mod tests {
 		}
 	}
 	impl std::error::Error for FakeError {}
-	impl web_transport_trait::Error for FakeError {
+	impl crate::transport::Error for FakeError {
 		fn session_error(&self) -> Option<(u32, String)> {
 			Some((0, "closed".to_string()))
 		}
@@ -865,12 +885,12 @@ mod tests {
 			self
 		}
 
-		fn closed(&self) -> Option<u32> {
+		fn close_code(&self) -> Option<u32> {
 			*self.closed.lock().unwrap()
 		}
 	}
 
-	impl web_transport_trait::poll::Session for FakeSession {
+	impl crate::transport::poll::Session for FakeSession {
 		type SendStream = FakeSend;
 		type RecvStream = FakeRecv;
 		type Error = FakeError;
@@ -884,7 +904,7 @@ mod tests {
 					data: data.into(),
 					stops: self.stops.clone(),
 				})),
-				None if self.closed().is_some() => std::task::Poll::Ready(Err(FakeError)),
+				None if self.close_code().is_some() => std::task::Poll::Ready(Err(FakeError)),
 				None => std::task::Poll::Pending,
 			}
 		}
@@ -940,14 +960,14 @@ mod tests {
 		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
 		}
-		fn stats(&self) -> impl web_transport_trait::Stats {
-			web_transport_trait::StatsUnavailable
+		fn stats(&self) -> impl crate::transport::Stats {
+			crate::transport::StatsUnavailable
 		}
 	}
 
 	#[derive(Clone, Default)]
 	struct FakeSend;
-	impl web_transport_trait::poll::SendStream for FakeSend {
+	impl crate::transport::poll::SendStream for FakeSend {
 		type Error = FakeError;
 		fn poll_write(
 			&mut self,
@@ -970,7 +990,7 @@ mod tests {
 		data: VecDeque<u8>,
 		stops: Arc<Mutex<Vec<u32>>>,
 	}
-	impl web_transport_trait::poll::RecvStream for FakeRecv {
+	impl crate::transport::poll::RecvStream for FakeRecv {
 		type Error = FakeError;
 		fn poll_read(
 			&mut self,
@@ -998,7 +1018,9 @@ mod tests {
 	fn lite05_setup(path: Option<&str>, role: Option<Role>, hop: Option<Hop>) -> Vec<u8> {
 		let v = lite::Version::Lite05;
 		let mut buf = Vec::new();
-		lite::DataType::Setup.encode(&mut buf, v).unwrap();
+		lite::DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
+			.unwrap();
 		lite::Setup {
 			probe: lite::ProbeLevel::None,
 			path: path.map(str::to_string),
@@ -1006,7 +1028,7 @@ mod tests {
 			cost: None,
 			hop,
 		}
-		.encode(&mut buf, v)
+		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();
 		buf
 	}
@@ -1026,7 +1048,10 @@ mod tests {
 
 		let mut buf = Vec::new();
 		setup::Setup { parameters }
-			.encode(&mut buf, crate::Version::Ietf(version))
+			.encode(
+				&mut crate::coding::Encoder::new(&mut buf, (crate::Version::Ietf(version)).into()),
+				crate::Version::Ietf(version),
+			)
 			.unwrap();
 		buf
 	}
@@ -1038,7 +1063,10 @@ mod tests {
 			versions: crate::coding::Versions::from([crate::Version::Ietf(version).into()]),
 			parameters: params.encode_bytes(version).unwrap(),
 		}
-		.encode(&mut buf, crate::Version::Ietf(version))
+		.encode(
+			&mut crate::coding::Encoder::new(&mut buf, (crate::Version::Ietf(version)).into()),
+			crate::Version::Ietf(version),
+		)
 		.unwrap();
 		buf
 	}
@@ -1056,7 +1084,7 @@ mod tests {
 		params
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_exposes_the_setup_token() {
 		let modern = FakeSession::new(
 			ALPN_19,
@@ -1070,30 +1098,24 @@ mod tests {
 			token_params(ietf::Version::Draft16),
 		));
 		for (name, session) in [("draft-19", modern), ("draft-16", legacy)] {
-			let request = Server::new()
-				.accept_request(tokio::time::Instant::now().into_std(), session)
-				.await
-				.unwrap();
+			let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 			assert_eq!(request.token(), Some(&setup_token()), "{name}");
 		}
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_without_a_token_reports_none() {
 		let ietf = FakeSession::new(ALPN_19, [ietf_setup(ietf::Version::Draft19, None)]);
 		let lite = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
 		for (name, session) in [("draft-19", ietf), ("lite-05", lite)] {
-			let request = Server::new()
-				.accept_request(tokio::time::Instant::now().into_std(), session)
-				.await
-				.unwrap();
+			let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 			assert_eq!(request.token(), None, "{name}");
 		}
 	}
 
 	/// A SETUP the server refuses closes the session with the code naming why, on both
 	/// the draft-17+ uni stream and the draft 14-16 bidi stream.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn a_refused_setup_token_closes_with_its_code() {
 		let delete = [0x0, 0x7]; // DELETE alias 7
 		let truncated = [0x3]; // USE_VALUE with no Token Type
@@ -1107,16 +1129,14 @@ mod tests {
 			let modern = FakeSession::new(ALPN_19, [ietf_setup_with(ietf::Version::Draft19, params.clone())]);
 			let legacy = FakeSession::new(ALPN_16, []).with_bi(legacy_setup(ietf::Version::Draft16, params));
 			for (name, session) in [("draft-19", modern), ("draft-16", legacy)] {
-				let result = Server::new()
-					.accept_request(tokio::time::Instant::now().into_std(), session.clone())
-					.await;
+				let result = Server::new().accept_request(moq_net_sim::now(), session.clone()).await;
 				assert!(result.is_err(), "{name}");
-				assert_eq!(session.closed(), Some(code.to_code()), "{name} {code}");
+				assert_eq!(session.close_code(), Some(code.to_code()), "{name} {code}");
 			}
 		}
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_reads_ietf_path() {
 		// Every draft-17+ version gates on the SETUP stream before starting, so the
 		// path is known at authorization time just like lite-05.
@@ -1126,88 +1146,72 @@ mod tests {
 			(ALPN_19, ietf::Version::Draft19),
 		] {
 			let session = FakeSession::new(alpn, [ietf_setup(version, Some("/team/room"))]);
-			let request = Server::new()
-				.accept_request(tokio::time::Instant::now().into_std(), session)
-				.await
-				.unwrap();
+			let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 			assert_eq!(request.path(), "/team/room", "{alpn}");
 		}
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_ietf_without_path_is_empty() {
 		let session = FakeSession::new(ALPN_19, [ietf_setup(ietf::Version::Draft19, None)]);
-		let request = Server::new()
-			.accept_request(tokio::time::Instant::now().into_std(), session)
-			.await
-			.unwrap();
+		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_ietf_empty_path_is_accepted() {
 		let session = FakeSession::new(ALPN_19, [ietf_setup(ietf::Version::Draft19, Some(""))]);
-		let request = Server::new()
-			.accept_request(tokio::time::Instant::now().into_std(), session)
-			.await
-			.unwrap();
+		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
 	/// Encode a lite-05 GROUP uni stream header (just the `DataType::Group` tag).
 	fn lite05_group() -> Vec<u8> {
 		let mut buf = Vec::new();
-		lite::DataType::Group.encode(&mut buf, lite::Version::Lite05).unwrap();
+		lite::DataType::Group
+			.encode(
+				&mut crate::coding::Encoder::new(&mut buf, lite::Version::Lite05.into()),
+				lite::Version::Lite05,
+			)
+			.unwrap();
 		buf
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_reads_lite05_path() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), None, None)]);
-		let request = Server::new()
-			.accept_request(tokio::time::Instant::now().into_std(), session)
-			.await
-			.unwrap();
+		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert_eq!(request.role(), None, "a client that omits the role is bidirectional");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_lite05_without_path_is_empty() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
-		let request = Server::new()
-			.accept_request(tokio::time::Instant::now().into_std(), session)
-			.await
-			.unwrap();
+		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_lite05_empty_path_is_accepted() {
 		// An empty path is valid on the wire and means the same as omitting it, so a
 		// client that wants the root doesn't have to special-case the parameter.
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some(""), None, None)]);
-		let request = Server::new()
-			.accept_request(tokio::time::Instant::now().into_std(), session)
-			.await
-			.unwrap();
+		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_reads_lite05_role() {
 		let session = FakeSession::new(
 			ALPN_LITE_05,
 			[lite05_setup(Some("/team/room"), Some(Role::Publisher), None)],
 		);
-		let request = Server::new()
-			.accept_request(tokio::time::Instant::now().into_std(), session)
-			.await
-			.unwrap();
+		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 		assert_eq!(request.role(), Some(Role::Publisher));
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_holds_uni_stream_before_setup() {
 		let session = FakeSession::new(
 			ALPN_LITE_05,
@@ -1215,50 +1219,47 @@ mod tests {
 		);
 		let stops = session.stops.clone();
 		let request = Server::new()
-			.accept_request_lite(tokio::time::Instant::now().into_std(), session)
+			.accept_request_lite(moq_net_sim::now(), session)
 			.await
 			.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert!(stops.lock().unwrap().is_empty(), "the early stream must stay open");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_reads_buffered_setup_after_transport_close() {
 		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
-		web_transport_trait::poll::Session::close(&mut session, SessionError::Cancel.to_code(), "closed");
+		crate::transport::poll::Session::close(&mut session, SessionError::Cancel.to_code(), "closed");
 		let request = Server::new()
-			.accept_request_lite(tokio::time::Instant::now().into_std(), session)
+			.accept_request_lite(moq_net_sim::now(), session)
 			.await
 			.unwrap();
 		assert_eq!(request.path(), "/closed");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accepted_lite_setup_refuses_a_second_setup_stream() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
 		let transport = session.clone();
 		let request = Server::new()
-			.accept_request_lite(tokio::time::Instant::now().into_std(), session)
+			.accept_request_lite(moq_net_sim::now(), session)
 			.await
 			.unwrap();
 		let (_session, mut driver) = request.ok().await.unwrap();
 		transport.uni.lock().unwrap().push_back(vec![1]);
-		let _ = driver.poll(tokio::time::Instant::now().into_std(), &kio::Waiter::noop());
-		assert_eq!(transport.closed(), Some(SessionError::ProtocolViolation.to_code()));
+		let _ = driver.poll(moq_net_sim::now(), &kio::Waiter::noop());
+		assert_eq!(transport.close_code(), Some(SessionError::ProtocolViolation.to_code()));
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_request_reads_lite05_peer_hop() {
 		let hop = Hop::new(42).unwrap();
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, Some(hop))]);
-		let request = Server::new()
-			.accept_request(tokio::time::Instant::now().into_std(), session)
-			.await
-			.unwrap();
+		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
 		assert_eq!(request.peer_hop(), Some(hop));
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn anonymous_peer_hop_filters_routes_from_server_session() {
 		let other = Hop::new(778).unwrap();
 		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
@@ -1275,7 +1276,7 @@ mod tests {
 			assigned_hop: Hop::random(),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
-				runtime: Clock::new(tokio::time::Instant::now().into_std()),
+				runtime: Clock::new(moq_net_sim::now()),
 				handshake: PausedHandshake::Boxed(Box::new(PausedIetfModern {
 					session: transport,
 					version,
@@ -1312,13 +1313,13 @@ mod tests {
 			.unwrap();
 
 		let (session, driver) = request.ok().await.unwrap();
-		tokio::spawn(crate::time::run(driver));
+		moq_net_sim::spawn(crate::time::run_sim(driver));
 
 		for _ in 0..100 {
 			if occurrences(&log, b"local-route") > 0 {
 				break;
 			}
-			tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		assert_eq!(occurrences(&log, b"echoed-route"), 0);

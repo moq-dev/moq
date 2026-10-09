@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
+import { Reader } from "../stream.ts";
 import * as Filter from "./filter.ts";
 import { joinFilter } from "./subscribe.ts";
 import { Version } from "./version.ts";
@@ -182,3 +184,98 @@ test("fill skips allowed parameters it ignores", () => {
 	const encoded = new Uint8Array([0x02, 0x20, 0x2a, 0x01, 0x01, 0x02]);
 	expect(Filter.decodeFill(encoded, NEW)).toEqual({ filter: { kind: "relative", groups: 2n }, rangeFilters: false });
 });
+
+const TYPED = Version.DRAFT_22;
+
+// Draft-22 section 9.20.9: a Location Filter Type, then only the fields it names.
+test("draft-22 carries the Location Filter Type", () => {
+	const cases: [Filter.Filter, number[]][] = [
+		[{ kind: "unfiltered" }, [0x00]],
+		[{ kind: "relative", groups: 1n }, [0x01, 0x01]],
+		[{ kind: "absolute", startGroup: 7n, startObject: 3n }, [0x02, 0x07, 0x03]],
+		[{ kind: "absolute", startGroup: 7n, startObject: 3n, endGroup: 9n }, [0x03, 0x07, 0x03, 0x02]],
+		[
+			{ kind: "absolute", startGroup: 7n, startObject: 3n, endGroup: 9n, endObject: 4n },
+			[0x04, 0x07, 0x03, 0x02, 0x04],
+		],
+		[{ kind: "nextObject" }, [0x05]],
+		// The type says absolute, so {0, 0} no longer has to borrow the unfiltered spelling.
+		[{ kind: "absolute", startGroup: 0n, startObject: 0n }, [0x02, 0x00, 0x00]],
+	];
+	for (const [filter, bytes] of cases) {
+		expect([...Filter.encode(filter, TYPED)]).toEqual(bytes);
+		// No Length: the parameter value is the type and its fields.
+		expect([...Filter.encodeParam(filter, TYPED)]).toEqual(bytes);
+		expect(Filter.decode(new Uint8Array(bytes), TYPED)).toEqual(filter);
+	}
+
+	// Draft-21 still frames the value with a Length and infers the meaning from it.
+	expect([...Filter.encodeParam({ kind: "nextObject" }, Version.DRAFT_21)]).toEqual([0x02, 0x00, 0x00]);
+});
+
+// With no Length, the type alone says where the value ends, so the bytes after it are left
+// for the next parameter.
+test("draft-22 reads only the named fields", async () => {
+	const r = new Reader(undefined, new Uint8Array([0x05, 0x01, 0x02]), TYPED);
+	expect(await Filter.decodeParam(r, TYPED)).toEqual({ kind: "nextObject" });
+	expect(await r.u62()).toBe(1n);
+	expect(await r.u62()).toBe(2n);
+});
+
+test("draft-22 rejects an unknown Location Filter Type", async () => {
+	for (const type of [0x06, 0x3f]) {
+		expect(() => Filter.decode(new Uint8Array([type, 0x00, 0x00]), TYPED)).toThrow(ProtocolViolation);
+		const r = new Reader(undefined, new Uint8Array([type, 0x00, 0x00]), TYPED);
+		await expect(Filter.decodeParam(r, TYPED)).rejects.toThrow(ProtocolViolation);
+	}
+});
+
+// The nested LOCATION_FILTER carries its type too, and the whole-track form the spec calls
+// zero-length is type 0x00.
+test("draft-22 fill carries the Location Filter Type", () => {
+	// A two-byte group, so the draft-20 Length (4) and the draft-22 type (3) differ.
+	const range: Filter.Filter = { kind: "absolute", startGroup: 128n, startObject: 0n, endGroup: 130n };
+	expect([...Filter.encodeFill({ filter: range, rangeFilters: false }, NEW)]).toEqual([
+		0x01, 0x21, 0x04, 0x80, 0x80, 0x00, 0x02,
+	]);
+	expect([...Filter.encodeFill({ filter: range, rangeFilters: false }, TYPED)]).toEqual([
+		0x01, 0x21, 0x03, 0x80, 0x80, 0x00, 0x02,
+	]);
+	expect([...Filter.encodeFill({ filter: { kind: "nextObject" }, rangeFilters: false }, TYPED)]).toEqual([
+		0x01, 0x21, 0x05,
+	]);
+	expect([...Filter.encodeFill({ filter: { kind: "unfiltered" }, rangeFilters: false }, TYPED)]).toEqual([
+		0x01, 0x21, 0x00,
+	]);
+
+	const fills: Filter.Fill[] = [
+		{ filter: undefined, rangeFilters: false },
+		{ filter: { kind: "unfiltered" }, rangeFilters: false },
+		{ filter: { kind: "nextObject" }, rangeFilters: false },
+		{ filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+		{ filter: range, rangeFilters: false },
+	];
+	for (const fill of fills) {
+		expect(Filter.decodeFill(Filter.encodeFill(fill, TYPED), TYPED)).toEqual(fill);
+	}
+
+	// A uint8, a typed filter, then another uint8: the filter must stop at its own fields.
+	expect(Filter.decodeFill(new Uint8Array([0x03, 0x20, 0x80, 0x01, 0x05, 0x01, 0x01]), TYPED)).toEqual({
+		filter: { kind: "nextObject" },
+		rangeFilters: false,
+	});
+});
+
+for (const version of [Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22]) {
+	test(`fill rejects invalid group order on ${version}`, () => {
+		for (const value of [0, 3, 255]) {
+			expect(() => Filter.decodeFill(new Uint8Array([1, 0x22, value]), version)).toThrow(/group order/);
+		}
+		for (const value of [1, 2]) {
+			expect(Filter.decodeFill(new Uint8Array([1, 0x22, value]), version)).toEqual({
+				filter: undefined,
+				rangeFilters: false,
+			});
+		}
+	});
+}

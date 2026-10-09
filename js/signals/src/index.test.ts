@@ -82,6 +82,17 @@ describe("Signal", () => {
 		expect(seen).toEqual([{ a: 2 }]);
 		dispose();
 	});
+
+	test("any number of subscribers is legitimate", async () => {
+		const signal = new Signal(0);
+		let notified = 0;
+		const disposes = Array.from({ length: 1000 }, () => signal.subscribe(() => notified++));
+
+		signal.set(1);
+		await settle();
+		expect(notified).toBe(1000);
+		for (const dispose of disposes) dispose();
+	});
 });
 
 describe("Effect", () => {
@@ -312,6 +323,35 @@ describe("Effect", () => {
 		}
 	});
 
+	test("teardown runs last-in, first-out, nested effects included", async () => {
+		// Something registered later may depend on something registered earlier, such as a nested
+		// effect using its parent's connection, so it has to be released first.
+		const sig = new Signal(0);
+		const order: string[] = [];
+		const effect = new Effect((inner) => {
+			inner.get(sig);
+			inner.cleanup(() => order.push("first"));
+			inner.run((nested) => {
+				nested.cleanup(() => order.push("nested first"));
+				nested.cleanup(() => order.push("nested second"));
+			});
+			inner.cleanup(() => order.push("third"));
+		});
+
+		try {
+			await settle();
+			sig.set(1);
+			await settle();
+
+			expect(order).toEqual(["third", "nested second", "nested first", "first"]);
+			order.length = 0;
+		} finally {
+			effect.close();
+		}
+
+		expect(order).toEqual(["third", "nested second", "nested first", "first"]);
+	});
+
 	test("a cleanup registered during close still runs", async () => {
 		// Teardown that cascades still completes: `cleanup` appends onto the list close() is
 		// draining rather than dropping it on the floor.
@@ -375,17 +415,17 @@ describe("Effect", () => {
 	});
 
 	test("closing from a rerun cleanup runs each teardown once", async () => {
-		// `#run` and `close` share one drain, so a cleanup that closes the effect hands off at the
-		// cursor rather than starting a second pass over callbacks that already ran.
+		// `#run` and `close` share one drain, so a cleanup that closes the effect keeps popping the
+		// same list rather than starting a second pass over callbacks that already ran.
 		const sig = new Signal(0);
 		const ran: string[] = [];
 		const effect = new Effect((inner) => {
 			inner.get(sig);
+			inner.cleanup(() => ran.push("b"));
 			inner.cleanup(() => {
 				ran.push("a");
 				inner.close();
 			});
-			inner.cleanup(() => ran.push("b"));
 		});
 
 		try {
@@ -433,19 +473,18 @@ describe("Effect", () => {
 	});
 
 	test("cancelling a nested run during teardown does not skip the next cleanup", async () => {
-		// The disposer `run` hands back removes itself from the parent. Doing that by splicing
-		// shifts every later entry down, stepping the drain's cursor over a cleanup that has not
-		// run yet, so it never fires and leaks whatever it owned.
+		// The disposer `run` hands back removes itself from the parent while that list is being
+		// drained. The cleanup still pending below it must not be stepped over or leaked.
 		const sig = new Signal(0);
 		const ran: string[] = [];
 		const effect = new Effect((inner) => {
 			inner.get(sig);
+			inner.cleanup(() => ran.push("first"));
 			const dispose = inner.run(() => {});
 			inner.cleanup(() => {
-				ran.push("middle");
+				ran.push("last");
 				dispose();
 			});
-			inner.cleanup(() => ran.push("last"));
 		});
 
 		try {
@@ -453,7 +492,7 @@ describe("Effect", () => {
 			sig.set(1);
 			await settle();
 
-			expect(ran).toEqual(["middle", "last"]);
+			expect(ran).toEqual(["last", "first"]);
 		} finally {
 			effect.close();
 		}

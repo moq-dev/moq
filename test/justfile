@@ -24,7 +24,7 @@ harness:
     ./lib/harness.test.sh
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
-    cd interop/clients/js && bun test ./harness.browser.ts
+    cd interop/clients/js && bun test ./harness.browser.ts ./src/contract.test.ts
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -33,10 +33,11 @@ harness:
 # client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
-# and on lite-06/07 messages (the filter also matches `lite_varint_interop`).
+# and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
+# moq-transport OBJECT_DATAGRAMs both ways on every draft.
 [positional-arguments]
 interop *args:
-    just rs test -p moq-net --lib varint_interop --run-ignored all
+    just rs test -p moq-net --lib varint_interop ietf_datagram_interop --run-ignored all
     ./interop/interop.sh "$@"
 
 # Negative control: no publisher, every subscriber must time out (proves the
@@ -98,12 +99,13 @@ drill-sensitivity *args:
     ./drill/sensitivity.sh "$@"
 
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
-# ts` output with TSDuck plus a custom analyzer (PCR jitter/repetition,
-# burstiness, instantaneous bitrate, T-STD). Flags: `--analyze-only file.ts`
+# ts` output with TSDuck plus a custom analyzer (the T-STD buffer model, PCR
+# spacing and byte schedule). Flags: `--analyze-only file.ts`
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
 # the pipe instead, which a capture cannot carry; nightly runs this arm),
-# `--open-gop` (an open-GOP clip whose leading pictures must survive). See
+# `--open-gop` (an open-GOP clip whose leading pictures must survive), `--hrd`
+# (1080p video filling a broadcast-sized CPB), `--delay 1s` (the exporter's). See
 # ts/README.md.
 
 # Check the subscriber's MPEG-TS output for IRD compliance.
@@ -116,6 +118,11 @@ ts *args:
 [positional-arguments]
 ts-eit *args:
     ./ts/eit-roundtrip.sh "$@"
+
+# The T-STD model's controls: a broadcast capture must pass, and the same capture
+# delivered too slowly, too early, or in a burst must fail. Needs only TSDuck.
+ts-tstd:
+    ./ts/tstd-controls.py
 
 # A JS viewer watching a live track through a relay that drains (SIGTERM, after
 # a stand-in for DNS stops pointing at it) migrates to a second relay behind the

@@ -25,7 +25,7 @@ class Live {
 	}
 
 	async push(n: number): Promise<void> {
-		this.producer.push({ n });
+		this.producer.push({ value: { n } });
 		await this.read();
 	}
 
@@ -75,6 +75,28 @@ test("push and pop round-trip", async () => {
 	]);
 });
 
+test("a cut is invisible to the consumer", async () => {
+	const live = new Live();
+	await live.push(0);
+	live.producer.cut();
+	live.producer.cut();
+	await live.push(1);
+
+	expect(await live.finish()).toEqual([
+		{ push: { index: 0, value: { n: 0 } } },
+		{ push: { index: 1, value: { n: 1 } } },
+	]);
+});
+
+test("reset makes the next edit a header", () => {
+	const encoder = new Encoder<Rec>({});
+	encoder.push({ n: 0 }).commit();
+	expect(encoder.push({ n: 1 }).keyframe).toBe(false);
+
+	encoder.reset();
+	expect(encoder.push({ n: 2 }).keyframe).toBe(true);
+});
+
 test("concurrent consumer reads are rejected", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer<Rec>({ track: track.subscribe() });
@@ -88,10 +110,10 @@ test("concurrent consumer reads are rejected", async () => {
 test("writes after finish are rejected before encoding", () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<number>({ track });
-	producer.push(1);
+	producer.push({ value: 1 });
 	producer.finish();
 
-	expect(() => producer.push(2)).toThrow("track is closed");
+	expect(() => producer.push({ value: 2 })).toThrow("track is closed");
 	expect(() => producer.pop(1)).toThrow("track is closed");
 	expect(producer.window).toEqual([1]);
 });
@@ -191,7 +213,7 @@ test("the window slides", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track });
 	for (let n = 0; n < 5; n++) {
-		producer.push({ n });
+		producer.push({ value: { n } });
 		if (n >= 2) producer.pop(1);
 	}
 
@@ -237,7 +259,7 @@ test("a lagging consumer is told what it missed", async () => {
 
 	// The consumer stops reading while the window slides past everything it holds.
 	for (let n = 2; n < 8; n++) {
-		producer.push({ n });
+		producer.push({ value: { n } });
 		producer.pop(1);
 	}
 	subscriber.setGroups({ start: { included: subscriber.latest() as number } });
@@ -289,7 +311,7 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 test("a fresh consumer adopts the current offset", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track, opRatio: 0 });
-	for (let n = 0; n < 5; n++) producer.push({ n });
+	for (let n = 0; n < 5; n++) producer.push({ value: { n } });
 	producer.pop(3);
 
 	const subscriber = track.subscribe();
@@ -417,4 +439,19 @@ test("an uncommitted edit leaves the window unchanged", () => {
 	next.commit();
 	popped.commit();
 	expect(encoder.window).toEqual([2, 3]);
+});
+
+test("edits keep their timestamps, and an edit without one goes out untimed", async () => {
+	for (const at of [undefined, Time.Timestamp.fromMillis(1_000)]) {
+		const track = new Track.Producer("test").accept(at ? { timescale: Time.Timescale.MILLI } : {});
+		const producer = new Producer<Rec>({ track });
+		producer.push({ value: { n: 0 }, at });
+		producer.pop(1, at);
+		producer.finish();
+
+		const group = await track.subscribe().ordered().nextGroup();
+		for (let i = 0; i < 2; i++) {
+			expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(at?.as(Time.Timescale.MILLI));
+		}
+	}
 });

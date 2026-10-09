@@ -57,22 +57,6 @@ test("a same-name re-announce is a distinct update", async () => {
 	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "start", route });
 });
 
-test("the live marker is delivered once", async () => {
-	const producer = new Announce.Producer();
-	const consumer = producer.consume();
-
-	// A stream spanning sessions forwards each one's marker; only the first is news.
-	const route = Route.default;
-	producer.append({ kind: "live" });
-	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
-	producer.append({ kind: "live" });
-	producer.append({ prefix: p("b"), captures: undefined, kind: "start", route });
-
-	expect(await consumer.next()).toEqual({ kind: "live" });
-	expect(await consumer.next()).toMatchObject({ prefix: p("a") });
-	expect(await consumer.next()).toMatchObject({ prefix: p("b") });
-});
-
 test("closing resolves next with undefined", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();

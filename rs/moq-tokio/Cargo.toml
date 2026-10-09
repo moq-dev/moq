@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.19.22"
+version = "0.19.23"
 edition = "2024"
 rust-version.workspace = true
 
@@ -39,7 +39,7 @@ iroh = ["_transport", "dep:web-transport-iroh", "dep:web-transport-proto", "dep:
 mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["_transport", "dep:qmux", "watch", "dep:dns-lookup"]
-# Plain-TCP qmux transport (`tcp://`), no TLS. Server-side and client-side.
+# Qmux over TCP: plaintext `tcp://`, and `tls://` once a crypto provider is on. Server-side and client-side.
 tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).

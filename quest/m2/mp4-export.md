@@ -39,7 +39,3 @@ moov at the end; a second SIGINT leaves a playable fragmented file.
 Open for the PR: edit lists or stretched durations for gaps and track start
 offsets; whether a returning rendition with a new config gets an extra sample
 description.
-
-## Related
-
-- [fMP4 export tracks](/quest/m1/fmp4-export-tracks.md) - the streaming export, which refuses renditions that join after its moov

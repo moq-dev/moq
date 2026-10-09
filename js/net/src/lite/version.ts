@@ -10,7 +10,7 @@ export const Version = {
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
 	/// Work-in-progress lite-07, only negotiated when explicitly offered.
-	/// Adds the ANNOUNCE_REQUEST hidden opt-in.
+	/// Adds the ANNOUNCE_REQUEST hidden opt-in and the publisher epoch.
 	DRAFT_07: 0xff0dad07,
 } as const;
 
@@ -132,9 +132,8 @@ export function hasExcludeHop(version: Version): boolean {
 	}
 }
 
-/** Whether announcements carry the route cost varints alongside the hop chain: the
- * warm and cold cost of pulling the broadcast via this route, accumulated per link.
- * Added in lite-06. Older versions carry neither, so a received route has no cost
+/** Whether announcements carry a static route price alongside the hop chain.
+ * Added in lite-06. Older versions omit the price, so a received route has no cost
  * at all and routing falls back to the hop-count tie-break. */
 export function hasRouteCost(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-06+ behavior.
@@ -255,6 +254,23 @@ export function hasStreamCount(version: Version): boolean {
  * since a transport ACK does not say the application read the tail.
  */
 export function waitsForSubscriberFin(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether ANNOUNCE_START, TRACK, SUBSCRIBE, and FETCH carry the publisher epoch. Added in lite-07.
+ * Older versions carry nothing, so a received route has no epoch and is never resumed elsewhere. */
+export function hasEpoch(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

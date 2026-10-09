@@ -3,15 +3,14 @@
 ## Goal
 
 BBR's loss path follows draft-06 and Google Linux: a lost packet is judged
-from its own delivery state, not from the last ACK's sample, and undoing a
-spurious loss re-enters ProbeUp through Refill. The controller's spec
-citations point at draft-06.
+from its own delivery state, not from the last ACK's sample. The shipped
+spurious-loss undo, which re-enters ProbeUp through Refill, keeps working.
+The controller's spec citations point at draft-06.
 
 ## Plan
 
 The lost-packet sample gap remains after the seven correctness fixes in
-BBR3 (`noq-proto/src/congestion/bbr3/mod.rs` today), which the
-[hard fork](/quest/m1/quic/fork/README.md) re-ports into `moq-quic`:
+`moq-quic`'s BBR3 (`rs/moq-quic/src/congestion/bbr3/mod.rs`):
 
 - Loss handling reuses the shared ACK sample (`self.rs`) as scratch space,
   and skips the inflight-too-high check when a loss arrives before any ACK
@@ -39,4 +38,8 @@ traffic yet.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+- [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) - edits the same `bbr3/mod.rs` packet bookkeeping and lands first; this keeps the metadata it preserves
+
+## Related
+
+- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`; not a blocker, since this is a local `rs/moq-quic` fix (decided for the m1 BBR quests in fork/input-validation)

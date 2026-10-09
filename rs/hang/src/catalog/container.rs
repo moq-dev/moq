@@ -15,7 +15,7 @@ use serde_with::{base64::Base64, serde_as};
 /// rendition must be ignored by consumers.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Container {
-	/// A QUIC VarInt timestamp prefix followed by the raw codec payload.
+	/// A QUIC varint timestamp prefix followed by the raw codec payload.
 	/// Timestamps are in microseconds.
 	#[default]
 	Legacy,

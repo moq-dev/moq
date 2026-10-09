@@ -1,0 +1,24 @@
+# drill: bursts_cross_a_flapping_peer::loopback
+# expect: stalled with the route withdrawn
+#
+# Removes redialing a cluster peer whose link was lost. The edge stops driving
+# its connection to the origin once the session drops, so a link flap withdraws
+# the route for good: the groups caught in the flap and every burst after it
+# never arrive. A steady link never drops, so only the flap drill depends on it.
+diff --git a/rs/moq-relay/src/cluster.rs b/rs/moq-relay/src/cluster.rs
+index 6e3e22cbc..7bc6d15cf 100644
+--- a/rs/moq-relay/src/cluster.rs
++++ b/rs/moq-relay/src/cluster.rs
+@@ -1728,7 +1728,11 @@ impl Cluster {
+ 				moq_tokio::Status::Connected if connection.is_none() => {
+ 					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
+ 				}
+-				moq_tokio::Status::Disconnected => connection = None,
++				// MUTATION: a lost peer link is never redialed.
++				moq_tokio::Status::Disconnected => {
++					drop(reconnect);
++					return std::future::pending().await;
++				}
+ 				moq_tokio::Status::Migrating => {}
+ 				_ => {}
+ 			}

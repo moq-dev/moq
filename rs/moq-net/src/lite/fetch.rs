@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::{
 	Path,
-	coding::{Decode, DecodeError, Encode, EncodeError},
+	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 };
 
 use super::{Message, Version};
@@ -13,6 +13,9 @@ use super::{Message, Version};
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {
 	pub broadcast: Path<'a>,
+	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// Lite07+ only.
+	pub epoch: Option<crate::Epoch>,
 	pub track: Cow<'a, str>,
 	pub priority: u8,
 	pub group: u64,
@@ -24,7 +27,7 @@ pub struct Fetch<'a> {
 }
 
 impl Message for Fetch<'_> {
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
@@ -33,12 +36,13 @@ impl Message for Fetch<'_> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
-		let track = Cow::<str>::decode(r, version)?;
-		let priority = u8::decode(r, version)?;
-		let group = u64::decode(r, version)?;
+		let epoch = super::epoch::decode_epoch(r, version)?;
+		let track = Cow::Owned(r.string()?);
+		let priority = r.u8()?;
+		let group = r.varint()?;
 
 		let (start_frame, end_frame) = match version.has_frame_bounds() {
-			true => (u64::decode(r, version)?, Option::<u64>::decode(r, version)?),
+			true => (r.varint()?, r.varint_opt()?),
 			false => (0, None),
 		};
 		// A range that ends before it starts can never be served.
@@ -48,6 +52,7 @@ impl Message for Fetch<'_> {
 
 		Ok(Self {
 			broadcast,
+			epoch,
 			track,
 			priority,
 			group,
@@ -56,7 +61,7 @@ impl Message for Fetch<'_> {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				return Err(EncodeError::Version);
@@ -65,13 +70,14 @@ impl Message for Fetch<'_> {
 		}
 
 		self.broadcast.encode(w, version)?;
-		self.track.encode(w, version)?;
-		self.priority.encode(w, version)?;
-		self.group.encode(w, version)?;
+		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
+		w.string(&self.track)?;
+		w.u8(self.priority);
+		w.varint(self.group)?;
 
 		if version.has_frame_bounds() {
-			self.start_frame.encode(w, version)?;
-			self.end_frame.encode(w, version)?;
+			w.varint(self.start_frame)?;
+			w.varint_opt(self.end_frame)?;
 		} else if self.start_frame != 0 || self.end_frame.is_some() {
 			// The peer would serve the whole group, including frames the caller excluded.
 			return Err(EncodeError::Version);
@@ -87,6 +93,7 @@ mod test {
 
 	fn fetch_sample() -> Fetch<'static> {
 		Fetch {
+			epoch: None,
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),
 			priority: 3,
@@ -98,9 +105,10 @@ mod test {
 
 	fn fetch_roundtrip(version: Version, msg: &Fetch<'_>) -> Fetch<'static> {
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, version).unwrap();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
 		let mut slice = buf.as_slice();
-		Fetch::decode_msg(&mut slice, version).unwrap()
+		crate::coding::decode_buf(&mut slice, version, Fetch::decode_msg).unwrap()
 	}
 
 	#[test]
@@ -132,9 +140,10 @@ mod test {
 		msg.end_frame = Some(2);
 
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, Version::Lite06).unwrap();
+		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
+			.unwrap();
 		assert!(matches!(
-			Fetch::decode_msg(&mut buf.as_slice(), Version::Lite06),
+			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite06, Fetch::decode_msg),
 			Err(DecodeError::InvalidSubscribeLocation)
 		));
 	}
@@ -146,12 +155,19 @@ mod test {
 		msg.start_frame = 2;
 
 		let mut buf = Vec::new();
-		assert!(msg.encode_msg(&mut buf, Version::Lite05).is_err());
+		assert!(
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
+				.is_err()
+		);
 	}
 
 	#[test]
 	fn fetch_rejected_before_lite03() {
 		let mut buf = Vec::new();
-		assert!(fetch_sample().encode_msg(&mut buf, Version::Lite02).is_err());
+		assert!(
+			fetch_sample()
+				.encode_msg(&mut Encoder::new(&mut buf, Version::Lite02.into()), Version::Lite02)
+				.is_err()
+		);
 	}
 }

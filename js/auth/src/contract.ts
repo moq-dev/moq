@@ -137,6 +137,8 @@ export const GrantSchema = z
 		tier: z.optional(z.string()),
 		/** The session is a cluster peer (another relay): what it announces entered the cluster elsewhere. */
 		peer: z.optional(z.boolean()),
+		/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
+		upstream: z.optional(z.boolean()),
 	})
 	.check(
 		z.refine((grant) => (grant.publish?.length ?? 0) > 0 || (grant.subscribe?.length ?? 0) > 0, {
@@ -144,6 +146,9 @@ export const GrantSchema = z
 		}),
 		z.refine((grant) => grant.revalidate === undefined || grant.expires !== undefined, {
 			message: "a grant that asks to be revalidated must expire",
+		}),
+		z.refine((grant) => !grant.upstream || grant.peer === true, {
+			message: "an upstream grant must be a peer",
 		}),
 	);
 export type Grant = z.infer<typeof GrantSchema>;

@@ -1,8 +1,6 @@
 //! The Location Filter carried by SUBSCRIBE, PUBLISH and REQUEST_UPDATE.
 
-use bytes::Buf as _;
-
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
 use super::{Location, Param, Version};
 
@@ -59,11 +57,23 @@ mod tag {
 	pub const ABSOLUTE_RANGE: u64 = 0x4;
 }
 
+/// The Location Filter Type of draft-22, which names the fields that follow it.
+mod filter_type {
+	pub const NONE: u64 = 0x0;
+	pub const RELATIVE_START: u64 = 0x1;
+	pub const ABSOLUTE_START: u64 = 0x2;
+	pub const ABSOLUTE_GROUP_END: u64 = 0x3;
+	pub const ABSOLUTE_RANGE: u64 = 0x4;
+	pub const NEXT_OBJECT: u64 = 0x5;
+}
+
 impl Filter {
 	/// Whether this is draft-20 or newer.
 	///
 	/// Draft-20 replaced the Filter Type tag with up to four optional varints, where the
 	/// number present selects the meaning, and added the parameters that ride alongside it.
+	/// Draft-22 names the meaning with a Location Filter Type instead, but keeps those
+	/// parameters, so this still gates them.
 	pub(crate) fn is_draft20(version: Version) -> bool {
 		!matches!(
 			version,
@@ -82,42 +92,97 @@ impl Filter {
 	}
 
 	/// Encode the draft-20 field list, without the enclosing length prefix.
-	fn encode_fields<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_fields(&self, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
 		match *self {
 			// Zero fields. The draft defines an open ended absolute {0, 0} as equivalent, so
 			// that spelling normalizes to this one rather than colliding with NextObject.
 			Self::Unfiltered => {}
 			Self::NextObject => {
-				0u64.encode(w, version)?;
-				0u64.encode(w, version)?;
+				w.varint(0)?;
+				w.varint(0)?;
 			}
-			Self::Relative(groups) => groups.encode(w, version)?,
+			Self::Relative(groups) => w.varint(groups)?,
 			Self::Absolute {
 				start: Location { group: 0, object: 0 },
 				end: None,
 			} => {}
-			Self::Absolute { start, end } => {
-				start.group.encode(w, version)?;
-				start.object.encode(w, version)?;
-				if let Some(end) = end {
-					Self::end_delta(start.group, end.group)?.encode(w, version)?;
-					if let Some(object) = end.object {
-						object.encode(w, version)?;
-					}
-				}
+			Self::Absolute { start, end } => Self::encode_absolute(w, start, end)?,
+		}
+		Ok(())
+	}
+
+	/// Encode the start, then as much of the end as is set.
+	fn encode_absolute(w: &mut Encoder<'_>, start: Location, end: Option<EndLocation>) -> Result<(), EncodeError> {
+		w.varint(start.group)?;
+		w.varint(start.object)?;
+		if let Some(end) = end {
+			w.varint(Self::end_delta(start.group, end.group)?)?;
+			if let Some(object) = end.object {
+				w.varint(object)?;
 			}
 		}
 		Ok(())
 	}
 
+	/// Encode the draft-22 form: the Location Filter Type, then only the fields it names.
+	fn encode_typed(&self, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
+		match *self {
+			Self::Unfiltered => w.varint(filter_type::NONE)?,
+			Self::NextObject => w.varint(filter_type::NEXT_OBJECT)?,
+			Self::Relative(groups) => {
+				w.varint(filter_type::RELATIVE_START)?;
+				w.varint(groups)?;
+			}
+			Self::Absolute { start, end } => {
+				w.varint(match end {
+					None => filter_type::ABSOLUTE_START,
+					Some(EndLocation { object: None, .. }) => filter_type::ABSOLUTE_GROUP_END,
+					Some(EndLocation { object: Some(_), .. }) => filter_type::ABSOLUTE_RANGE,
+				})?;
+				Self::encode_absolute(w, start, end)?;
+			}
+		}
+		Ok(())
+	}
+
+	/// Decode the draft-22 form, reading only the fields its Location Filter Type names.
+	fn decode_typed(r: &mut Decoder<'_>) -> Result<Self, DecodeError> {
+		Ok(match r.varint()? {
+			filter_type::NONE => Self::Unfiltered,
+			filter_type::RELATIVE_START => Self::Relative(r.varint()?),
+			kind @ (filter_type::ABSOLUTE_START | filter_type::ABSOLUTE_GROUP_END | filter_type::ABSOLUTE_RANGE) => {
+				let start = Location {
+					group: r.varint()?,
+					object: r.varint()?,
+				};
+				let end = match kind {
+					filter_type::ABSOLUTE_START => None,
+					_ => Some(EndLocation {
+						group: start
+							.group
+							.checked_add(r.varint()?)
+							.ok_or(DecodeError::BoundsExceeded)?,
+						object: match kind {
+							filter_type::ABSOLUTE_RANGE => Some(r.varint()?),
+							_ => None,
+						},
+					}),
+				};
+				Self::Absolute { start, end }
+			}
+			filter_type::NEXT_OBJECT => Self::NextObject,
+			_ => return Err(DecodeError::InvalidValue),
+		})
+	}
+
 	/// Decode the draft-20 field list, which the caller has already delimited.
-	fn decode_fields<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_fields(r: &mut Decoder<'_>) -> Result<Self, DecodeError> {
 		let mut fields = Vec::with_capacity(4);
-		while r.has_remaining() {
+		while !r.is_empty() {
 			if fields.len() == 4 {
 				return Err(DecodeError::TrailingBytes);
 			}
-			fields.push(u64::decode(r, version)?);
+			fields.push(r.varint()?);
 		}
 
 		Ok(match fields[..] {
@@ -148,20 +213,20 @@ impl Filter {
 	}
 
 	/// Encode the draft-19 and earlier tag form, without the enclosing length prefix.
-	fn encode_tag<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_tag(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match *self {
 			// No tag means "everything", which only the absolute spelling can say.
 			Self::Unfiltered => {
-				tag::ABSOLUTE_START.encode(w, version)?;
+				w.varint(tag::ABSOLUTE_START)?;
 				Location::default().encode(w, version)?;
 			}
-			Self::NextObject => tag::LARGEST_OBJECT.encode(w, version)?,
-			Self::Relative(0) => tag::NEXT_GROUP.encode(w, version)?,
+			Self::NextObject => w.varint(tag::LARGEST_OBJECT)?,
+			Self::Relative(0) => w.varint(tag::NEXT_GROUP)?,
 			// Only draft-20 can name a start further back than the next group without
 			// knowing Largest Object, so there is no honest tag to fall back to.
 			Self::Relative(_) => return Err(EncodeError::Unsupported),
 			Self::Absolute { start, end: None } => {
-				tag::ABSOLUTE_START.encode(w, version)?;
+				w.varint(tag::ABSOLUTE_START)?;
 				start.encode(w, version)?;
 			}
 			// Draft-19's AbsoluteRange ends on a group, so an object-bounded range has no
@@ -171,17 +236,17 @@ impl Filter {
 				..
 			} => return Err(EncodeError::Unsupported),
 			Self::Absolute { start, end: Some(end) } => {
-				tag::ABSOLUTE_RANGE.encode(w, version)?;
+				w.varint(tag::ABSOLUTE_RANGE)?;
 				start.encode(w, version)?;
-				Self::end_delta(start.group, end.group)?.encode(w, version)?;
+				w.varint(Self::end_delta(start.group, end.group)?)?;
 			}
 		}
 		Ok(())
 	}
 
 	/// Decode the draft-19 and earlier tag form.
-	fn decode_tag<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		Ok(match u64::decode(r, version)? {
+	fn decode_tag(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		Ok(match r.varint()? {
 			tag::NEXT_GROUP => Self::Relative(0),
 			tag::LARGEST_OBJECT => Self::NextObject,
 			tag::ABSOLUTE_START => Self::Absolute {
@@ -190,7 +255,7 @@ impl Filter {
 			},
 			tag::ABSOLUTE_RANGE => {
 				let start = Location::decode(r, version)?;
-				let delta = u64::decode(r, version)?;
+				let delta = r.varint()?;
 				Self::Absolute {
 					start,
 					end: Some(EndLocation {
@@ -207,13 +272,13 @@ impl Filter {
 /// The inline form, used by draft-14 where the filter is message fields rather than a
 /// parameter. Later drafts go through [`Param`] instead.
 impl Encode<Version> for Filter {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.encode_tag(w, version)
 	}
 }
 
 impl Decode<Version> for Filter {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		Self::decode_tag(r, version)
 	}
 }
@@ -225,9 +290,7 @@ impl Param for Filter {
 		!matches!(self, Self::Unfiltered)
 	}
 
-	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		let mut buf = Vec::new();
-
+	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		// Inner varints use the draft-15 leading-ones encoding on the drafts that predate
 		// the switch, matching the other length-prefixed parameters.
 		let sv = match version {
@@ -235,30 +298,37 @@ impl Param for Filter {
 			_ => version,
 		};
 
-		if Self::is_draft20(version) {
-			self.encode_fields(&mut buf, sv)?;
-		} else {
-			self.encode_tag(&mut buf, sv)?;
+		let mut buf = Vec::new();
+		let mut inner = Encoder::new(&mut buf, sv.into());
+		match version {
+			Version::Draft14
+			| Version::Draft15
+			| Version::Draft16
+			| Version::Draft17
+			| Version::Draft18
+			| Version::Draft19 => self.encode_tag(&mut inner, sv)?,
+			Version::Draft20 | Version::Draft21 => self.encode_fields(&mut inner)?,
+			// Draft-22 drops the Length, since the Location Filter Type says which fields follow.
+			_ => return self.encode_typed(w),
 		}
 
-		buf.encode(w, version)
+		w.bytes(&buf)
 	}
 
-	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let data = Vec::<u8>::decode(r, version)?;
-		let mut buf = bytes::Bytes::from(data);
+	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let sv = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
-			_ => version,
+			Version::Draft17 | Version::Draft18 | Version::Draft19 => version,
+			// The field count is what carries the meaning, so the value is consumed whole.
+			Version::Draft20 | Version::Draft21 => {
+				return Self::decode_fields(&mut Decoder::new(r.bytes()?, version.into()));
+			}
+			_ => return Self::decode_typed(r),
 		};
 
-		if Self::is_draft20(version) {
-			// The field count is what carries the meaning, so the value is consumed whole.
-			return Self::decode_fields(&mut buf, sv);
-		}
-
+		let mut buf = Decoder::new(r.bytes()?, sv.into());
 		let filter = Self::decode_tag(&mut buf, sv)?;
-		if buf.has_remaining() {
+		if !buf.is_empty() {
 			return Err(DecodeError::TrailingBytes);
 		}
 		Ok(filter)
@@ -274,19 +344,23 @@ mod tests {
 
 	fn round_trip(filter: Filter, version: Version) -> Filter {
 		let mut buf = Vec::new();
-		filter.param_encode(&mut buf, version).expect("encode");
+		filter
+			.param_encode(&mut Encoder::new(&mut buf, version.into()), version)
+			.expect("encode");
 		let mut bytes = bytes::Bytes::from(buf);
-		let decoded = Filter::param_decode(&mut bytes, version).expect("decode");
-		assert!(!bytes.has_remaining(), "parameter left trailing bytes");
+		let decoded = crate::coding::decode_buf(&mut bytes, version, Filter::param_decode).expect("decode");
+		assert!(bytes.is_empty(), "parameter left trailing bytes");
 		decoded
 	}
 
 	/// The value bytes, without the length prefix a parameter carries.
 	fn value(filter: Filter, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
-		filter.param_encode(&mut buf, version).expect("encode");
+		filter
+			.param_encode(&mut Encoder::new(&mut buf, version.into()), version)
+			.expect("encode");
 		let mut bytes = bytes::Bytes::from(buf);
-		Vec::<u8>::decode(&mut bytes, version).expect("length prefix")
+		crate::coding::decode_buf(&mut bytes, version, |r, _| Ok(r.bytes()?.to_vec())).expect("length prefix")
 	}
 
 	#[test]
@@ -435,7 +509,11 @@ mod tests {
 				object: Some(4),
 			}),
 		};
-		assert!(bounded.param_encode(&mut buf, OLD).is_err());
+		assert!(
+			bounded
+				.param_encode(&mut Encoder::new(&mut buf, OLD.into()), OLD)
+				.is_err()
+		);
 	}
 
 	/// Draft-19 has a tag per case and none of them mean "two groups back", so refuse
@@ -443,7 +521,11 @@ mod tests {
 	#[test]
 	fn draft19_cannot_name_a_relative_group() {
 		let mut buf = Vec::new();
-		assert!(Filter::Relative(2).param_encode(&mut buf, OLD).is_err());
+		assert!(
+			Filter::Relative(2)
+				.param_encode(&mut Encoder::new(&mut buf, OLD.into()), OLD)
+				.is_err()
+		);
 	}
 
 	#[test]
@@ -454,16 +536,102 @@ mod tests {
 		};
 		for version in [OLD, NEW] {
 			let mut buf = Vec::new();
-			assert!(backwards.param_encode(&mut buf, version).is_err(), "{version}");
+			assert!(
+				backwards
+					.param_encode(&mut Encoder::new(&mut buf, version.into()), version)
+					.is_err(),
+				"{version}"
+			);
+		}
+	}
+
+	const TYPED: Version = Version::Draft22;
+
+	/// The whole parameter value as it sits on the wire, which from draft-22 has no Length.
+	fn raw(filter: Filter, version: Version) -> Vec<u8> {
+		let mut buf = Vec::new();
+		filter
+			.param_encode(&mut Encoder::new(&mut buf, version.into()), version)
+			.expect("encode");
+		buf
+	}
+
+	fn decode_raw(bytes: &[u8], version: Version) -> Result<(Filter, usize), DecodeError> {
+		let mut r = Decoder::new(bytes, version.into());
+		let filter = Filter::param_decode(&mut r, version)?;
+		Ok((filter, r.remaining()))
+	}
+
+	/// Draft-22 section 9.20.9: a Location Filter Type, then only the fields it names.
+	#[test]
+	fn draft22_carries_the_type() {
+		let start = Location { group: 7, object: 3 };
+		for (filter, bytes) in [
+			(Filter::Unfiltered, vec![0x00]),
+			(Filter::Relative(1), vec![0x01, 0x01]),
+			(Filter::Absolute { start, end: None }, vec![0x02, 0x07, 0x03]),
+			(
+				Filter::Absolute {
+					start,
+					end: Some(EndLocation { group: 9, object: None }),
+				},
+				vec![0x03, 0x07, 0x03, 0x02],
+			),
+			(
+				Filter::Absolute {
+					start,
+					end: Some(EndLocation {
+						group: 9,
+						object: Some(4),
+					}),
+				},
+				vec![0x04, 0x07, 0x03, 0x02, 0x04],
+			),
+			(Filter::NextObject, vec![0x05]),
+			// The type says absolute, so {0, 0} no longer has to borrow the unfiltered spelling.
+			(
+				Filter::Absolute {
+					start: Location::default(),
+					end: None,
+				},
+				vec![0x02, 0x00, 0x00],
+			),
+		] {
+			assert_eq!(raw(filter, TYPED), bytes, "{filter:?}");
+			assert_eq!(decode_raw(&bytes, TYPED).unwrap(), (filter, 0), "{filter:?}");
+		}
+	}
+
+	/// With no Length, the type alone says where the value ends, so the parameter after it
+	/// must be left untouched. Draft-21 still reads a Length first.
+	#[test]
+	fn draft22_reads_only_the_named_fields() {
+		assert_eq!(decode_raw(&[0x05, 0x22, 0x01], TYPED).unwrap(), (Filter::NextObject, 2));
+		assert_eq!(
+			decode_raw(&[0x01, 0x01, 0x22, 0x01], TYPED).unwrap(),
+			(Filter::Relative(1), 2)
+		);
+
+		// The same Next Object on draft-21 is a Length of 2 and two zero fields.
+		assert_eq!(raw(Filter::NextObject, Version::Draft21), vec![0x02, 0x00, 0x00]);
+	}
+
+	#[test]
+	fn draft22_rejects_an_unknown_type() {
+		for kind in [0x06u8, 0x3f] {
+			assert!(matches!(
+				decode_raw(&[kind, 0x00, 0x00], TYPED),
+				Err(DecodeError::InvalidValue)
+			));
 		}
 	}
 
 	#[test]
 	fn rejects_too_many_fields() {
 		let mut buf = Vec::new();
-		vec![0u8; 5].encode(&mut buf, NEW).expect("encode");
+		Encoder::new(&mut buf, NEW.into()).bytes(&[0u8; 5]).unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
-		assert!(Filter::param_decode(&mut bytes, NEW).is_err());
+		assert!(crate::coding::decode_buf(&mut bytes, NEW, Filter::param_decode).is_err());
 	}
 }
 
@@ -495,8 +663,8 @@ enum Framing {
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fill {
 	/// The range to fill. `None` means the Location Filter was omitted, which inherits the
-	/// subscription's own filter; [`Filter::Unfiltered`] (a zero-length filter) means the
-	/// whole track up to Largest Object.
+	/// subscription's own filter; [`Filter::Unfiltered`] (a zero-length filter, or type 0x00
+	/// from draft-22) means the whole track up to Largest Object.
 	pub filter: Option<Filter>,
 
 	/// Whether the scope carried a Range Filter (0x25-0x28). Those narrow which objects
@@ -510,9 +678,9 @@ impl Fill {
 	/// LOCATION_FILTER, the only nested parameter that changes what we deliver.
 	const LOCATION_FILTER: u64 = 0x21;
 
-	/// The parameters the draft allows inside FILL_PARAMETERS, and how each frames its
-	/// value. Anything absent from this table is a protocol violation rather than something
-	/// to skip.
+	/// The parameters the draft allows inside FILL_PARAMETERS besides LOCATION_FILTER, and
+	/// how each frames its value. Anything else is a protocol violation rather than
+	/// something to skip.
 	///
 	/// The framing is tabulated rather than derived, because neither shortcut is right. The
 	/// Key-Value-Pair rule keys it off the id's parity, but the Range Filters (0x25-0x28)
@@ -522,40 +690,40 @@ impl Fill {
 	const ALLOWED: &'static [(u64, Framing)] = &[
 		(0x0A, Framing::Varint), // FILL_TIMEOUT
 		(0x20, Framing::Byte),   // SUBSCRIBER_PRIORITY, a uint8
-		(Self::LOCATION_FILTER, Framing::Bytes),
-		(0x22, Framing::Byte),  // GROUP_ORDER, a uint8
-		(0x25, Framing::Bytes), // SUBGROUP_FILTER
-		(0x26, Framing::Bytes), // OBJECTID_FILTER, length prefixed despite an even id
-		(0x27, Framing::Bytes), // PRIORITY_FILTER
-		(0x28, Framing::Bytes), // OBJECT_PROPERTY_FILTER, likewise
+		(0x22, Framing::Byte),   // GROUP_ORDER, a uint8
+		(0x25, Framing::Bytes),  // SUBGROUP_FILTER
+		(0x26, Framing::Bytes),  // OBJECTID_FILTER, length prefixed despite an even id
+		(0x27, Framing::Bytes),  // PRIORITY_FILTER
+		(0x28, Framing::Bytes),  // OBJECT_PROPERTY_FILTER, likewise
 	];
 }
 
 impl Param for Fill {
-	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
+		let mut inner = Encoder::new(&mut buf, w.form());
 
 		// A nested scope is encoded like a message's parameters: a count, then the KVPs.
 		// An omitted filter inherits the subscription's, so the scope is empty. An explicit
-		// Unfiltered still encodes, as a zero-length filter meaning the whole track.
+		// Unfiltered still encodes, as a zero-length filter (type 0x00 from draft-22)
+		// meaning the whole track.
 		match self.filter {
-			None => 0u64.encode(&mut buf, version)?,
+			None => inner.varint(0)?,
 			Some(filter) => {
-				1u64.encode(&mut buf, version)?;
+				inner.varint(1u64)?;
 				// The first type in a scope is not delta encoded, so this is the raw id.
-				Self::LOCATION_FILTER.encode(&mut buf, version)?;
-				filter.param_encode(&mut buf, version)?;
+				inner.varint(Self::LOCATION_FILTER)?;
+				filter.param_encode(&mut inner, version)?;
 			}
 		}
 
-		buf.encode(w, version)
+		w.bytes(&buf)
 	}
 
-	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let data = Vec::<u8>::decode(r, version)?;
-		let mut buf = bytes::Bytes::from(data);
+	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let mut buf = Decoder::new(r.bytes()?, r.form());
 
-		let count = u64::decode(&mut buf, version)?;
+		let count = buf.varint()?;
 		if count > 64 {
 			return Err(DecodeError::TooMany);
 		}
@@ -564,7 +732,7 @@ impl Param for Fill {
 		let mut range_filters = false;
 		let mut prev = 0u64;
 		for i in 0..count {
-			let delta = u64::decode(&mut buf, version)?;
+			let delta = buf.varint()?;
 			let key = if i == 0 {
 				delta
 			} else {
@@ -572,10 +740,7 @@ impl Param for Fill {
 			};
 			prev = key;
 
-			let Some((_, framing)) = Self::ALLOWED.iter().find(|(id, _)| *id == key) else {
-				return Err(DecodeError::InvalidValue);
-			};
-
+			// Its framing depends on the draft, so the filter reads itself.
 			if key == Self::LOCATION_FILTER {
 				if filter.is_some() {
 					return Err(DecodeError::Duplicate);
@@ -583,6 +748,10 @@ impl Param for Fill {
 				filter = Some(Filter::param_decode(&mut buf, version)?);
 				continue;
 			}
+
+			let Some((_, framing)) = Self::ALLOWED.iter().find(|(id, _)| *id == key) else {
+				return Err(DecodeError::InvalidValue);
+			};
 
 			// A Range Filter changes which objects the fill may contain, so its presence
 			// is recorded even though its value is not interpreted.
@@ -592,18 +761,22 @@ impl Param for Fill {
 			// consumed or the remaining keys desync.
 			match framing {
 				Framing::Bytes => {
-					Vec::<u8>::decode(&mut buf, version)?;
+					buf.bytes()?;
 				}
 				Framing::Varint => {
-					u64::decode(&mut buf, version)?;
+					buf.varint()?;
 				}
 				Framing::Byte => {
-					u8::decode(&mut buf, version)?;
+					if key == 0x22 {
+						super::GroupOrder::param_decode(&mut buf, version)?;
+					} else {
+						buf.u8()?;
+					}
 				}
 			}
 		}
 
-		if buf.has_remaining() {
+		if !buf.is_empty() {
 			return Err(DecodeError::TrailingBytes);
 		}
 
@@ -617,34 +790,69 @@ mod fill_tests {
 
 	const NEW: Version = Version::Draft20;
 
-	fn round_trip(fill: Fill) -> Fill {
+	#[test]
+	fn fill_rejects_invalid_group_order() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			for value in [0, 3, 255] {
+				let bytes = [3, 1, 0x22, value];
+				let mut r = Decoder::new(&bytes, version.into());
+				assert!(matches!(
+					Fill::param_decode(&mut r, version),
+					Err(DecodeError::InvalidValue)
+				));
+			}
+			for value in [1, 2] {
+				let bytes = [3, 1, 0x22, value];
+				let mut r = Decoder::new(&bytes, version.into());
+				assert_eq!(Fill::param_decode(&mut r, version).unwrap(), Fill::default());
+			}
+		}
+	}
+
+	fn round_trip(fill: Fill, version: Version) -> Fill {
 		let mut buf = Vec::new();
-		fill.param_encode(&mut buf, NEW).expect("encode");
+		fill.param_encode(&mut Encoder::new(&mut buf, version.into()), version)
+			.expect("encode");
 		let mut bytes = bytes::Bytes::from(buf);
-		let decoded = Fill::param_decode(&mut bytes, NEW).expect("decode");
-		assert!(!bytes.has_remaining());
+		let decoded = crate::coding::decode_buf(&mut bytes, version, Fill::param_decode).expect("decode");
+		assert!(bytes.is_empty());
 		decoded
+	}
+
+	/// The scope's value, without the length prefix FILL_PARAMETERS carries.
+	fn value(filter: Filter, version: Version) -> Vec<u8> {
+		let fill = Fill {
+			filter: Some(filter),
+			range_filters: false,
+		};
+		let mut buf = Vec::new();
+		fill.param_encode(&mut Encoder::new(&mut buf, version.into()), version)
+			.expect("encode");
+		let mut bytes = bytes::Bytes::from(buf);
+		crate::coding::decode_buf(&mut bytes, version, |r, _| Ok(r.bytes()?.to_vec())).expect("length prefix")
 	}
 
 	#[test]
 	fn round_trips() {
-		for filter in [
-			// An omitted filter (inherit the subscription's) and an explicit zero-length
-			// one (the whole track) are distinct spellings and must stay distinct.
-			None,
-			Some(Filter::Unfiltered),
-			Some(Filter::Relative(1)),
-			Some(Filter::Relative(3)),
-			Some(Filter::Absolute {
-				start: Location { group: 4, object: 0 },
-				end: Some(EndLocation { group: 9, object: None }),
-			}),
-		] {
-			let fill = Fill {
-				filter,
-				range_filters: false,
-			};
-			assert_eq!(round_trip(fill).filter, filter, "{filter:?}");
+		for version in [Version::Draft20, Version::Draft22] {
+			for filter in [
+				// An omitted filter (inherit the subscription's) and an explicit zero-length
+				// one (the whole track) are distinct spellings and must stay distinct.
+				None,
+				Some(Filter::Unfiltered),
+				Some(Filter::Relative(1)),
+				Some(Filter::Relative(3)),
+				Some(Filter::Absolute {
+					start: Location { group: 4, object: 0 },
+					end: Some(EndLocation { group: 9, object: None }),
+				}),
+			] {
+				let fill = Fill {
+					filter,
+					range_filters: false,
+				};
+				assert_eq!(round_trip(fill, version).filter, filter, "{version} {filter:?}");
+			}
 		}
 	}
 
@@ -652,16 +860,34 @@ mod fill_tests {
 	/// that starts one group back.
 	#[test]
 	fn current_group_join() {
-		let fill = Fill {
-			filter: Some(Filter::Relative(1)),
-			range_filters: false,
-		};
-		let mut buf = Vec::new();
-		fill.param_encode(&mut buf, NEW).expect("encode");
 		// count=1, type=0x21, len=1, StartGroup=1
-		let mut bytes = bytes::Bytes::from(buf);
-		let value = Vec::<u8>::decode(&mut bytes, NEW).expect("length prefix");
-		assert_eq!(value, vec![0x01, 0x21, 0x01, 0x01]);
+		assert_eq!(value(Filter::Relative(1), NEW), vec![0x01, 0x21, 0x01, 0x01]);
+		// count=1, type=0x21, Relative Start, StartGroup=1: the same bytes by coincidence.
+		assert_eq!(
+			value(Filter::Relative(1), Version::Draft22),
+			vec![0x01, 0x21, 0x01, 0x01]
+		);
+	}
+
+	/// Draft-22's nested LOCATION_FILTER carries its type instead of a Length, and the
+	/// whole-track form the spec calls zero-length is type 0x00.
+	#[test]
+	fn draft22_nested_filter_carries_its_type() {
+		// A two-byte group, so the draft-20 Length (4) and the draft-22 type (3) differ.
+		let range = Filter::Absolute {
+			start: Location { group: 128, object: 0 },
+			end: Some(EndLocation {
+				group: 130,
+				object: None,
+			}),
+		};
+		assert_eq!(value(range, NEW), vec![0x01, 0x21, 0x04, 0x80, 0x80, 0x00, 0x02]);
+		assert_eq!(
+			value(range, Version::Draft22),
+			vec![0x01, 0x21, 0x03, 0x80, 0x80, 0x00, 0x02]
+		);
+		assert_eq!(value(Filter::NextObject, Version::Draft22), vec![0x01, 0x21, 0x05]);
+		assert_eq!(value(Filter::Unfiltered, Version::Draft22), vec![0x01, 0x21, 0x00]);
 	}
 
 	/// A parameter the draft does not allow inside the scope is a violation, not something
@@ -669,14 +895,14 @@ mod fill_tests {
 	#[test]
 	fn rejects_a_disallowed_parameter() {
 		let mut value = Vec::new();
-		1u64.encode(&mut value, NEW).unwrap();
-		0x10u64.encode(&mut value, NEW).unwrap(); // FORWARD, not allowed in a fill
-		0u64.encode(&mut value, NEW).unwrap();
+		Encoder::new(&mut value, NEW.into()).varint(1u64).unwrap();
+		Encoder::new(&mut value, NEW.into()).varint(0x10u64).unwrap(); // FORWARD, not allowed in a fill
+		Encoder::new(&mut value, NEW.into()).varint(0).unwrap();
 
 		let mut buf = Vec::new();
-		value.encode(&mut buf, NEW).unwrap();
+		Encoder::new(&mut buf, NEW.into()).bytes(&value).unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
-		assert!(Fill::param_decode(&mut bytes, NEW).is_err());
+		assert!(crate::coding::decode_buf(&mut bytes, NEW, Fill::param_decode).is_err());
 	}
 
 	/// A uint8 parameter is one raw byte, so a priority of 128 or more would be read as a
@@ -684,16 +910,18 @@ mod fill_tests {
 	#[test]
 	fn skips_a_uint8_whose_value_has_a_leading_one() {
 		let mut value = Vec::new();
-		2u64.encode(&mut value, NEW).unwrap();
-		0x20u64.encode(&mut value, NEW).unwrap(); // SUBSCRIBER_PRIORITY
-		0x80u8.encode(&mut value, NEW).unwrap(); // a raw byte, not a varint
-		1u64.encode(&mut value, NEW).unwrap(); // delta to 0x21
-		Filter::Relative(1).param_encode(&mut value, NEW).unwrap();
+		Encoder::new(&mut value, NEW.into()).varint(2u64).unwrap();
+		Encoder::new(&mut value, NEW.into()).varint(0x20u64).unwrap(); // SUBSCRIBER_PRIORITY
+		Encoder::new(&mut value, NEW.into()).u8(0x80u8); // a raw byte, not a varint
+		Encoder::new(&mut value, NEW.into()).varint(1u64).unwrap(); // delta to 0x21
+		Filter::Relative(1)
+			.param_encode(&mut Encoder::new(&mut value, NEW.into()), NEW)
+			.unwrap();
 
 		let mut buf = Vec::new();
-		value.encode(&mut buf, NEW).unwrap();
+		Encoder::new(&mut buf, NEW.into()).bytes(&value).unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
-		let fill = Fill::param_decode(&mut bytes, NEW).expect("decode");
+		let fill = crate::coding::decode_buf(&mut bytes, NEW, Fill::param_decode).expect("decode");
 		assert_eq!(fill.filter, Some(Filter::Relative(1)));
 	}
 
@@ -704,16 +932,18 @@ mod fill_tests {
 	#[test]
 	fn skips_a_length_prefixed_range_filter() {
 		let mut value = Vec::new();
-		2u64.encode(&mut value, NEW).unwrap();
-		0x26u64.encode(&mut value, NEW).unwrap(); // OBJECTID_FILTER, length prefixed
-		vec![0xAAu8, 0xBB, 0xCC].encode(&mut value, NEW).unwrap();
-		1u64.encode(&mut value, NEW).unwrap(); // delta to 0x27
-		vec![0xDDu8].encode(&mut value, NEW).unwrap(); // PRIORITY_FILTER
+		Encoder::new(&mut value, NEW.into()).varint(2u64).unwrap();
+		Encoder::new(&mut value, NEW.into()).varint(0x26u64).unwrap(); // OBJECTID_FILTER, length prefixed
+		Encoder::new(&mut value, NEW.into())
+			.bytes(&[0xAAu8, 0xBB, 0xCC])
+			.unwrap();
+		Encoder::new(&mut value, NEW.into()).varint(1u64).unwrap(); // delta to 0x27
+		Encoder::new(&mut value, NEW.into()).bytes(&[0xDDu8]).unwrap(); // PRIORITY_FILTER
 
 		let mut buf = Vec::new();
-		value.encode(&mut buf, NEW).unwrap();
+		Encoder::new(&mut buf, NEW.into()).bytes(&value).unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
-		let fill = Fill::param_decode(&mut bytes, NEW).expect("decode");
+		let fill = crate::coding::decode_buf(&mut bytes, NEW, Fill::param_decode).expect("decode");
 		assert_eq!(fill.filter, None, "no Location Filter in the scope means inherit");
 		assert!(fill.range_filters, "a Range Filter's presence must be recorded");
 	}
@@ -721,16 +951,18 @@ mod fill_tests {
 	#[test]
 	fn skips_allowed_parameters_it_ignores() {
 		let mut value = Vec::new();
-		2u64.encode(&mut value, NEW).unwrap();
-		0x20u64.encode(&mut value, NEW).unwrap(); // SUBSCRIBER_PRIORITY, even: one varint
-		42u64.encode(&mut value, NEW).unwrap();
-		1u64.encode(&mut value, NEW).unwrap(); // delta to 0x21, odd: length prefixed
-		Filter::Relative(2).param_encode(&mut value, NEW).unwrap();
+		Encoder::new(&mut value, NEW.into()).varint(2u64).unwrap();
+		Encoder::new(&mut value, NEW.into()).varint(0x20u64).unwrap(); // SUBSCRIBER_PRIORITY, even: one varint
+		Encoder::new(&mut value, NEW.into()).varint(42u64).unwrap();
+		Encoder::new(&mut value, NEW.into()).varint(1u64).unwrap(); // delta to 0x21, odd: length prefixed
+		Filter::Relative(2)
+			.param_encode(&mut Encoder::new(&mut value, NEW.into()), NEW)
+			.unwrap();
 
 		let mut buf = Vec::new();
-		value.encode(&mut buf, NEW).unwrap();
+		Encoder::new(&mut buf, NEW.into()).bytes(&value).unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
-		let fill = Fill::param_decode(&mut bytes, NEW).expect("decode");
+		let fill = crate::coding::decode_buf(&mut bytes, NEW, Fill::param_decode).expect("decode");
 		assert_eq!(fill.filter, Some(Filter::Relative(2)));
 	}
 }

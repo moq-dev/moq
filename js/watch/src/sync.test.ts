@@ -14,12 +14,12 @@ describe("delay and buffer", () => {
 		sync.close();
 	});
 
-	it("caps maxAge at the delay when no buffer is configured", async () => {
+	it("caps maxDelay at the delay when no buffer is configured", async () => {
 		const sync = new Sync({ delay: 100 as Time.Milli });
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(false);
 		expect(sync.out.delay.peek()).toBe(100 as Time.Milli);
-		expect(sync.out.maxAge.peek()).toBe(100 as Time.Milli);
+		expect(sync.out.maxDelay.peek()).toBe(100 as Time.Milli);
 		sync.close();
 	});
 
@@ -29,7 +29,7 @@ describe("delay and buffer", () => {
 		const sync = new Sync({ delay: 100 as Time.Milli, buffer: 30_000 as Time.Milli });
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(true);
-		expect(sync.out.maxAge.peek()).toBe(30_100 as Time.Milli);
+		expect(sync.out.maxDelay.peek()).toBe(30_100 as Time.Milli);
 		sync.close();
 	});
 
@@ -37,7 +37,7 @@ describe("delay and buffer", () => {
 		const sync = new Sync({ delay: 200 as Time.Milli, buffer: 0 as Time.Milli });
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(false);
-		expect(sync.out.maxAge.peek()).toBe(200 as Time.Milli);
+		expect(sync.out.maxDelay.peek()).toBe(200 as Time.Milli);
 		sync.close();
 	});
 
@@ -50,7 +50,7 @@ describe("delay and buffer", () => {
 		buffer.set(30_000 as Time.Milli);
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(true);
-		expect(sync.out.maxAge.peek()).toBe(30_100 as Time.Milli);
+		expect(sync.out.maxDelay.peek()).toBe(30_100 as Time.Milli);
 		sync.close();
 	});
 
@@ -60,7 +60,7 @@ describe("delay and buffer", () => {
 		expect(sync.out.instant.peek()).toBe(true);
 		expect(sync.out.buffered.peek()).toBe(false);
 		expect(sync.out.delay.peek()).toBe(0 as Time.Milli);
-		expect(sync.out.maxAge.peek()).toBe(0 as Time.Milli);
+		expect(sync.out.maxDelay.peek()).toBe(0 as Time.Milli);
 		sync.close();
 	});
 });

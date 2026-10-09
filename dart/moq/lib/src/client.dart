@@ -203,9 +203,8 @@ final class Moq {
 extension AnnounceConsumerUpdates on AnnounceConsumer {
   /// Stream announce events until the cursor ends.
   ///
-  /// A [AnnounceEventLive] follows the routes live at subscribe time, so a
-  /// listener can collect what is live and stop there. Listen once: the cursor
-  /// is cancelled and released when the subscription ends.
+  /// Listen once: the cursor is cancelled and released when the subscription
+  /// ends.
   Stream<AnnounceEvent> updates() async* {
     try {
       while (true) {

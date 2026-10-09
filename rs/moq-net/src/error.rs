@@ -32,6 +32,12 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
+	/// The peer went past what the session allows: a request ID at or past the
+	/// MAX_REQUEST_ID we advertised (moq-transport drafts 14 to 16), or more announcements
+	/// or subscriptions than its [`crate::session::Limits`].
+	#[error("too many requests")]
+	TooManyRequests,
+
 	/// The peer did not close within the GOAWAY drain deadline.
 	#[error("goaway timeout")]
 	GoawayTimeout,
@@ -62,6 +68,7 @@ impl SessionError {
 			Self::Unauthorized => 0x2,
 			Self::ProtocolViolation => 0x3,
 			Self::KeyValueFormatting => 0x6,
+			Self::TooManyRequests => 0x7,
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
 			Self::Version => 0x15,
@@ -82,6 +89,7 @@ impl SessionError {
 			0x2 => Self::Unauthorized,
 			0x3 => Self::ProtocolViolation,
 			0x6 => Self::KeyValueFormatting,
+			0x7 => Self::TooManyRequests,
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
 			0x15 => Self::Version,
@@ -146,6 +154,11 @@ pub enum StreamError {
 	#[error("not found")]
 	NotFound,
 
+	/// A FETCH reached a datagram, which is never cached. Sent on moq-lite-07
+	/// and later; an earlier version sends [`NotFound`](Self::NotFound) instead.
+	#[error("not fetchable")]
+	NotFetchable,
+
 	/// The broadcast is neither announced nor served, so there is no route to it.
 	#[error("unroutable")]
 	Unroutable,
@@ -171,7 +184,8 @@ pub enum StreamError {
 	#[error("group too large")]
 	GroupTooLarge,
 
-	/// A frame's timestamp doesn't match its track's negotiated timescale.
+	/// A frame's timestamp doesn't match its track: missing on a timed track, present on
+	/// an untimed one, or out of range for the track's timescale.
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 
@@ -197,7 +211,6 @@ impl StreamError {
 			Self::GoingAway => 0x4,
 			Self::TooFarBehind => 0x5,
 			Self::MalformedTrack => 0x12,
-			// 0x30 NO_CAPACITY is assigned by other work in this range. Do not reuse it.
 			Self::ControlTimeout => 0x31,
 			Self::GroupTooLarge => 0x32,
 			Self::NotFound => 0x33,
@@ -207,6 +220,7 @@ impl StreamError {
 			Self::WrongSize => 0x37,
 			Self::FrameTooLarge => 0x38,
 			Self::TimestampMismatch => 0x39,
+			Self::NotFetchable => 0x3a,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -238,6 +252,7 @@ impl StreamError {
 			0x37 => Self::WrongSize,
 			0x38 => Self::FrameTooLarge,
 			0x39 => Self::TimestampMismatch,
+			0x3a => Self::NotFetchable,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -323,6 +338,10 @@ pub enum Error {
 	#[error("not found")]
 	NotFound,
 
+	/// A FETCH reached a datagram, which is never cached.
+	#[error("not fetchable")]
+	NotFetchable,
+
 	/// A joining FETCH named a request that is not an active subscription.
 	#[error("invalid joining request ID")]
 	InvalidJoiningRequestId,
@@ -365,6 +384,11 @@ pub enum Error {
 	#[error("too many parameters")]
 	TooManyParameters,
 
+	/// The peer already holds as many requests, announcements, or subscriptions as this
+	/// session allows (see [`crate::session::Limits`]).
+	#[error("too many requests")]
+	TooManyRequests,
+
 	/// The peer offered an ALPN this endpoint doesn't recognize, so no version could be
 	/// negotiated. A connect-time error.
 	#[error("unknown ALPN: {0}")]
@@ -404,9 +428,8 @@ pub enum Error {
 	#[error("frame already open")]
 	FrameOpen,
 
-	/// A frame's timestamp doesn't match its track's negotiated timescale: it's
-	/// missing on a timed track, present on an untimed track, or carries a
-	/// different scale than the track advertised.
+	/// A frame's timestamp doesn't match its track: it's missing on a timed track,
+	/// present on an untimed track, or out of range for the track's timescale.
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 
@@ -484,7 +507,7 @@ impl Error {
 	/// [`StreamError::from_code`]. Reading a stream reset with the session table (or the
 	/// reverse) silently mistranslates, since e.g. 0 is "no error" for a session but an
 	/// internal error for a stream.
-	pub fn from_transport(err: impl web_transport_trait::Error) -> Self {
+	pub fn from_transport(err: impl crate::transport::Error) -> Self {
 		if let Some((code, _reason)) = err.session_error() {
 			return SessionError::from_code(code).into();
 		}
@@ -528,6 +551,7 @@ impl From<&Error> for SessionError {
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::TooManyParameters => Self::KeyValueFormatting,
+			Error::TooManyRequests => Self::TooManyRequests,
 			Error::GoawayTimeout => Self::GoawayTimeout,
 			Error::Timeout => Self::Timeout,
 			Error::ProtocolViolation
@@ -568,6 +592,7 @@ impl From<&Error> for StreamError {
 			Error::Evicted => Self::Evicted,
 			Error::Lagged => Self::TooFarBehind,
 			Error::NotFound => Self::NotFound,
+			Error::NotFetchable => Self::NotFetchable,
 			Error::Unroutable => Self::Unroutable,
 			Error::WrongSize => Self::WrongSize,
 			Error::FrameTooLarge => Self::FrameTooLarge,
@@ -599,7 +624,7 @@ impl From<&Error> for StreamError {
 	}
 }
 
-impl web_transport_trait::Error for Error {
+impl crate::transport::Error for Error {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}
@@ -623,6 +648,7 @@ mod tests {
 			SessionError::Unauthorized,
 			SessionError::ProtocolViolation,
 			SessionError::KeyValueFormatting,
+			SessionError::TooManyRequests,
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,
 			SessionError::Version,
@@ -639,6 +665,7 @@ mod tests {
 
 		// The moq-transport codes we reuse must keep moq-transport's values.
 		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
+		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
 
@@ -676,14 +703,14 @@ mod tests {
 			StreamError::WrongSize,
 			StreamError::FrameTooLarge,
 			StreamError::TimestampMismatch,
+			StreamError::NotFetchable,
 			StreamError::App(7),
 		];
 		for err in registered {
 			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
 		}
 
-		// moq-lite's own 48-63 range, pinned to the draft's table. They stay off 0x30
-		// (NO_CAPACITY), which other work assigns.
+		// moq-lite's own 48-63 range, pinned to the draft's table.
 		for (err, code) in [
 			(StreamError::ControlTimeout, 0x31),
 			(StreamError::GroupTooLarge, 0x32),
@@ -694,6 +721,7 @@ mod tests {
 			(StreamError::WrongSize, 0x37),
 			(StreamError::FrameTooLarge, 0x38),
 			(StreamError::TimestampMismatch, 0x39),
+			(StreamError::NotFetchable, 0x3a),
 		] {
 			assert_eq!(err.to_code(), code, "{err:?} moved off its assigned code");
 		}
@@ -728,9 +756,12 @@ mod tests {
 		let relayed = StreamError::from(&Error::from(StreamError::from_code(0x3)));
 		assert_eq!(relayed.to_code(), 0x3);
 
+		// A datagram reached by a FETCH keeps its own code rather than reading as a plain miss.
+		assert_eq!(StreamError::from(&Error::NotFetchable), StreamError::NotFetchable);
+
 		// Registered stream codes survive the hop unchanged.
 		for code in [
-			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a,
 		] {
 			let relayed = StreamError::from(&Error::from(StreamError::from_code(code)));
 			assert_eq!(relayed.to_code(), code, "stream {code:#x} changed across a relay");
@@ -770,7 +801,7 @@ mod tests {
 			stream: Option<u32>,
 		}
 
-		impl web_transport_trait::Error for Failed {
+		impl crate::transport::Error for Failed {
 			fn session_error(&self) -> Option<(u32, String)> {
 				self.session.map(|code| (code, "closed".to_string()))
 			}

@@ -276,8 +276,7 @@ export class Connection {
 	/**
 	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects
 	 * and URL switches: a switch retracts everything from
-	 * the old relay's origin, then the new one's arrivals stream in. The `live` marker
-	 * comes once, from the first origin; see {@link Origin.Consumer.announced}.
+	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const producer = new Announce.Producer();
@@ -310,8 +309,7 @@ export class Connection {
 						const entry = await effect.race(upstream.next());
 						if (!entry) break;
 						if (entry.kind === "end") active.delete(entry.prefix);
-						else if (entry.kind !== "live") active.set(entry.prefix, entry);
-						// The stream delivers the marker once; a later session's is dropped.
+						else active.set(entry.prefix, entry);
 						producer.append(entry);
 					}
 				} finally {

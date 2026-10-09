@@ -16,8 +16,8 @@ AUTH-capable.
 
 IETF AUTH initially carries only prefix-representable grants. Propagate its
 `Unsupported` result for an unrepresentable pattern union; do not retry the
-token through the URL, widen it, or leave token admission pending. Lite pattern
-AUTH can carry the full grant once the pattern-interest prerequisite lands.
+token through the URL, widen it, or leave token admission pending. Lite AUTH
+already carries the full pattern grant.
 
 - Client configuration separates the credential from the address: `moq_tokio::connect::Config` gains `tokens`, repeatable as
   `--connect-token` and `MOQ_CONNECT_TOKEN`, the default set for every dial
@@ -82,9 +82,8 @@ Additive.
 
 ## Required
 
+- [FFI shape](/quest/m1/ffi-shape/README.md) - puts the `MoqClientConfig` record in place that `tokens` extends, so the wrappers break once
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the verify and
   widen path the configured tokens reuse
 - [Bindings](/quest/m1/auth/bindings.md) - supplies the client surface the new
   token setters sit beside
-- [moq-transport](/quest/m1/auth/moq-transport.md) - supplies the IETF AUTH
-  exchange the setup-option token pairs with

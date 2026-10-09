@@ -14,8 +14,6 @@ await for (final event in announced.updates()) {
     // Prefix stays origin-relative; captures reports wildcard matches.
     print(event.announce.prefix);
     print(event.announce.captures);
-  } else if (event is AnnounceEventLive) {
-    break; // every route live at subscribe time has been delivered
   }
 }
 ```
@@ -33,7 +31,7 @@ final server = await Server.listen(
 final broadcast = server.createBroadcast('live');
 broadcast.announce(route: MoqRoute()); // unannounced broadcasts are invisible
 await for (final request in server.requests()) {
-  final session = await request.accept(publish: null, consume: null);
+  final session = await request.accept();
   print(session.epoch());
 }
 ```

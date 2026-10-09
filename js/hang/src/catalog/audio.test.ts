@@ -24,3 +24,15 @@ test("audio config accepts a human-readable label", () => {
 
 	expect(config.label).toBe("English");
 });
+
+test("audio config accepts optional enabled state", () => {
+	const config = AudioConfigSchema.parse({
+		codec: "opus",
+		container: { kind: "legacy" },
+		sampleRate: 48_000,
+		numberOfChannels: 2,
+		enabled: false,
+	});
+
+	expect(config.enabled).toBe(false);
+});

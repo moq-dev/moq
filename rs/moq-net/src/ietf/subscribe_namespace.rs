@@ -58,22 +58,22 @@ fn hidden_from_param(value: Option<u64>) -> Result<bool, DecodeError> {
 impl Message for SubscribeNamespace<'_> {
 	const ID: u64 = 0x50;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if is_legacy_version(version) {
 			return Err(EncodeError::Version);
 		}
 		self.request_id.encode(w, version)?;
-		encode_namespace(w, &self.namespace, version)?;
+		encode_namespace(w, &self.namespace)?;
 		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden));
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if is_legacy_version(version) {
 			return Err(DecodeError::Version);
 		}
 		let request_id = RequestId::decode(r, version)?;
-		let namespace = decode_namespace(r, version)?;
+		let namespace = decode_namespace(r)?;
 		// The token is ignored: the session's grant is what authorizes the request.
 		decode_params!(r, version,
 			0x03 => _authorization_token: Vec<super::Opaque>,
@@ -88,18 +88,51 @@ impl Message for SubscribeNamespace<'_> {
 	}
 }
 
+/// What a draft-16/17 SUBSCRIBE_NAMESPACE asks for (d16 §9.25, d17 §9.20).
+///
+/// Draft-14/15 have no field and only ever ask for namespaces. Draft-18 dropped it
+/// when SUBSCRIBE_TRACKS took over the PUBLISH half.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscribeOptions {
+	/// PUBLISH for each matching track (0x00).
+	Publish,
+	/// NAMESPACE for each matching namespace (0x01).
+	Namespace,
+	/// Both PUBLISH and NAMESPACE (0x02).
+	Both,
+}
+
+impl SubscribeOptions {
+	fn encode(self, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
+		w.varint(match self {
+			Self::Publish => 0x00u64,
+			Self::Namespace => 0x01,
+			Self::Both => 0x02,
+		})
+	}
+
+	fn decode(r: &mut Decoder<'_>) -> Result<Self, DecodeError> {
+		match r.varint()? {
+			0x00 => Ok(Self::Publish),
+			0x01 => Ok(Self::Namespace),
+			0x02 => Ok(Self::Both),
+			_ => Err(DecodeError::InvalidValue),
+		}
+	}
+}
+
 /// SUBSCRIBE_NAMESPACE message for draft-14 through draft-17 (type 0x11).
 ///
 /// In v16 this moves from the control stream to its own bidirectional stream.
-/// Draft-16/17 carry a Subscribe Options field (NAMESPACE vs TRACKS); draft-17
-/// additionally prefixes a Required Request ID delta (removed in draft-18 per
-/// #1615). Draft-18+ uses [`SubscribeNamespace`].
+/// Draft-16/17 carry [`SubscribeOptions`]; draft-17 additionally prefixes a
+/// Required Request ID delta (removed in draft-18 per #1615). Draft-18+ uses
+/// [`SubscribeNamespace`].
 #[derive(Clone, Debug)]
 pub struct SubscribeNamespaceLegacy<'a> {
 	pub request_id: RequestId,
 	pub namespace: Path<'a>,
-	/// v16/v17: Subscribe Options (default 0x01 = NAMESPACE only).
-	pub subscribe_options: u64,
+	/// Encoded on v16/v17 only; earlier drafts always mean [`SubscribeOptions::Namespace`].
+	pub subscribe_options: SubscribeOptions,
 	/// MoQ Hidden: see [`SubscribeNamespace::hidden`].
 	pub hidden: bool,
 }
@@ -107,39 +140,44 @@ pub struct SubscribeNamespaceLegacy<'a> {
 impl Message for SubscribeNamespaceLegacy<'_> {
 	const ID: u64 = 0x11;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if !is_legacy_version(version) {
 			return Err(EncodeError::Version);
 		}
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
+			w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
-		encode_namespace(w, &self.namespace, version)?;
+		encode_namespace(w, &self.namespace)?;
 		if matches!(version, Version::Draft16 | Version::Draft17) {
-			self.subscribe_options.encode(w, version)?;
+			self.subscribe_options.encode(w)?;
 		}
 		encode_params!(w, version, HIDDEN_PARAM => hidden_param(self.hidden));
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !is_legacy_version(version) {
 			return Err(DecodeError::Version);
 		}
 		let request_id = RequestId::decode(r, version)?;
 		if version == Version::Draft17 {
-			let _required_request_id_delta = u64::decode(r, version)?;
+			let _required_request_id_delta = r.varint()?;
 		}
-		let namespace = decode_namespace(r, version)?;
+		let namespace = decode_namespace(r)?;
 		let subscribe_options = match version {
-			Version::Draft16 | Version::Draft17 => u64::decode(r, version)?,
-			_ => 0x01,
+			Version::Draft16 | Version::Draft17 => SubscribeOptions::decode(r)?,
+			_ => SubscribeOptions::Namespace,
 		};
 
 		// The token is ignored: the session's grant is what authorizes the request.
+		// FORWARD is legal here in draft-15 through draft-17. The value is checked (only
+		// 0 or 1) and then dropped: a namespace subscription has no objects to forward.
+		// Draft-14 has no such parameter, so an unlisted id is ignored. Draft-18 moved
+		// FORWARD onto SUBSCRIBE_TRACKS and closes if it shows up on the new message.
 		decode_params!(r, version,
 			0x03 => _authorization_token: Vec<super::Opaque>,
+			0x10 => _forward: Option<bool> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
 
@@ -161,12 +199,12 @@ pub struct SubscribeNamespaceOk {
 impl Message for SubscribeNamespaceOk {
 	const ID: u64 = 0x12;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		Ok(Self { request_id })
 	}
@@ -183,17 +221,17 @@ pub struct SubscribeNamespaceError<'a> {
 impl Message for SubscribeNamespaceError<'_> {
 	const ID: u64 = 0x13;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
-		self.error_code.encode(w, version)?;
-		self.reason_phrase.encode(w, version)?;
+		w.varint(self.error_code)?;
+		w.string(&self.reason_phrase)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
-		let error_code = u64::decode(r, version)?;
-		let reason_phrase = Cow::<str>::decode(r, version)?;
+		let error_code = r.varint()?;
+		let reason_phrase = Cow::Owned(r.string()?);
 
 		Ok(Self {
 			request_id,
@@ -212,12 +250,12 @@ pub struct UnsubscribeNamespace {
 impl Message for UnsubscribeNamespace {
 	const ID: u64 = 0x14;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		Ok(Self { request_id })
 	}
@@ -241,8 +279,8 @@ pub struct Namespace<'a> {
 impl Namespace<'_> {
 	/// Decode the message body, expecting the extended form when the session negotiated
 	/// the MoQ Cluster extension. See [`super::PublishNamespace::decode_body`].
-	pub fn decode_body<R: bytes::Buf>(r: &mut R, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
-		let suffix = decode_namespace(r, version)?;
+	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
+		let suffix = decode_namespace(r)?;
 
 		// The base form has no Parameters field at all, so there is nothing to read
 		// (and nothing to reject) unless the extension is on.
@@ -258,15 +296,15 @@ impl Namespace<'_> {
 impl Message for Namespace<'_> {
 	const ID: u64 = 0x08;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		encode_namespace(w, &self.suffix, version)?;
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		encode_namespace(w, &self.suffix)?;
 		match &self.cluster {
 			Some(advert) => super::publish_namespace::encode_cluster_params(w, version, Some(advert)),
 			None => Ok(()),
 		}
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		Self::decode_body(r, version, false)
 	}
 }
@@ -283,19 +321,19 @@ pub struct PublishBlocked<'a> {
 impl Message for PublishBlocked<'_> {
 	const ID: u64 = 0x0F;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		assert!(version == Version::Draft17, "PublishBlocked is draft17 only");
-		encode_namespace(w, &self.suffix, version)?;
-		self.track_name.encode(w, version)?;
+		encode_namespace(w, &self.suffix)?;
+		w.string(&self.track_name)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if version != Version::Draft17 {
 			return Err(DecodeError::Unsupported);
 		}
-		let suffix = decode_namespace(r, version)?;
-		let track_name = Cow::<str>::decode(r, version)?;
+		let suffix = decode_namespace(r)?;
+		let track_name = Cow::Owned(r.string()?);
 		Ok(Self { suffix, track_name })
 	}
 }
@@ -310,13 +348,13 @@ pub struct NamespaceDone<'a> {
 impl Message for NamespaceDone<'_> {
 	const ID: u64 = 0x0E;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		encode_namespace(w, &self.suffix, version)?;
+	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		encode_namespace(w, &self.suffix)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let suffix = decode_namespace(r, version)?;
+	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		let suffix = decode_namespace(r)?;
 		Ok(Self { suffix })
 	}
 }
@@ -324,11 +362,11 @@ impl Message for NamespaceDone<'_> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::BytesMut;
 
 	fn body<M: Message>(msg: &M, version: Version) -> Vec<u8> {
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version).unwrap();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
 		buf.to_vec()
 	}
 
@@ -352,7 +390,7 @@ mod tests {
 
 		let encoded = body(&msg, version);
 		let mut buf = bytes::Bytes::from(encoded.clone());
-		let decoded = Namespace::decode_body(&mut buf, version, true).unwrap();
+		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, true)).unwrap();
 		assert!(buf.is_empty());
 		assert_eq!(decoded.suffix.as_str(), "alice.hang");
 		assert_eq!(decoded.cluster, msg.cluster);
@@ -367,7 +405,7 @@ mod tests {
 		assert!(base_encoded.len() < encoded.len());
 
 		let mut buf = bytes::Bytes::from(encoded);
-		let decoded = Namespace::decode_body(&mut buf, version, false).unwrap();
+		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, false)).unwrap();
 		assert!(decoded.cluster.is_none());
 		assert!(!buf.is_empty(), "the parameters were not consumed");
 	}
@@ -393,7 +431,7 @@ mod tests {
 		assert!(body(&free, version).len() < body(&priced, version).len());
 
 		let mut buf = bytes::Bytes::from(body(&free, version));
-		let decoded = Namespace::decode_body(&mut buf, version, true).unwrap();
+		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, true)).unwrap();
 		assert_eq!(decoded.cluster.unwrap().cost, 0);
 	}
 
@@ -401,14 +439,14 @@ mod tests {
 	#[test]
 	fn cluster_namespace_requires_hop_path() {
 		let version = Version::Draft19;
-		let mut buf = BytesMut::new();
-		encode_namespace(&mut buf, &Path::new("a"), version).unwrap();
+		let mut buf = Vec::new();
+		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::new("a")).unwrap();
 		// Number of Parameters = 0.
-		0u64.encode(&mut buf, version).unwrap();
+		Encoder::new(&mut buf, version.into()).varint(0).unwrap();
 
-		let mut bytes = buf.freeze();
+		let mut bytes = bytes::Bytes::from(buf);
 		assert!(matches!(
-			Namespace::decode_body(&mut bytes, version, true),
+			crate::coding::decode_buf(&mut bytes, version, |r, v| Namespace::decode_body(r, v, true)),
 			Err(DecodeError::InvalidValue)
 		));
 	}
@@ -427,10 +465,55 @@ mod tests {
 			}),
 		};
 
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version).unwrap();
-		let mut bytes = buf.freeze();
-		assert!(super::super::PublishNamespace::decode_body(&mut bytes, version, false).is_err());
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
+		let mut bytes = bytes::Bytes::from(buf);
+		assert!(
+			crate::coding::decode_buf(&mut bytes, version, |r, v| super::super::PublishNamespace::decode_body(
+				r, v, false
+			))
+			.is_err()
+		);
+	}
+
+	/// FORWARD (0x10) is legal on SUBSCRIBE_NAMESPACE through draft-17. A value other
+	/// than 0 or 1 still closes the session. Draft-18 dropped it from this message.
+	#[test]
+	fn forward_follows_the_draft() {
+		fn with_forward(version: Version, value: u64) -> Vec<u8> {
+			let mut buf = Vec::new();
+			let w = &mut Encoder::new(&mut buf, version.into());
+			RequestId(1).encode(w, version).unwrap();
+			if version == Version::Draft17 {
+				w.varint(0).unwrap();
+			}
+			encode_namespace(w, &Path::default()).unwrap();
+			if matches!(version, Version::Draft16 | Version::Draft17) {
+				w.varint(1).unwrap();
+			}
+			// Count, absolute key, then the raw varint. encode_params! needs a Result.
+			w.varint(1).unwrap();
+			w.varint(0x10).unwrap();
+			w.varint(value).unwrap();
+			buf
+		}
+
+		for version in [Version::Draft15, Version::Draft16, Version::Draft17] {
+			let mut buf = bytes::Bytes::from(with_forward(version, 0));
+			crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg)
+				.unwrap_or_else(|err| panic!("{version} FORWARD=0: {err}"));
+			assert!(buf.is_empty(), "{version}");
+
+			let mut buf = bytes::Bytes::from(with_forward(version, 2));
+			assert!(
+				crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg).is_err(),
+				"{version} FORWARD=2"
+			);
+		}
+
+		let mut buf = bytes::Bytes::from(with_forward(Version::Draft18, 0));
+		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg).is_err());
 	}
 
 	#[test]
@@ -455,7 +538,7 @@ mod tests {
 		let legacy = SubscribeNamespaceLegacy {
 			request_id: RequestId(0),
 			namespace: Path::default(),
-			subscribe_options: 0x01,
+			subscribe_options: SubscribeOptions::Namespace,
 			hidden: false,
 		};
 		assert!(body(&legacy, Version::Draft17).len() > body(&modern, Version::Draft18).len());
@@ -469,7 +552,7 @@ mod tests {
 			hidden: false,
 		};
 		let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
-		let decoded = SubscribeNamespace::decode_msg(&mut buf, Version::Draft18).unwrap();
+		let decoded = crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg).unwrap();
 		assert!(buf.is_empty());
 		assert_eq!(decoded.request_id, RequestId(4));
 		assert_eq!(decoded.namespace.as_str(), "example/meeting");
@@ -486,7 +569,7 @@ mod tests {
 			};
 			let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
 			assert_eq!(
-				SubscribeNamespace::decode_msg(&mut buf, Version::Draft18)
+				crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg)
 					.unwrap()
 					.hidden,
 				hidden
@@ -496,11 +579,12 @@ mod tests {
 				let msg = SubscribeNamespaceLegacy {
 					request_id: RequestId(4),
 					namespace: Path::new("example"),
-					subscribe_options: 0x01,
+					subscribe_options: SubscribeOptions::Namespace,
 					hidden,
 				};
 				let mut buf = bytes::Bytes::from(body(&msg, version));
-				let decoded = SubscribeNamespaceLegacy::decode_msg(&mut buf, version).unwrap();
+				let decoded =
+					crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg).unwrap();
 				assert_eq!(decoded.hidden, hidden, "{version:?}");
 			}
 		}
@@ -509,19 +593,37 @@ mod tests {
 	#[test]
 	fn legacy_round_trips() {
 		for version in [Version::Draft16, Version::Draft17] {
-			let msg = SubscribeNamespaceLegacy {
-				request_id: RequestId(4),
-				namespace: Path::new("example/meeting"),
-				subscribe_options: 0x01,
-				hidden: false,
-			};
-			let mut buf = bytes::Bytes::from(body(&msg, version));
-			let decoded = SubscribeNamespaceLegacy::decode_msg(&mut buf, version).unwrap();
-			assert!(buf.is_empty(), "trailing bytes for {version:?}");
-			assert_eq!(decoded.request_id, RequestId(4));
-			assert_eq!(decoded.namespace.as_str(), "example/meeting");
-			assert_eq!(decoded.subscribe_options, 0x01);
+			for options in [
+				SubscribeOptions::Publish,
+				SubscribeOptions::Namespace,
+				SubscribeOptions::Both,
+			] {
+				let msg = SubscribeNamespaceLegacy {
+					request_id: RequestId(4),
+					namespace: Path::new("example/meeting"),
+					subscribe_options: options,
+					hidden: false,
+				};
+				let mut buf = bytes::Bytes::from(body(&msg, version));
+				let decoded =
+					crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg).unwrap();
+				assert!(buf.is_empty(), "trailing bytes for {version:?}");
+				assert_eq!(decoded.request_id, RequestId(4));
+				assert_eq!(decoded.namespace.as_str(), "example/meeting");
+				assert_eq!(decoded.subscribe_options, options);
+			}
 		}
+	}
+
+	/// The drafts define only 0x00 through 0x02, so we refuse any other value as a protocol violation.
+	#[test]
+	fn legacy_rejects_unknown_subscribe_options() {
+		// Request ID, empty namespace, Subscribe Options 0x03, no parameters.
+		let mut buf = bytes::Bytes::from(vec![0x00, 0x00, 0x03, 0x00]);
+		assert!(matches!(
+			crate::coding::decode_buf(&mut buf, Version::Draft16, SubscribeNamespaceLegacy::decode_msg),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 
 	#[test]
@@ -530,7 +632,7 @@ mod tests {
 		for version in [Version::Draft14, Version::Draft16, Version::Draft17] {
 			let mut buf = bytes::Bytes::from(vec![0x00, 0x00, 0x00]);
 			assert!(matches!(
-				SubscribeNamespace::decode_msg(&mut buf, version),
+				crate::coding::decode_buf(&mut buf, version, SubscribeNamespace::decode_msg),
 				Err(DecodeError::Version)
 			));
 		}
@@ -538,7 +640,7 @@ mod tests {
 		// The legacy 0x11 message only exists in draft-14..17.
 		let mut buf = bytes::Bytes::from(vec![0x00, 0x00, 0x00]);
 		assert!(matches!(
-			SubscribeNamespaceLegacy::decode_msg(&mut buf, Version::Draft18),
+			crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespaceLegacy::decode_msg),
 			Err(DecodeError::Version)
 		));
 	}

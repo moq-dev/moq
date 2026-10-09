@@ -47,7 +47,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	max_age: Duration,
+	max_delay: Duration,
 	fragment_duration: Option<Duration>,
 
 	tracks: HashMap<String, MkvTrack>,
@@ -162,7 +162,7 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			max_age: Duration::ZERO,
+			max_delay: Duration::ZERO,
 			fragment_duration: None,
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
@@ -171,13 +171,13 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Set the max age for each per-track source.
+	/// Set the max delay for each per-track source.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
 	/// Defaults to
 	/// [`Duration::ZERO`] (skip aggressively).
-	pub fn with_max_age(mut self, max_age: Duration) -> Self {
-		self.max_age = max_age;
+	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
@@ -340,7 +340,7 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			ensure_legacy(&config.container, "video", name)?;
-			let Some(source) = ExportSource::for_video(&self.source, name, config, self.max_age)? else {
+			let Some(source) = ExportSource::for_video(&self.source, name, config, self.max_delay)? else {
 				continue;
 			};
 			self.tracks.insert(
@@ -361,7 +361,7 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			ensure_legacy(&config.container, "audio", name)?;
-			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.max_age)? else {
+			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.max_delay)? else {
 				continue;
 			};
 			self.tracks.insert(
@@ -650,13 +650,25 @@ pub(super) fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -
 		MatroskaSpec::TrackType(2),
 		MatroskaSpec::CodecID(codec_id.to_string()),
 	];
+	// The catalog names the output rate. Under explicit SBR, Matroska puts the core's rate first
+	// and the output after it, as a separate field.
+	let core_rate = match (&config.codec, &codec_private) {
+		(AudioCodec::AAC(aac), Some(asc)) if matches!(aac.profile, 5 | 29) => {
+			Some(crate::codec::aac::in_band(asc)?.sample_rate)
+		}
+		_ => None,
+	};
 	if let Some(cp) = codec_private {
 		entry.push(MatroskaSpec::CodecPrivate(cp));
 	}
-	entry.push(MatroskaSpec::Audio(Master::Full(vec![
-		MatroskaSpec::SamplingFrequency(config.sample_rate as f64),
+	let mut audio = vec![
+		MatroskaSpec::SamplingFrequency(core_rate.unwrap_or(config.sample_rate) as f64),
 		MatroskaSpec::Channels(config.channel_count as u64),
-	])));
+	];
+	if core_rate.is_some_and(|core| core != config.sample_rate) {
+		audio.push(MatroskaSpec::OutputSamplingFrequency(config.sample_rate as f64));
+	}
+	entry.push(MatroskaSpec::Audio(Master::Full(audio)));
 
 	Ok(MatroskaSpec::TrackEntry(Master::Full(entry)))
 }

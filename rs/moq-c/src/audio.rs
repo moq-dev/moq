@@ -108,12 +108,12 @@ pub struct moq_audio_decoder_output {
 	pub channels: u32,
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// microseconds. Same congestion-control knob as
-	/// `moq_consume_audio`'s `max_age_us`. 0 = skip
+	/// `moq_consume_audio`'s `max_delay_us`. 0 = skip
 	/// aggressively (the moq-mux default); set to your playout
 	/// buffer (tens to a few hundred ms) for a softer skip. Named
 	/// `_max` to leave room for a future `min_buffer_us`, a
 	/// jitter-buffer floor rather than a staleness bound.
-	pub max_age_us: u64,
+	pub max_delay_us: u64,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -515,7 +515,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 		config.output.layout = zeroable(raw.channels)
 			.map(moq_audio::Layout::from_channels)
 			.transpose()?;
-		config.max_age = Duration::from_micros(raw.max_age_us);
+		config.max_delay = Duration::from_micros(raw.max_delay_us);
 
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
 

@@ -79,17 +79,19 @@ async function publish(config: Config) {
 
 	// Create a new "broadcast", which is a collection of tracks.
 	const broadcast = origin.createBroadcast(Moq.Path.from(config.broadcast));
-	broadcast.announce();
+	// A fresh epoch per run, so a restarted clock replaces the old broadcast.
+	broadcast.announce({ epoch: Moq.Epoch.mint() });
 
 	console.log("✅ Published broadcast:", config.broadcast);
 
-	void publishTrack(broadcast.createTrack(config.track));
+	void publishTrack(broadcast.createTrack(config.track, { timescale: Moq.Time.Timescale.MILLI }));
 	await connection.closed;
 }
 
 async function publishTrack(track: Moq.Track.Producer) {
 	// Send timestamps over the wire, matching the Rust implementation format
 	console.log("✅ Publishing clock data on track:", track.name);
+	const encoder = new TextEncoder();
 
 	for (;;) {
 		const now = new Date();
@@ -99,7 +101,7 @@ async function publishTrack(track: Moq.Track.Producer) {
 
 		// Send the base timestamp (everything but seconds) - matching Rust format
 		const base = `${now.toISOString().slice(0, 16).replace("T", " ")}:`;
-		group.writeString(base);
+		group.writeFrame({ payload: encoder.encode(base), timestamp: Moq.Time.Timestamp.now() });
 
 		// Send individual seconds for this minute
 		const currentMinute = now.getMinutes();
@@ -108,7 +110,7 @@ async function publishTrack(track: Moq.Track.Producer) {
 			const secondsNow = new Date();
 			const seconds = secondsNow.getSeconds().toString().padStart(2, "0");
 
-			group.writeString(seconds);
+			group.writeFrame({ payload: encoder.encode(seconds), timestamp: Moq.Time.Timestamp.now() });
 
 			// Wait until next second
 			const nextSecond = new Date(secondsNow);

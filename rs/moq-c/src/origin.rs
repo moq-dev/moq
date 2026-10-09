@@ -60,14 +60,6 @@ impl AnnouncedRecord {
 			Event::Start(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_START),
 			Event::Update(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATE),
 			Event::End(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_END),
-			Event::Live => {
-				return Self {
-					prefix: String::new(),
-					captures: None,
-					capture_views: Vec::new(),
-					kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE,
-				};
-			}
 		};
 		let captures = update.captures.map(|captures| {
 			captures
@@ -303,7 +295,7 @@ impl Origin {
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Resolves to an error when no announced route can serve the path.
-		let pending = consumer.request_broadcast(path.as_str());
+		let pending = consumer.request_broadcast(path.as_str(), None);
 
 		// `biased` so a pending close always wins over a ready broadcast.
 		let broadcast = tokio::select! {

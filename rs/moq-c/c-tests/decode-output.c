@@ -31,7 +31,7 @@
 
 _Static_assert(MOQ_VIDEO_PIXEL_FORMAT_I420 == 0, "I420 discriminant moved");
 _Static_assert(MOQ_VIDEO_PIXEL_FORMAT_RGBA == 1, "RGBA discriminant moved");
-_Static_assert(offsetof(moq_video_decoder_output, max_age_us) == 0, "max_age_us moved");
+_Static_assert(offsetof(moq_video_decoder_output, max_delay_us) == 0, "max_delay_us moved");
 _Static_assert(offsetof(moq_video_decoder_output, format) == 8, "format moved");
 _Static_assert(offsetof(moq_video_decoder_output, width) == 12, "width moved");
 _Static_assert(offsetof(moq_video_decoder_output, height) == 16, "height moved");

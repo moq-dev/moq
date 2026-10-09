@@ -79,7 +79,7 @@ class Server internal constructor(
                 // routine. Swallow it: letting it escape would cancel the scope
                 // and let one client take the whole accept loop down.
                 try {
-                    request.accept(publish = null, consume = null).closed()
+                    request.accept().closed()
                 } catch (e: MoqException) {
                     // Nothing to do; this session is already gone.
                 }

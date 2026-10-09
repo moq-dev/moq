@@ -31,7 +31,6 @@ import kotlinx.coroutines.flow.collect
 // connect() wires up an internal origin and returns a live connection.
 Moq.connect("https://relay.example.com").use { moq ->
     moq.announced(AnnounceConfig(prefix = "demos/", filter = "*/camera")).updates().collect { event ->
-        // AnnounceEventLive follows the routes live at subscribe time.
         if (event !is AnnounceEventStart) return@collect
         // Prefix stays origin-relative; captures reports what * matched.
         println("got broadcast ${event.announce.prefix}")
