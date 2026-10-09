@@ -164,7 +164,7 @@ function serveSnapshot<T>(
 		effect.cleanup(() => producer.finish());
 
 		effect.run((effect) => {
-			producer.update(value(effect));
+			producer.update({ value: value(effect), at: Moq.Time.Timestamp.now() });
 		});
 	});
 }

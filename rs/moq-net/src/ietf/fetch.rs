@@ -925,19 +925,29 @@ mod tests {
 	/// Reading a Fetch Type there instead takes the namespace's field count for one.
 	#[test]
 	fn test_fetch_v20_decodes_every_parameter() {
+		// Groups 128 through 130. The group takes two bytes, so draft-20's Length (4) and
+		// draft-22's Location Filter Type (0x03) differ, and reading one as the other
+		// misframes every parameter after it.
 		#[rustfmt::skip]
-		let body = [FETCH_HEAD, &[
-			0x07, // Number of Parameters
-			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
-			0x07, 0x64, // FILL_TIMEOUT (0x0A) = 100, a varint
-			0x16, 0x40, // SUBSCRIBER_PRIORITY (0x20) = 64
-			0x01, 0x03, 0x04, 0x00, 0x02, // LOCATION_FILTER (0x21): groups 4 through 6
-			0x01, 0x01, // GROUP_ORDER (0x22) = Ascending
-			0x04, 0x02, 0x00, 0x05, // OBJECTID_FILTER (0x26): SetID 0, from 5
-			0x0F, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
-		]].concat();
+		let cases: [(Version, &[u8]); 3] = [
+			(Version::Draft20, &[0x01, 0x04, 0x80, 0x80, 0x00, 0x02]),
+			(Version::Draft21, &[0x01, 0x04, 0x80, 0x80, 0x00, 0x02]),
+			(Version::Draft22, &[0x01, 0x03, 0x80, 0x80, 0x00, 0x02]),
+		];
 
-		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+		for (version, location_filter) in cases {
+			#[rustfmt::skip]
+			let body = [FETCH_HEAD, &[
+				0x07, // Number of Parameters
+				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
+				0x07, 0x64, // FILL_TIMEOUT (0x0A) = 100, a varint
+				0x16, 0x40, // SUBSCRIBER_PRIORITY (0x20) = 64
+			], location_filter, &[
+				0x01, 0x01, // GROUP_ORDER (0x22) = Ascending
+				0x04, 0x02, 0x00, 0x05, // OBJECTID_FILTER (0x26): SetID 0, from 5
+				0x0F, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
+			]].concat();
+
 			let fetch: Fetch = decode_message(&body, version).unwrap_or_else(|e| panic!("{version}: {e}"));
 			assert_eq!(fetch.request_id, RequestId(1));
 			assert_eq!(fetch.subscriber_priority, 64);
@@ -951,8 +961,11 @@ mod tests {
 					namespace: Path::new("live"),
 					track: "video".into(),
 					filter: Filter::Absolute {
-						start: Location { group: 4, object: 0 },
-						end: Some(crate::ietf::EndLocation { group: 6, object: None }),
+						start: Location { group: 128, object: 0 },
+						end: Some(crate::ietf::EndLocation {
+							group: 130,
+							object: None,
+						}),
 					},
 				},
 				"{version}"
