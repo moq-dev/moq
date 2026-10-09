@@ -21,4 +21,5 @@ cannot hold more than the window open"), bounding only how many are open.
 - Tests: a repeated ID and a lower ID are each refused with the drafts' error;
   in-order IDs and the MAX_REQUEST_ID grant are unchanged.
 
-Public API: none. Wire: none (a stricter receiver).
+Public API: none. Wire: no format change, but a stricter receiver closes
+sessions with peers that reuse IDs today; report it as an interop change.
