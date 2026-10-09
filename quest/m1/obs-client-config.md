@@ -25,7 +25,8 @@ again, under the same keys.
   (`moq_qlog_supported`), so the plugin hides a field it can't honor.
 - `cpp/obs/src/moq-settings.cpp`: restore the fields and their `Configure`
   calls, reading defaults from moq-ffi instead of the constants it repeats now
-  (`QUIC_MAX_STREAMS_DEFAULT`, the WebSocket defaults).
+  (`QUIC_MAX_STREAMS_DEFAULT`, the WebSocket defaults). The dock's
+  **Advanced** tooltip names the protocol pin again.
 - Cross-package sync for `rs/moq-ffi`: the hand-written wrappers' client
   options and `doc/lib/*`; `doc/bin/obs.md` lists the restored settings.
 

@@ -435,7 +435,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 
 	advancedButton = new QPushButton("Advanced…", streamPage);
 	advancedButton->setCursor(Qt::PointingHandCursor);
-	advancedButton->setToolTip("Protocol pin, TLS, reconnect, QUIC and WebSocket settings. "
+	advancedButton->setToolTip("TLS, reconnect, QUIC and WebSocket settings. "
 				   "Opens them in a window. Changes apply on the next Go Live.");
 	connect(advancedButton, &QPushButton::clicked, this, &MoQDock::OpenAdvanced);
 
