@@ -76,7 +76,10 @@ each as its own broadcast (`event.hang` becomes `event/1.hang`,
 `event/2.hang`). A damaged packet is dropped on its own PID, so video freezes
 until its next keyframe while the other tracks carry on. The importer also
 logs feed health (stalled streams, TR 101 290 errors) without changing what it
-publishes. FLV covers H.264 + AAC.
+publishes. `--passthrough` publishes the multiplex whole instead, every packet
+in order on one [`m2ts`](/concept/hang#transport-streams) track with every
+program aboard, for what demultiplexing cannot carry, such as a scrambled
+service; `export ts` does not read it. FLV covers H.264 + AAC.
 
 ## Export
 

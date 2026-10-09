@@ -27,6 +27,7 @@ on:
       - "package.json"
       # The Go client builds against the modules this script stages.
       - "sh/go/**"
+      - "cpp/moq/**"
       - ".github/workflows/interop.yml"
 
 concurrency:
@@ -104,6 +105,16 @@ jobs:
         env:
           # The run writes its directory here, so a failed one is uploaded below
           # and a passing one is deleted as usual.
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # Registry installs and the release matrix run only on main, nightly or
+      # on demand: a break only needs catching before the next release.
+      - name: Released wire compatibility
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: nix develop --command just test wire-compat
+        shell: bash -leo pipefail {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: Interop negative control

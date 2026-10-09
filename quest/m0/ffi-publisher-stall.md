@@ -2,11 +2,11 @@
 
 ## Goal
 
-Every cell of `just test interop --all` with a Go or Python publisher passes
+Every cell of `just test interop --all` with a Go, Python, or C++ publisher passes
 reliably on `main` and in nightly CI. Today a moq-ffi publisher goes silent,
 not even sending QUIC keep-alives, until the relay's 10 s idle timeout closes
 its connection and it reconnects. The browser cells (`go -> js`,
-`python -> js`) can't absorb that within their 30 s limit and fail at 32 to
+`python -> js`, `cpp -> js`) can't absorb that within their 30 s limit and fail at 32 to
 33 s; `-> rust` and `-> gst` pass slowly at 10 to 11 s, and in some runs most
 cells of one publisher fail at 11 s. The harness fails any cell whose
 connection idles out, so a drop and reconnect can no longer pass as a slow
@@ -25,7 +25,7 @@ Decided 2026-10-08:
 
 - In m0, moved from m1 and widened from the browser cells: the stall masks
   interop on every wire PR and may disconnect real FFI publishers.
-- Re-check every Go and Python publisher cell now that the budget landed.
+- Re-check every Go, Python, and C++ publisher cell now that the budget landed.
   The #4225 root-cause comment saw a 64-iteration yield still time the
   publisher out, so if a cell still stalls, find the rest of the cause.
   Never raise a timeout or add a retry.

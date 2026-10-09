@@ -30,6 +30,13 @@ A payload is stamped when written, unless it carries its capture time:
 `moq_net::Timed::from(bytes).at(captured)`. Writes return the encoded frame
 size.
 
+A stream rides one group, so the whole log shares moq-net's group budget:
+32 MiB of payload and 8192 payloads. An `append` that might not fit returns
+`moq_net::Error::GroupTooLarge` before it is encoded and leaves the log intact,
+compressed or not. Once the budget is spent every `append` is refused; start a
+new track to keep going. Any other failed append aborts the track, so readers
+see the error rather than a log that looks complete.
+
 The group-scoped codec underneath is exported as `Encoder`/`Decoder`, which
 [`moq-json`](/lib/rs/moq-json) reuses for its merge-patch deltas. Create one
 pair per group and feed frames in order.

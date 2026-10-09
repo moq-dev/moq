@@ -4,18 +4,29 @@
 //! sequence of samples). Nothing is ever superseded: a consumer yields each payload in the order it
 //! was appended. For a latest-value document, use [`snapshot`](crate::snapshot) instead.
 //!
-//! Retention is bounded, which is the limit of "lossless" here. The group's cache is finite, so a
-//! write that would outgrow it aborts the group with [`moq_net::Error::GroupTooLarge`] rather than
-//! dropping a prefix some readers missed: a partial log presented as a whole one is what this
-//! mode exists to prevent. Keep a log inside what the group retains, and split anything unbounded
-//! across successive tracks.
-//!
 //! On the wire the log is a single group that is never rolled, one payload per frame. A payload
 //! that cannot be written ends the track rather than opening a second group: a log missing a record
 //! is not lossless, and a gap dressed up as a complete log is worse than a visible failure. With
 //! [`Config::compression`] set to [`Compression::Deflate`], that one
 //! group is one sync-flushed DEFLATE stream, so each
 //! payload compresses against the earlier ones and a run of similar payloads shrinks sharply.
+//!
+//! # Budget
+//!
+//! That single group is what bounds the log. moq-net caps a group at
+//! [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES) (32 MiB) of payload and
+//! [`MAX_GROUP_FRAMES`](moq_net::group::MAX_GROUP_FRAMES) (8192) frames, and a consumer always
+//! starts at frame 0, so the cap is never met by dropping a prefix some readers missed: a partial
+//! log presented as a whole one is what this mode exists to prevent.
+//!
+//! Instead an append that might not fit is refused with [`moq_net::Error::GroupTooLarge`] before
+//! it is encoded, and the log stays intact and writable. With compression the check counts the
+//! payload's raw size plus DEFLATE's worst-case overhead ([`Encoder::bound`](crate::Encoder::bound)),
+//! since the compressed size is only known once the window has moved. The budget is below the
+//! decoder's [`DEFAULT_MAX_FRAME_SIZE`](crate::DEFAULT_MAX_FRAME_SIZE), so any payload that fits is
+//! one every consumer can inflate. The budget covers the whole log rather than a single payload, so
+//! once it is spent every append is refused: the live stream is bounded history by design, and a
+//! publisher with more to say opens a new track.
 
 use crate::Compression;
 
@@ -218,28 +229,68 @@ mod test {
 		);
 	}
 
-	/// A record the consumer could never decode is as lost as one the track rejects, so it takes the
-	/// track with it rather than leaving a live log missing a record. Guards the guard: an early
-	/// return here would bypass the terminal path and let a later append continue the gap.
+	fn refused(result: crate::Result<usize>) -> bool {
+		matches!(result, Err(crate::Error::Net(moq_net::Error::GroupTooLarge)))
+	}
+
+	/// A payload past the group budget is refused before anything is written, so the log carries
+	/// on: the next payload lands and decodes, which with compression proves the window never
+	/// moved. One past the decoder's cap is refused the same way rather than ending the track.
 	#[test]
-	fn an_undecodable_record_ends_the_track() {
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("test", None)
-			.unwrap();
-		let mut subscriber = track.subscribe(None);
-		let mut producer = Producer::new(track, cfg(true));
+	fn an_oversized_payload_is_refused_and_the_log_continues() {
+		let huge = Bytes::from(vec![0u8; crate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
+		let past_budget = huge.slice(..moq_net::group::MAX_CACHE_BYTES as usize);
 
-		assert!(producer.demand().is_used());
-		let oversized = Bytes::from(vec![0u8; crate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
-		assert!(matches!(producer.append(oversized), Err(crate::Error::TooLarge(_))));
+		for compression in [false, true] {
+			let (mut producer, track) = producer(compression);
+			producer.append(&b"first"[..]).unwrap();
 
-		assert!(!producer.demand().is_used());
+			assert!(
+				refused(producer.append(past_budget.clone())),
+				"compression={compression}"
+			);
+			assert!(refused(producer.append(huge.clone())), "compression={compression}");
+			assert!(producer.demand().is_used(), "a refusal must not end the track");
 
-		// Nothing was published, and the track is terminal rather than merely skipping the record.
-		let waiter = kio::Waiter::noop();
-		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Err(_))));
-		assert!(producer.append(&b"after"[..]).is_err());
+			producer.append(&b"second"[..]).unwrap();
+			producer.finish().unwrap();
+
+			assert_eq!(
+				drain(track, compression),
+				vec![Bytes::from_static(b"first"), Bytes::from_static(b"second")],
+				"compression={compression}"
+			);
+		}
+	}
+
+	/// A refused first payload opens no group, so a subscriber is not handed an empty one to wait on.
+	#[test]
+	fn a_refused_first_payload_publishes_nothing() {
+		let (mut producer, track) = producer(true);
+		let huge = Bytes::from(vec![0u8; crate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
+		assert!(refused(producer.append(huge)));
+		assert_eq!(track.latest(), None);
+	}
+
+	/// The budget covers the whole log, so once its frames are spent every append is refused, and
+	/// the log written so far still finishes cleanly and reads back whole.
+	#[test]
+	fn a_spent_budget_refuses_every_append() {
+		let frames = moq_net::group::MAX_GROUP_FRAMES as u32;
+		for compression in [false, true] {
+			let (mut producer, track) = producer(compression);
+			for n in 0..frames {
+				producer.append(Bytes::copy_from_slice(&n.to_be_bytes())).unwrap();
+			}
+
+			assert!(refused(producer.append(&b"late"[..])), "compression={compression}");
+			assert!(refused(producer.append(&b"later"[..])), "compression={compression}");
+			producer.finish().unwrap();
+
+			let payloads = drain(track, compression);
+			assert_eq!(payloads.len(), frames as usize, "compression={compression}");
+			assert_eq!(payloads.last().unwrap()[..], (frames - 1).to_be_bytes());
+		}
 	}
 
 	/// A reader already inside the group keeps its own handle, which `track::Producer::abort`
@@ -247,14 +298,15 @@ mod test {
 	/// told the producer went away rather than why the log stopped.
 	#[test]
 	fn a_reader_inside_the_group_sees_the_real_error() {
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("test", None)
-			.unwrap();
+		let track = rejecting_track();
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::new(track, Config::default());
 
-		producer.append(&b"first"[..]).unwrap();
+		// The epoch still fits the extreme timescale, so this write lands and opens the group.
+		let epoch = moq_net::Timestamp::from_millis(0).unwrap();
+		producer
+			.append(moq_net::Timed::from(Bytes::from_static(b"first")).at(epoch))
+			.unwrap();
 
 		// Pull the group, the way a live reader would, so we hold a handle of our own.
 		let waiter = kio::Waiter::noop();
@@ -263,14 +315,16 @@ mod test {
 		};
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 
-		// A payload the group cannot hold, so the write fails and ends the log.
-		let oversized = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
-		assert!(producer.append(oversized).is_err());
+		// Stamped now, which overflows the timescale, so the write fails and ends the log.
+		let Err(crate::Error::Net(written)) = producer.append(&b"rejected"[..]) else {
+			panic!("the write should fail");
+		};
 
 		match group.poll_read_frame(&waiter) {
-			Poll::Ready(Err(err)) => assert!(
-				matches!(err, moq_net::Error::FrameTooLarge),
-				"the reader should see the write's own error, got {err:?}"
+			Poll::Ready(Err(err)) => assert_eq!(
+				err.to_string(),
+				written.to_string(),
+				"the reader should see the write's own error"
 			),
 			other => panic!("expected the write error, got {other:?}"),
 		}
@@ -294,6 +348,24 @@ mod test {
 			producer.append(&b"again"[..]).is_err(),
 			"a second append must fail on the closed track rather than open another group"
 		);
+	}
+
+	/// An ended log reports why it ended, even for a payload past the budget: `GroupTooLarge` would
+	/// tell the caller the log is still writable.
+	#[test]
+	fn an_ended_log_refuses_with_its_own_error() {
+		let track = rejecting_track();
+		let mut producer = Producer::new(track, Config::default());
+
+		let Err(written) = producer.append(&b"rejected"[..]) else {
+			panic!("the write should fail");
+		};
+
+		let huge = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
+		let Err(err) = producer.append(huge) else {
+			panic!("an append on an ended log should fail");
+		};
+		assert_eq!(err.to_string(), written.to_string());
 	}
 
 	/// A stream is one group. A publisher that rolls to a second one lost whatever would have

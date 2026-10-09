@@ -360,20 +360,23 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 /// is dropped. Once every clone is dropped *and* every reservation resolves, the first catalog
 /// snapshot is published atomically with the complete track list, so a one-shot muxer (fMP4,
 /// MPEG-TS) never sees a half-converged catalog.
+///
+/// It belongs to one [`Timebase`](super::Timebase), whose offset the importer handed it shifts its
+/// timestamps by. Clones share that timebase.
 pub struct Reserved<E: CatalogExt = ()> {
-	catalog: Producer<E>,
+	timebase: super::Timebase<E>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
-	pub(super) fn new(catalog: Producer<E>) -> Self {
-		catalog.add_reserver();
-		Self { catalog }
+	pub(super) fn new(timebase: super::Timebase<E>) -> Self {
+		timebase.catalog.add_reserver();
+		Self { timebase }
 	}
 
 	/// Track properties for a media track under this catalog, carrying any retention it declares.
 	/// See [`Producer::track_info`](super::Producer::track_info).
 	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
-		self.catalog.track_info(priority)
+		self.timebase.catalog.track_info(priority)
 	}
 
 	/// Reserve a rendition of config type `C` under `name`, returning its internal owner.
@@ -441,12 +444,12 @@ impl<E: CatalogExt> Reserved<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.init(track.name())?;
-		self.catalog.media(track, container, rendition, config.into())
+		self.timebase.catalog.media(track, container, rendition, config.into())
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
 	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
-		self.catalog.timestamp(hint)
+		self.timebase.catalog.timestamp(hint)
 	}
 
 	/// The underlying catalog [`Producer`], for edits that outlive this reservation.
@@ -455,22 +458,26 @@ impl<E: CatalogExt> Reserved<E> {
 	/// track removals after its initial set is declared) while the reservation itself is dropped to
 	/// open the gate. The returned handle does not gate: only live `Reserved`s do.
 	pub(crate) fn producer(&self) -> Producer<E> {
-		self.catalog.clone()
+		self.timebase.catalog.clone()
+	}
+
+	/// The timebase this reservation belongs to, which outlives it without gating the catalog.
+	///
+	/// An importer anchors through it on its first frame and shifts every frame by its offset.
+	pub(crate) fn timebase(&self) -> super::Timebase<E> {
+		self.timebase.clone()
 	}
 }
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		self.catalog.add_reserver();
-		Self {
-			catalog: self.catalog.clone(),
-		}
+		Self::new(self.timebase.clone())
 	}
 }
 
 impl<E: CatalogExt> Drop for Reserved<E> {
 	fn drop(&mut self) {
-		self.catalog.release_reserver();
+		self.timebase.catalog.release_reserver();
 	}
 }
 
@@ -515,7 +522,7 @@ pub(crate) type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 /// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
-		Self::owned(reserved.catalog.clone(), Some(reserved), name)
+		Self::owned(reserved.producer(), Some(reserved), name)
 	}
 
 	pub(super) fn live(catalog: Producer<E>, name: String) -> crate::Result<Self> {
@@ -549,9 +556,9 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.catalog.estimator()
 	}
 
-	/// The broadcast clock the catalog stamps its tracks on.
+	/// The broadcast clock the catalog stamps its tracks on, read without fixing it.
 	pub(crate) fn clock(&self) -> crate::Clock {
-		self.catalog.clock()
+		self.catalog.current_clock()
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
