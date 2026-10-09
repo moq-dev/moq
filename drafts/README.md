@@ -34,10 +34,13 @@ This builds `draft-lcurley-moq-lite-05.xml` and submits it to the datatracker,
 which emails you a confirmation link. The submission is final only once you
 click that link. For a brand-new draft (`-00`), set "Replaces" on the
 confirmation page. On a 200 or 201, the source gains an empty changelog
-section for the next version above the one just published, in that draft's
-heading style. Commit that edit; it is the record of the publish. The draft
-needs a changelog section for the version being published, and anything short
-of a 200 or 201 leaves the file untouched.
+section above the one just published. A versioned heading such as
+`moq-lite-07` stays put and the new heading ends in the next version. A
+`Since name-00 (in progress)` heading is the section for version 01:
+publishing drops `(in progress)` and opens `Since name-01 (in progress)`
+above it. Commit that edit; it is the record of the publish. Anything short
+of a 200 or 201 leaves the file untouched. Publishing the same version again
+submits the text without the section that is already open.
 
 ## Contributing
 

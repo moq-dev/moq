@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # publish.sh opens the next changelog section only after the datatracker
-# accepts the submission. Fixtures stand in for curl and kramdown-rfc.
+# accepts the submission. A Since-<prev> (in progress) heading publishes as
+# prev+1. A retry submits the source without the section already opened.
+# Fixtures stand in for curl and kramdown-rfc.
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
@@ -52,7 +54,19 @@ printf 'kramdown\n' >>"$KRAM_LOG"
 cat >"$KRAM_STDIN"
 printf '<rfc/>\n'
 EOF
-chmod +x "$bin/curl" "$bin/kramdown-rfc"
+# A template argument is the changelog temp beside the draft. Make that one
+# unwritable when FAKE_MKTEMP_RO is set, so the write fails after submit.
+real_mktemp=$(command -v mktemp)
+cat >"$bin/mktemp" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+path=\$("$real_mktemp" "\$@")
+if [[ -n \${FAKE_MKTEMP_RO:-} && \$# -gt 0 ]]; then
+    chmod a-w "\$path"
+fi
+printf '%s\n' "\$path"
+EOF
+chmod +x "$bin/curl" "$bin/kramdown-rfc" "$bin/mktemp"
 
 export PATH="$bin:$PATH"
 export CURL_LOG=$tmp/curl.log
@@ -129,6 +143,11 @@ first_version() {
             return 1
         fi
         if [[ ${lines[$i]} =~ ^##[[:space:]] ]]; then
+            # Since-<prev> (in progress) is the unpublished section for prev+1.
+            if [[ ${lines[$i]} =~ ^##\ Since\ .*-([0-9][0-9])\ \(in\ progress\)$ ]]; then
+                printf '%02d\n' $((10#${BASH_REMATCH[1]} + 1))
+                return 0
+            fi
             if [[ ${lines[$i]} =~ ^##\ .*-([0-9][0-9])(\ \(in\ progress\))?$ ]]; then
                 printf '%s\n' "${BASH_REMATCH[1]}"
                 return 0
@@ -141,65 +160,140 @@ first_version() {
     return 1
 }
 
+# Changelog version headings, in order, until the next top-level section.
+changelog_version_headings() {
+    local file=$1
+    local -a lines=()
+    mapfile -t lines <"$file"
+    local -i i n=${#lines[@]} start=-1
+    for ((i = 0; i < n; i++)); do
+        if [[ ${lines[$i]} =~ ^#\ .*Changelog[[:space:]]*$ ]]; then
+            start=$i
+            break
+        fi
+    done
+    ((start >= 0)) || return 1
+    for ((i = start + 1; i < n; i++)); do
+        if [[ ${lines[$i]} =~ ^#[[:space:]] ]]; then
+            break
+        fi
+        if [[ ${lines[$i]} =~ ^##\ .*-([0-9][0-9])(\ \(in\ progress\))?$ ]]; then
+            printf '%s\n' "${lines[$i]}"
+        fi
+    done
+}
+
 assert_opened() {
     local before_file=$1
     local after_file=$2
     local ver=$3
     local next=$4
-    local removed
-    removed=$(diff -u "$before_file" "$after_file" | grep -E '^-' | grep -vE '^---' || true)
-    [[ -z $removed ]] || fail "existing lines changed: $removed"
-
-    local old
-    old=$(grep -E "^## .*-${ver}( \\(in progress\\))?$" "$before_file" | head -n 1)
-    [[ -n $old ]] || fail "missing published heading for $ver"
-    local new=${old/$ver/$next}
-    [[ $(grep -cFx "$new" "$after_file") -eq 1 ]] || fail "want one $new heading"
-    [[ $(grep -cFx "$old" "$after_file") -eq 1 ]] || fail "published heading $old was rewritten"
-
     local -a before_lines after_lines
     mapfile -t before_lines <"$before_file"
     mapfile -t after_lines <"$after_file"
-    local -i old_idx=-1 i
-    for ((i = 0; i < ${#before_lines[@]}; i++)); do
-        if [[ ${before_lines[$i]} == "$old" ]]; then
+    local -i changelog=-1 i n=${#before_lines[@]}
+    for ((i = 0; i < n; i++)); do
+        if [[ ${before_lines[$i]} =~ ^#\ .*Changelog[[:space:]]*$ ]]; then
+            changelog=$i
+            break
+        fi
+    done
+    ((changelog >= 0)) || fail "$before_file has no changelog"
+    local -i old_idx=-1
+    for ((i = changelog + 1; i < n; i++)); do
+        if [[ ${before_lines[$i]} =~ ^#[[:space:]] ]]; then
+            break
+        fi
+        if [[ ${before_lines[$i]} =~ ^##\ .*-([0-9][0-9])(\ \(in\ progress\))?$ ]]; then
             old_idx=$i
             break
         fi
     done
-    ((old_idx >= 0)) || fail "could not find $old"
+    ((old_idx >= 0)) || fail "$before_file changelog has no version heading"
+    local old=${before_lines[$old_idx]}
+    local closed=$old
+    local new
+    if [[ $old =~ ^##\ Since\ (.+)-([0-9][0-9])\ \(in\ progress\)$ ]]; then
+        local stem=${BASH_REMATCH[1]}
+        local prev=${BASH_REMATCH[2]}
+        local expect_ver
+        expect_ver=$(printf '%02d' $((10#$prev + 1)))
+        [[ $ver == "$expect_ver" ]] || fail "since heading $old publishes as $expect_ver, not $ver"
+        closed="## Since ${stem}-${prev}"
+        new="## Since ${stem}-${ver} (in progress)"
+    else
+        [[ $old =~ ^##\ .*-${ver}(\ \(in\ progress\))?$ ]] || fail "published heading $old is not version $ver"
+        new=${old/$ver/$next}
+    fi
     local -a attrs=()
     local -i j=$((old_idx + 1))
-    while ((j < ${#before_lines[@]})) && [[ ${before_lines[$j]} =~ ^\{: ]]; do
+    while ((j < n)) && [[ ${before_lines[$j]} =~ ^\{: ]]; do
         attrs+=("${before_lines[$j]}")
         j+=1
     done
-
-    local -i new_idx=-1 after_old=-1
-    for ((i = 0; i < ${#after_lines[@]}; i++)); do
-        if [[ ${after_lines[$i]} == "$new" && new_idx -lt 0 ]]; then
-            new_idx=$i
-        fi
-        if [[ ${after_lines[$i]} == "$old" ]]; then
-            after_old=$i
-        fi
+    local -a expect_lines=()
+    local -i b
+    for ((b = 0; b < old_idx; b++)); do
+        expect_lines+=("${before_lines[$b]}")
     done
-    ((new_idx >= 0 && after_old > new_idx)) || fail "$new is not above $old"
-    local -i expect=$((new_idx + 1))
+    expect_lines+=("$new")
     if ((${#attrs[@]} > 0)); then
         local attr
         for attr in "${attrs[@]}"; do
-            [[ ${after_lines[$expect]} == "$attr" ]] || fail "attribute was not copied onto $new"
-            expect+=1
+            expect_lines+=("$attr")
         done
     fi
-    [[ -z ${after_lines[$expect]} ]] || fail "next section is not empty"
-    expect+=1
-    ((expect == after_old)) || fail "unexpected lines between $new and $old"
+    expect_lines+=("")
+    expect_lines+=("$closed")
+    for ((b = old_idx + 1; b < n; b++)); do
+        expect_lines+=("${before_lines[$b]}")
+    done
+    local mismatch=0
+    if ((${#expect_lines[@]} != ${#after_lines[@]})); then
+        mismatch=1
+    else
+        for ((b = 0; b < ${#expect_lines[@]}; b++)); do
+            if [[ ${expect_lines[$b]} != "${after_lines[$b]}" ]]; then
+                mismatch=1
+                break
+            fi
+        done
+    fi
+    if ((mismatch != 0)); then
+        printf '%s\n' "${expect_lines[@]}" >"$tmp/expect-opened.md"
+        diff -u "$tmp/expect-opened.md" "$after_file" >&2 || true
+        fail "$before_file did not gain an empty next section"
+    fi
+}
 
-    local growth=$((${#after_lines[@]} - ${#before_lines[@]}))
-    local want=$((2 + ${#attrs[@]}))
-    ((growth == want)) || fail "inserted $growth lines, want $want"
+# A retry still has the next heading in the file, and the text sent to
+# kramdown does not. Versioned submissions match the pre-insert source.
+# Since submissions match it with ` (in progress)` removed from that heading.
+assert_retry_submission() {
+    local name=$1
+    local src=$2
+    local version=$3
+    local file=$repo/drafts/$name.md
+    local -a headings=()
+    mapfile -t headings < <(changelog_version_headings "$file")
+    ((${#headings[@]} >= 2)) || fail "$name retry has no next section"
+    local next_heading=${headings[0]}
+    local published_heading=${headings[1]}
+    grep -qxF "$next_heading" "$file" || fail "$name file lost the next heading"
+    if grep -qxF "$next_heading" "$KRAM_STDIN"; then
+        fail "$name retry submitted the next heading: $next_heading"
+    fi
+    grep -qxF "$published_heading" "$KRAM_STDIN" || fail "$name retry dropped $published_heading"
+    if grep -q '^## Since ' "$src"; then
+        sed 's/^\(## Since .*\) (in progress)$/\1/' "$src" >"$tmp/retry-src.md"
+    else
+        cp "$src" "$tmp/retry-src.md"
+    fi
+    sed "s/${name}-latest/${name}-${version}/g" "$tmp/retry-src.md" >"$tmp/retry-want.md"
+    cmp -s "$tmp/retry-want.md" "$KRAM_STDIN" || {
+        diff -u "$tmp/retry-want.md" "$KRAM_STDIN" >&2 || true
+        fail "$name retry submitted a next section or rewrote entries"
+    }
 }
 
 expect_file() {
@@ -280,9 +374,31 @@ cat >"$tmp/hidden-next.md" <<'EOF'
 
 ## Since draft-lcurley-moq-hidden-01 (in progress)
 
-## Since draft-lcurley-moq-hidden-00 (in progress)
+## Since draft-lcurley-moq-hidden-00
 
 - Apply hidden filtering only to opted-in peers.
+EOF
+
+cat >"$tmp/since-attr.md" <<'EOF'
+# Changelog
+{:numbered="false"}
+
+## Since draft-lcurley-moq-solicit-00 (in progress)
+{:numbered="false"}
+
+- Declare what you want.
+EOF
+cat >"$tmp/since-attr-next.md" <<'EOF'
+# Changelog
+{:numbered="false"}
+
+## Since draft-lcurley-moq-solicit-01 (in progress)
+{:numbered="false"}
+
+## Since draft-lcurley-moq-solicit-00
+{:numbered="false"}
+
+- Declare what you want.
 EOF
 
 cat >"$tmp/e2ee.md" <<'EOF'
@@ -395,17 +511,22 @@ check_case() {
     grep -q "Changelog section " "$tmp/out" || fail "$label did not report the open section"
     expect_file "$name" "$src" "$want"
     cmp -s "$tmp/other.md" "$repo/drafts/draft-other.md" || fail "$label edited another draft"
+    local mode
+    mode=$(stat -c %a "$repo/drafts/$name.md")
+    [[ $mode == "$(stat -c %a "$src")" ]] || fail "$label changed the file mode to $mode"
     local once=$tmp/once.md
     cp "$repo/drafts/$name.md" "$once"
     run 201 "" "$name" "$version" test@example.com
     [[ $RUN_RC -eq 0 ]] || fail "$label republish exited $RUN_RC"
     cmp -s "$once" "$repo/drafts/$name.md" || fail "$label republish rewrote the changelog"
+    assert_retry_submission "$name" "$src" "$version"
 }
 
 check_case "hang" "$tmp/hang.md" draft-lcurley-moq-hang 04 "$tmp/hang-next.md"
 check_case "lite" "$tmp/lite.md" draft-lcurley-moq-lite 07 "$tmp/lite-next.md"
 check_case "cluster" "$tmp/cluster.md" draft-lcurley-moq-cluster 02 "$tmp/cluster-next.md"
-check_case "hidden" "$tmp/hidden.md" draft-lcurley-moq-hidden 00 "$tmp/hidden-next.md"
+check_case "hidden" "$tmp/hidden.md" draft-lcurley-moq-hidden 01 "$tmp/hidden-next.md"
+check_case "since attr" "$tmp/since-attr.md" draft-lcurley-moq-solicit 01 "$tmp/since-attr-next.md"
 check_case "e2ee" "$tmp/e2ee.md" draft-lcurley-moq-e2ee 00 "$tmp/e2ee-next.md"
 check_case "version 08" "$tmp/v08.md" draft-lcurley-moq-hang 08 "$tmp/v09.md"
 
@@ -448,18 +569,44 @@ run 200 "" draft-lcurley-moq-hang 04 test@example.com
 no_submit
 unchanged "$tmp/below.md" draft-lcurley-moq-hang
 
+cat >"$tmp/above-xml.md" <<'EOF'
+# Changelog
+
+## moq-hang-04
+
+- Published.
+EOF
 install_draft draft-lcurley-moq-hang "$tmp/above.md"
 run 200 "" draft-lcurley-moq-hang 04 test@example.com
 [[ $RUN_RC -eq 0 ]] || fail "existing next section exited $RUN_RC"
 unchanged "$tmp/above.md" draft-lcurley-moq-hang
 [[ -s $CURL_LOG ]] || fail "existing next section skipped submission"
-cmp -s "$tmp/above.md" "$KRAM_STDIN" || fail "existing next section changed the render"
+cmp -s "$tmp/above-xml.md" "$KRAM_STDIN" || {
+    diff -u "$tmp/above-xml.md" "$KRAM_STDIN" >&2 || true
+    fail "existing next section was submitted"
+}
+grep -qxF '## moq-hang-05' "$repo/drafts/draft-lcurley-moq-hang.md" || fail "existing next heading was removed"
 
 install_draft draft-lcurley-moq-hang "$tmp/hang.md"
 run 200 "" draft-lcurley-moq-hang 99 test@example.com
 [[ $RUN_RC -ne 0 ]] || fail "version 99 succeeded"
 no_submit
 unchanged "$tmp/hang.md" draft-lcurley-moq-hang
+
+install_draft draft-lcurley-moq-hang "$tmp/hang.md"
+export FAKE_MKTEMP_RO=1
+run 200 "" draft-lcurley-moq-hang 04 test@example.com
+unset FAKE_MKTEMP_RO
+[[ $RUN_RC -ne 0 ]] || fail "write failure succeeded"
+unchanged "$tmp/hang.md" draft-lcurley-moq-hang
+grep -q "not updated" "$tmp/err" || fail "write failure did not report the missed update"
+if grep -q "Submitted" "$tmp/out"; then
+    fail "write failure reported success"
+fi
+[[ -s $CURL_LOG ]] || fail "write failure skipped submission"
+if find "$repo/drafts" -name '*.tmp.*' -print -quit | grep -q .; then
+    fail "write failure left a temp file behind"
+fi
 
 for src in "$root"/drafts/draft-*.md; do
     name=$(basename "$src" .md)
@@ -482,6 +629,7 @@ for src in "$root"/drafts/draft-*.md; do
     run 200 "" "$name" "$ver" test@example.com
     [[ $RUN_RC -eq 0 ]] || fail "$name republish exited $RUN_RC"
     cmp -s "$tmp/once.md" "$repo/drafts/$name.md" || fail "$name republish rewrote the changelog"
+    assert_retry_submission "$name" "$src" "$ver"
 done
 
 after=$(sha256sum "$root"/drafts/draft-*.md)
