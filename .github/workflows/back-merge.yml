@@ -1,0 +1,51 @@
+name: Back-merge
+
+# Every push to `release` (a cut, a backport, or release-plz's version bump)
+# merges `release` back into `main`, so trunk carries the published versions
+# and CHANGELOGs and the next cut starts from an advanced merge base.
+#
+# It lands through a pull request as a merge commit, never a squash: a squash
+# leaves the merge base at the last cut, so a second publish before the next
+# cut would conflict. Check's `land` job merges it once Check and Test pass.
+
+on:
+  push:
+    branches: [release]
+  # Re-running by hand, e.g. after resolving a conflict that failed a run.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: back-merge
+  cancel-in-progress: false
+
+jobs:
+  back-merge:
+    name: Back-merge
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'moq-dev'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      # The app token, not GITHUB_TOKEN: a pull request GITHUB_TOKEN opens
+      # triggers no workflows, so Check and Test would never report.
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Merge release into main
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: just gh back-merge

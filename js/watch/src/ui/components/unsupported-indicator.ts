@@ -14,8 +14,8 @@ export function unsupportedIndicator(parent: Effect, watch: MoqWatch): HTMLEleme
 
 	parent.run((effect) => {
 		const unsupported = effect.get(watch.video.source.out.error) === "unsupported";
-		const offline = effect.get(watch.broadcast.out.status) === "offline";
-		const show = unsupported && !offline;
+		const status = effect.get(watch.broadcast.out.status);
+		const show = unsupported && (status === "loading" || status === "live");
 		container.style.display = show ? "" : "none";
 		if (!show) return;
 

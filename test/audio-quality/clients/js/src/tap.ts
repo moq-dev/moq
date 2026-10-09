@@ -41,7 +41,7 @@ export type Tap = {
 /** Attach a tap to `root`. */
 export async function tap(root: AudioNode, init: TapInit): Promise<Tap> {
 	const context = root.context as AudioContext;
-	await context.audioWorklet.addModule(TapWorklet);
+	await context.audioWorklet.addModule(await TapWorklet());
 
 	const node = new AudioWorkletNode(context, "audio-quality-tap", {
 		numberOfInputs: 1,

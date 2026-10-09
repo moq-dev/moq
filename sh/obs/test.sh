@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit-test the plugin sources against stubbed libobs/libmoq/ffmpeg, under
+# Unit-test the plugin sources against stubbed libobs/moq-c/ffmpeg, under
 # ThreadSanitizer.
 #
 # Manual because ThreadSanitizer needs its own build. `just obs ci` runs the

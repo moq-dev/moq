@@ -76,7 +76,7 @@ test("a discovery failure under a live session downgrades the origin", async () 
 	forwardAnnounced(session.session, origin);
 
 	// The relay announces a broadcast, which lands in the table.
-	session.announces.append({ prefix: path, captures: undefined, kind: "announced", route: Route.default });
+	session.announces.append({ prefix: path, captures: undefined, kind: "start", route: Route.default });
 	await settle();
 	expect(origin.discovery.peek()).toBe(true);
 	expect(wireOf(origin).routes(path)).toBe(true);
@@ -117,7 +117,7 @@ test("a request outlives the discovery failure that fed it", async () => {
 	forwardAnnounced(session.session, origin);
 
 	// Announced, so the table routes it and no blind answer is needed.
-	session.announces.append({ prefix: path, captures: undefined, kind: "announced", route: Route.default });
+	session.announces.append({ prefix: path, captures: undefined, kind: "start", route: Route.default });
 	await settle();
 
 	const request = origin.request(path);
@@ -233,7 +233,7 @@ test("a scoped session filters announcements and blind requests under its root",
 		session.announces.append({
 			prefix: Path.from(prefix),
 			captures: undefined,
-			kind: "announced",
+			kind: "start",
 			route: Route.default,
 		});
 	}
@@ -270,7 +270,7 @@ test("one failed scoped interest leaves the other routes live until the session 
 	for (const name of ["a", "b"]) {
 		sources
 			.get(`${name}/**`)
-			?.append({ prefix: Path.from(name), captures: undefined, kind: "announced", route: Route.default });
+			?.append({ prefix: Path.from(name), captures: undefined, kind: "start", route: Route.default });
 	}
 	await settle();
 	expect(origin.broadcasts().peek().size).toBe(2);

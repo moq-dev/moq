@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/362489bcf02833d8674cff339463b086442cf92d";
+      url = "github:kixelated/quest/5ff9229d277a4580296795a82f427f5ec30072c7";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
       inputs.crane.follows = "crane";
@@ -123,6 +123,10 @@
             glib
             libressl
             ffmpeg
+            # moq-video's `vpx` feature (VP8/VP9 software decode): libvpx-native-sys
+            # finds it through pkg-config, and `VPX_STATIC` below links the archive
+            # so nothing built here needs libvpx.so at runtime.
+            libvpx
             curl
             # MPEG-TS validation (tsp, tsanalyze) for the ts-compliance harness.
             tsduck
@@ -158,6 +162,8 @@
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
             # ScreenCaptureKit.
             pkgs.pipewire
+            # Isolated X11 server for SHM/GetImage capture measurements.
+            pkgs.xvfb-run
           ];
 
         # Where the shell's libasound looks for PCM plugins.
@@ -242,6 +248,8 @@
         # `cargo metadata` in `just rs check-changed`.
         devTools = with pkgs; [
           jq
+          # Runs the moq.sh installer tests under a strict POSIX shell.
+          dash
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
@@ -447,7 +455,7 @@
           # The package was `moq-cli` through 0.12.2. Refuse with the new name
           # so `nix run` and `nix profile upgrade` break instead of going stale.
           moq-cli = pkgs.writeShellScriptBin "moq" ''
-            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq#moq" >&2
+            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq/release#moq" >&2
             exit 1
           '';
 
@@ -456,7 +464,7 @@
             moq-relay
             moq-bench
             moq-boy
-            libmoq
+            moq-c
             moq-gst
             ;
 
@@ -520,18 +528,19 @@
           # host had, which shadows the Cargo shim `mbx setup` installs. Put it
           # back in front, so a bare `cargo` in this shell reaches the same
           # wrapper it reaches outside. `setup --status` is what knows where
-          # that shim lives; it exits non-zero when there is none, which is
-          # every machine that made a different caching choice.
+          # that shim lives, naming it on its first line even when it is
+          # missing. Its exit code is no guide: it also fails over unrelated
+          # setup, such as a rust-analyzer config `mbx setup` never wrote, so
+          # only the shim existing decides.
           #
           # CI included: `.github/actions/rust-cache` runs `mbx setup` so this
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
-            if status=$(mbx setup --status 2>/dev/null); then
-              shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
-              if [ -x "$shim" ]; then
-                export PATH="$(dirname "$shim"):$PATH"
-              fi
+            status=$(mbx setup --status 2>/dev/null || true)
+            shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
+            if [ -x "$shim" ]; then
+              export PATH="$(dirname "$shim"):$PATH"
             fi
           '';
 
@@ -549,6 +558,10 @@
             # Exported rather than read back out of nix, so the guard costs a
             # variable lookup instead of a nested evaluation of this flake.
             OBS_LINKED_VERSION = obs-linked-version;
+
+            # Link libvpx statically for moq-video's `vpx` feature, the shape the
+            # quest ships: no system codec library at runtime.
+            VPX_STATIC = "1";
           }
           // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
             ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";

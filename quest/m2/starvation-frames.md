@@ -17,7 +17,7 @@ frontier it reads moves. `Writer` in `rs/moq-net/src/coding/writer.rs` gains
 a monotonic written-offset counter, since every write funnels through it, so
 at each frame end the per-group serve task knows the stream offset and the
 frame timestamp. Record `(offset, timestamp, bytes, written_at)` and await
-`poll_acked(offset)` from the released `web-transport-trait` hook,
+`poll_acked(offset)` on moq-net's own `transport::poll::SendStream`,
 interleaved with the writes of later frames so a lagging ACK never stalls
 sending. One waiter per stream suffices: offsets are
 acknowledged in order for the purpose of this metric, so poll the oldest
@@ -45,6 +45,10 @@ Decided in the 2026-09-30 audit: moved to m2. The group-granularity sampler
 from the parent quest answers the m1 question, and this waits on the m2 ACK
 hook.
 
+Decided 2026-10-08: the group-granularity sampler is the egress lag histogram
+from the QoS line, which so far exists only on its line branch, so that quest
+is Required.
+
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity
 tracking of the same run; a reset mid-group attributing only the
@@ -54,7 +58,7 @@ unsupported.
 
 ## Required
 
-- [Starvation](/quest/m1/qos/starvation.md) - fixes the wire shape and the
-  group-granularity fallback
-- [poll_acked in web-transport](/quest/m2/quic-ack-hook.md) - the released
+- [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   hook this samples through
+- [Egress lag histogram](/quest/m1/qos/lag-histogram.md) - the
+  group-granularity sampler and starvation histogram this refines

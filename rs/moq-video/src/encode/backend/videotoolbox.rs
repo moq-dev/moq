@@ -9,7 +9,7 @@
 //!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
 //! higher-level crate we trust. The backend is `!Send` and a direct `Encoder` is
-//! thread-bound with it; only the macOS `Sink::Inner` keeps the serialized
+//! thread-bound with it; only the Apple `Sink::Inner` keeps the serialized
 //! `Send` wrapper, safe because `Sink` serializes every call.
 
 use std::ffi::{c_int, c_void};
@@ -39,8 +39,8 @@ use objc2_video_toolbox::{
 	kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
-use super::super::encoder::{Codec, Config, Gop};
-use super::{Backend, Encoded};
+use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
+use super::{Backend, Encoded, keyframe_nal};
 use crate::frame::Surface;
 use crate::{Color, Error, Frame};
 
@@ -51,7 +51,8 @@ pub(crate) const NAME: &str = "videotoolbox";
 /// stable for the lifetime of the session that holds it as a refcon.
 struct Sink {
 	codec: Codec,
-	packets: Vec<Bytes>,
+	/// Each access unit, and whether it is a keyframe.
+	packets: Vec<(Bytes, bool)>,
 	error: Option<i32>,
 }
 
@@ -190,7 +191,7 @@ impl Backend for VideoToolbox {
 		// Zero-copy when the capture handed us a surface; otherwise upload I420.
 		let pixel_buffer = match &frame.surface {
 			Surface::PixelBuffer(surface) => surface.buffer.clone(),
-			Surface::I420(i420) => crate::frame::macos::upload_i420(i420)?,
+			Surface::I420(i420) => crate::frame::apple::upload_i420(i420)?,
 		};
 		let image: &CVImageBuffer = &pixel_buffer;
 
@@ -240,7 +241,7 @@ impl Backend for VideoToolbox {
 		// packet collected here came from it and carries its timestamp.
 		Ok(std::mem::take(&mut self.sink.packets)
 			.into_iter()
-			.map(|payload| Encoded::new(payload, frame.timestamp))
+			.map(|(payload, keyframe)| Encoded::new(payload, frame.timestamp, keyframe))
 			.collect())
 	}
 
@@ -271,6 +272,13 @@ impl Backend for VideoToolbox {
 	fn name(&self) -> &'static str {
 		NAME
 	}
+
+	fn applied(&self) -> Applied {
+		// Both are set with a checked `VTSessionSetProperty`, so a session that
+		// opened has them. VideoToolbox gets no distinct Balanced or Quality
+		// mapping until one is measured on Apple hardware.
+		Applied::new(Preset::LowLatency, "real-time, no frame reordering")
+	}
 }
 
 /// C callback VideoToolbox invokes (synchronously, from `complete_frames`) for
@@ -300,7 +308,8 @@ unsafe extern "C-unwind" fn output_callback(
 /// Convert one AVCC/HVCC `CMSampleBuffer` into a single Annex-B access unit. On a
 /// keyframe, prepend the parameter sets (SPS/PPS for H.264; VPS/SPS/PPS for
 /// H.265) from the format description so the stream is self-contained (avc3 / hev1).
-fn annexb_from_sample(sample: &CMSampleBuffer, codec: Codec) -> Result<Option<Bytes>, i32> {
+/// Returns the access unit and whether it is a keyframe.
+fn annexb_from_sample(sample: &CMSampleBuffer, codec: Codec) -> Result<Option<(Bytes, bool)>, i32> {
 	let format = unsafe { sample.format_description() }.ok_or(-1)?;
 
 	// One call with null pointers just reports the count and NAL length size.
@@ -352,7 +361,7 @@ fn annexb_from_sample(sample: &CMSampleBuffer, codec: Codec) -> Result<Option<By
 	};
 
 	let slices = split_avcc(avcc, nal_length_size as usize);
-	let is_keyframe = slices.iter().any(|nal| is_keyframe_nal(nal, codec));
+	let is_keyframe = slices.iter().any(|nal| keyframe_nal(codec, nal));
 
 	let mut out = BytesMut::with_capacity(total + 64);
 	if is_keyframe {
@@ -373,7 +382,7 @@ fn annexb_from_sample(sample: &CMSampleBuffer, codec: Codec) -> Result<Option<By
 		append_annexb(&mut out, nal);
 	}
 
-	Ok(Some(out.freeze()))
+	Ok(Some((out.freeze(), is_keyframe)))
 }
 
 /// Dispatch to the codec-specific VideoToolbox parameter-set getter. Both have
@@ -395,21 +404,6 @@ unsafe fn get_param_set(
 		_ => unsafe {
 			CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, index, ptr_out, size_out, count_out, nal_len_out)
 		},
-	}
-}
-
-/// Whether a NAL is a keyframe slice: an H.264 IDR (type 5), or an H.265 IRAP
-/// picture (BLA/IDR/CRA, types 16..=23).
-fn is_keyframe_nal(nal: &[u8], codec: Codec) -> bool {
-	let Some(&b) = nal.first() else {
-		return false;
-	};
-	match codec {
-		Codec::H265 => {
-			let nal_type = (b >> 1) & 0x3f;
-			(16..=23).contains(&nal_type)
-		}
-		_ => b & 0x1f == 5,
 	}
 }
 

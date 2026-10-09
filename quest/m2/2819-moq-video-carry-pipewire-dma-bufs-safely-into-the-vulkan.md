@@ -40,4 +40,4 @@ Refs #2481, #1837.
 
 ## Related
 
-- [Capture multi-plane PipeWire cameras](/quest/m2/pipewire-camera-planes.md) - separate memory blocks from a camera, the capture offer rather than this import
+- [Capture multi-plane PipeWire cameras](/quest/m3/pipewire-camera-planes.md) - separate memory blocks from a camera, the capture offer rather than this import

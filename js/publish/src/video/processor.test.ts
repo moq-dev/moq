@@ -4,6 +4,8 @@ import type { FromWorker, ToWorker } from "./capture-worker.ts";
 // Whether the fake worker claims a native MediaStreamTrackProcessor, how much its source clock
 // advances per frame (WebKit's canvas tracks don't advance at all), and every worker spawned so far.
 let supported = true;
+// Whether the fake worker fails to load, which reports through onerror instead of a ready message.
+let loadFails = false;
 let advance = 1000;
 // Added to each frame's arrival time, so a test can space arrivals apart by more than the clock
 // resolution rather than relying on performance.now() ticking between microtasks.
@@ -14,7 +16,7 @@ const spawned: FakeWorker[] = [];
 // frame whose timestamp advances by 1000us.
 class FakeWorker {
 	onmessage: ((event: MessageEvent<FromWorker>) => void) | null = null;
-	onerror: unknown = null;
+	onerror: ((event: ErrorEvent) => void) | null = null;
 	onmessageerror: unknown = null;
 
 	terminated = false;
@@ -26,7 +28,8 @@ class FakeWorker {
 
 	constructor() {
 		spawned.push(this);
-		this.#emit({ type: "ready", supported });
+		if (loadFails) queueMicrotask(() => this.onerror?.({ message: "404" } as ErrorEvent));
+		else this.#emit({ type: "ready", supported });
 	}
 
 	postMessage(msg: ToWorker): void {
@@ -82,12 +85,14 @@ class FakeTrack {
 	}
 }
 
-// The capture worker is imported as an inlined blob URL, which the bun test loader can't resolve.
-mock.module("./capture-worker.ts?worker&inline", () => ({ default: FakeWorker }));
+// The capture worker is imported through a `?worklet` URL, which the bun test loader can't resolve.
+mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:fake-worker" }));
 
 Object.defineProperty(globalThis, "VideoFrame", { configurable: true, writable: true, value: FakeVideoFrame });
+Object.defineProperty(globalThis, "Worker", { configurable: true, writable: true, value: FakeWorker });
 
-const { TrackProcessor } = await import("./processor.ts");
+const { TrackProcessor, workerSupported } = await import("./processor.ts");
+const { assets } = await import("../assets.ts");
 
 test("captures through the worker, transferring a clone", async () => {
 	supported = true;
@@ -95,7 +100,7 @@ test("captures through the worker, transferring a clone", async () => {
 	arrivalStep = 0;
 	spawned.length = 0;
 
-	// The worker is constructed synchronously inside TrackProcessor, so bracket the whole call.
+	// Bracket the whole call, which spawns the worker.
 	const before = performance.now() * 1000;
 
 	const track = new FakeTrack();
@@ -170,4 +175,44 @@ test("falls back to arrival time when the source clock is stuck", async () => {
 	expect((third.value?.timestamp ?? 0) - (second.value?.timestamp ?? 0)).toBe(10_000);
 
 	await reader.cancel();
+});
+
+test("probes support again after assets() switches to hosted files", async () => {
+	spawned.length = 0;
+
+	// A strict CSP refuses the blob: worker, so the first probe fails, and the result is cached.
+	supported = false;
+	expect(await workerSupported()).toBe(false);
+	expect(await workerSupported()).toBe(false);
+	expect(spawned).toHaveLength(1);
+
+	// The hosted file loads, so a probe cached from the blob: attempt would be wrong.
+	Object.defineProperty(globalThis, "document", {
+		configurable: true,
+		writable: true,
+		value: { baseURI: "https://example.com/" },
+	});
+	assets("/moq/");
+	supported = true;
+	expect(await workerSupported()).toBe(true);
+	expect(spawned).toHaveLength(2);
+});
+
+test("fails loud when the hosted capture worker doesn't load", async () => {
+	spawned.length = 0;
+	supported = true;
+	loadFails = true;
+
+	// Still hosted from the previous test, so a missing file is a broken deploy, not a reason to
+	// quietly fall back to the <video> pipeline.
+	assets("/missing/");
+	await expect(workerSupported()).rejects.toThrow("hosted capture worker");
+
+	const track = new FakeTrack();
+	const stream = TrackProcessor(track as unknown as Parameters<typeof TrackProcessor>[0]);
+	await expect(stream.getReader().read()).rejects.toThrow("hosted capture worker");
+
+	expect(spawned).toHaveLength(2);
+	expect(spawned.every((worker) => worker.terminated)).toBe(true);
+	loadFails = false;
 });

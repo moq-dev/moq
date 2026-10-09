@@ -17,7 +17,10 @@
 //! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>`
 //! (default prefix `.stats`), or one per group of leading broadcast-path
 //! segments at `<prefix>/<group>/node/<node>`; parse announce paths back with
-//! [`parse_node_path`]. Each [`Tier`] carries `publisher.json`,
+//! [`parse_node_path`]. Each announcement carries a fresh
+//! [`Epoch`](moq_net::Epoch) on its route, so a restarted node or a group
+//! returning from idle is a new broadcast at the same path; a reader tells
+//! them apart by the announced route's epoch. Each [`Tier`] carries `publisher.json`,
 //! `subscriber.json`, and `sessions.json` tracks of cumulative [`Traffic`] and
 //! [`Presence`] counters, plus `.json.z` siblings encoded with
 //! [`moq_json::snapshot`]; compute names with [`traffic_track`] /

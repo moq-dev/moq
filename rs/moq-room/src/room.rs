@@ -78,8 +78,10 @@ impl Room {
 				return Poll::Ready(Some(event));
 			}
 
-			let Some(update) = ready!(self.announced.poll_next(waiter)) else {
-				return Poll::Ready(None);
+			let (update, active) = match ready!(self.announced.poll_next(waiter)) {
+				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true),
+				Some(announce::Event::End(update)) => (update, false),
+				None => return Poll::Ready(None),
 			};
 			let path = update.prefix;
 			let Some(parsed) = parse(&path) else {
@@ -88,7 +90,7 @@ impl Room {
 			if self.local.as_ref().is_some_and(|id| *id == parsed.identity) {
 				continue;
 			}
-			if !update.kind.is_active() {
+			if !active {
 				return Poll::Ready(Some(Event {
 					identity: parsed.identity,
 					kind: parsed.kind,
@@ -97,8 +99,8 @@ impl Room {
 				}));
 			}
 
-			let request = self.origin.request_broadcast(&path).into_inner();
-			match kio::Pollable::poll(&request, waiter) {
+			let mut request = self.origin.request_broadcast(&path, None).into_inner();
+			match kio::Task::poll(&mut request, waiter) {
 				Poll::Ready(Ok(broadcast)) => {
 					return Poll::Ready(Some(Event {
 						identity: parsed.identity,
@@ -125,7 +127,7 @@ impl Room {
 		let Some(inflight) = self.inflight.as_mut() else {
 			return Poll::Ready(None);
 		};
-		match ready!(kio::Pollable::poll(&inflight.request, waiter)) {
+		match ready!(kio::Task::poll(&mut inflight.request, waiter)) {
 			Ok(broadcast) => {
 				let inflight = self.inflight.take().expect("inflight still set");
 				Poll::Ready(Some(Event {

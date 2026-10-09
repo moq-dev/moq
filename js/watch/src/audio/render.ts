@@ -53,4 +53,6 @@ export interface State {
 	type: "state";
 	timestamp: Time.Micro;
 	stalled: boolean;
+	// How many times the ring has run dry mid-playback, cumulative.
+	underruns: number;
 }

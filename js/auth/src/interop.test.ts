@@ -261,7 +261,7 @@ describe("Rust-serialized contract", () => {
 	const RUST_INVALID_END =
 		'{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}';
 	const RUST_GRANT =
-		'{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true}';
+		'{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true,"upstream":true}';
 
 	test("parse a request a Rust relay sent", () => {
 		const request = RequestSchema.parse(JSON.parse(RUST_REQUEST));
@@ -278,6 +278,17 @@ describe("Rust-serialized contract", () => {
 		expect(request.reason).toBe("invalid");
 	});
 
+	test("parse gateway transports and stable end reasons from Rust", () => {
+		for (const transport of ["rtmp", "srt", "webrtc"] as const) {
+			for (const reason of ["narrowed", "shutdown"]) {
+				const request = RequestSchema.parse({ ...JSON.parse(RUST_REQUEST), transport, reason });
+				expect(request.transport).toBe(transport);
+				if (request.event !== "end") throw new Error("expected an end");
+				expect(request.reason).toBe(reason);
+			}
+		}
+	});
+
 	test("a grant built here is what a Rust relay reads", () => {
 		const grant = GrantSchema.parse({
 			publish: ["alice/**"],
@@ -287,6 +298,7 @@ describe("Rust-serialized contract", () => {
 			revalidate: 60,
 			tier: "websocket",
 			peer: true,
+			upstream: true,
 		});
 		expect(JSON.stringify(grant)).toBe(RUST_GRANT);
 	});

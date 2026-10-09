@@ -367,6 +367,10 @@ pub struct Serve {
 	#[usage(long, conflicts = "--key", value_hint = usage::ValueHint::DirPath)]
 	key_dir: Option<PathBuf>,
 
+	/// A JWK Set file, selecting one verification key by the token's `kid`.
+	#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("json", "jwks"))]
+	key_set: Option<PathBuf>,
+
 	/// Patterns an anonymous session may publish, rooted at `/` (repeatable); `foo/**` for a subtree.
 	#[usage(long)]
 	public_publish: Vec<Pattern>,
@@ -382,6 +386,14 @@ pub struct Serve {
 	/// Patterns a session with a verified certificate may subscribe to, rooted at `/` (repeatable).
 	#[usage(long)]
 	mtls_subscribe: Vec<Pattern>,
+
+	/// Mark sessions with a verified certificate as cluster peers: relays forwarding what entered elsewhere.
+	#[usage(long)]
+	mtls_peer: bool,
+
+	/// Mark those peers upstream: never offered a route learned from another upstream. Needs `--mtls-peer`.
+	#[usage(long)]
+	mtls_upstream: bool,
 
 	/// The tier label stamped on every grant, handed to the relay's stats.
 	#[usage(long)]
@@ -422,6 +434,12 @@ impl Serve {
 				"--limit-token and --limit-remote need --revalidate, which ages out the slots of dead relays"
 			);
 		}
+		if self.mtls_peer && self.mtls_publish.is_empty() && self.mtls_subscribe.is_empty() {
+			anyhow::bail!("--mtls-peer needs --mtls-publish or --mtls-subscribe, or every certificate is refused");
+		}
+		if self.mtls_upstream && !self.mtls_peer {
+			anyhow::bail!("--mtls-upstream needs --mtls-peer; only a cluster peer can be upstream");
+		}
 		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
 		// broadcast `anon`, so either silent reading would mislead someone upgrading.
 		let flags = [
@@ -444,14 +462,20 @@ impl Serve {
 		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
 			Permissions::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
 		};
+		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
+			anyhow::bail!("--key-set conflicts with --key and --key-dir");
+		}
 		let mut policy = Policy::default();
-		policy.keys = match (&self.key, &self.key_dir) {
-			(Some(key), _) => Some(Keys::File(key.clone())),
-			(None, Some(dir)) => Some(Keys::Dir(dir.clone())),
-			(None, None) => None,
+		policy.keys = match (&self.key, &self.key_dir, &self.key_set) {
+			(Some(key), _, _) => Some(Keys::File(key.clone())),
+			(None, Some(dir), _) => Some(Keys::Dir(dir.clone())),
+			(None, None, Some(set)) => Some(Keys::Set(set.clone())),
+			(None, None, None) => None,
 		};
 		policy.public = rules(&self.public_publish, &self.public_subscribe);
 		policy.mtls = rules(&self.mtls_publish, &self.mtls_subscribe);
+		policy.mtls_peer = self.mtls_peer;
+		policy.mtls_upstream = self.mtls_upstream;
 		policy.tier = self.tier.clone();
 		policy.revalidate = revalidate;
 		policy.expires = expires;
@@ -645,6 +669,8 @@ mod tests {
 			"**",
 			"--mtls-subscribe",
 			"**",
+			"--mtls-peer",
+			"--mtls-upstream",
 			"--tier",
 			"internal",
 			"--revalidate",
@@ -665,17 +691,29 @@ mod tests {
 		);
 		assert!(policy.public.publish.is_empty());
 		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
+		assert!(policy.mtls_peer && policy.mtls_upstream);
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
 		assert_eq!(policy.limits.token, Some(3));
 		assert_eq!(policy.limits.remote, Some(8));
 
+		let set = serve(&["moq", "auth", "serve", "--key-set", "/keys.jwks"])
+			.policy()
+			.unwrap();
+		assert!(matches!(&set.keys, Some(Keys::Set(path)) if path == std::path::Path::new("/keys.jwks")));
+		assert!(
+			serve(&["moq", "auth", "serve", "--key", "/key.jwk", "--key-set", "/keys.jwks"])
+				.policy()
+				.is_err()
+		);
+
 		// Nothing configured is a server that refuses everyone, and like 0.14, never
 		// re-checks or closes a session on its own.
 		let bare = serve(&["moq", "auth", "serve"]).policy().unwrap();
 		assert!(bare.keys.is_none());
 		assert!(bare.public.is_empty() && bare.mtls.is_empty());
+		assert!(!bare.mtls_peer && !bare.mtls_upstream);
 		assert_eq!(bare.revalidate, None);
 		assert_eq!(bare.expires, None);
 
@@ -687,6 +725,12 @@ mod tests {
 			// Only a re-check keeps a slot alive.
 			(&["--limit-token", "3"], "need --revalidate"),
 			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
+			// A peer marking with nothing granted to certificates marks nobody.
+			(&["--mtls-peer"], "--mtls-peer needs"),
+			(
+				&["--mtls-subscribe", "**", "--mtls-upstream"],
+				"--mtls-upstream needs --mtls-peer",
+			),
 		] {
 			let argv: Vec<&str> = ["moq", "auth", "serve"].iter().chain(args).copied().collect();
 			let err = serve(&argv).policy().unwrap_err().to_string();

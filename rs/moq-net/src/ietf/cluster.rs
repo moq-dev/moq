@@ -15,9 +15,7 @@
 //! [`crate::origin::Route`]); this module is only the moq-transport binding.
 //! Negotiated on draft-17+ only, where SETUP is a Key-Value-Pair block.
 
-use bytes::Buf;
-
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 use crate::{Hop, Hops};
 
 use super::{Param, Version};
@@ -94,22 +92,22 @@ impl HopPath {
 }
 
 impl Param for HopPath {
-	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		// The entries fill the value, so they are written with no count and framed by
 		// the parameter's own length prefix.
 		let mut buf = Vec::new();
+		let mut inner = Encoder::new(&mut buf, w.form());
 		for hop in &self.0 {
-			hop.encode(&mut buf, version)?;
+			hop.encode(&mut inner, version)?;
 		}
-		buf.encode(w, version)
+		w.bytes(&buf)
 	}
 
-	fn param_decode<R: Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let value = Vec::<u8>::decode(r, version)?;
-		let mut buf = bytes::Bytes::from(value);
+	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let mut buf = Decoder::new(r.bytes()?, r.form());
 
 		let mut hops = Hops::new();
-		while buf.has_remaining() {
+		while !buf.is_empty() {
 			// A short read here means the entries did not exactly fill the length.
 			hops.push(Hop::decode(&mut buf, version)?)?;
 		}
@@ -169,15 +167,9 @@ impl Advert {
 	/// The addition saturates rather than wraps, so an absurd upstream value ranks last
 	/// instead of overflowing to best.
 	///
-	/// The Cluster extension carries one cost, which is the warm one: a relay already
-	/// carrying the broadcast advertises zero here just as it does on lite-06. There
-	/// is nowhere to put the cold path, so it stays [`Cost::UNKNOWN`] and this route
-	/// never outranks one whose cold cost is actually known.
+	/// Add the arriving link price to the peer's static route cost.
 	pub fn route(&self, link_cost: u64) -> crate::origin::Route {
-		let advertised = crate::origin::Cost {
-			warm: self.cost,
-			..crate::origin::Cost::UNKNOWN
-		};
+		let advertised = crate::origin::Cost::new(self.cost);
 		// The prefix travels separately: it is stamped where the advertisement
 		// attaches (the namespace).
 		crate::origin::Route::default()
@@ -264,7 +256,6 @@ pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Opti
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::BytesMut;
 
 	const VERSION: Version = Version::Draft19;
 
@@ -284,11 +275,12 @@ mod tests {
 	}
 
 	fn round_trip(path: &HopPath) -> Result<HopPath, DecodeError> {
-		let mut buf = BytesMut::new();
-		path.param_encode(&mut buf, VERSION).unwrap();
-		let mut bytes = buf.freeze();
-		let decoded = HopPath::param_decode(&mut bytes, VERSION)?;
-		assert!(!bytes.has_remaining(), "trailing bytes after decode");
+		let mut buf = Vec::new();
+		path.param_encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
+			.unwrap();
+		let mut bytes = bytes::Bytes::from(buf);
+		let decoded = crate::coding::decode_buf(&mut bytes, VERSION, HopPath::param_decode)?;
+		assert!(bytes.is_empty(), "trailing bytes after decode");
 		Ok(decoded)
 	}
 
@@ -317,8 +309,10 @@ mod tests {
 	fn hop_path_has_no_inner_count() {
 		// The entries fill the parameter length; a count would make us unreadable to
 		// every other implementation. One byte of length plus one byte per small varint.
-		let mut buf = BytesMut::new();
-		hop_path(&[1, 2, 3]).param_encode(&mut buf, VERSION).unwrap();
+		let mut buf = Vec::new();
+		hop_path(&[1, 2, 3])
+			.param_encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
+			.unwrap();
 		assert_eq!(buf.to_vec(), vec![0x03, 0x01, 0x02, 0x03]);
 	}
 
@@ -336,15 +330,17 @@ mod tests {
 		// no longer lets one be built: only a non-conforming sender produces this.
 		let mut value = Vec::new();
 		for id in [4u64, 8, 4] {
-			hop(id).encode(&mut value, VERSION).unwrap();
+			hop(id)
+				.encode(&mut Encoder::new(&mut value, VERSION.into()), VERSION)
+				.unwrap();
 		}
 
-		let mut buf = BytesMut::new();
-		value.encode(&mut buf, VERSION).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, VERSION.into()).bytes(&value).unwrap();
 
-		let mut bytes = buf.freeze();
+		let mut bytes = bytes::Bytes::from(buf);
 		assert!(matches!(
-			HopPath::param_decode(&mut bytes, VERSION),
+			crate::coding::decode_buf(&mut bytes, VERSION, HopPath::param_decode),
 			Err(DecodeError::InvalidValue)
 		));
 	}
@@ -379,11 +375,13 @@ mod tests {
 	#[test]
 	fn hop_path_rejects_empty() {
 		// The list always has at least one entry: the original publisher.
-		let mut buf = BytesMut::new();
-		HopPath::default().param_encode(&mut buf, VERSION).unwrap();
-		let mut bytes = buf.freeze();
+		let mut buf = Vec::new();
+		HopPath::default()
+			.param_encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
+			.unwrap();
+		let mut bytes = bytes::Bytes::from(buf);
 		assert!(matches!(
-			HopPath::param_decode(&mut bytes, VERSION),
+			crate::coding::decode_buf(&mut bytes, VERSION, HopPath::param_decode),
 			Err(DecodeError::InvalidValue)
 		));
 	}
@@ -393,15 +391,17 @@ mod tests {
 		// Entries must exactly fill Length. Chop the last byte off a multi-byte hop id
 		// and shrink the length to match, so the value ends mid-varint.
 		let mut value = Vec::new();
-		hop(300).encode(&mut value, VERSION).unwrap();
+		hop(300)
+			.encode(&mut Encoder::new(&mut value, VERSION.into()), VERSION)
+			.unwrap();
 		assert!(value.len() > 1, "300 should not fit in one byte");
 		value.pop();
 
-		let mut buf = BytesMut::new();
-		value.encode(&mut buf, VERSION).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, VERSION.into()).bytes(&value).unwrap();
 
-		let mut bytes = buf.freeze();
-		assert!(HopPath::param_decode(&mut bytes, VERSION).is_err());
+		let mut bytes = bytes::Bytes::from(buf);
+		assert!(crate::coding::decode_buf(&mut bytes, VERSION, HopPath::param_decode).is_err());
 	}
 
 	#[test]
@@ -435,14 +435,14 @@ mod tests {
 			cost: 4,
 		};
 		let route = advert.route(3);
-		assert_eq!(route.cost.warm, 7);
+		assert_eq!(route.cost.value(), 7);
 		assert_eq!(&route.hops, hop_path(&[1, 2]).hops());
 
 		let absurd = Advert {
 			hops: hop_path(&[1]),
 			cost: u64::MAX,
 		};
-		assert_eq!(absurd.route(10).cost.warm, crate::origin::Cost::MAX.warm);
+		assert_eq!(absurd.route(10).cost.value(), crate::origin::Cost::MAX.value());
 	}
 
 	/// Negotiating the extension and declaring an identity are separate questions, and a
@@ -501,10 +501,12 @@ mod tests {
 			let mut params = super::super::Parameters::default();
 			peer_into_setup(&mut params, self_hop, cost, VERSION);
 
-			let mut buf = BytesMut::new();
-			params.encode(&mut buf, VERSION).unwrap();
-			let mut bytes = buf.freeze();
-			let decoded = super::super::Parameters::decode(&mut bytes, VERSION).unwrap();
+			let mut buf = Vec::new();
+			params
+				.encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
+				.unwrap();
+			let mut bytes = bytes::Bytes::from(buf);
+			let decoded = crate::coding::decode_buf(&mut bytes, VERSION, super::super::Parameters::decode).unwrap();
 
 			let peer = peer_from_setup(&decoded, VERSION).unwrap();
 			assert_eq!(peer.hop, Some(self_hop));
@@ -519,8 +521,10 @@ mod tests {
 		let mut params = super::super::Parameters::default();
 		peer_into_setup(&mut params, hop(42), None, VERSION);
 
-		let mut buf = BytesMut::new();
-		params.encode(&mut buf, VERSION).unwrap();
+		let mut buf = Vec::new();
+		params
+			.encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
+			.unwrap();
 		assert_eq!(buf.to_vec(), vec![0xC4, 0x0B, 0x54, 0x2A]);
 	}
 
@@ -539,10 +543,12 @@ mod tests {
 		let mut params = super::super::Parameters::default();
 		params.set_bytes(super::super::ParameterBytes::Unknown(0x40B55), vec![0x2A]);
 
-		let mut buf = BytesMut::new();
-		params.encode(&mut buf, VERSION).unwrap();
-		let mut bytes = buf.freeze();
-		let decoded = super::super::Parameters::decode(&mut bytes, VERSION).unwrap();
+		let mut buf = Vec::new();
+		params
+			.encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
+			.unwrap();
+		let mut bytes = bytes::Bytes::from(buf);
+		let decoded = crate::coding::decode_buf(&mut bytes, VERSION, super::super::Parameters::decode).unwrap();
 
 		let peer = peer_from_setup(&decoded, VERSION).unwrap();
 		assert!(!peer.negotiated());

@@ -68,10 +68,6 @@ impl session::MediaSink for IngestSink {
 		self.bridges.push(mid, frame)
 	}
 
-	fn tick(&mut self) -> Result<()> {
-		self.bridges.tick()
-	}
-
 	fn abort(&mut self, err: moq_net::Error) {
 		self.bridges.abort(err);
 	}
@@ -104,6 +100,6 @@ mod tests {
 		.unwrap();
 
 		let info = broadcast.consume().track("0.avc3").unwrap().query().await.unwrap();
-		assert_eq!(info.max_age, Duration::from_secs(3));
+		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
 }

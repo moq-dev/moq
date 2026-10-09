@@ -106,16 +106,24 @@ impl Video {
 		self.renditions.remove(name)
 	}
 
-	/// Iterate the renditions best first: largest picture, then highest bitrate.
+	/// True when there are no renditions, so the section can be omitted from the catalog.
+	///
+	/// Display, rotation, and flip ride this section, so they are omitted too when nothing is published.
+	pub fn is_empty(&self) -> bool {
+		self.renditions.is_empty()
+	}
+
+	/// Iterate the renditions best first: enabled, then largest picture, then highest bitrate.
 	///
 	/// A consumer that carries one rendition takes the first it supports, so the
-	/// picture doesn't depend on how the tracks are named. Unknown dimensions or
-	/// bitrate rank below known ones, and exact ties keep name order.
+	/// picture doesn't depend on how the tracks are named. A disabled rendition sends
+	/// no frames, so it ranks below every enabled one. Unknown dimensions or bitrate
+	/// rank below known ones, and exact ties keep name order.
 	pub fn ranked(&self) -> impl Iterator<Item = (&String, &VideoConfig)> {
 		let mut ranked: Vec<_> = self.renditions.iter().collect();
 		ranked.sort_by_key(|(_, config)| {
 			let area = u64::from(config.coded_width.unwrap_or(0)) * u64::from(config.coded_height.unwrap_or(0));
-			std::cmp::Reverse((area, config.bitrate))
+			std::cmp::Reverse((config.enabled, area, config.bitrate))
 		});
 		ranked.into_iter()
 	}
@@ -209,12 +217,13 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
-	/// Whether the publisher recommends temporarily avoiding this rendition.
-	///
-	/// The track remains available. Consumers may still select it when no
-	/// unstalled rendition is suitable.
-	#[serde(default)]
-	pub stalled: Option<bool>,
+	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
+	/// must not select it. Only written when false.
+	#[serde(
+		default = "crate::catalog::enabled_default",
+		skip_serializing_if = "crate::catalog::enabled_skip"
+	)]
+	pub enabled: bool,
 
 	/// The frame rate of the video track, if known.
 	#[serde(default)]
@@ -280,7 +289,7 @@ impl VideoConfig {
 			display_aspect_width: None,
 			display_aspect_height: None,
 			bitrate: None,
-			stalled: None,
+			enabled: true,
 			framerate: None,
 			optimize_for_latency: None,
 			container: Container::default(),
@@ -323,6 +332,11 @@ mod test {
 
 		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, ["f", "d", "e", "c", "b", "a"]);
+
+		// A disabled rendition sends no frames, so it ranks below every enabled one.
+		video.renditions.get_mut("f").unwrap().enabled = false;
+		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["d", "e", "c", "b", "a", "f"]);
 	}
 
 	#[test]
@@ -370,17 +384,25 @@ mod test {
 	}
 
 	#[test]
-	fn stalled_is_optional_and_round_trips() {
+	fn enabled_is_written_only_when_false() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert!(encoded.get("stalled").is_none());
+		assert!(encoded.get("enabled").is_none());
 
-		config.stalled = Some(true);
+		config.enabled = false;
 		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert_eq!(encoded["stalled"], true);
+		assert_eq!(encoded["enabled"], false);
 
 		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
-		assert_eq!(decoded.stalled, Some(true));
+		assert!(!decoded.enabled);
+	}
+
+	#[test]
+	fn legacy_stalled_is_ignored() {
+		let json = serde_json::json!({ "codec": "vp8", "stalled": true });
+		let config: VideoConfig = serde_json::from_value(json).expect("failed to decode");
+		assert!(config.enabled);
+		assert!(serde_json::to_value(&config).unwrap().get("stalled").is_none());
 	}
 
 	#[test]

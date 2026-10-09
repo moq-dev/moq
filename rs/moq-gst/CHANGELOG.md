@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.12](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.11...moq-gst-v0.4.12) - 2026-10-06
+
+### Other
+
+- updated the following local packages: moq-tokio
+
+## [0.4.11](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.10...moq-gst-v0.4.11) - 2026-10-05
+
+### Other
+
+- updated the following local packages: moq-net, hang, moq-mux, moq-tokio
+
+## [0.4.10](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.9...moq-gst-v0.4.10) - 2026-10-03
+
+### Added
+
+- *(tokio)* default QUIC idle timeout to 10s ([#4606](https://github.com/moq-dev/moq/pull/4606))
+
+### Other
+
+- publish only from release ([#4738](https://github.com/moq-dev/moq/pull/4738))
+
 ## [0.4.9](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.8...moq-gst-v0.4.9) - 2026-09-30
 
 ### Fixed

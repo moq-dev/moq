@@ -301,21 +301,21 @@ export class Connection {
 
 			// Track what this origin announced so a URL switch retracts it; the last
 			// event rides along for the retraction.
-			const active = new Map<Path.Valid, Announce.Update>();
+			const active = new Map<Path.Valid, Announce.Announce>();
 
 			effect.spawn(async () => {
 				try {
 					for (;;) {
 						const entry = await effect.race(upstream.next());
 						if (!entry) break;
-						if (Announce.isActive(entry.kind)) active.set(entry.prefix, entry);
-						else active.delete(entry.prefix);
+						if (entry.kind === "end") active.delete(entry.prefix);
+						else active.set(entry.prefix, entry);
 						producer.append(entry);
 					}
 				} finally {
 					if (!closed) {
 						for (const entry of active.values()) {
-							producer.append({ ...entry, kind: "retracted" });
+							producer.append({ ...entry, kind: "end" });
 						}
 					}
 				}

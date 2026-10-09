@@ -82,6 +82,14 @@ impl std::str::FromStr for CongestionControl {
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 
+/// Default connection-wide receive window, used when [`Config::receive_window`] is unset.
+///
+/// Bounds how much unread data one peer can make us buffer across all of its streams,
+/// which the backends otherwise leave unlimited. Sized so a relay-to-relay session, which
+/// shares one connection, can still sustain several Gbps at intercontinental RTTs.
+#[cfg(any(feature = "noq", feature = "iroh"))]
+pub(crate) const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
+
 /// Default idle timeout before an inactive connection is dropped.
 ///
 /// A peer that dies or drops off the network sends no close, so this is how long
@@ -189,7 +197,7 @@ pub struct Config {
 	pub congestion_control: Option<CongestionControl>,
 
 	/// Connection-wide receive window, in bytes: how much data the peer may have
-	/// in flight across every stream at once. Unset leaves the backend default.
+	/// in flight across every stream at once. Defaults to 64 MiB.
 	///
 	/// Raise it when a fat, long path is idling below the link rate: the window
 	/// has to cover the bandwidth-delay product or the peer stalls waiting for
@@ -605,7 +613,7 @@ pub struct Resolved {
 	pub mtu_discovery: bool,
 	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
-	/// Connection-wide receive window in bytes, or `None` for the backend default.
+	/// Connection-wide receive window in bytes, or `None` for the 64 MiB default.
 	pub receive_window: Option<u64>,
 	/// Per-stream receive window in bytes, or `None` for the backend default.
 	pub stream_receive_window: Option<u64>,
@@ -845,8 +853,8 @@ mod tests {
 		assert!(at_limit.validate().is_ok());
 	}
 
-	/// Each window reaches `Resolved` untouched, and stays `None` when unset so the
-	/// backend keeps its own default rather than being pinned to ours.
+	/// Each window reaches `Resolved` untouched, and stays `None` when unset so each
+	/// backend applies the default itself (and the io_uring workers can tell it was unset).
 	#[test]
 	fn windows_resolve_per_field() {
 		let unset = Config::default().resolve();

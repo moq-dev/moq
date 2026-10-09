@@ -96,7 +96,7 @@ export class Subscribe {
 			params.subscriberPriority = this.subscriberPriority;
 			params.groupOrder = GROUP_ORDER;
 			params.forward = this.forward;
-			params.subscriptionFilter = Filter.encode(this.filter, version);
+			params.subscriptionFilter = this.filter;
 
 			// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-20. An older peer reads
 			// either as an unknown parameter, which is a protocol violation, so they are
@@ -150,7 +150,7 @@ export class Subscribe {
 			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority, filter, forward });
 		}
 		// v15+: fields are in parameters
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "subscribe");
 		const subscriberPriority = params.subscriberPriority ?? 128;
 		let groupOrder = params.groupOrder ?? GROUP_ORDER;
 		if (groupOrder > 2) {
@@ -176,8 +176,7 @@ export class Subscribe {
 		}
 
 		// An absent LOCATION_FILTER means the subscription is unfiltered.
-		const raw = params.subscriptionFilter;
-		const filter = raw !== undefined ? Filter.decode(raw, version) : { kind: "unfiltered" as const };
+		const filter = params.subscriptionFilter ?? { kind: "unfiltered" as const };
 		const rawFill = params.fillParameters;
 		const fill = rawFill !== undefined ? Filter.decodeFill(rawFill, version) : undefined;
 
@@ -301,13 +300,15 @@ export class SubscribeOk {
 				largest = { groupId, objectId };
 			}
 
-			await Parameters.decode(r, version); // ignore parameters
+			properties.maxCacheDuration = (await Parameters.decode(r, version)).maxCacheDuration;
 		} else {
 			// v15+: parameters followed by Track Properties (draft-17+). LARGEST_OBJECT is
 			// required on every draft once the track has content, so rejecting it would tear
 			// down a session over a parameter compliant publishers must send.
-			largest = (await Parameters.decode(r, version)).largest;
+			const params = await Parameters.decode(r, version, "subscribe-ok");
+			largest = params.largest;
 			properties = await Properties.decode(r, version);
+			if (version === Version.DRAFT_15) properties.maxCacheDuration = params.maxCacheDuration;
 		}
 
 		return new SubscribeOk({ requestId, trackAlias, largest, properties });
@@ -359,26 +360,34 @@ export class SubscribeUpdate {
 
 	requestId: bigint;
 
-	constructor({ requestId }: { requestId: bigint }) {
+	// This update's own Request ID, the first field on drafts 14 to 16.
+	#ownRequestId?: bigint;
+
+	constructor({ requestId, ownRequestId }: { requestId: bigint; ownRequestId?: bigint }) {
 		this.requestId = requestId;
+		this.#ownRequestId = ownRequestId;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version === Version.DRAFT_14) {
+		// Drafts 14 to 16 send a new Request ID and then the request being updated.
+		// Later drafts dropped the new id, so the one field left is the target.
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			if (this.#ownRequestId === undefined) throw new Error("ownRequestId required for draft14-16");
+			await w.u62(this.#ownRequestId);
 			await w.u62(this.requestId);
-			await w.u62(0n); // subscription_request_id
-			await w.u62(0n); // start_group
-			await w.u62(0n); // start_object
-			await w.u62(0n); // end_group
-			await w.u8(128); // subscriber_priority
-			await w.bool(true); // forward
-			await w.u53(0); // no parameters
-		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			await w.u62(this.requestId);
-			await w.u62(0n); // subscription_request_id
-			const params = new Parameters();
-			await params.encode(w, version);
+			if (version === Version.DRAFT_14) {
+				await w.u62(0n); // start_group
+				await w.u62(0n); // start_object
+				await w.u62(0n); // end_group
+				await w.u8(128); // subscriber_priority
+				await w.bool(true); // forward
+				await w.u53(0); // no parameters
+			} else {
+				const params = new Parameters();
+				await params.encode(w, version);
+			}
 		} else {
+			if (this.#ownRequestId !== undefined) throw new Error("ownRequestId is only valid on draft14-16");
 			// v17+: REQUEST_UPDATE
 			await w.u62(this.requestId);
 			if (version === Version.DRAFT_17) {
@@ -398,30 +407,29 @@ export class SubscribeUpdate {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeUpdate> {
-		if (version === Version.DRAFT_14) {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			const ownRequestId = await r.u62();
 			const requestId = await r.u62();
-			await r.u62(); // subscription_request_id
-			await r.u62(); // start_group
-			await r.u62(); // start_object
-			await r.u62(); // end_group
-			await r.u8(); // subscriber_priority
-			await r.bool(); // forward
-			await Parameters.decode(r, version); // parameters
-			return new SubscribeUpdate({ requestId });
-		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			const requestId = await r.u62();
-			await r.u62(); // subscription_request_id
-			await Parameters.decode(r, version);
-			return new SubscribeUpdate({ requestId });
-		} else {
-			// v17+: REQUEST_UPDATE
-			const requestId = await r.u62();
-			if (version === Version.DRAFT_17) {
-				await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+			if (version === Version.DRAFT_14) {
+				await r.u62(); // start_group
+				await r.u62(); // start_object
+				await r.u62(); // end_group
+				await r.u8(); // subscriber_priority
+				await r.bool(); // forward
+				await Parameters.decode(r, version); // parameters
+			} else {
+				await Parameters.decode(r, version, "subscribe-update");
 			}
-			await Parameters.decode(r, version);
-			return new SubscribeUpdate({ requestId });
+			return new SubscribeUpdate({ requestId, ownRequestId });
 		}
+
+		// v17+: REQUEST_UPDATE. Request ID is the existing request.
+		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+		}
+		await Parameters.decode(r, version, "subscribe-update");
+		return new SubscribeUpdate({ requestId });
 	}
 }
 

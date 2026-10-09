@@ -1,7 +1,9 @@
+import type * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
 import {
 	hasAnnounceCompression,
@@ -48,8 +50,17 @@ export type AnnounceBroadcast =
 	/** A broadcast is now available, carrying the path suffix, the hop chain, and
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
 	 * `undefined` on a wire with no room for one. On lite-07, `suffix` follows the
-	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. */
-	| { status: "active"; suffix: Path.Valid; hops: Hop[]; cost?: Cost; pathBase?: Base; hopBase?: Base }
+	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The epoch
+	 * (lite-07+) is fixed for the announcement's lifetime: a new one ends it and starts afresh. */
+	| {
+			status: "active";
+			suffix: Path.Valid;
+			epoch?: Epoch.Valid;
+			hops: Hop[];
+			cost?: Cost;
+			pathBase?: Base;
+			hopBase?: Base;
+	  }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
 	| { status: "ended"; suffix: Path.Valid }
 	/** Lite06+: a broadcast is no longer available, retracted by announce id.
@@ -175,21 +186,23 @@ async function decodeHopsBlock(r: Reader, version: Version): Promise<{ hops: Hop
 	return hopBase ? { hops, hopBase } : { hops };
 }
 
-// The route cost rides lite-06+ announcements as two varints, warm then cold; older
-// versions carry neither. Costs saturate at 2^62-1 on every version, even where lite-07's
+// Lite07 carries one static cost. Lite06 retains its second field at the ceiling;
+// older versions carry neither. Costs saturate at 2^62-1 on every version, even where lite-07's
 // varints could carry more, so a cost always forwards to a peer on an older version.
 const MAX_COST = 2n ** 62n - 1n;
 const saturate = (v: bigint) => (v > MAX_COST ? MAX_COST : v);
 
 async function encodeRouteCost(w: Writer, version: Version, cost: Cost | undefined) {
 	if (!hasRouteCost(version)) return;
-	await w.u62(saturate(cost?.warm ?? 0n));
-	await w.u62(saturate(cost?.cold ?? 0n));
+	await w.u62(saturate(cost ?? 0n));
+	if (version === Version.DRAFT_06) await w.u62(MAX_COST);
 }
 
 async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | undefined> {
 	if (!hasRouteCost(version)) return undefined;
-	return { warm: saturate(await r.u62()), cold: saturate(await r.u62()) };
+	const cost = saturate(await r.u62());
+	if (version === Version.DRAFT_06) await r.u62();
+	return cost;
 }
 
 // lite-06 message body (no discriminator; the type is carried outside the length prefix).
@@ -197,6 +210,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 	switch (msg.status) {
 		case "active":
 			await encodePath(w, version, msg.suffix, msg.pathBase);
+			await encodeEpoch(w, version, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
@@ -236,8 +250,9 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 	switch (typ) {
 		case ANNOUNCE_START: {
 			const path = await decodePath(r, version);
+			const epoch = await decodeEpoch(r, version);
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "active", ...path, ...hops, cost: await decodeRouteCost(r, version) };
+			return { status: "active", ...path, epoch, ...hops, cost: await decodeRouteCost(r, version) };
 		}
 		case ANNOUNCE_END:
 			return { status: "endedId", id: await r.u62() };
@@ -468,14 +483,17 @@ export class AnnounceInit {
 		return new AnnounceInit(suffixes);
 	}
 
+	// The whole initial set in one message, so it scales with the publisher's broadcasts.
+	static readonly MAX_SIZE = 64 * 1024 * 1024;
+
 	async encode(w: Writer, version: Version): Promise<void> {
 		AnnounceInit.#guard(version);
-		return Message.encode(w, this.#encode.bind(this));
+		return Message.encode(w, this.#encode.bind(this), AnnounceInit.MAX_SIZE);
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AnnounceInit> {
 		AnnounceInit.#guard(version);
-		return Message.decode(r, AnnounceInit.#decode);
+		return Message.decode(r, AnnounceInit.#decode, AnnounceInit.MAX_SIZE);
 	}
 }
 

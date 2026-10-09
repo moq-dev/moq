@@ -6,7 +6,7 @@ use crate::container::{Container as ContainerTrait, Frame, Kind, fmp4, legacy, l
 ///
 /// Built from a track's audio or video configuration, including its container.
 pub enum Container {
-	/// VarInt timestamp + raw codec bitstream. The original hang wire format.
+	/// varint timestamp + raw codec bitstream. The original hang wire format.
 	Legacy(Kind),
 	/// ISO-BMFF moof+mdat fragments. The wrapped [`fmp4::Wire`] holds
 	/// the track's `trak` box so per-frame writes and reads have the

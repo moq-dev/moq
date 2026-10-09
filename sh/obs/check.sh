@@ -55,7 +55,7 @@ if command -v cmake >/dev/null; then
         echo "CMake accepted a release build without MOQ_VERSION" >&2
         exit 1
     fi
-    if ! grep -Fq "MOQ_VERSION is required when MOQ_LOCAL does not contain rs/libmoq" "$build_dir/configure.log"; then
+    if ! grep -Fq "MOQ_VERSION is required when MOQ_LOCAL does not contain rs/moq-c" "$build_dir/configure.log"; then
         cat "$build_dir/configure.log" >&2
         exit 1
     fi

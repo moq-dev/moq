@@ -63,8 +63,8 @@ use moq_v4l::sys::{
 	v4l2_mpeg_video_header_mode_V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME,
 };
 
-use super::super::encoder::{Config, Gop};
-use super::{Backend, Encoded};
+use super::super::encoder::{Applied, Codec, Config, Gop};
+use super::{Backend, Encoded, keyframe_annexb};
 use crate::v4l2::{self, Dequeue, Device, Dir, Planes, Queue, Rect, Request, Role};
 use crate::{Error, Frame, Size};
 
@@ -342,7 +342,9 @@ impl V4l2 {
 				// The driver copies the raw buffer's timestamp onto the coded buffer its
 				// work came out on, so this is the picture that was encoded rather than
 				// whatever went in last, and the timestamp is that frame's own.
-				out.push(Encoded::new(payload, timestamp));
+				// Read from the bitstream: drivers set `V4L2_BUF_FLAG_KEYFRAME` unevenly.
+				let keyframe = keyframe_annexb(Codec::H264, &payload);
+				out.push(Encoded::new(payload, timestamp, keyframe));
 			}
 
 			if buffer.last() {
@@ -530,6 +532,12 @@ impl Backend for V4l2 {
 
 	fn name(&self) -> &'static str {
 		NAME
+	}
+
+	fn applied(&self) -> Applied {
+		// B-frames and the codec's queue depth are the driver's defaults: nothing
+		// here sets or reads them back.
+		Applied::unconfirmed("CBR; frame reordering and queue depth left to the driver")
 	}
 }
 

@@ -45,7 +45,9 @@ As a library, `Shaper::bind` takes a `Config`: where to listen and forward, the 
 per direction. It also takes a `Setup`, which is a `Config` plus the opt-in options below, each off by
 default. `Shaper::verify` fails when the shaper stopped forwarding, when an impairment the profile
 configures never acted and the traffic makes that silence implausible, or when a direction carried
-traffic but no datagram saw one of its phases, before the first step or after one. The relay's drills
+traffic but no datagram saw one of its phases, before the first step or after one. `Shaper::cut` takes
+the path down both ways until the `Outage` it returns drops, so a test can sever a link mid-run and
+restore it when it chooses rather than on a timer. The relay's drills
 (`rs/moq-relay/tests/drills.rs`, described in `test/drill/README.md`) run every scenario through it.
 
 ## What a seed does and does not fix

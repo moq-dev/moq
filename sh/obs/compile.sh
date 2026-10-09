@@ -13,7 +13,7 @@
 # ENABLE_QT and ENABLE_FRONTEND_API are on, so the definitions they gate on are
 # set here to match.
 #
-# test/ is in scope because each test file defines the libmoq entry points the
+# test/ is in scope because each test file defines the moq-c entry points the
 # plugin calls, so a signature that drifts from the generated moq.h is a
 # conflicting C declaration. Catching that needs only headers, which is why it
 # belongs here: `just obs ci` finds the same drift, but only where obs.yml's
@@ -50,7 +50,7 @@ qt=$(pkg-config --cflags Qt6Widgets Qt6Gui Qt6Core)
 ffmpeg=$(pkg-config --cflags libavcodec libavutil libswscale libswresample)
 
 # MOQ_VERSION_STRING only reaches a label in the dock, so any value
-# type-checks the same; CMake stamps the real libmoq version.
+# type-checks the same; CMake stamps the real moq-c version.
 status=0
 for source in src/*.cpp test/*.cpp; do
     # shellcheck disable=SC2086

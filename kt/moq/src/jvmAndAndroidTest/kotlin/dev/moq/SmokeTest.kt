@@ -11,6 +11,7 @@ import uniffi.moq.MoqException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -19,6 +20,10 @@ import kotlin.time.Duration.Companion.milliseconds
 
 @Serializable
 private data class Status(val state: String)
+
+/** The next announce event. */
+private suspend fun AnnounceConsumer.nextRoute(): AnnounceEvent =
+    checkNotNull(next()) { "announce stream ended" }
 
 private fun opusHead(): ByteArray =
     "OpusHead".encodeToByteArray() + byteArrayOf(
@@ -143,10 +148,11 @@ class SmokeTest {
     }
 
     @Test
-    fun `end ends a broadcast while a dynamic handle is still held`() = runTest {
+    fun `ending a broadcast ends it while a dynamic handle remains`() = runTest {
         BroadcastProducer().use { broadcast ->
             broadcast.dynamic().use {
                 val consumer = broadcast.consume()
+                // Releasing the producer alone would leave the dynamic handle holding it open.
                 broadcast.end()
                 broadcast.end()
                 assertFailsWith<MoqException> { consumer.subscribeTrack("events", null) }
@@ -167,7 +173,7 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", null)
             val group = track.appendGroup()
-            group.writeFrame(Frame(payload = "cached".encodeToByteArray()))
+            group.writeFrame(Frame(payload = "cached".encodeToByteArray(), timestampUs = 0uL))
             group.finish()
 
             val fetched = broadcast.consume().fetchGroup(
@@ -351,18 +357,16 @@ class SmokeTest {
 
                 broadcast.announce(Route())
                 val announced = consumer.announced(AnnounceConfig())
-                val first = announced.next()!!
-                assertEquals("live", first.prefix())
-                assertTrue(first.active())
+                val first = assertIs<AnnounceEventStart>(announced.nextRoute())
+                assertEquals("live", first.announce.prefix)
 
                 broadcast.unannounce()
-                val retracted = announced.next()!!
-                assertEquals("live", retracted.prefix())
-                assertTrue(!retracted.active())
+                val retracted = assertIs<AnnounceEventEnd>(announced.nextRoute())
+                assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
                 broadcast.announce(Route())
-                assertTrue(announced.next()!!.active())
+                assertIs<AnnounceEventStart>(announced.nextRoute())
                 consumer.requestBroadcast("live")
             }
         }
@@ -374,9 +378,9 @@ class SmokeTest {
             val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.createBroadcast("room/alice/chat").use { broadcast ->
                 broadcast.announce(Route())
-                val update = announced.next()!!
-                assertEquals("room/alice/chat", update.prefix())
-                assertEquals(listOf("alice"), update.captures())
+                val update = assertIs<AnnounceEventStart>(announced.nextRoute())
+                assertEquals("room/alice/chat", update.announce.prefix)
+                assertEquals(listOf("alice"), update.announce.captures)
             }
         }
     }
@@ -479,12 +483,12 @@ class SmokeTest {
     }
 
     @Test
-    fun `decode video picks its pixel format`() = runTest {
+    fun `decoded video frame owns its picture`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("video-decode-format").use { broadcast ->
+            origin.createBroadcast("video-decode-frame").use { broadcast ->
                 val video = broadcast.encodeVideo(
                     VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
-                    // Software both ways so the test is deterministic everywhere.
+                    // Software so the encode is deterministic everywhere.
                     VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
                     null,
                 )
@@ -497,35 +501,29 @@ class SmokeTest {
                     video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
                 }
 
-                val consumer = origin.consume().requestBroadcast("video-decode-format")
+                val consumer = origin.consume().requestBroadcast("video-decode-frame")
                 val catalog = consumer.subscribeCatalog().next()!!
                 val rendition = catalog.video["camera"]!!
 
-                // Two subscribers over one publication, so the same encoded frames
-                // are read twice and only the requested layout differs.
-                val i420 = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
-                val packed = consumer.decodeVideo(
-                    "camera",
-                    rendition,
-                    VideoDecoderOutput(format = VideoPixelFormat.RGBA),
-                )
+                val decoder = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
 
-                // Keep the encoder fed so both decoders see frames after they joined.
+                // Keep the encoder fed so the decoder sees frames after it joined.
                 for (i in 10 until 40) {
                     video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
                 }
 
-                val planar = i420.next()!!
-                assertEquals(VideoPixelFormat.I420, planar.format)
-                assertEquals(planar.width.toInt() * planar.height.toInt() * 3 / 2, planar.data.size)
+                decoder.next()!!.use { frame ->
+                    // The frame outlives its consumer's cancellation.
+                    decoder.cancel()
 
-                val frame = packed.next()!!
-                assertEquals(VideoPixelFormat.RGBA, frame.format)
-                assertEquals(frame.width.toInt() * frame.height.toInt() * 4, frame.data.size)
-                assertTrue(frame.data.indices.filter { it % 4 == 3 }.all { frame.data[it] == 0xFF.toByte() })
+                    val planar = frame.pixels(VideoPixelFormat.I420)
+                    assertEquals(frame.width().toInt() * frame.height().toInt() * 3 / 2, planar.size)
 
-                i420.cancel()
-                packed.cancel()
+                    val packed = frame.pixels(VideoPixelFormat.RGBA)
+                    assertEquals(frame.width().toInt() * frame.height().toInt() * 4, packed.size)
+                    assertTrue(packed.indices.filter { it % 4 == 3 }.all { packed[it] == 0xFF.toByte() })
+                }
+
                 video.finish()
             }
         }

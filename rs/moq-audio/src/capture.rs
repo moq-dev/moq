@@ -18,7 +18,7 @@
 //! in that same callback so the buffers leaving here are already clean.
 
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::traits::Producer;
@@ -108,6 +108,10 @@ pub(crate) struct Samples {
 	/// behind wall clock.
 	pub gap: bool,
 
+	/// When the first sample was captured, or `None` when the host did not report
+	/// a usable capture time and the buffer should be stamped at arrival.
+	pub captured: Option<Instant>,
+
 	/// Returns the allocation to the microphone callback after every downstream
 	/// borrower is done with it. `None` for non-cpal capture sources.
 	recycle: Option<ringbuf::HeapProd<Vec<f32>>>,
@@ -120,15 +124,28 @@ impl Samples {
 		Self {
 			data,
 			gap,
+			captured: None,
+			recycle: None,
+		}
+	}
+
+	/// Samples captured at `captured`, for a fixture that separates that instant from the read.
+	#[cfg(test)]
+	pub(crate) fn at(data: Vec<f32>, gap: bool, captured: Instant) -> Self {
+		Self {
+			data,
+			gap,
+			captured: Some(captured),
 			recycle: None,
 		}
 	}
 
 	/// Samples borrowed from the microphone callback's fixed buffer pool.
-	fn pooled(data: Vec<f32>, gap: bool, recycle: ringbuf::HeapProd<Vec<f32>>) -> Self {
+	fn pooled(data: Vec<f32>, gap: bool, captured: Option<Instant>, recycle: ringbuf::HeapProd<Vec<f32>>) -> Self {
 		Self {
 			data,
 			gap,
+			captured,
 			recycle: Some(recycle),
 		}
 	}
@@ -395,6 +412,7 @@ impl Microphone {
 
 		let (mut writer, rx) = buffer::channel(
 			channels as usize,
+			sample_rate,
 			#[cfg(feature = "aec")]
 			aec,
 		);
@@ -404,12 +422,13 @@ impl Microphone {
 
 		// The callback runs on cpal's realtime audio thread. Every format writes
 		// into the same preallocated bounded pool.
+		let mut clock = StreamClock::default();
 		let stream = match sample_format {
 			cpal::SampleFormat::F32 => {
 				let errors = error_tx.clone();
 				device.build_input_stream(
 					stream_config,
-					move |data: &[f32], _: &_| writer.write_f32(data),
+					move |data: &[f32], info| writer.write_f32(data, clock.capture(info, Instant::now())),
 					move |err| stream_err(&errors, err),
 					None,
 				)
@@ -418,7 +437,7 @@ impl Microphone {
 				let errors = error_tx.clone();
 				device.build_input_stream(
 					stream_config,
-					move |data: &[i16], _: &_| writer.write_i16(data),
+					move |data: &[i16], info| writer.write_i16(data, clock.capture(info, Instant::now())),
 					move |err| stream_err(&errors, err),
 					None,
 				)
@@ -427,7 +446,7 @@ impl Microphone {
 				let errors = error_tx.clone();
 				device.build_input_stream(
 					stream_config,
-					move |data: &[u16], _: &_| writer.write_u16(data),
+					move |data: &[u16], info| writer.write_u16(data, clock.capture(info, Instant::now())),
 					move |err| stream_err(&errors, err),
 					None,
 				)
@@ -709,6 +728,54 @@ fn describe(device: &cpal::Device, id: &cpal::DeviceId, default: bool) -> Result
 	})
 }
 
+/// Longer than a live device buffer. A host that leaves `capture` at zero against
+/// an absolute callback clock reports a delay of the whole uptime, which is not
+/// a sample time this process can place.
+const MAX_CAPTURE_DELAY: Duration = Duration::from_secs(1);
+
+/// How much slower than `Instant` a stream clock may run and still be followed: one part in
+/// this many (1000 ppm), far above the gap between a host's hardware or raw monotonic clock
+/// and `Instant`.
+const MAX_DRIFT: u32 = 1_000;
+
+/// Places one open's cpal timestamps on the monotonic clock.
+///
+/// The host stamps a callback before the closure runs, so `Instant::now()` there overstates the
+/// callback's instant by its delivery delay. The estimate is the earliest arrival the stream
+/// clock predicts: a late callback cannot move it later, and it creeps by up to [`MAX_DRIFT`] so
+/// a slow stream clock is still followed. Only an open's first callback, with nothing earlier to
+/// predict it, carries its own delivery delay.
+#[derive(Default)]
+struct StreamClock {
+	/// The estimated instant of the last usable callback, and its stream timestamp.
+	anchor: Option<(Instant, cpal::StreamInstant)>,
+}
+
+impl StreamClock {
+	/// The instant the callback's first sample was captured, for a callback running at `now`.
+	///
+	/// `None` when the host timestamp cannot name one: the capture mark is after the
+	/// callback, or the delay is not a device buffer. The caller then stamps arrival.
+	fn capture(&mut self, info: &cpal::InputCallbackInfo, now: Instant) -> Option<Instant> {
+		let timestamp = info.timestamp();
+		self.place(timestamp.callback, timestamp.capture, now)
+	}
+
+	fn place(&mut self, callback: cpal::StreamInstant, capture: cpal::StreamInstant, now: Instant) -> Option<Instant> {
+		let delay = callback.checked_duration_since(capture)?;
+		if delay > MAX_CAPTURE_DELAY {
+			return None;
+		}
+		let predicted = self.anchor.and_then(|(at, stream)| {
+			let elapsed = callback.checked_duration_since(stream)?;
+			at.checked_add(elapsed + elapsed / MAX_DRIFT)
+		});
+		let at = predicted.map_or(now, |predicted| predicted.min(now));
+		self.anchor = Some((at, callback));
+		at.checked_sub(delay)
+	}
+}
+
 fn stream_err(errors: &kio::Producer<Option<cpal::Error>>, err: cpal::Error) {
 	if survivable(err.kind()) {
 		tracing::warn!(error = %err, "microphone stream error does not require a restart");
@@ -755,6 +822,7 @@ mod tests {
 	fn reader() -> (buffer::Writer, kio::Producer<Option<cpal::Error>>, MicrophoneReader) {
 		let (tx, rx) = buffer::channel(
 			1,
+			48_000,
 			#[cfg(feature = "aec")]
 			None,
 		);
@@ -789,7 +857,7 @@ mod tests {
 		drop(old_reader);
 
 		fail(&old_errors, "stale");
-		new_samples.write_f32(&[1.0]);
+		new_samples.write_f32(&[1.0], None);
 		let samples = new_reader.read().await.unwrap().unwrap();
 		assert_eq!(samples.data, vec![1.0]);
 	}
@@ -819,6 +887,82 @@ mod tests {
 	fn permission_errors_are_not_retryable() {
 		let failure = Failure::cpal(cpal::Error::new(cpal::ErrorKind::PermissionDenied));
 		assert!(!failure.is_retryable());
+	}
+
+	fn stream(millis: u64) -> cpal::StreamInstant {
+		cpal::StreamInstant::from_millis(millis)
+	}
+
+	#[test]
+	fn a_capture_timestamp_is_the_first_sample_not_the_callback() {
+		let now = Instant::now();
+		let placed = StreamClock::default().place(stream(1_000), stream(980), now).unwrap();
+		assert_eq!(now - placed, Duration::from_millis(20));
+	}
+
+	#[test]
+	fn a_capture_mark_after_the_callback_is_unusable() {
+		let now = Instant::now();
+		assert!(StreamClock::default().place(stream(10), stream(11), now).is_none());
+	}
+
+	#[test]
+	fn an_uptime_sized_capture_delay_is_unusable() {
+		let now = Instant::now();
+		let placed = StreamClock::default().place(stream(60_000), cpal::StreamInstant::ZERO, now);
+		assert!(placed.is_none());
+	}
+
+	#[test]
+	fn a_zero_capture_delay_stamps_the_callback() {
+		let now = Instant::now();
+		assert_eq!(StreamClock::default().place(stream(5), stream(5), now), Some(now));
+	}
+
+	/// A callback the scheduler runs late is placed where the stream clock says its samples
+	/// were captured, not where the closure ran.
+	#[test]
+	fn a_late_callback_keeps_its_stream_capture_time() {
+		let start = Instant::now();
+		let mut clock = StreamClock::default();
+		for millis in [0, 10, 20] {
+			let at = start + Duration::from_millis(millis);
+			assert_eq!(clock.place(stream(millis), stream(millis), at), Some(at));
+		}
+
+		// Captured at 25 ms, stamped by the host at 30 ms, run at 55 ms.
+		let placed = clock.place(stream(30), stream(25), start + Duration::from_millis(55));
+		let creep = Duration::from_millis(10) / MAX_DRIFT;
+		assert_eq!(placed, Some(start + Duration::from_millis(25) + creep));
+
+		let on_time = start + Duration::from_millis(40);
+		assert_eq!(clock.place(stream(40), stream(40), on_time), Some(on_time));
+	}
+
+	/// An open's first callback has nothing to predict it, so a late one is placed at its run
+	/// time. The next callback that runs on time corrects the estimate.
+	#[test]
+	fn an_on_time_callback_corrects_a_late_first_one() {
+		let start = Instant::now();
+		let mut clock = StreamClock::default();
+		let late = start + Duration::from_millis(30);
+		assert_eq!(clock.place(stream(0), stream(0), late), Some(late));
+
+		let on_time = start + Duration::from_millis(40);
+		assert_eq!(clock.place(stream(40), stream(40), on_time), Some(on_time));
+	}
+
+	/// A stream clock running slower than `Instant`, within the drift bound, is followed instead
+	/// of leaving every later capture early.
+	#[test]
+	fn a_slow_stream_clock_is_followed() {
+		let start = Instant::now();
+		let mut clock = StreamClock::default();
+		// 500 ppm slow: 10 ms on the stream clock is 10.005 ms of `Instant`.
+		for index in 0..10_000u64 {
+			let at = start + Duration::from_micros(10_005 * index);
+			assert_eq!(clock.place(stream(10 * index), stream(10 * index), at), Some(at));
+		}
 	}
 
 	const MIC: &str = "Test Mic";

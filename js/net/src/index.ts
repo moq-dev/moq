@@ -15,6 +15,8 @@ export * as Bandwidth from "./bandwidth_api.ts";
 export * as Broadcast from "./broadcast.ts";
 /** A reconnecting, shareable handle on a MoQ session. */
 export { Connection } from "./connection/index.ts";
+/** Publisher instance identities, carried in broadcast paths as UUIDv7 epochs. */
+export * as Epoch from "./epoch.ts";
 export { SessionCode, StreamCode } from "./error.ts";
 /** Session and stream errors, each carrying a code from its own registry. */
 export * as Error from "./errors.ts";
@@ -26,6 +28,7 @@ export * as Origin from "./origin.ts";
 export * as Path from "./path.ts";
 /** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */
 export * as Time from "./time.ts";
+export type { Timed } from "./timed.ts";
 /** Track role handles. */
 export * as Track from "./track.ts";
 /** Varint encoding and decoding, in QUIC's format and moq-transport's leading-ones format. */

@@ -71,7 +71,7 @@ async function encodeMessage(
 
 test("SubscribeOk round-trips priority/groups on draft-04", async () => {
 	const got = await responseRoundtrip(Version.DRAFT_04, {
-		ok: new SubscribeOk({ priority: 7, maxAge: 250, startGroup: 3 }),
+		ok: new SubscribeOk({ priority: 7, maxDelay: 250, startGroup: 3 }),
 	});
 	expect("ok" in got).toBe(true);
 	if (!("ok" in got)) throw new Error("expected ok");
@@ -85,7 +85,7 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 		broadcast: Path.from("test"),
 		track: "video",
 		priority: 7,
-		maxAge: 250,
+		maxDelay: 250,
 		startGroup: 0,
 		endGroup: 9,
 	});
@@ -96,7 +96,7 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 		Version.DRAFT_06,
 	);
 	expect(got.priority).toBe(7);
-	expect(got.maxAge).toBe(250);
+	expect(got.maxDelay).toBe(250);
 	expect(got.startGroup).toBeUndefined();
 	expect(got.endGroup).toBe(9);
 
@@ -124,7 +124,7 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 test("SubscribeUpdate round-trips every option including startGroup 0", async () => {
 	const message = new SubscribeUpdate({
 		priority: 8,
-		maxAge: 500,
+		maxDelay: 500,
 		startGroup: 0,
 		endGroup: 12,
 	});
@@ -133,7 +133,7 @@ test("SubscribeUpdate round-trips every option including startGroup 0", async ()
 		Version.DRAFT_06,
 	);
 	expect(got.priority).toBe(8);
-	expect(got.maxAge).toBe(500);
+	expect(got.maxDelay).toBe(500);
 	expect(got.startGroup).toBeUndefined();
 	expect(got.endGroup).toBe(12);
 
@@ -151,6 +151,22 @@ test("SubscribeStart round-trips on draft-05", async () => {
 	expect("start" in got).toBe(true);
 	if (!("start" in got)) throw new Error("expected start");
 	expect(got.start.group).toBe(42);
+});
+
+test("SubscribeStart carries the largest position on draft-07", async () => {
+	// Type, length, group, largest group + 1, largest frame.
+	expect(await encode(Version.DRAFT_07, { start: new SubscribeStart(4, { group: 3, frame: 2 }) })).toEqual(
+		new Uint8Array([0, 3, 4, 4, 2]),
+	);
+	for (const largest of [undefined, { group: 3, frame: 2 }]) {
+		const got = await responseRoundtrip(Version.DRAFT_07, { start: new SubscribeStart(4, largest) });
+		if (!("start" in got)) throw new Error("expected start");
+		expect([got.start.group, got.start.largest]).toEqual([4, largest]);
+	}
+	// Draft-06 has no largest position on the wire.
+	expect(await encode(Version.DRAFT_06, { start: new SubscribeStart(4, { group: 3, frame: 2 }) })).toEqual(
+		new Uint8Array([0, 1, 4]),
+	);
 });
 
 test("SubscribeEnd round-trips on draft-05", async () => {

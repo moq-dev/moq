@@ -1,0 +1,321 @@
+use std::{
+	cell::RefCell,
+	ffi::{CString, c_char, c_void},
+	sync::LazyLock,
+};
+
+use url::Url;
+
+use crate::{Error, Id, moq_protocol_error};
+
+/// A callback receiving a positive handle/value, zero on clean completion, or a negative error.
+#[allow(non_camel_case_types)]
+pub type moq_status_callback = Option<extern "C" fn(user_data: *mut c_void, code: i32)>;
+
+pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let handle = runtime.handle().clone();
+
+	std::thread::Builder::new()
+		.name("moq-c".into())
+		.spawn(move || {
+			runtime.block_on(std::future::pending::<()>());
+		})
+		.expect("failed to spawn runtime thread");
+
+	handle
+});
+
+/// Runs the provided function in the runtime context.
+/// Additionally, we convert the return code to a C-compatible return value.
+///
+/// Callers run concurrently: entering a handle only sets a thread-local, so
+/// nothing here is shared between threads. Tokio's requirement that the guards
+/// be dropped in LIFO order is per-thread too, and this one lives and dies in
+/// this frame, so a nested call nests rather than crosses.
+pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
+	let _guard = RUNTIME.enter();
+
+	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+		Ok(ret) => {
+			record_error(&ret);
+			ret.code()
+		}
+		Err(_) => {
+			record_error(&Error::Panic);
+			Error::Panic.code()
+		}
+	}
+}
+
+/// Wrapper for C callback functions with user data.
+///
+/// Stores a function pointer and user data pointer to call C callbacks
+/// from async Rust code.
+#[derive(Clone, Copy)]
+pub struct OnStatus {
+	user_data: *mut c_void,
+	on_status: extern "C" fn(user_data: *mut c_void, code: i32),
+}
+
+impl OnStatus {
+	/// Create a new callback wrapper from a C function pointer.
+	///
+	/// # Safety
+	/// - The caller must ensure user_data remains valid for the callback's lifetime.
+	/// - The callback function pointer must be valid if provided.
+	pub unsafe fn new(user_data: *mut c_void, on_status: moq_status_callback) -> Result<Self, Error> {
+		Ok(Self {
+			user_data,
+			on_status: on_status.ok_or(Error::InvalidPointer)?,
+		})
+	}
+
+	/// Invoke the callback with a result code.
+	///
+	/// We record the reason before invoking the callback (on the same thread)
+	/// so a callback receiving a negative code can read `moq_error()` for it.
+	pub fn call<C: ReturnCode>(&self, ret: C) {
+		record_error(&ret);
+		let code = ret.code();
+		(self.on_status)(self.user_data, code);
+	}
+}
+
+unsafe impl Send for OnStatus {}
+
+/// Types that can be converted to C-compatible return codes.
+pub trait ReturnCode {
+	/// Convert to an i32 status code.
+	fn code(&self) -> i32;
+
+	/// The error this carries, if any, so the boundary can record its reason
+	/// for `moq_error`. Defaults to none for non-fallible return types.
+	fn error(&self) -> Option<&Error> {
+		None
+	}
+}
+
+impl ReturnCode for () {
+	fn code(&self) -> i32 {
+		0
+	}
+}
+
+impl ReturnCode for i32 {
+	fn code(&self) -> i32 {
+		*self
+	}
+}
+
+impl ReturnCode for Result<i32, Error> {
+	fn code(&self) -> i32 {
+		match self {
+			Ok(code) if *code < 0 => Error::InvalidCode.code(),
+			Ok(code) => *code,
+			Err(e) => e.code(),
+		}
+	}
+
+	fn error(&self) -> Option<&Error> {
+		self.as_ref().err()
+	}
+}
+
+impl ReturnCode for Result<usize, Error> {
+	fn code(&self) -> i32 {
+		match self {
+			Ok(code) => i32::try_from(*code).unwrap_or_else(|_| Error::InvalidCode.code()),
+			Err(e) => e.code(),
+		}
+	}
+
+	fn error(&self) -> Option<&Error> {
+		self.as_ref().err()
+	}
+}
+
+impl ReturnCode for Result<Id, Error> {
+	fn code(&self) -> i32 {
+		match self {
+			Ok(id) => i32::from(*id),
+			Err(e) => e.code(),
+		}
+	}
+
+	fn error(&self) -> Option<&Error> {
+		self.as_ref().err()
+	}
+}
+
+impl ReturnCode for Result<(), Error> {
+	fn code(&self) -> i32 {
+		match self {
+			Ok(()) => 0,
+			Err(e) => e.code(),
+		}
+	}
+
+	fn error(&self) -> Option<&Error> {
+		self.as_ref().err()
+	}
+}
+
+impl ReturnCode for usize {
+	fn code(&self) -> i32 {
+		i32::try_from(*self).unwrap_or_else(|_| Error::InvalidCode.code())
+	}
+}
+
+impl ReturnCode for Id {
+	fn code(&self) -> i32 {
+		i32::from(*self)
+	}
+}
+
+struct LastError {
+	message: CString,
+	protocol: Option<moq_protocol_error>,
+}
+
+thread_local! {
+	/// Reason for the most recent error returned on this thread. FFI functions
+	/// hand back only a numeric code, so we stash the human-readable message
+	/// (and protocol details, when the failure is a session or stream code)
+	/// here for `moq_error` / `moq_error_protocol` to retrieve.
+	static LAST_ERROR: RefCell<Option<LastError>> = const { RefCell::new(None) };
+}
+
+/// Record the reason for an error return into this thread's `moq_error` slot.
+///
+/// Called at the FFI boundary (sync return and callback dispatch) right before
+/// the numeric code is produced, so the conversion in `code()` stays pure.
+fn record_error<C: ReturnCode>(ret: &C) {
+	let Some(err) = ret.error() else { return };
+	// CString::new fails only on an interior NUL, which our messages never
+	// contain; skip storing rather than truncating if it ever happens.
+	if let Ok(msg) = CString::new(err.to_string()) {
+		LAST_ERROR.with(|cell| {
+			*cell.borrow_mut() = Some(LastError {
+				message: msg,
+				protocol: err.protocol(),
+			});
+		});
+	}
+}
+
+/// Pointer to this thread's last error message, or null if none was recorded.
+///
+/// The pointer is valid until the next moq-c call on the same thread.
+pub fn last_error_ptr() -> *const c_char {
+	LAST_ERROR.with(|cell| {
+		cell.borrow()
+			.as_ref()
+			.map_or(std::ptr::null(), |err| err.message.as_ptr())
+	})
+}
+
+/// Copy this thread's last protocol error into `out`.
+///
+/// Returns true when the last error was a protocol failure and `out` was written.
+pub fn last_protocol(out: &mut moq_protocol_error) -> bool {
+	LAST_ERROR.with(|cell| match cell.borrow().as_ref().and_then(|err| err.protocol) {
+		Some(protocol) => {
+			*out = protocol;
+			true
+		}
+		None => false,
+	})
+}
+
+/// Parse an i32 handle into an Id.
+pub fn parse_id(id: u32) -> Result<Id, Error> {
+	Id::try_from(id)
+}
+
+/// Parse an optional i32 handle (0 = None) into an Option<Id>.
+pub fn parse_id_optional(id: u32) -> Result<Option<Id>, Error> {
+	match id {
+		0 => Ok(None),
+		id => Ok(Some(parse_id(id)?)),
+	}
+}
+
+/// Parse a C string pointer into a Url.
+pub fn parse_url(url: *const c_char, url_len: usize) -> Result<Url, Error> {
+	let url = unsafe { parse_str(url, url_len)? };
+	Ok(Url::parse(url)?)
+}
+
+/// Parse a C string pointer into a &str.
+///
+/// Returns an empty string if the pointer is null.
+///
+/// # Safety
+/// The caller must ensure that cstr is valid for 'a.
+pub unsafe fn parse_str<'a>(cstr: *const c_char, cstr_len: usize) -> Result<&'a str, Error> {
+	let slice = unsafe { parse_slice(cstr.cast::<u8>(), cstr_len)? };
+	let string = std::str::from_utf8(slice)?;
+	Ok(string)
+}
+
+/// Parse an optional C string, where a NULL or empty value means "unset".
+///
+/// Config setters use this so one function both sets and clears a knob, rather than
+/// needing a paired `moq_client_clear_*` for every optional field.
+///
+/// # Safety
+/// The caller must ensure that cstr is valid for 'a.
+pub unsafe fn parse_str_optional<'a>(cstr: *const c_char, cstr_len: usize) -> Result<Option<&'a str>, Error> {
+	if cstr.is_null() {
+		return Ok(None);
+	}
+
+	let string = unsafe { parse_str(cstr, cstr_len)? };
+	Ok((!string.is_empty()).then_some(string))
+}
+
+/// Parse a C array of [`crate::moq_string`] into owned strings.
+///
+/// A NULL array is only valid when `count` is zero, which yields an empty list.
+///
+/// # Safety
+/// The caller must ensure that items is valid for count elements, and that each
+/// element points to its own length in bytes.
+pub unsafe fn parse_strings(items: *const crate::moq_string, count: usize) -> Result<Vec<String>, Error> {
+	if items.is_null() {
+		if count == 0 {
+			return Ok(Vec::new());
+		}
+
+		return Err(Error::InvalidPointer);
+	}
+
+	let items = unsafe { std::slice::from_raw_parts(items, count) };
+	items
+		.iter()
+		.map(|item| Ok(unsafe { parse_str(item.data, item.len)? }.to_string()))
+		.collect()
+}
+
+/// Parse a raw pointer and size into a byte slice.
+///
+/// Returns an empty slice if both pointer and size are zero.
+///
+/// # Safety
+/// The caller must ensure that data is valid for 'a.
+pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], Error> {
+	if data.is_null() {
+		if size == 0 {
+			return Ok(&[]);
+		}
+
+		return Err(Error::InvalidPointer);
+	}
+
+	let data = unsafe { std::slice::from_raw_parts(data, size) };
+	Ok(data)
+}

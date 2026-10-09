@@ -12,6 +12,10 @@ rust-version.workspace = true
 keywords = ["quic", "networking", "reuseport"]
 categories = ["network-programming"]
 
+[features]
+# Batch `udp` sends and receives through Apple's private sendmsg_x/recvmsg_x.
+fast-apple-datapath = []
+
 [dependencies]
 core_affinity = "0.8"
 libc = { workspace = true }
@@ -19,6 +23,12 @@ rand = "0.10"
 socket2 = { version = "0.6", features = ["all"] }
 thiserror = "2"
 tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_Networking_WinSock"] }
+
+[build-dependencies]
+cfg_aliases = "0.2"
 
 [dev-dependencies]
 tracing-test = "0.2"

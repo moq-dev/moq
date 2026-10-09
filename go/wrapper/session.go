@@ -18,7 +18,7 @@ type Session struct {
 // up waiting and shuts the session down, so a caller that no longer cares about
 // the connection can tear it down by cancelling.
 func (s *Session) Closed(ctx context.Context) error {
-	return runErr(ctx, s.inner.Shutdown, s.inner.Closed)
+	return runErr(ctx, func() { s.inner.Cancel(0) }, s.inner.Closed)
 }
 
 // Status blocks until the connection status differs from the one this session
@@ -33,7 +33,7 @@ func (s *Session) Closed(ctx context.Context) error {
 // before the next call is coalesced away, so the outages it hides are the ones
 // that already healed. Don't count outages with it.
 func (s *Session) Status(ctx context.Context) (ConnectionStatus, error) {
-	return runCancellable(ctx, s.inner.Shutdown, s.inner.Status)
+	return runCancellable(ctx, func() { s.inner.Cancel(0) }, s.inner.Status)
 }
 
 // Epoch is the connection epoch: 1 for the connect that built this session, one
@@ -103,9 +103,10 @@ func (s *Session) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: s.inner.Consume()}
 }
 
-// Shutdown closes the session gracefully.
-func (s *Session) Shutdown() {
-	s.inner.Shutdown()
+// Shutdown drains finished tracks within one second, returning any delivery error.
+// Cancelling ctx aborts the session immediately.
+func (s *Session) Shutdown(ctx context.Context) error {
+	return runErr(ctx, func() { s.inner.Cancel(0) }, s.inner.Shutdown)
 }
 
 // Cancel closes the session abruptly with an application error code.

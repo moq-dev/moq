@@ -10,7 +10,7 @@ pub enum Error {
 	#[error("not found: {0}")]
 	NotFound(String),
 
-	/// The recording format version is not 1.
+	/// The recording format version is not the current one.
 	#[error("unknown version {0}")]
 	Version(u64),
 
@@ -30,6 +30,18 @@ pub enum Error {
 	#[error("timescale {existing} does not match {intended}")]
 	TimescaleMismatch { existing: u64, intended: u64 },
 
+	/// An existing `.info` was recorded from another publisher instance: the source
+	/// restarted, so the caller starts a new prefix.
+	#[error(
+		"source epoch {} does not match the recorded {}",
+		epoch_text(intended),
+		epoch_text(existing)
+	)]
+	EpochMismatch {
+		existing: Option<moq_net::Epoch>,
+		intended: Option<moq_net::Epoch>,
+	},
+
 	/// The object has no groups.
 	#[error("empty object")]
 	Empty,
@@ -38,9 +50,9 @@ pub enum Error {
 	#[error("group sequences are not strictly ascending")]
 	Sequence,
 
-	/// A group range is empty, reversed, or does not match an object's table.
-	#[error("invalid or mismatched group bounds {smallest}..={largest}")]
-	Bounds { smallest: u64, largest: u64 },
+	/// An object's table does not hold exactly the frames its record names.
+	#[error("object does not match its record")]
+	Span,
 
 	/// The binary table is truncated, overlapping, gapped, or out of range.
 	#[error("malformed table")]
@@ -73,6 +85,30 @@ pub enum Error {
 	/// `.info` JSON is malformed.
 	#[error("json: {0}")]
 	Json(String),
+
+	/// Publishing the replayed archive failed.
+	#[error("moq: {0}")]
+	Moq(String),
+
+	/// The track was already enrolled, or is the recording's own timeline.
+	#[error("track already enrolled: {0}")]
+	Enrolled(String),
+
+	/// The track is untimed, and a recording needs a timestamp on every frame.
+	#[error("untimed track: {0}")]
+	Untimed(String),
+
+	/// The source broadcast or one of its tracks failed.
+	#[error("source: {0}")]
+	Source(String),
+
+	/// The recording's timeline could not be recovered, segmented, or published.
+	#[error("timeline: {0}")]
+	Timeline(String),
+
+	/// The writer stopped accepting commands.
+	#[error("writer closed")]
+	Closed,
 }
 
 impl From<object_store::Error> for Error {
@@ -84,6 +120,12 @@ impl From<object_store::Error> for Error {
 	}
 }
 
+impl From<moq_net::Error> for Error {
+	fn from(err: moq_net::Error) -> Self {
+		Self::Moq(err.to_string())
+	}
+}
+
 impl From<serde_json::Error> for Error {
 	fn from(err: serde_json::Error) -> Self {
 		Self::Json(err.to_string())
@@ -92,3 +134,10 @@ impl From<serde_json::Error> for Error {
 
 /// A [`Result`](std::result::Result) using this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn epoch_text(epoch: &Option<moq_net::Epoch>) -> String {
+	match epoch {
+		Some(epoch) => epoch.to_string(),
+		None => "none".to_string(),
+	}
+}

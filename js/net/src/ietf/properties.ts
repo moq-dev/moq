@@ -22,9 +22,12 @@ export const DESCENDING = 0x02;
 
 /// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
 export interface Properties {
+	/** The publisher's cache window in milliseconds, omitted when unconstrained. */
+	maxCacheDuration?: bigint;
+
 	/// The track's Timescale, which declares the units of every object Timestamp on it.
 	///
-	/// `undefined` declares no timeline, so the subscriber times objects by arrival.
+	/// `undefined` declares no timeline, so the track and its objects are untimed.
 	timescale?: Timescale;
 
 	/// Publisher priority for a group header without its priority flag. The wire default is 128.
@@ -37,23 +40,34 @@ export interface Properties {
 	groupOrder?: number;
 }
 
+/** Whether {@link encode} writes a TIMESCALE on this version.
+ *
+ * Drafts 14-16 do not. 14 and 15 have no properties block, and 16's Track Extensions
+ * predate the TIMESCALE registration; an older peer rejects trailing bytes it does not
+ * parse. A Timestamp on those drafts would have no units. Draft-16 is still read, so a
+ * peer that sends the block is understood.
+ */
+export function sendsTimescale(version: IetfVersion): boolean {
+	return version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16;
+}
+
 /// Write the block, which is the final field of the message: no count and no length, so
 /// the caller must not append anything after it.
 ///
 /// Properties are serialized in ascending order by type, delta-encoded.
 export async function encode(w: Writer, properties: Properties, version: IetfVersion): Promise<void> {
-	// Draft-16 carries the same block under the name Track Extensions, but we only write it
-	// from draft-17 on: a draft-16 peer running an older build rejects any trailing bytes it
-	// doesn't parse, and draft-16 never registered TIMESCALE (0x08). We still read the block
-	// on draft-16, so a peer that sends one is understood.
-	if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-		return;
-	}
+	if (!sendsTimescale(version)) return;
 
 	let prevType = 0n;
 
+	if (properties.maxCacheDuration !== undefined) {
+		await w.u62(4n);
+		await w.u62(properties.maxCacheDuration);
+		prevType = 4n;
+	}
+
 	if (properties.timescale !== undefined) {
-		await w.u62(TIMESCALE);
+		await w.u62(TIMESCALE - prevType);
 		await w.u62(BigInt(properties.timescale));
 		prevType = TIMESCALE;
 	}
@@ -103,7 +117,9 @@ export async function decode(r: Reader, version: IetfVersion): Promise<Propertie
 		if (abs % 2n === 0n) {
 			// Even type: single varint value
 			const value = await r.u62();
-			if (abs === TIMESCALE && value > 0n) {
+			if (abs === 4n) {
+				properties.maxCacheDuration = value;
+			} else if (abs === TIMESCALE && value > 0n) {
 				// A zero timescale is invalid; treat it as no declaration rather than
 				// failing the whole message over one property we could have ignored.
 				properties.timescale = Timescale(Number(value));

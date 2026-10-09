@@ -47,7 +47,7 @@ import {
 import {
 	type CaptureState,
 	FAULTS,
-	KEYFRAME_INTERVAL_MS,
+	lateJoinStartsLive,
 	leakedPlayerStarted,
 	SAMPLE_MS,
 	SAMPLE_RATE,
@@ -55,7 +55,7 @@ import {
 import * as Pattern from "./src/pattern";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
-const CASES = ["capture-denial", "pause", "rejoin", "detach", "republish", "late-join"] as const;
+const CASES = ["capture-denial", "pause", "disable", "rejoin", "detach", "republish", "late-join"] as const;
 type Case = (typeof CASES)[number];
 
 const { values } = parseArgs({
@@ -114,9 +114,6 @@ const MIN_RATE = 0.5;
  * step off some of the time. Two steps is not boundary noise.
  */
 const MAX_SKEW_STEPS = 1;
-
-/** The first decodable frame may start at the current GOP's keyframe, but never in older history. */
-const MAX_LATE_JOIN_LAG_FRAMES = Math.ceil((Pattern.FPS * KEYFRAME_INTERVAL_MS) / 1000);
 
 const percentile = (values: number[], p: number) => {
 	if (values.length === 0) return Number.NaN;
@@ -568,6 +565,44 @@ try {
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after resume");
 	}
 
+	// ── disable and re-enable the video rendition ────────────────────────────
+	// A disabled rendition stays in the catalog with `enabled: false`. The player deselects it and
+	// shows black instead of freezing on the last picture, then picks it up again once re-enabled.
+	if (wants("disable")) {
+		console.error("=== disable and enable video ===");
+		const before = await readPlayerState(player);
+		await command(publisher, "disableVideo");
+		await waitForFixture(publisher, publisherErrors, {
+			deadline: Date.now() + SETTLE_MS,
+			assertion: "disable keeps the rendition",
+			description: "the fixture to publish its video rendition with enabled: false and stop encoding",
+			predicate: (state) => !state.videoEnabled && !state.videoActive,
+		});
+		await waitForState(player, playerErrors, {
+			deadline: Date.now() + SETTLE_MS,
+			assertion: "disable blanks the picture",
+			description: `the canvas to go black instead of holding frame ${before.frameId}`,
+			predicate: (state) => !state.painted,
+		});
+		const blank = await collect(player, playerErrors, HELD_MS);
+		const lit = blank.filter((s) => s.painted);
+		check(
+			lit.length === 0,
+			"disable blanks the picture",
+			() => `the canvas showed a picture again while disabled: ${JSON.stringify(lit[0])}`,
+		);
+
+		await command(publisher, "enableVideo");
+		const resumed = await waitForState(player, playerErrors, {
+			deadline: Date.now() + timeoutMs,
+			assertion: "enable resumes playback",
+			description: `the presented frame to move past the ${before.frameId} showing before the disable`,
+			predicate: (state) => (state.frameId ?? 0) > (before.frameId ?? 0),
+		});
+		console.error(`  black while disabled, then resumed at frame ${resumed.frameId}`);
+		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after enable");
+	}
+
 	// ── unsubscribe and rejoin ───────────────────────────────────────────────
 	if (wants("rejoin")) {
 		console.error("=== unsubscribe and rejoin ===");
@@ -660,8 +695,8 @@ try {
 	// at the live edge rather than replay what it missed.
 	if (wants("late-join")) {
 		console.error("=== late join ===");
+		const live = await command(publisher, "liveGop");
 		await player.close();
-		const live = await readFixtureState(publisher);
 		[player, playerErrors] = await subscriber(broadcast, "latecomer");
 		await gesture(player);
 		const joined = await waitForState(player, playerErrors, {
@@ -670,17 +705,16 @@ try {
 			description: "the latecomer to present the fixture",
 			predicate: (state) => state.frameId !== undefined && state.audioContext === "running",
 		});
-		// The fixture sample names the frame painted immediately before the page opens. The first
-		// decodable frame can be the keyframe at the start of the current GOP, so require it to be
-		// within that GOP rather than requiring an impossible zero-frame capture/encode delay.
-		const lag = live.frameId - (joined.frameId ?? 0);
+		// requestFrame() is asynchronous, and capture timestamps decide keyframes. The painted
+		// counter can therefore be over 15 ticks ahead of a still-current encoded GOP under load.
+		// Compare against its actual published keyframe, sampled while the old viewer held demand.
 		check(
-			lag <= MAX_LATE_JOIN_LAG_FRAMES,
+			lateJoinStartsLive(live, joined.videoTimestamp),
 			"late join starts live",
 			() =>
-				`joined at frame ${joined.frameId}, ${lag} frames behind the ${live.frameId} already published when it opened (one GOP is ${MAX_LATE_JOIN_LAG_FRAMES})`,
+				`joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms before the current GOP's ${live.timestamp}ms keyframe`,
 		);
-		console.error(`  joined at frame ${joined.frameId}, live edge was ${live.frameId}`);
+		console.error(`  joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms, current GOP began at ${live.timestamp}ms`);
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "late join");
 	}
 

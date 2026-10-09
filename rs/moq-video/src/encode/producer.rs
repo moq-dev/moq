@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use moq_mux::catalog::hang::CatalogExt;
 #[cfg(feature = "capture")]
-use moq_mux::rate::{Control, Policy};
+use moq_mux::rate;
 #[cfg(any(feature = "capture", test))]
 use moq_net::Timestamp;
 
@@ -26,6 +26,8 @@ use crate::capture;
 use super::Encoded;
 #[cfg(feature = "capture")]
 use super::Sink;
+#[cfg(feature = "capture")]
+use super::cuts::Cuts;
 #[cfg(any(feature = "capture", test))]
 use super::encoder;
 #[cfg(feature = "capture")]
@@ -175,33 +177,6 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
-	/// Record the encode duration before publishing its frames so the catalog can report a stall.
-	pub fn observe_lag(&mut self, lag: std::time::Duration) -> Result<(), Error> {
-		match &mut self.codecs {
-			Codecs::H264 { import, .. } => import.observe_lag(lag)?,
-			Codecs::H265 { import, .. } => import.observe_lag(lag)?,
-		}
-		Ok(())
-	}
-
-	/// Re-evaluate stall from source silence while waiting for the next frame.
-	pub fn tick(&mut self) -> Result<(), Error> {
-		match &mut self.codecs {
-			Codecs::H264 { import, .. } => import.tick()?,
-			Codecs::H265 { import, .. } => import.tick()?,
-		}
-		Ok(())
-	}
-
-	/// The camera is released; this rendition is never stalled while idle.
-	pub fn idle(&mut self) -> Result<(), Error> {
-		match &mut self.codecs {
-			Codecs::H264 { import, .. } => import.idle()?,
-			Codecs::H265 { import, .. } => import.idle()?,
-		}
-		Ok(())
-	}
-
 	/// Mark a break in the published timeline: whatever is published next does not continue
 	/// what came before.
 	///
@@ -241,7 +216,7 @@ impl<E: CatalogExt> Producer<E> {
 	}
 }
 
-/// Source-agnostic encode knobs for [`publish_capture`], where the geometry
+/// Source-agnostic encode knobs for a capture publish, where the geometry
 /// (width / height / framerate) comes from the capture source, not the caller.
 /// For the bring-your-own-frames [`Encoder`](super::Encoder) path, where you
 /// must specify geometry, use [`Config`](super::Config) instead.
@@ -279,87 +254,258 @@ pub struct Options {
 	pub bandwidth: moq_net::bandwidth::Allocator,
 }
 
+/// Capture and encode settings for [`Control::new`] and [`publish_capture`].
+///
+/// Frames are stamped on the catalog's [`clock`](moq_mux::catalog::Producer::clock), the one
+/// its consumers are told about, so a concurrent audio capture on the same catalog stays aligned.
+///
+/// `#[non_exhaustive]`: construct via [`Capture::default`] and set
+/// fields, so new settings can be added without changing [`Control::new`].
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+#[cfg(feature = "capture")]
+pub struct Capture {
+	/// The source to capture.
+	pub capture: capture::Config,
+	/// The track's codec and encode settings.
+	pub encode: Options,
+}
+
+/// The keyframe requests shared between the [`Control`]s and the [`Driver`].
+///
+/// One lock covers both fields, so a request is either counted before the driver
+/// learns an encoder refuses cuts (and that encoder's opening keyframe serves it),
+/// or refused outright. None can land unserved in between.
+#[derive(Debug, Default)]
+#[cfg(feature = "capture")]
+struct Requests {
+	/// A running count, so the driver coalesces any number between two frames into one.
+	count: u64,
+	/// The backend that cannot force a keyframe, once the driver has opened it.
+	refused: Option<&'static str>,
+}
+
+/// A handle for controlling a running capture publish.
+///
+/// Clones control the same track. Dropping the final clone stops the [`Driver`]
+/// and ends the track, even while it is still opening the source or an encoder.
+#[derive(Clone, Debug)]
+#[cfg(feature = "capture")]
+pub struct Control {
+	requests: kio::Producer<Requests>,
+}
+
+#[cfg(feature = "capture")]
+impl Control {
+	/// Register one video track and return its control handle and driver.
+	///
+	/// The track is registered here, but its catalog rendition describes the mode
+	/// the source negotiates, so the driver opens the source once to probe it
+	/// before publishing the rendition. Off macOS the driver's future is `Send`
+	/// and can be spawned; on macOS the capture session is `!Send`, so await
+	/// [`Driver::run`] on a local task there. [`Control`] itself is `Send + Sync`,
+	/// so it can live anywhere.
+	pub fn new<E: CatalogExt>(
+		broadcast: moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
+		options: Capture,
+	) -> Result<(Self, Driver<E>), Error> {
+		let suffix = match options.encode.codec {
+			Codec::H264 => ".avc3",
+			Codec::H265 => ".hev1",
+		};
+		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video))?;
+		let requests = kio::Producer::new(Requests::default());
+		let driver = Driver {
+			track,
+			catalog,
+			options,
+			requests: requests.weak(),
+		};
+		Ok((Self { requests }, driver))
+	}
+
+	/// Request a keyframe, opening a new group at a frame no earlier than this call.
+	///
+	/// For a resume, a recording cut, or a known tune-in moment; [`Config::gop`](super::Config::gop)
+	/// is the cadence. Requests coalesce into the next keyframe, whether forced or on that cadence,
+	/// and a forced one lands at least 500ms after any other, so a caller in a loop cannot pin the
+	/// encoder at all-IDR; a request that arrives too soon waits rather than being dropped. A
+	/// request while nothing is watching is served by the keyframe every fresh encoder opens with.
+	///
+	/// # Errors
+	///
+	/// Returns [`Error::CutUnsupported`] once the driver knows its backend cannot force a
+	/// keyframe, and queues nothing: groups keep falling on the cadence and the publish carries
+	/// on. The startup probe learns this before the first viewer, and each encoder the driver
+	/// reopens updates it, since a reopen can land on a different backend. Before the probe
+	/// finishes nothing is known, and the request is accepted because it is served anyway: no
+	/// frame has been published yet, and the first one out of any encoder is a keyframe.
+	pub fn cut(&self) -> Result<(), Error> {
+		// Only a `close` fails the write, and nothing closes it; the last handle dropping does.
+		let Ok(mut requests) = self.requests.write() else {
+			return Ok(());
+		};
+		if let Some(name) = requests.refused {
+			return Err(Error::CutUnsupported(name));
+		}
+		requests.count = requests.count.wrapping_add(1);
+		Ok(())
+	}
+}
+
+/// The task that captures, encodes, and publishes the track.
+///
+/// Runs until the track ends, the capture fails, or the final [`Control`] drops.
+#[cfg(feature = "capture")]
+pub struct Driver<E: CatalogExt = ()> {
+	track: moq_net::track::Producer,
+	catalog: moq_mux::catalog::Producer<E>,
+	options: Capture,
+	/// Weak, so the driver never keeps the controls' channel open itself.
+	requests: kio::ProducerWeak<Requests>,
+}
+
+#[cfg(feature = "capture")]
+impl<E: CatalogExt> std::fmt::Debug for Driver<E> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Driver").finish_non_exhaustive()
+	}
+}
+
+#[cfg(feature = "capture")]
+impl<E: CatalogExt> Driver<E> {
+	/// Run capture until the final control handle drops or the MoQ track ends.
+	///
+	/// The source is opened once at startup to probe the mode it negotiates, then released until a
+	/// subscriber arrives and reopened for as long as one is watching. That one open is what lets
+	/// the catalog rendition be exact before a single frame is published, so a consumer can size
+	/// itself against it without waiting for an encoder that may never run.
+	///
+	/// Dropping the final [`Control`] ends it promptly wherever it is waiting, including a camera
+	/// open or permission prompt still in flight, which is abandoned rather than finished.
+	pub async fn run(self) -> Result<(), Error> {
+		self.run_with(DeviceSource).await
+	}
+
+	async fn run_with<S: CaptureSource>(self, mut source: S) -> Result<(), Error> {
+		let Self {
+			track,
+			catalog,
+			options,
+			requests,
+		} = self;
+		let Capture { capture, encode } = options;
+		let clock = catalog.clock();
+		let controls = requests.consume();
+
+		// Open the camera once to find out what it actually negotiated, since a requested size is
+		// only a hint (macOS ignores it outright) and the encoder is built from the mode, not the
+		// request. It closes again immediately: this costs one camera open at startup and buys a
+		// rendition that says exactly what the stream will carry, rather than one every consumer has
+		// to treat as provisional.
+		let rendition = async {
+			let camera = source.open(&capture).await?;
+			let mut probe_config = encoder::Config::new(
+				camera.width(),
+				camera.height(),
+				capture
+					.framerate
+					.or_else(|| camera.framerate())
+					.unwrap_or(DEFAULT_FRAMERATE),
+			);
+			probe_config.bitrate = encode.bitrate;
+			probe_config.codec = encode.codec;
+			probe_config.kind = encode.kind.clone();
+			probe_config.color = camera.color();
+			let (rendition, mut sink) = probe_config.probe_sink().await?;
+			// Learned here so a caller finds out before the first viewer, not on its first cut.
+			learn(&requests, refusal(&mut sink).await?);
+			Ok::<_, Error>(rendition)
+		};
+		// Every wait below races the controls closing, so an abandoned publish never holds a camera
+		// or a permission prompt open for an owner that is gone.
+		let rendition = tokio::select! {
+			biased;
+			() = controls.closed() => {
+				// A track that already ended has nobody left to tell.
+				let _ = track.finish();
+				return Ok(());
+			}
+			rendition = rendition => rendition,
+		};
+		let rendition = match rendition {
+			Ok(rendition) => rendition,
+			Err(err) => {
+				// A track that already ended has nobody left to tell.
+				let _ = track.abort(moq_net::Error::Transport(err.to_string()));
+				return Err(err);
+			}
+		};
+
+		let mut producer = Producer::with_track(track, catalog, rendition)?;
+		let demand = producer.demand();
+
+		let result = tokio::select! {
+			biased;
+			() = controls.closed() => Ok(()),
+			result = capture_loop(&mut producer, &demand, &mut source, &capture, &encode, &clock, &requests) => result,
+		};
+
+		// This runs only when the loop ends on its own (the track is usually already
+		// going away by then); a Ctrl+C cancels the future before this point, since
+		// async `Drop` can't finalize the track.
+		match &result {
+			// Clean end (the track was dropped): best-effort finish.
+			Ok(()) => {
+				if let Err(err) = producer.finish() {
+					tracing::debug!(error = %err, "video track finish after capture ended");
+				}
+			}
+			// The capture loop failed: abort with the real cause so subscribers see it.
+			Err(err) => producer.abort(moq_net::Error::Transport(err.to_string())),
+		}
+		result
+	}
+}
+
 /// Capture a webcam and publish it as an on-demand video track.
 ///
-/// Returns when the broadcast is dropped (the track stops being announced)
-/// or the capture loop fails. Frames are stamped from `clock`, so passing the
-/// same [`Clock`](moq_mux::Clock) to a concurrent audio publish keeps the two
-/// tracks aligned.
+/// This convenience function runs a [`Control`] from `options` without handing
+/// back the handle. Use [`Control::new`] directly to retain controls.
 ///
-/// The camera is opened once at startup to probe the mode it negotiates, then released until a
-/// subscriber arrives and reopened for as long as one is watching. That one open is what lets the
-/// catalog rendition be exact before a single frame is published, so a consumer can size itself
-/// against it (and discover the track at all) without waiting for an encoder that may never run.
+/// Returns when the broadcast is dropped (the track stops being announced) or
+/// the capture fails. Frames are stamped on the catalog's clock, so a
+/// concurrent audio publish into the same catalog stays aligned.
 #[cfg(feature = "capture")]
 pub async fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer<E>,
-	capture: capture::Config,
-	encode: Options,
-	clock: moq_mux::Clock,
+	options: Capture,
 ) -> Result<(), Error> {
-	// Open the camera once to find out what it actually negotiated, since a requested size is only a
-	// hint (macOS ignores it outright) and the encoder is built from the mode, not the request. It
-	// closes again immediately: this costs one camera open at startup and buys a rendition that says
-	// exactly what the stream will carry, rather than one every consumer has to treat as provisional.
-	let rendition = {
-		let camera = capture::open(&capture).await?;
-		let mut probe_config = encoder::Config::new(
-			camera.width(),
-			camera.height(),
-			capture
-				.framerate
-				.or_else(|| camera.framerate())
-				.unwrap_or(DEFAULT_FRAMERATE),
-		);
-		probe_config.bitrate = encode.bitrate;
-		probe_config.codec = encode.codec;
-		probe_config.kind = encode.kind.clone();
-		probe_config.color = camera.color();
-		probe_config.probe().await?
-	};
-
-	let mut producer = Producer::new(broadcast, catalog, rendition)?;
-	let demand = producer.demand();
-
-	let result = capture_loop(&mut producer, &demand, &mut DeviceSource, &capture, &encode, &clock).await;
-
-	// This runs only when the loop ends on its own (the track is usually already
-	// going away by then); a Ctrl+C cancels the future before this point, since
-	// async `Drop` can't finalize the track.
-	match &result {
-		// Clean end (the track was dropped): best-effort finish.
-		Ok(()) => {
-			if let Err(err) = producer.finish() {
-				tracing::debug!(error = %err, "video track finish after capture ended");
-			}
-		}
-		// The capture loop failed: abort with the real cause so subscribers see it.
-		Err(err) => producer.abort(moq_net::Error::Transport(err.to_string())),
-	}
-	result
+	// Held, not dropped: the driver ends as soon as the last control handle goes.
+	let (_control, driver) = Control::new(broadcast, catalog, options)?;
+	driver.run().await
 }
 
-/// Off macOS, [`publish_capture`]'s future must stay `Send` so a server can
+/// Off macOS and iOS, [`publish_capture`]'s future must stay `Send` so a server can
 /// `tokio::spawn` it: the encoder runs on its own thread and the capture guard
 /// is `Send` there. This is never called; it exists only to fail compilation if
-/// the future ever regains a `!Send` component. macOS is exempt (the objc
-/// capture session is `!Send`).
-#[cfg(all(feature = "capture", not(target_os = "macos")))]
+/// the future ever regains a `!Send` component. Apple platforms are exempt (the inline encoder and objc
+/// capture session are `!Send`).
+#[cfg(all(feature = "capture", not(apple)))]
 #[allow(dead_code)]
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
-	capture: capture::Config,
-	encode: Options,
-	clock: moq_mux::Clock,
+	options: Capture,
 ) {
 	fn is_send<T: Send>(_: &T) {}
-	is_send(&publish_capture(broadcast, catalog, capture, encode, clock));
+	is_send(&publish_capture(broadcast, catalog, options));
 }
 
-/// Where the capture loop opens its camera. Kept apart from the device backends so
-/// the clock fixtures can drive the real loop from a synthetic source.
+/// Where the driver opens its camera. Kept apart from the device backends so the
+/// fixtures can drive the real driver from a synthetic or stalled source.
 #[cfg(feature = "capture")]
 trait CaptureSource {
 	async fn open(&mut self, config: &capture::Config) -> Result<capture::Stream, Error>;
@@ -381,7 +527,7 @@ impl CaptureSource for DeviceSource {
 /// `None` rather than being absent. Retiring stops the `select!` arm from spinning on
 /// a channel that is permanently ready.
 #[cfg(feature = "capture")]
-type RateControl = Option<(moq_net::bandwidth::Consumer, Control)>;
+type RateControl = Option<(moq_net::bandwidth::Consumer, rate::Control)>;
 
 /// Wait for the next bandwidth estimate, or forever when rate control is off or
 /// finished. Cancel-safe: [`Consumer::changed`](moq_net::bandwidth::Consumer::changed)
@@ -435,6 +581,27 @@ async fn apply_estimate(
 	}
 }
 
+/// Whether `sink` refuses cuts, as the name [`Control::cut`] reports it under.
+#[cfg(feature = "capture")]
+async fn refusal(sink: &mut Sink) -> Result<Option<&'static str>, Error> {
+	match sink.check_cut().await {
+		Ok(()) => Ok(None),
+		Err(Error::CutUnsupported(name)) => Ok(Some(name)),
+		Err(err) => Err(err),
+	}
+}
+
+/// Record whether the encoder just opened refuses cuts, returning the request count
+/// its opening keyframe already serves.
+#[cfg(feature = "capture")]
+fn learn(requests: &kio::ProducerWeak<Requests>, refused: Option<&'static str>) -> u64 {
+	// No controls left, so nobody can ask and the driver is on its way out.
+	let Some(producer) = requests.produce() else { return 0 };
+	let Ok(mut requests) = producer.write() else { return 0 };
+	requests.refused = refused;
+	requests.count
+}
+
 /// A dropped or closed track is the normal end of a publish; any other cause is
 /// a real abort (e.g. a transport reset) worth surfacing rather than treating as
 /// a clean exit.
@@ -454,34 +621,28 @@ fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Erro
 	producer.discontinuity()
 }
 
-// Keep observing silence while source setup or an encode is pending. The work
-// future stays pinned across ticks, so a slow operation is never restarted.
+// Race source setup or an encode against the last viewer leaving, so an unwatched track
+// stops waiting promptly.
 #[cfg(feature = "capture")]
-async fn wait_capture<E: CatalogExt, T>(
-	producer: &mut Producer<E>,
+async fn wait_capture<T>(
 	demand: &moq_net::track::Demand,
 	work: impl std::future::Future<Output = Result<T, Error>>,
 ) -> Result<Option<T>, Error> {
-	let mut work = std::pin::pin!(work);
-	let mut timer = tokio::time::interval(hang::catalog::stalled::DEFAULT_INTERVAL);
-	loop {
-		tokio::select! {
-			biased;
-			res = demand.unused() => {
-				if let Err(err) = res {
-					log_track_ended(err);
-				}
-				producer.idle()?;
-				return Ok(None);
+	tokio::select! {
+		biased;
+		res = demand.unused() => {
+			if let Err(err) = res {
+				log_track_ended(err);
 			}
-			_ = timer.tick() => producer.tick()?,
-			res = &mut work => return res.map(Some),
+			Ok(None)
 		}
+		res = work => res.map(Some),
 	}
 }
 
 /// Async capture/encode loop. Opens the camera while at least one viewer is
-/// watching and releases it when the last one leaves.
+/// watching and releases it when the last one leaves. It never returns on its
+/// own when the controls close; [`Driver::run`] races it against that instead.
 ///
 /// Cancel safety: every wait here is a real `.await` (a frame read, a demand
 /// transition, or an encode), so dropping this future (e.g. on Ctrl+C) drops
@@ -497,11 +658,13 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 	capture: &capture::Config,
 	encode: &Options,
 	clock: &moq_mux::Clock,
+	requests: &kio::ProducerWeak<Requests>,
 ) -> Result<(), Error> {
 	// This track's claim on the connection. Taken on the first open, because the
 	// negotiated mode is what finally says how much this encoder can ever send, and
 	// held across reopens so the claim doesn't lapse while the camera is closed.
 	let mut reservation: Option<moq_net::bandwidth::Reservation> = None;
+	let counted = requests.consume();
 
 	loop {
 		// Idle until a viewer subscribes; the track ending is a clean exit. The
@@ -513,7 +676,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		}
 
 		// Open the camera and an encoder sized to its negotiated mode.
-		let Some(mut camera) = wait_capture(producer, demand, source.open(capture)).await? else {
+		let Some(mut camera) = wait_capture(demand, source.open(capture)).await? else {
 			continue;
 		};
 		// Capture timestamps use a private monotonic timeline. Sample both clocks
@@ -532,13 +695,16 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		encoder_config.codec = encode.codec;
 		encoder_config.kind = encode.kind.clone();
 		encoder_config.color = camera.color();
-		// Off macOS this opens the encoder on a dedicated thread; see `sink`.
+		// Off macOS and iOS this opens the encoder on a dedicated thread; see `sink`.
 		// No cut on reopen: a fresh encoder opens with a keyframe on every backend,
 		// so the viewer whose subscription reopened the camera can decode from the
 		// first frame regardless, and a backend that cannot cut still captures.
-		let Some(mut encoder) = wait_capture(producer, demand, Sink::open(&encoder_config)).await? else {
+		let Some(mut encoder) = wait_capture(demand, Sink::open(&encoder_config)).await? else {
 			continue;
 		};
+		// A reopen can land on another backend than the probe did, so the controls
+		// learn this one's answer before any request is counted against it.
+		let served = learn(requests, refusal(&mut encoder).await?);
 		tracing::info!(encoder = encoder.name(), device = camera.label(), "capturing");
 
 		// A reopen can negotiate a different mode (a display resized while nothing was
@@ -553,13 +719,14 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// so the policy's ceiling is that rate and the target starts there. A
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
-		let mut rate = Some((reservation.consumer(), Control::new(Policy::new(ceiling))));
+		let mut rate = Some((reservation.consumer(), rate::Control::new(rate::Policy::new(ceiling))));
+		// Per encoder, so a reopen forgets the old encoder's last keyframe along with it.
+		let mut forced = Cuts::new(served);
 
 		loop {
 			// Race the next frame against the last viewer leaving so we release the
 			// camera promptly when demand drops. `biased` checks demand first so an
 			// unwatched track stops before reading another frame.
-			let interval = hang::catalog::stalled::interval_from_fps(Some(framerate.as_f64()));
 			let frame = tokio::select! {
 				biased;
 				res = demand.unused() => {
@@ -577,31 +744,28 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 				}
 				// A read error is terminal for this selection (the source is gone
 				// or was refused); `None` just ends the stream, so reopen below.
-				// Timing out is a quiet camera: mark the rendition stalled and wait again.
-				frame = tokio::time::timeout(interval, camera.read()) => match frame {
-					Ok(frame) => frame?,
-					Err(_) => {
-						producer.tick()?;
-						continue;
-					}
-				},
+				frame = camera.read() => frame?,
 			};
 
 			let Some(mut frame) = frame else { break };
 			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
-			let started = Instant::now();
-			let Some(encoded) = wait_capture(producer, demand, encoder.encode(frame)).await? else {
+			let count = counted.read().count;
+			if forced.due(count, frame.timestamp) {
+				// Never refused: `Control::cut` stops counting once this encoder is known to.
+				encoder.cut().await?;
+			}
+			let Some(encoded) = wait_capture(demand, encoder.encode(frame)).await? else {
 				break;
 			};
-			let lag = started.elapsed();
-			producer.observe_lag(lag)?;
+			for unit in encoded.iter().filter(|unit| unit.keyframe) {
+				forced.keyframe(unit.timestamp);
+			}
 			producer.publish(&encoded)?;
 		}
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
 		drop(camera);
 		drop(encoder);
-		producer.idle()?;
 		capture_stopped(producer)?;
 		tracing::info!("capture stopped; released source");
 	}
@@ -710,7 +874,7 @@ mod tests {
 				catalog.track_info(hang::catalog::PRIORITY.video).with_max_age(replay),
 			)
 			.unwrap();
-		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_age(replay));
+		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_delay(replay));
 
 		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
@@ -868,7 +1032,7 @@ mod tests {
 
 	/// H.265 has no software encoder, so this only runs where a hardware one
 	/// exists (VideoToolbox on macOS, the only hardware backend on this target).
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[tokio::test]
 	async fn h265_roundtrip_publishes_hev1() {
 		let (name, config) = roundtrip_rendition(Codec::H265, encoder::Kind::Hardware).await;
@@ -955,8 +1119,19 @@ mod tests {
 						..Options::default()
 					};
 					let config = capture::Config::default();
+					// Held, so the loop has a channel to report each encoder's cut support into.
+					let controls = kio::Producer::new(Requests::default());
+					let requests = controls.weak();
 					tokio::select! {
-						res = capture_loop(&mut producer, &demand, &mut source, &config, &options, &clock) => res?,
+						res = capture_loop(
+							&mut producer,
+							&demand,
+							&mut source,
+							&config,
+							&options,
+							&clock,
+							&requests,
+						) => res?,
 						_ = stopped => {}
 					}
 					producer.finish()
@@ -983,7 +1158,7 @@ mod tests {
 					.consumer
 					.track(name)
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_max_age(RETAIN))
+					.subscribe(moq_net::track::Subscription::default().with_max_delay(RETAIN))
 					.await
 					.unwrap();
 				moq_mux::container::Consumer::new(track, container)
@@ -1019,7 +1194,7 @@ mod tests {
 			}
 		}
 
-		fn surface() -> crate::frame::Surface {
+		pub(super) fn surface() -> crate::frame::Surface {
 			crate::frame::Surface::I420(crate::frame::I420 {
 				width: 320,
 				height: 240,
@@ -1028,7 +1203,7 @@ mod tests {
 			})
 		}
 
-		fn us(micros: u64) -> Timestamp {
+		pub(super) fn us(micros: u64) -> Timestamp {
 			Timestamp::from_micros(micros).unwrap()
 		}
 
@@ -1181,7 +1356,7 @@ mod tests {
 				.await
 		}
 
-		/// A recording replays what the live edge published: the archive's segment records
+		/// A recording replays what the live edge published: the archive's records
 		/// carry the live timestamps across an idle restart, with the idle gap left in.
 		#[tokio::test]
 		async fn retained_archive_playback_keeps_the_live_timestamps() {
@@ -1193,9 +1368,10 @@ mod tests {
 						.snapshot()
 						.archive
 						.expect("the video track enrolls an archive");
-					let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section)
-						.await
-						.unwrap();
+					let mut timeline =
+						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "video")
+							.await
+							.unwrap();
 
 					let mut live = Vec::new();
 					for _ in 0..2 {
@@ -1207,12 +1383,12 @@ mod tests {
 						fixture.assert_acquired(published, captured);
 						live.push(published);
 						drop(track);
-						// Idle past the minimum segment, so each run is archived as its own segment.
+						// Idle past the minimum segment, so each run is archived as its own record.
 						tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
 					}
 
 					let (catalog, _consumer) = fixture.finish().await;
-					catalog.timeline().finish().unwrap();
+					catalog.timeline().finish();
 					let mut archived = Vec::new();
 					while let Some(event) = timeline.next().await.unwrap() {
 						match event {
@@ -1221,19 +1397,293 @@ mod tests {
 						}
 					}
 
-					assert_eq!(archived.len(), live.len(), "one segment per capture run: {archived:?}");
+					assert_eq!(archived.len(), live.len(), "one record per capture run: {archived:?}");
 					for (entry, live) in archived.iter().zip(&live) {
 						// The archive keeps millisecond precision.
 						assert_eq!(entry.pts.as_micros() / 1000, u128::from(*live / 1000), "{archived:?}");
-						assert!(entry.tracks.contains_key("video"), "{archived:?}");
 					}
 					let first = &archived[0];
 					assert!(
 						archived[1].pts.as_micros() >= first.pts.as_micros() + first.duration.as_micros(),
-						"the resumed segment overlaps the one before it: {archived:?}"
+						"the resumed record overlaps the one before it: {archived:?}"
 					);
 				})
 				.await
+		}
+	}
+
+	/// Control fixtures: the real driver against sources that answer, or never do, on cue.
+	#[cfg(all(feature = "capture", feature = "openh264"))]
+	mod control {
+		use std::collections::VecDeque;
+		use std::sync::Arc;
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		use std::time::Duration;
+
+		use super::clock::{surface, us};
+		use super::*;
+		use crate::capture::Synthetic;
+		use crate::encode::backend::probe;
+
+		/// Hands out one queued stream per open, then stalls like a permission prompt nobody answers.
+		struct Streams {
+			queued: VecDeque<capture::Stream>,
+			opens: Arc<AtomicUsize>,
+		}
+
+		impl Streams {
+			fn new(queued: impl IntoIterator<Item = capture::Stream>) -> Self {
+				Self {
+					queued: queued.into_iter().collect(),
+					opens: Arc::default(),
+				}
+			}
+		}
+
+		impl CaptureSource for Streams {
+			async fn open(&mut self, _config: &capture::Config) -> Result<capture::Stream, Error> {
+				self.opens.fetch_add(1, Ordering::SeqCst);
+				match self.queued.pop_front() {
+					Some(stream) => Ok(stream),
+					None => std::future::pending().await,
+				}
+			}
+		}
+
+		fn camera() -> (Synthetic, capture::Stream) {
+			Synthetic::open(crate::Size::new(320, 240), crate::Rate::new(30, 1).unwrap())
+		}
+
+		async fn until(done: impl Fn() -> bool) {
+			while !done() {
+				tokio::task::yield_now().await;
+			}
+		}
+
+		/// Drive cuts through the public control and read their group boundaries from the track.
+		async fn capture_cuts(cut_after_cadence: bool) -> Vec<usize> {
+			use moq_mux::container::Container as _;
+
+			// Off Apple, encoding waits on an OS thread. Keep Tokio from auto-advancing
+			// the paused clock to a timer deadline while that thread answers.
+			let (hold, released) = tokio::sync::oneshot::channel::<()>();
+			let clock = tokio::task::spawn_blocking(move || {
+				let _ = released.blocking_recv();
+			});
+			let started = tokio::time::Instant::now();
+			// Capture streams are !Send on macOS.
+			let groups = tokio::task::LocalSet::new()
+				.run_until(async {
+					let mut broadcast = moq_net::broadcast::Info::new().produce();
+					let consumer = broadcast.consume();
+					let catalog =
+						moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+					let mut options = Capture::default();
+					options.encode.kind = encoder::Kind::Software;
+					let (control, driver) = Control::new(broadcast.clone(), catalog, options).unwrap();
+
+					// Ten nominal fps makes the default two-second GOP twenty frames. Feed them
+					// 10ms apart in media time so cadence falls inside the 500ms cut spacing window.
+					let rate = crate::Rate::new(10, 1).unwrap();
+					let (_probe, probe) = Synthetic::open(crate::Size::new(320, 240), rate);
+					let (camera, stream) = Synthetic::open(crate::Size::new(320, 240), rate);
+					let run = tokio::task::spawn_local(driver.run_with(Streams::new([probe, stream])));
+					let mut catalog =
+						moq_mux::catalog::Consumer::<()>::new(&consumer, moq_mux::catalog::CatalogFormat::Hang)
+							.await
+							.unwrap();
+					let (mut subscriber, format) = loop {
+						let snapshot = catalog.next().await.unwrap().expect("a catalog");
+						if let Some((name, rendition)) = snapshot.video.renditions.iter().next() {
+							break (
+								consumer.track(name).unwrap().subscribe(None).await.unwrap(),
+								moq_mux::catalog::hang::Container::try_from(rendition).unwrap(),
+							);
+						}
+					};
+
+					let (published, mut received) = tokio::sync::mpsc::unbounded_channel();
+					let collect = tokio::task::spawn_local(async move {
+						let mut groups = Vec::new();
+						while let Some(mut group) = subscriber.recv_group().await.unwrap() {
+							let mut frames = 0;
+							while let Some(batch) =
+								kio::wait(|waiter| format.poll_read(&mut group, waiter)).await.unwrap()
+							{
+								for frame in batch {
+									// A duration marker closes the group but is not an encoded picture.
+									if format.end(&frame).is_none() {
+										frames += 1;
+										published.send(()).unwrap();
+									}
+								}
+							}
+							groups.push(frames);
+						}
+						groups
+					});
+
+					let timestamps = (0..=20).map(|frame| frame * 10).chain([201, 699, 700, 1200]);
+					for (frame, millis) in timestamps.enumerate() {
+						camera.push_native(surface(), us(millis * 1000));
+						// Wait for delivery before requesting a cut or replacing the capture's latest slot.
+						received.recv().await.expect("the frame reached the subscriber");
+						if frame == 0 || (frame == 20 && cut_after_cadence) {
+							control.cut().unwrap();
+						}
+					}
+					drop(control);
+					run.await.unwrap().unwrap();
+					collect.await.unwrap()
+				})
+				.await;
+			assert_eq!(started.elapsed(), Duration::ZERO);
+			drop(hold);
+			clock.await.unwrap();
+			groups
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn cadence_keyframe_serves_a_pending_capture_cut() {
+			// The keyframe at 200ms serves the pending cut. Passing 700ms must not force another.
+			assert_eq!(capture_cuts(false).await, [20, 5]);
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn capture_cut_after_cadence_waits_for_spacing() {
+			// A new cut after 200ms waits through 699ms, opens at 700ms, and fires only once.
+			assert_eq!(capture_cuts(true).await, [20, 3, 2]);
+		}
+
+		/// Drop the controls while the driver sits in its `opens`th open, which never finishes.
+		async fn abandon(
+			control: Control,
+			run: impl std::future::Future<Output = Result<(), Error>>,
+			opens: &AtomicUsize,
+			expected: usize,
+		) {
+			let mut run = std::pin::pin!(run);
+			tokio::select! {
+				res = &mut run => panic!("the driver ended before the stalled open: {res:?}"),
+				() = until(|| opens.load(Ordering::SeqCst) == expected) => {}
+			}
+			// Nothing has refused a cut: the probe never finished, or its backend can force one.
+			control.cut().unwrap();
+			drop(control);
+			tokio::time::timeout(Duration::from_secs(1), run)
+				.await
+				.expect("dropping the controls ends the driver")
+				.unwrap();
+		}
+
+		/// A startup probe stuck in its camera open still ends with the controls.
+		#[tokio::test(start_paused = true)]
+		async fn dropping_the_controls_abandons_the_probe() {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let (control, driver) = Control::new(broadcast.clone(), catalog, Capture::default()).unwrap();
+
+			let source = Streams::new([]);
+			let opens = source.opens.clone();
+			abandon(control, driver.run_with(source), &opens, 1).await;
+		}
+
+		/// A subscriber's camera open stuck in flight still ends with the controls.
+		#[tokio::test(start_paused = true)]
+		async fn dropping_the_controls_abandons_an_open() {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let mut options = Capture::default();
+			options.encode.kind = encoder::Kind::Software;
+			let (control, driver) = Control::new(broadcast.clone(), catalog.clone(), options).unwrap();
+
+			// The probe gets a camera; the subscriber's open after it never finishes.
+			let (_camera, stream) = camera();
+			let source = Streams::new([stream]);
+			let opens = source.opens.clone();
+			let mut run = std::pin::pin!(driver.run_with(source));
+
+			let subscribe = async {
+				let mut stream =
+					moq_mux::catalog::Consumer::<()>::new(&consumer, moq_mux::catalog::CatalogFormat::Hang)
+						.await
+						.unwrap();
+				loop {
+					let snapshot = stream.next().await.unwrap().expect("a catalog");
+					if let Some(name) = snapshot.video.renditions.keys().next() {
+						return consumer.track(name).unwrap().subscribe(None).await.unwrap();
+					}
+				}
+			};
+			let _subscriber = tokio::select! {
+				res = &mut run => panic!("the driver ended before a subscriber arrived: {res:?}"),
+				subscriber = subscribe => subscriber,
+			};
+
+			abandon(control, run, &opens, 2).await;
+		}
+
+		/// A keyframe request the backend cannot force is refused to the caller, and the capture
+		/// carries on at its cadence rather than ending or dropping the request without a word.
+		#[tokio::test]
+		// The guard only keeps other tests out of the process-wide probe log, and this runtime has
+		// one thread, so holding it across an await blocks nothing.
+		#[allow(clippy::await_holding_lock)]
+		async fn a_cut_the_backend_cannot_force_is_refused() {
+			let _probe = probe::exclusive();
+
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let track = broadcast
+				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let _subscriber = track.subscribe(None);
+			let mut rendition = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+			rendition.kind = encoder::Kind::Software;
+			let mut producer = Producer::with_track(track, catalog.clone(), rendition.probe().await.unwrap()).unwrap();
+			let demand = producer.demand();
+
+			let (camera, stream) = camera();
+			let mut source = Streams::new([stream]);
+			let options = Options {
+				kind: encoder::Kind::Named(probe::NO_CUT.into()),
+				..Options::default()
+			};
+			let control = Control {
+				requests: kio::Producer::new(Requests::default()),
+			};
+			let requests = control.requests.weak();
+			let clock = catalog.clock();
+			let config = capture::Config::default();
+			let mut run = std::pin::pin!(capture_loop(
+				&mut producer,
+				&demand,
+				&mut source,
+				&config,
+				&options,
+				&clock,
+				&requests,
+			));
+
+			// Nothing is known before an encoder opens, and its opening keyframe serves the request.
+			control.cut().unwrap();
+			tokio::select! {
+				res = &mut run => panic!("the capture ended before its encoder opened: {res:?}"),
+				() = until(|| control.requests.read().refused.is_some()) => {}
+			}
+			let err = control.cut().expect_err("the backend cannot cut");
+			assert!(
+				matches!(err, Error::CutUnsupported(name) if name == probe::NO_CUT),
+				"unexpected error: {err:?}"
+			);
+
+			// The refusal ends nothing: the next frame still reaches the codec.
+			camera.push_native(surface(), us(0));
+			tokio::select! {
+				res = &mut run => panic!("the capture ended after a refused cut: {res:?}"),
+				() = until(|| probe::take().iter().any(|(event, _)| *event == "encode")) => {}
+			}
 		}
 	}
 }

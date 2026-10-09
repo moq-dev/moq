@@ -1,7 +1,7 @@
 {
 	"name": "@moq/hang",
 	"type": "module",
-	"version": "0.5.1",
+	"version": "0.5.2",
 	"description": "WebCodecs-based media format for MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {
@@ -35,7 +35,6 @@
 		"zod": "^4.6.5"
 	},
 	"devDependencies": {
-		"@types/audioworklet": "^0.0.100",
 		"@types/bun": "^1.4.2",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
 		"fast-glob": "^3.3.3",

@@ -13,7 +13,7 @@ export interface Frame {
 	// per-sample duration; Legacy and LOC report later endpoints through Consumer.next().end.
 	// The consumer adds it to `timestamp` to learn how far a group has presented,
 	// so it can advance to a newer group as soon as the gap is covered instead of
-	// waiting out the max age budget.
+	// waiting out the max delay budget.
 	duration?: Time.Micro;
 }
 

@@ -11,7 +11,7 @@ import * as z from "@zod/mini";
 import { PatternListSchema } from "./claims.ts";
 
 /** How a session reached the relay; `http` is a one-shot request on the relay's web listener. */
-export const TransportSchema = z.enum(["quic", "iroh", "websocket", "tcp", "unix", "http"]);
+export const TransportSchema = z.enum(["quic", "iroh", "websocket", "tcp", "unix", "http", "rtmp", "srt", "webrtc"]);
 export type Transport = z.infer<typeof TransportSchema>;
 
 /** The single direction a client declared at SETUP. */
@@ -102,7 +102,7 @@ export const RequestSchema = z.discriminatedUnion("event", [
 	z.extend(BaseRequestSchema, {
 		/** The session closed. */
 		event: z.literal("end"),
-		/** Why it closed: `dropped`, `expired`, `refused`, `invalid`, or the session's own classification. */
+		/** Why it closed: `dropped`, `expired`, `refused`, `invalid`, `narrowed`, `shutdown`, or the session's own classification. */
 		reason: z.string(),
 		/** How long it was admitted, in seconds. */
 		duration: z.number(),
@@ -137,6 +137,8 @@ export const GrantSchema = z
 		tier: z.optional(z.string()),
 		/** The session is a cluster peer (another relay): what it announces entered the cluster elsewhere. */
 		peer: z.optional(z.boolean()),
+		/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
+		upstream: z.optional(z.boolean()),
 	})
 	.check(
 		z.refine((grant) => (grant.publish?.length ?? 0) > 0 || (grant.subscribe?.length ?? 0) > 0, {
@@ -144,6 +146,9 @@ export const GrantSchema = z
 		}),
 		z.refine((grant) => grant.revalidate === undefined || grant.expires !== undefined, {
 			message: "a grant that asks to be revalidated must expire",
+		}),
+		z.refine((grant) => !grant.upstream || grant.peer === true, {
+			message: "an upstream grant must be a peer",
 		}),
 	);
 export type Grant = z.infer<typeof GrantSchema>;

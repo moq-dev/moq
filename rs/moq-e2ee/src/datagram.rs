@@ -7,8 +7,8 @@ use bytes::Bytes;
 pub struct Datagram {
 	/// Per-track sequence, shared with the group namespace.
 	pub sequence: u64,
-	/// Presentation timestamp.
-	pub timestamp: moq_net::Timestamp,
+	/// Presentation timestamp, or `None` when untimed.
+	pub timestamp: Option<moq_net::Timestamp>,
 	/// Decrypted application bytes.
 	pub plaintext: Bytes,
 }

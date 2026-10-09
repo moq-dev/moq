@@ -33,7 +33,6 @@
 		"js/pattern",
 		"js/auth",
 		"js/flate",
-		"js/binary",
 		"js/json",
 		"js/hang",
 		"js/loc",

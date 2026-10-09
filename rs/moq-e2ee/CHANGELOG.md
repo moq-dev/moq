@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/moq-dev/moq/compare/moq-e2ee-v0.0.10...moq-e2ee-v0.0.11) - 2026-10-05
+
+### Other
+
+- updated the following local packages: moq-net
+
+## [0.0.10](https://github.com/moq-dev/moq/compare/moq-e2ee-v0.0.9...moq-e2ee-v0.0.10) - 2026-10-03
+
+### Other
+
+- *(moxygen)* Moxygen compatibility ([#4253](https://github.com/moq-dev/moq/pull/4253))
+
 ## [0.0.9](https://github.com/moq-dev/moq/compare/moq-e2ee-v0.0.8...moq-e2ee-v0.0.9) - 2026-09-30
 
 ### Other

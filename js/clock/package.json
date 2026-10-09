@@ -26,7 +26,7 @@
 		"@fails-components/webtransport-transport-http3-quiche": "^1.6.8"
 	},
 	"devDependencies": {
-		"@types/node": "^26.6.2",
+		"@types/node": "^26.6.3",
 		"typescript": "7.0.2"
 	}
 }

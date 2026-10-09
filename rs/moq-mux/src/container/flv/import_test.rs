@@ -114,10 +114,12 @@ async fn rendition_is_not_published_when_the_media_track_fails() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
-	// Squat the broadcast's timeline track, so enrolling the first rendition (and with it building
-	// its media producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// Squat the catalog's timeline track, so enrolling the first rendition (which enrolls the catalog
+	// too, and with it building its media producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
 	// dropping it frees the name.
-	let _squat = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
+	let _squat = broadcast
+		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
+		.unwrap();
 
 	let mut importer = Import::new(broadcast, catalog.reserve());
 	// A track it cannot build surfaces in the catalog rather than in this result.
@@ -172,7 +174,7 @@ async fn import_emits_frames() {
 	let track = consumer
 		.track(&video_name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -495,7 +497,7 @@ async fn import_enhanced_av1() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -505,6 +507,30 @@ async fn import_enhanced_av1() {
 	let frame = decoder.read().await.unwrap().expect("an AV1 frame");
 	assert!(frame.keyframe);
 	assert_eq!(frame.payload.as_ref(), payload);
+}
+
+/// GStreamer 1.28 `fdkaacenc` output at 48 kHz stereo, remuxed to FLV by ffmpeg 9.0.1, whose
+/// AudioSpecificConfig signals SBR (and PS for v2) over a 24 kHz LC core. The catalog names the
+/// output, as ffprobe does, not the core.
+#[tokio::test(start_paused = true)]
+async fn import_explicit_sbr_names_its_output() {
+	let fixtures: [(&[u8], u8); 2] = [
+		(include_bytes!("../ts/test_data/he_aac.flv"), 5),
+		(include_bytes!("../ts/test_data/he_aac_v2.flv"), 29),
+	];
+	for (data, profile) in fixtures {
+		let mut producer = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+		let mut importer = Import::new(producer, catalog.reserve());
+		importer.decode(&bytes::BytesMut::from(data)).unwrap();
+		importer.finish().unwrap();
+
+		let snap = catalog.snapshot();
+		let a = snap.audio.renditions.values().next().expect("an AAC track");
+		assert!(matches!(&a.codec, AudioCodec::AAC(aac) if aac.profile == profile));
+		assert_eq!(a.sample_rate, 48_000);
+		assert_eq!(a.channel_count, 2);
+	}
 }
 
 #[tokio::test(start_paused = true)]
@@ -605,7 +631,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -645,7 +671,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -709,36 +735,35 @@ fn session(header: bool, start_ms: u32, frames: u32) -> Vec<u8> {
 	out
 }
 
-/// What an FLV import published, plus the broadcast clock's reading around the first chunk.
+/// What an FLV import published, and the wall-clock window its first chunk arrived in.
 struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	video: String,
-	before: u128,
-	after: u128,
+	/// The root clock the catalog advertised.
+	clock: hang::catalog::Clock,
+	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	/// Why a chunk was refused, if one was.
+	refused: Option<crate::Error>,
 }
 
-/// Import `chunks` in order, idling `idle` between them, on a clock that began `ago` earlier.
-/// `live` translates onto that clock; otherwise tag timestamps publish verbatim.
-async fn import(chunks: &[Vec<u8>], live: bool, ago: Duration, idle: Duration) -> Imported {
+/// Import `chunks` in order on a catalog with the default clock, stopping at the first refused
+/// chunk.
+async fn import(chunks: &[Vec<u8>]) -> Imported {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let config = crate::catalog::Config::default().with_clock(crate::container::test_util::late_clock(ago));
-	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let clock = catalog.clock();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = Import::new(broadcast, catalog.reserve());
-	if live {
-		importer = importer.live();
-	}
 
-	let before = clock.now().as_micros();
+	let before = std::time::SystemTime::now();
 	let mut after = before;
+	let mut refused = None;
 	for (i, chunk) in chunks.iter().enumerate() {
-		if i > 0 {
-			std::thread::sleep(idle);
+		if let Err(err) = importer.decode(chunk) {
+			refused = Some(err);
+			break;
 		}
-		importer.decode(chunk).unwrap();
 		if i == 0 {
-			after = clock.now().as_micros();
+			after = std::time::SystemTime::now();
 		}
 	}
 	importer.finish().unwrap();
@@ -747,63 +772,74 @@ async fn import(chunks: &[Vec<u8>], live: bool, ago: Duration, idle: Duration) -
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
 		video: snapshot.video.renditions.keys().next().unwrap().clone(),
-		before,
-		after,
+		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		arrival: before..=after,
+		refused,
 	}
 }
 
-/// A feed an hour into its own timeline, arriving 30s after the broadcast began, publishes on the
-/// broadcast clock: the first frame is live on arrival, and audio and video keep the one offset
-/// their tags gave them, B-frame reordering included.
+/// A feed an hour into its own timeline publishes its tag timestamps verbatim, and the catalog
+/// clock maps its first frame to the arrival time.
 #[tokio::test]
-async fn live_import_anchors_a_late_first_frame() {
-	let input = [session(true, 3_600_000, 50)];
-	let ago = Duration::from_secs(30);
-	let verbatim = import(&input, false, ago, Duration::ZERO).await;
-	let live = import(&input, true, ago, Duration::ZERO).await;
+async fn import_publishes_tag_timestamps_on_an_arrival_clock() {
+	let start_ms = 3_600_000;
+	let import = import(&[session(true, start_ms, 50)]).await;
+	assert!(import.refused.is_none());
 
-	crate::container::test_util::common_offset(&verbatim.published, &live.published);
-	let first = live.published[&live.video][0];
+	// The first video frame presents 40ms after its decode time.
+	let first = import.published[&import.video][0];
+	assert_eq!(first, (start_ms as u128 + 40) * 1000, "the source's own timestamp");
+
+	let tick = Duration::from_millis(1);
+	let wall = import
+		.clock
+		.wall_clock(moq_net::Timestamp::from_micros(first as u64).unwrap())
+		.unwrap();
 	assert!(
-		(live.before..=live.after).contains(&first),
-		"the first frame is live on arrival: {first} not in {}..={}",
-		live.before,
-		live.after
+		*import.arrival.start() - tick <= wall && wall <= *import.arrival.end() + tick,
+		"the first frame is live on arrival"
 	);
 }
 
-/// An encoder restarting its timestamps at zero continues the broadcast forward: after the real
-/// idle gap, and with every track moving onto the one new mapping.
+/// An encoder restarting its timestamps is a new epoch: the import refuses the rewind rather than
+/// re-anchoring it forward, keeping everything published before it.
 #[tokio::test]
-async fn live_import_restarts_forward_after_idle() {
-	for idle in [Duration::ZERO, Duration::from_millis(300)] {
-		let input = [session(true, 5_000, 50), session(false, 0, 50)];
-		let live = import(&input, true, Duration::from_secs(30), idle).await;
+async fn import_refuses_a_restart() {
+	let import = import(&[session(true, 5_000, 50), session(false, 0, 50)]).await;
+	let err = import.refused.expect("the restart is refused");
+	assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
+	assert_eq!(
+		import.published[&import.video].len(),
+		50,
+		"the first session stays published"
+	);
+}
 
-		let last_before = live
-			.published
-			.values()
-			.map(|t| t[..50].iter().max().unwrap())
-			.max()
-			.unwrap();
-		let video = &live.published[&live.video];
-		let gap = video[50] as i128 - *last_before as i128;
-		assert!(
-			gap >= idle.as_micros() as i128,
-			"the restart lands after the idle gap: {gap}us after {idle:?}"
-		);
-		assert!(
-			gap < (idle + Duration::from_secs(5)).as_micros() as i128,
-			"the restart is not pushed further: {gap}us"
-		);
+/// The catalog is first published at the first frame, carrying the clock that frame anchors,
+/// rather than at the sequence headers on a provisional clock a copy-once reader would keep.
+#[tokio::test]
+async fn first_catalog_carries_the_anchored_clock() {
+	let start_ms = 3_600_000;
+	let data = session(true, start_ms, 10);
+	let (headers, frames) = data.split_at(session(true, start_ms, 0).len());
 
-		// The second session keeps its own A/V relationship on the new mapping.
-		let verbatim = import(&[session(true, 0, 50)], false, Duration::ZERO, Duration::ZERO).await;
-		let second = live
-			.published
-			.iter()
-			.map(|(name, t)| (name.clone(), t[50..].to_vec()))
-			.collect();
-		crate::container::test_util::common_offset(&verbatim.published, &second);
-	}
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let provisional = catalog.clock().wall();
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut importer = Import::new(broadcast, catalog.reserve());
+
+	importer.decode(headers).unwrap();
+	assert_eq!(clocks.drain(), vec![], "the sequence headers alone publish nothing");
+
+	importer.decode(frames).unwrap();
+	let anchored = catalog.clock().wall();
+	assert_ne!(anchored, provisional, "the first frame anchors the clock");
+	let published = clocks.drain();
+	assert!(!published.is_empty(), "the first frame publishes the catalog");
+	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
+
+	importer.finish().unwrap();
+	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
 }

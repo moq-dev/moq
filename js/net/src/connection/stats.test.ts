@@ -69,8 +69,8 @@ test("stats() snapshots the transport on demand", async () => {
 		pair.client.stats.bytesSent = 5_678;
 		expect((await client.stats()).bytesSent).toBe(5_678);
 	} finally {
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	}
 });
 
@@ -83,8 +83,8 @@ test("stats() is empty on a transport without getStats", async () => {
 	try {
 		expect(await client.stats()).toEqual({});
 	} finally {
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	}
 });
 
@@ -97,8 +97,8 @@ test("probe starts empty and stays empty without PROBE support", async () => {
 		expect(client.probe.peek()).toEqual({});
 		expect((await client.stats()).bytesReceived).toBe(42);
 	} finally {
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	}
 });
 
@@ -120,7 +120,7 @@ test("Reload reports stats and probe only while connected", async () => {
 		expect((await reload.stats())?.bytesSent).toBe(99);
 		expect(reload.probe.peek()).toEqual({});
 
-		server.close();
+		server.abort();
 		while (reload.established.peek()) {
 			await new Promise((resolve) => setTimeout(resolve, 0));
 		}

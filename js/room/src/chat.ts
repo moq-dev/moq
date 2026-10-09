@@ -5,7 +5,7 @@
  */
 
 import * as Json from "@moq/json";
-import type { Broadcast, Track } from "@moq/net";
+import { type Broadcast, Time, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 
 /** Name of the track carrying the chat window. */
@@ -17,9 +17,9 @@ export const HISTORY = 10_000;
 /** A message entering, leaving, or missed from the window. */
 export type Event = Json.Window.Event<string>;
 
-/** Track settings for the latest chat window. */
-export function info(): Pick<Track.Info, "priority"> {
-	return { priority: PRIORITY };
+/** Track settings for the latest chat window, timed in milliseconds since each message is stamped when sent. */
+export function info(): Pick<Track.Info, "priority" | "timescale"> {
+	return { priority: PRIORITY, timescale: Time.Timescale.MILLI };
 }
 
 /** Publishes chat messages and retires them after ten seconds, including while idle. */
@@ -48,7 +48,7 @@ export class Publisher {
 	send(text: string): void {
 		if (!text) return;
 		this.expire();
-		this.#producer.push(text);
+		this.#producer.push({ value: text, at: Time.Timestamp.now() });
 		this.#expires.update((expires) => [...expires, performance.now() + HISTORY]);
 	}
 
@@ -59,7 +59,7 @@ export class Publisher {
 		let count = 0;
 		while (count < expires.length && expires[count] <= now) count++;
 		if (!count) return;
-		this.#producer.pop(count);
+		this.#producer.pop(count, Time.Timestamp.now());
 		this.#expires.set(expires.slice(count));
 	}
 

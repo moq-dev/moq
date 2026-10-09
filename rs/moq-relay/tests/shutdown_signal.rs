@@ -20,12 +20,15 @@
 //! The drain ends as soon as every session has left rather than waiting out the
 //! window, which a stop-time budget depends on.
 //!
-//! Each signal test raises or handles process signals, so they rely on
-//! nextest's process-per-test isolation. `a_trigger_before_run_keeps_the_deadline`
-//! fires the trigger before `run` instead of a signal.
+//! A raised signal reaches every listener in the process, and a relay exits at
+//! once on its second one, so the tests that raise SIGINT hold [`SIGINT`]:
+//! `cargo test` (the Nix check phase) runs them as threads of one process.
+//! `a_trigger_before_run_keeps_the_deadline` fires the trigger before `run`
+//! instead of a signal.
 
 #![cfg(unix)]
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use moq_relay::{Config, Relay, auth};
@@ -34,6 +37,10 @@ use moq_relay::{Config, Relay, auth};
 /// confused, short enough to keep the test quick: a session that never leaves
 /// keeps `Relay::run` up this long.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Held by every test that raises SIGINT, so one test's signal cannot drain (or,
+/// as a second signal, kill) another test's relay.
+static SIGINT: Mutex<()> = Mutex::new(());
 
 /// Run `test` on a current-thread runtime with a large stack.
 fn run_test<F: std::future::Future<Output = ()> + 'static>(test: fn() -> F) {
@@ -56,11 +63,13 @@ fn run_test<F: std::future::Future<Output = ()> + 'static>(test: fn() -> F) {
 
 #[test]
 fn sigint_drains_sessions_before_exiting() {
+	let _sigint = SIGINT.lock().unwrap_or_else(|e| e.into_inner());
 	run_test(sigint_drains_sessions_before_exiting_inner);
 }
 
 #[test]
 fn an_embedder_owns_the_signals() {
+	let _sigint = SIGINT.lock().unwrap_or_else(|e| e.into_inner());
 	run_test(an_embedder_owns_the_signals_inner);
 }
 
@@ -113,16 +122,9 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	// so it is the elapsed time below that proves it was honored.
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
-	// Mid-window the relay is still running: the point of the drain is the time it
-	// buys, not the notice. This is what the old ctrl-C race broke.
-	tokio::time::sleep(DRAIN_TIMEOUT / 2).await;
-	assert!(
-		!run.is_finished(),
-		"relay exited {:?} after SIGINT, well inside the {DRAIN_TIMEOUT:?} drain window",
-		signalled.elapsed()
-	);
-
-	// Then it exits on its own, cleanly.
+	// It exits on its own, cleanly, and not before the window has passed: the point
+	// of the drain is the time it buys, not the notice. This is what the old ctrl-C
+	// race broke.
 	tokio::time::timeout(Duration::from_secs(15), run)
 		.await
 		.expect("relay never exited after the drain window")

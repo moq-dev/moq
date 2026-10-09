@@ -8,136 +8,32 @@ description: Container import and export
 [![crates.io](https://img.shields.io/crates/v/moq-mux)](https://crates.io/crates/moq-mux)
 [![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)
 
-Turns existing container formats into hang broadcasts and back. This is what
-`moq import`/`export` and the gateways are built on.
+Turns existing container formats into [hang](/concept/hang) broadcasts and
+back. This is what `moq import` / `export` and the gateways are built on.
 
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
 | fMP4 / CMAF | yes | yes | Passthrough as `cmaf` or repackaged as `legacy`. |
-| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
+| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 and subtitle PIDs as tracks; service tables round-trip. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
 | Matroska / WebM | yes | yes | |
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
 
-Importers parse the bitstream to fill the catalog (resolution, codec string,
-`description`), split groups at keyframes, and stamp timestamps. Exporters do
-the inverse and skip stalled groups past a max age. Per-codec
-producers (`import::Opus`, H.264, and so on) are available for feeding frames
-you already have.
+Importers fill the catalog from the bitstream, split groups at keyframes, and
+publish the source's own timestamps, mapped to the wall time the first frame
+arrived. A timeline that rewinds ends the import. fMP4 export fixes its track
+set at the init segment, so a new rendition or a changed configuration ends the
+export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:
+one program per broadcast, damaged packets, and feed checks.
 
-fMP4 export emits one fragment per publisher group by default, including audio.
-A closed group flushes even if the live publisher pauses before its next frame.
-`fmp4::Export::with_fragment_duration` adds an explicit duration cap. A zero cap
-emits one fragment per frame; video with unknown duration waits for the next
-timestamp or endpoint marker. Audio and samples with explicit durations remain
-immediate. CMAF audio
-samples are always encoded as sync samples; the decoded `Frame::keyframe` marks
-only the first audio sample of a MoQ group.
-
-Each catalog track constructor returns one `container::Producer` that owns the
-media stream and its catalog entry. `set` publishes or replaces its config,
-`modify` edits the published config through a guard, and dropping the producer
-retires the entry. Calling `modify` before the first `set` returns
-`Error::NotPublished`. Container writes measure bitrate; importers can also
-measure batch span or reorder delay for jitter. Locally encoded frames call
-`container::Producer::flush(timestamp, Instant::now())`; jitter is the spread
-above that track's own recent minimum lateness, and delay is how far that
-minimum trails the earliest track on the same catalog. Both are published as
-soon as they rise. `import::Track::discontinuity()` marks a source seek or
-pause, clears partial input, and restarts the flush baseline without lowering
-advertised values. It forwards the container timeline marker, so resumed
-timestamps must continue forward on the broadcast clock. Generic imports remain
-clock-free. Invalid or decreasing jitter or delay is rejected before the edit is
-retained, including while the initial catalog is reserved.
-Codec importers propagate catalog and media errors through their configuration
-and frame-writing methods.
-
-Data tracks go through the catalog too. `catalog.json_stream(track, config)`
-(or `json_snapshot`, `binary_snapshot`, `binary_stream`) writes the track's
-`json` or `binary` entry, measures an absent `bitrate` from the writes, and
-retires the entry when the producer drops. To list the track in your own
-section beside application fields, pass that section's entry instead of a
-`json::Config` or `binary::Config`: any `RenditionConfig` that embeds the data
-config through `AsMut`.
-
-```rust
-#[derive(Serialize, Deserialize, Clone)]
-struct Mavlink {
-    #[serde(flatten)]
-    binary: hang::catalog::BinaryConfig, // mode, compression, bitrate, ...
-    sysid: u8,
-}
-
-impl AsMut<hang::catalog::BinaryConfig> for Mavlink {
-    fn as_mut(&mut self) -> &mut hang::catalog::BinaryConfig {
-        &mut self.binary
-    }
-}
-
-// Plus `RenditionConfig<Ext>` writing to `catalog.ext.mavlink`, a map
-// serialized under the `com.example.mavlink` root key.
-let binary = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Stream);
-let mut telemetry = catalog.binary_stream(track, Mavlink { binary, sysid: 1 })?;
-telemetry.append(packet)?;
-```
-
-The producer sets the entry's `mode` and encodes the track with its
-`compression`. Read it back from `Catalog<Ext>` and subscribe with
-`catalog::Entry::new(name, &entry.binary)`.
-
-A payload that knows when it was captured (a datagram's arrival, a sensor read)
-carries that `Instant`. The producer maps it onto the broadcast clock and writes
-it as the frame timestamp, and the entry advertises `jitter` and `delay` the way
-a media rendition does, so telemetry lagging its video shows up as `delay`. An
-instant ahead of now is refused. A device's own clock is an unrelated epoch;
-keep it in the payload.
-
-```rust
-telemetry.append(moq_net::Timed::from(packet).at(received_at))?;
-```
-
-The fMP4, MPEG-TS, and FLV importers publish the source's own timestamps unless
-built with `live()`, which translates them onto the catalog's broadcast clock:
-the first frame is live on arrival, every track of the input shares that one
-mapping, and a source that restarts its timestamps continues forward after the
-real idle gap. fMP4 passthrough rewrites each fragment's `tfdt` to match. Use
-it for a live feed with its own zero; publish verbatim only when the catalog's
-clock (`Config::with_clock`) already names the source's zero.
-
-An application running its own demuxer gets the same mapping from
-`clock::Anchor`: one per source, plus one `clock::Lane` per track. A single
-`SourceMap` per track would let tracks drift apart by their first-PTS
-difference, and one `SourceMap` shared across tracks reads their interleaving
-as a reset. Each lane detects its own restarts, and the anchor moves once for
-all of them. Call `Lane::restart()` before a frame when the demuxer sees a
-discontinuity out of band.
-
-```rust
-use moq_mux::clock;
-
-let mut anchor = clock::Anchor::new(catalog.clock());
-let mut video = clock::Lane::default();
-let mut klv = clock::Lane::default();
-
-// Both tracks keep their source spacing on the broadcast clock.
-let video_ts = anchor.translate(&mut video, video_pts)?;
-let klv_ts = anchor.translate(&mut klv, klv_pts)?;
-```
+Data tracks are catalog entries too. The [hang page](/concept/hang#data-tracks)
+describes the modes. A capture time converts onto the broadcast clock; a
+timestamp taken from the source is published as given and lines up with media
+only when they share that clock.
 
 ```bash
 cargo add moq-mux
 ```
 
-API: [docs.rs/moq-mux](https://docs.rs/moq-mux). Real-world usage:
-[`rs/moq-cli`](https://github.com/moq-dev/moq/tree/main/rs/moq-cli).
-
-Container producers and consumers take a format configured from the track's audio
-or video catalog entry (`catalog::hang::Container::try_from(&config)`). For a raw
-track, supply `container::Kind` explicitly. `cut(Some(end))` flushes and closes the
-group immediately. Legacy and LOC video write an empty timestamped frame at that end;
-audio and CMAF do not. With no explicit end, the producer uses a known sample
-duration or observed cadence, independently of batching and reorder jitter.
-Streaming consumers deliver frames immediately. The live fMP4 exporter receives
-duration endpoints as metadata and uses them to time samples still buffered when
-the group closes. Fetched groups retain their trailing frame until the marker or
-group completion arrives.
+API: [docs.rs/moq-mux](https://docs.rs/moq-mux). The commands that exercise it
+are [`moq-cli`](/bin/cli).

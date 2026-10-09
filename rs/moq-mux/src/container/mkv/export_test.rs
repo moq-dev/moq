@@ -20,7 +20,7 @@ use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
 /// export it, which the exporter's default
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) collapses to the live edge:
 /// completeness has to be asked for, exactly as a real recorder does.
-const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[tokio::test(start_paused = true)]
 async fn export_header_roundtrip_vp9_opus() {
@@ -202,6 +202,54 @@ fn build_flac_audio_track_entry() {
 	crate::codec::flac::Config::parse(&mut private.as_slice()).expect("valid FLAC header");
 }
 
+/// The catalog names HE-AAC's output rate; Matroska wants the SBR core's rate as
+/// SamplingFrequency and the output as OutputSamplingFrequency.
+#[test]
+fn build_he_aac_audio_track_entry() {
+	// fdkaacenc HE-AAC at 48 kHz stereo: SBR over a 24 kHz LC core.
+	let mut config = hang::catalog::AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile: 5 }), 48_000, 2);
+	config.description = Some(Bytes::from_static(&[0x2B, 0x11, 0x88, 0x00]));
+	assert_eq!(audio_rates(&config), (24_000.0, Some(48_000.0)));
+
+	// HE-AACv2: the same rates over a mono PS core.
+	config.codec = AudioCodec::AAC(hang::catalog::AAC { profile: 29 });
+	config.description = Some(Bytes::from_static(&[0xEB, 0x09, 0x88, 0x00]));
+	assert_eq!(audio_rates(&config), (24_000.0, Some(48_000.0)));
+
+	// AAC-LC 48 kHz stereo plays at its own rate.
+	config.codec = AudioCodec::AAC(hang::catalog::AAC { profile: 2 });
+	config.description = Some(Bytes::from_static(&[0x11, 0x90]));
+	assert_eq!(audio_rates(&config), (48_000.0, None));
+
+	// AAC-LC keeps the catalog's rate without parsing its description (a reserved rate index here).
+	config.description = Some(Bytes::from_static(&[0x16, 0x90]));
+	assert_eq!(audio_rates(&config), (48_000.0, None));
+}
+
+/// The SamplingFrequency and OutputSamplingFrequency of an exported audio track entry.
+fn audio_rates(config: &hang::catalog::AudioConfig) -> (f64, Option<f64>) {
+	let entry = super::export::build_audio_track_entry(1, config).expect("build audio entry");
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = entry else {
+		panic!("expected a TrackEntry");
+	};
+	let audio = children
+		.into_iter()
+		.find_map(|c| match c {
+			MatroskaSpec::Audio(Master::Full(audio)) => Some(audio),
+			_ => None,
+		})
+		.expect("an Audio element");
+	let sampling = audio.iter().find_map(|c| match c {
+		MatroskaSpec::SamplingFrequency(rate) => Some(*rate),
+		_ => None,
+	});
+	let output = audio.iter().find_map(|c| match c {
+		MatroskaSpec::OutputSamplingFrequency(rate) => Some(*rate),
+		_ => None,
+	});
+	(sampling.expect("SamplingFrequency"), output)
+}
+
 /// MP3 (config in band, no codec private) survives an import -> export -> re-import
 /// round trip as the `A_MPEG/L3` track entry.
 #[tokio::test(start_paused = true)]
@@ -377,7 +425,7 @@ async fn export_emits_blocks_for_each_frame() {
 		// Use per-frame clustering so each frame is observable as its own
 		// Cluster chunk; batching is exercised in a dedicated test below.
 		.with_fragment_duration(std::time::Duration::ZERO)
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_max_delay(RECORDING_MAX_DELAY);
 	let mut exported: Vec<u8> = Vec::new();
 
 	let mut importer = Some(importer);
@@ -616,7 +664,7 @@ async fn export_fragment_duration_batches_blocks() {
 		.expect("catalog consumer");
 	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream)
 		.with_fragment_duration(std::time::Duration::from_secs(2))
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_max_delay(RECORDING_MAX_DELAY);
 	let mut exported: Vec<u8> = Vec::new();
 
 	let mut importer = Some(importer);

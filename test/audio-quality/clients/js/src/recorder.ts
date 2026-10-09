@@ -16,12 +16,12 @@
  * @module
  */
 import * as Catalog from "@moq/hang/catalog";
-import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
+import { format, arrivals as readArrivals } from "./capture.ts";
 import type { Arrival } from "./schema.ts";
 
 /** How far back the relay may serve a group. Long, so a late group is recorded rather than dropped. */
-const MAX_AGE = Moq.Time.Milli(10_000);
+const MAX_DELAY = Moq.Time.Milli(10_000);
 
 /** What the recorder has, until the driver drains it. */
 export type Recorder = {
@@ -58,31 +58,6 @@ globalThis.recorder = {
 	error: () => failure,
 };
 
-/** The container format the player's decoder would pick for `config`. */
-function format(config: Catalog.AudioConfig): Container.Format {
-	const container = config.container;
-	if (container.kind === "legacy") return new Container.Legacy.Format(config);
-	if (container.kind === "loc") return new Container.Loc.Format("audio");
-	if (container.kind === "cmaf") {
-		const init = Uint8Array.from(atob(container.init), (c) => c.charCodeAt(0));
-		return new Container.Cmaf.Format(Container.Cmaf.decodeInitSegment(init));
-	}
-	throw new Error(`unsupported container: ${JSON.stringify(container)}`);
-}
-
-/** Stamp every frame of one group as it is read. Markers carry no media, so they are not arrivals. */
-async function readGroup(group: Moq.Group.Consumer, decoder: Container.Format): Promise<void> {
-	for (;;) {
-		const next = await group.readFrame();
-		const at = performance.now();
-		if (!next) return;
-		for (const frame of decoder.decode(next.payload)) {
-			if (decoder.end?.(frame) !== undefined) continue;
-			arrivals.push([at, frame.timestamp / 1000, group.sequence]);
-		}
-	}
-}
-
 async function record(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
 	const connection = await Moq.Connection.connect({ url: new URL(required("url")), consume: origin });
@@ -111,7 +86,7 @@ async function record(): Promise<void> {
 	if (!name || !config) throw new Error("the catalog ended without an audio rendition");
 
 	const decoder = format(config);
-	const track = broadcast.track(name).subscribe({ priority: Catalog.PRIORITY.audio, maxAge: MAX_AGE });
+	const track = broadcast.track(name).subscribe({ priority: Catalog.PRIORITY.audio, maxDelay: MAX_DELAY });
 	info = {
 		transport: connection.transport,
 		get rtt() {
@@ -123,7 +98,9 @@ async function record(): Promise<void> {
 	for (;;) {
 		const group = await track.recvGroup();
 		if (!group) throw new Error("the track ended");
-		readGroup(group, decoder).catch(fail);
+		(async () => {
+			for await (const arrival of readArrivals(group, decoder)) arrivals.push(arrival);
+		})().catch(fail);
 	}
 }
 

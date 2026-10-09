@@ -26,6 +26,7 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 /// Create a pool and its bounded filled-buffer queue.
 pub(super) fn channel(
 	channels: usize,
+	sample_rate: u32,
 	#[cfg(feature = "aec")] aec: Option<crate::aec::Attachment>,
 ) -> (Writer, Reader) {
 	let samples = CHUNK_FRAMES * channels;
@@ -59,6 +60,8 @@ pub(super) fn channel(
 		pending_gap: false,
 		dropped: dropped.clone(),
 		channels,
+		sample_rate,
+		capture: None,
 		#[cfg(feature = "aec")]
 		aec,
 	};
@@ -99,6 +102,7 @@ struct Buffer {
 struct Filled {
 	data: Vec<f32>,
 	gap: bool,
+	captured: Option<Instant>,
 	slot: usize,
 	recycle: HeapProd<Vec<f32>>,
 }
@@ -117,23 +121,32 @@ pub(super) struct Writer {
 	pending_gap: bool,
 	dropped: Arc<AtomicU64>,
 	channels: usize,
+	sample_rate: u32,
+	/// Capture instant of the next chunk's first sample. `None` stamps arrival.
+	capture: Option<Instant>,
 	#[cfg(feature = "aec")]
 	aec: Option<crate::aec::Attachment>,
 }
 
 impl Writer {
 	/// Copy native `f32` samples into preallocated buffers.
-	pub(super) fn write_f32(&mut self, input: &[f32]) {
+	///
+	/// `captured` is the instant of `input`'s first sample. Each chunk keeps its
+	/// own, so a split callback does not stamp every piece at the first one.
+	pub(super) fn write_f32(&mut self, input: &[f32], captured: Option<Instant>) {
+		self.capture = captured;
 		self.write(input, |sample| sample);
 	}
 
 	/// Convert native signed samples into preallocated buffers.
-	pub(super) fn write_i16(&mut self, input: &[i16]) {
+	pub(super) fn write_i16(&mut self, input: &[i16], captured: Option<Instant>) {
+		self.capture = captured;
 		self.write(input, |sample| sample as f32 / 32768.0);
 	}
 
 	/// Convert native unsigned samples into preallocated buffers.
-	pub(super) fn write_u16(&mut self, input: &[u16]) {
+	pub(super) fn write_u16(&mut self, input: &[u16], captured: Option<Instant>) {
+		self.capture = captured;
 		self.write(input, |sample| (sample as f32 - 32768.0) / 32768.0);
 	}
 
@@ -143,6 +156,8 @@ impl Writer {
 		let complete = input.len() - input.len() % self.channels;
 
 		for input in input[..complete].chunks(chunk_samples) {
+			let captured = self.capture;
+			self.advance_capture(input.len());
 			let Some(mut output) = self.take() else {
 				self.drop_one();
 				continue;
@@ -160,6 +175,7 @@ impl Writer {
 			let filled = Filled {
 				data: output.data,
 				gap: self.pending_gap,
+				captured,
 				slot: output.slot,
 				recycle,
 			};
@@ -215,6 +231,20 @@ impl Writer {
 		self.free.push(Buffer { data, slot });
 	}
 
+	/// Move the next chunk's capture instant forward by `samples` interleaved samples.
+	fn advance_capture(&mut self, samples: usize) {
+		let Some(captured) = self.capture else {
+			return;
+		};
+		if self.channels == 0 || self.sample_rate == 0 {
+			return;
+		}
+		let frames = (samples / self.channels) as u128;
+		let micros = frames.saturating_mul(1_000_000) / u128::from(self.sample_rate);
+		let micros = u64::try_from(micros).unwrap_or(u64::MAX);
+		self.capture = captured.checked_add(Duration::from_micros(micros));
+	}
+
 	fn drop_one(&mut self) {
 		self.pending_gap = true;
 		#[cfg(feature = "aec")]
@@ -239,7 +269,12 @@ impl Reader {
 	pub(super) async fn recv(&mut self) -> Option<Samples> {
 		let filled = self.rx.recv().await?;
 		self.observe();
-		Some(Samples::pooled(filled.data, filled.gap, filled.recycle))
+		Some(Samples::pooled(
+			filled.data,
+			filled.gap,
+			filled.captured,
+			filled.recycle,
+		))
 	}
 
 	/// Fold callback drops into a throttled log.
@@ -312,6 +347,7 @@ mod tests {
 	fn create(channels: usize) -> (Writer, Reader) {
 		channel(
 			channels,
+			48_000,
 			#[cfg(feature = "aec")]
 			None,
 		)
@@ -325,7 +361,7 @@ mod tests {
 		)
 		.unwrap();
 		let attachment = aec.attach(48_000, channels as u32).unwrap();
-		let (writer, reader) = channel(channels, Some(attachment));
+		let (writer, reader) = channel(channels, 48_000, Some(attachment));
 		(writer, reader, aec)
 	}
 
@@ -336,9 +372,9 @@ mod tests {
 		let i16s = vec![8192i16; 960 * 2];
 		let u16s = vec![40960u16; 960 * 2];
 
-		assert_eq!(activity(|| writer.write_f32(&f32s)), 0);
-		assert_eq!(activity(|| writer.write_i16(&i16s)), 0);
-		assert_eq!(activity(|| writer.write_u16(&u16s)), 0);
+		assert_eq!(activity(|| writer.write_f32(&f32s, None)), 0);
+		assert_eq!(activity(|| writer.write_i16(&i16s, None)), 0);
+		assert_eq!(activity(|| writer.write_u16(&u16s, None)), 0);
 	}
 
 	#[tokio::test]
@@ -347,7 +383,7 @@ mod tests {
 		let input = vec![0.25f32; 480];
 
 		for _ in 0..128 {
-			assert_eq!(activity(|| writer.write_f32(&input)), 0);
+			assert_eq!(activity(|| writer.write_f32(&input, None)), 0);
 			drop(reader.recv().await.unwrap());
 		}
 	}
@@ -360,7 +396,7 @@ mod tests {
 		let thread = std::thread::spawn(move || {
 			let activity = activity(|| {
 				for _ in 0..DEPTH * 4 {
-					writer.write_f32(&input);
+					writer.write_f32(&input, None);
 				}
 			});
 			done.send(activity).unwrap();
@@ -375,12 +411,12 @@ mod tests {
 		let (mut writer, mut reader) = create(1);
 		let input = vec![0.5; 480];
 
-		writer.write_f32(&input);
+		writer.write_f32(&input, None);
 		let released = reader.recv().await.unwrap();
 		let address = released.data.as_ptr();
 		drop(released);
 
-		writer.write_f32(&input);
+		writer.write_f32(&input, None);
 		let reused = reader.recv().await.unwrap();
 		assert_eq!(reused.data.as_ptr(), address);
 	}
@@ -391,15 +427,15 @@ mod tests {
 		let backlog = vec![0.5; 480];
 
 		for _ in 0..DEPTH {
-			writer.write_f32(&backlog);
+			writer.write_f32(&backlog, None);
 		}
-		writer.write_f32(&[0.75; 480]);
+		writer.write_f32(&[0.75; 480], None);
 
 		let first = reader.recv().await.unwrap();
 		assert!(!first.gap);
 		assert_eq!(first.data[0], 0.5);
 		drop(first);
-		writer.write_f32(&[1.0; 480]);
+		writer.write_f32(&[1.0; 480], None);
 
 		for _ in 1..DEPTH {
 			let backlog = reader.recv().await.unwrap();
@@ -416,15 +452,15 @@ mod tests {
 	async fn overflow_discards_partial_aec_frames() {
 		let (mut writer, mut reader, aec) = create_with_aec(1);
 
-		writer.write_f32(&[0.5; 512]);
+		writer.write_f32(&[0.5; 512], None);
 		for _ in 1..DEPTH {
-			writer.write_f32(&[0.5; 480]);
+			writer.write_f32(&[0.5; 480], None);
 		}
 		assert_eq!(aec.pending_samples(), 32);
 
-		writer.write_f32(&[0.75; 512]);
+		writer.write_f32(&[0.75; 512], None);
 		drop(reader.recv().await.unwrap());
-		writer.write_f32(&[1.0; 448]);
+		writer.write_f32(&[1.0; 448], None);
 
 		assert_eq!(
 			aec.pending_samples(),
@@ -438,6 +474,23 @@ mod tests {
 		let (mut writer, _reader) = create(2);
 		let input = vec![0.25f32; (CHUNK_FRAMES * 2) + 960];
 
-		assert_eq!(activity(|| writer.write_f32(&input)), 0);
+		assert_eq!(activity(|| writer.write_f32(&input, None)), 0);
+	}
+
+	/// A callback larger than one pool buffer is several reads. Each read's first
+	/// sample is later than the callback's, by the samples already handed off.
+	#[tokio::test]
+	async fn chunked_callbacks_stamp_each_piece_at_its_first_sample() {
+		let (mut writer, mut reader) = create(2);
+		let captured = Instant::now();
+		let frames = CHUNK_FRAMES * 2 + 2;
+		let input = vec![0.25f32; frames * 2];
+		writer.write_f32(&input, Some(captured));
+
+		let step = Duration::from_micros(1_000_000 * CHUNK_FRAMES as u64 / 48_000);
+		for index in 0..3 {
+			let samples = reader.recv().await.unwrap();
+			assert_eq!(samples.captured, Some(captured + step * (index as u32)));
+		}
 	}
 }

@@ -1,5 +1,5 @@
+import type { Time, Timed } from "@moq/net";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 
 import { type Config as CodecConfig, DEFAULT_DELTA_RATIO, type Encoded, Encoder } from "./encoder.ts";
 
@@ -54,9 +54,10 @@ export class Producer<T> {
 	/**
 	 * Publish a new value, emitting a snapshot or delta automatically. No-op if unchanged.
 	 *
-	 * `at` is when the value was captured, written as its frame timestamp. Defaults to now.
+	 * `at` is when the value was captured, written as its frame timestamp. Omit it only on an
+	 * untimed track: it is never filled in.
 	 */
-	update(value: T, at: Time.Timestamp = Time.Timestamp.now()): void {
+	update({ value, at }: Timed<T>): void {
 		const frame = this.#encoder.update(value);
 		if (!frame) return;
 
@@ -66,7 +67,7 @@ export class Producer<T> {
 		frame.commit();
 	}
 
-	#write(encoded: Encoded, at: Time.Timestamp): void {
+	#write(encoded: Encoded, at: Time.Timestamp | undefined): void {
 		// Check before touching a group. A keyframe closes the previous group and publishes its
 		// replacement before the frame is written, so discovering the limit inside `writeFrame` would
 		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the last
@@ -106,7 +107,8 @@ export class Producer<T> {
 	}
 
 	/**
-	 * Mutate the current value in place and publish the result.
+	 * Mutate the current value in place and publish the result, captured at `at` (omit it only on an
+	 * untimed track).
 	 *
 	 * The callback receives a deep clone of the current value: everything published through this
 	 * producer so far, composed, falling back to {@link Config.initial} if nothing has been (throws if
@@ -129,7 +131,7 @@ export class Producer<T> {
 	 * failed sees the error, and the next successful publish is a full snapshot carrying the composed
 	 * value, so consumers converge on it either way.
 	 */
-	mutate(fn: (value: T) => void): void {
+	mutate(fn: (value: T) => void, at?: Time.Timestamp): void {
 		// Start from the last-published value, falling back to the configured initial value. We
 		// don't invent an empty object: mutating with nothing to start from is a usage error.
 		const base = this.#encoder.value ?? this.#initial;
@@ -139,7 +141,7 @@ export class Producer<T> {
 
 		const value = structuredClone(base) as T;
 		fn(value);
-		this.update(value);
+		this.update({ value, at });
 	}
 
 	/** Finish the track, closing any open group. */
