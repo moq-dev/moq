@@ -16,9 +16,10 @@ cell.
 
 The cause is known: a serve loop with work always ready never yields and
 starves moq-ffi's single runtime thread until the relay times the publisher
-out (found 2026-10-08 landing #4225). kio's cooperative budget (`kio::coop`)
-is meant to fix it: interop run 37889112106 on #5088 passed every Go and
-Python publisher cell. Confirm on `main` and nightly before closing.
+out (found 2026-10-08 landing #4225). The publish serve loops now yield
+through a `kio::coop::Budget` (#5088), which is meant to fix it: interop run
+37889112106 passed every Go and Python publisher cell on an earlier design of
+that PR. Confirm on `main` and nightly before closing.
 
 Decided 2026-10-08:
 

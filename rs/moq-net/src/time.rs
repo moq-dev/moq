@@ -37,33 +37,29 @@ pub trait Driver {
 /// terminal error, [`Error::Closed`] for a clean finish.
 pub async fn run<D: Driver>(mut driver: D) -> Error {
 	let mut timer: Option<std::pin::Pin<Box<web_async::time::Sleep>>> = None;
-	// One budget per runtime poll, outside the loop: a timer that is always due must
-	// not refill it per pass.
 	kio::wait(|waiter| {
-		kio::coop::budget(|| {
-			loop {
-				let now = web_async::time::Instant::now();
-				#[cfg(not(target_family = "wasm"))]
-				let now = now.into_std();
-				let at = match driver.poll(now, waiter) {
-					Ok(Some(at)) => at,
-					Ok(None) => {
-						timer = None;
-						return Poll::Pending;
-					}
-					Err(err) => return Poll::Ready(err),
-				};
-				#[cfg(not(target_family = "wasm"))]
-				let at = web_async::time::Instant::from_std(at);
-				let sleep = timer.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(at)));
-				if sleep.deadline() != at {
-					sleep.as_mut().reset(at);
-				}
-				if waiter.poll_future(sleep.as_mut()).is_pending() {
+		loop {
+			let now = web_async::time::Instant::now();
+			#[cfg(not(target_family = "wasm"))]
+			let now = now.into_std();
+			let at = match driver.poll(now, waiter) {
+				Ok(Some(at)) => at,
+				Ok(None) => {
+					timer = None;
 					return Poll::Pending;
 				}
+				Err(err) => return Poll::Ready(err),
+			};
+			#[cfg(not(target_family = "wasm"))]
+			let at = web_async::time::Instant::from_std(at);
+			let sleep = timer.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(at)));
+			if sleep.deadline() != at {
+				sleep.as_mut().reset(at);
 			}
-		})
+			if waiter.poll_future(sleep.as_mut()).is_pending() {
+				return Poll::Pending;
+			}
+		}
 	})
 	.await
 }

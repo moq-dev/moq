@@ -69,10 +69,6 @@ impl<T> Shared<T> {
 			state: self.state.lock(),
 		};
 		match f(&guard) {
-			Poll::Ready(()) if !crate::coop::spend(waiter) => {
-				drop(guard);
-				crate::coop::exhausted(waiter)
-			}
 			// Upgrade the Ref to a Mut, keeping the same lock guard.
 			Poll::Ready(()) => Poll::Ready(Mut::new(guard.state)),
 			Poll::Pending => {

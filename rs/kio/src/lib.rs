@@ -13,7 +13,7 @@
 //! clone-able handles, bounded or unbounded, with separate wake lists for the
 //! push and pop sides.
 //!
-//! [`coop`] bounds how much one task does per turn, so a loop that always finds
+//! [`coop`] bounds the passes a loop makes per poll, so one that always finds
 //! work ready still yields.
 
 use std::{

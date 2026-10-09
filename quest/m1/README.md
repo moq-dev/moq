@@ -67,6 +67,8 @@ were done or not worth their cost.
 - [moq-uring tests under load](/quest/m1/uring-tests-under-load.md) - uring tests pass while parallel checks share locked memory
 - [FFI runtime](/quest/m1/ffi-runtime.md) - moq-ffi drives moq on a multi-thread runtime instead of one thread
 - [Audio group duration](/quest/m1/audio-group-duration.md) - audio groups span at least 20 ms by default, so small frames don't mint a group each
+- [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
+- [A busy js/net serve yields](/quest/m1/js-serve-yield.md) - js/net's serve loop leaves the browser its event loop under a fast publisher, if it does not already
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [Kotlin wrapper POMs](/quest/m1/kt-ffi-pom.md) - Maven builds of `dev.moq:moq` resolve a published moq-ffi instead of the missing `0.0.0-dev`
 - [Installable moq-gst](/quest/m1/gst-brew-path.md) - `brew install moq-gst` installs the plugin from the tarball's `lib/gstreamer-1.0/`, and the Nix package carries `x264enc`, `avenc_aac`, and `avdec_h264`

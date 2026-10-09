@@ -645,8 +645,6 @@ async fn resolve_track_alias(
 		if let Poll::Ready(result) = resolved {
 			return Poll::Ready(result.unwrap_or(Err(Error::Dropped)));
 		}
-		// A lookup that yielded to the cooperative budget may have found it.
-		ready!(kio::coop::poll_proceed(waiter));
 		if timeout.poll(waiter).is_ready() {
 			return Poll::Ready(Err(Error::NotFound));
 		}
@@ -1744,8 +1742,6 @@ where
 						if let Poll::Ready(next) = broadcast.poll_requested_track(waiter) {
 							return Poll::Ready(Some(next));
 						}
-						// A yield to the cooperative budget, not an empty queue.
-						ready!(kio::coop::poll_proceed(waiter));
 						if route.as_ref().is_some_and(|route| route.poll_closed(waiter).is_ready()) {
 							source.close();
 							continue;
@@ -4410,28 +4406,6 @@ mod tests {
 
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
 
-		assert_eq!(pending.await.unwrap(), RequestId(11));
-	}
-
-	/// An alias bound by the time the timeout fires still resolves when the lookup yields
-	/// to the cooperative budget: the yield is no "not found".
-	#[moq_net_sim::test]
-	async fn a_budget_yield_is_not_an_alias_timeout() {
-		let runtime = crate::time::Clock::sim();
-		let aliases = TrackAliases::default();
-		let pending = resolve_track_alias(&runtime, aliases.consume(), 7);
-		let mut pending = std::pin::pin!(pending);
-		assert!(poll!(&mut pending).is_pending());
-
-		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
-		moq_net_sim::sleep(TRACK_ALIAS_TIMEOUT).await;
-
-		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-		let starved = kio::coop::budget(|| {
-			crate::util::leave_budget(0);
-			pending.as_mut().poll(&mut cx)
-		});
-		assert!(starved.is_pending(), "the lookup yields: {starved:?}");
 		assert_eq!(pending.await.unwrap(), RequestId(11));
 	}
 

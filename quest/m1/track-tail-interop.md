@@ -31,7 +31,7 @@ js-native-node`, and `rust -> js-native-bun`. Merge `main` (after #4741 and
 
 Found 2026-10-08: #4225's `go -> *` lanes fail on a stall where the go
 publisher's serve loop starves its own QUIC driver until the relay times it
-out. kio's cooperative budget (`kio::coop`) is meant to fix it; rerun the
+out. The serve budgets (`kio::coop::Budget`) are meant to fix it; rerun the
 lanes.
 
 Decided in the 2026-09-30 audit: the lite-07 drop case moved into

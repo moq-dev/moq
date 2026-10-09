@@ -258,25 +258,6 @@ impl Drop for TaskSet {
 	}
 }
 
-/// Spend all but `left` units of the current [`kio::coop::budget`] on reads that decide
-/// nothing, so the next poll runs out wherever its `left + 1`th unit falls.
-#[cfg(test)]
-pub(crate) fn leave_budget(left: usize) {
-	let channel = kio::Producer::new(());
-	let reader = channel.consume();
-	// Not `noop`, which the budget exempts.
-	let waiter = kio::Waiter::new(std::task::Waker::noop().clone());
-	let mut units = 0usize;
-	kio::coop::budget(|| {
-		while reader.poll(&waiter, |_| Poll::Ready(())).is_ready() {
-			units += 1;
-		}
-	});
-	for _ in 0..units.saturating_sub(left) {
-		let _ = reader.poll(&waiter, |_| Poll::Ready(()));
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use std::sync::{

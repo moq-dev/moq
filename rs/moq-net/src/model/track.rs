@@ -3433,9 +3433,8 @@ impl kio::Task for Fetching {
 			Poll::Pending => return Poll::Pending,
 		};
 		// An accept caches the group before it answers the channel, which may land
-		// between the track check above and this one: look again before failing. A probe,
-		// so the cooperative budget can't turn a hit into that failure.
-		match cached(&kio::Waiter::noop()) {
+		// between the track check above and this one: look again before failing.
+		match cached(waiter) {
 			Poll::Ready(res) => Poll::Ready(res),
 			Poll::Pending => Poll::Ready(Err(err)),
 		}
@@ -3577,10 +3576,7 @@ impl group::Expiry for GroupExpiry {
 			if let Some(reach) = successor.timestamp() {
 				break reach;
 			}
-			// Registers for the first frame; the timestamp is the verdict, so a yield to the
-			// cooperative budget cannot read as "not started".
-			let _ = successor.poll_started(waiter);
-			if successor.timestamp().is_none() {
+			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
 				return false;
 			}
 		};
@@ -3702,7 +3698,7 @@ impl Cursor {
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
-		F: FnOnce(&kio::Ref<'_, TrackState>) -> Poll<Result<R>>,
+		F: Fn(&kio::Ref<'_, TrackState>) -> Poll<Result<R>>,
 	{
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(res) => res,
@@ -3723,29 +3719,29 @@ impl Cursor {
 	/// group is only ever judged against content that could actually be served in its
 	/// place. Read fresh each poll, so a mid-stream [`Control::update`] applies
 	/// to the very next group, and shared across every candidate that poll walks off, so
-	/// discarding a backlog of N groups costs one scan rather than N. A plain read, like
-	/// [`Self::is_stale`], so it never yields to the cooperative budget; the track ending
-	/// surfaces as the error the caller was going to get anyway.
-	fn drift(&self, cap: Option<u64>, waiter: &kio::Waiter) -> Drift {
+	/// discarding a backlog of N groups costs one scan rather than N. Only ever
+	/// [`Poll::Ready`]; the track ending surfaces as the error the caller was going to
+	/// get anyway.
+	fn poll_drift(&self, cap: Option<u64>, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
 		let mut max_delay = Duration::default();
 		let _ = self.subscription.poll(waiter, |subscription| {
 			max_delay = subscription.max_delay;
 			Poll::<()>::Pending
 		});
-		let state = self.state.read();
-		Drift {
-			budget: clamp_max_delay(max_delay, state.max_age_bound()),
-			edge: state.drift_edge(cap),
-		}
+		self.poll(waiter, |state| {
+			Poll::Ready(Ok(Drift {
+				budget: clamp_max_delay(max_delay, state.max_age_bound()),
+				edge: state.drift_edge(cap),
+			}))
+		})
 	}
 
 	/// Whether the drift budget says to skip `group`, against a [`Drift`] already resolved
 	/// for this poll.
-	///
-	/// A plain read, not a poll: the caller has already taken `group` off its cursor, so
-	/// yielding to the cooperative budget here would drop it.
-	fn is_stale(&self, group: &group::Consumer, drift: Drift) -> bool {
-		self.state.read().is_stale(group.sequence, &drift.edge, drift.budget)
+	fn poll_stale(&self, group: &group::Consumer, drift: Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+		self.poll(waiter, |state| {
+			Poll::Ready(Ok(state.is_stale(group.sequence, &drift.edge, drift.budget)))
+		})
 	}
 
 	fn with_expiry(&self, group: group::Consumer) -> group::Consumer {
@@ -3780,7 +3776,7 @@ impl Cursor {
 			.retain(|sequence, group| *sequence >= min_sequence && watch(group));
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = self.drift(self.end_sequence, waiter);
+		let drift = ready!(self.poll_drift(self.end_sequence, waiter))?;
 
 		loop {
 			// Re-offer the lowest parked group back inside the cap once it rises,
@@ -3826,7 +3822,7 @@ impl Cursor {
 
 			// Drop a group the drift budget has given up on and keep scanning, so one
 			// poll walks a whole backlog off rather than handing it out group by group.
-			if self.is_stale(&consumer, drift) {
+			if ready!(self.poll_stale(&consumer, drift, waiter))? {
 				self.stale.add(consumer.content());
 				continue;
 			}
@@ -3867,50 +3863,38 @@ impl Cursor {
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
 	fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		let floor = self.next_sequence.max(self.min_sequence);
+		let mut floor = self.next_sequence.max(self.min_sequence);
 		let end = self.end_sequence;
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
-		let drift = self.drift(end, waiter);
+		let drift = ready!(self.poll_drift(end, waiter))?;
 
-		// Walk the backlog under one lock, so it spends one unit of the cooperative budget
-		// however many groups it skips: a poll per skip would yield partway through a long
-		// backlog and restart at `floor` every turn.
-		let mut convicted = Vec::new();
-		let res = self.poll(waiter, |state| {
-			let mut floor = floor;
-			loop {
-				let Some(producer) = ready!(state.poll_next_in_range(floor, end))? else {
-					return Poll::Ready(Ok(None));
-				};
-				if !state.is_stale(producer.sequence, &drift.edge, drift.budget) {
-					return Poll::Ready(Ok(Some(producer)));
-				}
-				floor = producer.sequence.saturating_add(1);
-				convicted.push(producer);
-			}
-		});
-
-		// Recorded even after a yield, since the next walk only re-snapshots them. Not
-		// counted yet: a conviction is not permanent (the budget can widen, the edge can be
-		// evicted), so the group may still be delivered. Consumed with the track guard
-		// released.
-		for producer in convicted {
+		let group = loop {
+			let Some(producer) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, end))?) else {
+				// Deliberately no flush of `seek_pending` here: only a delivery commit
+				// may count a conviction. This `None` can be an artifact of a floor
+				// that will lower again. A conviction never committed is dropped
+				// uncounted with the cursor.
+				return Poll::Ready(Ok(None));
+			};
 			let group = producer.consume();
-			self.seek_pending.insert(group.sequence, group.content());
-		}
 
-		let Some(producer) = ready!(res)? else {
-			// Deliberately no flush of `seek_pending` here: only a delivery commit
-			// may count a conviction. This `None` can be an artifact of a floor
-			// that will lower again. A conviction never committed is dropped
-			// uncounted with the cursor.
-			return Poll::Ready(Ok(None));
+			// Skip a group the budget has given up on and keep scanning, so one poll
+			// walks a whole backlog off rather than handing it out group by group.
+			if ready!(self.poll_stale(&group, drift, waiter))? {
+				// Not counted yet: a conviction is not permanent (the budget can widen,
+				// the edge can be evicted), so the group may still be delivered.
+				// Re-snapshot on every re-examination so the eventual count reflects the
+				// group's latest observed content.
+				self.seek_pending.insert(group.sequence, group.content());
+				floor = group.sequence.saturating_add(1);
+				continue;
+			}
+
+			// A conviction the budget walked back: the group is handed over after all,
+			// so it must never reach the stale count.
+			self.seek_pending.remove(&group.sequence);
+			break self.with_expiry(group);
 		};
-		let group = producer.consume();
-		// A conviction the budget walked back: the group is handed over after all,
-		// so it must never reach the stale count.
-		self.seek_pending.remove(&group.sequence);
-		let group = self.with_expiry(group);
 
 		self.next_sequence = group.sequence.saturating_add(1);
 		// The delivery commits everything the seek stepped over to reach this group.
@@ -8010,129 +7994,6 @@ mod test {
 			5
 		);
 		assert!(consumer.next_group().now_or_never().is_none(), "no more groups");
-	}
-
-	/// Read every group `poll` hands out, running out of budget at every position a
-	/// poll can: a yield must only postpone, so each group still arrives exactly once.
-	fn read_through_yields(
-		left: usize,
-		mut poll: impl FnMut(&kio::Waiter) -> Poll<Result<Option<group::Consumer>>>,
-	) -> Vec<u64> {
-		let waiter = kio::Waiter::new(std::task::Waker::noop().clone());
-		let mut read = Vec::new();
-		loop {
-			// Starved first, then a whole budget, so every read also makes progress.
-			let starved = kio::coop::budget(|| {
-				crate::util::leave_budget(left);
-				poll(&waiter)
-			});
-			let res = match starved {
-				Poll::Pending => kio::coop::budget(|| poll(&waiter)),
-				res => res,
-			};
-			match res {
-				Poll::Ready(Ok(Some(group))) => read.push(group.sequence),
-				Poll::Ready(Ok(None)) | Poll::Pending => return read,
-				Poll::Ready(Err(err)) => panic!("read failed: {err}"),
-			}
-		}
-	}
-
-	/// Fresh and parked groups alike survive a poll that runs out of budget part way.
-	#[test]
-	fn a_budget_yield_never_drops_a_group() {
-		for left in 0..4 {
-			for ordered in [false, true] {
-				let producer = track_producer("test", None);
-				let mut subscriber = producer.subscribe(replay());
-				subscriber.set_groups(..4);
-				for sequence in 0..8 {
-					let mut group = producer.create_group(group::Info { sequence }).unwrap();
-					group
-						.write_frame(Timestamp::from_millis(sequence).unwrap(), b"x".as_slice())
-						.unwrap();
-					group.finish().unwrap();
-				}
-
-				let (mut plain, mut sequenced) = match ordered {
-					true => (None, Some(subscriber.ordered())),
-					false => (Some(subscriber), None),
-				};
-				let mut read = Vec::new();
-				// The first half is fresh, the rest parks above the cap until it lifts.
-				for lift in [false, true] {
-					if lift {
-						plain.iter_mut().for_each(|sub| sub.set_groups(..));
-						sequenced.iter_mut().for_each(|sub| sub.set_groups(..));
-					}
-					read.extend(read_through_yields(left, |waiter| match (&mut plain, &mut sequenced) {
-						(Some(sub), _) => sub.poll_recv_group(waiter),
-						(_, Some(sub)) => sub.poll_next_group(waiter),
-						_ => unreachable!(),
-					}));
-				}
-				assert_eq!(read, (0..8).collect::<Vec<_>>(), "left {left}, ordered {ordered}");
-			}
-		}
-	}
-
-	/// A stale backlog longer than a whole budget still reaches the deliverable group.
-	#[test]
-	fn an_ordered_walk_past_a_long_stale_backlog_spends_once() {
-		let mut producer = track_producer("test", None);
-		// Retains the backlog the reader under test walks off.
-		let _retain = producer.subscribe(replay());
-		let mut ordered = producer.subscribe(None).ordered();
-		let backlog = 64;
-		for millis in 0..=backlog {
-			append_at(&mut producer, millis);
-		}
-
-		let waiter = kio::Waiter::new(std::task::Waker::noop().clone());
-		let res = kio::coop::budget(|| ordered.poll_next_group(&waiter));
-		let Poll::Ready(Ok(Some(group))) = res else {
-			panic!("one turn delivers the newest group");
-		};
-		assert_eq!(group.sequence, backlog);
-	}
-
-	/// A read the cooperative budget turns into `Pending` is not a stalled read, so the
-	/// drift budget leaves the group's buffered frame alone.
-	#[test]
-	fn a_budget_yield_is_not_a_stalled_read() {
-		for chunked in [false, true] {
-			let mut producer = track_producer("test", None);
-			let mut subscriber = producer.subscribe(None);
-			append_at(&mut producer, 0);
-			let mut group = subscriber.recv_group().now_or_never().unwrap().unwrap().expect("group");
-			// The live edge moves a whole budget past the group's only frame.
-			append_at(&mut producer, 1000);
-
-			let waiter = kio::Waiter::new(std::task::Waker::noop().clone());
-			let read = |group: &mut group::Consumer| -> Poll<Result<Option<bytes::Bytes>>> {
-				match chunked {
-					false => group
-						.poll_read_frame(&waiter)
-						.map_ok(|frame| frame.map(|frame| frame.payload)),
-					true => match ready!(group.poll_next_frame(&waiter)?) {
-						Some(mut frame) => frame.poll_read_chunk(&waiter),
-						None => Poll::Ready(Ok(None)),
-					},
-				}
-			};
-			let starved = kio::coop::budget(|| {
-				crate::util::leave_budget(0);
-				read(&mut group)
-			});
-			assert!(starved.is_pending(), "chunked {chunked}: the read yields: {starved:?}");
-
-			let res = kio::coop::budget(|| read(&mut group));
-			assert!(
-				matches!(&res, Poll::Ready(Ok(Some(payload))) if payload.as_ref() == b"x"),
-				"chunked {chunked}: the buffered frame is still delivered: {res:?}"
-			);
-			assert!(!group.latency_expired());
-		}
 	}
 
 	#[test]

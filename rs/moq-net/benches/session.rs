@@ -883,8 +883,8 @@ fn session(c: &mut Criterion) {
 		}),
 	);
 	delivery(c, "frame", [64, 1024, 16 * 1024].map(|frame| Shape { frame, ..base }));
-	// One session serving a backlog on each of its subscriptions: the serve loop that
-	// kio's cooperative budget bounds per turn.
+	// One session serving a backlog on each of its subscriptions: the serve loop that a
+	// `kio::coop::Budget` bounds per poll.
 	delivery(
 		c,
 		"burst",

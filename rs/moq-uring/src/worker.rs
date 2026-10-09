@@ -177,8 +177,7 @@ impl Worker {
 
 			let cx = Context::from_waker(&waker);
 			let waiter = self.park.hold(&cx);
-			// The root gets a turn like any task; `Tasks` budgets the spawned ones.
-			if let Poll::Ready(value) = kio::coop::budget(|| waiter.poll_future(future.as_mut())) {
+			if let Poll::Ready(value) = waiter.poll_future(future.as_mut()) {
 				return Ok(value);
 			}
 			// `Ready` just means the set is drained; the waiter stays
@@ -612,19 +611,16 @@ impl Handle {
 	/// with its terminal error.
 	pub async fn run<D: moq_net::time::Driver>(&self, mut driver: D) -> moq_net::Error {
 		let mut timer = self.timer();
-		// One cooperative budget per poll, outside the loop, like `moq_net::time::run`.
 		kio::wait(|waiter| {
-			kio::coop::budget(|| {
-				loop {
-					match driver.poll(Instant::now(), waiter) {
-						Ok(at) => timer.set(at),
-						Err(err) => return Poll::Ready(err),
-					}
-					if timer.poll(waiter).is_pending() {
-						return Poll::Pending;
-					}
+			loop {
+				match driver.poll(Instant::now(), waiter) {
+					Ok(at) => timer.set(at),
+					Err(err) => return Poll::Ready(err),
 				}
-			})
+				if timer.poll(waiter).is_pending() {
+					return Poll::Pending;
+				}
+			}
 		})
 		.await
 	}
