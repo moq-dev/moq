@@ -12,13 +12,12 @@ request. On any other request the token is ignored.
 
 ## Plan
 
-[#4675](https://github.com/moq-dev/moq/pull/4675) builds this and is in manual
-maintainer review. Decided 2026-10-09: an external moq-transport deployment
-needs per-request tokens with in-band renewal, so this quest keeps its full
-scope, reversing the 2026-10-08 shrink. The pieces that stand alone land first
-as the quests under Required; #4675 then rebases onto them and onto the line,
-which already routes draft-14/15/16 updates to their target (#4961), and drops
-its own copies.
+[#5148](https://github.com/moq-dev/moq/pull/5148) builds this, carrying
+Kyle Sletmoe's [#4675](https://github.com/moq-dev/moq/pull/4675) forward on a
+branch maintainers can push to. Decided 2026-10-09: an external moq-transport
+deployment needs per-request tokens with in-band renewal, so this quest keeps
+its full scope, reversing the 2026-10-08 shrink. The pieces that stand alone
+land first as the quests under Required; #5148 stacks on both.
 
 Decided, so review does not relitigate them:
 
@@ -45,36 +44,23 @@ Decided, so review does not relitigate them:
   closing with TOO_MANY_REQUEST_UPDATES (0x1B); earlier drafts keep a local
   guard that ends only the request. The sender keeps one renewal in flight per
   subscription.
-- **Drafts.** Renewal works on every supported draft, 14 through 16 included
-  (2026-10-09).
+- **Drafts.** Subscription renewal works on every supported draft, 14 through
+  16 included (2026-10-09). Namespace renewal is draft-17+, since earlier
+  drafts cannot update an announce in place.
 - `EXPIRED_AUTH_TOKEN` and `MALFORMED_AUTH_TOKEN` land with
   [Expired token error](/quest/m1/auth/expired-error.md) (2026-10-01 Q4).
 
-Fix in #4675 before it merges, each with a regression test. Found by a
-2026-10-09 read of head `29ed74e78`, not yet reproduced:
-
-- The publisher answers a token-less REQUEST_UPDATE while a renewal's verdict
-  is still pending (`handle_renewal_update`), so on draft-17+, where answers
-  are unkeyed, they go out of order.
-- The new 0x03 fields decode as `Option`, refusing a repeat the drafts allow;
-  [Request-token decode](/quest/m1/auth/request-token-decode.md) settles the
-  rule.
-- The admission sequence appears four times and the receiver renewal state
-  machine twice (publisher and subscriber); each becomes one helper.
-- `set_request_token` takes `setup::Token`, not encoded bytes, so a caller
-  cannot send an alias form. `auth::Request`'s `path`, `kind`, and
-  `token_kind` become one `Option`.
-- Setting a request token on a moq-lite session fails loud instead of doing
-  nothing.
-- Drop the outbound update sniffer in `ietf/adapter.rs`, which re-parses an ID
-  the sender already holds, and the unread `Peer::max_request_updates` and
-  `token::decode_value`.
+#5148 also fixes what a 2026-10-09 read of #4675 found: updates answered out
+of order behind a pending renewal, duplicated admission and renewal logic, a
+byte-encoded `set_request_token`, three parallel `Option`s on `auth::Request`,
+a request token silently ignored on moq-lite, an outbound update sniffer, and
+a refused renewal overloading `Error::Unsupported`.
 
 Open for review: one `requests()` consumer receives both session and request
 tokens, so an acceptor written for session tokens also answers request tokens.
 
-Public API: additive. moq-net gains `auth::RequestKind`, the request a
-`auth::Request` belongs to, `auth::Handle::set_request_token`, and
+Public API: additive. moq-net gains `auth::RequestKind`, `auth::Scope`,
+`auth::Request::scope`, `auth::Handle::set_request_token`, and
 `SessionError::TooManyRequestUpdates`. moq-tokio gains `Auth`,
 `Connection::auth`, `connect::Config::with_request_token`, and
 `server::Request::auth`. Wire: MAX_REQUEST_UPDATES (0x08) on draft-19+ and
