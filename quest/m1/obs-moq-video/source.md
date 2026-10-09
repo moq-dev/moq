@@ -18,7 +18,6 @@ Decided 2026-10-08: [Codecs](/quest/m1/ffi-shape/codec.md) lands first, so the s
 
 ## Required
 
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ before decode changes
 - [Codecs](/quest/m1/ffi-shape/codec.md) - the video decoder lands once, in the `video` namespace
 
 ## Related

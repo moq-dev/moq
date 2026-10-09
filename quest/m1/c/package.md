@@ -18,8 +18,8 @@ under the same names.
   hardcodes `<prefix>/lib`.
 - `doc/index.md` says the C library ships static and shared; say what the
   package actually ships.
-- A release workflow and nightly/CI jobs follow the C++ package's, pinned to the
-  fork tag that carries the C backend, `v0.11.0-kixelated.4+v0.32.2`
+- A release workflow and nightly/CI jobs follow the C++ package's, on the same
+  generator pin; `v0.11.0-kixelated.4+v0.32.2` already carries the C backend
   (`--lang c`).
 - Ship a hand-written `moq_shutdown` that calls `moq_ffi_shutdown`, then
   `moq_shutdown_dispatcher`.
@@ -32,4 +32,3 @@ under the same names.
 ## Required
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - moq-c 0.8.0 ships the reshaped moq-ffi, so C breaks once
-- [C++ package](/quest/m1/cpp/README.md) - the `cpp/moq` build, generator pin, and release workflow this mirrors (#4079)

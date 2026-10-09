@@ -15,6 +15,5 @@ One opt-in Use MoQ encoders choice publishes OBS video and audio through moq-vid
 
 ## Required
 
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ first
 - [Audio publishing](/quest/m1/obs-moq-video/audio-publish.md) - both adapters are needed for the combined opt-in UI
 - [Codecs](/quest/m1/ffi-shape/codec.md) - the encoder and decoder types land once, in the `audio` and `video` namespaces (decided in the 2026-10-05 audit)

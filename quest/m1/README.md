@@ -85,7 +85,12 @@ were done or not worth their cost.
 - [Claim epochs](/quest/m1/claim-epochs.md) - a lite-07 claim's answer carries its broadcast's epoch, so a worker restarting an output under an unchanged claim route is a new source; moved from m0 on 2026-10-08 since lite-07 is opt-in
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a release tarball, and adopted by the OBS plugin
+- [Client settings parity](/quest/m1/obs-client-config.md) - moq-ffi offers moq-c's client knobs, and the OBS Advanced settings get back the ones the C++ migration dropped
+- [Session report parity](/quest/m1/obs-session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
+- [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - `moq::Client` is the generated type itself and `moq::expected` is one type at every C++ standard
+- [First C++ package release](/quest/m1/cpp-release.md) - the OBS release path is dry-run nightly, then the first `cpp-v*` tag publishes the C++ archives and the first OBS plugin built on them
+- [Catalog switch](/quest/m1/obs-catalog-switch.md) - a catalog update keeps OBS playback running until the replacement track is decoding
+- [OBS stats race test](/quest/m1/obs-stats-race.md) - a test against the generated bindings proves a retired session's stats are refused
 - [OBS publishes under epochs](/quest/m1/obs-epoch.md) - each OBS Start Streaming is a fresh epoch, through the generated C++
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [The final libmoq release is the stub](/quest/m1/libmoq-final-release.md) - the release that lets `rs/libmoq` go
