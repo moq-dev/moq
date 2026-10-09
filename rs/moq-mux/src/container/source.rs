@@ -234,7 +234,7 @@ impl ExportSource {
 	}
 
 	/// The underlying consumer's playhead generation, or 0 until the subscription resolves:
-	/// it counts skipped groups as well as restarts ([`Consumer::discontinuity`]).
+	/// it counts skipped groups as well as markers ([`Consumer::discontinuity`]).
 	pub fn skips(&self) -> u64 {
 		match &self.state {
 			SourceState::Active(consumer) => consumer.discontinuity(),
@@ -265,16 +265,16 @@ impl ExportSource {
 		}
 	}
 
-	/// How many times the publisher declared its timeline restarted, or 0 until the
-	/// subscription resolves.
+	/// How many marker groups the publisher declared, each a pause or forward break in its
+	/// timeline, or 0 until the subscription resolves.
 	///
-	/// See [`Consumer::restarts`]. Sample it alongside each frame returned by
+	/// See [`Consumer::markers`]. Sample it alongside each frame returned by
 	/// [`poll_read`](Self::poll_read): the frame read while the counter changes is the
-	/// first on the new timeline, so anything anchored on the media clock has to
-	/// re-anchor to it. A skipped group is not a restart: the timeline carries on.
-	pub fn restarts(&self) -> u64 {
+	/// first past the break, so anything anchored on the media clock has to re-anchor to
+	/// it. A skipped group is not a marker: the timeline carries on.
+	pub fn markers(&self) -> u64 {
 		match &self.state {
-			SourceState::Active(consumer) => consumer.restarts(),
+			SourceState::Active(consumer) => consumer.markers(),
 			_ => 0,
 		}
 	}

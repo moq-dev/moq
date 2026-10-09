@@ -24,6 +24,9 @@ use moq_net::AsPath;
 pub struct Source {
 	origin: moq_net::origin::Consumer,
 	path: moq_net::PathOwned,
+	/// The publisher instance requests for this path are pinned to, once an export resolved
+	/// it: a request never lands on a replacement, which would splice two broadcasts.
+	epoch: Option<moq_net::Epoch>,
 }
 
 impl Source {
@@ -38,7 +41,15 @@ impl Source {
 		Self {
 			origin,
 			path: path.as_path().to_owned(),
+			epoch: None,
 		}
+	}
+
+	/// This source with every request for its own path pinned to `epoch`, the instance an
+	/// export resolved. `None` (an epochless route) leaves requests unpinned.
+	pub(crate) fn pinned(mut self, epoch: Option<moq_net::Epoch>) -> Self {
+		self.epoch = epoch;
+		self
 	}
 
 	/// Resolve and subscribe to the catalog broadcast (the one at this source's path).
@@ -59,18 +70,15 @@ impl Source {
 		crate::catalog::Consumer::new(&broadcast, format).await
 	}
 
-	/// Wait for the broadcast to come back after `ended`, the one an export was reading, closes.
-	///
-	/// A broadcast that stays up never returns, so a clean catalog end that leaves it announced
-	/// waits here until the caller's own deadline. Bound the wait with a timeout.
-	pub async fn returned(&self, ended: &moq_net::broadcast::Consumer) -> crate::Result<moq_net::broadcast::Consumer> {
-		ended.closed().await;
-		Ok(self.origin.routed_broadcast(&self.path).await?)
-	}
-
 	/// Begin resolving the catalog broadcast (the one at this source's path).
 	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Requesting> {
-		self.origin.request_broadcast(&self.path, None)
+		self.request_path(&self.path)
+	}
+
+	/// Begin resolving `path`, pinned to this source's epoch when it names its own broadcast.
+	fn request_path(&self, path: &moq_net::PathOwned) -> kio::Pending<moq_net::origin::Requesting> {
+		let epoch = self.epoch.clone().filter(|_| *path == self.path);
+		self.origin.request_broadcast(path, epoch)
 	}
 
 	/// Resolve a rendition's optional broadcast reference to an origin path.
@@ -110,7 +118,7 @@ impl Source {
 		&self,
 		rel: Option<&moq_net::path::Relative<'_>>,
 	) -> crate::Result<kio::Pending<moq_net::origin::Requesting>> {
-		Ok(self.origin.request_broadcast(&self.target(rel)?, None))
+		Ok(self.request_path(&self.target(rel)?))
 	}
 
 	/// The skipping counterpart to [`Self::request`], returning `None` when `rel` walks above
@@ -123,7 +131,7 @@ impl Source {
 		&self,
 		rel: Option<&moq_net::path::Relative<'_>>,
 	) -> Option<kio::Pending<moq_net::origin::Requesting>> {
-		Some(self.origin.request_broadcast(&self.resolve_reference(rel)?, None))
+		Some(self.request_path(&self.resolve_reference(rel)?))
 	}
 
 	/// Remove renditions whose broadcast reference escapes above the origin root.
@@ -382,34 +390,30 @@ mod tests {
 		assert!(binding.broadcast().await.is_err());
 	}
 
+	/// A source pinned to an epoch never resolves its path to a replacement, so an export's
+	/// later requests cannot splice another instance into it. Other paths stay unpinned.
 	#[tokio::test]
-	async fn returned_waits_for_a_new_broadcast_after_the_old_one_ends() {
+	async fn a_pinned_source_refuses_a_replacement() {
 		let origin = produce_origin();
-		let first = origin.publish("live", Default::default()).unwrap();
+		let first = moq_net::Epoch::mint();
+		let _old = origin
+			.publish("live", moq_net::origin::Route::default().with_epoch(first.clone()))
+			.unwrap();
+		let _sibling = origin.publish("sibling", Default::default()).unwrap();
 		settle().await;
-		let source = Source::new(origin.consume(), "live");
-		let ended = source.broadcast().await.unwrap();
+		let source = Source::new(origin.consume(), "live").pinned(Some(first));
+		source.broadcast().await.expect("the pinned instance resolves");
 
-		let returned = source.returned(&ended);
-		tokio::pin!(returned);
-		tokio::select! {
-			biased;
-			_ = &mut returned => panic!("the broadcast is still up"),
-			_ = settle() => {}
-		}
-
-		// Gone, and nothing serves the path yet.
-		drop(first);
-		tokio::select! {
-			biased;
-			_ = &mut returned => panic!("nothing has published the path again"),
-			_ = settle() => {}
-		}
-
-		let _second = origin.publish("live", Default::default()).unwrap();
-		let back = returned.await.unwrap();
-		assert!(!back.is_closed());
-		assert!(!back.is_clone(&ended));
+		let _new = origin
+			.publish("live", moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.unwrap();
+		settle().await;
+		assert!(source.broadcast().await.is_err(), "the replacement is refused");
+		let sibling = Relative::new("./sibling");
+		source
+			.resolve(Some(&sibling))
+			.await
+			.expect("another path is not pinned");
 	}
 
 	#[tokio::test]

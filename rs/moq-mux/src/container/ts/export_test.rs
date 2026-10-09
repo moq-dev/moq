@@ -6825,9 +6825,9 @@ async fn a_late_join_starts_at_the_live_edge() {
 }
 
 /// Publish a Legacy AAC rendition named `name`.
-fn aac_rendition(
+fn aac_rendition<E: crate::catalog::hang::CatalogExt>(
 	broadcast: &mut moq_net::broadcast::Producer,
-	catalog: &mut crate::catalog::Producer,
+	catalog: &mut crate::catalog::Producer<E>,
 	name: &str,
 ) -> Producer<HangContainer> {
 	let track = broadcast
@@ -6925,96 +6925,309 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	assert_eq!(pes_count(&frames), 20 + 15, "every frame of both tracks went out");
 }
 
-/// A broadcast that ends and is published again carries on in the same export: the
-/// returned catalog resubscribes the program's tracks, the clock break is flagged once,
-/// and the PAT/PMT go out again for a receiver re-acquiring after the gap. Both ways a
-/// broadcast ends, a clean finish and a drop, resume the same way.
-async fn resume_after(finish: bool) {
+/// Publish an empty catalog at `live` under `route`.
+fn publish_live<E: crate::catalog::hang::CatalogExt>(
+	origin: &moq_net::origin::Producer,
+	route: moq_net::origin::Route,
+) -> (moq_net::broadcast::Producer, crate::catalog::Producer<E>) {
+	let mut broadcast = origin.publish("live", route).unwrap();
+	let config = crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<E>::default());
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+	(broadcast, catalog)
+}
+
+/// Publish a Legacy H.264 rendition named `name`, described out of band.
+fn h264_rendition<E: crate::catalog::hang::CatalogExt>(
+	broadcast: &mut moq_net::broadcast::Producer,
+	catalog: &mut crate::catalog::Producer<E>,
+	name: &str,
+) -> Producer<HangContainer> {
+	let track = broadcast
+		.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut cfg = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: false,
+	});
+	cfg.container = Container::Legacy;
+	cfg.description =
+		Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
+	catalog.modify().unwrap().video.renditions.insert(name.to_string(), cfg);
+	Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
+}
+
+/// Write one 25 fps video frame at `ms`, a keyframe opening a group every fifth.
+fn write_h264(producer: &mut Producer<HangContainer>, ms: u64) {
+	let keyframe = ms.is_multiple_of(200);
+	if keyframe && ms > 0 {
+		producer.cut(None).unwrap();
+	}
+	let slice = if keyframe { [0x65u8; 64] } else { [0x41u8; 64] };
+	producer
+		.write(Frame {
+			timestamp: Timestamp::from_millis(60_000 + ms).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[&slice]),
+			keyframe,
+		})
+		.unwrap();
+}
+
+/// Every PAT in `frames`: its version and the PMT PID it lists.
+fn pats(frames: &[Frame]) -> Vec<(u8, u16)> {
+	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut out = Vec::new();
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pat(pat)) = packet.payload {
+			out.push((pat.version_number.as_u8(), pat.table[0].program_map_pid.as_u16()));
+		}
+	}
+	out
+}
+
+/// Every PMT in `frames`: its version and the stream types it lists.
+fn pmts(frames: &[Frame]) -> Vec<(u8, Vec<StreamType>)> {
+	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut out = Vec::new();
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			let types = pmt.es_info.iter().map(|es| es.stream_type).collect();
+			out.push((pmt.version_number.as_u8(), types));
+		}
+	}
+	out
+}
+
+/// The PIDs whose first packet in `frames` does not flag a discontinuity.
+fn unflagged(frames: &[Frame]) -> Vec<u16> {
+	let mut seen = std::collections::HashSet::new();
+	let mut out = Vec::new();
+	for packet in frames.iter().flat_map(|f| f.payload.as_chunks::<188>().0.iter()) {
+		let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+		if pid == 0x1fff || !seen.insert(pid) {
+			continue;
+		}
+		if !(packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0) {
+			out.push(pid);
+		}
+	}
+	out
+}
+
+/// The same instance back after every route went carries on in the same export, under the
+/// program already announced: the PSI keeps its version, and nothing flags a break across a
+/// gap the clock spans. Both ways a broadcast ends, a clean finish and a drop, continue alike.
+async fn same_instance_returns(finish: bool) {
 	let origin = crate::source::produce_origin();
 	let source = crate::Source::new(origin.consume(), "live");
-	let publish = || {
-		let mut broadcast = origin.publish("live", Default::default()).unwrap();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		(broadcast, catalog)
-	};
+	let epoch = moq_net::Epoch::mint();
+	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
 
-	let (mut broadcast, mut catalog) = publish();
+	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
-	let ended = source.broadcast().await.unwrap();
 	let mut export = Export::new(source.clone())
 		.await
 		.unwrap()
 		.with_delay(RECORDING_MAX_AGE)
 		.with_replay();
+	let start = tokio::time::Instant::now();
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
 	}
-	let mut before = drain_frames(&mut export).await;
+	let mut frames = drain_frames(&mut export).await;
 	if finish {
 		track.finish().unwrap();
 		catalog.finish().unwrap();
 	}
 	drop((broadcast, catalog, track));
 	let (rest, end) = drain_to_end(&mut export).await;
-	before.extend(rest);
+	frames.extend(rest);
 	assert_eq!(end.is_ok(), finish, "a finish ends cleanly and a drop fails: {end:?}");
 
-	// The old broadcast ends before the publisher comes back: a path still routed is one
-	// broadcast, so a publisher back before then would resume it instead.
-	ended.closed().await;
-
-	// The returned catalog lists the track only in its second snapshot, and the restarted
-	// publisher's clock starts over.
-	let (mut broadcast, mut catalog) = publish();
+	// Back under the same epoch a second later, its media as far on as the wall clock, its
+	// catalog listing the track only in its second snapshot.
+	tokio::time::sleep(Duration::from_secs(1)).await;
+	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
-	source.returned(&ended).await.unwrap();
-	export.resume().await.unwrap();
-	let mut after = drain_frames(&mut export).await;
-	assert!(after.is_empty(), "nothing to carry before the track is listed");
+	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	let mut export = export.follow(back).await.unwrap();
+	frames.extend(drain_frames(&mut export).await);
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
-	for ms in (0..200).step_by(20) {
+	let resumed = start.elapsed().as_millis() as u64;
+	for ms in (resumed..resumed + 200).step_by(20) {
 		write_aac(&mut track, ms);
 	}
-	after.extend(drain_frames(&mut export).await);
+	frames.extend(drain_frames(&mut export).await);
 	track.finish().unwrap();
 	catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	end.unwrap();
+
+	assert_eq!(pes_count(&frames), 20, "every frame of both spans went out");
+	assert_eq!(count_discontinuity(&frames), 0, "a gap the clock spans is no break");
+	assert_eq!(export.discontinuity(), 0);
+	assert!(
+		pats(&frames).iter().all(|&(version, _)| version == 0),
+		"the PAT keeps its version"
+	);
+	assert!(
+		pmts(&frames).iter().all(|(version, _)| *version == 0),
+		"the PMT keeps its version"
+	);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_same_instance_continues_after_a_finish() {
+	same_instance_returns(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_same_instance_continues_after_a_drop() {
+	same_instance_returns(false).await;
+}
+
+/// Following another instance is a full program switch, even while the old one stays up and
+/// keeps writing: a new PMT version from the replacement's catalog, whatever its codecs and
+/// tracks, every PID's first packet flagging the break, each stream starting on a keyframe,
+/// and nothing of the old broadcast after it.
+#[tokio::test(start_paused = true)]
+async fn another_instance_is_a_full_program_switch() {
+	let origin = crate::source::produce_origin();
+	let source = crate::Source::new(origin.consume(), "live");
+	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+
+	let (mut old, mut old_catalog) = publish_live::<()>(&origin, route());
+	let mut old_audio = aac_rendition(&mut old, &mut old_catalog, "a.aac");
+	let mut export = Export::new(source.clone())
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut old_audio, ms);
+	}
+	let before = drain_frames(&mut export).await;
+	assert_eq!(
+		pmts(&before).last().map(|(_, types)| types.clone()),
+		Some(vec![StreamType::AdtsAac])
+	);
+
+	let (mut new, mut new_catalog) = publish_live::<()>(&origin, route());
+	let mut video = h264_rendition(&mut new, &mut new_catalog, "video.avc1");
+	let mut new_audio = aac_rendition(&mut new, &mut new_catalog, "b.aac");
+	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let mut export = export.follow(replacement).await.unwrap();
+
+	// The old instance carries on ten seconds ahead, where none of it may land.
+	for ms in (10_000..10_200).step_by(20) {
+		write_aac(&mut old_audio, ms);
+	}
+	for ms in (0..400).step_by(40) {
+		write_h264(&mut video, ms);
+	}
+	for ms in (0..400).step_by(20) {
+		write_aac(&mut new_audio, ms);
+	}
+	let mut after = drain_frames(&mut export).await;
+	video.finish().unwrap();
+	new_audio.finish().unwrap();
+	new_catalog.finish().unwrap();
 	let (rest, end) = drain_to_end(&mut export).await;
 	after.extend(rest);
 	end.unwrap();
 
-	assert_eq!(export.discontinuity(), 1, "the return is one break");
-	assert_eq!(count_discontinuity(&before), 0);
-	assert_eq!(count_discontinuity(&after), 1, "the break is flagged once");
-	assert!(count_pid(&after, 0x0000) >= 1, "PAT re-emitted after the return");
-	assert_eq!(pes_count(&after), 10, "the returned broadcast's frames all went out");
+	assert!(pats(&before).iter().all(|&(version, _)| version == 0));
+	assert!(pmts(&before).iter().all(|(version, _)| *version == 0));
+	assert!(!pats(&after).is_empty() && pats(&after).iter().all(|&(version, _)| version == 1));
+	let tables = pmts(&after);
+	assert!(!tables.is_empty());
+	for (version, types) in tables {
+		assert_eq!(version, 1, "the replacement's PMT is a new version");
+		assert_eq!(types, [StreamType::AdtsAac, StreamType::H264]);
+	}
+	assert_eq!(
+		unflagged(&after),
+		Vec::<u16>::new(),
+		"every PID's first packet flags the break"
+	);
+	assert_eq!(export.discontinuity(), 1, "a pacing caller sees the new clock");
+
+	let bytes: Vec<u8> = after.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video_pts, audio_pts) = collect_pes_pts(&bytes);
+	assert_eq!(video_pts.first(), Some(&(60_000 * 90)), "the video starts on its keyframe");
+	assert_eq!(video_pts.len(), 10);
+	assert!(
+		audio_pts.iter().all(|&pts| pts < 60_400 * 90),
+		"nothing of the old broadcast after the break: {audio_pts:?}"
+	);
 }
 
+/// A switch that keeps the transport stream ID but moves the PMT advances the PAT version,
+/// or a demux caching the PAT by version keeps reading the old PMT PID.
 #[tokio::test(start_paused = true)]
-async fn resume_after_a_finish() {
-	resume_after(true).await;
-}
+async fn a_switch_moving_the_pmt_advances_the_pat() {
+	let origin = crate::source::produce_origin();
+	let source = crate::Source::new(origin.consume(), "live");
+	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let publish = |pmt_pid: u16| {
+		let (mut broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
+		let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+		catalog.modify().unwrap().ext.mpegts.program = Some(tscat::Program {
+			transport_stream_id: 7,
+			program_number: 1,
+			pmt_pid,
+		});
+		(broadcast, catalog, track)
+	};
 
-#[tokio::test(start_paused = true)]
-async fn resume_after_a_drop() {
-	resume_after(false).await;
+	let (_old, _old_catalog, mut old_track) = publish(0x100);
+	let mut export = Export::with_ts(source.clone(), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut old_track, ms);
+	}
+	let before = drain_frames(&mut export).await;
+
+	let (_new, mut new_catalog, mut new_track) = publish(0x200);
+	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let mut export = export.follow(replacement).await.unwrap();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut new_track, ms);
+	}
+	let mut after = drain_frames(&mut export).await;
+	new_track.finish().unwrap();
+	new_catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	after.extend(rest);
+	end.unwrap();
+
+	assert!(!pats(&before).is_empty() && pats(&before).iter().all(|&pat| pat == (0, 0x100)));
+	let after = pats(&after);
+	assert!(!after.is_empty());
+	assert!(after.iter().all(|&pat| pat == (1, 0x200)), "{after:?}");
 }
 
 /// The stats count only output that was returned. A frame the muxer refuses fails the export
-/// with the span before it queued but never returned, and the resume discards it.
+/// with the span before it queued but not yet returned, and the same instance coming back
+/// carries on with it.
 #[tokio::test(start_paused = true)]
-async fn export_stats_skip_output_a_failure_discards() {
+async fn export_stats_count_only_returned_output() {
 	let origin = crate::source::produce_origin();
 	let source = crate::Source::new(origin.consume(), "live");
-	let publish = || {
-		let mut broadcast = origin.publish("live", Default::default()).unwrap();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		(broadcast, catalog)
-	};
+	let epoch = moq_net::Epoch::mint();
+	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
 	let units = |stats: stats::Export| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
 
-	let (mut broadcast, mut catalog) = publish();
+	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
-	let ended = source.broadcast().await.unwrap();
 	let mut export = Export::new(source.clone()).await.unwrap().with_delay(RECORDING_MAX_AGE);
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
@@ -7035,14 +7248,11 @@ async fn export_stats_skip_output_a_failure_discards() {
 	assert_eq!(units(export.stats()), pes_count(&frames));
 
 	drop((broadcast, catalog, track));
-	// The old broadcast ends before the publisher comes back: a path still routed is one
-	// broadcast, so a publisher back before then would resume it instead.
-	ended.closed().await;
-	let (mut broadcast, mut catalog) = publish();
+	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
-	source.returned(&ended).await.unwrap();
-	export.resume().await.unwrap();
-	for ms in (0..200).step_by(20) {
+	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	let mut export = export.follow(back).await.unwrap();
+	for ms in (1_000..1_200).step_by(20) {
 		write_aac(&mut track, ms);
 	}
 	frames.extend(drain_frames(&mut export).await);
@@ -7051,11 +7261,7 @@ async fn export_stats_skip_output_a_failure_discards() {
 	let (rest, end) = drain_to_end(&mut export).await;
 	frames.extend(rest);
 	end.unwrap();
-	assert_eq!(
-		units(export.stats()),
-		pes_count(&frames),
-		"the discarded span never counts"
-	);
+	assert_eq!(units(export.stats()), pes_count(&frames));
 }
 
 /// Export 25 fps video and two AAC tracks for [`TICKS`] video frames, the video and the first

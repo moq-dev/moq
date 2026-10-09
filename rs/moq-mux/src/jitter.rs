@@ -732,19 +732,6 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	pub fn out_of_tolerance(&self) -> u64 {
 		self.out_of_tolerance
 	}
-
-	/// Drop every queued frame and the clock, so the next frame starts it afresh.
-	pub fn clear(&mut self) {
-		self.clock = None;
-		self.previous = None;
-		self.leads.clear();
-		self.acquire = None;
-		self.tracks.clear();
-		self.horizon = None;
-		self.released = false;
-		self.steer = Steer::default();
-		self.timer = None;
-	}
 }
 
 /// `nanos` after `at`, or before it if negative, if an instant holds it.
@@ -1452,20 +1439,5 @@ mod tests {
 		assert_eq!(buffer.push(2, arrival(late, 40, "a40")).unwrap(), Push::Queued);
 		assert_eq!(due(&mut buffer), ["a40"]);
 		assert_eq!(buffer.dropped(), 0);
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn clear_starts_a_fresh_clock() {
-		let start = Instant::now();
-		let mut buffer = Buffer::new(DELAY);
-		buffer.push(1, arrival(start, 5_000, "old")).unwrap();
-		buffer.clear();
-		assert!(buffer.is_empty());
-
-		tokio::time::advance(Duration::from_secs(1)).await;
-		let now = Instant::now();
-		assert_eq!(buffer.push(1, arrival(now, 0, "new")).unwrap(), Push::Queued);
-		tokio::time::advance(DELAY).await;
-		assert_eq!(due(&mut buffer), ["new"]);
 	}
 }
