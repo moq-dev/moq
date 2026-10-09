@@ -384,33 +384,13 @@ export class Producer {
 	}
 
 	/**
-	 * Insert a track that is served directly, without an on-demand request round-trip.
-	 *
-	 * It continues the name's group and datagram sequences from any earlier track of the name in
-	 * this broadcast. Throws if an open track or a request already holds the name, or if the
-	 * broadcast cannot remember another track name's sequences.
-	 */
-	insertTrack(track: track.Producer): void {
-		if (this.#state.closed.peek() !== undefined) {
-			throw new Error("broadcast is closed");
-		}
-
-		// One logical track per name: an open inserted track or a live request already serves it.
-		// A queued request's subscribers wait on its own producer, so only createTrack can answer it.
-		const live = [this.#state.tracks.get(track.name), this.#state.requests.get(track.name)];
-		if (live.some((existing) => existing && existing.closed.peek() === undefined)) {
-			throw new Error(`duplicate track: ${track.name}`);
-		}
-
-		hooks.bindSequence(track, this.#state.sequences.admit(track.name));
-		adopt(this.#state, track);
-	}
-
-	/**
 	 * Create a track, insert it into the broadcast, and return its producer.
 	 *
 	 * A request still queued for the name is answered with this track, so its subscribers read
-	 * from the returned producer. Otherwise it behaves as {@link insertTrack}.
+	 * from the returned producer. A request a handler has already taken stays a duplicate.
+	 * The track continues the name's group and datagram sequences from any earlier track of the
+	 * name in this broadcast. Throws if an open track or a live request already holds the name,
+	 * or if the broadcast cannot remember another track name's sequences.
 	 */
 	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {
@@ -428,8 +408,16 @@ export class Producer {
 			return producer;
 		}
 
+		// One logical track per name: an open track or a live request already serves it.
+		// A request a handler already pulled stays duplicate, as in Rust.
+		const live = [this.#state.tracks.get(name), this.#state.requests.get(name)];
+		if (live.some((existing) => existing && existing.closed.peek() === undefined)) {
+			throw new Error(`duplicate track: ${name}`);
+		}
+
 		const producer = new track.Producer(name).accept(info);
-		this.insertTrack(producer);
+		hooks.bindSequence(producer, this.#state.sequences.admit(name));
+		adopt(this.#state, producer);
 		return producer;
 	}
 

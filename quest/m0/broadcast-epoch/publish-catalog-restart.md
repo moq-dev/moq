@@ -22,9 +22,9 @@ re-announce. `js/publish/src/broadcast.ts` mints the epoch once and keeps the
 publisher across unannounce and announce on purpose, which points at
 continuing the sequence.
 
-Decided 2026-10-08: the `@moq/net` fix landed separately: `createTrack` and
-`insertTrack` now continue a name's sequences within a broadcast, so this
-quest does not fix `createTrack` itself. Run the test against it and fix
-`@moq/publish` only if it still restarts.
+Decided 2026-10-08: the `@moq/net` fix landed separately: `createTrack` now
+continues a name's sequences within a broadcast, so this quest does not fix
+`createTrack` itself. Run the test against it and fix `@moq/publish` only if
+it still restarts.
 
 Public API: none expected. Wire: none.
