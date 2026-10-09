@@ -364,21 +364,19 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 /// It belongs to one [`Input`](super::Input), whose offset the importer handed it shifts its
 /// timestamps by. Clones share that input.
 pub struct Reserved<E: CatalogExt = ()> {
-	catalog: Producer<E>,
 	input: super::Input<E>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
 	pub(super) fn new(input: super::Input<E>) -> Self {
-		let catalog = input.catalog.clone();
-		catalog.add_reserver();
-		Self { catalog, input }
+		input.catalog.add_reserver();
+		Self { input }
 	}
 
 	/// Track properties for a media track under this catalog, carrying any retention it declares.
 	/// See [`Producer::track_info`](super::Producer::track_info).
 	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
-		self.catalog.track_info(priority)
+		self.input.catalog.track_info(priority)
 	}
 
 	/// Reserve a rendition of config type `C` under `name`, returning its internal owner.
@@ -446,12 +444,12 @@ impl<E: CatalogExt> Reserved<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.init(track.name())?;
-		self.catalog.media(track, container, rendition, config.into())
+		self.input.catalog.media(track, container, rendition, config.into())
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
 	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
-		self.catalog.timestamp(hint)
+		self.input.catalog.timestamp(hint)
 	}
 
 	/// The underlying catalog [`Producer`], for edits that outlive this reservation.
@@ -460,7 +458,7 @@ impl<E: CatalogExt> Reserved<E> {
 	/// track removals after its initial set is declared) while the reservation itself is dropped to
 	/// open the gate. The returned handle does not gate: only live `Reserved`s do.
 	pub(crate) fn producer(&self) -> Producer<E> {
-		self.catalog.clone()
+		self.input.catalog.clone()
 	}
 
 	/// The input this reservation belongs to, which outlives it without gating the catalog.
@@ -473,17 +471,13 @@ impl<E: CatalogExt> Reserved<E> {
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		self.catalog.add_reserver();
-		Self {
-			catalog: self.catalog.clone(),
-			input: self.input.clone(),
-		}
+		Self::new(self.input.clone())
 	}
 }
 
 impl<E: CatalogExt> Drop for Reserved<E> {
 	fn drop(&mut self) {
-		self.catalog.release_reserver();
+		self.input.catalog.release_reserver();
 	}
 }
 
@@ -528,7 +522,7 @@ pub(crate) type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 /// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
-		Self::owned(reserved.catalog.clone(), Some(reserved), name)
+		Self::owned(reserved.producer(), Some(reserved), name)
 	}
 
 	pub(super) fn live(catalog: Producer<E>, name: String) -> crate::Result<Self> {

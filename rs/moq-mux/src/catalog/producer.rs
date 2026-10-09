@@ -495,8 +495,14 @@ impl<E: CatalogExt> Producer<E> {
 		wall: Option<std::time::SystemTime>,
 	) -> crate::Result<super::Offset> {
 		let mut guard = self.modify()?;
-		// Another clone of the input may have anchored first; the lock orders them.
+		// Another clone of the input may have anchored first; the lock orders them. A placement
+		// is refused then, since it would not land where it says.
 		if let Some(offset) = input.get() {
+			if wall.is_some() {
+				return Err(crate::Error::UnmappableTimestamp(
+					"the input already anchored on its first frame".to_string(),
+				));
+			}
 			return Ok(*offset);
 		}
 

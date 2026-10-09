@@ -135,8 +135,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// SPTS scope: one clock for the whole input. Under MPTS every program's video
 	/// advances it, so a cue could be stamped with another program's PTS.
 	last_pts: Option<Timestamp>,
-	/// The first PES's PTS on the catalog clock: the section clock until video starts
-	/// `last_pts`, so a cue ahead of the first picture lands on the media timeline, not at zero.
+	/// The first PES's PTS on the catalog clock since the last timebase break: the section clock
+	/// until video starts `last_pts`, so a cue ahead of the first picture lands on the media
+	/// timeline, not at zero.
 	start_pts: Option<Timestamp>,
 	media_unwrap: PtsUnwrap,
 	/// The program number chosen by [`with_program`](Self::with_program). `None` imports the
@@ -860,6 +861,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		self.media_unwrap.discontinuity();
 		self.last_pts = None;
+		self.start_pts = None;
 		self.published = false;
 		self.liveness.discontinuity();
 		if self.mux_rate.discontinuity() {
@@ -6278,9 +6280,11 @@ pub(super) mod test {
 	fn timebase_reset_clears_section_clock() {
 		let (_, _, mut import) = two_stream_import();
 		import.last_pts = Some(Timestamp::from_micros(45_000_000).unwrap());
+		import.start_pts = Some(Timestamp::from_micros(40_000_000).unwrap());
 		import.published = true;
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
 		assert!(import.last_pts.is_none(), "section clock belongs to the old timebase");
+		assert!(import.start_pts.is_none(), "so does its fallback ahead of video");
 	}
 
 	#[tokio::test(start_paused = true)]

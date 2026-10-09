@@ -44,11 +44,6 @@ impl<E: CatalogExt> Input<E> {
 	/// frame, this places the catalog's clock if it is not yet fixed and offsets onto it otherwise.
 	/// Refused once this input has an offset.
 	pub fn place(&self, pts: moq_net::Timestamp, wall: std::time::SystemTime) -> crate::Result<()> {
-		if self.offset.get().is_some() {
-			return Err(crate::Error::UnmappableTimestamp(
-				"the input already anchored on its first frame".to_string(),
-			));
-		}
 		self.catalog.clone().anchor(&self.offset, pts, Some(wall))?;
 		Ok(())
 	}
