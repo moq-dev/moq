@@ -40,6 +40,16 @@ added this quest). Re-planned from issue #703, whose stub quest the
   default) picks WebGPU where supported, else Canvas2D, and logs the choice.
   An explicit `"webgpu"` where it is missing refuses loudly; only `"auto"`
   falls back.
+- Selection happens once, before the renderer touches the canvas, so a
+  canvas only ever gets the one context it will keep. WebGPU counts as
+  supported when `navigator.gpu` exists, `requestAdapter()` returns an
+  adapter that is not a software fallback (`adapter.info.isFallbackAdapter`),
+  `requestDevice()` succeeds, and a 1x1 `VideoFrame` imports through
+  `importExternalTexture` (a try/catch probe; Firefox Android lacks it).
+  Only then does the renderer call `getContext("webgpu")`, else
+  `getContext("2d")`. There is no runtime fallback: a renderer never switches
+  paths on a canvas it already drew to. Decided 2026-10-08. Rejected: WebGPU
+  only, with no Canvas2D.
 - Device loss: request a new device and rebuild the pipeline. A canvas that
   acquired a `webgpu` context never returns a `2d` one, and the canvas is
   caller-owned, so when no adapter comes back the renderer fails loud:
