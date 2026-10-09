@@ -51,7 +51,14 @@ publisher that stays alive holds the export on a replaced broadcast.
   deleting `--linger`. Exiting does not hide the switch from a receiver
   downstream of `tsp`, it only drops the flags.
 - moq-srt's egress (`rs/moq-srt/src/ts.rs`) gets the same two options and keeps
-  its SRT connection across a stitch.
+  its SRT connection across a stitch. Its linger defaults to 0, like the CLI:
+  an `End` that nothing replaces within the linger closes the SRT stream, so
+  a finished broadcast never leaves a caller connected indefinitely.
+- Open, decide at start: how the PMT version crosses to the new `Export`,
+  since both callers live outside `moq-mux`. Recommended: a method that
+  consumes the old export and returns its successor on a new source (such as
+  `Export::stitch(self, source)`), so the version never becomes a public knob.
+  Alternative: a builder option seeding the PSI version.
 - Decided: the TS output has no epoch. A re-import of an export is out of
   scope.
 - Fold in the stale wording from the marker audit: a marker group only
@@ -69,13 +76,13 @@ publisher that stays alive holds the export on a replaced broadcast.
     stream at a keyframe, and writes nothing from the old broadcast after the
     break.
   - Update #4504's relay-backed CLI tests, and add the stitch case for SRT
-    egress.
+    egress, plus an unreplaced `End` closing the SRT stream at the linger.
 - Docs: the `--linger` paragraph in `doc/bin/cli.md` (plus `--stitch`), any
   restart behavior in `doc/bin/srt.md`, and every example invocation using
   `--linger`.
 
 Public API: breaking, `ts::Export::resume` is removed and `restarts()` is
-renamed. CLI: new `--stitch` on `export ts` and SRT egress, and `--linger`
+renamed. New: the successor operation above. CLI: new `--stitch` on `export ts` and SRT egress, and `--linger`
 no longer follows a replacement. Wire: none.
 
 ## Required
