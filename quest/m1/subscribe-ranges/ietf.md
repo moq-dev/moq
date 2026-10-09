@@ -16,7 +16,7 @@ one stream. Absent sequences between the FETCH's groups become drops, and a
 group already cached is discarded as a duplicate. Cap a downstream FETCH at
 the Largest Object, as the moq-transport drafts require. A relay with only
 fetch demand learns the upstream's Largest from TRACK_STATUS without a
-SUBSCRIBE, as open #4974 does for fetch-only demand.
+SUBSCRIBE, since #4974.
 
 Serving downstream lifts the one-group refusal ("FETCH spanning several
 groups not supported") in `run_fetch_stream`
@@ -34,3 +34,7 @@ a live track's Largest Object, and test both cases.
 ## Required
 
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - the range requests this answers
+
+## Related
+
+- [Pipelined first FETCH](/quest/m1/pipeline-requests/fetch.md) - sends TRACK_STATUS alongside the FETCH in adjacent code (`ietf/subscriber.rs`, `model/origin.rs`); decided 2026-10-08 it lands first, since it is unblocked and this is not, and this rebases onto it

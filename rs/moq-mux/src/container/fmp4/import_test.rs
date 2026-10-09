@@ -564,7 +564,12 @@ fn sample(timestamp_us: u64, keyframe: bool, duration_us: Option<u64>) -> crate:
 fn decode_rejects_durationless_multisample() {
 	let frames = vec![sample(0, true, None), sample(33_000, false, None)];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let err = super::decode(frag, None, scale(), crate::container::fmp4::Kind::Video).unwrap_err();
+	let err = super::decode(
+		frag,
+		None,
+		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
+	)
+	.unwrap_err();
 	assert!(matches!(err, super::Error::MissingSampleDuration), "got {err:?}");
 }
 
@@ -572,7 +577,12 @@ fn decode_rejects_durationless_multisample() {
 #[test]
 fn decode_single_sample_no_duration_ok() {
 	let frag = super::encode_fragment(info(1, scale(), 0), &[sample(0, true, None)]).unwrap();
-	let out = super::decode(frag, None, scale(), crate::container::fmp4::Kind::Video).unwrap();
+	let out = super::decode(
+		frag,
+		None,
+		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
+	)
+	.unwrap();
 	assert_eq!(out.len(), 1);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 }
@@ -583,7 +593,12 @@ fn decode_single_sample_no_duration_ok() {
 fn decode_multisample_with_durations_roundtrips() {
 	let frames = vec![sample(0, true, Some(33_000)), sample(33_000, false, Some(33_000))];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let out = super::decode(frag, None, scale(), crate::container::fmp4::Kind::Video).unwrap();
+	let out = super::decode(
+		frag,
+		None,
+		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
+	)
+	.unwrap();
 	assert_eq!(out.len(), 2);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 	assert_eq!(out[1].timestamp.as_micros(), 33_000);
@@ -1505,4 +1520,54 @@ async fn a_deselected_fragment_does_not_publish() {
 	let video = super::encode_fragment(info(video_id, video_scale, 0), &[sample(0, true, Some(100_000))]).unwrap();
 	fmp4.decode(&video).unwrap();
 	assert_eq!(clocks.drain().len(), 1, "the selected track's first fragment publishes");
+}
+
+/// The importer resolves sample flags the way every CMAF reader does, so a fragment opening on a
+/// sync sample rolls a group even when its flags are left to `tfhd` or `trex`, or say nothing.
+/// The fragments it passes through then decode against its catalog init to the same samples.
+#[tokio::test]
+async fn imports_the_sample_defaults_fixtures() {
+	use mp4_atom::DecodeMaybe;
+
+	for fixture in super::fixtures() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+		fmp4.decode(&fixture.init).unwrap();
+
+		let snapshot = catalog.snapshot();
+		let (name, video) = snapshot.video.renditions.iter().next().unwrap();
+		let Container::Cmaf { init } = &video.container else {
+			panic!("{}: a CMAF rendition", fixture.name);
+		};
+		let wire = super::Wire::from_init(init).unwrap();
+		let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+
+		// The same fragment again, one second later, so its first sample can open a second group.
+		let mut cursor = std::io::Cursor::new(fixture.fragment.as_slice());
+		let Some(mp4_atom::Any::Moof(mut moof)) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() else {
+			panic!("{}: a moof first", fixture.name);
+		};
+		moof.traf[0].tfdt.as_mut().unwrap().base_media_decode_time += 1_000;
+		let mut later = Vec::new();
+		moof.encode(&mut later).unwrap();
+		later.extend_from_slice(&fixture.fragment[cursor.position() as usize..]);
+
+		fmp4.decode(&fixture.fragment).unwrap();
+		fmp4.decode(&later).unwrap();
+		fmp4.finish().unwrap();
+
+		let mut first = track.recv_group().await.unwrap().unwrap();
+		let frame = first.read_frame().await.unwrap().unwrap();
+		let frames = super::decode(frame.payload, frame.timestamp, wire.track().unwrap()).unwrap();
+		let samples: Vec<super::FixtureSample> = frames.iter().map(super::FixtureSample::from).collect();
+		assert_eq!(samples, fixture.samples, "{}", fixture.name);
+
+		assert!(
+			track.recv_group().await.unwrap().is_some(),
+			"{}: the second fragment opens on a sync sample, so a group",
+			fixture.name
+		);
+	}
 }
