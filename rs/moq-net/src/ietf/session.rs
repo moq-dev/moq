@@ -74,12 +74,17 @@ pub struct Config<S: crate::transport::poll::Session> {
 
 	/// The session's auth handle, created before [`start`] so a server can take the
 	/// peer's token requests during its handshake. Supports AUTH exactly when the
-	/// version can negotiate it; the peer's SETUP decides whether it does.
+	/// version can negotiate it and this side offers it; the peer's SETUP decides whether
+	/// it does.
 	pub auth: crate::auth::Handle,
 
 	/// Uni streams that arrived before that pre-read SETUP (see [`PeerSetup::early`]),
 	/// classified by the session before it accepts any more.
 	pub early_unis: Vec<Reader<S::RecvStream, crate::Version>>,
+
+	/// The extensions our SETUP offers. Drafts 14-16 already sent it, so there this only
+	/// records what it said. MoQ Auth is offered only while [`Self::auth`] supports it too.
+	pub extensions: crate::setup::Extensions,
 }
 
 pub(crate) struct Driver {
@@ -126,6 +131,7 @@ where
 		peer_declared,
 		auth,
 		early_unis,
+		extensions,
 	} = config;
 
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
@@ -239,7 +245,8 @@ where
 					tasks.clone(),
 					goaway.going_away.clone(),
 				)
-				.with_auth(auth.clone());
+				.with_auth(auth.clone())
+				.with_solicit(extensions.solicit);
 				subscriber.announces = announces;
 
 				// GOAWAY send task: draft-14-16 carry GOAWAY on the shared control
@@ -374,9 +381,23 @@ where
 					let runtime = runtime.clone();
 					let session = session.clone();
 					let goaway = goaway.clone();
+					let extensions = crate::setup::Extensions {
+						auth: extensions.auth && auth.supported(),
+						..extensions
+					};
 					async move {
-						if let Err(err) =
-							run_setup(runtime, session, version, path, authority, self_origin, cost, goaway).await
+						if let Err(err) = run_setup(
+							runtime,
+							session,
+							version,
+							path,
+							authority,
+							self_origin,
+							cost,
+							extensions,
+							goaway,
+						)
+						.await
 						{
 							tracing::warn!(%err, "setup send error");
 						}
@@ -427,7 +448,8 @@ where
 					tasks,
 					goaway.going_away.clone(),
 				)
-				.with_auth(auth.clone());
+				.with_auth(auth.clone())
+				.with_solicit(extensions.solicit);
 
 				// Our tokens, one Auth request each, once the peer's SETUP negotiates it.
 				let present = auth::run_present(
@@ -439,11 +461,13 @@ where
 					version,
 					goaway.going_away.clone(),
 				);
-				let serve = auth::Serve {
+				// Only a side that offered MoQ Auth answers the peer's Auth requests: one that
+				// arrives otherwise falls through to the protocol violation in `run_dispatch`.
+				let serve = auth.supported().then(|| auth::Serve {
 					runtime: runtime.clone(),
 					handle: auth.clone(),
 					peer_grant,
-				};
+				});
 				subscriber.announces = announces;
 
 				let sub_ns_session = session.clone();
@@ -482,7 +506,7 @@ where
 					publisher.clone(),
 					subscriber.clone(),
 					peer_setup.clone(),
-					Some(serve),
+					serve,
 					version
 				)));
 				let mut datagrams = std::pin::pin!(err_only(run_datagrams(session.clone(), subscriber.clone())));
@@ -714,8 +738,8 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 ///
 /// `path` is the request path we advertise (clients on URL-less transports); a
 /// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
-/// declare our identity and (client-only) what this link costs to cross. The MoQ Solicit
-/// declaration is unconditional, so it takes no argument.
+/// declare our identity and (client-only) what this link costs to cross. `extensions`
+/// names the other extensions we offer.
 #[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session>(
 	runtime: crate::time::Clock,
@@ -725,6 +749,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	authority: Option<String>,
 	self_origin: Hop,
 	cost: Option<u64>,
+	extensions: crate::setup::Extensions,
 	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
@@ -741,9 +766,13 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		parameters.set_bytes(ietf::ParameterBytes::Authority, authority.into_bytes());
 	}
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
-	solicit::into_setup(&mut parameters, version);
+	if extensions.solicit {
+		solicit::into_setup(&mut parameters, version);
+	}
 	hidden::into_setup(&mut parameters, version);
-	auth::into_setup(&mut parameters, version);
+	if extensions.auth {
+		auth::into_setup(&mut parameters, version);
+	}
 	active_count::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
@@ -1110,8 +1139,8 @@ where
 	// costs a handshake round rather than blocking.
 	let peer = subscriber.peer().await;
 
-	// An AUTH from a peer that did not negotiate MoQ Auth is an unknown request, which
-	// falls through to the protocol violation below.
+	// An AUTH without MoQ Auth negotiated, offered by both sides, is an unknown request,
+	// which falls through to the protocol violation below.
 	let serve = match peer_setup.get().await.auth {
 		true => serve,
 		false => None,
@@ -1400,6 +1429,7 @@ mod tests {
 			}),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 
@@ -1455,6 +1485,7 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 		let _driver = moq_net_sim::spawn(driver);
@@ -1529,6 +1560,7 @@ mod tests {
 			}),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 		let driver = moq_net_sim::spawn(driver);
@@ -1613,6 +1645,7 @@ mod tests {
 			peer_declared,
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 		let _driver = moq_net_sim::spawn(driver);
@@ -1718,6 +1751,7 @@ mod tests {
 			}),
 			auth: handle.clone(),
 			early_unis: Vec::new(),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 		AuthSession {
@@ -1772,6 +1806,159 @@ mod tests {
 			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
 		}
 		assert_eq!(occurrences(log, &auth_type()), 1, "one AUTH for the setup token");
+	}
+
+	/// What the draft-18 SETUP that `start` writes says about MoQ Auth and MoQ Solicit.
+	async fn our_setup(client: bool, auth: crate::auth::Handle, extensions: crate::setup::Extensions) -> (bool, bool) {
+		const VERSION: Version = Version::Draft18;
+
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+		let (driver, _goaway, _) = start(Config {
+			runtime: crate::time::Clock::sim(),
+			session,
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version: VERSION,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer::default()),
+			auth,
+			early_unis: Vec::new(),
+			extensions,
+		})
+		.expect("start the session");
+
+		// The driver parks once SETUP is out.
+		moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+			.await
+			.expect_err("the session ended instead of parking after SETUP");
+
+		let writes = log.writes.lock().unwrap().clone();
+		let (setup, _) = setup::Setup::decode_slice(&writes, crate::Version::Ietf(VERSION)).expect("our SETUP");
+		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, VERSION).expect("its options");
+		(
+			auth::from_setup(&params, VERSION) == Some(true),
+			solicit::from_setup(&params, VERSION).unwrap() == Some(true),
+		)
+	}
+
+	/// Each extension reaches our SETUP only while this side offers it.
+	#[moq_net_sim::test]
+	async fn a_declined_extension_stays_out_of_setup() {
+		let all = crate::setup::Extensions::default();
+		let mut no_auth = all;
+		no_auth.auth = false;
+		let mut no_solicit = all;
+		no_solicit.solicit = false;
+
+		// A client's handle supports AUTH exactly when it offers it.
+		assert_eq!(our_setup(true, crate::auth::Handle::new(true), all).await, (true, true));
+		assert_eq!(
+			our_setup(true, crate::auth::Handle::new(false), no_auth).await,
+			(false, true)
+		);
+		assert_eq!(
+			our_setup(true, crate::auth::Handle::new(true), no_solicit).await,
+			(true, false)
+		);
+	}
+
+	/// A server's handle supports AUTH only when the client offered it too, so a server
+	/// answering a client that did not offer it leaves the option out, whatever it offers.
+	#[moq_net_sim::test]
+	async fn a_server_offers_auth_only_to_a_client_that_did() {
+		let all = crate::setup::Extensions::default();
+		assert_eq!(
+			our_setup(false, crate::auth::Handle::new(true), all).await,
+			(true, true)
+		);
+		assert_eq!(
+			our_setup(false, crate::auth::Handle::new(false), all).await,
+			(false, true)
+		);
+	}
+
+	/// The bytes of a peer's Auth request presenting its connection credential.
+	async fn auth_request(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		writer
+			.encode_message(&auth::Auth {
+				request_id: RequestId(0),
+				token: bytes::Bytes::new(),
+			})
+			.await
+			.unwrap();
+		let writes = log.writes.lock().unwrap();
+		writes.clone()
+	}
+
+	/// Run a draft-18 server whose client offered MoQ Auth and then sent an Auth request.
+	/// `offered` is whether the server offered it too. Returns how the session ended, if it
+	/// did, and what closed it.
+	async fn serve_auth_request(offered: bool) -> (Option<Result<(), Error>>, Vec<(u32, String)>) {
+		const VERSION: Version = Version::Draft18;
+
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
+			.with_incoming_bidis(vec![auth_request(VERSION).await]);
+		let log = session.log.clone();
+		let (driver, _goaway, _) = start(Config {
+			runtime: crate::time::Clock::sim(),
+			session,
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client: false,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version: VERSION,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer {
+				auth: true,
+				..Default::default()
+			}),
+			// As `Server` builds it: offered by the client, so supported iff we offer it.
+			auth: crate::auth::Handle::new(offered),
+			early_unis: Vec::new(),
+			extensions: crate::setup::Extensions::default(),
+		})
+		.expect("start the session");
+
+		let res = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+			.await
+			.ok();
+		(res, log.closes())
+	}
+
+	/// The Auth draft negotiates the extension only when both sides offer it, so an Auth
+	/// request reaching a side that declined it is a protocol violation, not a token to grant.
+	#[moq_net_sim::test]
+	async fn an_auth_request_to_a_side_that_declined_it_is_refused() {
+		let (res, closes) = serve_auth_request(true).await;
+		assert!(res.is_none(), "both offered: the request is served, {res:?}");
+		assert_eq!(closes, vec![]);
+
+		let (res, closes) = serve_auth_request(false).await;
+		let Some(Err(err)) = res else {
+			panic!("declined: the Auth request did not end the session: {res:?}");
+		};
+		assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation);
+		assert_eq!(
+			closes,
+			vec![(SessionError::ProtocolViolation.to_code(), err.to_string())]
+		);
 	}
 
 	/// The declared Hop ID must be the caller's own origin, whichever half carries it.
@@ -1832,6 +2019,7 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 
@@ -1872,6 +2060,7 @@ mod tests {
 				peer_declared: Some(peer::Peer::default()),
 				auth: crate::auth::Handle::new(false),
 				early_unis: Vec::new(),
+				extensions: Default::default(),
 			})
 			.expect("start the session");
 
@@ -2183,6 +2372,7 @@ mod tests {
 					peer_declared: Some(peer::Peer::default()),
 					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
+					extensions: Default::default(),
 				})
 				.unwrap();
 
@@ -2249,6 +2439,7 @@ mod tests {
 					peer_declared: Some(peer::Peer::default()),
 					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
+					extensions: Default::default(),
 					limits: Default::default(),
 				})
 				.unwrap();
@@ -2350,6 +2541,7 @@ mod tests {
 			peer_declared: None,
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 		let driver = moq_net_sim::spawn(driver);

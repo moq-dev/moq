@@ -21,6 +21,7 @@ pub struct Server {
 	stats: stats::Session,
 	versions: Versions,
 	limits: crate::session::Limits,
+	extensions: setup::Extensions,
 }
 
 impl Server {
@@ -69,6 +70,12 @@ impl Server {
 	/// Defaults to every version this crate supports.
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
+		self
+	}
+
+	/// Choose which moq-transport extensions to offer in SETUP. Defaults to all of them.
+	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
+		self.extensions = extensions;
 		self
 	}
 
@@ -438,8 +445,9 @@ impl Server {
 			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
 			token: peer_setup.token.clone(),
 			assigned_hop: crate::Hop::random(),
-			// The client's SETUP already settled whether MoQ Auth is negotiated.
-			auth: crate::auth::Handle::new(peer_setup.declared.auth),
+			// The client's SETUP already settled whether it offered MoQ Auth, so it is
+			// negotiated exactly when we offer it too.
+			auth: crate::auth::Handle::new(peer_setup.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -579,6 +587,7 @@ where
 				peer_declared: Some(peer_setup.declared),
 				auth: auth.clone(),
 				early_unis: peer_setup.early,
+				extensions: server.extensions,
 			})?;
 			tracing::debug!(?version, "connected");
 			Ok(Session::new(
@@ -644,7 +653,9 @@ where
 						ietf::initial_max_request_id(server.limits.requests(), true),
 					);
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-					ietf::solicit::into_setup(&mut parameters, v);
+					if server.extensions.solicit {
+						ietf::solicit::into_setup(&mut parameters, v);
+					}
 					ietf::hidden::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
@@ -705,6 +716,7 @@ where
 						peer_declared: Some(peer_declared),
 						auth: auth.clone(),
 						early_unis: Vec::new(),
+						extensions: server.extensions,
 					})?;
 					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup)
 				}

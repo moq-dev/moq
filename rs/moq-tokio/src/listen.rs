@@ -146,6 +146,11 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
+	/// The moq-transport extensions to offer in SETUP, all by default.
+	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
+	#[usage(skip)]
+	pub extensions: moq_net::setup::Extensions,
+
 	/// Maximum time for one accepted connection to finish its handshake: the
 	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, through
 	/// [`crate::server::Request::ok`]. Defaults to 10 seconds; set to 0 to wait forever.
@@ -258,6 +263,7 @@ impl Default for Config {
 			#[cfg(all(feature = "uds", unix))]
 			unix: Default::default(),
 			version: Vec::new(),
+			extensions: Default::default(),
 			timeout: DEFAULT_TIMEOUT,
 			timeout_arg: None,
 			tls: Default::default(),
@@ -507,6 +513,21 @@ impl Config {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The listen config offers every extension unless told otherwise, and leaves the
+	/// default out when serialized.
+	#[test]
+	fn extensions_default_on_and_parse_off() {
+		let config: Config = toml::from_str("[extensions]\nauth = false\n").expect("parse");
+		assert!(!config.extensions.auth);
+		assert!(config.extensions.solicit);
+		assert!(toml::to_string(&config).expect("serialize").contains("auth = false"));
+		assert!(
+			!toml::to_string(&Config::default())
+				.expect("serialize")
+				.contains("extensions")
+		);
+	}
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).
 	#[derive(usage::Cli)]

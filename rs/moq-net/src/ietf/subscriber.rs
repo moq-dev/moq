@@ -594,6 +594,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	self_origin: crate::Hop,
 	// What the peer declared in its SETUP.
 	peer_setup: peer::PeerSetup,
+	// Whether our SETUP declared MoQ Solicit, which is what makes an unsolicited
+	// PUBLISH_NAMESPACE the peer's fault.
+	solicit: bool,
 	// Local policy for what pulling from this peer costs, overriding whatever it
 	// declared. See `cluster::link_cost`.
 	cost: Option<u64>,
@@ -686,6 +689,7 @@ where
 			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
 			peer_setup,
+			solicit: true,
 			cost,
 			state: Default::default(),
 			tasks,
@@ -703,6 +707,13 @@ where
 		self.auth = auth;
 		let this = self.clone();
 		self.tasks.push(async move { this.run_limit().await });
+		self
+	}
+
+	/// Whether our SETUP declared MoQ Solicit. Without it an unsolicited PUBLISH_NAMESPACE
+	/// is what we invited, even from a peer that implements the extension.
+	pub fn with_solicit(mut self, solicit: bool) -> Self {
+		self.solicit = solicit;
 		self
 	}
 
@@ -1185,16 +1196,20 @@ where
 
 	/// Whether an incoming PUBLISH_NAMESPACE means the peer ignored our SETUP.
 	///
-	/// We always declare that advertisements to us must be solicited (MoQ Solicit), and a
-	/// peer that wrote the option at all proves it implements the extension, whichever
-	/// value it chose. It also cannot have advertised before reading our SETUP, since our
-	/// SETUP is what says whether advertising unasked is allowed. So this is a bug in the
-	/// peer, and a silent one on both sides if we tolerate it.
+	/// Unless [`with_solicit`](Self::with_solicit) turned it off, we declare that
+	/// advertisements to us must be solicited (MoQ Solicit), and a peer that wrote the
+	/// option at all proves it implements the extension, whichever value it chose. It also
+	/// cannot have advertised before reading our SETUP, since our SETUP is what says whether
+	/// advertising unasked is allowed. So this is a bug in the peer, and a silent one on
+	/// both sides if we tolerate it.
 	///
 	/// Draft-14/15 are exempt: they have no inline NAMESPACE, so a PUBLISH_NAMESPACE
 	/// request is also how a peer answers our SUBSCRIBE_NAMESPACE there, and the message
 	/// alone does not say which it is.
 	fn unsolicited_is_a_violation(&self, declared: Option<bool>) -> bool {
+		if !self.solicit {
+			return false;
+		}
 		match self.version {
 			Version::Draft14 | Version::Draft15 => false,
 			_ => declared.is_some(),
@@ -4607,8 +4622,13 @@ mod tests {
 	}
 
 	/// What an unsolicited advertisement means to a subscriber on `version` whose peer
-	/// declared `solicit`.
+	/// declared `solicit`, when we declared MoQ Solicit ourselves.
 	fn unsolicited_is_a_violation(solicit: Option<bool>, version: Version) -> bool {
+		unsolicited_is_a_violation_to(true, solicit, version)
+	}
+
+	/// The same, for a subscriber whose own SETUP declared MoQ Solicit only if `ours`.
+	fn unsolicited_is_a_violation_to(ours: bool, solicit: Option<bool>, version: Version) -> bool {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let peer_setup = peer::PeerSetup::default();
@@ -4631,10 +4651,23 @@ mod tests {
 			tasks,
 			Default::default(),
 		)
+		.with_solicit(ours)
 		.unsolicited_is_a_violation(solicit)
 	}
 
-	/// We always declare that advertisements to us must be solicited, so a peer that
+	/// A side that declined MoQ Solicit invited unsolicited advertisements, so one is
+	/// expected even from a peer that implements the extension.
+	#[moq_net_sim::test]
+	async fn an_announce_to_a_side_that_declined_solicit_is_fine() {
+		for solicit in [Some(true), Some(false), None] {
+			assert!(
+				!unsolicited_is_a_violation_to(false, solicit, Version::Draft17),
+				"{solicit:?}"
+			);
+		}
+	}
+
+	/// By default we declare that advertisements to us must be solicited, so a peer that
 	/// implements the extension and announces anyway has a bug. Tolerating it is what
 	/// keeps that bug invisible on both sides, so the session goes.
 	///
