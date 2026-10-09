@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use crate::error::MoqError;
 
-/// A dedicated runtime thread, so a foreign caller's thread never has to drive our futures.
+/// A dedicated runtime thread, which drives the I/O and timers every call registers and runs
+/// the background work spawned onto it.
 ///
 /// wasm32 has neither threads nor a tokio driver. uniffi's `RustFuture` is polled by the
-/// JS event loop instead, so [`Task::run`] awaits in place there.
+/// JS event loop instead.
 #[cfg(not(target_arch = "wasm32"))]
 static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 
@@ -16,6 +17,9 @@ pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
+	/// Set by [`shutdown`], so a [`Task::run`] awaited in place resolves `Cancelled` rather than
+	/// polling timers and sockets whose driver is gone.
+	stopped: tokio::sync::watch::Sender<bool>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -60,6 +64,7 @@ pub(crate) fn runtime() -> &'static Runtime {
 		Runtime {
 			handle,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
+			stopped: tokio::sync::watch::Sender::new(false),
 		}
 	})
 }
@@ -73,8 +78,24 @@ pub(crate) fn shutdown() {
 	let Some(thread) = runtime.thread.lock().unwrap().take() else {
 		return;
 	};
+	// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
+	runtime.stopped.send_replace(true);
 	let _ = thread.stop.send(());
 	let _ = thread.join.join();
+}
+
+/// Resolves once [`shutdown`] has run.
+#[cfg(not(target_arch = "wasm32"))]
+async fn stopped() {
+	let mut stopped = runtime().stopped.subscribe();
+	// `Err` only when the sender is dropped, which a static never is.
+	let _ = stopped.wait_for(|&stopped| stopped).await;
+}
+
+/// wasm32's runtime is the JS event loop, which never stops under us.
+#[cfg(target_arch = "wasm32")]
+async fn stopped() {
+	std::future::pending().await
 }
 
 /// Enter the runtime context, so a handle built outside [`Task::run`] can still spawn.
@@ -213,12 +234,42 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		}
 	}
 
-	/// Spawn an async closure on the runtime.
+	/// Run an async closure against the state, awaiting it in place.
 	///
 	/// The closure receives a [Guard] which derefs to `T`.
 	/// If two calls are made concurrently, the second waits for the first to finish.
-	#[cfg(not(target_arch = "wasm32"))]
+	///
+	/// Not spawned: a foreign cancel (uniffi's `rust_future_cancel`) only stops polling, and the
+	/// future is dropped later at `rust_future_free`. Spawned work would keep running until then
+	/// and take the very event the next call is waiting for. Each poll enters the runtime, so the
+	/// closure can still use tokio timers, sockets, and spawn.
 	pub async fn run<R, F, Fut>(&self, f: F) -> Result<R, MoqError>
+	where
+		F: FnOnce(Guard<T>) -> Fut,
+		Fut: Future<Output = Result<R, MoqError>>,
+	{
+		let drive = Self::drive(self.cancel.subscribe(), self.state.clone(), f);
+		let mut run = std::pin::pin!(async {
+			tokio::select! {
+				biased;
+				_ = stopped() => Err(MoqError::Cancelled),
+				result = drive => result,
+			}
+		});
+		std::future::poll_fn(|cx| {
+			let _runtime = enter();
+			run.as_mut().poll(cx)
+		})
+		.await
+	}
+
+	/// [Self::run] on the runtime thread rather than in place.
+	///
+	/// Only for a state shut down by [Self::cancel_and_wait], which blocks its caller until an
+	/// in-flight call unwinds: a call awaited in place on that same thread never would. The cost
+	/// is the race [Self::run] avoids, since a foreign cancel leaves this running until freed.
+	#[cfg(not(target_arch = "wasm32"))]
+	pub async fn spawn<R, F, Fut>(&self, f: F) -> Result<R, MoqError>
 	where
 		R: Send + 'static,
 		F: FnOnce(Guard<T>) -> Fut + Send + 'static,
@@ -229,11 +280,8 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 
 		let handle = runtime().spawn(async move { Self::drive(cancel, state, f).await });
 
-		// Dropping a JoinHandle detaches its task rather than stopping it, so a caller
-		// that gives up (an `asyncio.wait_for` timeout, a cancelled Swift/Kotlin task)
-		// would leave the closure running with the state lock held. It then consumes
-		// the very event the next call is waiting for, and that call blocks behind it
-		// meanwhile. Tie the work to the caller's future instead.
+		// Dropping a JoinHandle detaches its task rather than stopping it, so a caller that
+		// gives up would leave the closure running with the state lock held.
 		let _abort = AbortOnDrop(handle.abort_handle());
 
 		match handle.await {
@@ -241,20 +289,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
 			Err(e) => Err(e.into()),
 		}
-	}
-
-	/// Run an async closure, awaiting it in place.
-	///
-	/// Unlike the native path this does not detach, so dropping the returned future
-	/// cancels the work rather than leaving it running on a runtime thread.
-	#[cfg(target_arch = "wasm32")]
-	pub async fn run<R, F, Fut>(&self, f: F) -> Result<R, MoqError>
-	where
-		R: 'static,
-		F: FnOnce(Guard<T>) -> Fut + 'static,
-		Fut: Future<Output = Result<R, MoqError>> + 'static,
-	{
-		Self::drive(self.cancel.subscribe(), self.state.clone(), f).await
 	}
 
 	/// Wait for the lock, then run `f`, with [Self::cancel] able to interrupt either.
@@ -288,8 +322,9 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	///
 	/// Terminal: there is no way back from here, and the state is gone rather than idle.
 	/// The drop is not synchronous with this call, because an in-flight [Self::run] holds the
-	/// state until it observes the flag and unwinds. It also lands on the runtime thread, which
-	/// is where the state was built and the only place with a reactor for what it unregisters.
+	/// state until it observes the flag and unwinds, or its caller drops it. It also lands on the
+	/// runtime thread, which is where the state was built and the only place with a reactor for
+	/// what it unregisters.
 	pub fn cancel(&self) {
 		// send_replace, not send: `send` refuses to store the value while no
 		// receiver exists, so a cancel BEFORE the first `run` would silently
@@ -309,12 +344,13 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	///
 	/// A synchronous caller uses this to make the release of what the state owns
 	/// observable: the listening socket is gone, not merely scheduled to close.
-	/// `shutdown` runs on the runtime thread, after any in-flight [Self::run] has
+	/// `shutdown` runs on the runtime thread, after any in-flight [Self::spawn] has
 	/// unwound, and the lock is held across it so a second cancel waits too.
 	///
 	/// It waits on a channel rather than [tokio::sync::Mutex::blocking_lock] so it
 	/// works from inside another runtime, as the tests do; it must not run on the
-	/// runtime thread itself, which would deadlock.
+	/// runtime thread itself, which would deadlock. Neither may the state's calls use
+	/// [Self::run]: one awaited in place on the blocked thread would never unwind.
 	#[cfg(not(target_arch = "wasm32"))]
 	pub fn cancel_and_wait<F, Fut>(&self, shutdown: F)
 	where

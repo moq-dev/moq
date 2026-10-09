@@ -30,7 +30,7 @@ async fn ffi_caught_up() {
 	rx.await.expect("ffi runtime dropped the catch-up task");
 }
 
-/// Spawn `fut` and wait until the FFI runtime has driven its inner `Task::run`.
+/// Spawn `fut`, poll it once, and wait until the FFI runtime has caught up with what that started.
 async fn spawn_parked<F, T>(fut: F) -> tokio::task::JoinHandle<T>
 where
 	F: Future<Output = T> + Send + 'static,
@@ -3317,6 +3317,31 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 		.expect("expected the populated group's first frame");
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, Some(2_000));
+}
+
+/// A foreign cancel only stops polling a read; uniffi drops it later, at `rust_future_free`.
+/// Until then the cancelled read must not take the frame the next read is waiting for.
+#[tokio::test]
+async fn raw_read_frame_cancelled_before_free_leaves_the_frame() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	// Poll once, then stop without dropping, which is all `rust_future_cancel` does.
+	let mut cancelled = Box::pin(consumer.read_frame());
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx))).await;
+	assert!(first.is_pending());
+
+	track.write_frame(group_frame(b"next")).unwrap();
+	// Give anything still driving the cancelled read the chance to take the frame.
+	ffi_caught_up().await;
+
+	let next = consumer.read_frame();
+	drop(cancelled);
+	let frame = tokio::time::timeout(TIMEOUT, next)
+		.await
+		.expect("the cancelled read took the frame")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, b"next".to_vec());
 }
 
 /// Cancelling `read_frame` after it has taken the next group must not drop that
