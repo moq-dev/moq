@@ -830,7 +830,7 @@ where
 					}
 					if gate.poll_denied(waiter).is_ready() {
 						tracing::info!(broadcast = %absolute, track = %track_name, "subscription no longer authorized");
-						return Poll::Ready(Some((Err(Error::Unauthorized), false)));
+						return Poll::Ready(Some(Err(Error::Unauthorized)));
 					}
 					Poll::Pending
 				})
