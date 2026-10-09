@@ -108,11 +108,13 @@ export class Broadcast {
 	readonly out = readonlys(this.#out);
 
 	// The announced paths on the connection, for cross-broadcast (`broadcast: ../`) references so
-	// `relativeBroadcast` can gate on whether a sibling is announced, each with how many times it
-	// was announced (a start or a restart), which is what requests a referenced path afresh.
+	// `relativeBroadcast` can gate on whether a sibling is announced, each with the sequence of its
+	// latest start or restart, which is what requests a referenced path afresh. The sequence never
+	// repeats, so an end and a start seen in one flush still read as a new announcement.
 	// `undefined` until the stream is open. Opened lazily; the main broadcast doesn't use it
 	// (`#runBroadcast` drives off its own name-scoped stream).
 	readonly #announced = new Signal<Map<Moq.Path.Valid, number> | undefined>(undefined);
+	#sequence = 0;
 
 	// The request per referenced path, shared by every caller of `relativeBroadcast` and replaced
 	// only when the path is announced anew, never because the request ended.
@@ -178,8 +180,10 @@ export class Broadcast {
 				this.#announced.mutate((active) => {
 					if (!active) return;
 					if (entry.kind === "end") active.delete(entry.prefix);
-					else if (entry.kind !== "update") active.set(entry.prefix, (active.get(entry.prefix) ?? 0) + 1);
-					else if (!active.has(entry.prefix)) active.set(entry.prefix, 1);
+					else if (entry.kind !== "update" || !active.has(entry.prefix)) {
+						this.#sequence += 1;
+						active.set(entry.prefix, this.#sequence);
+					}
 				});
 			}
 		});
@@ -212,11 +216,11 @@ export class Broadcast {
 		return false;
 	}
 
-	// How many times anything covering `path` was announced: changes with each start or restart.
+	// The latest announcement covering `path`: changes with each start or restart.
 	#generation(effect: Effect, path: Moq.Path.Valid): number {
 		let generation = 0;
-		for (const [prefix, count] of effect.get(this.#announced) ?? []) {
-			if (Path.hasPrefix(prefix, path)) generation += count;
+		for (const [prefix, sequence] of effect.get(this.#announced) ?? []) {
+			if (Path.hasPrefix(prefix, path)) generation = Math.max(generation, sequence);
 		}
 		return generation;
 	}

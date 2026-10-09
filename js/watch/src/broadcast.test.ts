@@ -469,6 +469,42 @@ describe("cross-broadcast renditions", () => {
 		}
 	});
 
+	it("follows a rendition broadcast that ends and starts again in one tick", async () => {
+		const owner = new Origin.Producer();
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("public/transcode.hang"),
+			enabled: true,
+			catalogFormat: "manual",
+		});
+		const rel = Path.normalizeRelative("../private/source");
+		const resolved: (Moq.Broadcast.Consumer | undefined)[] = [];
+		const effect = new Effect();
+		effect.run((nested) => {
+			resolved.push(source.relativeBroadcast(nested, rel));
+		});
+
+		try {
+			const first = publish(owner, Path.from("private/source"));
+			await settle();
+			const old = resolved.at(-1);
+			expect(old).toBeDefined();
+
+			// An end then a start, delivered back to back: a new instance all the same.
+			first.close();
+			const second = publish(owner, Path.from("private/source"));
+			await settle();
+			const restarted = resolved.at(-1);
+			expect(restarted).toBeDefined();
+			expect(restarted).not.toBe(old);
+			second.close();
+		} finally {
+			effect.close();
+			source.close();
+			owner.close();
+		}
+	});
+
 	it("hides a data track until its broadcast is announced", async () => {
 		const owner = new Origin.Producer();
 		const source = new Broadcast({
