@@ -58,12 +58,13 @@ work no child does:
   each language's module, linked from every binding page.
 - The bindings section of the following release's upgrade page: old call to
   new call per language.
+- `MoqGroupRequest` gains `demand()` in moq-ffi and every wrapper, matching
+  Rust's `group::Request::demand`, so a group server can see when nobody
+  still wants the group (decided in #4868; the bullet was lost when #4946
+  removed `net.md`).
 - `just test interop --all` green on the finished line.
 
 ## Required
 
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - lands first; this line adopts its epoch surface and the `session.epoch()` rename
-- [JSON](/quest/m1/ffi-shape/json.md) - the pilot: json and flate become their own namespaces wrapping a track in every binding and set the per-language pattern
-- [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
-- [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape

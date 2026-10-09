@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
+import { Error as NetError, Time } from "@moq/net";
 
 import { type Config as CodecConfig, Encoder, type Pending } from "./encoder.ts";
 
@@ -25,10 +25,14 @@ export class Producer<T> {
 	/**
 	 * Append one record to the log.
 	 *
-	 * A record that cannot be written ends the track: a log missing a record is not the lossless log
-	 * this mode promises, so the failure is surfaced rather than papered over with a second group.
-	 * The track is aborted rather than closed cleanly, so a consumer sees the failure instead of a
-	 * log that merely looks complete.
+	 * A record that might not fit in what is left of the group's budget throws `GroupTooLarge`
+	 * before anything is written, leaving the log intact. The budget covers the whole log, so once it
+	 * is spent every append throws; a publisher with more to say opens a new track.
+	 *
+	 * Any other record that cannot be written ends the track: a log missing a record is not the
+	 * lossless log this mode promises, so the failure is surfaced rather than papered over with a
+	 * second group. The track is aborted rather than closed cleanly, so a consumer sees the failure
+	 * instead of a log that merely looks complete.
 	 *
 	 * `at` is when the value was captured, written as its frame timestamp. Defaults to now.
 	 */
@@ -40,6 +44,9 @@ export class Producer<T> {
 		try {
 			record = this.#encoder.encode(value);
 		} catch (err) {
+			// Refused before encoding, so nothing is missing from the log and nothing desynced.
+			if (err instanceof NetError.GroupTooLarge) throw err;
+
 			// A record that can't be encoded is as lost as one the group rejects: the log is missing it
 			// either way. Nothing was published, so this only has to end the track.
 			this.#abort(err);

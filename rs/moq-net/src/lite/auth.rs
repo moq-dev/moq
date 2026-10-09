@@ -17,20 +17,20 @@ pub struct Auth {
 }
 
 impl Message for Auth {
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
 		Ok(Self {
-			token: Bytes::decode(r, version)?,
+			token: Bytes::copy_from_slice(r.bytes()?),
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if !version.has_auth() {
 			return Err(EncodeError::Version);
 		}
-		self.token.encode(w, version)
+		w.bytes(&self.token)
 	}
 }
 
@@ -49,21 +49,21 @@ pub struct AuthOk {
 const MAX_EXPIRES_MS: u64 = (1 << 53) - 1;
 
 /// Encode a grant's patterns as their canonical text.
-fn encode_patterns<W: bytes::BufMut>(patterns: &Patterns, w: &mut W, version: Version) -> Result<(), EncodeError> {
-	patterns.len().encode(w, version)?;
+fn encode_patterns(patterns: &Patterns, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
+	w.varint(patterns.len() as u64)?;
 	for pattern in patterns {
-		pattern.as_str().encode(w, version)?;
+		w.string(pattern.as_str())?;
 	}
 	Ok(())
 }
 
-fn decode_patterns<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Patterns, DecodeError> {
-	let count = usize::decode(r, version)?;
+fn decode_patterns(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
+	let count = r.varint()?;
 	let mut patterns = Patterns::new();
 	// No preallocation: the count is peer-controlled, and the message size limit
 	// is what bounds how many patterns actually fit.
 	for _ in 0..count {
-		let text = String::decode(r, version)?;
+		let text = r.string()?;
 		let pattern = Pattern::try_from(text.as_str()).map_err(|_| DecodeError::InvalidValue)?;
 		// Only the canonical spelling is valid, so each pattern has one encoding.
 		if pattern.as_str() != text {
@@ -75,13 +75,13 @@ fn decode_patterns<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Pattern
 }
 
 impl Message for AuthOk {
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
-		let publish = decode_patterns(r, version)?;
-		let subscribe = decode_patterns(r, version)?;
-		let expires = match u64::decode(r, version)? {
+		let publish = decode_patterns(r)?;
+		let subscribe = decode_patterns(r)?;
+		let expires = match r.varint()? {
 			0 => None,
 			ms => Some(Duration::from_millis(ms)),
 		};
@@ -92,19 +92,19 @@ impl Message for AuthOk {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if !version.has_auth() {
 			return Err(EncodeError::Version);
 		}
-		encode_patterns(&self.publish, w, version)?;
-		encode_patterns(&self.subscribe, w, version)?;
+		encode_patterns(&self.publish, w)?;
+		encode_patterns(&self.subscribe, w)?;
 		// 0 means never, so a grant that has already lapsed rounds up to the
 		// smallest value that still reads as an expiry.
 		let expires = match self.expires {
 			None => 0,
 			Some(expires) => (expires.as_nanos().div_ceil(1_000_000).min(MAX_EXPIRES_MS as u128) as u64).max(1),
 		};
-		expires.encode(w, version)
+		w.varint(expires)
 	}
 }
 
@@ -122,31 +122,28 @@ pub struct AuthError {
 const MAX_REASON: usize = 8192;
 
 impl Message for AuthError {
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
-		let code = u64::decode(r, version)?;
-		let len = usize::decode(r, version)?;
-		if len > MAX_REASON {
+		let code = r.varint()?;
+		let len = r.varint()?;
+		if len > MAX_REASON as u64 {
 			return Err(DecodeError::InvalidValue);
 		}
-		if r.remaining() < len {
-			return Err(DecodeError::Short);
-		}
-		let reason = String::from_utf8(r.copy_to_bytes(len).to_vec())?;
+		let reason = String::from_utf8(r.slice(len as usize)?.to_vec())?;
 		Ok(Self { code, reason })
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if !version.has_auth() {
 			return Err(EncodeError::Version);
 		}
 		if self.reason.len() > MAX_REASON {
 			return Err(EncodeError::TooLarge);
 		}
-		self.code.encode(w, version)?;
-		self.reason.as_str().encode(w, version)
+		w.varint(self.code)?;
+		w.string(&self.reason)
 	}
 }
 
@@ -161,18 +158,13 @@ const AUTH_OK: u64 = 0;
 const AUTH_ERROR: u64 = 1;
 
 /// Write a `type` varint followed by the size-prefixed message body.
-fn encode_typed<W: bytes::BufMut, M: Message>(
-	w: &mut W,
-	typ: u64,
-	msg: &M,
-	version: Version,
-) -> Result<(), EncodeError> {
-	typ.encode(w, version)?;
+fn encode_typed<M: Message>(w: &mut Encoder<'_>, typ: u64, msg: &M, version: Version) -> Result<(), EncodeError> {
+	w.varint(typ)?;
 	msg.encode(w, version)
 }
 
 impl Encode<Version> for AuthReply {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match self {
 			Self::Ok(ok) => encode_typed(w, AUTH_OK, ok, version),
 			Self::Error(err) => encode_typed(w, AUTH_ERROR, err, version),
@@ -181,10 +173,10 @@ impl Encode<Version> for AuthReply {
 }
 
 impl Decode<Version> for AuthReply {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		match u64::decode(buf, version)? {
-			AUTH_OK => Ok(Self::Ok(AuthOk::decode(buf, version)?)),
-			AUTH_ERROR => Ok(Self::Error(AuthError::decode(buf, version)?)),
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		match r.varint()? {
+			AUTH_OK => Ok(Self::Ok(AuthOk::decode(r, version)?)),
+			AUTH_ERROR => Ok(Self::Error(AuthError::decode(r, version)?)),
 			typ => Err(DecodeError::InvalidMessage(typ)),
 		}
 	}
@@ -198,12 +190,17 @@ mod tests {
 		texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
 	}
 
+	fn encode<T: Encode<Version>>(msg: &T, version: Version) -> Result<Vec<u8>, EncodeError> {
+		let mut buf = Vec::new();
+		msg.encode(&mut Encoder::new(&mut buf, version.into()), version)?;
+		Ok(buf)
+	}
+
 	fn round_trip<T: Encode<Version> + Decode<Version>>(msg: &T) -> T {
-		let mut buf = bytes::BytesMut::new();
-		msg.encode(&mut buf, Version::Lite07).unwrap();
-		let mut slice = &buf[..];
-		let got = T::decode(&mut slice, Version::Lite07).unwrap();
-		assert!(slice.is_empty(), "trailing bytes after decode");
+		let buf = encode(msg, Version::Lite07).unwrap();
+		let mut r = Decoder::new(&buf, Version::Lite07.into());
+		let got = T::decode(&mut r, Version::Lite07).unwrap();
+		assert!(r.is_empty(), "trailing bytes after decode");
 		got
 	}
 
@@ -245,8 +242,7 @@ mod tests {
 			subscribe: patterns(&[""]),
 			expires: Some(Duration::from_millis(1000)),
 		});
-		let mut buf = bytes::BytesMut::new();
-		msg.encode(&mut buf, Version::Lite07).unwrap();
+		let buf = encode(&msg, Version::Lite07).unwrap();
 		#[rustfmt::skip]
 		let want: &[u8] = &[
 			0x00, // AUTH_OK
@@ -265,18 +261,18 @@ mod tests {
 	#[test]
 	fn invalid_patterns_are_refused() {
 		for text in ["*/**", "/room", "room/", "room//a", "a*b*c", "**/**", "a**"] {
-			let mut buf = bytes::BytesMut::new();
-			AUTH_OK.encode(&mut buf, Version::Lite07).unwrap();
-			let mut body = bytes::BytesMut::new();
-			1usize.encode(&mut body, Version::Lite07).unwrap();
-			text.encode(&mut body, Version::Lite07).unwrap();
-			0usize.encode(&mut body, Version::Lite07).unwrap();
-			0u64.encode(&mut body, Version::Lite07).unwrap();
-			body.len().encode(&mut buf, Version::Lite07).unwrap();
-			buf.extend_from_slice(&body);
+			let mut buf = Vec::new();
+			let mut w = Encoder::new(&mut buf, Version::Lite07.into());
+			w.varint(AUTH_OK).unwrap();
+			let prefix = w.prefix_varint();
+			w.varint(1).unwrap();
+			w.string(text).unwrap();
+			w.varint(0).unwrap();
+			w.varint(0).unwrap();
+			w.fill(prefix).unwrap();
 			assert!(
 				matches!(
-					AuthReply::decode(&mut &buf[..], Version::Lite07),
+					AuthReply::decode(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07),
 					Err(DecodeError::InvalidValue)
 				),
 				"{text} decoded"
@@ -314,10 +310,7 @@ mod tests {
 		let msg = Auth {
 			token: Bytes::from(vec![0; super::super::message::MAX_MESSAGE_SIZE + 1]),
 		};
-		assert!(matches!(
-			msg.encode(&mut Sizer::default(), Version::Lite07),
-			Err(EncodeError::TooLarge)
-		));
+		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::TooLarge)));
 	}
 
 	#[test]
@@ -330,14 +323,12 @@ mod tests {
 			Version::Lite05,
 			Version::Lite06,
 		] {
-			let mut buf = bytes::BytesMut::new();
 			assert!(matches!(
-				Auth { token: Bytes::new() }.encode(&mut buf, version),
+				encode(&Auth { token: Bytes::new() }, version),
 				Err(EncodeError::Version)
 			));
-			let mut slice: &[u8] = &[0];
 			assert!(matches!(
-				Auth::decode_msg(&mut slice, version),
+				Auth::decode_msg(&mut Decoder::new(&[0], version.into()), version),
 				Err(DecodeError::Version)
 			));
 		}

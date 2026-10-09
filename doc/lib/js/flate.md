@@ -25,7 +25,8 @@ producer.update(payload);
 ```
 
 A payload is stamped when written, unless you pass its capture time:
-`producer.update(payload, at)`.
+`producer.update(payload, at)`. Every frame carries a timestamp, so the track must
+declare a timescale, such as `createTrack(name, { timescale: Time.Timescale.MILLI })`.
 
 The codec underneath is exported as `Encoder`/`Decoder`. Create one pair per
 group and feed frames in order.

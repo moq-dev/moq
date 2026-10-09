@@ -1,7 +1,10 @@
 import { Reader, Writer } from "../stream.ts";
 
-/** The largest message body either side accepts, matching the Rust implementation. */
-export const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
+/**
+ * The largest message body either side accepts, matching the Rust implementation: the
+ * same ceiling as SETUP, checked at the length prefix before the body is buffered.
+ */
+export const MAX_MESSAGE_SIZE = 0xffff;
 
 // Encodes a message with a varint size prefix, refusing a body the peer would reject. A type
 // `id` is written only once the body fits, so a refused message leaves nothing on the stream.

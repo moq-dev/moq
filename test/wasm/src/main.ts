@@ -141,7 +141,7 @@ async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Pr
 	// published into the origin and the session announces the table.
 	const origin = new Moq.Origin.Producer();
 	const broadcast = origin.createBroadcast(Moq.Path.from(path));
-	const track = broadcast.createTrack(TRACK);
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const missing = broadcast.createTrack("missing");
 	const used = track.demand().used;
 	const missingUsed = missing.demand().used;

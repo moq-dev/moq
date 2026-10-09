@@ -3,6 +3,7 @@ import type { Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
@@ -17,6 +18,7 @@ import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
+import { encodeDatagram } from "./datagram.ts";
 import { type RequestKind, requestReason, toRequestCode } from "./error.ts";
 import { type Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
@@ -39,6 +41,7 @@ import {
 	type SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
+	SubscribeNamespaceError,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
 import type { TrackStatusRequest } from "./track.ts";
@@ -56,17 +59,17 @@ function clusterFor(base: Cluster.Advert | undefined, route: Route): Cluster.Adv
 	const self = base.hops.at(-1);
 	if (self === undefined) return undefined;
 	const hops = route.hops.at(-1) === self ? [...route.hops] : [...route.hops, self];
-	return { hops, cost: route.cost.warm };
+	return { hops, cost: route.cost };
 }
 
 /**
  * What it takes to move the peer from `held` to `next`.
  *
- * - `"same"`: the peer would decode the same advertisement. The cold cost, and the whole
- *   route without Cluster, never reach the wire, so a change there sends nothing.
+ * - `"same"`: the peer would decode the same advertisement. The route without Cluster
+ *   never reaches the wire, so a change there sends nothing.
  * - `"restart"`: nothing is held, nothing is wanted, or a different broadcast, which is
  *   withdrawn and advertised again.
- * - Otherwise the same broadcast at a new hop chain or warm cost: the cluster parameters
+ * - Otherwise the same broadcast at a new hop chain or static cost: the cluster parameters
  *   the peer holds and the ones it should, for the target to update.
  */
 function change(
@@ -75,6 +78,8 @@ function change(
 	next: Advertised | undefined,
 ): "same" | "restart" | Reprice {
 	if (held === undefined || next === undefined || held.identity !== next.identity) return "restart";
+	// A new epoch is another broadcast, even from the same entry.
+	if (held.route.epoch !== next.route.epoch) return "restart";
 	const from = clusterFor(base, held.route);
 	const to = clusterFor(base, next.route);
 	if (from === undefined || to === undefined) return from === to ? "same" : "restart";
@@ -132,8 +137,8 @@ interface Namespaces {
 	/** What the peer refused, and whether coming back is worth anything. */
 	refused: Map<Path.Valid, Refused>;
 
-	/** The identity each refusal was about, so a republish at the same path clears it. */
-	offered: Map<Path.Valid, object>;
+	/** The advertisement each refusal was about, so a republish or new epoch at the same path clears it. */
+	offered: Map<Path.Valid, Advertised>;
 }
 
 /** Where one announce loop sends its advertisements. */
@@ -156,20 +161,19 @@ interface RunGroup {
 	/** The group to serve. */
 	group: group.Consumer;
 
-	/** The track's advertised timescale, applied to every frame timestamp. */
-	timescale: Timescale;
+	/**
+	 * The units each object's presentation timestamp is written in, or undefined when objects
+	 * carry none.
+	 *
+	 * Undefined when SUBSCRIBE_OK carries no TIMESCALE: the track has no timeline, the
+	 * subscriber sent INCLUDE_PROPERTIES=0, or the draft (14-16) cannot send the property. A
+	 * timestamp whose units were never declared is worse than none. Our own reader discards
+	 * it; another may read it as some default and time the media wrong.
+	 */
+	timescale?: Timescale;
 
 	/** The publisher's tie-break priority, already converted to the IETF wire convention. */
 	publisherPriority: number;
-
-	/**
-	 * Whether objects carry their presentation timestamp.
-	 *
-	 * False once the subscriber sends INCLUDE_PROPERTIES=0: that drops TIMESCALE from
-	 * SUBSCRIBE_OK, and a timestamp whose units were never declared is worse than none. Our
-	 * own reader discards it; another may read it as some default and time the media wrong.
-	 */
-	stamped: boolean;
 
 	/** The objects of this group the subscription's filter selects. */
 	slice: GroupSlice;
@@ -207,11 +211,8 @@ interface RunFill {
 	 */
 	cache: TrackSubscriber;
 
-	/** The track's advertised timescale, applied to every frame timestamp. */
-	timescale: Timescale;
-
-	/** Whether objects carry their presentation timestamp; see {@link RunGroup.stamped}. */
-	stamped: boolean;
+	/** The units objects are stamped in, if any; see {@link RunGroup.timescale}. */
+	timescale?: Timescale;
 
 	/** Settles when the subscriber leaves, releasing a fill still waiting on its group. */
 	unsubscribed: Promise<void>;
@@ -235,12 +236,18 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+
+	// The one writer for the outbound datagram stream, shared by every subscription since a
+	// second getWriter would throw. Undefined when the transport carries no datagrams, which
+	// turns them off: there is no stream fallback. Released in close().
+	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 	#hidden: boolean;
 
 	// The origin this session serves, borrowed: it outlives the session, and closing the
-	// session leaves its broadcasts alone. The namespaces are advertised with an unsolicited
-	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), or on request if the peer asked
-	// for that (see {@link runSubscribeNamespace}).
+	// session leaves its broadcasts alone. Namespaces go out as an unsolicited
+	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}) unless the peer asked to be
+	// told on request. On draft-16 and later {@link runSubscribeNamespace} also carries
+	// every match: a NAMESPACE is discovery, not a second route.
 	#advertised: Getter<Advertisements | undefined>;
 	#publish?: OriginConsumer;
 
@@ -300,6 +307,18 @@ export class Publisher {
 		this.#requiresSolicitation = requiresSolicitation;
 		this.#hidden = hidden;
 		this.#advert = Cluster.advertise(cluster);
+		this.#datagramWriter = DatagramStream.datagramWriter(quic);
+	}
+
+	/**
+	 * Release the datagram writer's lock so the transport can be torn down. The broadcasts
+	 * belong to the origin, which outlives this session.
+	 *
+	 * @internal
+	 */
+	close() {
+		this.#datagramWriter?.releaseLock();
+		this.#datagramWriter = undefined;
 	}
 
 	/**
@@ -342,7 +361,9 @@ export class Publisher {
 			} catch (err: unknown) {
 				const e = error(err);
 				const condition =
-					e instanceof StreamError && e.code === StreamCode.NotFound ? "does_not_exist" : "internal";
+					e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
+						? "does_not_exist"
+						: "internal";
 				refusal = { errorCode: toRequestCode(condition, "subscribe", version), reasonPhrase: reason(e) };
 			}
 		}
@@ -377,16 +398,17 @@ export class Publisher {
 			// producer retained and let the receiving subscriber enforce its own budget.
 			// Keep the sentinel encodable if this demand crosses a Lite hop before the
 			// producer's retention bound is known.
-			maxAge: Milli(Varint.MAX_U53),
+			maxDelay: Milli(Varint.MAX_U53),
 		});
 
 		let cache: TrackSubscriber | undefined;
 
 		try {
-			// Declaring the timescale is what opts the track into timestamps; every object
-			// Timestamp below is in these units.
 			const info = await track.info();
-			const timescale = info.timescale;
+			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
+			// Drafts 14-16 never write that property, so their objects stay unstamped.
+			const timescale =
+				msg.propertiesWanted && Properties.sendsTimescale(version) ? (info.timescale ?? undefined) : undefined;
 			// The model ranks higher-first, the IETF wire lower-first. Every group this
 			// subscription serves carries the same publisher priority, which is what lets a
 			// relay prefer catalog and audio over video when it has no subscriber preference
@@ -407,7 +429,7 @@ export class Publisher {
 			// group; the model's `endGroup` is exclusive.
 			track.update({
 				priority,
-				maxAge: Milli(Varint.MAX_U53),
+				maxDelay: Milli(Varint.MAX_U53),
 				groups: {
 					start: range.start ? { included: Number(range.start.group) } : undefined,
 					end: range.end ? { included: Number(range.end.group) } : undefined,
@@ -422,7 +444,8 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			const fill =
 				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
-			cache = fill && fill.kind !== "empty" ? track.fork({ priority, maxAge: Milli(Varint.MAX_U53) }) : undefined;
+			cache =
+				fill && fill.kind !== "empty" ? track.fork({ priority, maxDelay: Milli(Varint.MAX_U53) }) : undefined;
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
@@ -444,11 +467,11 @@ export class Publisher {
 						? { groupId: edge.largest.group, objectId: edge.largest.object }
 						: { groupId: edge.largest.group, objectId: 0n }),
 				properties: msg.propertiesWanted
-					? // Declaring the timescale is what opts the track into timestamps; every
-						// object Timestamp below is in these units. We serve the newest group
-						// first, matching moq-lite.
+					? // TIMESCALE is what opts the track into timestamps, on drafts that can
+						// send it. We serve the newest group first, matching moq-lite.
 						{
-							timescale,
+							// An untimed track declares none, so it stays untimed downstream.
+							timescale: info.timescale ?? undefined,
 							priority: publisherPriority,
 							groupOrder: Properties.DESCENDING,
 							maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
@@ -480,7 +503,7 @@ export class Publisher {
 					const params = await Message.decode(stream.reader, async (r) => {
 						await r.u62();
 						if (version === Version.DRAFT_17) await r.u62();
-						return Parameters.decode(r, version);
+						return Parameters.decode(r, version, "request-update");
 					});
 					const unsupported =
 						params.forward === false ||
@@ -542,7 +565,6 @@ export class Publisher {
 						group,
 						timescale,
 						publisherPriority,
-						stamped: msg.propertiesWanted,
 						slice: groupSlice(range, group.sequence),
 						unsubscribed,
 						streams,
@@ -551,6 +573,10 @@ export class Publisher {
 					void task.finally(() => groups.delete(task));
 				}
 			})();
+
+			// Datagrams count toward no stream, so PUBLISH_DONE never waits on them; closing
+			// the track below ends the loop.
+			void this.#runDatagrams({ requestId: msg.requestId, track, timescale, publisherPriority });
 
 			// The fill (when one was requested) runs alongside on its own fetch stream; its
 			// failures reset that stream and never touch the subscription.
@@ -562,7 +588,6 @@ export class Publisher {
 							fill,
 							cache,
 							timescale,
-							stamped: msg.propertiesWanted,
 							unsubscribed,
 							streams,
 						})
@@ -669,7 +694,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, publisherPriority, stamped, slice, unsubscribed, streams } = options;
+		const { requestId, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -694,7 +719,7 @@ export class Publisher {
 				flags: {
 					// The object properties carry the timestamp, so there is nothing to write
 					// when the track declared no units to read one in.
-					hasExtensions: stamped,
+					hasExtensions: timescale !== undefined,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
 					hasEnd: true,
@@ -753,6 +778,48 @@ export class Publisher {
 	}
 
 	/**
+	 * Send a track's datagrams as OBJECT_DATAGRAMs, best-effort, like moq-lite.
+	 *
+	 * One that does not fit the transport's limit is dropped; there is no stream fallback. A
+	 * send failure stops the loop but never fails the subscription.
+	 */
+	async #runDatagrams(options: {
+		requestId: bigint;
+		track: TrackSubscriber;
+		/** The units datagrams are stamped in, if any; see {@link RunGroup.timescale}. */
+		timescale: Timescale | undefined;
+		publisherPriority: number;
+	}) {
+		const writer = this.#datagramWriter;
+		if (!writer) return;
+		const { requestId, track, timescale, publisherPriority } = options;
+		const version = this.#session.version;
+
+		try {
+			for (;;) {
+				const datagram = await track.recvDatagram();
+				if (!datagram) return;
+
+				const body = await encodeDatagram(
+					datagram,
+					{ trackAlias: requestId, publisherPriority, timescale },
+					version,
+				);
+				const max = DatagramStream.maxDatagramSize(this.#quic);
+				if (body.byteLength > max) {
+					console.debug(`dropping oversize datagram: alias=${requestId} size=${body.byteLength} max=${max}`);
+					continue;
+				}
+
+				await writer.ready;
+				await writer.write(body);
+			}
+		} catch (err: unknown) {
+			console.debug(`datagram send stopped: alias=${requestId} error=${reason(error(err))}`);
+		}
+	}
+
+	/**
 	 * Mark the track's end with an END_OF_TRACK object on its own stream, at object 0 of the
 	 * group that will never exist.
 	 *
@@ -804,7 +871,7 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, fill, cache, timescale, stamped, unsubscribed, streams } = options;
+		const { requestId, fill, cache, timescale, unsubscribed, streams } = options;
 		const version = this.#session.version;
 
 		// Everything is inside the try so the cache fork is released on every path out,
@@ -829,7 +896,7 @@ export class Publisher {
 
 			const group = takeGroup(cache, Number(fill.sequence));
 			try {
-				await this.#writeFillGroup(stream, group, fill, timescale, stamped, unsubscribed);
+				await this.#writeFillGroup(stream, group, fill, timescale, unsubscribed);
 			} finally {
 				group.close();
 			}
@@ -856,8 +923,7 @@ export class Publisher {
 		stream: Writer,
 		group: group.Consumer,
 		fill: FillGroup,
-		timescale: Timescale,
-		stamped: boolean,
+		timescale: Timescale | undefined,
 		unsubscribed: Promise<void>,
 	) {
 		let first = true;
@@ -885,7 +951,7 @@ export class Publisher {
 			next = BigInt(frame.sequence) + 1n;
 			if (fill.until !== undefined && BigInt(frame.sequence) >= fill.until) break;
 
-			const obj = new FetchFrame({ payload: frame.payload, timestamp: stamped ? frame.timestamp : undefined });
+			const obj = new FetchFrame({ payload: frame.payload, timestamp: frame.timestamp });
 			await obj.encode(
 				stream,
 				{ group: Number(fill.sequence), object: frame.sequence, first },
@@ -915,12 +981,12 @@ export class Publisher {
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
 	 *
-	 * This carries the advertisements when the peer asked to be told on request (MoQ
-	 * Solicit); otherwise {@link runPublishNamespaces} has already announced everything
-	 * visible and repeating it here would leave the peer holding two sources for one
-	 * broadcast, so only the hidden namespaces it may see ride here (MoQ Hidden).
-	 * Draft-16+ streams Namespace entries inline; draft-14/15 predate those messages, so
-	 * each advertisement is a PUBLISH_NAMESPACE request of its own.
+	 * On draft-16 and later every visible match is a NAMESPACE on this stream, whatever
+	 * the peer's SETUP said. A NAMESPACE is discovery, not a route, so a peer that also
+	 * hears the unsolicited PUBLISH_NAMESPACE still gets the match here. Draft-14/15
+	 * predate those messages, so each advertisement is a PUBLISH_NAMESPACE request, and
+	 * only for what {@link runPublishNamespaces} does not already say (the whole set when
+	 * the peer asked to be told on request, otherwise the hidden remainder).
 	 *
 	 * @internal
 	 */
@@ -958,12 +1024,13 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			}
 
-			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Unless the
-			// peer asked to be told only on request, it has already heard everything visible
-			// from the empty prefix unasked, so this stream carries only what that hid.
+			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Draft-16
+			// and later carry every remaining match. Draft-14/15 only add what the
+			// unsolicited loop cannot say.
+			const visible = (covered: Path.Valid) => !this.#hidden || msg.hidden || !hiddenBelow(prefix, covered);
 			const carries = (covered: Path.Valid) =>
-				(!this.#hidden || msg.hidden || !hiddenBelow(prefix, covered)) &&
-				(this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered))) &&
+				visible(covered) &&
+				(legacy ? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)) : true) &&
 				!this.#denied(covered);
 
 			// Nothing is advertised before the grant it would be checked against.
@@ -1055,9 +1122,10 @@ export class Publisher {
 	 *
 	 * The peers that never send SUBSCRIBE_NAMESPACE are exactly the ones expecting a
 	 * publisher to announce itself, so announcing is the default. A peer that would
-	 * rather ask says so in its SETUP (MoQ Solicit) and this does nothing, leaving
-	 * {@link runSubscribeNamespace} to carry the advertisements instead. Exactly one of
-	 * the two is live, so the peer never hears a namespace twice.
+	 * rather ask says so in its SETUP (MoQ Solicit) and this does nothing. On draft-16
+	 * and later {@link runSubscribeNamespace} also carries every match, so a peer that
+	 * did not ask hears each namespace both ways. A NAMESPACE is discovery only, not a
+	 * second route.
 	 *
 	 * @internal
 	 */
@@ -1178,7 +1246,9 @@ export class Publisher {
 		// by rebuilding the watched entry.
 		for (const key of [...ns.refused.keys()]) {
 			const snap = updated.get(key);
-			if (snap === undefined || ns.offered.get(key) !== snap.identity) {
+			const offered = ns.offered.get(key);
+			// A new epoch is another broadcast too, even from the same front.
+			if (snap === undefined || offered?.identity !== snap.identity || offered.route.epoch !== snap.route.epoch) {
 				ns.refused.delete(key);
 				ns.offered.delete(key);
 			}
@@ -1213,7 +1283,7 @@ export class Publisher {
 				held.delete(key);
 				if (answer !== "dropped") {
 					ns.refused.set(key, answer);
-					ns.offered.set(key, snap.identity);
+					ns.offered.set(key, snap);
 				}
 			}
 		}
@@ -1441,6 +1511,21 @@ export class Publisher {
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
 		// TRACK_STATUS_ERROR is 0x0f on draft-14.
 		await this.#refuseUnsupported(stream, msg.requestId, "track_status", 0x0f, "TRACK_STATUS is not supported");
+	}
+
+	/**
+	 * Refuses a draft-16/17 SUBSCRIBE_NAMESPACE that asks for PUBLISH alone: we never send PUBLISH.
+	 *
+	 * @internal
+	 */
+	async refuseSubscribeNamespace(requestId: bigint, stream: Stream) {
+		await this.#refuseUnsupported(
+			stream,
+			requestId,
+			"subscribe_namespace",
+			SubscribeNamespaceError.id,
+			"SUBSCRIBE_NAMESPACE for PUBLISH is not supported",
+		);
 	}
 
 	/**

@@ -25,7 +25,7 @@ pub enum MoqProtocolKind {
 	Cancel,
 	/// Something went wrong that isn't worth a dedicated code. Session 1, stream 0.
 	Internal,
-	/// The peer's token does not grant the requested path or operation. Session 2, stream 0x3A.
+	/// The peer's token does not grant the requested path or operation. Session 2, stream 0x3B.
 	Unauthorized,
 	/// The peer broke a protocol rule; the session is unusable.
 	ProtocolViolation,
@@ -136,7 +136,8 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 		moq_net::StreamError::GoingAway => MoqProtocolKind::GoingAway,
 		moq_net::StreamError::TooFarBehind => MoqProtocolKind::TooFarBehind,
 		moq_net::StreamError::MalformedTrack => MoqProtocolKind::MalformedTrack,
-		moq_net::StreamError::NotFound => MoqProtocolKind::NotFound,
+		// A datagram reached by a FETCH is, to a binding, a miss like any other.
+		moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable => MoqProtocolKind::NotFound,
 		moq_net::StreamError::Unroutable => MoqProtocolKind::Unroutable,
 		moq_net::StreamError::Old => MoqProtocolKind::Old,
 		moq_net::StreamError::Evicted => MoqProtocolKind::Evicted,
@@ -281,7 +282,7 @@ impl From<moq_net::Error> for MoqError {
 	fn from(err: moq_net::Error) -> Self {
 		match err {
 			moq_net::Error::Transport(message) => Self::Transport(message),
-			moq_net::Error::NotFound => Self::NotFound,
+			moq_net::Error::NotFound | moq_net::Error::NotFetchable => Self::NotFound,
 			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
 			moq_net::Error::Unauthorized => Self::Unauthorized,
@@ -477,7 +478,7 @@ mod tests {
 		match err {
 			MoqError::Protocol { details: protocol } => {
 				assert_eq!(protocol.scope, MoqErrorScope::Stream);
-				assert_eq!(protocol.code, 0x3a);
+				assert_eq!(protocol.code, 0x3b);
 				assert_eq!(protocol.kind, MoqProtocolKind::Unauthorized);
 			}
 			other => panic!("expected Protocol, got {other}"),

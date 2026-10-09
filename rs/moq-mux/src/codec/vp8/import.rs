@@ -88,27 +88,8 @@ impl Import {
 			keyframe: header.keyframe,
 			duration: None,
 		})?;
-		let demand = self.track.demand().is_used();
-		self.catalog.on_frame(&mut self.track, demand)?;
 
 		Ok(())
-	}
-
-	/// Re-evaluate stall from source silence.
-	pub fn tick(&mut self) -> crate::Result<()> {
-		let demand = self.track.demand().is_used();
-		self.catalog.tick(&mut self.track, demand)
-	}
-
-	/// The source is gone; this rendition is never stalled while idle.
-	pub fn idle(&mut self) -> crate::Result<()> {
-		self.catalog.idle(&mut self.track)
-	}
-
-	/// Record the encode duration before publishing its frames so the catalog can report a stall.
-	pub fn observe_lag(&mut self, lag: std::time::Duration) -> crate::Result<()> {
-		let demand = self.track.demand().is_used();
-		self.catalog.observe_lag(&mut self.track, demand, lag)
 	}
 
 	/// A watch-only handle to this track's subscriber demand.

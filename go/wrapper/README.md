@@ -50,12 +50,9 @@ for event, err := range announced.All(ctx) {
 		}
 		log.Fatal(err)
 	}
-	switch event := event.(type) {
-	case moq.AnnounceEventStart:
+	if event, ok := event.(moq.AnnounceEventStart); ok {
 		// Prefix stays origin-relative; Captures reports wildcard matches.
 		fmt.Println("got broadcast", event.Announce.Prefix)
-	case moq.AnnounceEventLive:
-		fmt.Println("caught up; later events are live changes")
 	}
 }
 ```

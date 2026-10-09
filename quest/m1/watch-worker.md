@@ -35,5 +35,5 @@ Gate on the plan's jank harness and N-player sweep, both nightly.
 
 ## Related
 
-- [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - touches the same video decoder
+- [WebGPU renderer](/quest/m1/webgpu-renderer.md) - the renderer this moves into the worker; it already takes an `OffscreenCanvas`
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - changes the worklet this feeds

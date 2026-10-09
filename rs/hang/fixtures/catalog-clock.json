@@ -20,5 +20,9 @@
 		}
 	},
 	"clock": { "wall": 1751846400000000, "timescale": 1000000 },
-	"archive": { "track": "timeline.z", "timescale": 1000, "durationMax": 2000 }
+	"archive": {
+		"timelines": { "video": "video.timeline.z", "audio": "audio.timeline.z" },
+		"timescale": 1000,
+		"durationMax": 2000
+	}
 }

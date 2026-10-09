@@ -363,6 +363,56 @@ for (const [kind, create] of [
 		expect(media.attempts).toBe(2);
 		source.close();
 	});
+
+	test(`${kind} reports an ended track that exhausts the retry budget`, async () => {
+		using _time = fakeTime();
+		using media = install(new FakeMediaDevices());
+		const enabled = new Signal(false);
+		const source = create(enabled);
+		try {
+			// Settle discovery before starting so it cannot refund this attempt's budget.
+			await settle();
+			enabled.set(true);
+			await settle();
+			expect(published(source.out.source.peek())).toBe(media.latest());
+			expect(source.out.error.peek()).toBeUndefined();
+
+			for (let i = 0; i < Retry.LIMIT; i++) {
+				media.latest().end();
+				await settle();
+				expect(source.out.error.peek()).toBeUndefined();
+				jest.advanceTimersToNextTimer();
+				await settle();
+				expect(media.attempts).toBe(i + 2);
+				expect(published(source.out.source.peek())).toBe(media.latest());
+				expect(source.out.error.peek()).toBeUndefined();
+			}
+
+			media.latest().end();
+			await settle();
+			expect(media.attempts).toBe(Retry.LIMIT + 1);
+			expect(source.out.source.peek()).toBeUndefined();
+			const error = source.out.error.peek();
+			expect(error?.name).toBe("AbortError");
+			expect(error?.message).toBe("The media track ended");
+
+			jest.advanceTimersByTime(Retry.SETTLED);
+			await settle();
+			expect(media.attempts).toBe(Retry.LIMIT + 1);
+			expect(source.out.error.peek()).toBe(error);
+
+			enabled.set(false);
+			await settle();
+			expect(source.out.error.peek()).toBeUndefined();
+			enabled.set(true);
+			await settle();
+			expect(media.attempts).toBe(Retry.LIMIT + 2);
+			expect(published(source.out.source.peek())).toBe(media.latest());
+			expect(source.out.error.peek()).toBeUndefined();
+		} finally {
+			source.close();
+		}
+	});
 }
 
 test("a microphone re-opens when its track dies", async () => {

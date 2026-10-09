@@ -8,6 +8,7 @@ mod announce;
 mod auth;
 mod compress;
 mod datagram;
+mod epoch;
 mod fetch;
 mod goaway;
 mod group;

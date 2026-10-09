@@ -31,9 +31,7 @@ Transport: implement `qmux::transport::{Transport, Writer, Reader}` over one
 reliable ordered str0m channel, the way `ws::Upgraded` does, and feed
 `qmux::Session` through `transport::Session` like `websocket.rs`. One record
 per message, `max_record_size` 16 KiB by default, clamped to the negotiated
-message size. `ordered` is a config knob for
-[unordered qmux](/quest/m3/p2p/unordered.md), set from the roster before
-the channel is created, never from the first qmux record.
+message size. The channel is always ordered, with no knob.
 
 Tests: an in-process str0m pair over loopback runs moq-net's session tests;
 a second pair puts a fake STUN server between them and asserts the reflexive
@@ -43,4 +41,4 @@ candidate is offered and selected. Browser interop is the harness's job.
 
 - [Data channel transport](/quest/m3/p2p/transport.md) - the browser side of the same binding
 - [moq-cli joins](/quest/m3/p2p/cli.md) - the first consumer
-- [One port](/quest/m2/one-port/README.md) - the relay-side STUN answer this client can be pointed at
+- [P2P](/quest/m3/p2p/README.md) - owns the relay-side public STUN responder this client could be pointed at, moved out of the one-port demux

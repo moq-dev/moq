@@ -64,8 +64,8 @@ browser harness pieces instead of starting another.
 
 The rewritten implementation quest names the chosen model, the public handle
 shape of `Player` and `<moq-watch>`, what happens to the composable classes,
-the worker bundling (the publish capture worker's `?worker&inline` is the
-precedent; like it, the worker loads through `?worklet`, a lazy blob plus a
+the worker bundling (the publish capture worker's `?worklet` import in
+`js/publish/src/video/processor.ts` is the precedent: a lazy blob plus a
 hostable file under the package's `assets()` base), and the follow-up
 quest for moving publish onto the same worker if the handle model wins. That
 follow-up wires the capture worklet to the encoder worker with a

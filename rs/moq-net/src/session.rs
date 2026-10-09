@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, task::Poll, time::Duration};
 
-use web_transport_trait::Stats as _;
+use crate::transport::Stats as _;
 
 use crate::{Error, SessionError, Version, auth, bandwidth, goaway};
 
@@ -33,6 +33,31 @@ struct StatsState {
 	sample: Stats,
 	/// A handle read the stats since the last sample: keep sampling.
 	demanded: bool,
+}
+
+/// How [`Session::setup`] learns that the peer's SETUP arrived.
+#[derive(Clone)]
+pub(crate) enum Setup {
+	/// The handshake read it before the session started.
+	Read,
+	/// The lite driver records it from the peer's Setup Stream.
+	Lite(crate::lite::PeerSetup),
+	/// The moq-transport driver records it from the peer's SETUP stream.
+	Ietf(crate::ietf::peer::PeerSetup),
+	/// The version carries no SETUP from the peer.
+	Never,
+}
+
+impl Setup {
+	/// `Ready(true)` once the SETUP arrived, `Ready(false)` if it never will.
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<bool> {
+		match self {
+			Self::Read => Poll::Ready(true),
+			Self::Lite(setup) => setup.poll_seen(waiter).map(|()| true),
+			Self::Ietf(setup) => setup.poll_seen(waiter).map(|()| true),
+			Self::Never => Poll::Ready(false),
+		}
+	}
 }
 
 /// A snapshot of connection statistics for a [`Session`].
@@ -102,6 +127,7 @@ pub struct Session {
 	recv_bandwidth: Option<bandwidth::Consumer>,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
+	setup: Setup,
 }
 
 impl Session {
@@ -217,6 +243,35 @@ impl Session {
 		}
 	}
 
+	/// Wait for the peer's SETUP, or return the session's close reason.
+	///
+	/// Resolves when the peer's SETUP arrives. This crate's servers send it only once
+	/// they admit the client, but neither protocol requires that ordering, so another
+	/// server may send SETUP and still refuse the session afterward.
+	/// [`crate::Client::connect`] returns before the SETUP on moq-lite-05+ and
+	/// moq-transport draft 17+. Older versions read it during the handshake and resolve
+	/// at once, except moq-lite-03 and -04, which carry none and return
+	/// [`Error::Unsupported`]. A session that already closed returns its close reason.
+	pub async fn setup(&self) -> Result<(), Error> {
+		kio::wait(|waiter| {
+			match self.closed.poll(waiter, |state| match &**state {
+				Some(ended) => Poll::Ready(ended.err.clone()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(err)) => return Poll::Ready(Err(err)),
+				// The driver was dropped before it could observe the close.
+				Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Cancel)),
+				Poll::Pending => {}
+			}
+			match self.setup.poll(waiter) {
+				Poll::Ready(true) => Poll::Ready(Ok(())),
+				Poll::Ready(false) => Poll::Ready(Err(Error::Unsupported)),
+				Poll::Pending => Poll::Pending,
+			}
+		})
+		.await
+	}
+
 	/// Drain the peer gracefully: the handle for sending this session's single
 	/// GOAWAY.
 	///
@@ -239,10 +294,10 @@ impl Session {
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
 	///
 	/// [`peek`](goaway::Consumer::peek) is the cheap synchronous check;
-	/// [`recv`](goaway::Consumer::recv) waits for one. Once a GOAWAY arrives, new
-	/// subscribe and announce-interest requests on this session are refused (both
-	/// drafts forbid opening new streams afterward); existing subscriptions keep
-	/// flowing until the session closes.
+	/// [`recv`](goaway::Consumer::recv) waits for one. Once a GOAWAY arrives, this
+	/// session's routes cost [`Cost::DRAIN`](crate::origin::Cost::DRAIN): requests
+	/// keep opening on it until a replacement session's route outranks it, and
+	/// existing subscriptions keep flowing until the session closes.
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
@@ -267,6 +322,7 @@ impl Session {
 		protocol: crate::driver::Protocol<S>,
 		goaway: goaway::Handle,
 		auth: auth::Handle,
+		setup: Setup,
 	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
@@ -311,6 +367,7 @@ impl Session {
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
 			auth,
+			setup,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -357,7 +414,7 @@ enum Drain {
 	/// Nobody asked for one.
 	Idle,
 	/// Requested: close once drained, or at the deadline.
-	Waiting(crate::runtime::Deadline<crate::time::Clock>),
+	Waiting(crate::time::Deadline),
 	/// The drain closed the transport, with this outcome.
 	Done(Result<(), Error>),
 }
@@ -366,9 +423,7 @@ enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling {
-		deadline: crate::runtime::Deadline<crate::time::Clock>,
-	},
+	Polling { deadline: crate::time::Deadline },
 }
 
 impl<S: crate::transport::poll::Session> Supervisor<S> {
@@ -428,7 +483,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				}
 				Close::Drain => {
 					if !draining {
-						self.drain = Drain::Waiting(crate::runtime::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
+						self.drain = Drain::Waiting(crate::time::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
 					}
 					// No handle is left to abort.
 					if last {
@@ -483,7 +538,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		stats.demanded = false;
 		drop(stats);
 		self.mode = SamplerMode::Polling {
-			deadline: crate::runtime::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
+			deadline: crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
 		};
 	}
 
@@ -599,5 +654,105 @@ pub(crate) struct Withdrawing(Withdrawal);
 impl Drop for Withdrawing {
 	fn drop(&mut self) {
 		self.0.0.lock().active -= 1;
+	}
+}
+
+/// Caps on what one peer can make a session hold at once.
+///
+/// A peer that goes past a cap loses the session, closed with `TOO_MANY_REQUESTS`. The
+/// stats sessions rows report each root's peaks, so an operator sees how close sessions
+/// come before one is closed.
+///
+/// On moq-transport drafts 14 to 16 the caps also size the request window, which counts
+/// every request (FETCH, TRACK_STATUS and SUBSCRIBE_UPDATE included), so very low caps
+/// can starve it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Limits {
+	/// Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us.
+	pub announces: usize,
+	/// Subscriptions the peer may hold on our broadcasts. On moq-lite 05 and later an open
+	/// TRACK stream holds one too, sharing it with a SUBSCRIBE for the same track.
+	pub subscriptions: usize,
+}
+
+impl Default for Limits {
+	/// Generous enough for a relay mesh carrying a large origin; lower them for untrusted peers.
+	fn default() -> Self {
+		Self {
+			announces: 100_000,
+			subscriptions: 10_000,
+		}
+	}
+}
+
+impl Limits {
+	/// How many requests a moq-transport peer may hold open at once (drafts 14 to 16).
+	///
+	/// Twice what the caps admit, so a peer within them is never blocked by request IDs
+	/// still waiting to be granted back.
+	pub(crate) fn requests(&self) -> u64 {
+		let caps = self.announces.saturating_add(self.subscriptions) as u64;
+		caps.saturating_mul(2)
+	}
+}
+
+/// A count of live entries shared across a session, refused past its cap.
+#[derive(Clone)]
+pub(crate) struct Slots {
+	live: Arc<std::sync::atomic::AtomicUsize>,
+	max: usize,
+	/// Where the most this session has held is reported.
+	stats: Option<(crate::stats::Session, crate::stats::Cap)>,
+}
+
+impl Slots {
+	pub(crate) fn new(max: usize) -> Self {
+		Self {
+			live: Default::default(),
+			max,
+			stats: None,
+		}
+	}
+
+	/// Report how many are held to `stats`, as `cap`'s peak.
+	pub(crate) fn with_stats(mut self, stats: &crate::stats::Session, cap: crate::stats::Cap) -> Self {
+		stats.track_held(cap, &self.live);
+		self.stats = Some((stats.clone(), cap));
+		self
+	}
+
+	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
+	///
+	/// The caller closes the session on that error: a peer past its limits loses the session.
+	pub(crate) fn acquire(&self) -> Result<Slot, Error> {
+		use std::sync::atomic::Ordering;
+		let held = self
+			.live
+			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+				(live < self.max).then_some(live + 1)
+			})
+			.map_err(|_| Error::TooManyRequests)?
+			+ 1;
+		if let Some((stats, cap)) = &self.stats {
+			stats.hold(*cap, held as u64);
+		}
+		Ok(Slot(self.live.clone()))
+	}
+}
+
+impl Default for Slots {
+	/// Unlimited, for sessions and tests that configure nothing.
+	fn default() -> Self {
+		Self::new(usize::MAX)
+	}
+}
+
+/// One taken [`Slots`] entry, released on drop.
+pub(crate) struct Slot(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Slot {
+	fn drop(&mut self) {
+		self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
 	}
 }

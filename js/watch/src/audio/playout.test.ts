@@ -1,7 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import * as Container from "@moq/hang/container";
 import { Group, Time, Track, Varint } from "@moq/net";
-import { AUTO_MAX_AGE, target } from "./latency";
+import { AUTO_MAX_DELAY, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
@@ -72,16 +72,16 @@ interface Measured {
 /**
  * Feed `t` through the path the decoder measures on: a transport subscription into a container
  * consumer, on a stubbed monotonic clock, one group per frame. After each arrival `budget` turns the
- * current target into the subscription's max age, the way the decoder does.
+ * current target into the subscription's max delay, the way the decoder does.
  */
 async function measure(t: Arrival[], budget: (target: Time.Milli) => Time.Milli): Promise<Measured> {
 	let clock = 0;
 	const now = spyOn(performance, "now").mockImplementation(() => clock);
 	const track = new Track.Producer("audio");
-	const subscriber = track.subscribe({ maxAge: budget(Time.Milli.zero) });
+	const subscriber = track.subscribe({ maxDelay: budget(Time.Milli.zero) });
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
-		maxAge: AUTO_MAX_AGE,
+		maxDelay: AUTO_MAX_DELAY,
 	});
 
 	const result: Measured = { targets: [], delivered: 0 };
@@ -110,7 +110,7 @@ async function measure(t: Arrival[], budget: (target: Time.Milli) => Time.Milli)
 
 			const current = target({ measured: consumer.spread.peek(), frame: CHUNK_MS as Time.Milli });
 			result.targets.push(current);
-			subscriber.update({ maxAge: budget(current) });
+			subscriber.update({ maxDelay: budget(current) });
 		}
 	} finally {
 		track.close();
@@ -124,7 +124,7 @@ async function measure(t: Arrival[], budget: (target: Time.Milli) => Time.Milli)
 
 /** The target the estimator settles on by the end of `t`, given the subscription "auto" asks for. */
 async function settled(t: Arrival[]): Promise<number> {
-	const { targets } = await measure(t, (target) => Time.Milli.max(target, AUTO_MAX_AGE));
+	const { targets } = await measure(t, (target) => Time.Milli.max(target, AUTO_MAX_DELAY));
 	return targets[targets.length - 1];
 }
 
@@ -254,7 +254,7 @@ describe("subscription budget", () => {
 	}
 
 	it("reaches a flush that starts after the target settled", async () => {
-		const { targets, delivered } = await measure(t, (target) => Time.Milli.max(target, AUTO_MAX_AGE));
+		const { targets, delivered } = await measure(t, (target) => Time.Milli.max(target, AUTO_MAX_DELAY));
 		expect(targets[PACED - 1]).toBe((2 * CHUNK_MS) as Time.Milli);
 		expect(delivered).toBe(t.length);
 		// Every flush lands whole, so its 100ms reaches the 95th percentile within a few intervals.
@@ -262,7 +262,7 @@ describe("subscription budget", () => {
 	});
 
 	it("drops the flush it should measure when the budget follows the target", async () => {
-		// The transport skips a group older than the subscription's max age, before the consumer
+		// The transport skips a group older than the subscription's max delay, before the consumer
 		// can observe it, so the estimate only ever sees what the target it already holds allows.
 		const { targets, delivered } = await measure(t, (target) => target);
 		expect(delivered).toBeLessThan(t.length);

@@ -13,6 +13,8 @@ use tokio::task::JoinHandle;
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// About three seconds of HEVC and Opus.
 const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb_cbr.ts");
+/// Fragmented AV1, which the TS export does not carry.
+const AV1: &[u8] = include_bytes!("../../moq-mux/src/container/fmp4/test_data/av1.mp4");
 
 type Output = Arc<Mutex<Vec<u8>>>;
 
@@ -151,14 +153,15 @@ async fn a_clean_finish_exits_zero_once_the_linger_expires() {
 	let (mut publisher, feeding) = import(&relay);
 	let stdin = feeding.await.unwrap();
 	output_past(&output, 0).await;
+	// The linger can't start before stdin closes, but it can before the publisher exits.
+	let closed = Instant::now();
 	drop(stdin);
 	assert!(wait(&mut publisher).await.success());
-	let finished = Instant::now();
 
 	let status = wait(&mut export).await;
 	assert!(status.success(), "a clean finish exits 0, got {status}");
 	assert!(
-		finished.elapsed() >= Duration::from_millis(900),
+		closed.elapsed() >= Duration::from_millis(900),
 		"the export waited out its linger"
 	);
 }
@@ -175,6 +178,33 @@ async fn a_drop_exits_one_once_the_linger_expires() {
 
 	let status = wait(&mut export).await;
 	assert_eq!(status.code(), Some(1), "a drop exits 1, got {status}");
+}
+
+/// An export that fails on its own, with the broadcast still up, has no return to wait for.
+#[tokio::test]
+async fn an_export_failure_with_the_broadcast_up_exits_without_lingering() {
+	let relay = relay().await;
+	let (mut export, _output) = export(&relay, "20s");
+
+	// TS cannot carry AV1, so the export fails on the catalog while the publisher stays up.
+	let mut publisher = moq(&relay, &["import", "fmp4"])
+		.stdin(Stdio::piped())
+		.spawn()
+		.expect("spawn import");
+	let mut stdin = publisher.stdin.take().expect("stdin");
+	let published = Instant::now();
+	stdin.write_all(AV1).await.expect("write stdin");
+
+	let status = wait(&mut export).await;
+	assert_eq!(status.code(), Some(1), "an export failure exits 1, got {status}");
+	assert!(
+		published.elapsed() < Duration::from_secs(10),
+		"exited after {:?}, as though the broadcast had ended",
+		published.elapsed()
+	);
+
+	drop(stdin);
+	wait(&mut publisher).await;
 }
 
 #[tokio::test]

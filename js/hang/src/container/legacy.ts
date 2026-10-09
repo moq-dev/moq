@@ -4,7 +4,6 @@ import { Time } from "@moq/net";
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
 import type { AudioConfig, VideoConfig } from "../catalog";
-import type { Recorder as TimelineRecorder } from "../timeline";
 import type { Format as ContainerFormat } from "./format";
 import type { Frame } from "./types";
 
@@ -59,16 +58,6 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro):
 	return data;
 }
 
-/** Options for a legacy-container {@link Producer}. */
-export interface ProducerProps {
-	/**
-	 * Report each group open (sequence + start timestamp) into the broadcast's timeline, so
-	 * consumers can index the media without downloading it. Mint one via
-	 * {@link Timeline.Producer.track}.
-	 */
-	timeline?: TimelineRecorder;
-}
-
 /** Writes legacy-container frames into a MoQ track, starting a new group on each keyframe. */
 export class Producer {
 	#track: Moq.Track.Producer;
@@ -76,9 +65,7 @@ export class Producer {
 	#previous?: Time.Micro;
 	#reordered = false;
 	#group?: Moq.Group.Producer;
-	#timeline?: TimelineRecorder;
-	// The newest timestamp written, reported to the timeline when the track closes: the last
-	// group has no successor to bound it, so its segment would be published a group short.
+	// The newest timestamp written in the current group, which estimates its end.
 	#end?: Time.Micro;
 	// Furthest timestamp in finished groups, used only for discontinuity markers.
 	#liveEdge?: Time.Micro;
@@ -91,10 +78,9 @@ export class Producer {
 	#marked = false;
 
 	/** Wrap a track to publish legacy-container frames into it. */
-	constructor(track: Moq.Track.Producer, format: Format, props: ProducerProps = {}) {
+	constructor(track: Moq.Track.Producer, format: Format) {
 		this.#format = format;
 		this.#track = track;
-		this.#timeline = props.timeline;
 	}
 
 	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe, a group start goes backwards, or a frame is below the previous group start. */
@@ -111,8 +97,6 @@ export class Producer {
 			this.#group = this.#track.appendGroup();
 			this.#floor = this.#start;
 			this.#start = timestamp;
-			// Report the group the moment it opens: its start is this keyframe's timestamp.
-			this.#timeline?.record(this.#group.sequence, timestamp, true);
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");
 		}
@@ -156,8 +140,6 @@ export class Producer {
 		if (this.#format.kind === "data" || this.#marked || timestamp === undefined) return;
 
 		const group = this.#track.appendGroup();
-		this.#timeline?.record(group.sequence, timestamp, false);
-		this.#timeline?.end(timestamp);
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array(), timestamp),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
@@ -185,8 +167,6 @@ export class Producer {
 				: undefined;
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		this.#format.finishGroup(this.#group, this.#reordered ? undefined : end);
-		const bound = end ?? this.#end;
-		if (bound !== undefined) this.#timeline?.end(bound);
 		this.#group.close();
 		this.#group = undefined;
 		if (this.#end !== undefined) {

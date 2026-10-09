@@ -115,6 +115,79 @@ impl Default for Input {
 	}
 }
 
+/// How an encoder trades latency for compression, applied with
+/// [`Settings::with_preset`].
+///
+/// Mirrors `moq_video::encode::Preset`. A preset sets packetization only:
+/// codec, sample rate, layout, bitrate, and DTX stay as configured. The
+/// packet duration is a packetization setting, not a delay guarantee: Opus adds
+/// its own 6.5 ms lookahead, and transport and playout buffering are separate.
+/// [`Encoder::applied`] reports what took effect.
+///
+/// `#[non_exhaustive]` so a later policy can be added without breaking a
+/// `match`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Preset {
+	/// 10 ms packets: the shortest packetization Opus codes with its full
+	/// toolset, at twice the packet rate.
+	LowLatency,
+	/// 20 ms packets, the Opus default and what [`Settings::new`] builds.
+	#[default]
+	Balanced,
+	/// 20 ms packets. Identical to [`Balanced`](Self::Balanced) today:
+	/// libopus already runs at full complexity, and a longer packet would only
+	/// add delay.
+	Quality,
+}
+
+impl Preset {
+	/// The packet duration this preset codes at.
+	fn frame_duration(self) -> Duration {
+		match self {
+			Self::LowLatency => Duration::from_millis(10),
+			Self::Balanced | Self::Quality => Duration::from_millis(20),
+		}
+	}
+}
+
+/// The packetization an encoder actually applied, as reported by
+/// [`Encoder::applied`].
+///
+/// Mirrors `moq_video::encode::Applied`. A report, not a request: it names the
+/// preset whose packet duration the encoder runs at, so [`Preset::Quality`]
+/// reports [`Preset::Balanced`], whose 20 ms it shares.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Applied {
+	/// The preset whose controls took effect, or `None` when the frame duration
+	/// matches none: a custom [`Settings::frame_duration`], or AAC's fixed
+	/// 1024-sample frames.
+	pub preset: Option<Preset>,
+	/// The controls that took effect, for display, e.g. `"10ms packets"`. Not a
+	/// parse target.
+	pub controls: String,
+}
+
+impl Applied {
+	/// What `settings` apply once validated.
+	fn new(settings: &Settings) -> Self {
+		if settings.codec == Codec::Aac {
+			return Self {
+				preset: None,
+				controls: format!("{AAC_FRAME_SIZE}-sample frames"),
+			};
+		}
+		let preset = [Preset::LowLatency, Preset::Balanced]
+			.into_iter()
+			.find(|preset| preset.frame_duration() == settings.frame_duration);
+		Self {
+			preset,
+			controls: format!("{:?} packets", settings.frame_duration),
+		}
+	}
+}
+
 /// Audio codec settings shared by [`Encoder`] and [`Producer`](super::Producer).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -146,20 +219,46 @@ pub struct Settings {
 	pub frame_duration: Duration,
 	/// Which encoder implementation to use.
 	pub kind: Kind,
+	/// The preset last given to [`with_preset`](Self::with_preset), read back
+	/// with [`preset`](Self::preset). Crate-visible so the crate's struct
+	/// literals can still end in `..Settings::default()`.
+	pub(crate) preset: Preset,
 }
 
 impl Settings {
-	/// Build default Opus settings for `sample_rate` and `layout`.
+	/// Build default Opus settings for `sample_rate` and `layout`, packetized
+	/// by the default [`Preset`].
 	pub fn new(sample_rate: u32, layout: Layout) -> Self {
+		let preset = Preset::default();
 		Self {
 			codec: Codec::default(),
 			sample_rate,
 			layout,
 			bitrate: None,
 			dtx: false,
-			frame_duration: Duration::from_millis(20),
+			frame_duration: preset.frame_duration(),
 			kind: Kind::Auto,
+			preset,
 		}
+	}
+
+	/// Store `preset` and apply its packetization, keeping every other setting.
+	///
+	/// AAC frames are always 1024 samples, so AAC keeps its frame duration.
+	pub fn with_preset(mut self, preset: Preset) -> Self {
+		self.preset = preset;
+		if self.codec != Codec::Aac {
+			self.frame_duration = preset.frame_duration();
+		}
+		self
+	}
+
+	/// The preset given to [`with_preset`](Self::with_preset), or the default.
+	///
+	/// It echoes the request and goes stale if `codec` or `frame_duration` is
+	/// changed afterward; [`Encoder::applied`] reports what took effect.
+	pub fn preset(&self) -> Preset {
+		self.preset
 	}
 
 	/// Derive concrete codec settings from source PCM.
@@ -297,6 +396,8 @@ fn aac_config(settings: &Settings) -> Result<moq_mux::codec::aac::Config, Error>
 pub struct Encoder {
 	backend: Box<dyn Backend>,
 	settings: Settings,
+	/// What the settings applied, fixed at open.
+	applied: Applied,
 	frame_size: usize,
 	/// The catalog description, synthesized from the settings at construction so
 	/// the rendition can be registered before the first packet exists.
@@ -347,13 +448,14 @@ impl Encoder {
 					.map_err(moq_mux::Error::from)?;
 				Some(head)
 			}
-			Codec::Aac => Some(aac_config(settings)?.encode()),
+			Codec::Aac => Some(aac_config(settings)?.encode().map_err(moq_mux::Error::from)?),
 			Codec::Pcm => None,
 		};
 
 		Ok(Self {
 			backend,
 			settings: settings.clone(),
+			applied: Applied::new(settings),
 			frame_size,
 			description,
 			started: false,
@@ -363,6 +465,11 @@ impl Encoder {
 	/// The encoder backend name in use, e.g. `"libopus"`.
 	pub fn name(&self) -> &str {
 		self.backend.name()
+	}
+
+	/// The packetization applied for [`Settings::preset`].
+	pub fn applied(&self) -> &Applied {
+		&self.applied
 	}
 
 	/// The encoder settings, including the latest accepted runtime bitrate.
@@ -613,6 +720,69 @@ mod tests {
 			..Settings::default()
 		});
 		assert!(matches!(err, Err(Error::Unsupported(_))));
+	}
+
+	/// A preset has to reach the codec as its packet duration, read back off the
+	/// packet's TOC rather than our own settings, and leave everything else alone.
+	/// The settings keep the requested preset; the encoder reports the applied one.
+	#[test]
+	fn preset_sets_the_packet_duration_and_keeps_the_rest() {
+		for (preset, samples, applied) in [
+			(Preset::LowLatency, 480, Preset::LowLatency),
+			(Preset::Balanced, 960, Preset::Balanced),
+			(Preset::Quality, 960, Preset::Balanced),
+		] {
+			let settings = Settings {
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(96_000)),
+				layout: Layout::Mono,
+				..Settings::default()
+			}
+			.with_preset(preset);
+			let mut enc = Encoder::new(&settings).unwrap();
+			assert_eq!(enc.settings().layout, Layout::Mono);
+			assert_eq!(enc.settings().preset(), preset);
+			assert_eq!(enc.applied().preset, Some(applied), "{preset:?}");
+			assert_eq!(enc.bitrate().as_bps(), 96_000);
+			assert_eq!(enc.frame_size(), samples);
+
+			let packet = enc.encode(&vec![0.0f32; samples]).unwrap();
+			// SAFETY: a non-empty packet from the encoder above; the TOC is its first byte.
+			let coded = unsafe { unsafe_libopus::opus_packet_get_samples_per_frame(packet.payload.as_ptr(), 48_000) };
+			assert_eq!(coded as usize, samples, "{preset:?} packet");
+
+			let input = Input::new(48_000, Layout::Stereo);
+			let aac = Settings::from_input(Codec::Aac, &input).with_preset(preset);
+			assert_eq!(aac.preset(), preset);
+			assert_eq!(
+				aac.frame_duration,
+				Settings::from_input(Codec::Aac, &input).frame_duration
+			);
+			assert_eq!(aac.frame_size().unwrap(), AAC_FRAME_SIZE, "{preset:?} aac");
+			assert_eq!(stub(&aac).unwrap().applied().preset, None, "{preset:?} aac");
+		}
+	}
+
+	/// Settings without a preset are the default preset, and say so.
+	#[test]
+	fn default_settings_apply_the_default_preset() {
+		let settings = Settings::default();
+		assert_eq!(settings.preset(), Preset::default());
+		let enc = Encoder::new(&settings).unwrap();
+		assert_eq!(enc.applied().preset, Some(Preset::default()));
+		assert_eq!(enc.applied().controls, "20ms packets");
+	}
+
+	/// A frame duration no preset uses is reported as such, not as the request.
+	#[test]
+	fn custom_frame_duration_applies_no_preset() {
+		let settings = Settings {
+			frame_duration: Duration::from_micros(2_500),
+			..Settings::default().with_preset(Preset::LowLatency)
+		};
+		let enc = Encoder::new(&settings).unwrap();
+		assert_eq!(enc.settings().preset(), Preset::LowLatency);
+		assert_eq!(enc.applied().preset, None);
+		assert_eq!(enc.applied().controls, "2.5ms packets");
 	}
 
 	#[test]
@@ -932,7 +1102,12 @@ mod tests {
 			Layout::SixPointOne,
 			Layout::Discrete(2),
 		] {
-			assert!(matches!(stub(&aac(layout)), Err(Error::Unsupported(_))), "{layout:?}");
+			let result = stub(&aac(layout));
+			let detail = result.as_ref().err().map(ToString::to_string);
+			assert!(
+				matches!(result, Err(Error::Unsupported(msg)) if msg.contains("no channelConfiguration")),
+				"{layout:?}: {detail:?}"
+			);
 		}
 	}
 

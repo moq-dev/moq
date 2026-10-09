@@ -14,7 +14,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::auth::{Grant, Handle, Issue, Reply, Request, Serving};
-use crate::coding::{Decode, DecodeError, Encode, EncodeError, Sizer, Stream};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Stream};
 use crate::{Error, Path, Pattern, Patterns, SessionError};
 
 use super::namespace::{decode_namespace, encode_namespace};
@@ -64,17 +64,17 @@ pub struct Auth {
 impl Message for Auth {
 	const ID: u64 = 0x40B61;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		check_version(version).map_err(|_| EncodeError::Version)?;
 		self.request_id.encode(w, version)?;
-		self.token.encode(w, version)
+		w.bytes(&self.token)
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		check_version(version)?;
 		Ok(Self {
 			request_id: RequestId::decode(r, version)?,
-			token: Bytes::decode(r, version)?,
+			token: Bytes::copy_from_slice(r.bytes()?),
 		})
 	}
 }
@@ -96,22 +96,22 @@ const MAX_EXPIRES_MS: u64 = (1 << 53) - 1;
 /// Encode patterns as namespace prefix tuples, refusing any that is not a subtree:
 /// sending `room` for a grant of the literal `room/alice` would hand out more than was
 /// granted.
-fn encode_prefixes<W: bytes::BufMut>(patterns: &Patterns, w: &mut W, version: Version) -> Result<(), EncodeError> {
-	patterns.len().encode(w, version)?;
+fn encode_prefixes(patterns: &Patterns, w: &mut Encoder<'_>) -> Result<(), EncodeError> {
+	w.varint(patterns.len() as u64)?;
 	for pattern in patterns {
 		let prefix = pattern.as_prefix().ok_or(EncodeError::Unsupported)?;
-		encode_namespace(w, &Path::new(prefix), version)?;
+		encode_namespace(w, &Path::new(prefix))?;
 	}
 	Ok(())
 }
 
-fn decode_prefixes<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Patterns, DecodeError> {
-	let count = usize::decode(r, version)?;
+fn decode_prefixes(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
+	let count = r.varint()?;
 	let mut patterns = Patterns::new();
 	// No preallocation: the count is peer-controlled, and the message size limit bounds
 	// how many prefixes actually fit.
 	for _ in 0..count {
-		let prefix = decode_namespace(r, version)?;
+		let prefix = decode_namespace(r)?;
 		let pattern = Pattern::subtree(prefix.as_str()).map_err(|_| DecodeError::InvalidValue)?;
 		patterns.insert(pattern);
 	}
@@ -121,24 +121,24 @@ fn decode_prefixes<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Pattern
 impl Message for AuthOk {
 	const ID: u64 = 0x40B62;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		check_version(version).map_err(|_| EncodeError::Version)?;
-		encode_prefixes(&self.publish, w, version)?;
-		encode_prefixes(&self.subscribe, w, version)?;
+		encode_prefixes(&self.publish, w)?;
+		encode_prefixes(&self.subscribe, w)?;
 		// 0 means never, so a grant that has already lapsed rounds up to the smallest
 		// value that still reads as an expiry.
 		let expires = match self.expires {
 			None => 0,
 			Some(expires) => (expires.as_nanos().div_ceil(1_000_000).min(MAX_EXPIRES_MS as u128) as u64).max(1),
 		};
-		expires.encode(w, version)
+		w.varint(expires)
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		check_version(version)?;
-		let publish = decode_prefixes(r, version)?;
-		let subscribe = decode_prefixes(r, version)?;
-		let expires = match u64::decode(r, version)? {
+		let publish = decode_prefixes(r)?;
+		let subscribe = decode_prefixes(r)?;
+		let expires = match r.varint()? {
 			0 => None,
 			ms => Some(Duration::from_millis(ms)),
 		};
@@ -164,19 +164,19 @@ const MAX_REASON: usize = 8192;
 impl Message for AuthError {
 	const ID: u64 = 0x40B63;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		check_version(version).map_err(|_| EncodeError::Version)?;
 		if self.reason.len() > MAX_REASON {
 			return Err(EncodeError::TooLarge);
 		}
-		self.code.encode(w, version)?;
-		self.reason.as_str().encode(w, version)
+		w.varint(self.code)?;
+		w.string(&self.reason)
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		check_version(version)?;
-		let code = u64::decode(r, version)?;
-		let reason = String::decode(r, version)?;
+		let code = r.varint()?;
+		let reason = r.string()?;
 		if reason.len() > MAX_REASON {
 			return Err(DecodeError::InvalidValue);
 		}
@@ -296,7 +296,7 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 		loop {
 			enum Next {
 				Withdrawn,
-				Reply(Result<Option<(u64, Bytes)>, Error>),
+				Reply(Result<Option<(u64, super::Body)>, Error>),
 			}
 
 			let next = {
@@ -310,7 +310,7 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 				.await
 			};
 
-			let (id, mut data) = match next {
+			let (id, body) = match next {
 				// Resetting our side is what tells the peer.
 				Next::Withdrawn => return Error::Cancel,
 				Next::Reply(Ok(Some(msg))) => msg,
@@ -321,13 +321,14 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 				Next::Reply(Err(err)) => return err,
 			};
 
+			let mut data = body.decoder(self.version);
 			match id {
 				AuthOk::ID => {
 					let ok = match AuthOk::decode_msg(&mut data, self.version) {
 						Ok(ok) => ok,
 						Err(err) => return err.into(),
 					};
-					let now = crate::runtime::Timers::now(&self.runtime);
+					let now = self.runtime.now();
 					// The expiry is the peer's number: one past the local clock's range is
 					// malformed, not a reason to panic.
 					let expires = match ok.expires.map(|expires| now.checked_add(expires)) {
@@ -367,13 +368,12 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 /// Read one `[type][size][body]` message, or `None` once the peer finished the stream.
 async fn read_message<S: crate::transport::poll::Session>(
 	stream: &mut Stream<S, Version>,
-) -> Result<Option<(u64, Bytes)>, Error> {
-	let Some(id) = stream.reader.decode_maybe::<u64>().await? else {
+) -> Result<Option<(u64, super::Body)>, Error> {
+	let Some(id) = stream.reader.varint_maybe().await? else {
 		return Ok(None);
 	};
-	let size: u16 = stream.reader.decode().await?;
-	let data = stream.reader.read_exact(size as usize).await?;
-	Ok(Some((id, data)))
+	let body: super::Body = stream.reader.decode().await?;
+	Ok(Some((id, body)))
 }
 
 /// Answers the peer's Auth requests: the app's verdict when it took the requests,
@@ -478,7 +478,7 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 			}
 			Next::Withdrawn(Err(err)) => return Err(err),
 			Next::Reply(Some(Reply::Grant(grant))) => {
-				let now = crate::runtime::Timers::now(runtime);
+				let now = runtime.now();
 				let ok = AuthOk {
 					publish: grant.publish,
 					subscribe: grant.subscribe,
@@ -488,7 +488,7 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 				// be encoded for any reason (not a prefix subtree, over the u16 message size)
 				// never leaves half a message on the wire. Never widen or trim it: refuse,
 				// which revokes whatever this stream granted before.
-				if let Err(err) = ok.encode(&mut Sizer::default(), version) {
+				if let Err(err) = ok.encode(&mut Encoder::new(&mut Vec::new(), version.into()), version) {
 					tracing::debug!(%err, "auth grant cannot be encoded as one AUTH_OK; refusing the token");
 					issue.lock().done = true;
 					let refused = AuthError {
@@ -526,12 +526,17 @@ mod tests {
 		prefixes.iter().map(|p| Pattern::subtree(p).unwrap()).collect()
 	}
 
+	fn encode_msg<T: Message>(msg: &T, version: Version) -> Result<Vec<u8>, EncodeError> {
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)?;
+		Ok(buf)
+	}
+
 	fn round_trip<T: Message + PartialEq>(msg: &T) -> T {
-		let mut buf = bytes::BytesMut::new();
-		msg.encode_msg(&mut buf, VERSION).unwrap();
-		let mut slice = &buf[..];
-		let got = T::decode_msg(&mut slice, VERSION).unwrap();
-		assert!(slice.is_empty(), "trailing bytes after decode");
+		let buf = encode_msg(msg, VERSION).unwrap();
+		let mut r = Decoder::new(&buf, VERSION.into());
+		let got = T::decode_msg(&mut r, VERSION).unwrap();
+		assert!(r.is_empty(), "trailing bytes after decode");
 		got
 	}
 
@@ -609,8 +614,7 @@ mod tests {
 			subscribe: Patterns::new(),
 			expires: None,
 		};
-		let mut buf = bytes::BytesMut::new();
-		msg.encode_msg(&mut buf, VERSION).unwrap();
+		let buf = encode_msg(&msg, VERSION).unwrap();
 		assert_eq!(&buf[..], b"\x01\x02\x04room\x05alice\x00\x00");
 	}
 
@@ -633,9 +637,8 @@ mod tests {
 				subscribe: Patterns::new(),
 				expires: None,
 			};
-			let mut buf = bytes::BytesMut::new();
 			assert!(
-				matches!(msg.encode_msg(&mut buf, VERSION), Err(EncodeError::Unsupported)),
+				matches!(encode_msg(&msg, VERSION), Err(EncodeError::Unsupported)),
 				"{union:?} encoded"
 			);
 		}
@@ -644,15 +647,13 @@ mod tests {
 	#[test]
 	fn older_drafts_have_no_auth() {
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			let mut buf = bytes::BytesMut::new();
 			let msg = Auth {
 				request_id: RequestId(0),
 				token: Bytes::new(),
 			};
-			assert!(matches!(msg.encode_msg(&mut buf, version), Err(EncodeError::Version)));
-			let mut slice: &[u8] = &[0, 0];
+			assert!(matches!(encode_msg(&msg, version), Err(EncodeError::Version)));
 			assert!(matches!(
-				Auth::decode_msg(&mut slice, version),
+				Auth::decode_msg(&mut Decoder::new(&[0, 0], version.into()), version),
 				Err(DecodeError::Version)
 			));
 		}

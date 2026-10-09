@@ -10,7 +10,6 @@ import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Writer } from "./stream.ts";
-import { Timestamp } from "./time.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -360,7 +359,7 @@ test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 	})();
 	await waitFor(client.auth.grant, (g) => g !== undefined && g.subscribe.size > 0);
 
-	const frame = { payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) };
+	const frame = { payload: new Uint8Array([1]) };
 	downTrack.appendGroup().writeFrame(frame);
 	upTrack.appendGroup().writeFrame(frame);
 

@@ -67,10 +67,15 @@ impl<T: Serialize> Producer<T> {
 
 	/// Append one record to the log.
 	///
-	/// Any failure ends the track. A log missing a record is not the lossless log a stream promises,
-	/// and that holds whether the group rejected the record or it never encoded at all, so the
-	/// failure is surfaced rather than papered over with a second group. The track is aborted rather
-	/// than closed cleanly, so a consumer sees the failure instead of a log that merely looks
+	/// A record that might not fit in what is left of the group's budget is refused with
+	/// [`moq_net::Error::GroupTooLarge`] before anything is written, leaving the log intact. The
+	/// budget covers the whole log, so once it is spent every append is refused; a publisher with
+	/// more to say opens a new track.
+	///
+	/// Any other failure ends the track. A log missing a record is not the lossless log a stream
+	/// promises, and that holds whether the group rejected the record or it never encoded at all, so
+	/// the failure is surfaced rather than papered over with a second group. The track is aborted
+	/// rather than closed cleanly, so a consumer sees the failure instead of a log that merely looks
 	/// complete. Every later append fails on the ended track.
 	///
 	/// Returns the encoded size of the frame written.
@@ -107,6 +112,8 @@ impl<T: Serialize> Inner<T> {
 		// `record` guards the window: any failure below drops it uncommitted.
 		let record = match encoder.encode(payload.value) {
 			Ok(record) => record,
+			// Refused before encoding, so nothing is missing from the log and nothing desynced.
+			Err(err @ crate::Error::Net(moq_net::Error::GroupTooLarge)) => return Err(err),
 			Err(err) => {
 				// A record that can't be encoded is as lost as one the group rejects: the log is
 				// missing it either way, and carrying on would present that gap as a complete log.

@@ -11,7 +11,8 @@ use moq_net::{
 	auth::{self, Grant},
 	origin,
 };
-use support::harness::{now, run};
+use futures::StreamExt;
+use support::harness::{now, spawn};
 use support::mock::{MockSession, create_mock_session_pair};
 
 /// Maximum time any single test may run before being treated as a deadlock.
@@ -31,13 +32,13 @@ const MOQT_22: &str = "moq-transport-22";
 macro_rules! cases {
 	($($case:ident),* $(,)?) => {
 		mod lite_07 {
-			$(#[tokio::test] async fn $case() { super::$case(super::LITE_07).await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
 		mod moqt_17 {
-			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_17).await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_17).await })*
 		}
 		mod moqt_22 {
-			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_22).await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_22).await })*
 		}
 	};
 }
@@ -66,10 +67,10 @@ cases!(
 macro_rules! prefix_cases {
 	($($case:ident),* $(,)?) => {
 		mod moqt_17_prefixes {
-			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_17).await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_17).await })*
 		}
 		mod moqt_22_prefixes {
-			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_22).await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_22).await })*
 		}
 	};
 }
@@ -80,17 +81,17 @@ prefix_cases!(
 	a_grant_too_large_for_one_message_is_unsupported,
 );
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn lite_07_carries_pattern_grants() {
 	pattern_grants_arrive_exactly(LITE_07).await
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn lite_07_enforces_a_wildcard_grant() {
 	a_wildcard_grant_is_enforced(LITE_07).await
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn lite_06_has_no_grant() {
 	older_versions_have_no_grant(LITE_06).await
 }
@@ -98,7 +99,7 @@ async fn lite_06_has_no_grant() {
 /// The control for the lite versions without AUTH: on the same barrier, lite-07 has
 /// opened an Auth Stream on each side, which is what makes its absence on them mean
 /// something.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn lite_07_opens_an_auth_stream_per_side() {
 	within(async {
 		let (pair, _broadcast) = connect_announced(LITE_07).await;
@@ -114,12 +115,12 @@ async fn lite_07_opens_an_auth_stream_per_side() {
 	.expect("timed out");
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn moqt_16_has_no_grant() {
 	older_versions_have_no_grant("moq-transport-16").await
 }
@@ -127,7 +128,7 @@ async fn moqt_16_has_no_grant() {
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(run(driver));
+	spawn(driver);
 	producer
 }
 
@@ -173,7 +174,6 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 		moq_net::announce::Event::End(update) => {
 			live.remove(update.prefix.as_str());
 		}
-		moq_net::announce::Event::Live => {}
 	};
 	// Take in the replay first, so a retraction is judged against what is announced now
 	// rather than against an empty start.
@@ -206,7 +206,7 @@ struct Pair {
 	server_transport: MockSession,
 	requests: Option<auth::Requests>,
 	/// Aborting it drops the server's driver without letting it finish.
-	server_driver: tokio::task::AbortHandle,
+	server_driver: moq_net_sim::JoinHandle<Error>,
 }
 
 async fn connect(opts: Options) -> Pair {
@@ -233,7 +233,7 @@ async fn connect(opts: Options) -> Pair {
 	let observe_server = server_transport.clone();
 	let client_fut = async {
 		let (session, driver) = client.connect(now(), client_transport).await.expect("client handshake");
-		tokio::spawn(run(driver));
+		spawn(driver);
 		session
 	};
 	let server_fut = async {
@@ -245,11 +245,13 @@ async fn connect(opts: Options) -> Pair {
 		let requests = opts
 			.server_requests
 			.then(|| handshake.auth().requests().expect("requests available before ok()"));
-		let (session, driver) = handshake.ok().await.expect("server accept");
-		let driver = tokio::spawn(run(driver)).abort_handle();
+		let (session, mut driver) = handshake.ok().await.expect("server accept");
+		let driver = moq_net_sim::spawn(moq_net_sim::drive(move |now, waiter| {
+			moq_net::time::Driver::poll(&mut driver, now, waiter)
+		}));
 		(session, requests, driver)
 	};
-	let (client, (server, requests, server_driver)) = tokio::join!(client_fut, server_fut);
+	let (client, (server, requests, server_driver)) = futures::join!(client_fut, server_fut);
 
 	Pair {
 		client,
@@ -265,16 +267,16 @@ async fn connect(opts: Options) -> Pair {
 /// table leaves unanswered) for as long as the returned task lives.
 fn serve(
 	mut requests: auth::Requests,
-	answer: impl Fn(&[u8]) -> Option<Grant> + Send + 'static,
-) -> tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, auth::Issued)> {
-	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-	tokio::spawn(async move {
+	answer: impl Fn(&[u8]) -> Option<Grant> + 'static,
+) -> futures::channel::mpsc::UnboundedReceiver<(Vec<u8>, auth::Issued)> {
+	let (tx, rx) = futures::channel::mpsc::unbounded();
+	moq_net_sim::spawn(async move {
 		let mut unanswered = Vec::new();
 		while let Some(request) = requests.next().await {
 			let token = request.token().to_vec();
 			match answer(&token) {
 				Some(grant) => {
-					let _ = tx.send((token, request.accept(grant)));
+					let _ = tx.unbounded_send((token, request.accept(grant)));
 				}
 				None => unanswered.push(request),
 			}
@@ -283,8 +285,8 @@ fn serve(
 	rx
 }
 
-fn within<F: std::future::Future>(f: F) -> tokio::time::Timeout<F> {
-	tokio::time::timeout(TEST_TIMEOUT, f)
+fn within<F: std::future::Future>(f: F) -> impl std::future::Future<Output = Result<F::Output, moq_net_sim::Elapsed>> {
+	moq_net_sim::timeout(TEST_TIMEOUT, f)
 }
 
 /// Each side's default grant is what the other side's origin handles allow:
@@ -412,7 +414,7 @@ async fn an_unanswered_token_does_not_suspend_the_check(version: &'static str) {
 		});
 
 		let auth = pair.client.auth();
-		let pending = tokio::spawn(async move { auth.add("never answered").await.map(|_| ()) });
+		let pending = moq_net_sim::spawn(async move { auth.add("never answered").await.map(|_| ()) });
 		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
 
 		let bad = publisher.create_broadcast("foo/bar").unwrap();
@@ -447,10 +449,10 @@ async fn tokens_union_and_withdrawing_one_shrinks_it(version: &'static str) {
 			b"t1" => Some(grant(&["b"], &[])),
 			_ => None,
 		});
-		let (_, _setup) = issued.recv().await.unwrap();
+		let (_, _setup) = issued.next().await.unwrap();
 
 		let t1 = pair.client.auth().add("t1").await.expect("t1 granted");
-		let (_, t1_issued) = issued.recv().await.unwrap();
+		let (_, t1_issued) = issued.next().await.unwrap();
 		assert_eq!(t1.grant().peek(), Some(grant(&["b"], &[])));
 		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
 
@@ -490,9 +492,9 @@ async fn an_update_replaces_one_tokens_grant(version: &'static str) {
 			b"t1" => Some(grant(&["b"], &[])),
 			_ => None,
 		});
-		let (_, _setup) = issued.recv().await.unwrap();
+		let (_, _setup) = issued.next().await.unwrap();
 		let t1 = pair.client.auth().add("t1").await.unwrap();
-		let (_, t1_issued) = issued.recv().await.unwrap();
+		let (_, t1_issued) = issued.next().await.unwrap();
 
 		t1_issued.update(grant(&["c"], &["c"]));
 		wait_for(t1.grant(), |g| g == &Some(grant(&["c"], &["c"]))).await;
@@ -520,7 +522,7 @@ async fn a_revoked_grant_withdraws_and_can_be_restored(version: &'static str) {
 			b"" | b"again" => Some(grant(&["a"], &[])),
 			_ => None,
 		});
-		let (_, setup) = issued.recv().await.unwrap();
+		let (_, setup) = issued.next().await.unwrap();
 
 		let a = publisher.create_broadcast("a/x").unwrap();
 		a.announce(Default::default()).unwrap();
@@ -552,7 +554,7 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		tokio::spawn(async move {
+		moq_net_sim::spawn(async move {
 			while let Some(request) = requests.next().await {
 				match request.token().is_empty() {
 					true => {
@@ -582,7 +584,7 @@ async fn a_refused_setup_token_grants_nothing(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		tokio::spawn(async move {
+		moq_net_sim::spawn(async move {
 			while let Some(request) = requests.next().await {
 				request.reject(SessionError::Unauthorized, "bad credential");
 			}
@@ -609,9 +611,9 @@ async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 		let first = requests.next().await.expect("setup token");
 		drop(first.accept(Grant::default()));
 		let auth = pair.client.auth();
-		let pending = tokio::spawn(async move { auth.add("queued").await.map(drop) });
+		let pending = moq_net_sim::spawn(async move { auth.add("queued").await.map(drop) });
 		// Give the second token time to reach the queue before dropping it.
-		tokio::time::sleep(Duration::from_millis(50)).await;
+		moq_net_sim::sleep(Duration::from_millis(50)).await;
 		drop(requests);
 
 		let err = pending.await.unwrap().expect_err("refused");
@@ -731,7 +733,7 @@ async fn connect_announced(version: &'static str) -> (Pair, moq_net::broadcast::
 async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		// The server publishes room/x to the client; the client publishes up/y to the server.
 		let server_origin = produce_origin(1);
@@ -757,7 +759,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		let mut issued = serve(pair.requests.take().unwrap(), |token| {
 			token.is_empty().then(|| grant(&["up"], &["room"]))
 		});
-		let (_, setup) = issued.recv().await.unwrap();
+		let (_, setup) = issued.next().await.unwrap();
 
 		let mut group = down_track.append_group().unwrap();
 		group.write_frame(ts(0), b"down".as_ref()).unwrap();
@@ -843,7 +845,7 @@ async fn an_unrepresentable_grant_is_unsupported(version: &'static str) {
 			}),
 			_ => None,
 		});
-		let (_, _setup) = issued.recv().await.unwrap();
+		let (_, _setup) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["a"], &[]));
 
 		for token in ["exact", "mixed", "wildcard"] {
@@ -875,9 +877,9 @@ async fn an_unrepresentable_update_revokes_only_its_token(version: &'static str)
 			b"t1" => Some(grant(&["b"], &[])),
 			_ => None,
 		});
-		let (_, _setup) = issued.recv().await.unwrap();
+		let (_, _setup) = issued.next().await.unwrap();
 		let t1 = pair.client.auth().add("t1").await.unwrap();
-		let (_, t1_issued) = issued.recv().await.unwrap();
+		let (_, t1_issued) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
 
 		t1_issued.update(Grant {
@@ -922,7 +924,7 @@ async fn a_grant_too_large_for_one_message_is_unsupported(version: &'static str)
 			}),
 			_ => None,
 		});
-		let (_, _setup) = issued.recv().await.unwrap();
+		let (_, _setup) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["a"], &[]));
 
 		let err = pair.client.auth().add("huge").await.err().expect("too large");
@@ -967,7 +969,7 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 			})
 		};
 		let mut issued = serve(pair.requests.take().unwrap(), table);
-		let (_, _setup) = issued.recv().await.unwrap();
+		let (_, _setup) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, table(b"").unwrap());
 
 		let mut held = Vec::new();
@@ -1045,7 +1047,7 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 		// Hold the answer, so the peer's discovery request is in long before the grant.
 		let mut requests = pair.requests.take().unwrap();
 		let setup = requests.next().await.expect("setup token");
-		let leaked = tokio::time::timeout(
+		let leaked = moq_net_sim::timeout(
 			Duration::from_millis(100),
 			wait_announced(&relay.consume(), "foo/bar", true),
 		)
@@ -1067,19 +1069,19 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 macro_rules! limit_cases {
 	($($case:ident),* $(,)?) => {
 		mod limit_lite_05 {
-			$(#[tokio::test] async fn $case() { super::$case("moq-lite-05").await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case("moq-lite-05").await })*
 		}
 		mod limit_lite_06 {
-			$(#[tokio::test] async fn $case() { super::$case(super::LITE_06).await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case(super::LITE_06).await })*
 		}
 		mod limit_lite_07 {
-			$(#[tokio::test] async fn $case() { super::$case(super::LITE_07).await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
 		mod limit_moqt_16 {
-			$(#[tokio::test] async fn $case() { super::$case("moq-transport-16").await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case("moq-transport-16").await })*
 		}
 		mod limit_moqt_17 {
-			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_17).await })*
+			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_17).await })*
 		}
 	};
 }
@@ -1091,17 +1093,17 @@ limit_cases!(
 	a_widening_brings_back_what_the_peer_published,
 );
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn lite_05_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight("moq-lite-05").await
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn lite_06_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_06).await
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn lite_07_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_07).await
 }
@@ -1134,7 +1136,7 @@ async fn ended(sub: &mut moq_net::track::Subscriber) -> Error {
 async fn a_narrowing_deafens_one_path(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		let relay = produce_origin(1);
 		let audio = relay.create_broadcast("room/alice/audio").unwrap();
@@ -1207,7 +1209,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
@@ -1320,7 +1322,7 @@ async fn recv_through(sub: &mut moq_net::track::Subscriber, sequence: u64) {
 async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		let relay = produce_origin(1);
 		let audio = relay.create_broadcast("room/alice/audio").unwrap();
@@ -1377,7 +1379,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();

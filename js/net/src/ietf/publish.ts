@@ -133,10 +133,10 @@ export class Publish {
 			});
 		}
 		// v15+: parameters followed by Track Properties (draft-17+)
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "publish");
 		const properties = await Properties.decode(r, version);
-		// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a peer that
-		// still sends it doesn't have its session torn down over a hint.
+		// GROUP_ORDER is legal here in draft-15 and again from draft-20. Draft-16 ignores it.
+		// Draft-17 through draft-19 close the session.
 		const groupOrder = properties.groupOrder ?? params.groupOrder ?? 0x02;
 		const forward = params.forward ?? true;
 		const largest = params.largest;

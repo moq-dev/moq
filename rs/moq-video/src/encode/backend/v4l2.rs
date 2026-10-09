@@ -63,7 +63,7 @@ use moq_v4l::sys::{
 	v4l2_mpeg_video_header_mode_V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME,
 };
 
-use super::super::encoder::{Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config, Gop};
 use super::{Backend, Encoded, keyframe_annexb};
 use crate::v4l2::{self, Dequeue, Device, Dir, Planes, Queue, Rect, Request, Role};
 use crate::{Error, Frame, Size};
@@ -532,6 +532,12 @@ impl Backend for V4l2 {
 
 	fn name(&self) -> &'static str {
 		NAME
+	}
+
+	fn applied(&self) -> Applied {
+		// B-frames and the codec's queue depth are the driver's defaults: nothing
+		// here sets or reads them back.
+		Applied::unconfirmed("CBR; frame reordering and queue depth left to the driver")
 	}
 }
 

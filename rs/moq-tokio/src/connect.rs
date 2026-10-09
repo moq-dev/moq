@@ -507,7 +507,7 @@ pub struct Config {
 	/// When DNS returns multiple addresses, attempts alternate between IPv6 and
 	/// IPv4, each starting this long after the previous one (or immediately when
 	/// it fails), and the first connection to complete wins. `0s` dials every
-	/// address at once. Defaults to 250ms. Applies to the QUIC and `tcp://` dials.
+	/// address at once. Defaults to 250ms. Applies to the QUIC, `tcp://`, and `tls://` dials.
 	///
 	/// This staggers the attempts within one [`crate::Client::connect`]; [`Self::timeout`]
 	/// bounds that call as a whole.

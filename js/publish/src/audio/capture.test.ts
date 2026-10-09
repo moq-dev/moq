@@ -300,7 +300,8 @@ function installGatedWebAudio(addModule: () => Promise<void> = () => Promise.res
 		}
 		disconnect(node?: unknown): void {
 			if (node === undefined) this.outputs.clear();
-			else this.outputs.delete(node);
+			// As browsers do: there is no such edge to remove.
+			else if (!this.outputs.delete(node)) throw new DOMException("not connected", "InvalidAccessError");
 		}
 	}
 
@@ -376,6 +377,28 @@ test("captures once a gesture resumes a context built before one", async () => {
 
 	capture.close();
 	await settle();
+});
+
+// Regression: the root's blanket disconnect ran before the worklet's own edge was removed, so removing
+// that edge threw InvalidAccessError and every microphone turn-off logged a cleanup error.
+test("tears a running capture down without errors", async () => {
+	using webaudio = installGatedWebAudio();
+	const error = spyOn(console, "error").mockImplementation(() => {});
+
+	try {
+		webaudio.gesture();
+		const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+		await settle();
+		expect([...webaudio.roots[0].outputs]).toEqual([webaudio.worklets[0]]);
+
+		capture.close();
+		await settle();
+
+		expect(webaudio.roots[0].outputs.size).toBe(0);
+		expect(error).not.toHaveBeenCalled();
+	} finally {
+		error.mockRestore();
+	}
 });
 
 // A suspended graph carries nothing, so an interrupted context (Safari, on a phone call) must not

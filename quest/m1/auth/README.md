@@ -16,7 +16,7 @@ This questline adds an AUTH exchange to both wires: one stream per token, a
 grant per token, the union of every accepted token as the session's scope,
 and a loud failure when a publish can never be honored. It ends with the
 credential able to travel in band, while the URL keeps working for every peer
-that predates the stream. Hop-bound peer grants for direct sessions belong to
+that predates the stream. Node-bound peer grants for direct sessions belong to
 [P2P](/quest/m3/p2p/peer-grant.md), their only consumer.
 
 ## Plan
@@ -71,7 +71,9 @@ Decisions settled while planning, recorded so review does not relitigate them:
   token like any client; AUTH reports the grant actually admitted in each
   direction. The next mTLS scope quest can restrict or refuse it. A v1 endpoint
   must explicitly grant `**` for unrestricted access; AUTH does not widen a
-  scoped grant because the caller is another relay.
+  scoped grant because the caller is another relay. Mesh dials use the default
+  version set, which leaves out `moq-lite-07-wip`, so this applies once lite-07
+  is cut or a cluster opts in.
 - **Client API.** Tokens live on `moq_tokio::connect::Config`, the
   dial-side config. `Connection::auth()` is a handle the connection owns: it
   keeps every added token, presents them on each session as it reconnects,
@@ -89,8 +91,10 @@ Decisions settled while planning, recorded so review does not relitigate them:
 Everything here is additive: `Session::auth()` is new, and the relay derives
 the grant from the origin handles it already scopes. Decided 2026-10-05: wire
 work targets the wip lite version until the maintainer cuts it, never a
-published version in place, so AUTH and its stream code land in
-`moq-lite-07-wip` (or whichever version is wip then), not lite-06.
+published version in place, so AUTH lands in `moq-lite-07-wip` (or whichever
+version is wip then), not lite-06. The UNAUTHORIZED stream code stays on lite-06
+(#5004), since a relay can narrow a session with no Auth Stream; it is 0x3B,
+because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
@@ -104,10 +108,13 @@ published version in place, so AUTH and its stream code land in
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
-  TOKEN` on a moq-transport request authorizes that request when the session
-  grant does not, and REQUEST_UPDATE refreshes it
+  TOKEN` on a moq-transport request decodes by the draft's rules, closing the
+  session on the forms the draft forbids
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
+- [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - an
+  auth decider sees `webtransport` for a WebTransport session and `quic` only
+  for native QUIC
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
@@ -116,5 +123,5 @@ published version in place, so AUTH and its stream code land in
 
 ## Related
 
-- [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's hop-bound credential,
+- [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's node-bound credential,
   built on this line's relay tokens

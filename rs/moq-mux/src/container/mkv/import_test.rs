@@ -412,10 +412,12 @@ fn rendition_is_not_published_when_the_media_track_fails() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
-	// Squat the broadcast's timeline track, so building the media producer (which creates it
-	// on first use) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// Squat the catalog's timeline track, so building the media producer (whose enrollment
+	// enrolls the catalog too) fails. The handle must stay alive: the broadcast tracks names weakly, so
 	// dropping it frees the name.
-	let _squat = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
+	let _squat = broadcast
+		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
+		.unwrap();
 
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(&data[..]);
@@ -546,4 +548,78 @@ async fn import_refuses_a_restart() {
 	let err = import.refused.expect("the restart is refused");
 	assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
 	assert_eq!(import.published.values().next().unwrap().len(), 2);
+}
+
+/// The catalog is first published at the first block, carrying the clock that block anchors,
+/// rather than at the Tracks element on a provisional clock a copy-once reader would keep.
+#[tokio::test]
+async fn first_catalog_carries_the_anchored_clock() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![
+			track_entry_video_vp9(1, 16, 16),
+			track_entry_audio_opus(2, 48_000.0, 2),
+		])
+		.cluster(3_600_000, || {
+			vec![simple_block(2, 0, true, b"a0"), simple_block(1, 0, true, b"k0")]
+		})
+		.segment_end()
+		.build();
+	// The writer sizes the Segment at its end, so split at the Cluster's element ID.
+	const CLUSTER_ID: [u8; 4] = [0x1F, 0x43, 0xB6, 0x75];
+	let split = data.windows(4).position(|w| w == CLUSTER_ID).expect("a cluster");
+	let (header, cluster) = data.split_at(split);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let provisional = catalog.clock().wall();
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+
+	mkv.decode(header).unwrap();
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.video.renditions.len(), 1, "the VP9 rendition was read");
+	let audio: Vec<_> = snapshot.audio.renditions.values().collect();
+	assert!(
+		matches!(audio.as_slice(), [rendition] if matches!(rendition.codec, AudioCodec::Opus)),
+		"the Opus rendition was read: {audio:?}"
+	);
+	assert_eq!(clocks.drain(), vec![], "the Tracks element alone publishes nothing");
+
+	mkv.decode(cluster).unwrap();
+	let anchored = catalog.clock().wall();
+	assert_ne!(anchored, provisional, "the first block anchors the clock");
+	let published = clocks.drain();
+	assert!(!published.is_empty(), "the first block publishes the catalog");
+	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
+
+	mkv.finish().unwrap();
+	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
+}
+
+/// A Tracks element after `finish()` is refused: its tracks would be declared but never finished.
+#[test]
+fn tracks_after_finish_are_refused() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+		.segment_end()
+		.build();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+
+	mkv.finish().unwrap();
+	let err = mkv.decode(&data).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::Mkv(crate::container::mkv::Error::TracksAfterFinish)),
+		"{err:?}"
+	);
+	assert!(catalog.snapshot().audio.renditions.is_empty(), "no track was declared");
 }

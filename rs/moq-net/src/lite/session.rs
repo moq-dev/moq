@@ -20,6 +20,8 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 	pub goaway: crate::goaway::Handle,
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
 	pub auth: crate::auth::Handle,
+	/// Whether the peer's SETUP arrived, read by [`crate::Session::setup`].
+	pub setup: crate::session::Setup,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -74,7 +76,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		}
 		let mut index = 0;
 		while index < pending.len() {
-			let kind = match pending[index].poll_decode_peek::<u64>(&mut cx) {
+			let kind = match pending[index].poll_varint_peek(&mut cx) {
 				Poll::Pending => {
 					index += 1;
 					continue;
@@ -181,6 +183,8 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// peer's token requests during its handshake. Supports AUTH exactly when `version`
 	/// does.
 	pub auth: crate::auth::Handle,
+	/// What the peer may make this session hold.
+	pub limits: crate::session::Limits,
 }
 
 /// Start a lite session.
@@ -202,6 +206,7 @@ where
 		mut our_setup,
 		peer_setup,
 		auth,
+		limits,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -246,6 +251,10 @@ where
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+	let subscriptions =
+		crate::session::Slots::new(limits.subscriptions).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+	let announces =
+		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets
@@ -264,6 +273,16 @@ where
 		Vec::new()
 	};
 	let peer_setup = peer_setup_slot;
+
+	// Lite-05+ records the peer's SETUP from its Setup Stream. Before that, only the
+	// legacy bidi handshake carries one, and it was read before the session started.
+	let setup = if version.has_setup_stream() {
+		crate::session::Setup::Lite(peer_setup.clone())
+	} else if setup_stream.is_some() {
+		crate::session::Setup::Read
+	} else {
+		crate::session::Setup::Never
+	};
 
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
 	// signal), the protocol tasks below hold the other. moq-lite lets either side
@@ -291,8 +310,9 @@ where
 		auth: auth.clone(),
 		peer_grant,
 		client,
+		subscriptions,
 	});
-	let subscriber = Subscriber::new(SubscriberConfig {
+	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
 		origin: subscribe,
@@ -307,6 +327,7 @@ where
 		going_away: goaway.going_away.clone(),
 		auth: auth.clone(),
 	});
+	subscriber.announces = announces;
 
 	let driver = Driver {
 		auth: Present {
@@ -336,6 +357,7 @@ where
 		driver,
 		goaway: goaway_handle,
 		auth,
+		setup,
 	})
 }
 
@@ -587,7 +609,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 					};
 					match reply {
 						super::AuthReply::Ok(ok) => {
-							let now = crate::runtime::Timers::now(&self.runtime);
+							let now = self.runtime.now();
 							// The expiry is the peer's number: one past the local clock's range
 							// is malformed, not a reason to panic.
 							let expires = match ok.expires.map(|expires| now.checked_add(expires)) {
@@ -865,21 +887,27 @@ mod tests {
 
 	/// An AUTH_ERROR code the session registry cannot hold is the peer breaking the
 	/// protocol: it closes the session rather than surfacing a code the peer never sent.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn an_auth_error_code_past_u32_closes_the_session() {
 		let refused = crate::lite::AuthReply::Error(crate::lite::AuthError {
 			code: u64::from(u32::MAX) + 1,
 			reason: String::new(),
 		});
 		let mut script = Vec::new();
-		refused.encode(&mut script, Version::Lite07).unwrap();
+		refused
+			.encode(
+				&mut crate::coding::Encoder::new(&mut script, Version::Lite07.into()),
+				Version::Lite07,
+			)
+			.unwrap();
 		// The setup token's AUTH stream is the first one the session opens.
 		let transport = ScriptedSession::per_stream(vec![script]);
 		let log = transport.log.clone();
 
 		let start = start(Config {
-			runtime: crate::time::Clock::tokio(),
+			runtime: crate::time::Clock::sim(),
 			client: true,
+			limits: Default::default(),
 			session: transport,
 			setup_stream: None,
 			publish: None,
@@ -893,7 +921,7 @@ mod tests {
 		.unwrap();
 		let mut driver = start.driver;
 
-		let res = tokio::time::timeout(
+		let res = moq_net_sim::timeout(
 			std::time::Duration::from_secs(10),
 			kio::wait(|waiter| driver.poll(waiter)),
 		)
@@ -903,19 +931,23 @@ mod tests {
 		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_setup_does_not_wait_on_an_early_stream_header() {
 		let version = Version::Lite05;
 		let mut setup = Vec::new();
-		DataType::Setup.encode(&mut setup, version).unwrap();
-		Setup::default().encode(&mut setup, version).unwrap();
+		DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
+		Setup::default()
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
 		let mut session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
 		let accepted = accept_setup(&mut session, version).await.unwrap();
 		assert_eq!(accepted.early.len(), 1);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_setup_refuses_two_incomplete_setup_streams() {
 		use futures::FutureExt;
 		let mut session =
@@ -926,20 +958,24 @@ mod tests {
 		));
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn duplicate_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for complete in [false, true] {
 				let mut first = Vec::new();
-				DataType::Setup.encode(&mut first, version).unwrap();
+				DataType::Setup
+					.encode(&mut crate::coding::Encoder::new(&mut first, version.into()), version)
+					.unwrap();
 				if complete {
-					Setup::default().encode(&mut first, version).unwrap();
+					Setup::default()
+						.encode(&mut crate::coding::Encoder::new(&mut first, version.into()), version)
+						.unwrap();
 				}
 				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 					.with_incoming_unis(vec![first.clone(), first]);
 				let log = session.log.clone();
 				let mut started = start(Config {
-					runtime: crate::time::Clock::tokio(),
+					runtime: crate::time::Clock::sim(),
 					session,
 					setup_stream: None,
 					publish: None,
@@ -950,6 +986,7 @@ mod tests {
 					peer_setup: None,
 					client: false,
 					auth: crate::auth::Handle::new(version.has_auth()),
+					limits: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -965,16 +1002,21 @@ mod tests {
 
 	/// A SETUP that ends before its body decodes leaves nothing to wait on, since the
 	/// Setup Stream is already claimed.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn truncated_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut truncated = Vec::new();
-			DataType::Setup.encode(&mut truncated, version).unwrap();
+			DataType::Setup
+				.encode(
+					&mut crate::coding::Encoder::new(&mut truncated, version.into()),
+					version,
+				)
+				.unwrap();
 			let session =
 				crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![truncated]);
 			let log = session.log.clone();
 			let mut started = start(Config {
-				runtime: crate::time::Clock::tokio(),
+				runtime: crate::time::Clock::sim(),
 				session,
 				setup_stream: None,
 				publish: None,
@@ -985,6 +1027,7 @@ mod tests {
 				peer_setup: None,
 				client: false,
 				auth: crate::auth::Handle::new(version.has_auth()),
+				limits: Default::default(),
 			})
 			.unwrap();
 			let _ = started.driver.poll(&kio::Waiter::noop());

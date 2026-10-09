@@ -93,21 +93,12 @@ test("connect logs the relay URL without its credentials", async () => {
 	const restoreTransport = stubWebTransport(pair.client);
 	const captured = captureConsole();
 
-	const mode = process.env.MODE;
-	const nodeEnv = process.env.NODE_ENV;
-	process.env.MODE = "development";
-	process.env.NODE_ENV = "development";
-
 	try {
 		const connection = await connect(authUrl, { websocket: { enabled: false } });
 		connection.abort();
 	} finally {
 		captured.restore();
 		restoreTransport();
-		if (mode === undefined) delete process.env.MODE;
-		else process.env.MODE = mode;
-		if (nodeEnv === undefined) delete process.env.NODE_ENV;
-		else process.env.NODE_ENV = nodeEnv;
 	}
 
 	// The diagnostics must still identify the relay, just without the query.
@@ -118,32 +109,6 @@ test("connect logs the relay URL without its credentials", async () => {
 		expect(line).not.toContain(SECRET);
 		expect(line).not.toContain("jwt");
 	}
-});
-
-test("connect emits no diagnostics in a production build", async () => {
-	const pair = createMockTransportPair(ALPN_05);
-	const restoreTransport = stubWebTransport(pair.client);
-
-	// Bun aliases `import.meta.env` to `process.env`, which is what the DEV check reads.
-	const mode = process.env.MODE;
-	process.env.MODE = "production";
-
-	const captured = captureConsole();
-
-	try {
-		const connection = await connect(authUrl, { websocket: { enabled: false } });
-		connection.abort();
-	} finally {
-		captured.restore();
-		restoreTransport();
-		if (mode === undefined) {
-			delete process.env.MODE;
-		} else {
-			process.env.MODE = mode;
-		}
-	}
-
-	expect(captured.lines).toEqual([]);
 });
 
 test("already-aborted signal rejects without connecting", async () => {

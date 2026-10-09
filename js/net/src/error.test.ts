@@ -14,6 +14,7 @@ import {
 	SessionError,
 	StreamCode,
 	StreamError,
+	TimestampMismatch,
 	toStreamCode,
 	toTransport,
 } from "./error.ts";
@@ -222,12 +223,13 @@ test("the code tables match the spec", () => {
 	// carries nothing, so no code sits there.
 	const assignedLite: StreamCode[] = [
 		StreamCode.ControlTimeout,
-		StreamCode.NoCapacity,
 		StreamCode.GroupTooLarge,
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,
+		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
+		StreamCode.TimestampMismatch,
 		StreamCode.Unauthorized,
 	];
 	for (const code of Object.values(StreamCode)) {
@@ -240,13 +242,14 @@ test("the code tables match the spec", () => {
 	}
 	// The values the Rust `StreamError` sends for the same conditions.
 	expect(Number(StreamCode.ControlTimeout)).toBe(0x31);
-	expect(Number(StreamCode.NoCapacity)).toBe(0x30);
 	expect(Number(StreamCode.GroupTooLarge)).toBe(0x32);
 	expect(Number(StreamCode.NotFound)).toBe(0x33);
 	expect(Number(StreamCode.Old)).toBe(0x34);
 	expect(Number(StreamCode.Evicted)).toBe(0x35);
+	expect(Number(StreamCode.Unroutable)).toBe(0x36);
 	expect(Number(StreamCode.FrameTooLarge)).toBe(0x38);
-	expect(Number(StreamCode.Unauthorized)).toBe(0x3a);
+	expect(Number(StreamCode.TimestampMismatch)).toBe(0x39);
+	expect(Number(StreamCode.Unauthorized)).toBe(0x3b);
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
 	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));
@@ -363,11 +366,11 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.TooFarBehind,
 		StreamCode.MalformedTrack,
 		StreamCode.ControlTimeout,
-		StreamCode.NoCapacity,
 		StreamCode.GroupTooLarge,
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,
+		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 		StreamCode(70),
 	]) {
@@ -381,6 +384,7 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 	expect(new FrameTooLarge()).toBeInstanceOf(StreamError);
 	expect(fromTransport(toTransport(StreamCode.GroupTooLarge, "overflow"))).toBeInstanceOf(GroupTooLarge);
 	expect(new GroupTooLarge()).toBeInstanceOf(StreamError);
+	expect(fromTransport(toTransport(StreamCode.TimestampMismatch, "mismatch"))).toBeInstanceOf(TimestampMismatch);
 
 	// The values the four codes were sent from before they were assigned stay reserved:
 	// a peer still emitting one is not read as anything.
@@ -399,6 +403,7 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 		StreamCode.Old,
 		StreamCode.Evicted,
 		StreamCode.GroupTooLarge,
+		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 	]) {
 		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_20 })).toBe(StreamCode.Internal);

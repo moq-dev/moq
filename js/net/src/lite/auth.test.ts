@@ -89,7 +89,6 @@ test("AUTH_OK matches the Rust encoding", async () => {
 
 // Mirrors `oversized_message_is_refused` in `rs/moq-net/src/lite/auth.rs`: the peer would
 // refuse it, so the acceptor withholds it, type included, and resets the stream instead.
-// Building a 64 MiB grant from patterns is too slow, so the body is raw bytes.
 test("a reply larger than the peer reads writes nothing", async () => {
 	const body = new Uint8Array(Message.MAX_MESSAGE_SIZE + 1);
 	const r = await roundTrip(async (w) => {

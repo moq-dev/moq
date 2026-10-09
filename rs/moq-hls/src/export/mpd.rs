@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use super::Kind;
 
-/// One DASH representation: master-level metadata plus its slice of the shared timeline.
+/// One DASH representation: master-level metadata plus its segment timeline.
 pub(crate) struct Representation {
 	/// Rendition name (the `<name>` in its `<kind>/<name>/...` paths).
 	pub name: String,
@@ -50,7 +50,9 @@ pub(crate) struct Representation {
 	pub ended: bool,
 	/// The init segment's content hash (`init.{init}.mp4`).
 	pub init: String,
-	/// The publisher run every segment URL carries (`seg/{generation}.t$Time$.m4s`).
+	/// The [`tag`](super::segments::tag) of the reference numbering the segments.
+	pub tag: String,
+	/// The publisher run every segment URL carries (`seg/{generation}.{tag}.t$Time$.m4s`).
 	pub generation: Option<Arc<str>>,
 }
 
@@ -61,8 +63,9 @@ pub(crate) struct Manifest {
 	pub availability_start: Option<SystemTime>,
 	/// When this render happened (`MPD@publishTime`, dynamic only).
 	pub publish: SystemTime,
-	/// The playlist window (`MPD@timeShiftBufferDepth`, dynamic only).
-	pub window: Duration,
+	/// The playlist window (`MPD@timeShiftBufferDepth`, dynamic only), or `None` when the
+	/// timeline bounds itself and the depth is the span it lists.
+	pub window: Option<Duration>,
 	/// The broadcast ended: render a `static` presentation instead of a `dynamic` one.
 	pub finished: bool,
 	/// Video representations, in catalog order.
@@ -105,6 +108,23 @@ fn frame_rate(rate: f64) -> Option<String> {
 	}
 }
 
+/// `units` of `timescale` as a [`Duration`].
+fn duration(units: u64, timescale: u32) -> Duration {
+	Duration::from_nanos((u128::from(units) * 1_000_000_000 / u128::from(timescale.max(1))) as u64)
+}
+
+/// The longest span any representation lists, oldest segment start to newest segment end.
+fn listed_span<'a>(representations: impl Iterator<Item = &'a Representation>) -> Duration {
+	representations
+		.filter_map(|rep| {
+			let (first, _) = rep.segments.first()?;
+			let (last, d) = rep.segments.last()?;
+			Some(duration(last + d - first, rep.timescale))
+		})
+		.max()
+		.unwrap_or_default()
+}
+
 /// The largest listed segment duration in whole seconds, for `MPD@maxSegmentDuration` (and the
 /// update cadence). Like HLS's target duration, derived from the segments when the publisher
 /// declared no bound.
@@ -123,6 +143,7 @@ fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
 	let kind = rep.kind.as_str();
 	let name = escape(&rep.name);
 	let init = escape(&rep.init);
+	let tag = escape(&rep.tag);
 	let generation = rep
 		.generation
 		.as_deref()
@@ -154,7 +175,7 @@ fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
 
 	let _ = writeln!(
 		out,
-		"        <SegmentTemplate timescale=\"{}\" initialization=\"{kind}/{name}/init.{init}.mp4{suffix}\" media=\"{kind}/{name}/seg/{generation}t$Time$.m4s{suffix}\">",
+		"        <SegmentTemplate timescale=\"{}\" initialization=\"{kind}/{name}/init.{init}.mp4{suffix}\" media=\"{kind}/{name}/seg/{generation}{tag}.t$Time$.m4s{suffix}\">",
 		rep.timescale.max(1)
 	);
 	let _ = writeln!(out, "          <SegmentTimeline>");
@@ -225,10 +246,7 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		let duration = representations()
 			.filter_map(|rep| {
 				let (t, d) = rep.segments.last()?;
-				let timescale = rep.timescale.max(1) as u64;
-				Some(Duration::from_nanos(
-					((t + d) as u128 * 1_000_000_000 / timescale as u128) as u64,
-				))
+				Some(duration(t + d, rep.timescale))
 			})
 			.max()
 			.unwrap_or_default();
@@ -242,14 +260,15 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		// Reload cadence and live delay follow HLS conventions: players refresh about once
 		// per segment and sit a few segments behind the live edge (bounded by the window).
 		let update = Duration::from_secs(target);
-		let delay = Duration::from_secs(3 * target).min(manifest.window.max(update));
+		let window = manifest.window.unwrap_or_else(|| listed_span(representations()));
+		let delay = Duration::from_secs(3 * target).min(window.max(update));
 		let _ = write!(
 			out,
 			" type=\"dynamic\" availabilityStartTime=\"{}\" publishTime=\"{}\" minimumUpdatePeriod=\"{}\" timeShiftBufferDepth=\"{}\" suggestedPresentationDelay=\"{}\"",
 			humantime::format_rfc3339_millis(availability),
 			humantime::format_rfc3339_millis(manifest.publish),
 			xs_duration(update),
-			xs_duration(manifest.window),
+			xs_duration(window),
 			xs_duration(delay),
 		);
 	}
@@ -287,6 +306,7 @@ mod tests {
 			segments,
 			ended,
 			init: "0123abcd".into(),
+			tag: "ab12cd34".into(),
 			generation: None,
 		}
 	}
@@ -306,6 +326,7 @@ mod tests {
 			segments,
 			ended,
 			init: "4567cdef".into(),
+			tag: "ab12cd34".into(),
 			generation: None,
 		}
 	}
@@ -315,7 +336,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 			publish: SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_410_000),
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![video(vec![(0, 2_000), (2_000, 2_000)], false)],
 			audio: vec![audio(vec![(0, 2_000), (2_000, 2_000)], false)],
@@ -343,7 +364,7 @@ mod tests {
 			"<AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"2\"/>"
 		));
 		assert!(out.contains(
-			"<SegmentTemplate timescale=\"1000\" initialization=\"video/video0/init.0123abcd.mp4\" media=\"video/video0/seg/t$Time$.m4s\">"
+			"<SegmentTemplate timescale=\"1000\" initialization=\"video/video0/init.0123abcd.mp4\" media=\"video/video0/seg/ab12cd34.t$Time$.m4s\">"
 		));
 		assert!(out.contains("<S t=\"0\" d=\"2000\"/>"));
 		assert!(out.contains("<S t=\"2000\" d=\"2000\"/>"));
@@ -355,7 +376,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: None,
 			publish: SystemTime::UNIX_EPOCH,
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: true,
 			// The window starts mid-broadcast: presentation time stays anchored at pts 0 (no
 			// presentationTimeOffset), so the duration spans the lead-in and a live session
@@ -379,7 +400,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: Some(SystemTime::UNIX_EPOCH),
 			publish: SystemTime::UNIX_EPOCH,
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
 			audio: Vec::new(),
@@ -387,7 +408,7 @@ mod tests {
 
 		let out = render_manifest(&manifest, Some("jwt=abc.def&x=1"));
 		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""));
-		assert!(out.contains("media=\"video/video0/seg/t$Time$.m4s?jwt=abc.def&amp;x=1\""));
+		assert!(out.contains("media=\"video/video0/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""));
 	}
 
 	#[test]
@@ -397,7 +418,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: Some(SystemTime::UNIX_EPOCH),
 			publish: SystemTime::UNIX_EPOCH,
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![rep],
 			audio: Vec::new(),
@@ -405,7 +426,7 @@ mod tests {
 
 		let out = render_manifest(&manifest, None);
 		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4\""));
-		assert!(out.contains("media=\"video/video0/seg/run-7.t$Time$.m4s\""));
+		assert!(out.contains("media=\"video/video0/seg/run-7.ab12cd34.t$Time$.m4s\""));
 	}
 
 	#[test]
@@ -420,7 +441,7 @@ mod tests {
 		let manifest = Manifest {
 			availability_start: Some(SystemTime::UNIX_EPOCH),
 			publish: SystemTime::UNIX_EPOCH,
-			window: Duration::from_secs(16),
+			window: Some(Duration::from_secs(16)),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
 			audio: vec![audio(Vec::new(), false)],

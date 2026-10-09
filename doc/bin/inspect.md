@@ -12,21 +12,22 @@ with the session's own auth, and a `curl` against the relay's
 
 | Question | MoQ | HTTP |
 | --- | --- | --- |
-| What is live? | `moq --connect <url>/<path> ls [prefix]` | `GET /announced/<path>` |
-| What changes? | `moq ... ls --follow` | (none) |
+| What is live? | `moq --connect <url>/<path> announced [prefix]` | `GET /announced/<path>` |
+| What changes? | `moq ... announced [prefix] \| cat` | (none) |
 | What is in a group? | `moq ... --broadcast <name> fetch <track>` | `GET /fetch/<path>/<name>/<track>` |
 
 ## What is live
 
 ```bash
-moq --connect http://localhost:4443/anon ls
+moq --connect http://localhost:4443/anon announced
 curl http://localhost:4443/announced/anon
 ```
 
-Both print one broadcast path per line, relative to the path in the URL, and
-both use that path for auth, so a token rooted at `rooms/123` lists only its
-room. `moq ls room` narrows the listing to one prefix, and `--json` prints
-`{"path": "room/alice", "active": true}` per line instead.
+Both name broadcasts by path, relative to the path in the URL, and both use
+that path for auth, so a token rooted at `rooms/123` lists only its room.
+`curl` prints a snapshot, one path per line. `moq announced` keeps running and
+redraws the list in place as broadcasts start and end, until you stop it.
+`moq announced room` narrows either to one prefix.
 
 Both list announced prefixes, which by convention are broadcast paths. A
 segment starting with `.` stays hidden unless the URL path or `prefix` names
@@ -35,13 +36,14 @@ it, which keeps the relay's own `.stats` out of the listing.
 ## What changes
 
 ```bash
-moq --connect http://localhost:4443/anon ls --follow
+moq --connect http://localhost:4443/anon announced | cat
 ```
 
-`--follow` prints `+ path` for each live broadcast, then `+ path` and `- path`
-as broadcasts come and go, until you stop it. It exits non-zero if the session
-ends, so a script can tell a lost relay from a quiet one. `curl` has no
-equivalent: `/announced` is a snapshot.
+Piped, `moq announced` prints `+ path` for each broadcast already announced,
+then `+ path` and `- path` as broadcasts come and go, and `--json` prints
+`{"path": "room/alice", "active": true}` per line instead. It exits non-zero if
+the session ends, so a script can tell a lost relay from a quiet one. `curl`
+has no equivalent: `/announced` is a snapshot.
 
 ## What is in a group
 
@@ -66,7 +68,7 @@ counters as ordinary broadcasts under `.stats`, so the same tools read them.
 Dial the `.stats` path, which the token must cover:
 
 ```bash
-moq --connect http://localhost:4443/.stats ls
+moq --connect http://localhost:4443/.stats announced
 moq --connect http://localhost:4443/.stats --broadcast node/local/host fetch publisher.json | jq
 curl http://localhost:4443/fetch/.stats/node/local/host/publisher.json | jq
 ```

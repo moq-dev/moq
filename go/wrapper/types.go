@@ -6,7 +6,7 @@ import ffi "moq.dev/moq-ffi/moq"
 // These are plain data, so type aliases are exact: a moq.AudioFrame is an
 // ffi.MoqAudioFrame, constructible and comparable across the boundary.
 type (
-	// Audio describes one audio rendition in a broadcast catalog: codec, sample rate, channel count, and container.
+	// Audio describes one audio rendition in a broadcast catalog: codec, sample rate, channel count, whether it is enabled, and container.
 	Audio = ffi.MoqAudio
 	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec or AacAudioCodec;
 	// adding a codec later adds a constructor, not a breaking enum change.
@@ -43,7 +43,7 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// Route is the hop chain a broadcast takes to reach an origin, and its costs: warm Cost plus undiscounted Cold (nil Cold means Cost).
+	// Route is the hop chain a broadcast takes to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
@@ -51,7 +51,7 @@ type (
 	// [OriginConsumer.RequestBroadcast].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
-	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive.
+	// AnnounceEventUpdate, or AnnounceEventEnd.
 	AnnounceEvent = ffi.MoqAnnounceEvent
 	// AnnounceEventStart reports a route now covering a prefix that had none.
 	AnnounceEventStart = ffi.MoqAnnounceEventStart
@@ -59,19 +59,16 @@ type (
 	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
 	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
 	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
-	// AnnounceEventLive reports that every route live at subscribe time has been
-	// delivered; what follows is live changes. Yielded once.
-	AnnounceEventLive = ffi.MoqAnnounceEventLive
-	// Subscription holds subscriber-side delivery preferences: priority, ordering, max age, and group range.
+	// Subscription holds subscriber-side delivery preferences: priority, ordering, max delay, and group range.
 	Subscription = ffi.MoqSubscription
 	// TrackInfo holds publisher-side track properties: priority, ordering, max age, and timescale.
 	// A zero Priority is the least urgent, not the default; set 127 for the midpoint a nil TrackInfo uses.
 	TrackInfo = ffi.MoqTrackInfo
-	// Video describes one catalog rendition, including whether the publisher recommends temporarily avoiding it.
+	// Video describes one catalog rendition, including whether it is enabled (a disabled one has no frames coming).
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
 	VideoHint = ffi.MoqVideoHint
-	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max age, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
+	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
 	VideoSurface = ffi.MoqVideoSurface

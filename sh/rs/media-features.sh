@@ -52,6 +52,17 @@ for crate in openh264 openh264-sys2 wgpu; do
     forbid_crate "$native" "$crate" "moq-video native-only"
 done
 
+# libvpx comes from the build host (the Nix dev shell here), so the default
+# check never compiles this backend. Its tests decode committed fixtures and
+# need no hardware, so they run here rather than waiting for the nightly.
+check -p moq-video --no-default-features --features vpx
+vpx=$(tree -p moq-video --no-default-features --features vpx)
+require_crate "$vpx" libvpx-native-sys "moq-video VP8/VP9"
+for crate in openh264 openh264-sys2 wgpu; do
+    forbid_crate "$vpx" "$crate" "moq-video VP8/VP9"
+done
+cargo nextest run --locked -p moq-video --no-default-features --features vpx -E 'test(/::vpx::/)'
+
 check -p moq-video --no-default-features --features render
 render=$(tree -p moq-video --no-default-features --features render)
 require_crate "$render" wgpu "moq-video rendering"

@@ -25,12 +25,8 @@ func TestOriginEndsWithItsProducer(t *testing.T) {
 
 	origin.inner.Destroy()
 
-	// The teardown runs on the origin's driver; the cursor ending is its signal. An
-	// empty origin reports Live first.
+	// The teardown runs on the origin's driver; the cursor ending is its signal.
 	update, err := announced.Next(ctx)
-	if _, live := update.(AnnounceEventLive); live && err == nil {
-		update, err = announced.Next(ctx)
-	}
 	if update != nil || err != nil {
 		t.Fatalf("Next = (%v, %v), want the end of the stream", update, err)
 	}

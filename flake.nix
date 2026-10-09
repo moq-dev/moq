@@ -123,6 +123,10 @@
             glib
             libressl
             ffmpeg
+            # moq-video's `vpx` feature (VP8/VP9 software decode): libvpx-native-sys
+            # finds it through pkg-config, and `VPX_STATIC` below links the archive
+            # so nothing built here needs libvpx.so at runtime.
+            libvpx
             curl
             # MPEG-TS validation (tsp, tsanalyze) for the ts-compliance harness.
             tsduck
@@ -524,18 +528,19 @@
           # host had, which shadows the Cargo shim `mbx setup` installs. Put it
           # back in front, so a bare `cargo` in this shell reaches the same
           # wrapper it reaches outside. `setup --status` is what knows where
-          # that shim lives; it exits non-zero when there is none, which is
-          # every machine that made a different caching choice.
+          # that shim lives, naming it on its first line even when it is
+          # missing. Its exit code is no guide: it also fails over unrelated
+          # setup, such as a rust-analyzer config `mbx setup` never wrote, so
+          # only the shim existing decides.
           #
           # CI included: `.github/actions/rust-cache` runs `mbx setup` so this
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
-            if status=$(mbx setup --status 2>/dev/null); then
-              shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
-              if [ -x "$shim" ]; then
-                export PATH="$(dirname "$shim"):$PATH"
-              fi
+            status=$(mbx setup --status 2>/dev/null || true)
+            shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
+            if [ -x "$shim" ]; then
+              export PATH="$(dirname "$shim"):$PATH"
             fi
           '';
 
@@ -553,6 +558,10 @@
             # Exported rather than read back out of nix, so the guard costs a
             # variable lookup instead of a nested evaluation of this flake.
             OBS_LINKED_VERSION = obs-linked-version;
+
+            # Link libvpx statically for moq-video's `vpx` feature, the shape the
+            # quest ships: no system codec library at runtime.
+            VPX_STATIC = "1";
           }
           // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
             ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
