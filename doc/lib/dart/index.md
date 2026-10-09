@@ -13,26 +13,37 @@ futures and streams. A Native Assets hook supplies the Rust core for Android
 (API 24+), iOS (16+), Linux, macOS, and Windows. Flutter web is not supported,
 since it can't load a native library.
 
+Import `package:moq/media.dart` with a prefix for catalogs, encoded-media imports, and
+container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
+and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
+and sections; it holds the broadcast weakly and fails after the broadcast closes.
+`CatalogConsumer.subscribe`, `ContainerConsumer.subscribe`, and `ContainerGroupConsumer.fetch`
+construct the read side from a broadcast.
+
 ```bash
 dart pub add moq        # or: flutter pub add moq
 ```
 
 ```dart
+import 'package:moq/media.dart' as media;
 import 'package:moq/moq.dart';
 
 final moq = await Moq.connect('https://relay.example.com');
 
 // Subscribe. The stream is live, so listen to it rather than awaiting its end.
-moq.announcements(
-  options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
-).listen((event) {
+moq
+    .announced(
+      options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
+    )
+    .updates()
+    .listen((event) {
   if (event is AnnounceEventStart) {
     print(event.announce.prefix);
     print(event.announce.captures);
   }
 });
 final broadcast = await moq.requestBroadcast('live/camera');
-final catalog = await broadcast.subscribeCatalog();
+final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
 print(await catalog.next());
 ```
 
@@ -41,7 +52,7 @@ print(await catalog.next());
 final mine = moq.createBroadcast('live/camera');
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
-group.writeFrame(frame: Frame(payload: bytes));
+group.writeFrame(frame: Frame(payload: bytes, timestampUs: 0));
 group.finish();
 mine.announce(route: MoqRoute());
 track.finish();
@@ -55,7 +66,7 @@ await moq.close();
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names.
 
-- **No codecs.** Unlike the other bindings, the published Dart binaries carry no encoder or decoder. Already-encoded frames flow through `MediaProducer` and `MediaConsumer`; encoding is up to `package:camera`, platform channels, or another codec package.
+- **No codecs.** Unlike the other bindings, the published Dart binaries carry no encoder or decoder. Already-encoded frames flow through `media.TrackProducer` and `media.ContainerConsumer`; encoding is up to `package:camera`, platform channels, or another codec package.
 - **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`) as aliases, so the generated names still work. `Container`, `Route`, and the exceptions keep it, since Flutter owns those names. `dynamic` is reserved, so the origin method is `dynamic_`.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs: ...)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.

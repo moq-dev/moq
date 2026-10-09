@@ -37,12 +37,7 @@ final class SmokeTests: XCTestCase {
     /// generated API. No network needed: we just instantiate a few types and
     /// exercise the cancel path.
     func testClientConstructsAndCancels() async throws {
-        let client = Client()
-        try client.setTlsRoots([])
-        try client.setTlsSystemRoots(true)
-        try client.setTlsFingerprints([])
-        try client.setTlsCert(nil)
-        try client.setTlsKey(nil)
+        let client = try Client(tls: ClientTls(roots: [], systemRoots: true, fingerprints: []))
         client.cancel()
         do {
             _ = try await client.connect(to: "https://localhost:0/test")
@@ -61,19 +56,29 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    /// A value the native side cannot use throws from the constructor, not the dial.
+    func testInvalidConfigThrowsConfig() {
+        XCTAssertThrowsError(try Client(versions: ["moq-lite-99"])) { error in
+            guard case MoqError.Config = error else {
+                return XCTFail("expected Config, got \(error)")
+            }
+        }
+        XCTAssertThrowsError(try Server(bind: "not-an-address")) { error in
+            guard case MoqError.Config = error else {
+                return XCTFail("expected Config, got \(error)")
+            }
+        }
+    }
+
     /// `cancel()` releases the listening socket before it returns, so the same
     /// address binds again with no retry.
     func testServerCloseReleasesPort() async throws {
-        let first = Server()
-        try first.bind("127.0.0.1:0")
-        try first.generateTls(hostnames: ["localhost"])
+        let first = try Server(bind: "127.0.0.1:0", tls: ServerTls(generate: ["localhost"]))
         let addr = try await first.listen()
         first.cancel()
 
         // No retry: cancel() closed the socket, so this binds on the first try.
-        let second = Server()
-        try second.bind(addr)
-        try second.generateTls(hostnames: ["localhost"])
+        let second = try Server(bind: addr, tls: ServerTls(generate: ["localhost"]))
         let rebound = try await second.listen()
         XCTAssertEqual(rebound, addr)
         second.cancel()
@@ -150,7 +155,7 @@ final class SmokeTests: XCTestCase {
     func testBroadcastProducerOpensTracks() throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events")
-        XCTAssertEqual(try track.name, "events")
+        XCTAssertEqual(try track.demand().name, "events")
         try track.finish()
         try broadcast.close()
     }
@@ -164,21 +169,29 @@ final class SmokeTests: XCTestCase {
 
     func testVideoHintsReachMediaPublishApi() throws {
         let broadcast = try BroadcastProducer()
-        let hint = VideoHint(
-            coded: Dimensions(width: 1920, height: 1080),
+        let hint = Media.VideoHint(
+            coded: Media.Dimensions(width: 1920, height: 1080),
             bitrate: 4_000_000,
             framerate: 60,
             optimizeForLatency: true
         )
-        let media = try broadcast.publishVideo(format: .avc3, hint: hint)
+        let media = try Media.TrackProducer.video(broadcast: broadcast, initData: Media.VideoInit(format: .avc3, data: Data(), hint: hint))
         try media.finish()
         try broadcast.close()
     }
 
     func testVideoPropertiesUseDefaultedFields() throws {
         let broadcast = try BroadcastProducer()
-        try broadcast.setVideoProperties(VideoProperties(rotation: 315))
+        try Media.CatalogProducer(broadcast: broadcast).setVideoProperties(Media.VideoProperties(rotation: 315))
         try broadcast.close()
+    }
+
+    func testCatalogHandleClosesWithBroadcast() throws {
+        let broadcast = try BroadcastProducer()
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
+        try catalog.setSection(name: "app", json: "{\"value\":42}")
+        try broadcast.close()
+        XCTAssertThrowsError(try catalog.removeSection(name: "app"))
     }
 
     func testBroadcastConsumerFetchesCachedGroup() async throws {
@@ -208,9 +221,10 @@ final class SmokeTests: XCTestCase {
         }
 
         let broadcast = try BroadcastProducer()
-        let producer = try broadcast.publishJsonSnapshot(name: "status", of: Status.self, compression: true)
-        let consumer = try await broadcast.consume().subscribeJsonSnapshot(
-            name: "status", as: Status.self, compression: true)
+        let producer = try Json.SnapshotProducer<Status>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "status"), compression: true)
+        let consumer = try Json.SnapshotConsumer<Status>(
+            track: try await broadcast.consume().subscribeTrack(name: "status"), compression: true)
 
         try producer.update(Status(state: "live", viewers: 42))
         let first = try await consumer.next()
@@ -232,9 +246,10 @@ final class SmokeTests: XCTestCase {
         }
 
         let broadcast = try BroadcastProducer()
-        let producer = try broadcast.publishJsonStream(name: "events", of: Event.self)
-        let consumer = try await broadcast.consume().subscribeJsonStream(
-            name: "events", as: Event.self)
+        let producer = try Json.StreamProducer<Event>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
+        let consumer = try Json.StreamConsumer<Event>(
+            track: try await broadcast.consume().subscribeTrack(name: "events"))
 
         for n in 0..<3 {
             try producer.append(Event(n: n))
@@ -249,16 +264,20 @@ final class SmokeTests: XCTestCase {
 
     func testJsonProducersReportDemand() async throws {
         let broadcast = try BroadcastProducer()
-        let snapshot = try broadcast.publishJsonSnapshot(name: "status", of: [String: Int].self)
-        let stream = try broadcast.publishJsonStream(name: "events", of: [String: Int].self)
+        let snapshot = try Json.SnapshotProducer<[String: Int]>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "status"))
+        let stream = try Json.StreamProducer<[String: Int]>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
         let snapshotDemand = try snapshot.demand()
         let streamDemand = try stream.demand()
         XCTAssertEqual(snapshotDemand.name, "status")
         XCTAssertFalse(snapshotDemand.isUsed)
         let consumer = try broadcast.consume()
 
-        let snapshotConsumer = try await consumer.subscribeJsonSnapshot(name: "status", as: [String: Int].self)
-        let streamConsumer = try await consumer.subscribeJsonStream(name: "events", as: [String: Int].self)
+        let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
+            track: try await consumer.subscribeTrack(name: "status"))
+        let streamConsumer = try Json.StreamConsumer<[String: Int]>(
+            track: try await consumer.subscribeTrack(name: "events"))
         try await snapshotDemand.used()
         try await streamDemand.used()
         XCTAssertTrue(snapshotDemand.isUsed)
@@ -378,7 +397,7 @@ final class SmokeTests: XCTestCase {
         }
 
         let consumer = try await origin.consume().requestBroadcast(path: "video-decode-frame")
-        let catalogs = try await consumer.subscribeCatalog()
+        let catalogs = try await Media.CatalogConsumer.subscribe(broadcast: consumer)
         // XCTUnwrap takes an autoclosure, which can't hold an await.
         let nextCatalog = try await catalogs.next()
         let catalog = try XCTUnwrap(nextCatalog)

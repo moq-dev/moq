@@ -100,7 +100,7 @@ Coroutine read_one(std::shared_ptr<moq::TrackConsumer> consumer, std::optional<m
 
 int main() {
     // A synchronous error is a returned value, not an exception.
-    auto unbound = moq::Server::init();
+    auto unbound = ok(moq::Server::init({}), "server init");
     auto fingerprints = unbound->cert_fingerprints();
     CHECK(!fingerprints);
     CHECK(std::holds_alternative<moq::Error::kBind>(fingerprints.error().get_variant()));
@@ -113,21 +113,23 @@ int main() {
     auto track = ok(broadcast->publish_track("data", std::nullopt), "publish_track");
     ok(broadcast->announce({}), "announce");
 
-    auto server = moq::Server::init();
-    ok(server->set_bind("127.0.0.1:0"), "set_bind");
-    ok(server->set_tls_generate({"localhost"}), "set_tls_generate");
-    ok(server->set_publish(origin), "set_publish");
+    moq::ServerConfig server_config;
+    server_config.bind = "127.0.0.1:0";
+    server_config.tls.generate = {"localhost"};
+    server_config.publish = origin;
+    auto server = ok(moq::Server::init(server_config), "server init");
     auto addr = ok(server->listen().get(), "listen");
 
     // Both halves of the handshake are futures, so they run concurrently while this
     // thread blocks on one at a time.
-    auto client = moq::Client::init();
-    ok(client->set_tls_verify(false), "set_tls_verify");
+    moq::ClientConfig client_config;
+    client_config.tls.insecure = true;
+    auto client = ok(moq::Client::init(client_config), "client init");
     auto accepting = server->accept();
     auto connecting = client->connect("https://" + addr);
     auto request = ok(accepting.get(), "accept");
     CHECK(request != nullptr);
-    auto served = ok(request->accept().get(), "request accept");
+    auto served = ok(request->accept(nullptr, nullptr).get(), "request accept");
     auto session = ok(connecting.get(), "connect");
 
     // Subscriber: resolve the announced broadcast and subscribe to its track.
@@ -205,7 +207,7 @@ int main() {
     auto ended = consumer->read_frame().get();
     CHECK(ended && !ended->has_value());
 
-    auto closed = moq::Client::init();
+    auto closed = ok(moq::Client::init({}), "client init");
     closed->cancel();
     auto refused = closed->connect("https://" + addr).get();
     CHECK(!refused);

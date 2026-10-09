@@ -13,6 +13,12 @@ async iterators for announcements, groups, and frames, and no `Moq` prefixes.
 Python 3.10+, with wheels for Linux x86\_64/aarch64, macOS arm64, and Windows
 x64.
 
+`moq.media` owns catalog snapshots, encoded-media importers, and container consumers.
+Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio` / `.video`.
+`CatalogProducer(broadcast)` holds the broadcast weakly and owns catalog properties and sections;
+its writes fail with `Error.Closed` after the broadcast closes or is released.
+`MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+
 ```bash
 pip install moq-rs      # or: uv add moq-rs
 ```
@@ -29,10 +35,10 @@ async def main():
             announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
             broadcast = await client.request_broadcast(announcement.prefix)
-            catalog = await broadcast.catalog()
+            catalog = await moq.media.catalog(broadcast)
             name, track = next(iter(catalog.audio.items()))
-            async for frame in await broadcast.subscribe_media(name, track):
-                print(frame.timestamp_us, len(frame.payload))
+            async for frame in await moq.media.ContainerConsumer.subscribe(broadcast, name, track.container):
+                print(frame.timestamp, len(frame.payload))
 
 asyncio.run(main())
 ```
@@ -46,8 +52,8 @@ async def main():
         broadcast = client.create_broadcast("my-stream.hang")
 
         # Already-encoded frames: the catalog is filled from the bitstream
-        audio = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_init_bytes)
-        audio.write_frame(payload, timestamp_us=0)
+        audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
+        audio.write_frame(payload)
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
         # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
@@ -63,8 +69,8 @@ async def main():
 
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
-        events.write_frame(b'{"cmd": "ready"}', 0)
-        status = broadcast.publish_json_snapshot("status", compression=True)
+        events.write_frame(b'{"cmd": "ready"}')
+        status = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
         status.update({"state": "live", "viewers": 42})
 
         broadcast.announce()
@@ -84,10 +90,10 @@ one to one; the API reference has the names.
 
 - **Context managers.** `async with` on a client or session awaits a graceful shutdown when the body exits cleanly, and cancels at once when it raises, so your exception survives.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
-- **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestamp_us)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestamp)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** Drop each frame from `decode_video` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await session.shutdown()` gives finished tracks up to one second to deliver and raises if they did not. `cancel(code)` closes at once. Finish or abort live tracks first.
-- **Stats.** `session.stats()` reports `rtt_us`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero.
+- **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero.
 
 ## Reference
 
