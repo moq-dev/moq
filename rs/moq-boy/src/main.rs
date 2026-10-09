@@ -17,7 +17,7 @@
 //!   audio_active ─┘
 //!                    either true → resumed (condvar notified)
 //!
-//!   On resume → force video keyframe, re-anchor audio epoch
+//!   On resume → force video keyframe, reanchor audio
 //! ```
 //!
 //! Emulator state is preserved across pauses: a new viewer joining after a
@@ -354,7 +354,7 @@ fn run_emulator(
 			// Force a keyframe so new viewers can start decoding.
 			session.video_encoder.force_keyframe();
 			// Re-anchor audio timestamps so the pause gap appears in PTS.
-			audio_encoder.reset_epoch();
+			audio_encoder.reanchor();
 		}
 
 		// Drain pending viewer commands before sleeping, so input that
@@ -445,7 +445,7 @@ fn run_emulator(
 		if is_audio {
 			// Re-anchor audio PTS when audio resumes after being inactive.
 			if !was_audio_active {
-				audio_encoder.reset_epoch();
+				audio_encoder.reanchor();
 			}
 			let samples = emu.audio_samples();
 			if !samples.is_empty()

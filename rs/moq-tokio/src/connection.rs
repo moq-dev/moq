@@ -453,8 +453,8 @@ struct State {
 	status: Option<Status>,
 	/// How many sessions have been live on this handle, counting the current one.
 	/// Advanced by `Shared::connected` with the same write that publishes `status`,
-	/// so a reader can't see `Connected` without its epoch.
-	epoch: u64,
+	/// so a reader can't see `Connected` without its count.
+	connects: u64,
 	/// Cumulative connects and disconnects, bumped by the reconnect loop itself so a session that
 	/// connects and drops before a consumer polls still counts.
 	presence: moq_net::stats::Presence,
@@ -503,7 +503,7 @@ impl Shared {
 				state.presence.sessions_ended += 1;
 			}
 			state.status = Some(Status::Connected);
-			state.epoch += 1;
+			state.connects += 1;
 			state.presence.sessions_started += 1;
 			state.version = Some(session.version());
 			state.transport = Some(transport);
@@ -644,7 +644,7 @@ pub struct Snapshot {
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
 /// The extra toggle a plain session doesn't have is the connection lifecycle: [`established`](Self::established)
 /// waits for the first session, [`connected`](Self::connected) reads the current state synchronously,
-/// [`epoch`](Self::epoch) counts the sessions so far, and [`status`](Self::status) waits for the
+/// [`connects`](Self::connects) counts the sessions so far, and [`status`](Self::status) waits for the
 /// next change. [`closed`](Self::closed) waits for the loop to stop. Clones share the loop; it
 /// stops when the last clone drops (or on an explicit [`abort`](Self::abort)).
 #[derive(Clone)]
@@ -1168,8 +1168,8 @@ impl Connection {
 	/// Advanced in the same write that publishes [`Status::Connected`], so reading
 	/// after a `Connected` status never returns a stale count. Zero only if no
 	/// session has connected yet, which [`established`](Self::established) rules out.
-	pub fn epoch(&self) -> u64 {
-		self.state.read().epoch
+	pub fn connects(&self) -> u64 {
+		self.state.read().connects
 	}
 
 	/// The negotiated MoQ version of the live session, or `None` while disconnected.
@@ -2547,7 +2547,7 @@ mod tests {
 		);
 		assert!(connection.connected());
 		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
-		assert_eq!(connection.epoch(), 2);
+		assert_eq!(connection.connects(), 2);
 		let (transport, _quic) = fallback.accept().await;
 		assert_eq!(transport, crate::Transport::WebTransport);
 		// QUIC works on this network, so the next dial gives it the head start again.
@@ -2636,7 +2636,7 @@ mod tests {
 		let status = tokio::time::timeout(UPGRADE_WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Connected);
 		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
-		assert_eq!(connection.epoch(), 1);
+		assert_eq!(connection.connects(), 1);
 		assert!(
 			websocket.draining().peek().is_none(),
 			"the refused upgrade drained WebSocket"
@@ -2667,7 +2667,7 @@ mod tests {
 			.expect("a failed WebSocket handshake must fall back to the pending QUIC dial");
 
 		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
-		assert_eq!(connection.epoch(), 1);
+		assert_eq!(connection.connects(), 1);
 		let (transport, _session) = fallback.accept().await;
 		assert_eq!(transport, crate::Transport::WebTransport);
 		// QUIC works on this network, so the next dial gives it the head start again.
@@ -2717,7 +2717,7 @@ mod tests {
 		// QUIC's win dropped the fallback before it dialed, so there is nothing else to
 		// accept and nothing to upgrade from.
 		assert!(fallback.accepted.try_recv().is_err(), "a second session was opened");
-		assert_eq!(connection.epoch(), 1);
+		assert_eq!(connection.connects(), 1);
 		assert!(!crate::websocket::won(&fallback.url));
 	}
 

@@ -4812,7 +4812,7 @@ fn server_accepts_a_session() {
 		"accept consumes the request"
 	);
 
-	// Both sides report the first (and, for the server, only) epoch.
+	// Both sides report the first (and, for the server, only) connect.
 	assert_eq!(session_cb.recv(), 1);
 	assert_eq!(client_cb.recv(), 1);
 

@@ -30,7 +30,8 @@ async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         # The filter is relative to the literal prefix; prefixes stay origin-relative.
         async for event in client.announced("live/", filter="*/camera"):
-            if not isinstance(event, moq.AnnounceEventStart):
+            # A restart is a new publisher run at the same path: request it again.
+            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart)):
                 continue  # AnnounceEventUpdate or AnnounceEventEnd
             announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
@@ -73,7 +74,7 @@ async def main():
         status = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
         status.update({"state": "live", "viewers": 42})
 
-        broadcast.announce()
+        broadcast.announce(moq.Route(epoch=moq.mint_epoch()))  # a fresh epoch per run
         audio.finish()
         video.finish()
         events.finish()

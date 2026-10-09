@@ -416,9 +416,9 @@ func (a *AudioProducer) Unused(ctx context.Context) error {
 	return a.inner.Unused(ctx)
 }
 
-// ResetEpoch re-anchors the timeline to the next frame after an idle gap.
-func (a *AudioProducer) ResetEpoch() error {
-	return a.inner.ResetEpoch()
+// Reanchor re-anchors the timeline to the next frame after an idle gap.
+func (a *AudioProducer) Reanchor() error {
+	return a.inner.Reanchor()
 }
 
 // Write pushes one frame of PCM in the configured input format.

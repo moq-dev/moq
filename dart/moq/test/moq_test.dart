@@ -226,6 +226,30 @@ void main() {
     announced.dispose();
   });
 
+  test('a new epoch restarts announce consumers', () async {
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
+    final announced = origin.consume().announced(config: MoqAnnounceConfig());
+    final broadcast = origin.createBroadcast(path: 'epoch');
+
+    final first = mintEpoch();
+    expect(
+      DateTime.now().toUtc().difference(epochTime(first)).abs(),
+      lessThan(const Duration(minutes: 1)),
+    );
+    broadcast.announce(route: MoqRoute(epoch: first));
+    final start = await nextRoute(announced) as AnnounceEventStart;
+    expect(start.announce.route.epoch, first);
+
+    final second = mintEpoch();
+    broadcast.announce(route: MoqRoute(epoch: second));
+    final restart = await nextRoute(announced) as AnnounceEventRestart;
+    expect(restart.announce.route.epoch, second);
+
+    expect(() => epochTime('not-an-epoch'), throwsA(isA<MoqException>()));
+    announced.cancel();
+    announced.dispose();
+  });
+
   test('announced pattern reports captures', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final announced = origin.consume().announced(

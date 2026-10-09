@@ -5,6 +5,7 @@
 
 #include <moq/ffi/moq.hpp>
 
+#include <chrono>
 #include <functional>
 #include <string>
 #include <utility>
@@ -189,6 +190,21 @@ inline void shutdown() noexcept {
 // Sets the log level: "error", "warn", "info", "debug", "trace", or "". Errors if called twice.
 inline expected<void> log_level(const std::string &level) {
     return moq_log_level(level);
+}
+
+// Mints a fresh publisher epoch, ordered newest last. Announce one per run in Route::epoch,
+// so viewers see a restart as a new broadcast instead of a stalled one.
+inline std::string mint_epoch() {
+    return moq_mint_epoch();
+}
+
+// The wall-clock time an epoch encodes, to the millisecond. Errors unless it is a UUIDv7.
+inline expected<std::chrono::system_clock::time_point> epoch_time(const std::string &epoch) {
+    auto ms = moq_epoch_time_ms(epoch);
+    if (!ms) {
+        return unexpected(std::move(ms).error());
+    }
+    return std::chrono::system_clock::time_point(std::chrono::milliseconds(*ms));
 }
 
 #ifdef MOQ_COROUTINES

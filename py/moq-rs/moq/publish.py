@@ -278,9 +278,9 @@ class AudioProducer:
         """Wait until this audio track has no active subscribers. Prefer :meth:`demand`."""
         await self._inner.unused()
 
-    def reset_epoch(self) -> None:
+    def reanchor(self) -> None:
         """Re-anchor the timeline to the next frame after an idle gap."""
-        self._inner.reset_epoch()
+        self._inner.reanchor()
 
     def write(self, frame: AudioFrame) -> None:
         """Push one frame of PCM in the configured input format."""

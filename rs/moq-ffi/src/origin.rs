@@ -27,7 +27,7 @@ pub struct MoqAnnounceConfig {
 	pub hidden: bool,
 }
 
-/// A path-prefix route: hops and a static cost for an advertisement.
+/// A path-prefix route: hops, a static cost, and the publisher epoch for an advertisement.
 ///
 /// Pair one with `MoqBroadcastProducer::announce` for an exact path, or with
 /// `MoqOriginProducer::dynamic` for a prefix. Observe them with
@@ -50,6 +50,14 @@ pub struct MoqRoute {
 	/// fully identified one, whatever the costs say.
 	#[uniffi(default = false)]
 	pub anonymous: bool,
+	/// The publisher instance the route serves, as UUIDv7 text, or `None` when unknown.
+	///
+	/// A publisher that can restart sets a fresh one per run from `moq_mint_epoch`, so
+	/// viewers see a restart instead of a stalled broadcast. Routes with the same epoch
+	/// serve the same bytes, so redundant publishers share one. Among routes at a
+	/// prefix the newest epoch wins, and changing it is a `MoqAnnounceEvent::Restart`.
+	#[uniffi(default = None)]
+	pub epoch: Option<String>,
 }
 
 impl From<moq_net::origin::Route> for MoqRoute {
@@ -58,6 +66,7 @@ impl From<moq_net::origin::Route> for MoqRoute {
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
 			cost: route.cost.value(),
 			anonymous: route.is_anonymous(),
+			epoch: route.epoch.map(|epoch| epoch.to_string()),
 		}
 	}
 }
@@ -75,10 +84,31 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 			};
 			hops.push(origin).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 		}
-		Ok(moq_net::origin::Route::default()
+		let mut out = moq_net::origin::Route::default()
 			.with_cost(moq_net::origin::Cost::new(route.cost))
-			.with_hops(hops))
+			.with_hops(hops);
+		if let Some(epoch) = route.epoch {
+			out = out.with_epoch(epoch.parse()?);
+		}
+		Ok(out)
 	}
+}
+
+/// Mint a fresh publisher epoch from the wall clock and secure randomness, ordered newest last.
+#[uniffi::export]
+pub fn moq_mint_epoch() -> String {
+	moq_net::Epoch::mint().to_string()
+}
+
+/// The wall-clock time an epoch encodes, in milliseconds since the Unix epoch.
+///
+/// Errors with `InvalidEpoch` unless the text is a lowercase hyphenated UUIDv7.
+#[uniffi::export]
+pub fn moq_epoch_time_ms(epoch: String) -> Result<u64, MoqError> {
+	let epoch: moq_net::Epoch = epoch.parse()?;
+	let since = epoch.time().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+	// A UUIDv7 holds 48 bits of milliseconds, so this never truncates.
+	Ok(since.as_millis() as u64)
 }
 
 #[derive(uniffi::Object)]
@@ -174,7 +204,7 @@ pub struct MoqAnnounce {
 	pub prefix: String,
 	/// What each wildcard matched, or `None` when the route only overlaps the scope.
 	pub captures: Option<Vec<String>>,
-	/// The route serving the prefix: its hops and a static cost.
+	/// The route serving the prefix: its epoch, hops, and a static cost.
 	pub route: MoqRoute,
 }
 
@@ -425,7 +455,7 @@ impl MoqOriginDynamic {
 			.await
 	}
 
-	/// Re-price the route in place: replace its hops and a static cost. The prefix cannot
+	/// Replace the route in place: its epoch, hops, and a static cost. The prefix cannot
 	/// change; call `dynamic` again instead.
 	pub fn update(&self, route: MoqRoute) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();

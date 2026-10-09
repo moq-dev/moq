@@ -30,6 +30,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   moq-lite 06 and older and moq-transport. moq-lite 07 adds `ANNOUNCE_RESTART`
   (0x3), and lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it
   always meant.
+- **"Epoch" means only the publisher epoch.** The reconnect counter is
+  `connects()`: `moq_tokio::Connection::epoch()` and moq-ffi's
+  `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's
+  `Connects()`, Swift's and Kotlin's `connects()`, and Dart's `connects`. The
+  audio re-anchor is `reanchor()`: `moq_audio::encode::Producer::reset_epoch` and
+  moq-ffi's `MoqAudioProducer::reset_epoch` are `reanchor`, which is Go's
+  `Reanchor()` and Swift's `reanchor()`.
 - **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
   catalog codec string and dimensions are enough, `moq export fmp4` writes an
   `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,

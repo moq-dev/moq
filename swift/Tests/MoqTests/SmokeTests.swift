@@ -137,6 +137,29 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(update.captures, ["alice"])
     }
 
+    func testAnnouncedEpochRestarts() async throws {
+        let origin = OriginProducer()
+        let announced = try origin.consume().announced(prefix: "")
+        let broadcast = try origin.createBroadcast(path: "epoch")
+
+        let first = mintEpoch()
+        XCTAssertLessThan(abs(try epochTime(first).timeIntervalSinceNow), 60)
+        try broadcast.announce(route: Route(epoch: first))
+        guard case .start(let start) = try await nextRoute(announced) else {
+            return XCTFail("expected an announcement")
+        }
+        XCTAssertEqual(start.route.epoch, first)
+
+        let second = mintEpoch()
+        try broadcast.announce(route: Route(epoch: second))
+        guard case .restart(let restart) = try await nextRoute(announced) else {
+            return XCTFail("expected a restart")
+        }
+        XCTAssertEqual(restart.route.epoch, second)
+
+        XCTAssertThrowsError(try epochTime("not-an-epoch"))
+    }
+
     func testDynamicServesARequestUnderAPrefix() async throws {
         let origin = OriginProducer()
         let dynamic = try origin.dynamic(prefix: "live")

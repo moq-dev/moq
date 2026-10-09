@@ -178,9 +178,9 @@ final class Moq {
   Future<BroadcastConsumer> requestBroadcast(String path) =>
       session.consume().requestBroadcast(path: path);
 
-  /// The connection epoch: 1 for the connect that built this session, one more
+  /// How many times this session has connected: 1 for the connect that built it, one more
   /// on each reconnect. A server-accepted session stays at 1.
-  int get epoch => session.epoch();
+  int get connects => session.connects();
 
   /// The session's bandwidth allocator.
   ///

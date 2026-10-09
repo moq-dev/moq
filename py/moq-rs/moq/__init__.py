@@ -8,6 +8,7 @@ from moq_ffi import MoqError as Error
 # A submodule, not in __all__: a star import would shadow the stdlib `json`.
 from . import json as json
 from .client import Client, connect
+from .epoch import epoch_time, mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
@@ -16,6 +17,7 @@ from .origin import (
     AnnouncedBroadcast,
     AnnounceEvent,
     AnnounceEventEnd,
+    AnnounceEventRestart,
     AnnounceEventStart,
     AnnounceEventUpdate,
     BroadcastRequest,
@@ -79,6 +81,7 @@ __all__ = [
     "AnnouncedBroadcast",
     "AnnounceEvent",
     "AnnounceEventEnd",
+    "AnnounceEventRestart",
     "AnnounceEventStart",
     "AnnounceEventUpdate",
     "AudioCodec",
@@ -135,9 +138,11 @@ __all__ = [
     "VideoPixelFormat",
     "VideoProducer",
     "connect",
+    "epoch_time",
     "is_auth",
     "is_shutdown",
     "log_level",
+    "mint_epoch",
     "protocol_error",
 ]
 

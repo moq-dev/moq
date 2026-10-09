@@ -95,13 +95,13 @@ public final class Session: Sendable {
         try await ffi.status()
     }
 
-    /// The connection epoch: 1 for the connect that built this session, one more
+    /// How many times this session has connected: 1 for the connect that built it, one more
     /// on each reconnect. A server-accepted session stays at 1.
     ///
     /// Pair it with `status()` to log each reconnect by number: a `.connected`
-    /// status whose epoch grew is a reconnect.
-    public func epoch() -> UInt64 {
-        ffi.epoch()
+    /// status whose count grew is a reconnect.
+    public func connects() -> UInt64 {
+        ffi.connects()
     }
 
     /// Close the session with the given error code. Code 0 means "no error";

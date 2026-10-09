@@ -50,7 +50,7 @@ pub struct Options {
 	/// they are encoded rather than buffered until the group fills. A longer
 	/// [`Settings::frame_duration`] (up to 60 ms for Opus) also packs more audio
 	/// per group, at the cost of encoder latency. An unfinished group remains open
-	/// across a pause or [`Producer::reset_epoch`] until the next write; use
+	/// across a pause or [`Producer::reanchor`] until the next write; use
 	/// [`Producer::discontinuity`] to close it when capture stops.
 	pub group_duration: std::time::Duration,
 }
@@ -88,12 +88,12 @@ pub struct Producer<E: CatalogExt = ()> {
 	group_samples: u64,
 	/// Codec samples in the open group.
 	grouped: u64,
-	/// Samples emitted since the current epoch (reset by [`reset_epoch`](Self::reset_epoch)).
+	/// Samples emitted since the current anchor (reset by [`reanchor`](Self::reanchor)).
 	frames_produced: u64,
 	/// Wall-clock anchor in microseconds, taken from the first frame after each
-	/// (re)start. Emitted PTS = `epoch + frames_produced / codec_rate`. `None`
+	/// (re)start. Emitted PTS = `anchor + frames_produced / codec_rate`. `None`
 	/// until the first write so the next frame re-anchors to its timestamp.
-	epoch_us: Option<u64>,
+	anchor_us: Option<u64>,
 	/// An encoder reset that still needs a marker group before its next packet.
 	pending_discontinuity: bool,
 	/// Whether a marker group already separates the next packet from prior codec state.
@@ -207,7 +207,7 @@ impl<E: CatalogExt> Reserved<E> {
 			group_samples: registered.group_samples,
 			grouped: 0,
 			frames_produced: 0,
-			epoch_us: None,
+			anchor_us: None,
 			pending_discontinuity: false,
 			decoder_boundary: true,
 			activity: Activity::Active,
@@ -311,9 +311,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// released-then-reopened microphone) so the gap appears in the PTS and
 	/// audio stays aligned with a wall-clock video track, rather than the gap
 	/// being compressed out by the running sample count. Mirrors moq-boy's
-	/// `reset_epoch`. If the codec had started, a marker group is published before
+	/// `reanchor`. If the codec had started, a marker group is published before
 	/// the next packet so subscribers jump the playhead.
-	pub fn reset_epoch(&mut self) {
+	pub fn reanchor(&mut self) {
 		if self.encoder.started() && !self.decoder_boundary {
 			self.pending_discontinuity = true;
 		}
@@ -321,14 +321,14 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	fn reset_state(&mut self) {
-		self.epoch_us = None;
+		self.anchor_us = None;
 		self.activity = Activity::Active;
 		self.frames_produced = 0;
 		self.pending.clear();
 		self.encoder.reset();
 		// The resampler holds samples of its own, plus filter state primed by them.
 		// Left alone, `finish` would flush that pre-reset audio onto the track
-		// (stamped at an epoch that no longer exists), and the next write would run
+		// (stamped at an anchor that no longer exists), and the next write would run
 		// the new audio through a filter still ringing with the old.
 		if let Some(resampler) = self.resampler.as_mut() {
 			resampler.reset();
@@ -339,11 +339,11 @@ impl<E: CatalogExt> Producer<E> {
 	/// publishes as many packets as the input contains; any partial trailing
 	/// frame is carried to the next call.
 	///
-	/// The first frame after construction (or [`reset_epoch`](Self::reset_epoch))
-	/// anchors the timeline: its timestamp becomes the epoch, and emitted PTS
+	/// The first frame after construction (or [`reanchor`](Self::reanchor))
+	/// anchors the timeline: its timestamp becomes the anchor, and emitted PTS
 	/// then advances purely by the running sample count, so subsequent frames'
 	/// timestamps are ignored. An idle gap is only reflected in the PTS if you
-	/// call [`reset_epoch`](Self::reset_epoch) on resume (which re-anchors from
+	/// call [`reanchor`](Self::reanchor) on resume (which re-anchors from
 	/// the next frame's wall-clock stamp); writing straight across a gap without
 	/// resetting compresses it out.
 	///
@@ -364,7 +364,7 @@ impl<E: CatalogExt> Producer<E> {
 
 		let timestamp_us = u64::try_from(frame.timestamp.as_micros())
 			.map_err(|_| Error::Unsupported(format!("frame timestamp {:?} out of range", frame.timestamp)))?;
-		let epoch_us = *self.epoch_us.get_or_insert(timestamp_us);
+		let anchor_us = *self.anchor_us.get_or_insert(timestamp_us);
 
 		let input = &self.input;
 		let (format, channels) = (input.format, input.layout.channels());
@@ -380,19 +380,19 @@ impl<E: CatalogExt> Producer<E> {
 
 		self.pending.extend(pcm);
 
-		self.publish_full_frames(epoch_us)
+		self.publish_full_frames(anchor_us)
 	}
 
 	/// Encode and publish every full frame in `pending`, keeping any partial
 	/// trailing frame for the next call.
-	fn publish_full_frames(&mut self, epoch_us: u64) -> Result<(), Error> {
+	fn publish_full_frames(&mut self, anchor_us: u64) -> Result<(), Error> {
 		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
 		while self.pending.len() >= frame_samples {
 			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
 			let packet = self.encoder.encode(&chunk)?;
 
 			let timestamp = Self::timestamp(
-				epoch_us,
+				anchor_us,
 				self.frames_produced,
 				self.encoder.folded_delay(),
 				self.encoder.codec_rate(),
@@ -406,16 +406,16 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
-	/// PTS of the frame `frames` samples past the epoch, stamped `delay` samples
+	/// PTS of the frame `frames` samples past the anchor, stamped `delay` samples
 	/// earlier to fold in codec priming the catalog can't signal.
 	///
-	/// Priming that would land before a zero epoch is stamped at zero instead: it
+	/// Priming that would land before a zero anchor is stamped at zero instead: it
 	/// decodes to the codec's warm-up rather than to input, so only its spacing is
 	/// lost.
-	fn timestamp(epoch_us: u64, frames: u64, delay: usize, codec_rate: u32) -> Result<Timestamp, Error> {
+	fn timestamp(anchor_us: u64, frames: u64, delay: usize, codec_rate: u32) -> Result<Timestamp, Error> {
 		let frames = i128::from(frames) - delay as i128;
 		let offset_us = (frames * 1_000_000).div_euclid(i128::from(codec_rate));
-		let micros = (i128::from(epoch_us) + offset_us).max(0);
+		let micros = (i128::from(anchor_us) + offset_us).max(0);
 		let micros = u64::try_from(micros).map_err(|_| moq_net::TimeOverflow)?;
 		Ok(Timestamp::from_micros(micros)?)
 	}
@@ -478,8 +478,8 @@ impl<E: CatalogExt> Producer<E> {
 	/// Mark a break in the published timeline and reset codec state.
 	///
 	/// Call this when capture stops rather than merely gapping between packets: going idle,
-	/// switching source, or anything else that resumes on a re-anchored epoch. Buffered samples
-	/// are dropped, and the next frame anchors a fresh codec epoch. See
+	/// switching source, or anything else that resumes on a new anchor. Buffered samples
+	/// are dropped, and the next frame sets a fresh anchor. See
 	/// [`Producer::discontinuity`](moq_mux::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> Result<(), Error> {
 		self.track.discontinuity()?;
@@ -508,17 +508,17 @@ impl<E: CatalogExt> Producer<E> {
 
 		// The drained resampler tail can span multiple frames. Publish those first
 		// so only the final partial frame reaches the encoder's terminal drain.
-		let epoch_us = self.epoch_us.unwrap_or(0);
-		self.publish_full_frames(epoch_us)?;
+		let anchor_us = self.anchor_us.unwrap_or(0);
+		self.publish_full_frames(anchor_us)?;
 
 		let frame_size = self.encoder.frame_size();
 		let codec_rate = self.encoder.codec_rate();
 		let channels = self.encoder.codec_channels() as usize;
 		let source_frames = self.pending.len() / channels;
 		let delay = self.encoder.folded_delay();
-		let start = Self::timestamp(epoch_us, self.frames_produced, delay, codec_rate)?;
+		let start = Self::timestamp(anchor_us, self.frames_produced, delay, codec_rate)?;
 		// The source ends where it ends: priming only moves the packets carrying it.
-		let end = Self::timestamp(epoch_us, self.frames_produced + source_frames as u64, 0, codec_rate)?;
+		let end = Self::timestamp(anchor_us, self.frames_produced + source_frames as u64, 0, codec_rate)?;
 		let finish = self.encoder.drain(&self.pending)?;
 		let discard_padding = finish.discard_padding();
 		let packets = finish.into_packets();
@@ -536,7 +536,7 @@ impl<E: CatalogExt> Producer<E> {
 			)?;
 		} else {
 			for packet in packets {
-				let timestamp = Self::timestamp(epoch_us, self.frames_produced, delay, codec_rate)?;
+				let timestamp = Self::timestamp(anchor_us, self.frames_produced, delay, codec_rate)?;
 				self.activity = packet.activity;
 				self.publish(packet, timestamp)?;
 				self.frames_produced += frame_size as u64;
@@ -705,11 +705,11 @@ mod tests {
 		assert_eq!(packets, 11);
 	}
 
-	/// `reset_epoch` promises to drop buffered samples, and the resampler buffers
+	/// `reanchor` promises to drop buffered samples, and the resampler buffers
 	/// samples of its own. Leaving those behind let `finish` flush pre-reset audio
-	/// onto the track, stamped at an epoch that no longer exists.
+	/// onto the track, stamped at an anchor that no longer exists.
 	#[tokio::test]
-	async fn reset_epoch_drops_the_resampler_buffer_too() {
+	async fn reanchor_drops_the_resampler_buffer_too() {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 44_100,
@@ -741,7 +741,7 @@ mod tests {
 			.write(&Frame::new(data.into(), moq_net::Timestamp::ZERO))
 			.unwrap();
 
-		producer.reset_epoch();
+		producer.reanchor();
 		producer.finish().unwrap();
 
 		// The reset dropped everything, so the track ends without a packet.
@@ -750,7 +750,7 @@ mod tests {
 
 	/// Resetting after a full frame drops codec lookahead as well as producer buffers.
 	#[tokio::test]
-	async fn reset_epoch_drops_the_encoder_lookahead() {
+	async fn reanchor_drops_the_encoder_lookahead() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let consumer = broadcast.consume();
@@ -779,7 +779,7 @@ mod tests {
 		);
 
 		producer.write(&full_frame(1_000_000)).unwrap();
-		producer.reset_epoch();
+		producer.reanchor();
 		producer.finish().unwrap();
 
 		assert!(track.read().await.unwrap().is_some());
@@ -788,7 +788,7 @@ mod tests {
 
 	/// A codec reset starts a new pre-skip interval at the receiver too.
 	#[tokio::test]
-	async fn reset_epoch_restarts_the_decoder() {
+	async fn reanchor_restarts_the_decoder() {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
@@ -818,10 +818,10 @@ mod tests {
 		.unwrap();
 
 		producer.write(&full_frame(0)).unwrap();
-		let first = audio.read().await.unwrap().expect("first epoch packet");
+		let first = audio.read().await.unwrap().expect("first packet before the reanchor");
 		assert_eq!(first.data.len() / size_of::<f32>(), 960 - 312);
 
-		producer.reset_epoch();
+		producer.reanchor();
 		producer.write(&full_frame(1_000_000)).unwrap();
 		producer.finish().unwrap();
 
@@ -831,7 +831,7 @@ mod tests {
 				resumed_frames += frame.data.len() / size_of::<f32>();
 			}
 		}
-		assert!(resumed_frames > 0, "the resumed epoch still decodes");
+		assert!(resumed_frames > 0, "the reanchored audio still decodes");
 	}
 
 	#[tokio::test]
@@ -898,7 +898,7 @@ mod tests {
 	}
 
 	/// Publish each frame and read back the resulting packet PTS (microseconds).
-	/// If `reset_before` contains an index, `reset_epoch()` is called before that
+	/// If `reset_before` contains an index, `reanchor()` is called before that
 	/// frame's `write`.
 	async fn published_pts(frames: &[Frame], reset_before: Option<usize>) -> Vec<u128> {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -925,7 +925,7 @@ mod tests {
 		let mut pts = Vec::new();
 		for (i, frame) in frames.iter().enumerate() {
 			if reset_before == Some(i) {
-				producer.reset_epoch();
+				producer.reanchor();
 			}
 			producer.write(frame).unwrap();
 			let read = reader.read().await.unwrap().expect("a packet per full frame");
@@ -1010,7 +1010,7 @@ mod tests {
 			assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
 
 			if deferred {
-				producer.reset_epoch();
+				producer.reanchor();
 				assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
 			} else {
 				producer.discontinuity().unwrap();
@@ -1024,7 +1024,7 @@ mod tests {
 			assert_eq!(
 				resumed.sequence,
 				partial.sequence + 2,
-				"one marker separates the epochs"
+				"one marker separates the anchors"
 			);
 			for _ in 0..5 {
 				assert!(resumed.read_frame().await.unwrap().is_some());
@@ -1034,18 +1034,18 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn epoch_anchors_to_first_frame_timestamp() {
-		// The first frame's timestamp becomes the epoch (regression guard: the
+	async fn anchors_to_first_frame_timestamp() {
+		// The first frame's timestamp becomes the anchor (regression guard: the
 		// old code derived PTS purely from the sample count, always near 0).
 		let pts = published_pts(&[full_frame(1_000_000)], None).await;
 		assert_eq!(pts, vec![1_000_000]);
 	}
 
 	/// AAC can't signal its encoder delay, so each packet is stamped that much
-	/// earlier and the first input sample still decodes at the epoch.
+	/// earlier and the first input sample still decodes at the anchor.
 	#[tokio::test]
 	async fn aac_folds_the_encoder_delay_into_timestamps() {
-		async fn pts(epoch_us: u64) -> Vec<u128> {
+		async fn pts(anchor_us: u64) -> Vec<u128> {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 			let consumer = broadcast.consume();
@@ -1071,7 +1071,7 @@ mod tests {
 				moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
 			);
 
-			producer.write(&pcm_frame(&[0.1; 4 * 1024], epoch_us)).unwrap();
+			producer.write(&pcm_frame(&[0.1; 4 * 1024], anchor_us)).unwrap();
 			let mut pts = Vec::new();
 			for _ in 0..4 {
 				pts.push(reader.read().await.unwrap().expect("a packet").timestamp.as_micros());
@@ -1081,16 +1081,16 @@ mod tests {
 
 		// 2112 frames of delay at 48 kHz is 44 ms, rounded down per packet.
 		assert_eq!(pts(1_000_000).await, vec![956_000, 977_333, 998_666, 1_020_000]);
-		// Priming before a zero epoch stamps at zero; the input still starts on time.
+		// Priming before a zero anchor stamps at zero; the input still starts on time.
 		assert_eq!(pts(0).await, vec![0, 0, 0, 20_000]);
 	}
 
 	/// The encoder needs no correction for the resampler's own delay: it anchors
-	/// the epoch to the first input timestamp and advances by emitted samples,
+	/// the anchor to the first input timestamp and advances by emitted samples,
 	/// while `Resampler::process` drops its startup silence rather than passing it
 	/// on, so the first sample published is the first sample written. Anything
 	/// that let that delay through would shift every PTS on a resampled track,
-	/// which no `reset_epoch` would ever correct.
+	/// which no `reanchor` would ever correct.
 	#[tokio::test]
 	async fn resampling_does_not_shift_the_first_pts() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1130,14 +1130,14 @@ mod tests {
 	#[tokio::test]
 	async fn pts_advances_by_frame_duration_ignoring_later_timestamps() {
 		// Second frame's own timestamp (way ahead) is ignored; PTS advances by
-		// exactly one 20 ms frame from the epoch.
+		// exactly one 20 ms frame from the anchor.
 		let pts = published_pts(&[full_frame(1_000), full_frame(999_999)], None).await;
 		assert_eq!(pts, vec![1_000, 1_000 + 20_000]);
 	}
 
 	#[tokio::test]
-	async fn reset_epoch_reanchors_so_the_gap_lands_in_pts() {
-		// Frame at t=0, then reset_epoch + a frame at t=5s: the 5 s idle gap must
+	async fn reanchor_lets_the_gap_land_in_pts() {
+		// Frame at t=0, then reanchor + a frame at t=5s: the 5 s idle gap must
 		// appear in the PTS (otherwise audio drifts behind a wall-clock video track).
 		let pts = published_pts(&[full_frame(0), full_frame(5_000_000)], Some(1)).await;
 		assert_eq!(pts, vec![0, 5_000_000]);

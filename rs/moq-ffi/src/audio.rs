@@ -231,11 +231,11 @@ impl MoqAudioProducer {
 	///
 	/// Call this before writing after an idle gap so the gap remains visible in
 	/// the audio PTS instead of being compressed out by the running sample count.
-	pub fn reset_epoch(&self) -> Result<(), MoqError> {
+	pub fn reanchor(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.reset_epoch();
+		producer.reanchor();
 		Ok(())
 	}
 
