@@ -6046,7 +6046,8 @@ mod serve_tests {
 	}
 
 	/// A stream cut short by the range's end Location does not claim END_OF_GROUP, since
-	/// the group goes on past it. A range ending on a whole group still does.
+	/// the group goes on past it. A range ending on a whole group still does. A cap at or past
+	/// the group's real end clears the bit too, since the header is written before we know.
 	#[moq_net_sim::test]
 	async fn capped_group_does_not_claim_its_end() {
 		async fn serve(object: Option<u64>) -> ietf::GroupHeader {
