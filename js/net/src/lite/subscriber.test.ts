@@ -318,6 +318,43 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 	subscriber.close();
 });
 
+// A replaced prefix served everything consumed beneath it, so those paths subscribe fresh too,
+// whether the replacement arrives as a lite-07 restart or as an end then a start.
+test.each([
+	["a lite-07 restart", Version.DRAFT_07],
+	["an end then a start", Version.DRAFT_06],
+] as const)("%s of a prefix stops sharing what was consumed beneath it", async (_, version) => {
+	const { subscriber, send, settle } = announceHarness(version);
+	const announced = subscriber.announced();
+	await settle();
+	const pool = Path.from("pool");
+	const job = Path.from("pool/job");
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
+	await send((w) => encodeAnnounceBroadcast(w, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, version));
+	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
+	const held = subscriber.consume(job);
+
+	if (version === Version.DRAFT_07) {
+		await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_B] }, version));
+		expect(await announced.next()).toMatchObject({ prefix: pool, kind: "restart" });
+	} else {
+		await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, version));
+		expect(await announced.next()).toMatchObject({ prefix: pool, kind: "end" });
+		await send((w) => encodeAnnounceBroadcast(w, { status: "active", suffix: pool, hops: [PUBLISHER_B] }, version));
+		expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
+	}
+
+	const fresh = subscriber.consume(job);
+	expect(fresh.closed).not.toBe(held.closed);
+	expect(held.closed.peek()).toBeUndefined();
+
+	fresh.close();
+	held.close();
+	announced.close();
+	subscriber.close();
+});
+
 test("an update that re-prices the same publisher emits the new route", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
@@ -1149,6 +1186,37 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 
 		subscriber.close();
 	}
+});
+
+// A fetch belongs to the consume that opened it. Once that consume is gone (a replaced
+// instance's is evicted), a fresh one for the path opens its own FETCH rather than reading the
+// old one's, even while the old FETCH is still open.
+test("a fresh consume never joins a fetch an earlier one opened", async () => {
+	const { quic, streams } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const room = Path.from("room");
+
+	const old = subscriber.consume(room);
+	const fetch = old.track("video").fetchGroup(0);
+	await drainUntil(() => streams.length === 1);
+	await answerTrackInfo(streams[0]);
+	await drainUntil(() => streams.length === 2);
+	await streams[1].reading;
+	streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("head")]));
+	const group = await fetch;
+	old.close();
+
+	const fresh = subscriber.consume(room);
+	expect(fresh.closed).not.toBe(old.closed);
+	void fresh
+		.track("video")
+		.fetchGroup(0)
+		.catch(() => {});
+	await drainUntil(() => streams.length === 3);
+
+	group.close();
+	fresh.close();
+	subscriber.close();
 });
 
 // A reader leaving partway through a fetched group cancels the FETCH: the truncated group

@@ -78,6 +78,16 @@ function supportsTrackStream(version: Version): boolean {
 	}
 }
 
+/**
+ * What a consumed broadcast captured when it was opened: the epoch it asks for, and its own id.
+ * Fetches are shared only within one consume, so a fresh consume for a replaced instance never
+ * reads a FETCH the old one opened.
+ */
+interface Consumed {
+	readonly epoch?: Epoch.Valid;
+	readonly id?: number;
+}
+
 interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
@@ -148,14 +158,16 @@ export class Subscriber {
 
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
+	#consumeNext = 0;
 
 	// The epoch each live advertisement named, by path. A consumed broadcast captures it
 	// once and asks for it on every request, so a later epoch never feeds an older handle.
 	#epochs = new Map<Path.Valid, Epoch.Valid>();
 
-	// Dedup in-flight one-shot fetches, keyed by [broadcast, track, sequence]. Concurrent (or
-	// repeat, while still open) fetchGroup() calls for the same group share one FETCH stream and
-	// each get an independent mirror; the entry is evicted once the group closes.
+	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, epoch, track, sequence].
+	// Concurrent (or repeat, while still open) fetchGroup() calls for the same group of one consume
+	// share one FETCH stream and each get an independent mirror; the entry is evicted once the
+	// group closes.
 	#fetches = new Map<string, { group: netGroup.Producer; accepted: Promise<void> }>();
 
 	// The peer's PROBE estimates, written as they arrive (Lite03+ only).
@@ -565,7 +577,7 @@ export class Subscriber {
 		// back into this Subscriber (see ConsumeBroadcast below), rather than the wire
 		// installing callbacks on the broadcast.
 		const epoch = this.#epochs.get(path);
-		const consumer = new ConsumeBroadcast(this, path, epoch);
+		const consumer = new ConsumeBroadcast(this, path, { epoch, id: this.#consumeNext++ });
 
 		void (async () => {
 			for (;;) {
@@ -855,8 +867,9 @@ export class Subscriber {
 		track: string,
 		sequence: number,
 		options: track.FetchGroupOptions = {},
-		epoch?: Epoch.Valid,
+		consumed: Consumed = {},
 	): Promise<netGroup.Consumer> {
+		const { epoch } = consumed;
 		options.signal?.throwIfAborted();
 
 		// Coalesce onto a still-open fetch of the same group so we don't open a second FETCH
@@ -866,7 +879,7 @@ export class Subscriber {
 		// demand from the start, and a fast FIN cannot discard frames before these callers
 		// receive their handles. An abort closes only this caller's mirror, so the stream is
 		// cancelled once the last one leaves.
-		const key = JSON.stringify([broadcast, epoch, track, sequence]);
+		const key = JSON.stringify([consumed.id, broadcast, epoch, track, sequence]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {
@@ -1421,22 +1434,22 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
 class ConsumeBroadcast extends broadcast.Consumer {
 	#subscriber: Subscriber;
 	#path: Path.Valid;
-	#epoch?: Epoch.Valid;
+	#consumed: Consumed;
 
-	constructor(subscriber: Subscriber, path: Path.Valid, epoch: Epoch.Valid | undefined, state?: never) {
+	constructor(subscriber: Subscriber, path: Path.Valid, consumed: Consumed, state?: never) {
 		super(state);
 		overrideBroadcastWire(this, {
-			resolveTrackInfo: (name, hold) => subscriber.resolveTrackInfo(path, name, epoch, hold),
-			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, epoch),
+			resolveTrackInfo: (name, hold) => subscriber.resolveTrackInfo(path, name, consumed.epoch, hold),
+			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, consumed),
 		});
 		this.#subscriber = subscriber;
 		this.#path = path;
-		this.#epoch = epoch;
+		this.#consumed = consumed;
 	}
 
 	// Preserve the subclass (and its wire-backed info/fetchGroup) when the consume cache shares
 	// this broadcast across callers.
 	override clone(): ConsumeBroadcast {
-		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#epoch, this.shareState());
+		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#consumed, this.shareState());
 	}
 }

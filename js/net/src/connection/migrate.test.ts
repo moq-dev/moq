@@ -94,6 +94,7 @@ test("an empty GOAWAY migrates without unrouting the path", async () => {
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
 		const first = reload.established.peek();
+		const served = watched.active.peek();
 
 		// Record every moment the path had no route, from here on.
 		let gaps = 0;
@@ -112,9 +113,10 @@ test("an empty GOAWAY migrates without unrouting the path", async () => {
 		expect(drained.closed).toBe(false);
 		expect(reload.status.peek()).toBe("connected");
 
-		// The old session closes at the handover cap, and the path never went unrouted.
+		// The old session closes at the handover cap, and the path never went unrouted: the
+		// request stays on the old session's broadcast until then, and follows the new one after.
 		await waitUntil(() => drained.closed, handover * 10);
-		await settle();
+		await waitUntil(() => watched.active.peek() !== served);
 		expect(watched.active.peek()).not.toBeUndefined();
 		expect(gaps).toBe(0);
 		expect(dials.length).toBe(2);

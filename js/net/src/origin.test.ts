@@ -1503,6 +1503,73 @@ test("a request stays on its source when another instance wins", async () => {
 	origin.close();
 });
 
+// A request left on a replaced instance still hears that instance go: it lets go of the dead
+// front and follows the table again, and the origin closing reaches it like any other request.
+test("a request on a replaced instance follows the table once its source goes", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("restarted");
+
+	const older = new BroadcastProducer();
+	const keepOlder = older.consume();
+	const disposeOlder = serve(origin, path, () => keepOlder.clone());
+	const request = consumer.request(path);
+	await settle();
+	const first = request.active.peek();
+	expect(first).toBeDefined();
+
+	const newer = new BroadcastProducer();
+	const disposeNewer = serve(origin, path, provider(newer));
+	await settle();
+	expect(request.active.peek()).toBe(first);
+
+	disposeOlder();
+	await settle();
+	const second = request.active.peek();
+	expect(second).toBeDefined();
+	expect(second).not.toBe(first);
+
+	origin.close();
+	expect(request.active.peek()).toBeUndefined();
+	expect(request.unroutable.peek()).toBe(true);
+
+	request.close();
+	disposeNewer();
+	keepOlder.close();
+	older.close();
+	newer.close();
+});
+
+// The winning source going while another waits is not a replacement to stay behind: the
+// request moves to the standby rather than keeping the dead front.
+test("a request moves to the standby when its winning source goes", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("standby");
+
+	const standby = new BroadcastProducer();
+	const disposeStandby = serve(origin, path, provider(standby), Route.normalize({ cost: 5n }));
+	const winner = new BroadcastProducer();
+	const keepWinner = winner.consume();
+	const disposeWinner = serve(origin, path, () => keepWinner.clone());
+	const request = consumer.request(path);
+	await settle();
+	const first = request.active.peek();
+	expect(first).toBeDefined();
+
+	disposeWinner();
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(request.active.peek()).not.toBe(first);
+
+	request.close();
+	disposeStandby();
+	keepWinner.close();
+	winner.close();
+	standby.close();
+	origin.close();
+});
+
 test("a refusal is terminal, never falling through to a broader route", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

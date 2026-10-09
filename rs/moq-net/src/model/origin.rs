@@ -1988,17 +1988,22 @@ impl AnnounceProducer {
 		for (prefix, id) in &self.entries {
 			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
+			// Read before borrowing the entry; consumed only when the epoch changes.
+			let generation = shared.next_route;
 			// Each entry keeps its advertised prefix; only the metadata moves.
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				return Err(Error::Closed);
 			};
 			// Another publisher instance: what its server was asked, or answered, for the
 			// old one is not its own. Under the table lock, so no front sees the new epoch
-			// while an old answer can still land.
-			if entry.epoch != route.epoch
-				&& let Some(server) = &entry.server
-			{
-				server.lock().renew();
+			// while an old answer can still land. Losing the epoch names a new instance
+			// too, so the generation moves rather than reviving the one before the epoch.
+			let renewed = entry.epoch != route.epoch;
+			if renewed {
+				entry.generation = generation;
+				if let Some(server) = &entry.server {
+					server.lock().renew();
+				}
 			}
 			entry.hops = route.hops.clone();
 			entry.epoch = route.epoch.clone();
@@ -2007,6 +2012,9 @@ impl AnnounceProducer {
 			entry.via = route.via;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
+			if renewed {
+				shared.next_route += 1;
+			}
 			shared.sync_route(prefix, &claim);
 			shared.prune_withdrawn(prefix);
 		}
@@ -8250,6 +8258,35 @@ mod tests {
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&fresh_track, &mut subscription, b"new").await;
+	}
+
+	/// A route that gains an epoch and then drops it serves a third instance, not the
+	/// first: a request after the round trip is asked again rather than joining the
+	/// front still serving the first instance's subscribers.
+	#[moq_net_sim::test]
+	async fn losing_an_epoch_is_another_instance() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let dynamic = producer.dynamic("room", Route::default()).unwrap();
+		let pending = consumer.request_broadcast("room/alice", None);
+		let old = broadcast::Info::new().produce();
+		let _old_track = old.create_track("video", None).unwrap();
+		queued(&dynamic).await.accept(&old);
+		let resolved = pending.await.expect("resolves");
+
+		dynamic
+			.update(dynamic.route().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		let mut route = dynamic.route();
+		route.epoch = None;
+		dynamic.update(route).unwrap();
+
+		let retry = consumer.request_broadcast("room/alice", None);
+		let fresh = broadcast::Info::new().produce();
+		let _fresh_track = fresh.create_track("video", None).unwrap();
+		queued(&dynamic).await.accept(&fresh);
+		let replaced = retry.await.expect("the new instance resolves");
+		assert!(!replaced.is_clone(&resolved), "rejoined the first instance's front");
 	}
 
 	/// Announce cursors follow the newest epoch over a cheaper one, and deliver a

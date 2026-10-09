@@ -102,7 +102,12 @@ pub async fn handle_viewers(
 			});
 			readers.insert(viewer_id, reader.abort_handle());
 		} else {
-			readers.remove(&viewer_id);
+			// Dropping an abort handle leaves its task running. Older versions send a restart
+			// as END then START, and the old track keeps flowing meanwhile, so the old reader
+			// must stop here or it would race the replacement.
+			if let Some(old) = readers.remove(&viewer_id) {
+				old.abort();
+			}
 			tracing::info!(%viewer_id, "viewer went offline");
 			let _ = cmd_tx
 				.send(Command::ViewerLeft {
@@ -160,4 +165,62 @@ async fn handle_viewer_commands(
 	}
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use super::*;
+
+	/// Write one command to the track as its own group.
+	fn send(track: &moq_net::track::Producer, command: &str) {
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::ZERO, command.as_bytes().to_vec())
+			.unwrap();
+		group.finish().unwrap();
+	}
+
+	/// Publish a viewer with a live command track.
+	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
+		let broadcast = origin.create_broadcast("alice").unwrap();
+		let track = broadcast.create_track("command", None).unwrap();
+		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		(broadcast, track)
+	}
+
+	/// Older versions send a restart as END then START while the old command track
+	/// keeps flowing: the old reader stops at the END, so it neither forwards commands
+	/// nor reports the replacement gone.
+	#[tokio::test(start_paused = true)]
+	async fn end_then_start_replaces_the_reader() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+		let consumer = origin.consume();
+		tokio::spawn(async move { handle_viewers(&consumer, &tx).await });
+
+		let (old, old_track) = viewer(&origin);
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		send(&old_track, r#"{"type":"reset"}"#);
+		assert!(matches!(rx.recv().await, Some(Command::Reset)));
+
+		old.unannounce();
+		assert!(matches!(rx.recv().await, Some(Command::ViewerLeft { .. })));
+		let (_new, new_track) = viewer(&origin);
+		tokio::time::sleep(Duration::from_secs(1)).await;
+
+		// The old track is still live: anything it says now comes from a stale reader.
+		send(&old_track, r#"{"type":"reset"}"#);
+		drop(old_track);
+		drop(old);
+		tokio::time::sleep(Duration::from_secs(1)).await;
+
+		send(&new_track, r#"{"type":"buttons","buttons":[]}"#);
+		let next = rx.recv().await;
+		assert!(matches!(next, Some(Command::Buttons { .. })), "{next:?}");
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert!(rx.try_recv().is_err(), "the old reader is still running");
+	}
 }
