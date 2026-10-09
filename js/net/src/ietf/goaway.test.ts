@@ -41,7 +41,7 @@ test("a draft-17 GOAWAY surfaces its URI and deadline without closing the sessio
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(closed).toBe(false);
 	} finally {
-		connection.close();
+		connection.abort();
 	}
 });
 
@@ -72,7 +72,7 @@ test("a server rejects a client GOAWAY that names a redirect", async () => {
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(closed).toBe(true);
 	} finally {
-		connection.close();
+		connection.abort();
 	}
 });
 

@@ -2,15 +2,16 @@
 /**
  * Site-wide notice shown at the top of every page.
  *
- * Reminds readers that MoQ is pre-1.0 and its public surfaces may change.
+ * Reminds readers that MoQ is pre-1.0: APIs will change, but the wire stays
+ * backwards compatible.
  */
 </script>
 
 <template>
 	<div class="moq-banner">
 		<p>
-			<strong>MoQ is under active development.</strong> APIs and protocols may
-			change between releases.
+			<strong>MoQ is under active development.</strong> APIs will change, but
+			we keep backwards wire compatibility.
 		</p>
 	</div>
 </template>

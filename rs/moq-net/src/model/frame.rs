@@ -1,4 +1,4 @@
-//! Frames are the leaf of the model: a sized, timestamped payload within a group.
+//! Frames are the leaf of the model: a sized, optionally timestamped payload within a group.
 //!
 //! A group is a single ordered stream, so at most one frame is ever in flight.
 //! Completed frames are plain data ([`Frame`]); the in-flight frame is written
@@ -17,7 +17,7 @@ use bytes::Bytes;
 use crate::group::{self, GroupState};
 use crate::{Error, IntoBytes, Result, Timestamp, stats};
 
-/// A chunk of data with an upfront size and a presentation timestamp.
+/// A chunk of data with an upfront size and an optional presentation timestamp.
 ///
 /// This is just the header; the payload is carried separately (as a completed
 /// [`Frame`] or streamed via [`Producer`] / [`Consumer`]).
@@ -25,22 +25,25 @@ use crate::{Error, IntoBytes, Result, Timestamp, stats};
 pub struct Info {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,
-	/// Presentation timestamp.
+	/// Presentation timestamp, or `None` on an untimed track. It must match the track
+	/// ([`Error::TimestampMismatch`] otherwise).
 	///
 	/// [`group::Producer::create_frame`] converts it into the parent track's
 	/// timescale, so the scale you build it with doesn't have to match the track.
-	/// For data without a presentation time, pass [`Timestamp::now`] explicitly.
-	pub timestamp: Timestamp,
+	/// No receiver fills one in, so an untimed track stays untimed across hops, except
+	/// over moq-lite 05 and later, which can't mark a track untimed yet and carries the
+	/// encoder's send time instead.
+	pub timestamp: Option<Timestamp>,
 }
 
-/// A completed frame: a timestamp and its full, contiguous payload.
+/// A completed frame: an optional timestamp and its full, contiguous payload.
 ///
 /// This is the stored form of every finished frame in a group. The payload is a
 /// single [`Bytes`], so a consumer gets it with one zero-copy slice.
 #[derive(Clone, Debug)]
 pub struct Frame {
-	/// Presentation timestamp, at the parent track's timescale.
-	pub timestamp: Timestamp,
+	/// Presentation timestamp, at the parent track's timescale, or `None` when untimed.
+	pub timestamp: Option<Timestamp>,
 	/// The full frame payload.
 	pub payload: Bytes,
 }
@@ -676,6 +679,9 @@ pub struct Consumer {
 	// The parent subscription can expire after this frame handle is returned.
 	expiry: Option<Expiry>,
 	expired: bool,
+	// Read from a front's logical track: carries the read across route changes, with
+	// this frame's index in its group. Boxed: it is the rare case.
+	recover: Option<Box<(super::resume::Recover, u64)>>,
 }
 
 impl std::ops::Deref for Consumer {
@@ -696,6 +702,69 @@ impl Consumer {
 			stats: stats::Meter::default(),
 			expiry: None,
 			expired: false,
+			recover: None,
+		}
+	}
+
+	/// Carry this frame across a front's route changes; see [`super::resume`].
+	pub(crate) fn with_recover(mut self, recover: super::resume::Recover, index: u64) -> Self {
+		self.recover = Some(Box::new((recover, index)));
+		self
+	}
+
+	/// Run `read`, and once this copy fails with its route, or stalls while a newer route
+	/// serves, continue from the serving route's copy of the same frame, past the bytes
+	/// already read.
+	fn poll_resumed<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<T>>,
+	) -> Poll<Result<T>> {
+		loop {
+			let res = read(self, waiter);
+			if self.expired {
+				return res;
+			}
+			let Some(recover) = self.recover.as_mut() else {
+				return res;
+			};
+			let failed = match &res {
+				Poll::Ready(Ok(_)) => return res,
+				Poll::Ready(Err(err)) => Some(err.clone()),
+				Poll::Pending => None,
+			};
+			let (recover, index) = &mut **recover;
+			if !recover.wants(failed.as_ref(), waiter) {
+				return res;
+			}
+			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
+				Poll::Ready(Ok(group)) => group,
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => return Poll::Pending,
+			};
+			// A cached group can precede this frame's header. Keep the old generation
+			// until the replacement frame is actually available.
+			if let Some(expiry) = &mut self.expiry {
+				expiry.policy = expiry.policy.for_track(&replacement.copy);
+			}
+			let frame = match replacement.group.poll_next_frame(waiter) {
+				Poll::Ready(Ok(Some(frame))) => frame,
+				Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => {
+					return match self.poll_expired(waiter) {
+						true => Poll::Ready(Err(Error::Old)),
+						false => Poll::Pending,
+					};
+				}
+			};
+			// Same name, same content: a different size is the routes disagreeing.
+			if frame.info.size != self.info.size {
+				return Poll::Ready(Err(Error::ProtocolViolation));
+			}
+			recover.adopt(&replacement);
+			self.state = frame.state;
+			self.source = frame.source;
 		}
 	}
 
@@ -730,7 +799,8 @@ impl Consumer {
 		let Some(expiry) = &self.expiry else {
 			return false;
 		};
-		if !expiry.policy.is_expired(waiter) {
+		let budget = self.recover.as_ref().and_then(|recover| recover.0.poll_budget(waiter));
+		if !expiry.policy.is_expired(budget, waiter) {
 			return false;
 		}
 
@@ -749,6 +819,13 @@ impl Consumer {
 	///
 	/// Returns `None` once the frame is finished and all bytes have been consumed.
 	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		if self.recover.is_none() {
+			return self.poll_read_chunk_once(waiter);
+		}
+		self.poll_resumed(waiter, Self::poll_read_chunk_once)
+	}
+
+	fn poll_read_chunk_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -806,6 +883,13 @@ impl Consumer {
 
 	/// Poll for all remaining bytes, resolving once the frame is finished.
 	pub fn poll_read_all(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
+		if self.recover.is_none() {
+			return self.poll_read_all_once(waiter);
+		}
+		self.poll_resumed(waiter, Self::poll_read_all_once)
+	}
+
+	fn poll_read_all_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}

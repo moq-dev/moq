@@ -22,8 +22,10 @@ build name:
 all:
     ../sh/drafts/build.sh
 
-# Validate that every draft parses and that its generated XML passes validation.
+# Validate that every draft parses, that its generated XML passes validation,
+# and that a successful publish opens the next changelog section.
 check:
+    ../sh/drafts/publish.test.sh
     ../sh/drafts/check.sh
 
 # Submit a new draft version to the IETF datatracker, e.g.

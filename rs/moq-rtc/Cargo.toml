@@ -31,7 +31,7 @@ moq-net = { workspace = true }
 # `RedactedUrl` keeps a dialed URL's query token and userinfo out of the logs.
 moq-tokio = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
-str0m = "0.23"
+str0m = "0.24"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

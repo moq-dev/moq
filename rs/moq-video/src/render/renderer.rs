@@ -140,7 +140,7 @@ struct Pipelines {
 	/// Paired with [`Layout::Nv12`], so it exists only where an importer can
 	/// hand back that layout. The shader still declares the entry point
 	/// everywhere, so it stays validated on every platform either way.
-	#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "dmabuf")))]
+	#[cfg(any(apple, all(target_os = "linux", feature = "dmabuf")))]
 	nv12: wgpu::RenderPipeline,
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 	/// Packed RGB or BGR imported from a Linux DMA-BUF.
@@ -293,7 +293,7 @@ impl Renderer {
 		let pipeline = match source.layout {
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Layout::Rgba => &self.shader.rgba,
-			#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "dmabuf")))]
+			#[cfg(any(apple, all(target_os = "linux", feature = "dmabuf")))]
 			Layout::Nv12 => &self.shader.nv12,
 			Layout::I420 => &self.shader.i420,
 		};
@@ -514,7 +514,7 @@ impl Pipelines {
 		Ok(Self {
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			rgba: pipeline("rgba"),
-			#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "dmabuf")))]
+			#[cfg(any(apple, all(target_os = "linux", feature = "dmabuf")))]
 			nv12: pipeline("nv12"),
 			i420: pipeline("i420"),
 			layout,
@@ -1412,11 +1412,11 @@ mod tests {
 	}
 
 	/// A pool-backed NV12 surface, shaped like a hardware decode's output.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	fn pooled(size: Size, rgba: [u8; 4]) -> crate::Surface {
 		let uploaded = solid(size, rgba).surface.into_pixel_buffer().expect("a pixel buffer");
 		let planar =
-			crate::Surface::PixelBuffer(crate::frame::macos::PixelBuffer::new(uploaded, size.width, size.height));
+			crate::Surface::PixelBuffer(crate::frame::apple::PixelBuffer::new(uploaded, size.width, size.height));
 		// The transfer session's pool is NV12 and IOSurface-backed, which is what
 		// makes the result importable; a plain upload is neither.
 		planar
@@ -1435,7 +1435,7 @@ mod tests {
 	/// A race, so passing is evidence rather than proof. It fails loudly when the
 	/// keepalive is missing and the pool turns over fast enough. Ignored: needs a
 	/// GPU. Run with `--ignored`.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[tokio::test]
 	#[ignore]
 	async fn imports_survive_decoder_pool_recycling() {
@@ -1465,7 +1465,7 @@ mod tests {
 	/// The zero-copy import has to produce the same pixels as the upload, or the
 	/// fallback would silently change what the user sees. Ignored: needs a GPU.
 	/// Run with `--ignored`.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[tokio::test]
 	#[ignore]
 	async fn the_metal_import_matches_the_cpu_path() {

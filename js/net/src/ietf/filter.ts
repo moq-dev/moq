@@ -501,6 +501,9 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		}
 		if (framing === "byte") {
 			if (rest.length < 1) throw new Error("truncated value inside FILL_PARAMETERS");
+			if (key === 0x22n && rest[0] !== 1 && rest[0] !== 2) {
+				throw new ProtocolViolation(`invalid group order: ${rest[0]}`);
+			}
 			rest = rest.slice(1);
 			continue;
 		}

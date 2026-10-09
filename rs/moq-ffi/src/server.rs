@@ -4,16 +4,89 @@ use std::sync::Arc;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::MoqOriginProducer;
-use crate::session::MoqSession;
+use crate::session::{MoqQuicConfig, MoqSession};
+
+/// Configuration for [`MoqServer::new`], mirroring moq-tokio's server config.
+///
+/// Every field has a default, so set only what you need. The TLS identity needs one of
+/// `tls.generate` or a `tls.cert`/`tls.key` pair.
+#[derive(Clone, Default, uniffi::Record)]
+pub struct MoqServerConfig {
+	/// Address to bind, e.g. `127.0.0.1:4443`, `[::]:443`, or `localhost:0`. Null binds `[::]:443`.
+	///
+	/// DNS hostnames are resolved when [`MoqServer::listen`] binds.
+	#[uniffi(default = None)]
+	pub bind: Option<String>,
+	/// Protocol versions to accept, spelled like `moq-lite-03`. Empty accepts every supported version.
+	#[uniffi(default = [])]
+	pub versions: Vec<String>,
+	/// The served TLS identity.
+	#[uniffi(default)]
+	pub tls: MoqServerTls,
+	/// QUIC transport tuning.
+	#[uniffi(default)]
+	pub quic: MoqQuicConfig,
+	/// The origin whose broadcasts are served to incoming sessions.
+	///
+	/// With neither `publish` nor `consume` set, each session's two sides share one fresh
+	/// origin. A [`MoqRequest`] can override either side in [`accept`](MoqRequest::accept).
+	#[uniffi(default = None)]
+	pub publish: Option<Arc<MoqOriginProducer>>,
+	/// The origin that receives broadcasts published by incoming sessions. See `publish`.
+	#[uniffi(default = None)]
+	pub consume: Option<Arc<MoqOriginProducer>>,
+}
+
+/// The served TLS identity for a [`MoqServerConfig`].
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct MoqServerTls {
+	/// PEM certificate chain files, one per identity.
+	#[uniffi(default = [])]
+	pub cert: Vec<String>,
+	/// PEM private key files, paired with `cert` in order.
+	#[uniffi(default = [])]
+	pub key: Vec<String>,
+	/// Hostnames to generate a self-signed certificate for.
+	///
+	/// Clients must either pin the certificate fingerprint or disable verification.
+	#[uniffi(default = [])]
+	pub generate: Vec<String>,
+}
 
 struct ServerState {
 	config: moq_tokio::listen::Config,
+	quic: moq_tokio::quic::Config,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 	server: Option<moq_tokio::Listener>,
 }
 
 impl ServerState {
+	fn new(config: MoqServerConfig) -> Result<Self, MoqError> {
+		let mut listen = moq_tokio::listen::Config::default();
+		if let Some(bind) = config.bind {
+			let parsed = bind
+				.parse()
+				.map_err(|_| MoqError::Config(format!("invalid bind address: {bind}")))?;
+			listen.bind = Some(parsed);
+		}
+		listen.version = crate::session::parse_versions(&config.versions)?;
+		listen.tls.cert = config.tls.cert.into_iter().map(PathBuf::from).collect();
+		listen.tls.key = config.tls.key.into_iter().map(PathBuf::from).collect();
+		listen.tls.generate = config.tls.generate;
+
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.max_streams = config.quic.max_streams;
+
+		Ok(Self {
+			config: listen,
+			quic,
+			publish: config.publish,
+			consume: config.consume,
+			server: None,
+		})
+	}
+
 	async fn listen(&mut self) -> Result<String, MoqError> {
 		if self.server.is_some() {
 			return Err(MoqError::Bind("already listening".into()));
@@ -21,7 +94,7 @@ impl ServerState {
 		let server = self
 			.config
 			.clone()
-			.init(Default::default())
+			.init(self.quic.clone())
 			.map_err(|err| MoqError::Bind(format!("{err}")))?
 			.listen()
 			.await
@@ -49,103 +122,22 @@ impl ServerState {
 }
 
 /// A MoQ server that accepts incoming QUIC/WebTransport sessions.
-///
-/// Bind and TLS are captured at [`listen`](Self::listen); those setters fail
-/// afterwards. Origins are captured at each [`accept`](Self::accept). Every setter
-/// fails with [`MoqError::Busy`] while listen/accept is in flight and
-/// [`MoqError::Cancelled`] after [`cancel`](Self::cancel).
 #[derive(uniffi::Object)]
 pub struct MoqServer {
 	task: Task<ServerState>,
 }
 
-impl MoqServer {
-	fn configure<R>(&self, f: impl FnOnce(&mut ServerState) -> R) -> Result<R, MoqError> {
-		Ok(f(&mut *self.task.configure()?))
-	}
-
-	fn configure_listen<R>(&self, f: impl FnOnce(&mut ServerState) -> R) -> Result<R, MoqError> {
-		let mut state = self.task.configure()?;
-		if state.server.is_some() {
-			return Err(MoqError::Bind("already listening".into()));
-		}
-		Ok(f(&mut state))
-	}
-}
-
 #[uniffi::export]
 impl MoqServer {
-	/// Create a new MoQ server with default configuration.
+	/// Create a server from `config`, failing on any value it cannot use.
+	///
+	/// Nothing is bound until [`listen`](Self::listen).
 	#[uniffi::constructor]
-	pub fn new() -> Arc<Self> {
+	pub fn new(config: MoqServerConfig) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
-		Arc::new(Self {
-			task: Task::new(ServerState {
-				config: moq_tokio::listen::Config::default(),
-				publish: None,
-				consume: None,
-				server: None,
-			}),
-		})
-	}
-
-	/// Set the address to bind, e.g. `127.0.0.1:4443`, `[::]:443`, or `localhost:0`.
-	///
-	/// Validated syntactically up-front. DNS hostnames are accepted and resolved
-	/// at `listen()` time. Captured at [`listen`](Self::listen); fails afterwards.
-	pub fn set_bind(&self, addr: String) -> Result<(), MoqError> {
-		let bind = addr
-			.parse()
-			.map_err(|_| MoqError::Bind(format!("invalid bind address: {addr}")))?;
-		self.configure_listen(|state| {
-			state.config.bind = Some(bind);
-		})
-	}
-
-	/// Load TLS certificate chains from PEM files on disk.
-	///
-	/// Captured at [`listen`](Self::listen); fails afterwards.
-	pub fn set_tls_cert(&self, paths: Vec<String>) -> Result<(), MoqError> {
-		self.configure_listen(|state| {
-			state.config.tls.cert = paths.into_iter().map(PathBuf::from).collect();
-		})
-	}
-
-	/// Load TLS private keys from PEM files on disk.
-	///
-	/// Captured at [`listen`](Self::listen); fails afterwards.
-	pub fn set_tls_key(&self, paths: Vec<String>) -> Result<(), MoqError> {
-		self.configure_listen(|state| {
-			state.config.tls.key = paths.into_iter().map(PathBuf::from).collect();
-		})
-	}
-
-	/// Generate self-signed TLS certificates for the given hostnames.
-	///
-	/// Clients must either pin the certificate fingerprint or disable verification.
-	/// Captured at [`listen`](Self::listen); fails afterwards.
-	pub fn set_tls_generate(&self, hostnames: Vec<String>) -> Result<(), MoqError> {
-		self.configure_listen(|state| {
-			state.config.tls.generate = hostnames;
-		})
-	}
-
-	/// Set the origin to publish broadcasts to incoming sessions.
-	///
-	/// Captured at each [`accept`](Self::accept).
-	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.publish = origin;
-		})
-	}
-
-	/// Set the origin to consume broadcasts from incoming sessions.
-	///
-	/// Captured at each [`accept`](Self::accept).
-	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.consume = origin;
-		})
+		Ok(Arc::new(Self {
+			task: Task::new(ServerState::new(config)?),
+		}))
 	}
 
 	/// Bind the listening socket. Returns the bound local address as a string,
@@ -166,7 +158,7 @@ impl MoqServer {
 	///
 	/// Useful for pinning a generated self-signed certificate in a browser via
 	/// WebTransport's `serverCertificateHashes`. Returns an error if called
-	/// before `listen()`.
+	/// before `listen()`, and [`MoqError::Busy`] while `listen()` or `accept()` is in flight.
 	pub fn cert_fingerprints(&self) -> Result<Vec<String>, MoqError> {
 		let state = self.task.configure()?;
 		let server = state
@@ -202,7 +194,7 @@ struct RequestState {
 /// The network transport carrying an incoming session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum MoqTransport {
-	/// QUIC, either directly or through WebTransport over HTTP/3.
+	/// Raw QUIC, negotiating a MoQ ALPN directly.
 	Quic,
 	/// An Iroh QUIC connection.
 	Iroh,
@@ -212,18 +204,21 @@ pub enum MoqTransport {
 	Tcp,
 	/// A Unix domain socket using qmux framing.
 	Unix,
+	/// WebTransport over HTTP/3 on QUIC.
+	WebTransport,
 }
 
-impl TryFrom<moq_tokio::server::Transport> for MoqTransport {
+impl TryFrom<moq_tokio::Transport> for MoqTransport {
 	type Error = MoqError;
 
-	fn try_from(value: moq_tokio::server::Transport) -> Result<Self, Self::Error> {
+	fn try_from(value: moq_tokio::Transport) -> Result<Self, Self::Error> {
 		Ok(match value {
-			moq_tokio::server::Transport::Quic => Self::Quic,
-			moq_tokio::server::Transport::Iroh => Self::Iroh,
-			moq_tokio::server::Transport::WebSocket => Self::WebSocket,
-			moq_tokio::server::Transport::Tcp => Self::Tcp,
-			moq_tokio::server::Transport::Unix => Self::Unix,
+			moq_tokio::Transport::Quic => Self::Quic,
+			moq_tokio::Transport::Iroh => Self::Iroh,
+			moq_tokio::Transport::WebSocket => Self::WebSocket,
+			moq_tokio::Transport::Tcp => Self::Tcp,
+			moq_tokio::Transport::Unix => Self::Unix,
+			moq_tokio::Transport::WebTransport => Self::WebTransport,
 			_ => return Err(MoqError::Unsupported),
 		})
 	}
@@ -232,7 +227,7 @@ impl TryFrom<moq_tokio::server::Transport> for MoqTransport {
 #[cfg(test)]
 mod transport_tests {
 	use super::MoqTransport;
-	use moq_tokio::server::Transport;
+	use moq_tokio::Transport;
 
 	#[test]
 	fn converts_supported_transports() {
@@ -244,14 +239,18 @@ mod transport_tests {
 		);
 		assert_eq!(MoqTransport::try_from(Transport::Tcp).unwrap(), MoqTransport::Tcp);
 		assert_eq!(MoqTransport::try_from(Transport::Unix).unwrap(), MoqTransport::Unix);
+		assert_eq!(
+			MoqTransport::try_from(Transport::WebTransport).unwrap(),
+			MoqTransport::WebTransport
+		);
 	}
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
 ///
-/// Origin overrides are captured at [`accept`](Self::accept). Setters fail with
-/// [`MoqError::Busy`] while accept/reject is in flight, [`MoqError::AlreadyResponded`]
-/// after a response, and [`MoqError::Cancelled`] after [`cancel`](Self::cancel).
+/// Origin arguments are captured when [`accept`](Self::accept) starts. A second
+/// response fails with [`MoqError::AlreadyResponded`], and calls after
+/// [`cancel`](Self::cancel) fail with [`MoqError::Cancelled`].
 #[derive(uniffi::Object)]
 pub struct MoqRequest {
 	task: Task<RequestState>,
@@ -283,15 +282,6 @@ impl MoqRequest {
 			query,
 		}))
 	}
-
-	fn configure_origin(&self, f: impl FnOnce(&mut RequestState)) -> Result<(), MoqError> {
-		let mut state = self.task.configure()?;
-		if state.request.is_none() {
-			return Err(MoqError::AlreadyResponded);
-		}
-		f(&mut state);
-		Ok(())
-	}
 }
 
 #[cfg(test)]
@@ -299,7 +289,7 @@ impl MoqRequest {
 	/// Hold the request lock until `held` finishes.
 	///
 	/// `accept`/`reject` use the same `Task::run` path; a live handshake can
-	/// finish before a waiter samples `Busy`.
+	/// finish before a queued accept samples the locked state.
 	pub(crate) async fn hold_lock<F, Fut>(&self, held: F) -> Result<(), MoqError>
 	where
 		F: FnOnce() -> Fut + Send + 'static,
@@ -337,32 +327,26 @@ impl MoqRequest {
 		self.transport
 	}
 
-	/// Override the publish origin for this session. Falls back to the server's
-	/// configured publish origin if unset. Captured at [`accept`](Self::accept).
-	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure_origin(|state| {
-			state.publish = origin;
-		})
-	}
-
-	/// Override the consume origin for this session. Falls back to the server's
-	/// configured consume origin if unset. Captured at [`accept`](Self::accept).
-	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure_origin(|state| {
-			state.consume = origin;
-		})
-	}
-
 	/// Complete the MoQ handshake and return the established session.
 	///
-	/// Returns `AlreadyResponded` if `accept()` or `reject()` has already been called.
-	pub async fn accept(&self) -> Result<Arc<MoqSession>, MoqError> {
+	/// A null origin inherits the server's configured origin; a supplied origin replaces it.
+	/// Pass a fresh origin for isolation, or the same fresh origin on both sides to share it.
+	/// Returns `AlreadyResponded` after a response and `Cancelled` after cancellation.
+	#[uniffi::method(default(publish = None, consume = None))]
+	pub async fn accept(
+		&self,
+		publish: Option<Arc<MoqOriginProducer>>,
+		consume: Option<Arc<MoqOriginProducer>>,
+	) -> Result<Arc<MoqSession>, MoqError> {
 		self.task
-			.run(|mut state| async move {
+			.run(move |mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
 				// Materialize both origin sides so the session can publish/subscribe and the
 				// FFI can hand back a publisher/consumer.
-				let (publish, subscribe) = crate::origin::resolve_pair(state.publish.as_ref(), state.consume.as_ref());
+				let (publish, subscribe) = crate::origin::resolve_pair(
+					publish.as_ref().or(state.publish.as_ref()),
+					consume.as_ref().or(state.consume.as_ref()),
+				);
 				let session = request
 					.with_publisher(&publish)
 					.with_subscriber(subscribe.clone())

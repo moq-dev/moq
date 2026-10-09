@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { FrameTooLarge, GroupTooLarge } from "./error.ts";
 import { MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
+import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 
 const dec = new TextDecoder();
@@ -9,21 +10,21 @@ test("used reflects mirror demand and unused resolves when the last reader leave
 	const producer = new Producer(0);
 
 	// No mirror readers: no demand.
-	expect(producer.used.peek()).toBe(false);
+	expect(producer.demand().used.peek()).toBe(false);
 
 	const a = producer.mirror();
 	const b = producer.mirror();
-	expect(producer.used.peek()).toBe(true);
+	expect(producer.demand().used.peek()).toBe(true);
 
 	// Closing one of two keeps demand, so unused() stays pending.
 	a.close();
-	expect(producer.used.peek()).toBe(true);
+	expect(producer.demand().used.peek()).toBe(true);
 
 	// Closing the last reader drops demand; unused() resolves. Fetch coalescing awaits this to
 	// cancel a download that everyone has abandoned (a group may never end on its own).
 	b.close();
-	await producer.unused();
-	expect(producer.used.peek()).toBe(false);
+	await producer.demand().unused();
+	expect(producer.demand().used.peek()).toBe(false);
 });
 
 function pair(sequence: number) {
@@ -124,8 +125,8 @@ test("a group with no eviction reads every frame without error", async () => {
 
 test("tryReadFrame drains buffered frames then returns undefined", () => {
 	const { producer, consumer } = pair(0);
-	producer.writeString("a");
-	producer.writeString("b");
+	producer.writeFrame(textFrame("a"));
+	producer.writeFrame(textFrame("b"));
 
 	expect(dec.decode(consumer.tryReadFrame()?.payload)).toBe("a");
 	expect(dec.decode(consumer.tryReadFrame()?.payload)).toBe("b");
@@ -135,8 +136,8 @@ test("tryReadFrame drains buffered frames then returns undefined", () => {
 
 test("tryReadFrameSequence reports per-frame sequence numbers", () => {
 	const { producer, consumer } = pair(7);
-	producer.writeString("a");
-	producer.writeString("b");
+	producer.writeFrame(textFrame("a"));
+	producer.writeFrame(textFrame("b"));
 
 	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 0, payload: new TextEncoder().encode("a") });
 	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 1, payload: new TextEncoder().encode("b") });
@@ -145,8 +146,8 @@ test("tryReadFrameSequence reports per-frame sequence numbers", () => {
 
 test("readFrameSequence reports per-frame sequence numbers", async () => {
 	const { producer, consumer } = pair(7);
-	producer.writeString("a");
-	producer.writeString("b");
+	producer.writeFrame(textFrame("a"));
+	producer.writeFrame(textFrame("b"));
 
 	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 0, payload: new TextEncoder().encode("a") });
 	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 1, payload: new TextEncoder().encode("b") });
@@ -158,7 +159,7 @@ test("done distinguishes a finished group from one that is merely empty", () => 
 	expect(consumer.tryReadFrame()).toBeUndefined();
 	expect(consumer.done).toBe(false);
 
-	producer.writeString("a");
+	producer.writeFrame(textFrame("a"));
 	// Buffered but closed: still not done until the frame is drained.
 	producer.close();
 	expect(consumer.done).toBe(false);
@@ -190,7 +191,7 @@ test("readable resolves once a frame is buffered", async () => {
 	expect(settled).toBe(false);
 
 	// Writing makes it resolve.
-	producer.writeString("hi");
+	producer.writeFrame(textFrame("hi"));
 	await readable; // must not hang
 	expect(dec.decode(consumer.tryReadFrame()?.payload)).toBe("hi");
 });
@@ -205,7 +206,7 @@ test("readable resolves once the group closes, even with nothing buffered", asyn
 
 test("buffered frames are still readable after the group closes", async () => {
 	const { producer, consumer } = pair(0);
-	producer.writeString("a");
+	producer.writeFrame(textFrame("a"));
 	producer.close();
 
 	// Closing doesn't discard buffered frames; the blocking reader drains them before ending.

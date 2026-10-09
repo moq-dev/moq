@@ -4,7 +4,6 @@
  * @module
  */
 import { type Dispose, race } from "@moq/signals";
-import { isActive } from "../announced.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
@@ -65,7 +64,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 					if (!event) break;
 					if (!originWire.accepts(event.prefix)) continue;
 
-					if (isActive(event.kind)) {
+					if (event.kind !== "end") {
 						const existing = inserted.get(event.prefix);
 						if (existing) {
 							existing.update(event.route);
@@ -147,7 +146,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		if (!map || dead) break;
 
 		for (const [path, slot] of map) {
-			if (slot.blind === 0) continue;
+			if (!table.blind(slot)) continue;
 			if (answered.get(path)?.slot === slot || slot.answer !== undefined) continue;
 			if (table.routes(path)) continue;
 			const withdraw = table.answer(path, session.consume(path));
@@ -158,7 +157,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		// A replaced slot counts as withdrawn: the answer we hold belongs to the slot that
 		// went away, not to whatever now occupies the path.
 		for (const [path, entry] of [...answered]) {
-			if (map.get(path) === entry.slot && entry.slot.blind > 0) continue;
+			if (map.get(path) === entry.slot && table.blind(entry.slot)) continue;
 			answered.delete(path);
 			entry.withdraw();
 		}

@@ -137,7 +137,7 @@ test("clock stays off the wire when absent", () => {
 test("archive round-trips at the root", () => {
 	const parsed = RootSchema.parse({
 		archive: {
-			track: "timeline.z",
+			timelines: { video: "video.timeline.z" },
 			durationMax: 2000,
 			replay: "./recordings/clip",
 			store: "https://objects.example/rec/",
@@ -145,12 +145,12 @@ test("archive round-trips at the root", () => {
 		},
 	});
 	expect(parsed.archive).toMatchObject({
-		track: "timeline.z",
+		timelines: { video: "video.timeline.z" },
 		timescale: 1000,
 		durationMax: 2000,
 		replay: "recordings/clip",
 		store: "https://objects.example/rec/",
-		version: 1,
+		version: 2,
 	});
 	expect(JSON.stringify(parsed)).not.toContain('"timeline":');
 });
@@ -161,7 +161,23 @@ test("a legacy root timeline is not an archive", () => {
 });
 
 test("an invalid store URL is refused", () => {
-	expect(() => RootSchema.parse({ archive: { track: "timeline.z", store: "not a url" } })).toThrow();
+	expect(() => RootSchema.parse({ archive: { timelines: {}, store: "not a url" } })).toThrow();
+});
+
+test("a single shared timeline is refused", () => {
+	expect(() => RootSchema.parse({ archive: { track: "timeline.z" } })).toThrow();
+});
+
+// The exact shape Rust's moq-mux publishes for every broadcast, so a native publisher's catalog
+// stays playable.
+test("a Rust per-track archive parses", () => {
+	const parsed = RootSchema.parse({
+		archive: {
+			timelines: { "catalog.json": "catalog.json.timeline.z", video0: "video0.timeline.z" },
+			timescale: 1000,
+		},
+	});
+	expect(parsed.archive?.timelines.video0).toBe("video0.timeline.z");
 });
 
 test("an absent or foreign text section parses to empty", () => {

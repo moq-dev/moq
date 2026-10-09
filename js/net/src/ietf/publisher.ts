@@ -1,5 +1,7 @@
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
+import { Withdrawal } from "../connection/withdrawal.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
@@ -14,10 +16,13 @@ import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
+import { encodeDatagram } from "./datagram.ts";
 import { type RequestKind, requestReason, toRequestCode } from "./error.ts";
 import { type Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
+import * as Message from "./message.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
+import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { PublishDone, PublishDoneStatus } from "./publish.ts";
@@ -28,11 +33,13 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { type Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
+import { cancelled, finCancels } from "./request_stream.ts";
+import { type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
+	SubscribeNamespaceError,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
 import type { TrackStatusRequest } from "./track.ts";
@@ -50,17 +57,17 @@ function clusterFor(base: Cluster.Advert | undefined, route: Route): Cluster.Adv
 	const self = base.hops.at(-1);
 	if (self === undefined) return undefined;
 	const hops = route.hops.at(-1) === self ? [...route.hops] : [...route.hops, self];
-	return { hops, cost: route.cost.warm };
+	return { hops, cost: route.cost };
 }
 
 /**
  * What it takes to move the peer from `held` to `next`.
  *
- * - `"same"`: the peer would decode the same advertisement. The cold cost, and the whole
- *   route without Cluster, never reach the wire, so a change there sends nothing.
+ * - `"same"`: the peer would decode the same advertisement. The route without Cluster
+ *   never reaches the wire, so a change there sends nothing.
  * - `"restart"`: nothing is held, nothing is wanted, or a different broadcast, which is
  *   withdrawn and advertised again.
- * - Otherwise the same broadcast at a new hop chain or warm cost: the cluster parameters
+ * - Otherwise the same broadcast at a new hop chain or static cost: the cluster parameters
  *   the peer holds and the ones it should, for the target to update.
  */
 function change(
@@ -69,6 +76,8 @@ function change(
 	next: Advertised | undefined,
 ): "same" | "restart" | Reprice {
 	if (held === undefined || next === undefined || held.identity !== next.identity) return "restart";
+	// A new epoch is another broadcast, even from the same entry.
+	if (held.route.epoch !== next.route.epoch) return "restart";
 	const from = clusterFor(base, held.route);
 	const to = clusterFor(base, next.route);
 	if (from === undefined || to === undefined) return from === to ? "same" : "restart";
@@ -126,8 +135,8 @@ interface Namespaces {
 	/** What the peer refused, and whether coming back is worth anything. */
 	refused: Map<Path.Valid, Refused>;
 
-	/** The identity each refusal was about, so a republish at the same path clears it. */
-	offered: Map<Path.Valid, object>;
+	/** The advertisement each refusal was about, so a republish or new epoch at the same path clears it. */
+	offered: Map<Path.Valid, Advertised>;
 }
 
 /** Where one announce loop sends its advertisements. */
@@ -150,20 +159,19 @@ interface RunGroup {
 	/** The group to serve. */
 	group: group.Consumer;
 
-	/** The track's advertised timescale, applied to every frame timestamp. */
-	timescale: Timescale;
+	/**
+	 * The units each object's presentation timestamp is written in, or undefined when objects
+	 * carry none.
+	 *
+	 * Undefined when SUBSCRIBE_OK carries no TIMESCALE: the track has no timeline, the
+	 * subscriber sent INCLUDE_PROPERTIES=0, or the draft (14-16) cannot send the property. A
+	 * timestamp whose units were never declared is worse than none. Our own reader discards
+	 * it; another may read it as some default and time the media wrong.
+	 */
+	timescale?: Timescale;
 
 	/** The publisher's tie-break priority, already converted to the IETF wire convention. */
 	publisherPriority: number;
-
-	/**
-	 * Whether objects carry their presentation timestamp.
-	 *
-	 * False once the subscriber sends INCLUDE_PROPERTIES=0: that drops TIMESCALE from
-	 * SUBSCRIBE_OK, and a timestamp whose units were never declared is worse than none. Our
-	 * own reader discards it; another may read it as some default and time the media wrong.
-	 */
-	stamped: boolean;
 
 	/** The objects of this group the subscription's filter selects. */
 	slice: GroupSlice;
@@ -201,11 +209,8 @@ interface RunFill {
 	 */
 	cache: TrackSubscriber;
 
-	/** The track's advertised timescale, applied to every frame timestamp. */
-	timescale: Timescale;
-
-	/** Whether objects carry their presentation timestamp; see {@link RunGroup.stamped}. */
-	stamped: boolean;
+	/** The units objects are stamped in, if any; see {@link RunGroup.timescale}. */
+	timescale?: Timescale;
 
 	/** Settles when the subscriber leaves, releasing a fill still waiting on its group. */
 	unsubscribed: Promise<void>;
@@ -221,15 +226,26 @@ interface RunFill {
  * @internal
  */
 export class Publisher {
+	#withdrawal = new Withdrawal();
+
+	withdraw(): Promise<void> {
+		return this.#withdrawal.close();
+	}
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+
+	// The one writer for the outbound datagram stream, shared by every subscription since a
+	// second getWriter would throw. Undefined when the transport carries no datagrams, which
+	// turns them off: there is no stream fallback. Released in close().
+	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 	#hidden: boolean;
 
 	// The origin this session serves, borrowed: it outlives the session, and closing the
-	// session leaves its broadcasts alone. The namespaces are advertised with an unsolicited
-	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), or on request if the peer asked
-	// for that (see {@link runSubscribeNamespace}).
+	// session leaves its broadcasts alone. Namespaces go out as an unsolicited
+	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}) unless the peer asked to be
+	// told on request. On draft-16 and later {@link runSubscribeNamespace} also carries
+	// every match: a NAMESPACE is discovery, not a second route.
 	#advertised: Getter<Advertisements | undefined>;
 	#publish?: OriginConsumer;
 
@@ -272,6 +288,18 @@ export class Publisher {
 		this.#requiresSolicitation = requiresSolicitation;
 		this.#hidden = hidden;
 		this.#advert = Cluster.advertise(cluster);
+		this.#datagramWriter = DatagramStream.datagramWriter(quic);
+	}
+
+	/**
+	 * Release the datagram writer's lock so the transport can be torn down. The broadcasts
+	 * belong to the origin, which outlives this session.
+	 *
+	 * @internal
+	 */
+	close() {
+		this.#datagramWriter?.releaseLock();
+		this.#datagramWriter = undefined;
 	}
 
 	/**
@@ -310,7 +338,9 @@ export class Publisher {
 			} catch (err: unknown) {
 				const e = error(err);
 				const condition =
-					e instanceof StreamError && e.code === StreamCode.NotFound ? "does_not_exist" : "internal";
+					e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
+						? "does_not_exist"
+						: "internal";
 				refusal = { errorCode: toRequestCode(condition, "subscribe", version), reasonPhrase: reason(e) };
 			}
 		}
@@ -345,16 +375,17 @@ export class Publisher {
 			// producer retained and let the receiving subscriber enforce its own budget.
 			// Keep the sentinel encodable if this demand crosses a Lite hop before the
 			// producer's retention bound is known.
-			maxAge: Milli(Varint.MAX_U53),
+			maxDelay: Milli(Varint.MAX_U53),
 		});
 
 		let cache: TrackSubscriber | undefined;
 
 		try {
-			// Declaring the timescale is what opts the track into timestamps; every object
-			// Timestamp below is in these units.
 			const info = await track.info();
-			const timescale = info.timescale;
+			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
+			// Drafts 14-16 never write that property, so their objects stay unstamped.
+			const timescale =
+				msg.propertiesWanted && Properties.sendsTimescale(version) ? (info.timescale ?? undefined) : undefined;
 			// The model ranks higher-first, the IETF wire lower-first. Every group this
 			// subscription serves carries the same publisher priority, which is what lets a
 			// relay prefer catalog and audio over video when it has no subscriber preference
@@ -375,7 +406,7 @@ export class Publisher {
 			// group; the model's `endGroup` is exclusive.
 			track.update({
 				priority,
-				maxAge: Milli(Varint.MAX_U53),
+				maxDelay: Milli(Varint.MAX_U53),
 				groups: {
 					start: range.start ? { included: Number(range.start.group) } : undefined,
 					end: range.end ? { included: Number(range.end.group) } : undefined,
@@ -390,7 +421,8 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			const fill =
 				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
-			cache = fill && fill.kind !== "empty" ? track.fork({ priority, maxAge: Milli(Varint.MAX_U53) }) : undefined;
+			cache =
+				fill && fill.kind !== "empty" ? track.fork({ priority, maxDelay: Milli(Varint.MAX_U53) }) : undefined;
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
@@ -412,10 +444,15 @@ export class Publisher {
 						? { groupId: edge.largest.group, objectId: edge.largest.object }
 						: { groupId: edge.largest.group, objectId: 0n }),
 				properties: msg.propertiesWanted
-					? // Declaring the timescale is what opts the track into timestamps; every
-						// object Timestamp below is in these units. We serve the newest group
-						// first, matching moq-lite.
-						{ timescale, priority: publisherPriority, groupOrder: Properties.DESCENDING }
+					? // TIMESCALE is what opts the track into timestamps, on drafts that can
+						// send it. We serve the newest group first, matching moq-lite.
+						{
+							// An untimed track declares none, so it stays untimed downstream.
+							timescale: info.timescale ?? undefined,
+							priority: publisherPriority,
+							groupOrder: Properties.DESCENDING,
+							maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+						}
 					: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
 						// the track opts out of timestamps for this subscriber.
 						{},
@@ -431,7 +468,49 @@ export class Publisher {
 			const unsubscribed = new Promise<void>((resolve) => {
 				unsubscribe = resolve;
 			});
-			void stream.reader.closed.then(
+			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+			const updates = (async () => {
+				for (;;) {
+					if (await stream.reader.done()) {
+						if (legacy || finCancels(version)) return;
+						return stream.writer.closed;
+					}
+					if ((await stream.reader.u53()) !== 0x02) throw new Error("unexpected message on subscribe stream");
+					if (legacy) {
+						// Not applied yet, but read anyway: an unread update keeps the adapter's
+						// stream from closing, which is how UNSUBSCRIBE arrives.
+						await SubscribeUpdate.decode(stream.reader, version);
+						continue;
+					}
+					const params = await Message.decode(stream.reader, async (r) => {
+						await r.u62();
+						if (version === Version.DRAFT_17) await r.u62();
+						return Parameters.decode(r, version, "request-update");
+					});
+					const unsupported =
+						params.forward === false ||
+						params.bytes.size > 0 ||
+						params.rangeFilters ||
+						params.trackPropertyFilter ||
+						[...params.vars.keys()].some((key) => key !== 0x10n && key !== 0x20n);
+					if (unsupported) {
+						await stream.writer.u53(RequestError.id);
+						await new RequestError({
+							requestId: undefined,
+							errorCode: toRequestCode("not_supported", "subscribe", version),
+							reasonPhrase: "REQUEST_UPDATE parameters not supported",
+						}).encode(stream.writer, version);
+						throw new UpdateFailed();
+					}
+					// update() replaces every option, so carry the rest over as Rust does.
+					if (params.subscriberPriority !== undefined)
+						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
+					await stream.writer.u53(RequestOk.id);
+					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
+				}
+			})();
+			const requestEnded = legacy ? updates : race([updates, stream.writer.closed]);
+			void requestEnded.then(
 				() => {
 					if (!finished) unsubscribe();
 				},
@@ -444,7 +523,7 @@ export class Publisher {
 			const groups = new Set<Promise<void>>();
 			const streams: StreamCount = { opened: 0 };
 
-			// Serve track groups, racing with stream close (= Unsubscribe)
+			// Serve groups until the track ends or the requester cancels.
 			const serving = (async () => {
 				for (;;) {
 					const group = await track.recvGroup();
@@ -465,7 +544,6 @@ export class Publisher {
 						group,
 						timescale,
 						publisherPriority,
-						stamped: msg.propertiesWanted,
 						slice: groupSlice(range, group.sequence),
 						unsubscribed,
 						streams,
@@ -474,6 +552,10 @@ export class Publisher {
 					void task.finally(() => groups.delete(task));
 				}
 			})();
+
+			// Datagrams count toward no stream, so PUBLISH_DONE never waits on them; closing
+			// the track below ends the loop.
+			void this.#runDatagrams({ requestId: msg.requestId, track, timescale, publisherPriority });
 
 			// The fill (when one was requested) runs alongside on its own fetch stream; its
 			// failures reset that stream and never touch the subscription.
@@ -485,7 +567,6 @@ export class Publisher {
 							fill,
 							cache,
 							timescale,
-							stamped: msg.propertiesWanted,
 							unsubscribed,
 							streams,
 						})
@@ -495,8 +576,7 @@ export class Publisher {
 			let ended = false;
 			try {
 				const served = Symbol("served");
-				ended =
-					(await race([Promise.all([serving, filling]).then(() => served), stream.reader.closed])) === served;
+				ended = (await race([Promise.all([serving, filling]).then(() => served), requestEnded])) === served;
 			} catch (err: unknown) {
 				publishError = error(err);
 			}
@@ -533,18 +613,26 @@ export class Publisher {
 						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
 							? msg.requestId
 							: undefined,
-					statusCode: publishError ? PublishDoneStatus.INTERNAL_ERROR : PublishDoneStatus.TRACK_ENDED,
+					statusCode:
+						publishError instanceof UpdateFailed
+							? PublishDoneStatus.UPDATE_FAILED
+							: publishError
+								? PublishDoneStatus.INTERNAL_ERROR
+								: PublishDoneStatus.TRACK_ENDED,
 					streamCount: BigInt(streams.opened),
-					reasonPhrase: publishError ? "internal error" : "track ended",
+					reasonPhrase:
+						publishError instanceof UpdateFailed
+							? "update failed"
+							: publishError
+								? "internal error"
+								: "track ended",
 				});
 				await done.encode(stream.writer, version);
 			} catch {
 				// Stream might already be closed by peer.
 			}
 
-			// Only now is the close below ours. Claiming it any earlier would read a peer FIN
-			// that lands while PublishDone is still going out as our own completion, leaving
-			// queued groups to open for a subscriber that has already left.
+			// Our close follows PUBLISH_DONE; it must not cancel data still queued for delivery.
 			finished = true;
 			stream.close();
 		} catch (err: unknown) {
@@ -563,7 +651,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, publisherPriority, stamped, slice, unsubscribed, streams } = options;
+		const { requestId, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -588,10 +676,12 @@ export class Publisher {
 				flags: {
 					// The object properties carry the timestamp, so there is nothing to write
 					// when the track declared no units to read one in.
-					hasExtensions: stamped,
+					hasExtensions: timescale !== undefined,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
-					hasEnd: true,
+					// A stream capped by the range stops before the group may end, so its FIN
+					// cannot claim END_OF_GROUP.
+					hasEnd: slice.until === undefined,
 					hasPriority: true,
 					// Only honest when the stream really starts at the group's first object;
 					// a trimmed head starts partway through.
@@ -647,6 +737,48 @@ export class Publisher {
 	}
 
 	/**
+	 * Send a track's datagrams as OBJECT_DATAGRAMs, best-effort, like moq-lite.
+	 *
+	 * One that does not fit the transport's limit is dropped; there is no stream fallback. A
+	 * send failure stops the loop but never fails the subscription.
+	 */
+	async #runDatagrams(options: {
+		requestId: bigint;
+		track: TrackSubscriber;
+		/** The units datagrams are stamped in, if any; see {@link RunGroup.timescale}. */
+		timescale: Timescale | undefined;
+		publisherPriority: number;
+	}) {
+		const writer = this.#datagramWriter;
+		if (!writer) return;
+		const { requestId, track, timescale, publisherPriority } = options;
+		const version = this.#session.version;
+
+		try {
+			for (;;) {
+				const datagram = await track.recvDatagram();
+				if (!datagram) return;
+
+				const body = await encodeDatagram(
+					datagram,
+					{ trackAlias: requestId, publisherPriority, timescale },
+					version,
+				);
+				const max = DatagramStream.maxDatagramSize(this.#quic);
+				if (body.byteLength > max) {
+					console.debug(`dropping oversize datagram: alias=${requestId} size=${body.byteLength} max=${max}`);
+					continue;
+				}
+
+				await writer.ready;
+				await writer.write(body);
+			}
+		} catch (err: unknown) {
+			console.debug(`datagram send stopped: alias=${requestId} error=${reason(error(err))}`);
+		}
+	}
+
+	/**
 	 * Mark the track's end with an END_OF_TRACK object on its own stream, at object 0 of the
 	 * group that will never exist.
 	 *
@@ -698,7 +830,7 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, fill, cache, timescale, stamped, unsubscribed, streams } = options;
+		const { requestId, fill, cache, timescale, unsubscribed, streams } = options;
 		const version = this.#session.version;
 
 		// Everything is inside the try so the cache fork is released on every path out,
@@ -723,7 +855,7 @@ export class Publisher {
 
 			const group = takeGroup(cache, Number(fill.sequence));
 			try {
-				await this.#writeFillGroup(stream, group, fill, timescale, stamped, unsubscribed);
+				await this.#writeFillGroup(stream, group, fill, timescale, unsubscribed);
 			} finally {
 				group.close();
 			}
@@ -750,8 +882,7 @@ export class Publisher {
 		stream: Writer,
 		group: group.Consumer,
 		fill: FillGroup,
-		timescale: Timescale,
-		stamped: boolean,
+		timescale: Timescale | undefined,
 		unsubscribed: Promise<void>,
 	) {
 		let first = true;
@@ -779,7 +910,7 @@ export class Publisher {
 			next = BigInt(frame.sequence) + 1n;
 			if (fill.until !== undefined && BigInt(frame.sequence) >= fill.until) break;
 
-			const obj = new FetchFrame({ payload: frame.payload, timestamp: stamped ? frame.timestamp : undefined });
+			const obj = new FetchFrame({ payload: frame.payload, timestamp: frame.timestamp });
 			await obj.encode(
 				stream,
 				{ group: Number(fill.sequence), object: frame.sequence, first },
@@ -793,23 +924,35 @@ export class Publisher {
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
 	 *
-	 * This carries the advertisements when the peer asked to be told on request (MoQ
-	 * Solicit); otherwise {@link runPublishNamespaces} has already announced everything
-	 * visible and repeating it here would leave the peer holding two sources for one
-	 * broadcast, so only the hidden namespaces it may see ride here (MoQ Hidden).
-	 * Draft-16+ streams Namespace entries inline; draft-14/15 predate those messages, so
-	 * each advertisement is a PUBLISH_NAMESPACE request of its own.
+	 * On draft-16 and later every visible match is a NAMESPACE on this stream, whatever
+	 * the peer's SETUP said. A NAMESPACE is discovery, not a route, so a peer that also
+	 * hears the unsolicited PUBLISH_NAMESPACE still gets the match here. Draft-14/15
+	 * predate those messages, so each advertisement is a PUBLISH_NAMESPACE request, and
+	 * only for what {@link runPublishNamespaces} does not already say (the whole set when
+	 * the peer asked to be told on request, otherwise the hidden remainder).
 	 *
 	 * @internal
 	 */
-	async runSubscribeNamespace(msg: SubscribeNamespace, stream: Stream) {
+	runSubscribeNamespace(msg: SubscribeNamespace, stream: Stream): Promise<void> {
+		return this.#withdrawal.track(this.#runSubscribeNamespace(msg, stream));
+	}
+
+	async #runSubscribeNamespace(msg: SubscribeNamespace, stream: Stream) {
+		if (this.#withdrawal.closing.peek()) return;
 		const version = this.#session.version;
 		const prefix = msg.namespace;
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
 
 		// Draft-14/15: the open PUBLISH_NAMESPACE request per advertised suffix.
 		const requests: Requests = new Map();
+		// Drains the requests map, so calling it twice is safe and the second is a no-op.
+		const withdrawAll = async () => {
+			for (const path of [...requests.keys()]) {
+				await this.#withdraw(path, requests);
+			}
+		};
 
+		const ending = cancelled(stream, version);
 		try {
 			// Send OK response
 			if (version === Version.DRAFT_14) {
@@ -824,12 +967,13 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			}
 
-			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Unless the
-			// peer asked to be told only on request, it has already heard everything visible
-			// from the empty prefix unasked, so this stream carries only what that hid.
+			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Draft-16
+			// and later carry every remaining match. Draft-14/15 only add what the
+			// unsolicited loop cannot say.
+			const visible = (covered: Path.Valid) => !this.#hidden || msg.hidden || !hiddenBelow(prefix, covered);
 			const carries = (covered: Path.Valid) =>
-				(!this.#hidden || msg.hidden || !hiddenBelow(prefix, covered)) &&
-				(this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)));
+				visible(covered) &&
+				(legacy ? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)) : true);
 
 			// Inline entries always land, and the receiver treats a repeated NAMESPACE as a
 			// replacement, so repricing one is just sending it again, a new original
@@ -882,22 +1026,25 @@ export class Publisher {
 
 				// Wait for the next change, or for the peer to unsubscribe.
 				const next = await (retry
-					? race([changed, stream.reader.closed, retryAfter(retry).then(() => advertised)])
-					: race([changed, stream.reader.closed]));
+					? race([changed, this.#withdrawal.closing, ending, retryAfter(retry).then(() => advertised)])
+					: race([changed, this.#withdrawal.closing, ending]));
 				dispose();
-				if (!next) break;
+				if (!next || next === true) break;
 			}
 
+			// Withdraw before the ask stream FINs, as Rust does: a peer that reads that
+			// FIN as the subscription ending can drop the DONEs still in flight.
+			await withdrawAll();
 			stream.close();
+			await stream.writer.closed;
 		} catch (err: unknown) {
 			const e = error(err);
 			console.debug(`subscribe_namespace stream error: ${reason(e)}`);
 			stream.abort(e);
+			if (this.#withdrawal.closing.peek()) throw e;
 		} finally {
 			// This subscription's advertisements die with it.
-			for (const path of [...requests.keys()]) {
-				await this.#withdraw(path, requests);
-			}
+			await withdrawAll();
 		}
 	}
 
@@ -907,13 +1054,19 @@ export class Publisher {
 	 *
 	 * The peers that never send SUBSCRIBE_NAMESPACE are exactly the ones expecting a
 	 * publisher to announce itself, so announcing is the default. A peer that would
-	 * rather ask says so in its SETUP (MoQ Solicit) and this does nothing, leaving
-	 * {@link runSubscribeNamespace} to carry the advertisements instead. Exactly one of
-	 * the two is live, so the peer never hears a namespace twice.
+	 * rather ask says so in its SETUP (MoQ Solicit) and this does nothing. On draft-16
+	 * and later {@link runSubscribeNamespace} also carries every match, so a peer that
+	 * did not ask hears each namespace both ways. A NAMESPACE is discovery only, not a
+	 * second route.
 	 *
 	 * @internal
 	 */
-	async runPublishNamespaces() {
+	runPublishNamespaces(): Promise<void> {
+		return this.#withdrawal.track(this.#runPublishNamespaces());
+	}
+
+	async #runPublishNamespaces() {
+		if (this.#withdrawal.closing.peek()) return;
 		if (this.#requiresSolicitation) {
 			// The peer asked to be told on request; runSubscribeNamespace answers it.
 			return;
@@ -972,15 +1125,16 @@ export class Publisher {
 
 				// Wait for the next change, which has already fired if one landed above.
 				const next = await (retry
-					? race([changed, closed, retryAfter(retry).then(() => advertised)])
-					: race([changed, closed]));
+					? race([changed, this.#withdrawal.closing, closed, retryAfter(retry).then(() => advertised)])
+					: race([changed, this.#withdrawal.closing, closed]));
 				dispose?.();
-				if (!next) break;
+				if (!next || next === true) break;
 			}
 		} catch (err: unknown) {
 			// Nothing restarts this loop, so whatever got us here cost the session its
 			// discovery. Not a debug-level event.
 			console.warn(`publish_namespace loop failed: ${reason(error(err))}`);
+			if (this.#withdrawal.closing.peek()) throw err;
 		} finally {
 			dispose?.();
 			// Close out every open PUBLISH_NAMESPACE request.
@@ -1008,7 +1162,9 @@ export class Publisher {
 		// by rebuilding the watched entry.
 		for (const key of [...ns.refused.keys()]) {
 			const snap = updated.get(key);
-			if (snap === undefined || ns.offered.get(key) !== snap.identity) {
+			const offered = ns.offered.get(key);
+			// A new epoch is another broadcast too, even from the same front.
+			if (snap === undefined || offered?.identity !== snap.identity || offered.route.epoch !== snap.route.epoch) {
 				ns.refused.delete(key);
 				ns.offered.delete(key);
 			}
@@ -1043,7 +1199,7 @@ export class Publisher {
 				held.delete(key);
 				if (answer !== "dropped") {
 					ns.refused.set(key, answer);
-					ns.offered.set(key, snap.identity);
+					ns.offered.set(key, snap);
 				}
 			}
 		}
@@ -1253,6 +1409,7 @@ export class Publisher {
 				// Stream might already be closed
 			}
 			request.stream.close();
+			await request.stream.writer.closed;
 			return;
 		}
 		request.stream.close();
@@ -1270,6 +1427,21 @@ export class Publisher {
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
 		// TRACK_STATUS_ERROR is 0x0f on draft-14.
 		await this.#refuseUnsupported(stream, msg.requestId, "track_status", 0x0f, "TRACK_STATUS is not supported");
+	}
+
+	/**
+	 * Refuses a draft-16/17 SUBSCRIBE_NAMESPACE that asks for PUBLISH alone: we never send PUBLISH.
+	 *
+	 * @internal
+	 */
+	async refuseSubscribeNamespace(requestId: bigint, stream: Stream) {
+		await this.#refuseUnsupported(
+			stream,
+			requestId,
+			"subscribe_namespace",
+			SubscribeNamespaceError.id,
+			"SUBSCRIBE_NAMESPACE for PUBLISH is not supported",
+		);
 	}
 
 	/**
@@ -1559,4 +1731,10 @@ function fillRange(fill: Filter.Fill, subscription: Filter.Filter, largest?: Loc
 		skip: start.object,
 		until: end.object === undefined ? undefined : end.object + 1n,
 	};
+}
+
+class UpdateFailed extends Error {
+	constructor() {
+		super("subscription update failed");
+	}
 }

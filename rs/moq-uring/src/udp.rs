@@ -85,7 +85,7 @@ pub struct Config {
 	/// Coalesce received datagrams with `UDP_GRO`.
 	pub gro: bool,
 	/// Send with a `UDP_SEGMENT` control message instead of one `sendmsg` per
-	/// datagram.
+	/// datagram. A socket whose route rejects a train falls back to the latter.
 	pub gso: bool,
 	/// Receive through one persistent multishot `recvmsg` and the provided
 	/// buffer ring, instead of re-armed oneshot receives.
@@ -413,6 +413,9 @@ pub(crate) struct SockShared {
 	/// `owner`, so counting a datagram is not a `Weak::upgrade`.
 	metrics: std::sync::Arc<Counters>,
 	config: Config,
+	/// Starts as `config.gso`, and clears for good once the kernel rejects a
+	/// train: the route or driver cannot segment.
+	gso: Cell<bool>,
 	bgid: u16,
 	closed: Cell<bool>,
 	rx: RefCell<Rx>,
@@ -609,6 +612,7 @@ impl Socket {
 			owner: Owner::new(shared),
 			shard,
 			metrics: shared.metrics.clone(),
+			gso: Cell::new(config.gso),
 			config,
 			bgid,
 			closed: Cell::new(false),
@@ -860,7 +864,7 @@ impl TxBuf {
 		// submit inline and go round again without reaping a single
 		// completion, which starves the worker and overflows the queue.
 		let segments = len.div_ceil(segment);
-		let limit = match self.sock.config.gso {
+		let limit = match self.sock.gso.get() {
 			true => MAX_GSO_SEGMENTS,
 			false => shared.ring.borrow().params().sq_entries() as usize,
 		};
@@ -894,9 +898,9 @@ impl TxBuf {
 		let one = SendOne {
 			to,
 			ecn,
-			segment: sock.config.gso.then_some(segment as u16),
+			segment: sock.gso.get().then_some(segment as u16),
 		};
-		if sock.config.gso {
+		if sock.gso.get() {
 			send_one(&shared, &staging, 0, base, len, &one)?;
 		} else {
 			for index in 0..segments {
@@ -974,6 +978,9 @@ pub(crate) struct SendOp {
 	sock: Rc<SockShared>,
 	id: u16,
 	expect: usize,
+	/// A GSO send's payload and destination, to resend it unsegmented if the
+	/// kernel rejects the train.
+	train: Option<(NonNull<u8>, SendOne)>,
 }
 
 impl Drop for SendOp {
@@ -983,6 +990,7 @@ impl Drop for SendOp {
 }
 
 /// What every datagram of one [`TxBuf::send`] shares.
+#[derive(Clone, Copy)]
 struct SendOne {
 	to: SocketAddr,
 	ecn: Option<Ecn>,
@@ -1063,6 +1071,7 @@ fn send_one(
 		sock: staging.sock.clone(),
 		id: staging.id,
 		expect: len,
+		train: segment.and(NonNull::new(base)).map(|base| (base, *one)),
 	}));
 	let entry = opcode::SendMsg::new(types::Fd(staging.sock.io.as_raw_fd()), hdr_ptr)
 		.build()
@@ -1332,6 +1341,19 @@ pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 			tracing::debug!("send completed with ECONNREFUSED");
 			return;
 		}
+		// Linux has no way to ask whether a route or driver can segment; it
+		// only fails the train with EIO or EINVAL. Dropping the train would
+		// cost the connection a full RTO, so send it again unsegmented. Other
+		// trains already in flight fail and resend the same way.
+		if let (libc::EIO | libc::EINVAL, Some((base, one))) = (code, op.train) {
+			if op.sock.gso.replace(false) {
+				tracing::info!(code, "GSO send rejected; halting segmentation offload");
+			}
+			if let Err(err) = resend_unsegmented(&op, base, &one) {
+				op.sock.fail_tx(err.raw_os_error().unwrap_or(libc::EIO));
+			}
+			return;
+		}
 		if code != libc::ECANCELED {
 			op.sock.fail_tx(code);
 		}
@@ -1339,6 +1361,47 @@ pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 		tracing::warn!(sent = cqe.result, expected = op.expect, "short UDP send");
 		op.sock.fail_tx(libc::EIO);
 	}
+}
+
+/// Stage a rejected GSO train again, one `sendmsg` per segment, from the
+/// buffer `op` still holds. Runs before `op` drops, so the slot stays leased.
+fn resend_unsegmented(op: &SendOp, base: NonNull<u8>, one: &SendOne) -> io::Result<()> {
+	let shared = match op.sock.owner.upgrade() {
+		Some(shared) if !shared.stopped.get() => shared,
+		_ => return Err(Shared::gone_error()),
+	};
+	let segment = usize::from(one.segment.expect("only a GSO send is resent"));
+	let segments = op.expect.div_ceil(segment);
+	let headers = {
+		let mut tx = op.sock.tx.borrow_mut();
+		let headers = &mut tx.bufs[op.id as usize].headers;
+		if headers.len() < segments {
+			headers.resize_with(segments, SendHdr::zeroed);
+		}
+		// SAFETY: the kernel completed the train's only `sendmsg`, so nothing
+		// points at these headers until the sends below stage them.
+		unsafe { NonNull::new_unchecked(headers.as_mut_ptr()) }
+	};
+	let staging = Staging {
+		sock: op.sock.clone(),
+		id: op.id,
+		headers,
+	};
+	let one = SendOne { segment: None, ..*one };
+	for index in 0..segments {
+		let offset = index * segment;
+		let chunk = segment.min(op.expect - offset);
+		// SAFETY: offset stays within the train, inside the leased buffer.
+		send_one(
+			&shared,
+			&staging,
+			index,
+			unsafe { base.as_ptr().add(offset) },
+			chunk,
+			&one,
+		)?;
+	}
+	Ok(())
 }
 
 /// What the kernel said about one receive, from its control buffer.

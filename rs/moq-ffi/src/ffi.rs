@@ -175,6 +175,8 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	}
 
 	/// Try to lock the state synchronously. Returns `None` if a task is running or it was cancelled.
+	// Only the native server and its requests read state synchronously.
+	#[cfg(not(target_arch = "wasm32"))]
 	pub fn lock(&self) -> Option<Guard<T>> {
 		let guard = self.state.clone().try_lock_owned().ok()?;
 
@@ -191,6 +193,7 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 
 	/// Whether [Self::cancel] has run, which [Self::lock] folds into the same `None` as a busy
 	/// state. The state may still be a moment away from being dropped.
+	#[cfg(not(target_arch = "wasm32"))]
 	pub fn is_cancelled(&self) -> bool {
 		*self.cancel.borrow()
 	}
@@ -201,6 +204,7 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	/// Configuration must apply or fail, so this splits them: [`MoqError::Busy`]
 	/// while a [`Self::run`] owns the state, [`MoqError::Cancelled`] after
 	/// [`Self::cancel`].
+	#[cfg(not(target_arch = "wasm32"))]
 	pub fn configure(&self) -> Result<Guard<T>, MoqError> {
 		match self.lock() {
 			Some(guard) => Ok(guard),

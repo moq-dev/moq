@@ -12,6 +12,12 @@ use bytes::BytesMut;
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live edge:
 /// completeness has to be asked for.
 const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a drain waits for the next frame: past the recording delay, the mux-ahead
+/// window a multiplex rate adds on top of it, and the clip, so the first frame goes out,
+/// and then until output stops.
+const DRAIN: std::time::Duration = RECORDING_MAX_AGE
+	.saturating_mul(3)
+	.saturating_add(std::time::Duration::from_secs(1));
 
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
@@ -248,7 +254,7 @@ async fn import_opus_frames() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -267,6 +273,36 @@ async fn import_opus_frames() {
 		// The Opus-in-TS control header starts with 0x7f; a stripped packet must not.
 		assert_ne!(frame[0], 0x7f, "control header was not stripped");
 	}
+}
+
+/// An Opus config comes from the PMT, before any PES, yet the catalog is first published at the
+/// first PES, carrying the clock it anchors rather than a provisional one a copy-once reader
+/// would keep.
+#[tokio::test]
+async fn opus_catalog_carries_the_anchored_clock() {
+	// An hour in, so the anchored clock lands far from the provisional one.
+	let data = shift_clock(include_bytes!("test_data/opus.ts"), 3_600 * 90_000);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let provisional = catalog.snapshot().clock.expect("a clock");
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+
+	// Packet by packet, so a snapshot published at the PMT is seen before the PES replaces it.
+	let mut published = Vec::new();
+	for pkt in data.chunks(188) {
+		import.decode(pkt).unwrap();
+		published.extend(clocks.drain());
+	}
+	import.finish().unwrap();
+	published.extend(clocks.drain());
+
+	let anchored = catalog.snapshot().clock.expect("a clock");
+	assert_ne!(anchored, provisional, "the first PES anchors the clock");
+	assert!(!published.is_empty(), "the catalog publishes");
+	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
 }
 
 /// `eac3.ts` is an ffmpeg-authored audio-only ATSC E-AC-3 program (stream_type
@@ -441,9 +477,10 @@ async fn import_export_import_roundtrip() {
 	let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
 	let mut out = BytesMut::new();
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
+	while let Ok(res) = tokio::time::timeout(DRAIN, exporter.next()).await {
 		match res.expect("exporter error") {
 			Some(frame) => out.extend_from_slice(&frame.payload),
 			None => break,
@@ -496,7 +533,7 @@ async fn survives_midstream_join() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -550,7 +587,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -599,111 +636,118 @@ fn import_handles_unaligned_chunks() {
 	assert_eq!(snapshot.audio.renditions.len(), 1);
 }
 
-/// What a TS import published, plus the broadcast clock's reading around the first chunk.
-struct LiveImport {
-	published: std::collections::BTreeMap<String, Vec<u128>>,
-	before: u128,
-	after: u128,
+/// `data` with every PES PTS/DTS and PCR base moved `ticks` later on the 90 kHz clock, as an
+/// encoder that had been running that much longer would stamp it.
+fn shift_clock(data: &[u8], ticks: u64) -> Vec<u8> {
+	const FIELD: u64 = (1 << 33) - 1;
+	let mut out = data.to_vec();
+	for pkt in out.as_chunks_mut::<188>().0 {
+		assert_eq!(pkt[0], 0x47, "an aligned TS packet");
+		let mut payload = 4;
+		if pkt[3] & 0x20 != 0 {
+			let len = pkt[4] as usize;
+			if len >= 7 && pkt[5] & 0x10 != 0 {
+				let pcr = &mut pkt[6..11];
+				let base = (pcr[0] as u64) << 25
+					| (pcr[1] as u64) << 17
+					| (pcr[2] as u64) << 9
+					| (pcr[3] as u64) << 1
+					| (pcr[4] as u64) >> 7;
+				let base = (base + ticks) & FIELD;
+				pcr[0] = (base >> 25) as u8;
+				pcr[1] = (base >> 17) as u8;
+				pcr[2] = (base >> 9) as u8;
+				pcr[3] = (base >> 1) as u8;
+				pcr[4] = (pcr[4] & 0x7F) | ((base as u8 & 1) << 7);
+			}
+			payload += 1 + len;
+		}
+		// Only a payload-unit start with a payload can open a PES header.
+		if pkt[1] & 0x40 == 0 || pkt[3] & 0x10 == 0 || payload + 9 > 188 {
+			continue;
+		}
+		let pes = &mut pkt[payload..];
+		if pes[..3] != [0, 0, 1] {
+			continue;
+		}
+		let flags = pes[7] >> 6;
+		let mut at = 9;
+		for present in [flags & 0b10 != 0, flags == 0b11] {
+			if !present {
+				continue;
+			}
+			let t = &mut pes[at..at + 5];
+			let v = ((t[0] as u64 >> 1) & 0x07) << 30
+				| (t[1] as u64) << 22
+				| (t[2] as u64 >> 1) << 15
+				| (t[3] as u64) << 7
+				| t[4] as u64 >> 1;
+			let v = (v + ticks) & FIELD;
+			t[0] = (t[0] & 0xF1) | (((v >> 30) as u8 & 0x07) << 1);
+			t[1] = (v >> 22) as u8;
+			t[2] = ((((v >> 15) & 0x7F) as u8) << 1) | 1;
+			t[3] = (v >> 7) as u8;
+			t[4] = (((v & 0x7F) as u8) << 1) | 1;
+			at += 5;
+		}
+	}
+	out
 }
 
-/// Import `chunks` in order, idling `idle` between them, on a clock that began `ago` earlier.
-/// `live` translates onto that clock; otherwise the unwrapped PTS publishes verbatim.
-async fn live_import(chunks: &[&[u8]], live: bool, ago: std::time::Duration, idle: std::time::Duration) -> LiveImport {
+/// What a TS import published, and the wall-clock window it arrived in.
+struct Imported {
+	published: std::collections::BTreeMap<String, Vec<u128>>,
+	/// The root clock the catalog advertised.
+	clock: hang::catalog::Clock,
+	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+}
+
+/// Import `data` on a catalog with the default clock.
+async fn import_stream(data: &[u8]) -> Imported {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let config = crate::catalog::Config::default().with_clock(crate::container::test_util::late_clock(ago));
-	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let clock = catalog.clock();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	if live {
-		import = import.live();
-	}
 
-	let before = clock.now().as_micros();
-	let mut after = before;
-	for (i, chunk) in chunks.iter().enumerate() {
-		if i > 0 {
-			std::thread::sleep(idle);
-		}
-		import.decode(chunk).unwrap();
-		if i == 0 {
-			after = clock.now().as_micros();
-		}
-	}
+	let before = std::time::SystemTime::now();
+	import.decode(data).unwrap();
+	let after = std::time::SystemTime::now();
 	import.finish().unwrap();
 
-	LiveImport {
-		published: crate::container::test_util::published(&consumer, &catalog.snapshot()).await,
-		before,
-		after,
+	let snapshot = catalog.snapshot();
+	Imported {
+		published: crate::container::test_util::published(&consumer, &snapshot).await,
+		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		arrival: before..=after,
 	}
 }
 
-/// A TS feed arriving 30s after the broadcast began publishes on the broadcast clock rather than
-/// its own PTS: the stream is live on arrival, and H.264 and AAC keep the one offset their PES
-/// headers gave them.
+/// A feed ten hours into its own PTS publishes those timestamps verbatim, H.264 and AAC keeping
+/// the offset their PES headers gave them, and the catalog clock maps it to the arrival time.
 #[tokio::test]
-async fn live_import_anchors_a_late_first_frame() {
+async fn import_publishes_stream_pts_on_an_arrival_clock() {
 	let data: &[u8] = include_bytes!("test_data/bbb_cbr.ts");
-	let ago = std::time::Duration::from_secs(30);
-	let verbatim = live_import(&[data], false, ago, std::time::Duration::ZERO).await;
-	let live = live_import(&[data], true, ago, std::time::Duration::ZERO).await;
+	let hours = std::time::Duration::from_secs(10 * 3600);
+	let original = import_stream(data).await;
+	let shifted = import_stream(&shift_clock(data, hours.as_secs() * 90_000)).await;
 
-	let offset = crate::container::test_util::common_offset(&verbatim.published, &live.published);
-	// The earliest PES anchors at its arrival, which frames muxed ahead of it may precede.
-	let earliest = verbatim.published.values().map(|t| t[0]).min().unwrap() as i128 + offset;
-	let skew = std::time::Duration::from_secs(2).as_micros() as i128;
+	let offset = crate::container::test_util::common_offset(&original.published, &shifted.published);
 	assert!(
-		live.before as i128 - skew <= earliest && earliest <= live.after as i128,
-		"the stream is live on arrival: {earliest} not near {}..={}",
-		live.before,
-		live.after
+		(offset - hours.as_micros() as i128).abs() <= 1_000,
+		"the source's own PTS: moved {offset}us"
 	);
-}
 
-/// The same feed played twice, as when an encoder restarts its PTS, continues forward after the
-/// real idle gap instead of rewinding.
-#[tokio::test]
-async fn live_import_restarts_forward_after_idle() {
-	let data: &[u8] = include_bytes!("test_data/bbb_cbr.ts");
-	let once = live_import(&[data], false, std::time::Duration::ZERO, std::time::Duration::ZERO).await;
-
-	// How much source time one pass covers, across every stream.
-	let starts = once.published.values().map(|t| *t.iter().min().unwrap());
-	let ends = once.published.values().map(|t| *t.iter().max().unwrap());
-	let span = (ends.max().unwrap() - starts.min().unwrap()) as i128;
-
-	for idle in [std::time::Duration::ZERO, std::time::Duration::from_millis(300)] {
-		let live = live_import(&[data, data], true, std::time::Duration::from_secs(30), idle).await;
-
-		// Each pass lands on one mapping for every stream: the first frames on the first, the last
-		// frames on the second.
-		let offset = |pick: fn(&Vec<u128>) -> u128| {
-			let deltas: Vec<i128> = live
-				.published
-				.iter()
-				.map(|(name, t)| pick(t) as i128 - pick(&once.published[name]) as i128)
-				.collect();
-			assert!(
-				deltas.iter().all(|d| (d - deltas[0]).abs() <= 1_000),
-				"every stream shares one mapping: {deltas:?}"
-			);
-			deltas[0]
-		};
-		let first = offset(|t| t[0]);
-		let second = offset(|t| *t.last().unwrap());
-
-		// The second pass continues after the first plus the real idle gap, not on top of it.
-		let shift = second - first;
-		assert!(
-			shift >= span + idle.as_micros() as i128,
-			"the restart resumes after the first pass and the idle gap: {shift} < {span} + {idle:?}"
-		);
-		assert!(
-			shift < span + (idle + std::time::Duration::from_secs(5)).as_micros() as i128,
-			"the restart is not pushed further: {shift}"
-		);
-	}
+	// The first PES anchors at its arrival, which frames muxed ahead of it may precede.
+	let earliest = shifted.published.values().map(|t| t[0]).min().unwrap();
+	let wall = shifted
+		.clock
+		.wall_clock(moq_net::Timestamp::from_micros(earliest as u64).unwrap())
+		.unwrap();
+	let skew = std::time::Duration::from_secs(2);
+	assert!(
+		*shifted.arrival.start() - skew <= wall && wall <= *shifted.arrival.end(),
+		"the stream is live on arrival"
+	);
 }
 
 /// The PCR a packet's adaptation field carries, in 27 MHz ticks.
@@ -816,7 +860,7 @@ fn assert_legal(ts: &[u8], stimulus: &[u8]) {
 
 /// Import `ts` with an `mpegts` catalog, snapshotting the stats once the program clock
 /// reaches each of `at`, and once more at the end of the input.
-fn sample(ts: &[u8], at: &[std::time::Duration]) -> Vec<crate::container::ts::Stats> {
+fn sample(ts: &[u8], at: &[std::time::Duration]) -> Vec<crate::container::ts::stats::Snapshot> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let _catalog = crate::catalog::Producer::new(
 		&mut broadcast,
@@ -926,7 +970,7 @@ fn import_reports_every_elementary_stream() {
 		),
 	] {
 		let stats = sample(data, &[]).pop().unwrap();
-		let tracks: Vec<(u16, &str)> = stats.streams.iter().map(|(&pid, s)| (pid, s.track)).collect();
+		let tracks: Vec<(u16, &str)> = stats.streams.iter().map(|(&pid, s)| (pid, s.track.as_str())).collect();
 		assert_eq!(tracks, rows);
 		for (pid, stream) in &stats.streams {
 			assert!(stream.units > 0, "{pid:#x} delivered nothing: {stream:?}");

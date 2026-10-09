@@ -1,6 +1,6 @@
 //! The original hang wire format.
 //!
-//! Each moq frame holds one media frame: a VarInt-encoded timestamp
+//! Each moq frame holds one media frame: a varint-encoded timestamp
 //! followed by the raw codec bitstream. Simple but ad-hoc; new
 //! broadcasts should use [`crate::container::loc`] instead.
 

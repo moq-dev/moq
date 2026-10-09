@@ -37,6 +37,10 @@ pub enum Error {
 	#[error("timestamp overflow")]
 	TimestampOverflow,
 
+	/// A Tracks element arrived after `finish()`, so the tracks it declares could never finish.
+	#[error("Tracks after finish")]
+	TracksAfterFinish,
+
 	#[error("TrackEntry missing TrackNumber")]
 	MissingTrackNumber,
 

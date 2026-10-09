@@ -35,6 +35,9 @@ pub(super) trait Sink: Send + Sync + 'static {
 
 	/// How much audio is queued ahead of the speaker.
 	fn buffered(&self) -> Duration;
+
+	/// Play every queued sample before releasing the sink.
+	fn finish(self) -> impl Future<Output = ()> + Send;
 }
 
 impl Speaker for moq_audio::playback::Engine {
@@ -51,6 +54,10 @@ impl Sink for moq_audio::playback::Sink {
 		// latency, and the sink already reports them in its logs.
 		let _ = moq_audio::playback::Sink::write(self, samples)?;
 		Ok(())
+	}
+
+	fn finish(self) -> impl Future<Output = ()> + Send {
+		moq_audio::playback::Sink::finish(self)
 	}
 
 	fn buffered(&self) -> Duration {

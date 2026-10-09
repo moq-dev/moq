@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
+import type { Time, Timed } from "@moq/net";
 
 import { type Config, type Encoded, Encoder } from "./encoder.ts";
 
@@ -39,10 +39,15 @@ export class Producer<T> {
 		return this.#encoder.offset;
 	}
 
-	/** Append one record to the back of the window. */
-	push(value: T): void {
+	/**
+	 * Append one record to the back of the window.
+	 *
+	 * `at` is when the record was captured, written as its frame timestamp. Omit it only on an
+	 * untimed track: it is never filled in.
+	 */
+	push({ value, at }: Timed<T>): void {
 		this.#assertOpen();
-		this.#write(this.#encoder.push(value));
+		this.#write(this.#encoder.push(value), at);
 	}
 
 	/**
@@ -50,18 +55,21 @@ export class Producer<T> {
 	 *
 	 * A no-op when the window is already empty, and clamped to what it holds, so a caller can trim
 	 * unconditionally.
+	 *
+	 * `at` is when the records were retired, written as the frame timestamp. Omit it only on an
+	 * untimed track: it is never filled in.
 	 */
-	pop(count: number): void {
+	pop(count: number, at?: Time.Timestamp): void {
 		this.#assertOpen();
 		const frame = this.#encoder.pop(count);
-		if (frame) this.#write(frame);
+		if (frame) this.#write(frame, at);
 	}
 
 	#assertOpen(): void {
 		if (this.#finished) throw new Error("track is closed");
 	}
 
-	#write(encoded: Encoded & { commit(): void }): void {
+	#write(encoded: Encoded & { commit(): void }, at: Time.Timestamp | undefined): void {
 		// A throw leaves the edit uncommitted and the retained window unchanged. The next edit opens a
 		// new group because the attempted frame advanced the group-local compression state.
 		if (encoded.keyframe) {
@@ -72,7 +80,7 @@ export class Producer<T> {
 
 			const group = this.#track.appendGroup();
 			try {
-				group.writeFrame({ payload: encoded.payload, timestamp: Time.Timestamp.now() });
+				group.writeFrame({ payload: encoded.payload, timestamp: at });
 			} catch (err) {
 				// The group carries no frames, so close it rather than leaving it open on the track. A
 				// consumer that already advanced into it would otherwise block with nothing to read.
@@ -86,8 +94,26 @@ export class Producer<T> {
 		}
 
 		if (!this.#group) throw new Error("op with no open group");
-		this.#group.writeFrame({ payload: encoded.payload, timestamp: Time.Timestamp.now() });
+		this.#group.writeFrame({ payload: encoded.payload, timestamp: at });
 		encoded.commit();
+	}
+
+	/**
+	 * Finish the open group, leaving the next edit to open a replacement with a header.
+	 *
+	 * Idempotent: cutting when no group is open does nothing. A caller that stores complete groups
+	 * cuts after its edits, so every edit so far sits in a group no later frame can extend.
+	 */
+	cut(): void {
+		if (!this.#group) return;
+
+		// Reset first: the group closes either way below, and a throw must not leave the encoder
+		// appending ops to a group that is gone.
+		this.#encoder.reset();
+
+		const group = this.#group;
+		this.#group = undefined;
+		group.close();
 	}
 
 	/** Finish the track, closing any open group. */

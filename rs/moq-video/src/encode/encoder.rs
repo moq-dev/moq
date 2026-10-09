@@ -16,7 +16,7 @@ use crate::{Color, Error, Frame, Rate, Size};
 /// breaking external `match`es.
 ///
 /// Not every codec has a backend on every platform: H.265 is hardware-only
-/// (VideoToolbox on macOS today). Building an [`Encoder`] returns
+/// (VideoToolbox on macOS and iOS today). Building an [`Encoder`] returns
 /// [`Error::NoEncoder`](crate::Error::NoEncoder) when nothing can encode the
 /// requested codec on this machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -86,8 +86,79 @@ impl Gop {
 	}
 }
 
+/// How an encoder trades latency for compression at the configured bitrate.
+///
+/// Bitrate is set separately, via [`Config::bitrate`]. Presets differ in the
+/// codec effort spent per frame and the buffering the backend allows. Each
+/// backend maps a preset onto the controls it actually has, so two presets can
+/// apply the same controls on one backend, and some backends cannot rule out
+/// frame reordering or queueing: V4L2 leaves both to the driver, and
+/// MediaCodec's no-B-frame setting is only a hint. [`Encoder::applied`] reports
+/// what took effect, and only a reported [`Applied::preset`] confirms it. A
+/// preset describes the encoder alone, not keyframe join time, transport delay,
+/// or viewer playout.
+///
+/// `#[non_exhaustive]` so a later policy can be added without breaking a
+/// `match`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Preset {
+	/// The least per-frame encode time and buffering the backend supports.
+	#[default]
+	LowLatency,
+	/// More codec effort per frame for better compression.
+	Balanced,
+	/// The most codec effort the backend spends without queueing frames.
+	Quality,
+}
+
+/// The latency and compression controls an encoder actually applied, as
+/// reported by [`Encoder::applied`].
+///
+/// A report, not a request: a backend that has no distinct mapping for the
+/// requested [`Preset`] names the one whose controls it did apply, and one that
+/// could not confirm the controls a preset needs names none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Applied {
+	/// The preset whose controls took effect, or `None` when the backend could
+	/// not confirm them (a refused or advisory low-latency setting).
+	pub preset: Option<Preset>,
+	/// The backend controls that took effect, for display, e.g.
+	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
+	pub controls: String,
+}
+
+impl Applied {
+	/// A report that `preset` took effect through `controls`.
+	#[cfg_attr(
+		not(any(feature = "openh264", feature = "nvidia", feature = "vaapi", target_os = "macos")),
+		allow(dead_code)
+	)]
+	pub(crate) fn new(preset: Preset, controls: impl Into<String>) -> Self {
+		Self {
+			preset: Some(preset),
+			controls: controls.into(),
+		}
+	}
+
+	/// A report of `controls` that were requested but that the backend cannot
+	/// confirm, so no preset is claimed.
+	#[cfg(any(
+		target_os = "windows",
+		all(target_os = "android", feature = "mediacodec"),
+		all(target_os = "linux", feature = "v4l2")
+	))]
+	pub(crate) fn unconfirmed(controls: impl Into<String>) -> Self {
+		Self {
+			preset: None,
+			controls: controls.into(),
+		}
+	}
+}
+
 /// Encoder configuration. `width` / `height` / `framerate` are the encoded
-/// output; input frames must already be at this resolution.
+/// output; external Vulkan frames are scaled by the backend on their GPU.
 ///
 /// `#[non_exhaustive]`: build via [`Config::new`] and set the optional fields,
 /// so future knobs don't break callers.
@@ -106,6 +177,9 @@ pub struct Config {
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
 	pub kind: Kind,
+	/// How the encoder trades latency for compression. Defaults to
+	/// [`Preset::LowLatency`].
+	pub preset: Preset,
 	/// The color space of the input frames, written into the bitstream's VUI so a
 	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
 	/// what the crate's own RGB conversions produce and what a player falls back
@@ -114,6 +188,10 @@ pub struct Config {
 	/// Set it only when feeding frames the crate did not convert and whose space
 	/// you know from elsewhere.
 	pub color: Option<Color>,
+	/// External Vulkan input device, required before opening a GPU-only encoder.
+	/// `None` retains selection for CPU and native decoder/capture surfaces.
+	#[cfg(target_os = "linux")]
+	pub input: Option<crate::frame::vulkan::Device>,
 }
 
 impl Config {
@@ -128,7 +206,10 @@ impl Config {
 			gop: Gop::keyframe_every(std::time::Duration::from_secs(2), framerate),
 			codec: Codec::default(),
 			kind: Kind::Auto,
+			preset: Preset::default(),
 			color: None,
+			#[cfg(target_os = "linux")]
+			input: None,
 		}
 	}
 
@@ -158,6 +239,12 @@ impl Config {
 	/// Fails when this machine cannot encode the config at all, which makes it a fail-fast check:
 	/// better here than on the first frame of a track that is already advertised.
 	pub async fn probe(&self) -> Result<hang::catalog::VideoConfig, Error> {
+		Ok(self.probe_sink().await?.0)
+	}
+
+	/// [`probe`](Self::probe), handing back the throwaway encoder so the caller can ask it more
+	/// before dropping it.
+	pub(crate) async fn probe_sink(&self) -> Result<(hang::catalog::VideoConfig, super::Sink), Error> {
 		// A `Sink` rather than an `Encoder`: this runs on whatever executor thread the caller is on,
 		// and the Windows backend's COM apartment has to be opened and closed on one thread.
 		let mut sink = super::Sink::open(self).await?;
@@ -191,7 +278,7 @@ impl Config {
 		// rides in an optional VUI. Fill them from the config that produced the rest.
 		rendition.bitrate.get_or_insert(self.resolved_bitrate().as_bps());
 		rendition.framerate.get_or_insert(self.framerate.as_f64());
-		Ok(rendition)
+		Ok((rendition, sink))
 	}
 
 	/// Resolved input color space: explicit override, or the size-based guess
@@ -232,6 +319,9 @@ pub struct Encoder {
 	codec: Codec,
 	size: Size,
 	bitrate: moq_net::bandwidth::Rate,
+	/// What the backend reported applying for [`Config::preset`], read once at
+	/// open: the controls are fixed for the session's lifetime.
+	applied: Applied,
 	/// What the backend wrote into the bitstream's VUI, kept so a frame declaring
 	/// a different space is caught rather than silently mislabeled.
 	color: Color,
@@ -239,6 +329,8 @@ pub struct Encoder {
 	/// rather than applied immediately because the caller decides a group
 	/// boundary before it has the frame that opens it.
 	pending_cut: bool,
+	#[cfg(target_os = "linux")]
+	input: Option<crate::frame::vulkan::Device>,
 	/// Keeps direct use bound to the constructing thread, regardless of backend.
 	_thread_bound: PhantomData<Rc<()>>,
 }
@@ -253,13 +345,18 @@ impl Encoder {
 		config.gop.validate()?;
 
 		let backend = backend::open(config)?;
+		let applied = backend.applied();
+		tracing::debug!(encoder = backend.name(), requested = ?config.preset, applied = ?applied.preset, controls = %applied.controls, "encoder preset");
 		Ok(Self {
 			backend,
 			codec: config.codec,
 			size,
 			bitrate: config.resolved_bitrate(),
+			applied,
 			color: config.resolved_color(),
 			pending_cut: false,
+			#[cfg(target_os = "linux")]
+			input: config.input,
 			_thread_bound: PhantomData,
 		})
 	}
@@ -269,7 +366,13 @@ impl Encoder {
 		self.backend.name()
 	}
 
-	/// The resolution this encoder emits, which every frame fed to it must match.
+	/// The latency and compression controls the backend applied for
+	/// [`Config::preset`].
+	pub fn applied(&self) -> &Applied {
+		&self.applied
+	}
+
+	/// The resolution this encoder emits; external Vulkan inputs may be larger.
 	pub fn size(&self) -> Size {
 		self.size
 	}
@@ -333,11 +436,17 @@ impl Encoder {
 	/// the caller decides whether that layout is acceptable rather than finding
 	/// out from the stream.
 	pub fn cut(&mut self) -> Result<(), Error> {
-		if !self.backend.can_cut() {
-			return Err(Error::CutUnsupported(self.backend.name()));
-		}
+		self.check_cut()?;
 		self.pending_cut = true;
 		Ok(())
+	}
+
+	/// What [`cut`](Self::cut) would answer, without queueing anything.
+	pub(crate) fn check_cut(&self) -> Result<(), Error> {
+		match self.backend.can_cut() {
+			true => Ok(()),
+			false => Err(Error::CutUnsupported(self.backend.name())),
+		}
 	}
 
 	/// Encode one raw [`Frame`], whether it came from capture, a decoder (the
@@ -351,15 +460,31 @@ impl Encoder {
 	/// A GPU surface feeds a hardware encoder on the same device directly
 	/// (NVDEC -> NVENC never leaves the GPU, a `CVPixelBuffer` goes straight to
 	/// VideoToolbox); anything else falls back to a CPU I420 upload. The frame must
-	/// already be at the encoder's resolution: scale it with
+	/// already be at the encoder's resolution, except external Vulkan inputs
+	/// which the backend scales on the GPU. Scale other surfaces with
 	/// [`Frame::resize`](crate::Frame::resize), which
 	/// [`decode::Config::scale_hint`](crate::decode::Config::scale_hint) lets a
 	/// hardware decoder make a no-op.
 	pub fn encode(&mut self, frame: &Frame) -> Result<Vec<Encoded>, Error> {
 		// A transposed frame is why this compares the shape rather than a byte
 		// count: 240x320 and 320x240 hold the same number of bytes.
+		#[cfg(target_os = "linux")]
+		let external = if let crate::Surface::Vulkan(image) = &frame.surface {
+			let device = image.image().device;
+			if self.input != Some(device) {
+				return Err(Error::Unsupported(format!(
+					"external Vulkan {device} does not match encoder input {:?}",
+					self.input
+				)));
+			}
+			true
+		} else {
+			false
+		};
+		#[cfg(not(target_os = "linux"))]
+		let external = false;
 		let size = frame.size();
-		if size != self.size {
+		if !external && size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"frame {size} does not match encoder {}",
 				self.size
@@ -583,7 +708,7 @@ mod tests {
 	/// Exercises the hand-rolled VideoToolbox backend end to end on macOS:
 	/// synthetic frames through the real `VTCompressionSession`, asserting the
 	/// AVCC -> Annex-B conversion produces a self-contained IDR (SPS+PPS+slice).
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn videotoolbox_emits_annexb_keyframe() {
 		let config = Config {
@@ -629,7 +754,7 @@ mod tests {
 	/// HEVC via VideoToolbox: synthetic frames through the real
 	/// `VTCompressionSession` with `kCMVideoCodecType_HEVC`, asserting the
 	/// HVCC -> Annex-B conversion produces a self-contained IRAP (VPS+SPS+PPS+IDR).
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn videotoolbox_emits_annexb_keyframe_h265() {
 		let config = Config {
@@ -671,7 +796,7 @@ mod tests {
 	}
 
 	/// HEVC NAL unit types in an Annex-B buffer (type = `(byte >> 1) & 0x3f`).
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	fn hevc_nal_types(annexb: &[u8]) -> Vec<u8> {
 		let mut types = Vec::new();
 		let mut i = 0;
@@ -688,7 +813,7 @@ mod tests {
 
 	/// Feed a GPU surface (NV12 `CVPixelBuffer`) straight into VideoToolbox:
 	/// the zero-copy capture -> encode path, no I420 round-trip.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn videotoolbox_encodes_surface_zero_copy() {
 		let config = Config {
@@ -718,7 +843,7 @@ mod tests {
 
 	/// A software encoder must download a GPU surface to I420 first. Exercises
 	/// the NV12 -> I420 fallback path.
-	#[cfg(all(target_os = "macos", feature = "openh264"))]
+	#[cfg(all(apple, feature = "openh264"))]
 	#[test]
 	fn openh264_downloads_surface() {
 		let config = Config {
@@ -739,8 +864,8 @@ mod tests {
 
 	/// A mid-gray NV12 `CVPixelBuffer`, the format AVFoundation/ScreenCaptureKit
 	/// hand us. Y and interleaved UV planes filled with 128.
-	#[cfg(target_os = "macos")]
-	fn nv12_surface(width: u32, height: u32) -> crate::frame::macos::PixelBuffer {
+	#[cfg(apple)]
+	fn nv12_surface(width: u32, height: u32) -> crate::frame::apple::PixelBuffer {
 		use std::ptr::{self, NonNull};
 
 		use objc2_core_foundation::CFRetained;
@@ -773,7 +898,7 @@ mod tests {
 		}
 		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
 
-		crate::frame::macos::PixelBuffer::new(buffer, width, height)
+		crate::frame::apple::PixelBuffer::new(buffer, width, height)
 	}
 
 	/// NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
@@ -970,9 +1095,9 @@ mod tests {
 	}
 
 	impl Backend for Delayed {
-		fn encode(&mut self, frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
+		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 			let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
-			let previous = self.pending.replace(Encoded::new(payload, frame.timestamp));
+			let previous = self.pending.replace(Encoded::new(payload, frame.timestamp, cut));
 			Ok(previous.into_iter().collect())
 		}
 
@@ -1005,8 +1130,11 @@ mod tests {
 			codec: config.codec,
 			size: config.size(),
 			bitrate: config.resolved_bitrate(),
+			applied: Applied::default(),
 			color: config.resolved_color(),
 			pending_cut: false,
+			#[cfg(target_os = "linux")]
+			input: None,
 			_thread_bound: PhantomData,
 		}
 	}
@@ -1342,7 +1470,7 @@ mod tests {
 	/// pixels were actually converted into. VideoToolbox takes the three
 	/// properties as a request, so read the SPS back rather than trusting that it
 	/// honored them.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn videotoolbox_sps_declares_the_color_space() {
 		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
@@ -1460,5 +1588,69 @@ mod tests {
 				);
 			}
 		}
+	}
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod external_tests {
+	use super::*;
+	use crate::frame::vulkan::{Device, Format, Handles, Image, Memory, Slot, Timeline};
+	use std::os::unix::net::UnixStream;
+
+	fn device() -> Device {
+		Device {
+			device_uuid: [0xaa; 16],
+			driver_uuid: [0xbb; 16],
+			render_node: None,
+		}
+	}
+
+	#[tokio::test]
+	async fn unknown_external_device_is_refused_at_open_and_probe() {
+		let mut config = Config::new(320, 240, Rate::new(30, 1).unwrap());
+		config.input = Some(device());
+		let error = match Encoder::new(&config) {
+			Ok(_) => panic!("opened an unrelated device"),
+			Err(error) => error,
+		};
+		assert!(error.to_string().contains(&device().to_string()), "{error}");
+		let error = config.probe().await.unwrap_err();
+		assert!(error.to_string().contains(&device().to_string()), "{error}");
+		config.kind = Kind::Software;
+		assert!(matches!(Encoder::new(&config), Err(Error::NoEncoder(_))));
+	}
+
+	#[test]
+	fn refuses_external_frame_on_an_encoder_without_that_device() {
+		let config = {
+			let mut config = Config::new(320, 240, Rate::new(30, 1).unwrap());
+			config.kind = Kind::Named("probe".into());
+			config
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+		let (memory, timeline) = UnixStream::pair().unwrap();
+		let slot = Slot::new(
+			Handles {
+				memory: memory.into(),
+				timeline: timeline.into(),
+			},
+			Image {
+				device: device(),
+				memory: Memory::OpaqueFd { memory_type: 0 },
+				size: config.size(),
+				allocation_size: 4096,
+				format: Format::Rgba8,
+			},
+			(),
+		)
+		.unwrap();
+		let (image, _) = slot.publish(Timeline::new(1, 2).unwrap()).unwrap();
+		let frame = Frame::new(
+			crate::Surface::Vulkan(image),
+			moq_net::Timestamp::from_micros(0).unwrap(),
+		);
+		let error = encoder.encode(&frame).unwrap_err();
+		assert!(error.to_string().contains(&device().to_string()), "{error}");
+		assert!(frame.surface.to_i420().is_err());
 	}
 }

@@ -9,6 +9,18 @@ import moq_ffi
 import pytest
 
 
+async def routes(announced: moq.AnnounceConsumer):
+    """Yield each newly announced route, skipping updates and ends."""
+    async for event in announced:
+        if isinstance(event, moq.AnnounceEventStart):
+            yield event.announce
+
+
+async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
+    """The next announce event."""
+    return await asyncio.wait_for(anext(announced), timeout=5.0)
+
+
 def opus_head() -> bytes:
     return (
         b"OpusHead"
@@ -25,7 +37,9 @@ async def test_server_client_roundtrip():
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         # Publish a broadcast on the server side.
         broadcast = server.create_broadcast("hello")
-        media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
+        media = moq.media.TrackProducer.audio(
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        )
         broadcast.announce()
 
         # Auto-accept incoming sessions in the background so the handshake
@@ -46,22 +60,24 @@ async def test_server_client_roundtrip():
                 tls_verify=False,
                 bind="127.0.0.1:0",
             ) as client:
-                async for announcement in client.announced():
+                async for announcement in routes(client.announced()):
                     assert announcement.prefix == "hello"
 
                     broadcast_consumer = await client.request_broadcast(announcement.prefix)
-                    catalog = await broadcast_consumer.catalog()
+                    catalog = await moq.media.catalog(broadcast_consumer)
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
 
-                    media_consumer = await broadcast_consumer.subscribe_media(track_name, audio)
+                    media_consumer = await moq.media.ContainerConsumer.subscribe(
+                        broadcast_consumer, track_name, audio.container
+                    )
 
                     payload = b"hello over the wire"
-                    media.write_frame(payload, 1_000_000)
+                    media.write_frame(payload, timedelta(microseconds=1_000_000))
 
                     async for frame in media_consumer:
                         assert frame.payload == payload
-                        assert frame.timestamp_us == 1_000_000
+                        assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
                         break
 
                     break
@@ -102,7 +118,12 @@ async def test_client_reconnects_and_resumes_announcements():
                 tls_verify=False,
                 bind="127.0.0.1:0",
                 # Fast retries so the test doesn't wait out the default 1s backoff.
-                backoff=moq.Backoff(initial_us=50_000, multiplier=2, max_us=200_000, timeout_us=0),
+                backoff=moq.Backoff(
+                    initial=timedelta(milliseconds=50),
+                    multiplier=2,
+                    max=timedelta(milliseconds=200),
+                    timeout=timedelta(0),
+                ),
             ) as client:
                 session = client.session
                 assert session is not None
@@ -124,7 +145,7 @@ async def test_client_reconnects_and_resumes_announcements():
                 # A broadcast published only after the reconnect still arrives.
                 broadcast = server.create_broadcast("after-reconnect")
                 broadcast.announce()
-                async for announcement in client.announced():
+                async for announcement in routes(client.announced()):
                     assert announcement.prefix == "after-reconnect"
                     break
                 broadcast.close()
@@ -157,12 +178,15 @@ async def test_server_request_close():
 
         reject_task = asyncio.create_task(reject_loop())
         try:
-            client = moq_ffi.MoqClient()
-            client.set_tls_verify(False)
-            client.set_bind("127.0.0.1:0")
-            # One-shot, so this dial's outcome is what surfaces here rather than
-            # whatever the reconnect loop eventually reports.
-            client.set_reconnect(False)
+            client = moq_ffi.MoqClient(
+                moq_ffi.MoqClientConfig(
+                    bind="127.0.0.1:0",
+                    tls=moq_ffi.MoqClientTls(insecure=True),
+                    # One-shot, so this dial's outcome is what surfaces here rather than
+                    # whatever the reconnect loop eventually reports.
+                    once=True,
+                )
+            )
             # The rejection races the optimistic connect: it surfaces either as a
             # connect error or as the session's terminal close. MoqError is an
             # Exception subclass at runtime; UniFFI's generated code rebinds the
@@ -212,15 +236,14 @@ async def test_client_websocket_fallback_options():
         moq.Client("https://localhost", websocket_delay=timedelta(milliseconds=-1))
 
 
-async def test_client_setters_fail_after_cancel():
-    """A cancelled client refuses further configuration rather than ignoring it."""
-    client = moq_ffi.MoqClient()
-    client.set_tls_verify(False)
-    client.cancel()
-    with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
-        client.set_tls_verify(True)
-    with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
-        client.set_bind("127.0.0.1:0")
+async def test_invalid_config_fails_on_enter():
+    """A value the native side cannot use fails the connect or listen, not a later call."""
+    with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
+        async with moq.Client("https://localhost", versions=["moq-lite-99"]):
+            pass
+    with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
+        async with moq.Server("not-an-address", tls_generate=["localhost"]):
+            pass
 
 
 async def test_cert_fingerprints_after_listen():
@@ -278,7 +301,7 @@ async def test_serve_helper_accepts_clients():
                 tls_verify=False,
                 bind="127.0.0.1:0",
             ) as client:
-                async for announcement in client.announced():
+                async for announcement in routes(client.announced()):
                     assert announcement.prefix == "via-serve"
                     break
         finally:
@@ -303,9 +326,8 @@ async def test_broadcast_route_over_wire():
                 tls_verify=False,
                 bind="127.0.0.1:0",
             ) as client:
-                async for announcement in client.announced():
+                async for announcement in routes(client.announced()):
                     assert announcement.prefix == "with-route"
-                    assert announcement.active
                     route = announcement.route
                     assert all(isinstance(h, int) for h in route.hops)
                     # A route crossing at least one session carries a non-empty hop chain.
@@ -321,7 +343,7 @@ async def test_broadcast_route_over_wire():
 
 
 async def test_route_update_observes_restart():
-    """A route metadata update arrives as another active announcement.
+    """A route metadata update arrives as an AnnounceEventUpdate.
 
     The publisher re-prices its announced route; the subscriber observes the new
     hop chain in place (no retraction), and cancelling retracts it.
@@ -338,27 +360,93 @@ async def test_route_update_observes_restart():
                 bind="127.0.0.1:0",
             ) as client:
                 announced = client.announced()
-                first = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
-                assert first.prefix == "routed"
-                assert first.active
-                assert 42 in first.route.hops
-                assert 77 not in first.route.hops
+                first = await next_route(announced)
+                assert isinstance(first, moq.AnnounceEventStart)
+                assert first.announce.prefix == "routed"
+                assert 42 in first.announce.route.hops
+                assert 77 not in first.announce.route.hops
 
                 # The publisher advertises a longer chain: an in-place update.
                 announce.update(moq.Route(hops=[42, 77]))
-                updated = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
-                assert updated.prefix == "routed"
-                assert updated.active
-                assert 77 in updated.route.hops
+                updated = await next_route(announced)
+                assert isinstance(updated, moq.AnnounceEventUpdate)
+                assert updated.announce.prefix == "routed"
+                assert 77 in updated.announce.route.hops
 
                 # Cancelling retracts the route.
                 announce.cancel()
-                ended = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
-                assert ended.prefix == "routed"
-                assert not ended.active
+                ended = await next_route(announced)
+                assert isinstance(ended, moq.AnnounceEventEnd)
+                assert ended.announce.prefix == "routed"
         finally:
             serve_task.cancel()
             try:
                 await serve_task
             except asyncio.CancelledError:
                 pass
+
+
+async def test_client_context_keeps_the_body_error():
+    """An error in the body survives the context manager, and the session is still
+    cancelled. A live subscribed track never drains, so draining on the way out would
+    wait out the deadline and replace the body's error with a delivery timeout."""
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        sessions: list = []
+        reading: list = []
+        accepted = asyncio.Event()
+
+        async def accept_loop() -> None:
+            async for request in server:
+                sessions.append(await request.accept())
+                accepted.set()
+
+        async def drain(reader: moq.TrackConsumer) -> None:
+            async for _ in reader:
+                pass
+
+        accept_task = asyncio.create_task(accept_loop())
+        broadcast = None
+        session = None
+        try:
+            with pytest.raises(ZeroDivisionError):
+                async with moq.Client(
+                    f"https://{server.local_addr}",
+                    tls_verify=False,
+                    bind="127.0.0.1:0",
+                ) as client:
+                    # Held past the context manager, so the exit has to cancel it
+                    # rather than lean on the last session reference dropping.
+                    session = client.session
+                    assert session is not None
+                    broadcast = client.create_broadcast("live")
+                    broadcast.announce()
+                    track = broadcast.publish_track("data")
+                    await asyncio.wait_for(accepted.wait(), timeout=5.0)
+                    consume = sessions[0].consume()
+                    async for announcement in routes(consume.announced()):
+                        assert announcement.prefix == "live"
+                        break
+                    consumer = await asyncio.wait_for(consume.request_broadcast("live"), timeout=5.0)
+                    reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
+                    reading.append(asyncio.create_task(drain(reader)))
+                    await asyncio.wait_for(track.demand().used(), timeout=5.0)
+                    raise ZeroDivisionError("boom")
+            # The error exits the context without draining, but the session is over.
+            assert session is not None
+            await asyncio.wait_for(session.closed(), timeout=5.0)
+        finally:
+            accept_task.cancel()
+            try:
+                await accept_task
+            except asyncio.CancelledError:
+                pass
+            if session is not None:
+                # Tear down before the readers so this is deterministic whether or not
+                # the exit above cancelled, and a failure surfaces as a failure rather
+                # than a wedged event loop.
+                session.cancel(0)
+            for task in reading:
+                task.cancel()
+            await asyncio.gather(*reading, return_exceptions=True)
+            if broadcast is not None:
+                broadcast.close()

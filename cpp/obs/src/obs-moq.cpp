@@ -19,6 +19,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <obs-module.h>
 
+#include <moq/moq.hpp>
+
+#include "logger.h"
 #include "moq-output.h"
 #include "moq-service.h"
 #include "moq-source.h"
@@ -26,8 +29,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #ifdef MOQ_FRONTEND_ENABLED
 #include "moq-dock.h"
 #endif
-
-#include "moq.h"
 
 #ifdef _WIN64
 #include <windows.h>
@@ -59,8 +60,8 @@ bool obs_module_load(void)
 #endif
 
 	// Use RUST_LOG env var for more verbose output
-	// The second argument is the string length of the first argument.
-	moq_log_level("info", 4);
+	if (auto logging = moq::log_level("info"); !logging)
+		LOG_WARNING("MoQ logging unavailable: %s", logging.error().to_string().c_str());
 
 	register_moq_output();
 	register_moq_service();
@@ -71,4 +72,15 @@ bool obs_module_load(void)
 #endif
 
 	return true;
+}
+
+// OBS unloads modules after it has destroyed every output and source, so none of
+// their continuations can still run. What remains is moq-ffi's runtime thread and
+// the thread that polls its futures, both running code in this module: stop them
+// before it is unmapped, or a thread still inside it crashes the process on exit.
+void obs_module_unload(void)
+{
+	LOG_INFO("Stopping the MoQ runtime");
+	moq::shutdown();
+	LOG_INFO("MoQ runtime stopped");
 }

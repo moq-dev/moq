@@ -124,10 +124,10 @@ pub enum Event {
 	},
 }
 
-/// How a session reached the relay. The names match `moq_tokio::server::Transport`,
-/// plus `http` for the relay's one-shot HTTP routes.
+/// How a session reached the relay, including QUIC, relay HTTP, and gateways.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Transport {
 	/// QUIC, either directly or through WebTransport over HTTP/3.
 	Quic,
@@ -135,13 +135,19 @@ pub enum Transport {
 	Iroh,
 	/// A WebSocket connection using qmux framing.
 	WebSocket,
-	/// A plaintext TCP connection using qmux framing.
+	/// A TCP connection using qmux framing, plaintext or TLS.
 	Tcp,
 	/// A Unix domain socket using qmux framing.
 	Unix,
 	/// A one-shot HTTP request on the relay's web listener (`/fetch`, `/announced`),
 	/// admitted and ended within the request.
 	Http,
+	/// An RTMP gateway session.
+	Rtmp,
+	/// An SRT gateway session.
+	Srt,
+	/// A WebRTC gateway session, including WHIP and WHEP.
+	WebRtc,
 }
 
 impl Transport {
@@ -154,6 +160,9 @@ impl Transport {
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",
 			Self::Http => "http",
+			Self::Rtmp => "rtmp",
+			Self::Srt => "srt",
+			Self::WebRtc => "webrtc",
 		}
 	}
 }
@@ -308,6 +317,20 @@ mod tests {
 		for value in ["", "AA", "AAA", "AAAA", "AQ", "AAE"] {
 			let json = format!(r#"{{"kind":0,"value":"{value}"}}"#);
 			assert!(serde_json::from_str::<Token>(&json).is_ok(), "{value}");
+		}
+	}
+
+	#[test]
+	fn gateway_transports_round_trip_on_the_wire() {
+		for (transport, text) in [
+			(Transport::Rtmp, "rtmp"),
+			(Transport::Srt, "srt"),
+			(Transport::WebRtc, "webrtc"),
+		] {
+			let request = Request::new("relay-1", transport, "/room");
+			let json = serde_json::to_value(&request).unwrap();
+			assert_eq!(json["transport"], text);
+			assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
 		}
 	}
 

@@ -3,7 +3,6 @@ package moq_test
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"moq.dev/moq"
+	moqmedia "moq.dev/moq/media"
 )
 
 // testTimeout bounds the blocking stream calls so a regression fails the test
@@ -110,14 +110,14 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer trackConsumer.Cancel()
 
 	payload := []byte("served dynamically")
-	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 0}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(0)}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := trackConsumer.ReadFrame(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != string(payload) || frame.TimestampUs != 0 {
+	if frame == nil || string(frame.Payload) != string(payload) || frame.Timestamp == nil || *frame.Timestamp != 0 {
 		t.Fatalf("frame = %+v, want payload=%q ts=0", frame, payload)
 	}
 
@@ -134,11 +134,11 @@ func TestPublishAudioLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), TimestampUs: 1000}); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: ts(1000 * time.Microsecond)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := media.Finish(); err != nil {
@@ -257,7 +257,11 @@ func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	rotation := 315.0
-	if err := broadcast.SetVideoProperties(moq.VideoProperties{Rotation: &rotation}); err != nil {
+	catalogProducer, err := moqmedia.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := catalogProducer.SetVideoProperties(moqmedia.VideoProperties{Rotation: &rotation}); err != nil {
 		t.Fatal(err)
 	}
 	if err := broadcast.Close(); err != nil {
@@ -265,15 +269,21 @@ func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 	}
 }
 
-// TestDecodeVideoFormat pins the decode side picking its CPU layout: an unset
-// Format is I420, and RGBA is four bytes a pixel, with each frame naming the
-// layout it was decoded to.
-func TestDecodeVideoFormat(t *testing.T) {
+// TestDecodeVideoFrame pins a decoded frame owning its picture: it converts to
+// either CPU layout on demand and stays readable after its consumer is
+// cancelled, until Close. A surface decode also exposes the platform surface,
+// and is refused where no surface variant exists.
+func TestDecodeVideoFrame(t *testing.T) {
+	t.Run("cpu", func(t *testing.T) { testDecodeVideoFrame(t, false) })
+	t.Run("surface", func(t *testing.T) { testDecodeVideoFrame(t, true) })
+}
+
+func testDecodeVideoFrame(t *testing.T, surface bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	origin := newOrigin(t)
-	broadcast, err := origin.CreateBroadcast("video-decode-format")
+	broadcast, err := origin.CreateBroadcast("video-decode-frame")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,11 +315,11 @@ func TestDecodeVideoFormat(t *testing.T) {
 		}
 	}
 
-	bc, err := origin.Consume().RequestBroadcast(ctx, "video-decode-format")
+	bc, err := origin.Consume().RequestBroadcast(ctx, "video-decode-frame")
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := bc.Catalog(ctx)
+	catalog, err := moqmedia.CatalogSnapshot(ctx, bc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,57 +328,60 @@ func TestDecodeVideoFormat(t *testing.T) {
 		t.Fatalf("catalog has no %q rendition: %v", track, catalog.Video)
 	}
 
-	// Two subscribers over one publication, so the same encoded frames are read
-	// twice and only the requested layout differs.
-	i420, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{})
+	decoder, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{Surface: surface})
+	if surface && runtime.GOOS != "darwin" {
+		if !errors.Is(err, moq.ErrUnsupported) {
+			t.Fatalf("surface decode off macOS: err = %v, want ErrUnsupported", err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer i420.Cancel()
-	format := moq.VideoPixelFormatRgba
-	packed, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{Format: &format})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer packed.Cancel()
 
-	// Keep the encoder fed so both decoders see frames after they joined.
+	// Keep the encoder fed so the decoder sees frames after it joined.
 	for i := 10; i < 40; i++ {
 		if err := video.Write(moq.VideoFrame{TimestampUs: uint64(i) * 33333, Data: rgba}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	frame, err := i420.Next(ctx)
+	frame, err := decoder.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if frame == nil {
-		t.Fatal("expected an I420 frame")
+		t.Fatal("expected a frame")
 	}
-	if frame.Format != moq.VideoPixelFormatI420 {
-		t.Fatalf("format = %v, want I420", frame.Format)
-	}
-	if want := int(frame.Width) * int(frame.Height) * 3 / 2; len(frame.Data) != want {
-		t.Fatalf("I420 length = %d, want %d", len(frame.Data), want)
+	defer frame.Close()
+	decoder.Cancel()
+
+	if !surface {
+		if got := frame.Surface(); got != nil {
+			t.Fatalf("CPU decode surface = %#v, want nil", got)
+		}
+	} else if pb, ok := frame.Surface().(moq.VideoSurfacePixelBuffer); !ok || pb.Pointer == 0 {
+		t.Fatalf("surface = %#v, want a non-null VideoSurfacePixelBuffer", frame.Surface())
 	}
 
-	frame, err = packed.Next(ctx)
+	i420, err := frame.Pixels(moq.VideoPixelFormatI420)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil {
-		t.Fatal("expected an RGBA frame")
+	if want := int(frame.Width()) * int(frame.Height()) * 3 / 2; len(i420) != want {
+		t.Fatalf("I420 length = %d, want %d", len(i420), want)
 	}
-	if frame.Format != moq.VideoPixelFormatRgba {
-		t.Fatalf("format = %v, want RGBA", frame.Format)
+
+	packed, err := frame.Pixels(moq.VideoPixelFormatRgba)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if want := int(frame.Width) * int(frame.Height) * 4; len(frame.Data) != want {
-		t.Fatalf("RGBA length = %d, want %d", len(frame.Data), want)
+	if want := int(frame.Width()) * int(frame.Height()) * 4; len(packed) != want {
+		t.Fatalf("RGBA length = %d, want %d", len(packed), want)
 	}
-	for i := 3; i < len(frame.Data); i += 4 {
-		if frame.Data[i] != 0xFF {
-			t.Fatalf("RGBA alpha at %d = %#x, want 0xff", i, frame.Data[i])
+	for i := 3; i < len(packed); i += 4 {
+		if packed[i] != 0xFF {
+			t.Fatalf("RGBA alpha at %d = %#x, want 0xff", i, packed[i])
 		}
 	}
 
@@ -401,7 +414,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cached.WriteFrame(moq.Frame{Payload: []byte("cached"), TimestampUs: 0}); err != nil {
+	if err := cached.WriteFrame(moq.Frame{Payload: []byte("cached"), Timestamp: ts(0)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := cached.Finish(); err != nil {
@@ -442,7 +455,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), TimestampUs: request.Sequence() * 20_000}); err != nil {
+	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), Timestamp: ts(time.Duration(request.Sequence()*20_000) * time.Microsecond)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := produced.Finish(); err != nil {
@@ -465,7 +478,7 @@ func TestUnknownFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A bad format is no longer expressible: it is an enum. Bad init bytes still are.
-	if _, err := broadcast.PublishAudio(moq.AudioFormatOpus, nil); err == nil {
+	if _, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: nil}); err == nil {
 		t.Fatal("expected error for unknown format")
 	}
 }
@@ -479,7 +492,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,29 +507,20 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	ann, err := announced.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
+	ann := nextAnnounced(t, ctx, announced)
+	if ann.Prefix != "live" {
+		t.Fatalf("prefix = %q, want %q", ann.Prefix, "live")
 	}
-	if ann == nil {
-		t.Fatal("expected an announcement")
-	}
-	if ann.Prefix() != "live" {
-		t.Fatalf("prefix = %q, want %q", ann.Prefix(), "live")
-	}
-	if !ann.Active() {
-		t.Fatal("expected an active announcement")
-	}
-	if route := ann.Route(); len(route.Hops) != 0 {
-		t.Fatalf("route hops = %v, want empty for local origin", route.Hops)
+	if len(ann.Route.Hops) != 0 {
+		t.Fatalf("route hops = %v, want empty for local origin", ann.Route.Hops)
 	}
 
-	bc, err := consumer.RequestBroadcast(ctx, ann.Prefix())
+	bc, err := consumer.RequestBroadcast(ctx, ann.Prefix)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	catalog, err := bc.Catalog(ctx)
+	catalog, err := moqmedia.CatalogSnapshot(ctx, bc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +529,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	}
 
 	var trackName string
-	var audio moq.Audio
+	var audio moqmedia.Audio
 	for name, a := range catalog.Audio {
 		trackName, audio = name, a
 	}
@@ -533,14 +537,14 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := bc.SubscribeMedia(ctx, trackName, audio.Container, nil)
+	mediaConsumer, err := moqmedia.NewContainerConsumer(ctx, bc, moqmedia.ContainerConfig{Name: trackName, Container: audio.Container, Subscription: nil})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mediaConsumer.Cancel()
 
 	payload := []byte("opus audio payload data")
-	if err := media.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 1_000_000}); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(1_000_000 * time.Microsecond)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -551,7 +555,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a frame")
 	}
-	if string(frame.Payload) != string(payload) || frame.TimestampUs != 1_000_000 {
+	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
 }
@@ -574,7 +578,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 	defer consumer.Cancel()
 
-	if err := track.WriteFrame(moq.Frame{Payload: []byte("hello"), TimestampUs: 12_345}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("hello"), Timestamp: ts(12_345 * time.Microsecond)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -585,7 +589,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a frame")
 	}
-	if string(frame.Payload) != "hello" || frame.TimestampUs != 12_345 {
+	if string(frame.Payload) != "hello" || frame.Timestamp == nil || *frame.Timestamp != 12_345*time.Microsecond {
 		t.Fatalf("frame = %+v, want payload=hello ts=12345", frame)
 	}
 
@@ -598,7 +602,7 @@ func TestTrackPublishConsume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer groupConsumer.Cancel()
-	if err := group.WriteFrame(moq.Frame{Payload: []byte("group"), TimestampUs: 23_456}); err != nil {
+	if err := group.WriteFrame(moq.Frame{Payload: []byte("group"), Timestamp: ts(23_456 * time.Microsecond)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := group.Finish(); err != nil {
@@ -611,7 +615,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a group frame")
 	}
-	if string(frame.Payload) != "group" || frame.TimestampUs != 23_456 {
+	if string(frame.Payload) != "group" || frame.Timestamp == nil || *frame.Timestamp != 23_456*time.Microsecond {
 		t.Fatalf("frame = %+v, want payload=group ts=23456", frame)
 	}
 }
@@ -641,7 +645,7 @@ func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	if err := empty.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := track.WriteFrame(moq.Frame{Payload: []byte("populated"), TimestampUs: 2_000}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("populated"), Timestamp: ts(2_000 * time.Microsecond)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -649,7 +653,7 @@ func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != "populated" || frame.TimestampUs != 2_000 {
+	if frame == nil || string(frame.Payload) != "populated" || frame.Timestamp == nil || *frame.Timestamp != 2_000*time.Microsecond {
 		t.Fatalf("frame = %+v, want payload=populated ts=2000", frame)
 	}
 }
@@ -688,138 +692,6 @@ func TestTrackSparseGroupsAndKnownEnd(t *testing.T) {
 	}
 	if err := track.Finish(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestJSONTracks(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	broadcast, err := moq.NewBroadcastProducer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	consumer, err := broadcast.Consume()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{Compression: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshotConsumer, err := consumer.SubscribeJSONSnapshot(ctx, "status", moq.JSONSubscribeOptions{Compression: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer snapshotConsumer.Cancel()
-	if err := snapshot.Update(map[string]any{"viewers": 42}); err != nil {
-		t.Fatal(err)
-	}
-	value, err := snapshotConsumer.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(*value, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded["viewers"] != float64(42) {
-		t.Fatalf("snapshot = %s", *value)
-	}
-
-	stream, err := broadcast.PublishJSONStream("events", moq.JSONStreamOptions{Compression: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	streamConsumer, err := consumer.SubscribeJSONStream(ctx, "events", moq.JSONSubscribeOptions{Compression: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer streamConsumer.Cancel()
-	if err := stream.Append(map[string]any{"n": 1}); err != nil {
-		t.Fatal(err)
-	}
-	record, err := streamConsumer.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(*record) != `{"n":1}` {
-		t.Fatalf("record = %s", *record)
-	}
-
-	if err := snapshot.Finish(); err != nil {
-		t.Fatal(err)
-	}
-	if err := stream.Finish(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestJSONDemand(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	broadcast, err := moq.NewBroadcastProducer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	consumer, err := broadcast.Consume()
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stream, err := broadcast.PublishJSONStream("events", moq.JSONStreamOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshotDemand, err := snapshot.Demand()
-	if err != nil {
-		t.Fatal(err)
-	}
-	streamDemand, err := stream.Demand()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if name := snapshotDemand.Name(); name != "status" {
-		t.Fatalf("Name = %q, want status", name)
-	}
-	if snapshotDemand.IsUsed() {
-		t.Fatal("IsUsed before any subscriber")
-	}
-
-	snapshotConsumer, err := consumer.SubscribeJSONSnapshot(ctx, "status", moq.JSONSubscribeOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	streamConsumer, err := consumer.SubscribeJSONStream(ctx, "events", moq.JSONSubscribeOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := snapshotDemand.Used(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := streamDemand.Used(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	snapshotConsumer.Cancel()
-	streamConsumer.Cancel()
-	if err := snapshotDemand.Unused(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := streamDemand.Unused(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := snapshot.Finish(); err != nil {
-		t.Fatal(err)
-	}
-	if err := snapshotDemand.Used(ctx); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("Used after Finish = %v, want ErrClosed", err)
 	}
 }
 
@@ -871,7 +743,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := []byte("hello dynamic track")
-	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 0}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(0)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -891,7 +763,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil || string(frame.Payload) != string(payload) || frame.TimestampUs != 0 {
+	if frame == nil || string(frame.Payload) != string(payload) || frame.Timestamp == nil || *frame.Timestamp != 0 {
 		t.Fatalf("frame = %+v, want payload=%q ts=0", frame, payload)
 	}
 	if err := track.Finish(); err != nil {
@@ -921,12 +793,12 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 
 	type subscribeResult struct {
-		media *moq.MediaConsumer
+		media *moqmedia.ContainerConsumer
 		err   error
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		media, err := consumer.SubscribeMedia(ctx, "requested-audio", moq.LegacyContainer(), nil)
+		media, err := moqmedia.NewContainerConsumer(ctx, consumer, moqmedia.ContainerConfig{Name: "requested-audio", Container: moqmedia.LegacyContainer(), Subscription: nil})
 		subscribe <- subscribeResult{media: media, err: err}
 	}()
 
@@ -942,14 +814,15 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatalf("request name = %q, want requested-audio", name)
 	}
 
-	media, err := broadcast.PublishAudioOnTrack(request, moq.AudioFormatOpus, opusHead())
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Requested{Request: request}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mediaName, err := media.Name()
+	mediaDemand, err := media.Demand()
 	if err != nil {
 		t.Fatal(err)
 	}
+	mediaName := mediaDemand.Name()
 	if mediaName != "requested-audio" {
 		t.Fatalf("media name = %q, want requested-audio", mediaName)
 	}
@@ -957,7 +830,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
 	}
 
-	var mediaConsumer *moq.MediaConsumer
+	var mediaConsumer *moqmedia.ContainerConsumer
 	select {
 	case res := <-subscribe:
 		if res.err != nil {
@@ -970,7 +843,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	defer mediaConsumer.Cancel()
 
 	payload := []byte("dynamic opus frame")
-	if err := media.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 20_000}); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(20_000 * time.Microsecond)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -981,7 +854,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a frame")
 	}
-	if string(frame.Payload) != string(payload) || frame.TimestampUs != 20_000 {
+	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 20_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=20000", frame, payload)
 	}
 	if err := media.Finish(); err != nil {
@@ -989,7 +862,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 }
 
-// TestRecvGroupCancelRace exercises the core runCancellable path under -race:
+// TestRecvGroupCancelRace exercises the core bridge.Call path under -race:
 // the native RecvGroup runs on an internal goroutine while ctx expiry triggers a
 // concurrent Cancel on the same consumer. No group is ever written, so each read
 // blocks until its short ctx fires. The race detector flags any unsynchronized
@@ -1195,7 +1068,7 @@ func TestSubscribeTrackCancelKeepsTheBroadcast(t *testing.T) {
 	}
 }
 
-// TestUsedCancelKeepsTheTrack cancels a producer-side Used wait, which has no
+// TestUsedCancelKeepsTheTrack cancels a demand Used wait, which has no
 // object-wide cancel to fall back on, and confirms the track still publishes.
 func TestUsedCancelKeepsTheTrack(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
@@ -1208,10 +1081,14 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	demand, err := track.Demand()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if err := track.Used(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if err := demand.Used(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Used error = %v, want context.DeadlineExceeded", err)
 	}
 
@@ -1223,12 +1100,12 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer consumer.Cancel()
-	if err := track.Used(readCtx); err != nil {
+	if err := demand.Used(readCtx); err != nil {
 		t.Fatal(err)
 	}
 
 	payload := []byte("still publishing")
-	if err := track.WriteFrame(moq.Frame{Payload: payload, TimestampUs: 0}); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(0)}); err != nil {
 		t.Fatal(err)
 	}
 	frame, err := consumer.ReadFrame(readCtx)
@@ -1337,17 +1214,16 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	ann, err := announced.Next(ctx)
-	if err != nil || ann == nil || ann.Prefix() != "live" || !ann.Active() || ann.Route().Cost != 3 {
-		t.Fatalf("announce: ann=%+v err=%v", ann, err)
+	if ann := nextAnnounced(t, ctx, announced); ann.Prefix != "live" || ann.Route.Cost != 3 {
+		t.Fatalf("announce: ann=%+v", ann)
 	}
 
 	if err := broadcast.Unannounce(); err != nil {
 		t.Fatal(err)
 	}
-	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || ann.Prefix() != "live" || ann.Active() {
-		t.Fatalf("unannounce: ann=%+v err=%v", ann, err)
+	event := nextRoute(t, ctx, announced)
+	if retracted, ok := event.(moq.AnnounceEventEnd); !ok || retracted.Announce.Prefix != "live" {
+		t.Fatalf("unannounce: event=%+v", event)
 	}
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err == nil {
 		t.Fatal("an unannounced broadcast must be unroutable")
@@ -1356,10 +1232,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	if err := broadcast.Announce(moq.Route{}); err != nil {
 		t.Fatal(err)
 	}
-	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || !ann.Active() {
-		t.Fatalf("reannounce: ann=%+v err=%v", ann, err)
-	}
+	nextAnnounced(t, ctx, announced)
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
 		t.Fatal(err)
 	}
@@ -1395,16 +1268,12 @@ func TestAnnouncedPatternCaptures(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	update, err := announced.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if update == nil || update.Prefix() != "room/alice/chat" {
+	update := nextAnnounced(t, ctx, announced)
+	if update.Prefix != "room/alice/chat" {
 		t.Fatalf("update = %+v, want room/alice/chat", update)
 	}
-	captures := update.Captures()
-	if len(captures) != 1 || captures[0] != "alice" {
-		t.Fatalf("captures = %v, want [alice]", captures)
+	if update.Captures == nil || len(*update.Captures) != 1 || (*update.Captures)[0] != "alice" {
+		t.Fatalf("captures = %v, want [alice]", update.Captures)
 	}
 }
 
@@ -1430,16 +1299,39 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	update, err := announced.Next(ctx)
+	update := nextAnnounced(t, ctx, announced)
+	if update.Prefix != "room/alice/chat" {
+		t.Fatalf("update = %+v, want room/alice/chat", update)
+	}
+	if update.Captures == nil || len(*update.Captures) != 0 {
+		t.Fatalf("captures = %#v, want a non-nil empty slice", update.Captures)
+	}
+}
+
+// nextRoute returns the next announce event.
+func nextRoute(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.AnnounceEvent {
+	t.Helper()
+
+	event, err := announced.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if update == nil || update.Prefix() != "room/alice/chat" {
-		t.Fatalf("update = %+v, want room/alice/chat", update)
+	if event == nil {
+		t.Fatal("announcement stream ended")
 	}
-	if captures := update.Captures(); captures == nil || len(captures) != 0 {
-		t.Fatalf("captures = %#v, want a non-nil empty slice", captures)
+	return event
+}
+
+// nextAnnounced returns the next newly announced route.
+func nextAnnounced(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.Announce {
+	t.Helper()
+
+	event := nextRoute(t, ctx, announced)
+	announcedEvent, ok := event.(moq.AnnounceEventStart)
+	if !ok {
+		t.Fatalf("expected an announcement, got %+v", event)
 	}
+	return announcedEvent.Announce
 }
 
 func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
@@ -1479,3 +1371,8 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// us is a raw frame's optional timestamp in microseconds.
+func us(v uint64) *uint64 { return &v }
+
+func ts(d time.Duration) *time.Duration { return &d }

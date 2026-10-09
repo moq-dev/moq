@@ -76,6 +76,10 @@ pub enum AudioCodecKind {
 	Mp3,
 	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
 	Pcm,
+	/// Dolby Digital (AC-3).
+	Ac3,
+	/// Dolby Digital Plus (E-AC-3).
+	Ec3,
 }
 
 impl AudioCodec {
@@ -87,9 +91,10 @@ impl AudioCodec {
 			Self::Pcm => AudioCodecKind::Pcm,
 			Self::Flac => AudioCodecKind::Flac,
 			Self::Mp3 => AudioCodecKind::Mp3,
-			// Legacy TS-bridge codecs aren't WebCodecs-decodable, so they share the
-			// coarse Unknown family for tag-only matching.
-			Self::Mp2 | Self::Ac3 | Self::Ec3 | Self::Unknown(_) => AudioCodecKind::Unknown,
+			// A decoder for one doesn't play the other, so selection must tell them apart.
+			Self::Ac3 => AudioCodecKind::Ac3,
+			Self::Ec3 => AudioCodecKind::Ec3,
+			Self::Mp2 | Self::Unknown(_) => AudioCodecKind::Unknown,
 		}
 	}
 }
@@ -148,5 +153,7 @@ mod tests {
 		assert_eq!(AudioCodecKind::Flac as isize, 3);
 		assert_eq!(AudioCodecKind::Mp3 as isize, 4);
 		assert_eq!(AudioCodecKind::Pcm as isize, 5);
+		assert_eq!(AudioCodecKind::Ac3 as isize, 6);
+		assert_eq!(AudioCodecKind::Ec3 as isize, 7);
 	}
 }

@@ -19,11 +19,11 @@ test("next streams every appended event in order", async () => {
 	const consumer = producer.consume();
 
 	const route = Route.default;
-	producer.append({ prefix: p("a"), captures: undefined, kind: "announced", route });
-	producer.append({ prefix: p("a"), captures: undefined, kind: "retracted", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "end", route });
 
-	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "announced", route });
-	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "retracted", route });
+	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "start", route });
+	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "end", route });
 });
 
 test("the consumer is an async iterable of the same events", async () => {
@@ -31,12 +31,12 @@ test("the consumer is an async iterable of the same events", async () => {
 	const consumer = producer.consume();
 
 	const route = Route.default;
-	producer.append({ prefix: p("a"), captures: undefined, kind: "announced", route });
-	producer.append({ prefix: p("a"), captures: undefined, kind: "retracted", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "end", route });
 
 	const events = consumer[Symbol.asyncIterator]();
-	expect((await events.next()).value?.kind).toBe("announced");
-	expect((await events.next()).value?.kind).toBe("retracted");
+	expect((await events.next()).value?.kind).toBe("start");
+	expect((await events.next()).value?.kind).toBe("end");
 	// A close drops what was queued and ends the iteration.
 	producer.close();
 	expect((await events.next()).done).toBe(true);
@@ -50,11 +50,11 @@ test("a same-name re-announce is a distinct update", async () => {
 	// than collapsing it. Deciding what a repeat means belongs to the session layer, which resolves
 	// a restart into either nothing (an identical route) or an in-place update.
 	const route = Route.default;
-	producer.append({ prefix: p("a"), captures: undefined, kind: "announced", route });
-	producer.append({ prefix: p("a"), captures: undefined, kind: "announced", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 
-	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "announced", route });
-	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "announced", route });
+	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "start", route });
+	expect(await consumer.next()).toEqual({ prefix: p("a"), captures: undefined, kind: "start", route });
 });
 
 test("closing resolves next with undefined", async () => {

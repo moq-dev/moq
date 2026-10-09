@@ -17,18 +17,20 @@ void main() {
       name: 'x' * size,
       info: null,
     );
+    final demand = track.demand();
     // Warm up so one-time allocations do not count as growth.
     for (var i = 0; i < 100; i++) {
-      track.name();
+      demand.name();
     }
 
     final before = ProcessInfo.currentRss;
     for (var i = 0; i < iterations; i++) {
-      track.name();
+      demand.name();
     }
     final growth = ProcessInfo.currentRss - before;
 
     expect(growth, lessThan(leaked ~/ 4));
+    track.dispose();
   });
 
   test('a non-null optional argument is released', () async {
@@ -64,7 +66,7 @@ void main() {
       final track = broadcast.publishTrack(name: 'frames', info: null);
       final consumer = track.consume(subscription: null);
       final producer = track.appendGroup();
-      producer.writeFrame(frame: MoqFrame(payload: payload));
+      producer.writeFrame(frame: MoqFrame(payload: payload, timestampUs: 0));
       producer.finish();
       final group = await consumer.nextGroup();
       final frame = await group!.readFrame();

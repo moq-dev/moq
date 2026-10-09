@@ -2,7 +2,7 @@ name: Quest
 
 # Validates the quest tree on every branch that carries one. check.yml already
 # runs `quest check` on a pull request into any branch, but a direct push (a
-# merge to `main` or `dev`, or `main` merged into a questline) is nobody's pull
+# merge to `main` or `release`, or `main` merged into a questline) is nobody's pull
 # request, so a broken tree could land there unseen.
 #
 # Push only: a pull request is check.yml's job, and a pull_request trigger here
@@ -18,7 +18,7 @@ on:
   push:
     branches:
       - main
-      - dev
+      - release
       - "quest/**"
     paths:
       - "quest/**"

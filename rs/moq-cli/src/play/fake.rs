@@ -115,6 +115,10 @@ pub(super) struct FakeSink {
 }
 
 impl Sink for FakeSink {
+	async fn finish(self) {
+		tokio::time::sleep_until(self.end).await;
+	}
+
 	fn write(&mut self, samples: &[u8]) -> anyhow::Result<()> {
 		anyhow::ensure!(samples.len().is_multiple_of(self.stride), "misaligned write");
 		let now = Instant::now();

@@ -4,7 +4,7 @@
 //! - WebTransport (HTTP/3)
 //! - Raw QUIC (with ALPN negotiation)
 //! - WebSocket (fallback via [web-transport-ws](https://crates.io/crates/web-transport-ws))
-//! - Plain TCP via the `tcp://` scheme (qmux, no TLS; requires `tcp` feature)
+//! - TCP via the `tcp://` (plaintext) and `tls://` schemes (qmux; requires `tcp` feature)
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
 //! - Iroh P2P (requires `iroh` feature)
 //!
@@ -75,6 +75,7 @@ pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 #[cfg(feature = "_transport")]
 pub use server::{Listener, Server};
+pub use transport::Transport;
 
 // Re-export these crates.
 pub use moq_net;

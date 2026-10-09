@@ -38,4 +38,4 @@ and drop the three iOS targets from `release-dart-ffi.yml` rather than paying
 
 ## Related
 
-- [Dart publish](/quest/m1/dart-publish.md) - requires this verdict, since publishing spreads the iOS claim
+- [Dart publish](/quest/m1/dart-publish.md) - the packages are already on pub.dev, and `moq_ffi` is tagged `platform:ios`, so this verdict now corrects a published claim rather than gating one

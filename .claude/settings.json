@@ -22,7 +22,7 @@
 			"Bash(cargo *)",
 			"Bash(bun *)",
 			"Bash(ffprobe:*)",
-			"Bash(rs/libmoq/build.sh:*)",
+			"Bash(rs/moq-c/build.sh:*)",
 			"WebFetch(domain:www.ietf.org)",
 			"WebFetch(domain:datatracker.ietf.org)",
 			"WebFetch(domain:docs.rs)",

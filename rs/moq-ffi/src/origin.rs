@@ -27,7 +27,7 @@ pub struct MoqAnnounceConfig {
 	pub hidden: bool,
 }
 
-/// A path-prefix route: hops and costs for an advertisement.
+/// A path-prefix route: hops and a static cost for an advertisement.
 ///
 /// Pair one with `MoqBroadcastProducer::announce` for an exact path, or with
 /// `MoqOriginProducer::dynamic` for a prefix. Observe them with
@@ -46,11 +46,6 @@ pub struct MoqRoute {
 	/// larger for content it would have to start producing on demand.
 	#[uniffi(default = 0)]
 	pub cost: u64,
-	/// The same path with every warm discount removed: what pulling the content
-	/// would cost if no relay along it were carrying anything. `None` means the
-	/// same as `cost`, which is right for a publisher seeding a production cost.
-	#[uniffi(default = None)]
-	pub cold: Option<u64>,
 	/// Whether the chain holds a 0 anywhere. An anonymous route ranks below every
 	/// fully identified one, whatever the costs say.
 	#[uniffi(default = false)]
@@ -61,8 +56,7 @@ impl From<moq_net::origin::Route> for MoqRoute {
 	fn from(route: moq_net::origin::Route) -> Self {
 		Self {
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
-			cost: route.cost.warm,
-			cold: Some(route.cost.cold),
+			cost: route.cost.value(),
 			anonymous: route.is_anonymous(),
 		}
 	}
@@ -72,7 +66,6 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 	type Error = MoqError;
 
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
-		let cold = route.cold.unwrap_or(route.cost);
 		let mut hops = moq_net::Hops::new();
 		for id in route.hops {
 			let origin = if id == 0 {
@@ -83,7 +76,7 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 			hops.push(origin).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 		}
 		Ok(moq_net::origin::Route::default()
-			.with_cost(moq_net::origin::Cost { warm: route.cost, cold })
+			.with_cost(moq_net::origin::Cost::new(route.cost))
 			.with_hops(hops))
 	}
 }
@@ -149,18 +142,8 @@ impl OriginDynamic {
 }
 
 impl Announced {
-	async fn next(&mut self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
-		match self.inner.next().await {
-			Some(update) => Ok(Some(Arc::new(MoqAnnounceUpdate {
-				prefix: update.prefix.to_string(),
-				captures: update
-					.captures
-					.map(|captures| captures.into_iter().map(|capture| capture.to_string()).collect()),
-				route: update.route.into(),
-				active: update.kind.is_active(),
-			}))),
-			None => Ok(None),
-		}
+	async fn next(&mut self) -> Result<Option<MoqAnnounceEvent>, MoqError> {
+		Ok(self.inner.next().await.map(Into::into))
 	}
 }
 
@@ -180,18 +163,59 @@ impl AnnouncedBroadcast {
 	}
 }
 
-/// A route announcement (or retraction) from an origin.
+/// A route over a prefix, carried by a [`MoqAnnounceEvent`].
 ///
 /// Carries no broadcast: resolve a specific path with
-/// `MoqOriginConsumer::request_broadcast` (after this update proves it is
-/// covered). Its prefix is relative to the origin. The application decides
-/// which paths name broadcasts.
-#[derive(uniffi::Object)]
-pub struct MoqAnnounceUpdate {
-	prefix: String,
-	captures: Option<Vec<String>>,
-	route: MoqRoute,
-	active: bool,
+/// `MoqOriginConsumer::request_broadcast` (after an event proves it is
+/// covered). The application decides which paths name broadcasts.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MoqAnnounce {
+	/// The covered prefix, relative to the origin.
+	pub prefix: String,
+	/// What each wildcard matched, or `None` when the route only overlaps the scope.
+	pub captures: Option<Vec<String>>,
+	/// The route serving the prefix: its hops and a static cost.
+	pub route: MoqRoute,
+}
+
+impl From<moq_net::announce::Announce> for MoqAnnounce {
+	fn from(announce: moq_net::announce::Announce) -> Self {
+		Self {
+			prefix: announce.prefix.to_string(),
+			captures: announce
+				.captures
+				.map(|captures| captures.into_iter().map(|capture| capture.to_string()).collect()),
+			route: announce.route.into(),
+		}
+	}
+}
+
+/// What a [`MoqAnnounceConsumer`] yields.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqAnnounceEvent {
+	/// A route now covers the prefix; the stream had none there.
+	Start { announce: MoqAnnounce },
+	/// The route covering the prefix changed hops or cost.
+	Update { announce: MoqAnnounce },
+	/// No route covers the prefix any more. Carries its last advertised route.
+	End { announce: MoqAnnounce },
+}
+
+impl From<moq_net::announce::Event> for MoqAnnounceEvent {
+	fn from(event: moq_net::announce::Event) -> Self {
+		use moq_net::announce::Event;
+		match event {
+			Event::Start(announce) => Self::Start {
+				announce: announce.into(),
+			},
+			Event::Update(announce) => Self::Update {
+				announce: announce.into(),
+			},
+			Event::End(announce) => Self::End {
+				announce: announce.into(),
+			},
+		}
+	}
 }
 
 /// Waits for a specific broadcast to be announced.
@@ -306,9 +330,8 @@ impl MoqOriginProducer {
 	/// tracks; an on-demand handler is [`Self::dynamic`]. Create, `dynamic()` if
 	/// tracks are served on demand, populate, then announce.
 	///
-	/// [`MoqBroadcastProducer::finish`] unpublishes immediately. Dropping the producer
-	/// without finishing also unpublishes, but subscribers observe the end as a
-	/// failure rather than a deliberate one.
+	/// [`MoqBroadcastProducer::close`] ends it for good; dropping its last handle,
+	/// `dynamic()` included, does the same.
 	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
@@ -377,7 +400,7 @@ impl MoqOriginConsumer {
 	/// Calling this straight after connecting therefore races the session's announcements
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let broadcast = self.inner.request_broadcast(path.as_str()).await?;
+		let broadcast = self.inner.request_broadcast(path.as_str(), None).await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.inner.clone())))
 	}
 }
@@ -396,7 +419,7 @@ impl MoqOriginDynamic {
 			.await
 	}
 
-	/// Re-price the route in place: replace its hops and costs. The prefix cannot
+	/// Re-price the route in place: replace its hops and a static cost. The prefix cannot
 	/// change; call `dynamic` again instead.
 	pub fn update(&self, route: MoqRoute) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -464,8 +487,8 @@ impl MoqBroadcastRequest {
 
 #[uniffi::export]
 impl MoqAnnounceConsumer {
-	/// Get the next route announcement or retraction. Returns `None` when the origin is closed.
-	pub async fn next(&self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
+	/// Get the next announce event. Returns `None` when the origin is closed.
+	pub async fn next(&self) -> Result<Option<MoqAnnounceEvent>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 
@@ -477,37 +500,13 @@ impl MoqAnnounceConsumer {
 	}
 }
 
-#[uniffi::export]
-impl MoqAnnounceUpdate {
-	/// The covered prefix, relative to the origin.
-	pub fn prefix(&self) -> String {
-		self.prefix.clone()
-	}
-
-	/// What each wildcard matched, or `None` when the route only overlaps the scope.
-	pub fn captures(&self) -> Option<Vec<String>> {
-		self.captures.clone()
-	}
-
-	/// The route serving the prefix: its hops and costs.
-	pub fn route(&self) -> MoqRoute {
-		self.route.clone()
-	}
-
-	/// Whether the route is active (`true`) or was retracted (`false`). A repeated
-	/// active announcement for the same prefix is a metadata update.
-	pub fn active(&self) -> bool {
-		self.active
-	}
-}
-
 // ---- MoqAnnouncedBroadcast ----
 
 #[uniffi::export]
 impl MoqAnnouncedBroadcast {
 	/// Wait until the broadcast is announced. Returns `Closed` if cancelled or the origin is closed.
 	///
-	/// Its end arrives as an inactive [`MoqAnnounceUpdate`] on the origin's announcements.
+	/// Its end arrives as a [`MoqAnnounceEvent::End`] on the origin's announcements.
 	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		self.task.run(|mut state| async move { state.available().await }).await
 	}

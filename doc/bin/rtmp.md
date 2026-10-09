@@ -29,15 +29,23 @@ the [`moq-rtmp`](https://docs.rs/moq-rtmp) library, which hands you each
 publish or play request to accept, map to a path, or reject. The CLI listener
 is unauthenticated; firewall it.
 
+Each push or pull is its own broadcast, under a fresh
+[epoch](/concept/moq-lite#publisher-epochs): an encoder that reconnects while
+its stale connection is still open replaces it at once. Subscriptions to the
+stale push end with `Unroutable` instead of stalling, and a viewer's next
+subscribe reaches the new push. Import publishes the encoder's own timestamps
+and anchors the catalog clock on the first frame, so it names the wall time the
+push arrived. A group starting before the previous group's start, such as an
+encoder restarting its timestamps mid-push, ends that push with an error.
+
 A player that advertises enhanced-RTMP multitrack receives every rendition.
-Any other player receives one video rendition: the largest picture (then
-highest bitrate) in a codec it advertised. A push carries the largest one.
+Any other player receives one video rendition, the largest picture (then
+highest bitrate) in a codec it advertised, and one audio rendition, the highest
+bitrate (then sample rate, then channels) in a codec it advertised. A push
+carries the best of each.
 
 Implemented in pure Rust (no librtmp). The CLI speaks plaintext `rtmp://`
-only. The library adds RTMPS on the same port when the embedder supplies a TLS
-config, and by default still accepts plaintext `rtmp://` there, so stream keys
-can arrive unencrypted. The embedder can set `plaintext` to `false` to serve
-`rtmps://` only: a plaintext client is refused at its first byte and the refusal
-is logged with the peer address. Refusing plaintext without a TLS config fails
-at startup. FLAC and MP3 enhanced-audio payloads are dropped because hang has no
+only, so stream keys cross the network unencrypted. The library adds RTMPS on
+the same port when the embedder supplies a TLS config, and can refuse plaintext
+there. FLAC and MP3 enhanced-audio payloads are dropped because hang has no
 catalog codec for them.

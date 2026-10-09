@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 
-from moq_ffi import MoqRequest, MoqServer, MoqTransport
+from moq_ffi import MoqQuicConfig, MoqRequest, MoqServer, MoqServerConfig, MoqServerTls, MoqTransport
 
+from ._records import _strs
 from .origin import OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
@@ -48,30 +49,22 @@ class Request:
         """The network transport carrying this session."""
         return self._inner.transport()
 
-    def set_publish(self, origin: OriginProducer | None) -> None:
-        """Override the publish origin for this session. Falls back to the
-        server's configured publish origin if unset. Captured at ``accept()``.
-
-        Raises if the request is currently accepting, already answered, or cancelled.
-        """
-        self._inner.set_publish(origin._inner if origin is not None else None)
-
-    def set_consume(self, origin: OriginProducer | None) -> None:
-        """Override the consume origin for this session. Falls back to the
-        server's configured consume origin if unset. Captured at ``accept()``.
-
-        Raises if the request is currently accepting, already answered, or cancelled.
-        """
-        self._inner.set_consume(origin._inner if origin is not None else None)
-
-    async def accept(self) -> Session:
+    async def accept(self, *, publish: OriginProducer | None = None, consume: OriginProducer | None = None) -> Session:
         """Complete the MoQ handshake and return the established session.
+
+        None inherits the server origin; a supplied origin replaces it.
+        Pass a fresh origin for isolation, or the same origin for both sides.
 
         The caller must hold the returned session to keep the connection
         alive; dropping it closes the session. Raises `Error.AlreadyResponded`
         if `accept()` or `reject()` has already been called.
         """
-        return Session(await self._inner.accept())
+        return Session(
+            await self._inner.accept(
+                publish=publish._inner if publish is not None else None,
+                consume=consume._inner if consume is not None else None,
+            )
+        )
 
     async def reject(self, code: int) -> None:
         """Reject the session with the given application error code.
@@ -119,7 +112,7 @@ class Server:
             "127.0.0.1:4443",
             tls_generate=["localhost"],
             publish=origin,
-            subscribe=origin,
+            consume=origin,
         )
     """
 
@@ -130,42 +123,40 @@ class Server:
         tls_cert: Sequence[str] = (),
         tls_key: Sequence[str] = (),
         tls_generate: Sequence[str] = (),
+        versions: Sequence[str] = (),
+        max_streams: int | None = None,
         publish: OriginProducer | None = None,
-        subscribe: OriginProducer | None = None,
+        consume: OriginProducer | None = None,
     ) -> None:
-        self._bind = bind
-        self._tls_cert = list(tls_cert)
-        self._tls_key = list(tls_key)
-        self._tls_generate = list(tls_generate)
-
         # If neither origin is provided, create a shared internal one.
-        if publish is None and subscribe is None:
-            self._origin: OriginProducer | None = OriginProducer()
-            self._publish_origin: OriginProducer | None = self._origin
-            self._consume_origin: OriginProducer | None = self._origin
-        else:
-            self._origin = None
-            self._publish_origin = publish
-            self._consume_origin = subscribe
+        if publish is None and consume is None:
+            publish = consume = OriginProducer()
+        self._publish_origin = publish
+
+        self._config = MoqServerConfig(
+            bind=bind,
+            versions=_strs(versions, "versions"),
+            tls=MoqServerTls(
+                cert=_strs(tls_cert, "tls_cert"),
+                key=_strs(tls_key, "tls_key"),
+                generate=_strs(tls_generate, "tls_generate"),
+            ),
+            quic=MoqQuicConfig(max_streams=max_streams),
+            publish=None if publish is None else publish._inner,
+            consume=None if consume is None else consume._inner,
+        )
 
         self._inner: MoqServer | None = None
         self._local_addr: str | None = None
 
     async def __aenter__(self):
-        self._inner = MoqServer()
-        self._inner.set_bind(self._bind)
-        if self._tls_cert:
-            self._inner.set_tls_cert(self._tls_cert)
-        if self._tls_key:
-            self._inner.set_tls_key(self._tls_key)
-        if self._tls_generate:
-            self._inner.set_tls_generate(self._tls_generate)
-        if self._publish_origin is not None:
-            self._inner.set_publish(self._publish_origin._inner)
-        if self._consume_origin is not None:
-            self._inner.set_consume(self._consume_origin._inner)
-
-        self._local_addr = await self._inner.listen()
+        self._inner = MoqServer(self._config)
+        try:
+            self._local_addr = await self._inner.listen()
+        except BaseException:
+            self._inner.cancel()
+            self._inner = None
+            raise
         return self
 
     async def __aexit__(self, *exc) -> None:

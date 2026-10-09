@@ -1,3 +1,5 @@
+import 'package:moq_ffi/moq_ffi.dart';
+
 import 'aliases.dart';
 
 /// Scope for discovering announcements.
@@ -18,6 +20,9 @@ final class AnnounceOptions {
 }
 
 /// Everything [Moq.connect] can be told beyond the URL.
+///
+/// Every field is optional; a null keeps the native default. A value the native
+/// side cannot use fails [Moq.connect] with `MoqException.Config`.
 final class ConnectOptions {
   /// Set false to skip certificate verification (local dev only).
   final bool tlsVerify;
@@ -40,6 +45,10 @@ final class ConnectOptions {
   /// Local socket address to bind, e.g. `0.0.0.0:0`.
   final String? bind;
 
+  /// Protocol versions to offer, most preferred first, e.g. `moq-lite-03`.
+  /// Null offers every supported version.
+  final List<String>? versions;
+
   /// Cap on the concurrent QUIC streams the peer may open toward this
   /// connection. MoQ opens one stream per group, so a subscriber to many
   /// tracks may want this raised.
@@ -55,7 +64,7 @@ final class ConnectOptions {
 
   /// Set false for a one-shot dial. By default the session redials with
   /// backoff whenever the transport drops.
-  final bool? reconnect;
+  final bool reconnect;
 
   /// Retry pacing for the automatic reconnect.
   final Backoff? backoff;
@@ -64,7 +73,7 @@ final class ConnectOptions {
   final OriginProducer? publish;
 
   /// Origin to discover broadcasts through; auto-created when null.
-  final OriginProducer? subscribe;
+  final OriginProducer? consume;
 
   const ConnectOptions({
     this.tlsVerify = true,
@@ -74,14 +83,47 @@ final class ConnectOptions {
     this.tlsCert,
     this.tlsKey,
     this.bind,
+    this.versions,
     this.maxStreams,
     this.websocketEnabled,
     this.websocketDelay,
-    this.reconnect,
+    this.reconnect = true,
     this.backoff,
     this.publish,
-    this.subscribe,
+    this.consume,
   });
+
+  MoqClientConfig get _ffi {
+    final delay = websocketDelay;
+    if (delay != null && delay.isNegative) {
+      throw ArgumentError.value(
+        delay,
+        'websocketDelay',
+        'must not be negative',
+      );
+    }
+    return MoqClientConfig(
+      bind: bind,
+      versions: versions ?? const [],
+      tls: MoqClientTls(
+        insecure: !tlsVerify,
+        roots: tlsRoots ?? const [],
+        systemRoots: tlsSystemRoots,
+        fingerprints: tlsFingerprints ?? const [],
+        cert: tlsCert,
+        key: tlsKey,
+      ),
+      quic: MoqQuicConfig(maxStreams: maxStreams),
+      websocket: MoqWebSocketConfig(
+        enabled: websocketEnabled,
+        delayUs: delay?.inMicroseconds,
+      ),
+      once: !reconnect,
+      backoff: backoff ?? MoqBackoff(),
+      publish: publish,
+      consume: consume,
+    );
+  }
 }
 
 /// A connected MoQ session with publishing and subscription conveniences.
@@ -95,58 +137,16 @@ final class Moq {
 
   /// Connect to a relay at [url].
   ///
-  /// With neither [ConnectOptions.publish] nor [ConnectOptions.subscribe]
+  /// With neither [ConnectOptions.publish] nor [ConnectOptions.consume]
   /// given, both sides of the session share one origin, so a broadcast
-  /// announced here is discoverable through [announcements]. Wiring either
+  /// announced here is discoverable through [announced]. Wiring either
   /// side opts out and isolates the two directions.
   static Future<Moq> connect(
     String url, {
     ConnectOptions options = const ConnectOptions(),
   }) async {
-    final websocketDelay = options.websocketDelay;
-    if (websocketDelay != null && websocketDelay.isNegative) {
-      throw ArgumentError.value(
-        websocketDelay,
-        'websocketDelay',
-        'must not be negative',
-      );
-    }
-
-    final client = Client();
+    final client = Client(config: options._ffi);
     try {
-      if (!options.tlsVerify) client.setTlsVerify(verify: false);
-      if (options.tlsRoots != null) {
-        client.setTlsRoots(paths: options.tlsRoots!);
-      }
-      if (options.tlsSystemRoots != null) {
-        client.setTlsSystemRoots(systemRoots: options.tlsSystemRoots!);
-      }
-      if (options.tlsFingerprints != null) {
-        client.setTlsFingerprints(fingerprints: options.tlsFingerprints!);
-      }
-      if (options.tlsCert != null) client.setTlsCert(path: options.tlsCert);
-      if (options.tlsKey != null) client.setTlsKey(path: options.tlsKey);
-      if (options.bind != null) client.setBind(addr: options.bind!);
-      if (options.maxStreams != null) {
-        client.setQuicMaxStreams(maxStreams: options.maxStreams!);
-      }
-      if (options.websocketEnabled != null) {
-        client.setWebsocketEnabled(enabled: options.websocketEnabled!);
-      }
-      if (websocketDelay != null) {
-        client.setWebsocketDelay(delayUs: websocketDelay.inMicroseconds);
-      }
-      if (options.reconnect != null) {
-        client.setReconnect(enabled: options.reconnect!);
-      }
-      if (options.backoff != null) {
-        client.setBackoff(backoff: options.backoff!);
-      }
-      if (options.publish != null) client.setPublish(origin: options.publish);
-      if (options.subscribe != null) {
-        client.setConsume(origin: options.subscribe);
-      }
-
       final session = await client.connect(url: url);
       return Moq._(session, client);
     } catch (_) {
@@ -162,24 +162,10 @@ final class Moq {
   BroadcastProducer createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
-  /// Stream routes matching [options]; update prefixes stay relative to the origin.
-  Stream<AnnounceUpdate> announcements({
-    AnnounceOptions options = const AnnounceOptions(),
-  }) async* {
-    final announced = session.consume().announced(config: options._ffi);
-    try {
-      while (true) {
-        final announcement = await announced.next();
-        if (announcement == null) return;
-        yield announcement;
-      }
-    } finally {
-      announced.cancel();
-      announced.dispose();
-    }
-  }
-
-  /// Return the raw cursor for [options].
+  /// Discover routes matching [options]; prefixes stay relative to the origin.
+  ///
+  /// Listen to `announced(...).updates()` for a [Stream] of [AnnounceEvent]
+  /// that releases the cursor when the subscription ends.
   AnnounceConsumer announced({
     AnnounceOptions options = const AnnounceOptions(),
   }) => session.consume().announced(config: options._ffi);
@@ -204,8 +190,31 @@ final class Moq {
   Bandwidth bandwidth() => session.bandwidth();
 
   /// Gracefully close the session and stop the client.
-  void close() {
-    session.shutdown();
-    _client.cancel();
+  Future<void> close() async {
+    try {
+      await session.shutdown();
+    } finally {
+      _client.cancel();
+    }
+  }
+}
+
+/// A [Stream] view over an announcement cursor.
+extension AnnounceConsumerUpdates on AnnounceConsumer {
+  /// Stream announce events until the cursor ends.
+  ///
+  /// Listen once: the cursor is cancelled and released when the subscription
+  /// ends.
+  Stream<AnnounceEvent> updates() async* {
+    try {
+      while (true) {
+        final event = await next();
+        if (event == null) return;
+        yield event;
+      }
+    } finally {
+      cancel();
+      dispose();
+    }
   }
 }

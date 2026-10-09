@@ -36,9 +36,9 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(#[from] moq_json::Error),
 
-	/// Error publishing or consuming binary payloads over a track.
-	#[error("binary: {0}")]
-	Binary(#[from] moq_binary::Error),
+	/// Error publishing or consuming opaque payloads over a track.
+	#[error("flate: {0}")]
+	Flate(#[from] moq_flate::Error),
 
 	/// A catalog entry declares a track mode this build does not implement.
 	#[error("unsupported track mode: {0}")]
@@ -163,7 +163,7 @@ pub enum Error {
 	#[error("{0}")]
 	InvalidEnd(#[from] crate::container::InvalidEnd),
 
-	/// A frame's timestamp sits below the live edge earlier groups reached.
+	/// A group starts before the previous group did: the source restarted.
 	#[error("{0}")]
 	TimestampRewind(#[from] crate::container::TimestampRewind),
 
@@ -180,29 +180,32 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
-	/// A segment ran past the [`duration_max`](crate::timeline::Config::duration_max) the
-	/// catalog advertised, so the timeline stopped publishing rather than contradict it. The
-	/// publisher declared a bound its media can't honor.
-	#[error("timeline segment {segment} lasted {duration:?}, over the declared maximum {duration_max:?}")]
-	TimelineOverrun {
-		/// The segment that broke the bound.
-		segment: u64,
-		/// How long it actually ran.
-		duration: std::time::Duration,
-		/// The bound the catalog advertised.
-		duration_max: std::time::Duration,
+	/// [`timeline::Producer::resume`](crate::timeline::Producer::resume) received a checkpoint
+	/// whose record at this window index has a different sequence.
+	#[error("timeline checkpoint record at index {0} has a different sequence")]
+	TimelineCheckpoint(u64),
+
+	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a record out of order.
+	#[error("timeline record {actual} pushed where {expected} was next")]
+	TimelineSequence {
+		/// The window's next index.
+		expected: u64,
+		/// The pushed record's sequence.
+		actual: u64,
 	},
 
-	/// [`timeline::Producer::finish`](crate::timeline::Producer::finish) was called before its
-	/// deferred [`timeline::Segmenter`](crate::timeline::Segmenter) completed and every record
-	/// was committed.
-	#[error("finish and commit every deferred timeline record before closing the Producer")]
-	TimelineDeferredPending,
+	/// A timeline frame report did not advance past the previous one.
+	#[error("timeline report at {position:?} does not advance past {last:?}")]
+	TimelinePosition {
+		/// The rejected report's position.
+		position: hang::timeline::Position,
+		/// The previous report's position.
+		last: hang::timeline::Position,
+	},
 
-	/// [`timeline::Producer::push`](crate::timeline::Producer::push) received a pending record that
-	/// its [`timeline::Deferred`](crate::timeline::Deferred) did not yield.
-	#[error("timeline segment {0} was not yielded for deferred publication")]
-	TimelineDeferredRecord(u64),
+	/// The catalog's `archive` entry indexes no timeline for this track.
+	#[error("no timeline for track {0}")]
+	TimelineMissing(String),
 
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
@@ -214,8 +217,8 @@ pub enum Error {
 	#[error("invalid timeline timescale: {0}")]
 	InvalidTimescale(u32),
 
-	/// A source timestamp cannot be mapped onto the broadcast clock: it would land before the
-	/// broadcast began or outside the representable range.
+	/// A source's first timestamp cannot anchor the broadcast clock: it is so large that PTS zero
+	/// would land before the moq epoch (2020).
 	#[error("timestamp cannot be mapped onto the broadcast clock: {0}")]
 	UnmappableTimestamp(String),
 	/// Tried to set an application catalog section whose name collides with a

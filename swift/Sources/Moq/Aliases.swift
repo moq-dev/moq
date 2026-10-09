@@ -10,45 +10,21 @@ import MoqFFI
 /// A payload plus the presentation timestamp it should play at. The unit of
 /// every raw write and raw read.
 public typealias Frame = MoqFFI.MoqFrame
-/// A media frame whose keyframe flag marks a group start or video keyframe; audio flags only group starts.
-public typealias MediaFrame = MoqFFI.MoqMediaFrame
-/// The JSON manifest describing a broadcast's tracks: video and audio
-/// renditions, display geometry, and untyped application sections.
-public typealias Catalog = MoqFFI.MoqCatalog
-/// A video rendition in the catalog: codec, dimensions, bitrate, temporary
-/// avoidance recommendation, framerate, and container.
-public typealias Video = MoqFFI.MoqVideo
-/// Caller-provided catalog fields for a video track.
-public typealias VideoHint = MoqFFI.MoqVideoHint
-/// A single audio codec an importer can parse.
-public typealias AudioFormat = MoqFFI.MoqAudioFormat
-/// A single video codec an importer can parse.
-public typealias VideoFormat = MoqFFI.MoqVideoFormat
-/// A container that publishes its own tracks.
-public typealias ContainerFormat = MoqFFI.MoqContainerFormat
-/// Catalog properties shared by every video rendition. A `nil` field clears
-/// that property from the next catalog snapshot.
-public typealias VideoProperties = MoqFFI.MoqVideoProperties
-/// An audio rendition in the catalog: codec, sample rate, channel count,
-/// bitrate, and container.
-public typealias Audio = MoqFFI.MoqAudio
 /// One raw-audio frame: PCM samples in the configured layout plus a
 /// presentation timestamp.
 public typealias AudioFrame = MoqFFI.MoqAudioFrame
-/// A width and height in pixels.
-public typealias Dimensions = MoqFFI.MoqDimensions
 /// The PCM layout (format, sample rate, channels) written to an `AudioProducer`.
 public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
 /// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
-/// What a `VideoConsumer` decodes to: an optional pixel format and resize,
-/// plus a max age.
+/// What a `VideoConsumer` decodes to: an optional resize, a max delay, and
+/// whether frames keep the decoder's native surface.
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
-/// One decoded video frame: packed pixels, the layout they are in, their
-/// dimensions, and a timestamp.
+/// One decoded video frame, owning the decoder's surface until released;
+/// `pixels(format:)` converts it to packed CPU pixels.
 public typealias VideoDecodedFrame = MoqVideoDecodedFrame
-/// The PCM layout an `AudioConsumer` decodes to, plus its max age.
+/// The PCM layout an `AudioConsumer` decodes to, plus its max delay.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 public typealias AudioSampleFormat = MoqFFI.MoqAudioSampleFormat
@@ -70,15 +46,18 @@ public typealias VideoCodec = MoqFFI.MoqVideoCodec
 /// Which encoder implementation to use: automatic, hardware, software, or one
 /// named backend.
 public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
-/// How a track's frames are packaged (Legacy, CMAF, or LOC), as advertised in
-/// the catalog.
-public typealias Container = MoqFFI.MoqContainer
 /// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
 public typealias Datagram = MoqFFI.MoqDatagram
 /// A path-prefix route: the prefix it covers, relay hop ids (oldest first),
-/// and the advertised costs: warm `cost`, lower wins, plus undiscounted `cold`
-/// (`nil` means the same as `cost`).
+/// and its static production and link cost, lower wins.
 public typealias Route = MoqFFI.MoqRoute
+/// A route over a prefix: the origin-relative `prefix`, what each filter
+/// wildcard matched (`captures`, `nil` for a partial overlap), and the `route`
+/// serving it. Resolve a path with `OriginConsumer.requestBroadcast`.
+public typealias Announce = MoqFFI.MoqAnnounce
+/// What an `AnnounceConsumer` yields: `.start`, `.update`, or `.end`, each
+/// carrying an `Announce`.
+public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, group ordering, latency
 /// budget, and group range.
 public typealias Subscription = MoqFFI.MoqSubscription
@@ -92,8 +71,21 @@ public typealias TrackInfo = MoqFFI.MoqTrackInfo
 /// counters). Fields are `nil` when the transport backend doesn't report them.
 public typealias ConnectionStats = MoqFFI.MoqConnectionStats
 
-/// Retry pacing for the automatic reconnect; see `Client.setBackoff`.
+/// Retry pacing for the automatic reconnect; see `Client(backoff:)`. A `nil`
+/// field keeps its default.
 public typealias Backoff = MoqFFI.MoqBackoff
+
+/// Certificate trust and the mTLS identity for a `Client`.
+public typealias ClientTls = MoqFFI.MoqClientTls
+
+/// The served TLS identity for a `Server`: PEM files or generated hostnames.
+public typealias ServerTls = MoqFFI.MoqServerTls
+
+/// QUIC transport tuning, such as the peer's inbound stream cap.
+public typealias QuicConfig = MoqFFI.MoqQuicConfig
+
+/// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.
+public typealias WebSocketConfig = MoqFFI.MoqWebSocketConfig
 
 /// A connection lifecycle transition reported by `Session.status()`.
 public typealias ConnectionStatus = MoqFFI.MoqConnectionStatus

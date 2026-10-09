@@ -1,15 +1,18 @@
 use super::origin::*;
 use super::producer::*;
-use super::server::MoqServer;
-use super::session::{MoqClient, MoqSession};
-use crate::binary::MoqBinaryConfig;
+use super::server::{MoqServer, MoqServerConfig, MoqServerTls};
+use super::session::{MoqClient, MoqClientConfig, MoqClientTls, MoqSession};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
 use crate::consumer::MoqTrackConsumer;
-use crate::error::MoqError;
-use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
-use crate::media::{MoqAudioFormat, MoqAudioInit, MoqFrame, MoqVideoFormat, MoqVideoInit};
+use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
+use crate::flate::{MoqFlateConfig, MoqFlateSnapshotProducer, MoqFlateStreamProducer};
+use crate::json::{
+	MoqJsonSnapshotConfig, MoqJsonSnapshotConsumer, MoqJsonSnapshotProducer, MoqJsonStreamConfig,
+	MoqJsonStreamConsumer, MoqJsonStreamProducer,
+};
+use crate::media::*;
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
 use std::future::Future;
@@ -58,6 +61,32 @@ where
 		.await
 		.expect("timed out waiting for the FFI runtime to poll the read");
 	handle
+}
+
+/// Trust any certificate, for dialing a server with a generated one.
+fn insecure_tls() -> MoqClientTls {
+	MoqClientTls {
+		insecure: true,
+		..Default::default()
+	}
+}
+
+/// A self-signed identity for `localhost`.
+fn localhost_tls() -> MoqServerTls {
+	MoqServerTls {
+		generate: vec!["localhost".into()],
+		..Default::default()
+	}
+}
+
+/// Retry pacing fast enough for a test, retrying forever.
+fn fast_backoff() -> MoqBackoff {
+	MoqBackoff {
+		initial_us: Some(50_000),
+		multiplier: Some(2),
+		max_us: Some(200_000),
+		timeout_us: Some(0),
+	}
 }
 
 async fn wait_for_config_error(
@@ -156,7 +185,6 @@ fn audio_init(format: MoqAudioFormat, data: Vec<u8>) -> MoqAudioInit {
 		format,
 		data,
 		label: None,
-		track: None,
 	}
 }
 
@@ -166,7 +194,6 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 		data,
 		label: None,
 		hint: None,
-		track: None,
 	}
 }
 
@@ -191,6 +218,23 @@ fn create_announced(origin: &MoqOriginProducer, path: &str) -> Arc<MoqBroadcastP
 	broadcast
 }
 
+/// The next announce event, failing the test on a timeout or a closed origin.
+async fn next_event(announced: &MoqAnnounceConsumer) -> MoqAnnounceEvent {
+	tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("timed out waiting for an announce event")
+		.unwrap()
+		.expect("origin ended while waiting for an announce event")
+}
+
+/// The next newly announced route.
+async fn next_announced(announced: &MoqAnnounceConsumer) -> MoqAnnounce {
+	match next_event(announced).await {
+		MoqAnnounceEvent::Start { announce } => announce,
+		other => panic!("expected an announcement, got {other:?}"),
+	}
+}
+
 /// An Opus rendition whose catalog `broadcast` field names `reference`.
 #[cfg(feature = "audio")]
 fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
@@ -204,6 +248,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 		sample_rate: 48_000,
 		channel_count: 2,
 		bitrate: None,
+		enabled: true,
 		container: MoqContainer::Legacy,
 	}
 }
@@ -215,7 +260,7 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		format: MoqAudioSampleFormat::F32,
 		sample_rate: None,
 		channels: None,
-		max_age_us: None,
+		max_delay_us: None,
 	}
 }
 
@@ -266,25 +311,22 @@ fn origin_config_set_cache_capacity() {
 }
 
 #[test]
-fn route_cold_cost_conversions_are_lossless() {
-	// An explicit cold half survives the round trip in both directions.
-	let route = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost { warm: 0, cold: 9 });
+fn route_cost_conversions_are_lossless() {
+	// A static cost survives conversion in both directions.
+	let route = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(9));
 	let ffi = MoqRoute::from(route.clone());
-	assert_eq!(ffi.cost, 0);
-	assert_eq!(ffi.cold, Some(9));
+	assert_eq!(ffi.cost, 9);
 	let back = moq_net::origin::Route::try_from(ffi).unwrap();
 	assert_eq!(back.cost, route.cost);
 
-	// An omitted cold means the same as the warm cost: a publisher seeding
-	// only its production cost sets one number.
+	// A publisher seeds its production cost with one number.
 	let seeded = moq_net::origin::Route::try_from(MoqRoute {
 		hops: vec![],
 		cost: 5,
-		cold: None,
 		anonymous: false,
 	})
 	.unwrap();
-	assert_eq!(seeded.cost, moq_net::origin::Cost { warm: 5, cold: 5 });
+	assert_eq!(seeded.cost, moq_net::origin::Cost::new(5));
 
 	let anonymous = MoqRoute::from(
 		moq_net::origin::Route::default().with_hops(moq_net::Hops::try_from(vec![moq_net::Hop::UNKNOWN]).unwrap()),
@@ -294,42 +336,35 @@ fn route_cold_cost_conversions_are_lossless() {
 }
 
 #[tokio::test]
-async fn announced_route_keeps_cold_cost_on_reannounce() {
+async fn announced_route_keeps_static_cost_on_reannounce() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let broadcast = origin.create_broadcast("cold-route".into()).unwrap();
+	let broadcast = origin.create_broadcast("priced-route".into()).unwrap();
 	broadcast
 		.announce(MoqRoute {
 			hops: vec![],
-			cost: 0,
-			cold: Some(9),
+			cost: 9,
 			anonymous: false,
 		})
 		.unwrap();
 
-	// The route observed through the announcement stream carries both halves:
-	// a truthful `{warm: 0, cold: 9}` is never rewritten to the publisher's
-	// own `{warm: 0, cold: 0}`.
+	// Reading an advertisement preserves its static production price.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let route = loop {
-		let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-			.await
-			.expect("timed out waiting for an announce update")
-			.unwrap()
-			.expect("origin ended while waiting for an announce update");
-		if announcement.prefix() == "cold-route" && announcement.active() {
-			break announcement.route();
+		if let MoqAnnounceEvent::Start { announce } | MoqAnnounceEvent::Update { announce } =
+			next_event(&announced).await
+			&& announce.prefix == "priced-route"
+		{
+			break announce.route;
 		}
 	};
-	assert_eq!(route.cost, 0);
-	assert_eq!(route.cold, Some(9));
+	assert_eq!(route.cost, 9);
 
-	// Announcing the observed route again reproduces it exactly, cold half
-	// included. (An identical re-announce is not redelivered, so this checks
-	// the conversion rather than waiting for a second update.)
+	// Re-announcing the observed route preserves its static price. An identical
+	// advertisement is not redelivered, so check its conversion instead.
 	broadcast.announce(route.clone()).unwrap();
 	let back = moq_net::origin::Route::try_from(route.clone()).unwrap();
-	assert_eq!(back.cost, moq_net::origin::Cost { warm: 0, cold: 9 });
+	assert_eq!(back.cost, moq_net::origin::Cost::new(9));
 	assert_eq!(MoqRoute::from(back), route);
 
 	broadcast.close().unwrap();
@@ -339,11 +374,16 @@ async fn announced_route_keeps_cold_cost_on_reannounce() {
 fn publish_media_lifecycle() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, init),
+	)
+	.unwrap();
 	media
 		.write_frame(MoqFrame {
 			payload: b"opus frame".to_vec(),
-			timestamp_us: 1000,
+			timestamp_us: Some(1000),
 		})
 		.unwrap();
 	media.finish().unwrap();
@@ -354,16 +394,17 @@ fn publish_media_lifecycle() {
 async fn raw_track_activity() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("status".into(), None).unwrap();
-	assert_eq!(track.name().unwrap(), "status");
+	let demand = track.demand().unwrap();
+	assert_eq!(demand.name(), "status");
 
 	let consumer = track.consume(None).unwrap();
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, demand.used())
 		.await
 		.expect("timed out waiting for raw track to become used")
 		.unwrap();
 
 	drop(consumer);
-	tokio::time::timeout(TIMEOUT, track.unused())
+	tokio::time::timeout(TIMEOUT, demand.unused())
 		.await
 		.expect("timed out waiting for raw track to become unused")
 		.unwrap();
@@ -383,7 +424,7 @@ async fn raw_audio_activity() {
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 	let audio = broadcast
 		.encode_audio(
 			"microphone".into(),
@@ -410,10 +451,16 @@ async fn raw_audio_activity() {
 		.unwrap()
 		.expect("expected a raw audio catalog");
 	let container = catalog.audio.get("microphone").unwrap().container.clone();
-	let subscription = consumer
-		.subscribe_media("microphone".into(), container.clone(), None)
-		.await
-		.unwrap();
+	let subscription = MoqMediaContainerConsumer::subscribe(
+		&consumer,
+		MoqMediaContainerConfig {
+			name: "microphone".into(),
+			container: container.clone(),
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
 	tokio::time::timeout(TIMEOUT, audio.used())
 		.await
 		.expect("timed out waiting for raw audio to become used")
@@ -437,10 +484,16 @@ async fn raw_audio_activity() {
 		.expect("timed out waiting for raw audio to become unused")
 		.unwrap();
 
-	let subscription = consumer
-		.subscribe_media("microphone".into(), container, None)
-		.await
-		.unwrap();
+	let subscription = MoqMediaContainerConsumer::subscribe(
+		&consumer,
+		MoqMediaContainerConfig {
+			name: "microphone".into(),
+			container,
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
 	tokio::time::timeout(TIMEOUT, audio.used())
 		.await
 		.expect("timed out waiting for raw audio to become used again")
@@ -563,7 +616,7 @@ async fn raw_audio_codec_default_frame() {
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[tokio::test]
@@ -585,7 +638,7 @@ async fn raw_track_datagram_roundtrip() {
 	let sequence = track
 		.append_datagram(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 123_456,
+			timestamp_us: Some(123_456),
 		})
 		.unwrap();
 	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
@@ -595,7 +648,7 @@ async fn raw_track_datagram_roundtrip() {
 		.expect("expected a datagram");
 
 	assert_eq!(datagram.sequence, sequence);
-	assert_eq!(datagram.timestamp_us, 123_456);
+	assert_eq!(datagram.timestamp_us, Some(123_456));
 	assert_eq!(datagram.payload, payload);
 }
 
@@ -629,7 +682,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 
 	consumer.update(MoqSubscription {
 		priority: 10,
-		max_age_us: 25_000,
+		max_delay_us: 25_000,
 		group_start: Some(0),
 		group_end: None,
 	});
@@ -638,7 +691,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	track
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 20_000,
+			timestamp_us: Some(20_000),
 		})
 		.unwrap();
 
@@ -649,7 +702,17 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 		.unwrap()
 		.expect("expected a frame");
 	assert_eq!(frame.payload, payload);
-	assert_eq!(frame.timestamp_us, 20_000);
+	assert_eq!(frame.timestamp_us, Some(20_000));
+}
+
+/// Subscribe to `name` on `broadcast` as a raw track, for a typed consumer to take over.
+async fn subscribe(broadcast: &MoqBroadcastProducer, name: &str) -> Arc<MoqTrackConsumer> {
+	broadcast
+		.consume()
+		.unwrap()
+		.subscribe_track(name.into(), None)
+		.await
+		.unwrap()
 }
 
 #[tokio::test]
@@ -659,13 +722,13 @@ async fn json_snapshot_roundtrip() {
 		delta_ratio: 8,
 		compression: true,
 	};
-	let producer = broadcast.publish_json_snapshot("meta".into(), config.clone()).unwrap();
-	let consumer = broadcast
-		.consume()
-		.unwrap()
-		.subscribe_json_snapshot("meta".into(), config)
-		.await
-		.unwrap();
+	let track = broadcast.publish_track("meta".into(), None).unwrap();
+	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
+	assert!(
+		matches!(track.demand(), Err(MoqError::Closed)),
+		"the producer takes over the track"
+	);
+	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await, config).unwrap();
 
 	producer.update(r#"{"a":1}"#.into()).unwrap();
 	let value = tokio::time::timeout(TIMEOUT, consumer.next())
@@ -703,27 +766,19 @@ async fn json_demand() {
 		compression: true,
 	};
 	let stream_config = MoqJsonStreamConfig { compression: true };
-	let snapshot = broadcast
-		.publish_json_snapshot("status".into(), snapshot_config.clone())
-		.unwrap();
-	let stream = broadcast
-		.publish_json_stream("events".into(), stream_config.clone())
-		.unwrap();
+	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let snapshot = MoqJsonSnapshotProducer::new(&broadcast, &track, snapshot_config.clone()).unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let stream = MoqJsonStreamProducer::new(&broadcast, &track, stream_config.clone()).unwrap();
 	let snapshot_demand = snapshot.demand().unwrap();
 	let stream_demand = stream.demand().unwrap();
 	assert_eq!(snapshot_demand.name(), "status");
 	assert_eq!(stream_demand.name(), "events");
 	assert!(!snapshot_demand.is_used());
 
-	let consumer = broadcast.consume().unwrap();
-	let snapshot_consumer = consumer
-		.subscribe_json_snapshot("status".into(), snapshot_config)
-		.await
-		.unwrap();
-	let stream_consumer = consumer
-		.subscribe_json_stream("events".into(), stream_config)
-		.await
-		.unwrap();
+	let snapshot_consumer =
+		MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "status").await, snapshot_config).unwrap();
+	let stream_consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await, stream_config).unwrap();
 
 	tokio::time::timeout(TIMEOUT, snapshot_demand.used())
 		.await
@@ -762,12 +817,15 @@ async fn json_demand() {
 async fn demand_handle_outlives_finish() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("status".into(), None).unwrap();
-	let media = broadcast
-		.publish_audio(audio_init(MoqAudioFormat::Opus, opus_head()))
-		.unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
 	let track_demand = track.demand().unwrap();
 	let media_demand = media.demand().unwrap();
-	assert_eq!(media_demand.name(), media.name().unwrap());
+	assert_eq!(media_demand.name(), media.demand().unwrap().name());
 
 	let consumer = track.consume(None).unwrap();
 	tokio::time::timeout(TIMEOUT, track_demand.used())
@@ -793,13 +851,9 @@ async fn demand_handle_outlives_finish() {
 async fn json_stream_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let config = MoqJsonStreamConfig { compression: true };
-	let producer = broadcast.publish_json_stream("events".into(), config.clone()).unwrap();
-	let consumer = broadcast
-		.consume()
-		.unwrap()
-		.subscribe_json_stream("events".into(), config)
-		.await
-		.unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let producer = MoqJsonStreamProducer::new(&broadcast, &track, config.clone()).unwrap();
+	let consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await, config).unwrap();
 
 	for n in 0..3 {
 		producer.append(format!(r#"{{"n":{n}}}"#)).unwrap();
@@ -814,6 +868,72 @@ async fn json_stream_roundtrip() {
 		);
 	}
 	producer.finish().unwrap();
+}
+
+/// A JSON producer serves a track a subscriber requested, which the broadcast never created by name.
+#[tokio::test]
+async fn json_on_requested_track() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let config = MoqJsonStreamConfig { compression: false };
+
+	// The subscribe stays pending until the request is accepted, so run it concurrently.
+	let subscribe = {
+		let consumer = broadcast.consume().unwrap();
+		tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await })
+	};
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for requested track")
+		.unwrap();
+	let producer = MoqJsonStreamProducer::new(&broadcast, &request.accept(None).unwrap(), config.clone()).unwrap();
+	let track = tokio::time::timeout(TIMEOUT, subscribe)
+		.await
+		.expect("timed out waiting for the subscribe")
+		.unwrap()
+		.unwrap();
+	let consumer = MoqJsonStreamConsumer::new(&track, config).unwrap();
+
+	producer.append(r#"{"n":1}"#.into()).unwrap();
+	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.expect("timed out waiting for json stream record")
+		.unwrap()
+		.expect("expected a record");
+	assert_eq!(value, r#"{"n":1}"#);
+}
+
+/// A JSON consumer refuses a track that has already read a group, and closes one it takes over.
+#[tokio::test]
+async fn json_consumer_takes_an_unread_track() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let config = MoqJsonStreamConfig { compression: false };
+
+	let read = broadcast
+		.consume()
+		.unwrap()
+		.subscribe_track("events".into(), None)
+		.await
+		.unwrap();
+	track.append_group().unwrap();
+	tokio::time::timeout(TIMEOUT, read.recv_group())
+		.await
+		.expect("timed out waiting for a group")
+		.unwrap()
+		.expect("expected a group");
+	assert!(matches!(
+		MoqJsonStreamConsumer::new(&read, config.clone()),
+		Err(MoqError::AlreadyCommitted)
+	));
+
+	let unread = subscribe(&broadcast, "events").await;
+	MoqJsonStreamConsumer::new(&unread, config.clone()).unwrap();
+	assert!(matches!(unread.recv_group().await, Err(MoqError::Cancelled)));
+	assert!(matches!(
+		MoqJsonStreamConsumer::new(&unread, config),
+		Err(MoqError::Closed)
+	));
 }
 
 #[tokio::test]
@@ -841,7 +961,7 @@ async fn dynamic_track_request() {
 	track
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 
@@ -858,8 +978,35 @@ async fn dynamic_track_request() {
 		.expect("expected a frame");
 
 	assert_eq!(frame.payload, payload);
-	assert_eq!(frame.timestamp_us, 0);
+	assert_eq!(frame.timestamp_us, Some(0));
 	track.finish().unwrap();
+}
+
+/// A raw track is timed, so a write or datagram without a timestamp is refused rather than
+/// stamped.
+#[test]
+fn raw_writes_need_a_timestamp() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let untimed = || MoqFrame {
+		payload: b"ready".to_vec(),
+		timestamp_us: None,
+	};
+	let refused = |err: MoqError| {
+		matches!(
+			err,
+			MoqError::Protocol {
+				details: MoqProtocolError {
+					kind: MoqProtocolKind::TimestampMismatch,
+					..
+				}
+			}
+		)
+	};
+	assert!(refused(track.write_frame(untimed()).unwrap_err()));
+	assert!(refused(track.append_datagram(untimed()).unwrap_err()));
+	let group = track.append_group().unwrap();
+	assert!(refused(group.write_frame(untimed()).unwrap_err()));
 }
 
 #[tokio::test]
@@ -872,7 +1019,7 @@ async fn raw_frame_timestamps() {
 	track
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 12_345,
+			timestamp_us: Some(12_345),
 		})
 		.unwrap();
 
@@ -882,7 +1029,7 @@ async fn raw_frame_timestamps() {
 		.unwrap()
 		.expect("expected a frame");
 	assert_eq!(frame.payload, payload);
-	assert_eq!(frame.timestamp_us, 12_345);
+	assert_eq!(frame.timestamp_us, Some(12_345));
 
 	let group = track.append_group().unwrap();
 	let group_consumer = group.consume().unwrap();
@@ -890,7 +1037,7 @@ async fn raw_frame_timestamps() {
 	group
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 23_456,
+			timestamp_us: Some(23_456),
 		})
 		.unwrap();
 	group.finish().unwrap();
@@ -901,7 +1048,7 @@ async fn raw_frame_timestamps() {
 		.unwrap()
 		.expect("expected a frame");
 	assert_eq!(frame.payload, payload);
-	assert_eq!(frame.timestamp_us, 23_456);
+	assert_eq!(frame.timestamp_us, Some(23_456));
 
 	track.finish().unwrap();
 }
@@ -931,7 +1078,7 @@ async fn abort_after_finish_keeps_the_track_handle() {
 	track
 		.write_frame(MoqFrame {
 			payload: b"late abort".to_vec(),
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 	track.finish().unwrap();
@@ -949,7 +1096,7 @@ async fn abort_after_finish_reaches_group_consumer() {
 	group
 		.write_frame(MoqFrame {
 			payload: b"late abort".to_vec(),
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 	group.finish().unwrap();
@@ -1005,13 +1152,13 @@ async fn fetches_cached_group_without_subscribing() {
 	group
 		.write_frame(MoqFrame {
 			payload: b"first".to_vec(),
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"second".to_vec(),
-			timestamp_us: 20_000,
+			timestamp_us: Some(20_000),
 		})
 		.unwrap();
 	group.finish().unwrap();
@@ -1025,10 +1172,10 @@ async fn fetches_cached_group_without_subscribing() {
 	assert_eq!(fetched.sequence(), 0);
 	let frame = fetched.read_frame().await.unwrap().expect("expected first frame");
 	assert_eq!(frame.payload, b"first".to_vec());
-	assert_eq!(frame.timestamp_us, 0);
+	assert_eq!(frame.timestamp_us, Some(0));
 	let frame = fetched.read_frame().await.unwrap().expect("expected second frame");
 	assert_eq!(frame.payload, b"second".to_vec());
-	assert_eq!(frame.timestamp_us, 20_000);
+	assert_eq!(frame.timestamp_us, Some(20_000));
 	assert!(fetched.read_frame().await.unwrap().is_none());
 }
 
@@ -1060,15 +1207,17 @@ async fn fetches_cached_media_group_and_decodes_container() {
 		.unwrap();
 	media.finish().unwrap();
 
-	let fetched = consumer
-		.fetch_media_group(
-			"media".into(),
-			0,
-			crate::media::MoqContainer::Legacy,
-			Some(MoqFetchGroupOptions { priority: 7 }),
-		)
-		.await
-		.unwrap();
+	let fetched = MoqMediaContainerGroupConsumer::fetch(
+		&consumer,
+		MoqMediaContainerGroupConfig {
+			name: "media".into(),
+			sequence: 0,
+			container: crate::media::MoqContainer::Legacy,
+			options: Some(MoqFetchGroupOptions { priority: 7 }),
+		},
+	)
+	.await
+	.unwrap();
 
 	assert_eq!(fetched.sequence(), 0);
 	let frame = fetched.next().await.unwrap().expect("expected keyframe");
@@ -1088,14 +1237,16 @@ async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 	let _track = broadcast.create_track("media", None).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 
-	let result = consumer
-		.fetch_media_group(
-			"media".into(),
-			0,
-			crate::media::MoqContainer::Cmaf { init: Vec::new() },
-			None,
-		)
-		.await;
+	let result = MoqMediaContainerGroupConsumer::fetch(
+		&consumer,
+		MoqMediaContainerGroupConfig {
+			name: "media".into(),
+			sequence: 0,
+			container: crate::media::MoqContainer::Cmaf { init: Vec::new() },
+			options: None,
+		},
+	)
+	.await;
 
 	assert!(matches!(result, Err(MoqError::Codec(_))));
 }
@@ -1112,7 +1263,9 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 		moq_mux::catalog::hang::Container::new(&catalog_container, moq_mux::container::Kind::Video).unwrap();
 
 	let broadcast = moq_net::broadcast::Info::new().produce();
-	let track = broadcast.create_track("video", None).unwrap();
+	// A CMAF track counts in its init's ticks.
+	let info = moq_net::track::Info::default().with_timescale(muxer.timescale());
+	let track = broadcast.create_track("video", info).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 	// Buffer both samples into one moof+mdat, which is what this decodes.
 	let mut media = moq_mux::container::Producer::new(track, container).with_buffer(Duration::from_secs(1));
@@ -1133,11 +1286,14 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 
 	let fetched = tokio::time::timeout(
 		TIMEOUT,
-		consumer.fetch_media_group(
-			"video".into(),
-			0,
-			crate::media::MoqContainer::Cmaf { init: init.to_vec() },
-			None,
+		MoqMediaContainerGroupConsumer::fetch(
+			&consumer,
+			MoqMediaContainerGroupConfig {
+				name: "video".into(),
+				sequence: 0,
+				container: crate::media::MoqContainer::Cmaf { init: init.to_vec() },
+				options: None,
+			},
 		),
 	)
 	.await
@@ -1193,7 +1349,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 	group
 		.write_frame(MoqFrame {
 			payload: b"fetched".to_vec(),
-			timestamp_us: 100_000,
+			timestamp_us: Some(100_000),
 		})
 		.unwrap();
 	group.finish().unwrap();
@@ -1206,7 +1362,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 	assert_eq!(fetched.sequence(), 5);
 	let frame = fetched.read_frame().await.unwrap().expect("expected fetched frame");
 	assert_eq!(frame.payload, b"fetched".to_vec());
-	assert_eq!(frame.timestamp_us, 100_000);
+	assert_eq!(frame.timestamp_us, Some(100_000));
 }
 
 #[tokio::test]
@@ -1281,7 +1437,7 @@ async fn requested_track_dynamic_survives_accept() {
 	group
 		.write_frame(MoqFrame {
 			payload: b"archive".to_vec(),
-			timestamp_us: 180_000,
+			timestamp_us: Some(180_000),
 		})
 		.unwrap();
 	group.finish().unwrap();
@@ -1293,26 +1449,49 @@ async fn requested_track_dynamic_survives_accept() {
 		.unwrap();
 	let frame = fetched.read_frame().await.unwrap().expect("expected archive frame");
 	assert_eq!(frame.payload, b"archive".to_vec());
-	assert_eq!(frame.timestamp_us, 180_000);
+	assert_eq!(frame.timestamp_us, Some(180_000));
 }
 
 #[tokio::test]
 async fn video_publish_named_track() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 
-	let named = |track: &str| MoqVideoInit {
-		track: Some(track.into()),
-		..video_init(MoqVideoFormat::Avc3, h264_init())
-	};
-	let hd = broadcast.publish_video(named("hd")).unwrap();
-	assert_eq!(hd.name().unwrap(), "hd");
-	let sd = broadcast.publish_video_stream(named("sd")).unwrap();
+	let init = || video_init(MoqVideoFormat::Avc3, h264_init());
+	let hd = MoqMediaTrackProducer::video(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("hd".into()),
+		},
+		init(),
+	)
+	.unwrap();
+	assert_eq!(hd.demand().unwrap().name(), "hd");
+	let sd = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("sd".into()),
+		},
+		init(),
+	)
+	.unwrap();
+	assert_eq!(sd.demand().unwrap().name(), "sd");
+	sd.finish().unwrap();
+	assert!(matches!(sd.demand(), Err(MoqError::Closed)));
 	drop(sd);
 
 	// A name is the caller's contract, so a duplicate fails rather than being made unique.
-	assert!(matches!(broadcast.publish_video(named("hd")), Err(MoqError::Codec(_))));
+	assert!(matches!(
+		MoqMediaTrackProducer::video(
+			&broadcast,
+			MoqMediaTarget::Named {
+				name: Some("hd".into())
+			},
+			init()
+		),
+		Err(MoqError::Codec(_))
+	));
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -1323,14 +1502,20 @@ async fn video_publish_named_track() {
 }
 
 #[tokio::test]
-async fn requested_track_refuses_a_name() {
+async fn requested_track_keeps_its_name() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
 	let subscribe = tokio::spawn(async move {
-		consumer
-			.subscribe_media("requested".into(), crate::media::MoqContainer::Legacy, None)
-			.await
+		MoqMediaContainerConsumer::subscribe(
+			&consumer,
+			MoqMediaContainerConfig {
+				name: "requested".into(),
+				container: crate::media::MoqContainer::Legacy,
+				subscription: None,
+			},
+		)
+		.await
 	});
 
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
@@ -1338,20 +1523,15 @@ async fn requested_track_refuses_a_name() {
 		.expect("timed out waiting for requested track")
 		.unwrap();
 
-	let named = MoqVideoInit {
-		track: Some("other".into()),
-		..video_init(MoqVideoFormat::Avc3, h264_init())
-	};
-	assert!(matches!(
-		broadcast.publish_video_on_track(&request, named),
-		Err(MoqError::Codec(_))
-	));
-
-	// The refusal leaves the request unaccepted, so it still publishes under its own name.
-	let media = broadcast
-		.publish_video_on_track(&request, video_init(MoqVideoFormat::Avc3, h264_init()))
-		.unwrap();
-	assert_eq!(media.name().unwrap(), "requested");
+	let media = MoqMediaTrackProducer::video(
+		&broadcast,
+		MoqMediaTarget::Requested {
+			request: request.clone(),
+		},
+		video_init(MoqVideoFormat::Avc3, h264_init()),
+	)
+	.unwrap();
+	assert_eq!(media.demand().unwrap().name(), "requested");
 	subscribe.abort();
 }
 
@@ -1360,16 +1540,22 @@ async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 
-	// publish_media_on_track accepts the request (at the media timescale), which is what
-	// unblocks subscribe_media, so the subscribe runs on a concurrent task until then.
+	// Importing onto the request accepts it (at the media timescale), which is what
+	// unblocks the media subscribe, so it runs on a concurrent task until then.
 	let subscribe = {
 		let consumer = consumer.clone();
 		tokio::spawn(async move {
-			consumer
-				.subscribe_media("requested-audio".into(), crate::media::MoqContainer::Legacy, None)
-				.await
+			MoqMediaContainerConsumer::subscribe(
+				&consumer,
+				MoqMediaContainerConfig {
+					name: "requested-audio".into(),
+					container: crate::media::MoqContainer::Legacy,
+					subscription: None,
+				},
+			)
+			.await
 		})
 	};
 
@@ -1379,10 +1565,13 @@ async fn dynamic_track_request_can_publish_media() {
 		.unwrap();
 	assert_eq!(track.name().unwrap(), "requested-audio");
 
-	let media = broadcast
-		.publish_audio_on_track(&track, audio_init(MoqAudioFormat::Opus, opus_head()))
-		.unwrap();
-	assert_eq!(media.name().unwrap(), "requested-audio");
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Requested { request: track.clone() },
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	assert_eq!(media.demand().unwrap().name(), "requested-audio");
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
 
 	let media_consumer = tokio::time::timeout(TIMEOUT, subscribe)
@@ -1408,7 +1597,7 @@ async fn dynamic_track_request_can_publish_media() {
 	media
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 20_000,
+			timestamp_us: Some(20_000),
 		})
 		.unwrap();
 	media.flush(20_000).unwrap();
@@ -1431,12 +1620,17 @@ async fn dynamic_track_request_can_publish_media() {
 async fn media_track_activity_and_name() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
-	let track_name = media.name().unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, init),
+	)
+	.unwrap();
+	let track_name = media.demand().unwrap().name();
 	assert_eq!(track_name, "0.opus");
 
 	let broadcast_consumer = broadcast.consume().unwrap();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -1445,13 +1639,13 @@ async fn media_track_activity_and_name() {
 	assert!(catalog.audio.contains_key(&track_name));
 
 	let track_consumer = broadcast_consumer.subscribe_track(track_name, None).await.unwrap();
-	tokio::time::timeout(TIMEOUT, media.used())
+	tokio::time::timeout(TIMEOUT, media.demand().unwrap().used())
 		.await
 		.expect("timed out waiting for media track to become used")
 		.unwrap();
 
 	drop(track_consumer);
-	tokio::time::timeout(TIMEOUT, media.unused())
+	tokio::time::timeout(TIMEOUT, media.demand().unwrap().unused())
 		.await
 		.expect("timed out waiting for media track to become unused")
 		.unwrap();
@@ -1465,13 +1659,16 @@ async fn publish_media_aac_populates_description() {
 		sample_rate: 44_100,
 		channel_count: 2,
 	};
-	let init = config.encode();
-	let _media = broadcast
-		.publish_audio(audio_init(MoqAudioFormat::Aac, init.to_vec()))
-		.unwrap();
+	let init = config.encode().unwrap();
+	let _media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Aac, init.to_vec()),
+	)
+	.unwrap();
 
 	let consumer = broadcast.consume().unwrap();
-	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
@@ -1492,10 +1689,13 @@ async fn publish_media_aac_populates_description() {
 #[test]
 fn audio_rejects_bad_init_bytes() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let err = broadcast
-		.publish_audio(audio_init(MoqAudioFormat::Opus, vec![]))
-		.err()
-		.expect("an OpusHead-less opus track should fail");
+	let err = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, vec![]),
+	)
+	.err()
+	.expect("an OpusHead-less opus track should fail");
 	assert!(
 		matches!(err, crate::error::MoqError::Codec(_)),
 		"expected Codec error, got {err}"
@@ -1536,8 +1736,10 @@ async fn create_broadcast_is_invisible_until_announced() {
 		.expect("task")
 		.expect("announce reaches the cursor")
 		.expect("the cursor is still open");
-	assert_eq!(update.prefix(), "live");
-	assert!(update.active());
+	assert!(
+		matches!(&update, MoqAnnounceEvent::Start { announce } if announce.prefix == "live"),
+		"{update:?}"
+	);
 	broadcast.close().unwrap();
 }
 
@@ -1630,18 +1832,14 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 
 	// `a/source` may be announced first, so keep reading until the catalog broadcast arrives.
 	let broadcast = loop {
-		let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-			.await
-			.expect("timed out waiting for the announcement")
-			.unwrap()
-			.expect("the origin should keep announcing");
-		let prefix = announcement.prefix();
+		let announcement = next_announced(&announced).await;
+		let prefix = announcement.prefix;
 		assert!(
 			matches!(prefix.as_str(), "a/pub" | "a/source"),
 			"covered prefix should stay relative to the origin: {prefix}"
 		);
 		assert_eq!(
-			announcement.captures(),
+			announcement.captures,
 			Some(vec![prefix.strip_prefix("a/").unwrap().to_string()]),
 			"the implicit trailing glob captures the suffix beneath the literal prefix"
 		);
@@ -1678,25 +1876,16 @@ async fn announced_filters_patterns_and_reports_captures() {
 		.unwrap();
 
 	let _broad = origin.dynamic("room".into(), MoqRoute::default()).unwrap();
-	let overlap = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out waiting for the overlapping announcement")
-		.unwrap()
-		.expect("the origin should keep announcing");
-	assert_eq!(overlap.prefix(), "room");
-	assert_eq!(overlap.captures(), None, "an overlap does not pin the wildcard");
+	let overlap = next_announced(&announced).await;
+	assert_eq!(overlap.prefix, "room");
+	assert_eq!(overlap.captures, None, "an overlap does not pin the wildcard");
 
 	let chat = create_announced(&origin, "room/alice/chat");
 	let _audio = create_announced(&origin, "room/alice/audio");
-	let update = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out waiting for the matching announcement")
-		.unwrap()
-		.expect("the origin should keep announcing");
+	let update = next_announced(&announced).await;
 
-	assert_eq!(update.prefix(), "room/alice/chat");
-	assert_eq!(update.captures(), Some(vec!["alice".into()]));
-	assert!(update.active());
+	assert_eq!(update.prefix, "room/alice/chat");
+	assert_eq!(update.captures, Some(vec!["alice".into()]));
 
 	chat.close().unwrap();
 }
@@ -1722,12 +1911,8 @@ async fn announced_hides_dot_paths_unless_asked() {
 			})
 			.unwrap();
 		// Updates arrive in path order, and `.` sorts before letters.
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
-			.await
-			.expect("timed out waiting for an announcement")
-			.unwrap()
-			.expect("the origin should keep announcing");
-		assert_eq!(update.prefix(), expected, "prefix {prefix:?}, hidden {hidden}");
+		let update = next_announced(&announced).await;
+		assert_eq!(update.prefix, expected, "prefix {prefix:?}, hidden {hidden}");
 	}
 }
 
@@ -1746,7 +1931,7 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	consumer.resolve(Some(String::new())).await.unwrap();
 	consumer.resolve(Some("/".into())).await.unwrap();
 
-	// Reported in normalized form, matching `EscapingBroadcast` and libmoq: it names what the
+	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
 	match consumer.resolve(Some("./source".into())).await {
 		Err(MoqError::UnresolvableBroadcast(reference)) => assert_eq!(reference, "source"),
@@ -1801,15 +1986,12 @@ async fn announce_and_unannounce_toggles_discovery() {
 	// The consumer observes the flag through the announce stream: an active
 	// announcement, then its retraction.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	async fn wait_live(announced: &MoqAnnounceConsumer, announce: bool) {
+	async fn wait_live(announced: &MoqAnnounceConsumer, active: bool) {
 		loop {
-			let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-				.await
-				.expect("timed out waiting for an announce update")
-				.unwrap()
-				.expect("origin ended while waiting for an announce update");
-			if announcement.prefix() == "live" && announcement.active() == announce {
-				return;
+			match next_event(announced).await {
+				MoqAnnounceEvent::Start { announce } if active && announce.prefix == "live" => return,
+				MoqAnnounceEvent::End { announce } if !active && announce.prefix == "live" => return,
+				_ => {}
 			}
 		}
 	}
@@ -1859,7 +2041,7 @@ async fn finish_unpublishes() {
 		}
 	})
 	.await;
-	assert!(removed.is_ok(), "finish should unpublish the broadcast");
+	assert!(removed.is_ok(), "close should unpublish the broadcast");
 }
 
 #[tokio::test]
@@ -1867,21 +2049,22 @@ async fn local_publish_consume_audio() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let broadcast = create_announced(&origin, "live");
 	let init = opus_head();
-	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, init),
+	)
+	.unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out waiting for announcement")
-		.unwrap()
-		.expect("expected an announcement");
+	let announcement = next_announced(&announced).await;
 
-	assert_eq!(announcement.prefix(), "live");
+	assert_eq!(announcement.prefix, "live");
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -1896,16 +2079,22 @@ async fn local_publish_consume_audio() {
 	assert_eq!(audio.channel_count, 2);
 	assert!(catalog.video.is_empty());
 
-	let media_consumer = broadcast_consumer
-		.subscribe_media(track_name.clone(), audio.container.clone(), None)
-		.await
-		.unwrap();
+	let media_consumer = MoqMediaContainerConsumer::subscribe(
+		&broadcast_consumer,
+		MoqMediaContainerConfig {
+			name: track_name.clone(),
+			container: audio.container.clone(),
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
 
 	let payload = b"opus audio payload data".to_vec();
 	media
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 1_000_000,
+			timestamp_us: Some(1_000_000),
 		})
 		.unwrap();
 
@@ -1926,19 +2115,20 @@ async fn video_publish_consume() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let broadcast = create_announced(&origin, "video-test");
 	let init = h264_init();
-	let media = broadcast.publish_video(video_init(MoqVideoFormat::Avc3, init)).unwrap();
+	let media = MoqMediaTrackProducer::video(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		video_init(MoqVideoFormat::Avc3, init),
+	)
+	.unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out")
-		.unwrap()
-		.expect("expected announcement");
+	let announcement = next_announced(&announced).await;
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -1958,16 +2148,22 @@ async fn video_publish_consume() {
 	assert_eq!(coded.height, 720);
 	assert!(catalog.audio.is_empty());
 
-	let media_consumer = broadcast_consumer
-		.subscribe_media(track_name.clone(), video.container.clone(), None)
-		.await
-		.unwrap();
+	let media_consumer = MoqMediaContainerConsumer::subscribe(
+		&broadcast_consumer,
+		MoqMediaContainerConfig {
+			name: track_name.clone(),
+			container: video.container.clone(),
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
 
 	let keyframe = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC];
 	media
 		.write_frame(MoqFrame {
 			payload: keyframe,
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 
@@ -2042,14 +2238,10 @@ async fn video_raw_publish_consume() {
 
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out")
-		.unwrap()
-		.expect("expected announcement");
+	let announcement = next_announced(&announced).await;
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -2069,10 +2261,16 @@ async fn video_raw_publish_consume() {
 	assert_eq!(coded.height, 240);
 	assert!(catalog.audio.is_empty());
 
-	let media_consumer = broadcast_consumer
-		.subscribe_media(track_name.clone(), rendition.container.clone(), None)
-		.await
-		.unwrap();
+	let media_consumer = MoqMediaContainerConsumer::subscribe(
+		&broadcast_consumer,
+		MoqMediaContainerConfig {
+			name: track_name.clone(),
+			container: rendition.container.clone(),
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
 
 	// Keep feeding the encoder so the subscriber has frames to read after it
 	// joins, whatever the group boundary it landed on.
@@ -2096,16 +2294,18 @@ async fn video_raw_publish_consume() {
 	broadcast.close().unwrap();
 }
 
-/// The decode side picks its CPU pixel layout: an unset `format` delivers I420,
-/// and RGBA delivers `width * height * 4` bytes, with each frame naming the
-/// layout it was decoded to.
+/// A decoded frame owns its surface and converts on demand: one frame yields
+/// both CPU layouts, a portable decode has no surface view, and the frame stays
+/// readable after its consumer is cancelled and dropped and the track is gone.
+/// A surface decode keeps the decoder's pixel buffer and still downloads on
+/// demand, where the platform has one (macOS) and is refused where it has none.
 #[cfg(feature = "video")]
 #[tokio::test]
-async fn video_decode_format() {
+async fn video_decode_frame_ownership() {
 	use crate::video::*;
 
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let broadcast = create_announced(&origin, "video-decode-format");
+	let broadcast = create_announced(&origin, "video-decode-frame");
 
 	let video = broadcast
 		.encode_video(
@@ -2120,7 +2320,7 @@ async fn video_decode_format() {
 				track: Some("camera".into()),
 				bitrate: None,
 				gop: None,
-				// Software both ways so the test is deterministic everywhere.
+				// Software so the encode is deterministic everywhere.
 				kind: MoqVideoEncoderKind::Software,
 			},
 			None,
@@ -2140,8 +2340,8 @@ async fn video_decode_format() {
 	}
 
 	let consumer = origin.consume();
-	let broadcast_consumer = await_announced(&consumer, "video-decode-format").await;
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let broadcast_consumer = await_announced(&consumer, "video-decode-frame").await;
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -2149,23 +2349,25 @@ async fn video_decode_format() {
 		.expect("expected catalog");
 	let (track, rendition) = catalog.video.iter().next().unwrap();
 
-	// Two subscribers over one publication, so the same encoded frames are read
-	// twice and only the requested layout differs.
-	let i420 = broadcast_consumer
+	let portable = broadcast_consumer
 		.decode_video(track.clone(), rendition.clone(), MoqVideoDecoderOutput::default())
 		.await
 		.unwrap();
-	let rgba_out = broadcast_consumer
-		.decode_video(
-			track.clone(),
-			rendition.clone(),
-			MoqVideoDecoderOutput {
-				format: Some(MoqVideoPixelFormat::Rgba),
-				..Default::default()
-			},
-		)
-		.await
-		.unwrap();
+	let surface_output = MoqVideoDecoderOutput {
+		surface: true,
+		..Default::default()
+	};
+	let retaining = broadcast_consumer
+		.decode_video(track.clone(), rendition.clone(), surface_output)
+		.await;
+	// A platform with no surface variant refuses the opt-in up front, rather than
+	// decoding to a surface the caller can neither view nor always download.
+	let retaining = if cfg!(any(target_os = "macos", target_os = "ios")) {
+		Some(retaining.unwrap())
+	} else {
+		assert!(matches!(retaining, Err(MoqError::Unsupported)));
+		None
+	};
 
 	// Keep the encoder fed so both decoders see frames after they joined.
 	for i in 10..40u64 {
@@ -2177,31 +2379,56 @@ async fn video_decode_format() {
 			.unwrap();
 	}
 
-	let frame = tokio::time::timeout(TIMEOUT, i420.next())
-		.await
-		.expect("timed out")
-		.unwrap()
-		.expect("expected an I420 frame");
-	assert!(matches!(frame.format, MoqVideoPixelFormat::I420));
-	assert_eq!(frame.data.len(), frame.width as usize * frame.height as usize * 3 / 2);
+	let next = async |decoder: &MoqVideoConsumer| {
+		tokio::time::timeout(TIMEOUT, decoder.next())
+			.await
+			.expect("timed out")
+			.unwrap()
+			.expect("expected a frame")
+	};
+	let frame = next(&portable).await;
+	let retained = match &retaining {
+		Some(decoder) => Some(next(decoder).await),
+		None => None,
+	};
 
-	let frame = tokio::time::timeout(TIMEOUT, rgba_out.next())
-		.await
-		.expect("timed out")
-		.unwrap()
-		.expect("expected an RGBA frame");
-	assert!(matches!(frame.format, MoqVideoPixelFormat::Rgba));
-	assert_eq!(frame.data.len(), frame.width as usize * frame.height as usize * 4);
+	// Release everything upstream of the frames before reading them.
+	portable.cancel();
+	if let Some(decoder) = &retaining {
+		decoder.cancel();
+	}
+	drop((portable, retaining));
+	video.finish().unwrap();
+	broadcast.close().unwrap();
+
+	if let Some(retained) = retained {
+		assert_eq!((retained.width(), retained.height()), (320, 240));
+		assert!(
+			matches!(retained.surface(), Some(MoqVideoSurface::PixelBuffer { pointer }) if pointer != 0),
+			"a surface decode on macOS retains the pixel buffer"
+		);
+		assert_eq!(
+			retained.pixels(MoqVideoPixelFormat::I420).unwrap().len(),
+			320 * 240 * 3 / 2
+		);
+	}
+
+	assert_eq!((frame.width(), frame.height()), (320, 240));
+	assert!(frame.surface().is_none(), "a portable decode holds CPU pixels");
+
+	let i420 = frame.pixels(MoqVideoPixelFormat::I420).unwrap();
+	assert_eq!(i420.len(), 320 * 240 * 3 / 2);
+
+	let packed = frame.pixels(MoqVideoPixelFormat::Rgba).unwrap();
+	assert_eq!(packed.len(), 320 * 240 * 4);
 	// Every fourth byte is alpha, so an opaque frame proves the conversion ran rather than handing back planes.
 	assert!(
-		frame.data.as_chunks::<4>().0.iter().all(|px| px[3] == 0xFF),
+		packed.as_chunks::<4>().0.iter().all(|px| px[3] == 0xFF),
 		"RGBA output should be opaque"
 	);
 
-	i420.cancel();
-	rgba_out.cancel();
-	video.finish().unwrap();
-	broadcast.close().unwrap();
+	// Converting again reads the same retained surface.
+	assert_eq!(frame.pixels(MoqVideoPixelFormat::I420).unwrap(), i420);
 }
 
 /// Regression: a `MoqVideoProducer` is shared, so its calls land on whichever
@@ -2266,16 +2493,11 @@ async fn video_raw_publish_from_many_threads() {
 	// Checked before finishing, which withdraws it again.
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out")
-		.unwrap()
-		.expect("expected announcement");
-	let catalog_consumer = await_announced(&consumer, &announcement.prefix())
-		.await
-		.subscribe_catalog()
-		.await
-		.unwrap();
+	let announcement = next_announced(&announced).await;
+	let catalog_consumer =
+		MoqMediaCatalogConsumer::subscribe(await_announced(&consumer, &announcement.prefix).await.as_ref())
+			.await
+			.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
@@ -2308,8 +2530,8 @@ async fn video_raw_publish_rejects_bad_frames() {
 		framerate: 30,
 	};
 	let output = || MoqVideoEncoderOutput {
-		codec: MoqVideoCodec::H264,
 		track: None,
+		codec: MoqVideoCodec::H264,
 		bitrate: None,
 		gop: None,
 		kind: MoqVideoEncoderKind::Software,
@@ -2359,18 +2581,19 @@ async fn multiple_frames_ordering() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let broadcast = create_announced(&origin, "ordering-test");
 	let init = opus_head();
-	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, init),
+	)
+	.unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.unwrap()
-		.unwrap()
-		.unwrap();
+	let announcement = next_announced(&announced).await;
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.unwrap()
@@ -2378,10 +2601,16 @@ async fn multiple_frames_ordering() {
 		.unwrap();
 
 	let (track_name, audio) = catalog.audio.iter().next().unwrap();
-	let media_consumer = broadcast_consumer
-		.subscribe_media(track_name.clone(), audio.container.clone(), None)
-		.await
-		.unwrap();
+	let media_consumer = MoqMediaContainerConsumer::subscribe(
+		&broadcast_consumer,
+		MoqMediaContainerConfig {
+			name: track_name.clone(),
+			container: audio.container.clone(),
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
 
 	let timestamps: [u64; 5] = [0, 20_000, 40_000, 60_000, 80_000];
 	for (i, &ts) in timestamps.iter().enumerate() {
@@ -2389,7 +2618,7 @@ async fn multiple_frames_ordering() {
 		media
 			.write_frame(MoqFrame {
 				payload: payload.into_bytes(),
-				timestamp_us: ts,
+				timestamp_us: Some(ts),
 			})
 			.unwrap();
 	}
@@ -2416,18 +2645,14 @@ async fn catalog_update_on_new_track() {
 	let init = opus_head();
 	let mut first = audio_init(MoqAudioFormat::Opus, init.clone());
 	first.label = Some("English".to_string());
-	let _media1 = broadcast.publish_audio(first).unwrap();
+	let _media1 = MoqMediaTrackProducer::audio(&broadcast, MoqMediaTarget::Named { name: None }, first).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.unwrap()
-		.unwrap()
-		.unwrap();
+	let announcement = next_announced(&announced).await;
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 
 	let catalog1 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -2437,7 +2662,12 @@ async fn catalog_update_on_new_track() {
 	assert_eq!(catalog1.audio.len(), 1);
 	assert_eq!(catalog1.audio["0.opus"].label.as_deref(), Some("English"));
 
-	let _media2 = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
+	let _media2 = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, init),
+	)
+	.unwrap();
 
 	let catalog2 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -2455,13 +2685,20 @@ async fn catalog_update_on_new_track() {
 fn close_twice_is_a_noop() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let _media = broadcast
-		.publish_audio(audio_init(MoqAudioFormat::Opus, init.clone()))
-		.unwrap();
+	let _media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, init.clone()),
+	)
+	.unwrap();
 	broadcast.close().unwrap();
 	broadcast.close().unwrap();
 
-	let Err(err) = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)) else {
+	let Err(err) = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, init),
+	) else {
 		panic!("publishing after close succeeded");
 	};
 	assert!(
@@ -2478,16 +2715,10 @@ async fn announced_broadcast() {
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out")
-		.unwrap()
-		.expect("expected announcement");
+	let announcement = next_announced(&announced).await;
 
-	assert_eq!(announcement.prefix(), "test/broadcast");
-	let _catalog = await_announced(&consumer, &announcement.prefix())
-		.await
-		.subscribe_catalog()
+	assert_eq!(announcement.prefix, "test/broadcast");
+	let _catalog = MoqMediaCatalogConsumer::subscribe(await_announced(&consumer, &announcement.prefix).await.as_ref())
 		.await
 		.unwrap();
 	// Finish so consumers observe a deliberate end (the canonical end for a
@@ -2532,7 +2763,7 @@ async fn dynamic_broadcast_request() {
 	track
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 20_000,
+			timestamp_us: Some(20_000),
 		})
 		.unwrap();
 
@@ -2542,7 +2773,7 @@ async fn dynamic_broadcast_request() {
 		.unwrap()
 		.expect("expected a frame");
 	assert_eq!(frame.payload, payload);
-	assert_eq!(frame.timestamp_us, 20_000);
+	assert_eq!(frame.timestamp_us, Some(20_000));
 
 	track.finish().unwrap();
 	served.close().unwrap();
@@ -2624,7 +2855,7 @@ async fn cancel_retracts_the_route_synchronously() {
 	let dynamic = serve(&origin, "");
 	let inner = origin.inner().consume();
 
-	let queued = inner.request_broadcast("x").into_inner();
+	let queued = inner.request_broadcast("x", None).into_inner();
 	assert!(
 		queued.poll_ok(&kio::Waiter::noop()).is_pending(),
 		"the route must serve while the handler lives"
@@ -2632,7 +2863,7 @@ async fn cancel_retracts_the_route_synchronously() {
 	drop(queued);
 
 	dynamic.cancel();
-	let verdict = inner.request_broadcast("y").into_inner();
+	let verdict = inner.request_broadcast("y", None).into_inner();
 	match verdict.poll_ok(&kio::Waiter::noop()) {
 		std::task::Poll::Ready(Err(moq_net::Error::Unroutable)) => {}
 		std::task::Poll::Ready(Err(err)) => panic!("unexpected error: {err}"),
@@ -2659,7 +2890,7 @@ async fn raw_track_next_group_is_repeatable() {
 		track
 			.write_frame(MoqFrame {
 				payload: payload.clone(),
-				timestamp_us: 0,
+				timestamp_us: Some(0),
 			})
 			.unwrap();
 
@@ -2697,7 +2928,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 	track
 		.write_frame(MoqFrame {
 			payload: b"one".to_vec(),
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 
@@ -2715,7 +2946,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 	track
 		.write_frame(MoqFrame {
 			payload: b"two".to_vec(),
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 	let group = tokio::time::timeout(TIMEOUT, consumer.recv_group())
@@ -2729,7 +2960,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 	let sequence = track
 		.append_datagram(MoqFrame {
 			payload: b"beep".to_vec(),
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
@@ -2755,14 +2986,14 @@ fn raw_track() -> (
 fn datagram_frame(payload: &[u8]) -> MoqFrame {
 	MoqFrame {
 		payload: payload.to_vec(),
-		timestamp_us: 1,
+		timestamp_us: Some(1),
 	}
 }
 
 fn group_frame(payload: &[u8]) -> MoqFrame {
 	MoqFrame {
 		payload: payload.to_vec(),
-		timestamp_us: 0,
+		timestamp_us: Some(0),
 	}
 }
 
@@ -2890,7 +3121,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 
 	consumer.update(MoqSubscription {
 		priority: 10,
-		max_age_us: 25_000,
+		max_delay_us: 25_000,
 		group_start: Some(0),
 		group_end: None,
 	});
@@ -3046,7 +3277,7 @@ async fn raw_read_frame_skips_empty_group_on_open_track() {
 	track
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 1_000,
+			timestamp_us: Some(1_000),
 		})
 		.unwrap();
 
@@ -3057,7 +3288,7 @@ async fn raw_read_frame_skips_empty_group_on_open_track() {
 		.unwrap()
 		.expect("expected a frame");
 	assert_eq!(frame.payload, payload);
-	assert_eq!(frame.timestamp_us, 1_000);
+	assert_eq!(frame.timestamp_us, Some(1_000));
 }
 
 /// Empty groups already in the cursor are skipped, then the next populated
@@ -3075,7 +3306,7 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 	track
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 2_000,
+			timestamp_us: Some(2_000),
 		})
 		.unwrap();
 
@@ -3085,7 +3316,7 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 		.unwrap()
 		.expect("expected the populated group's first frame");
 	assert_eq!(frame.payload, payload);
-	assert_eq!(frame.timestamp_us, 2_000);
+	assert_eq!(frame.timestamp_us, Some(2_000));
 }
 
 /// Cancelling `read_frame` after it has taken the next group must not drop that
@@ -3103,7 +3334,7 @@ async fn raw_read_frame_keeps_group_across_cancelled_call() {
 	group
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 3_000,
+			timestamp_us: Some(3_000),
 		})
 		.unwrap();
 	group.finish().unwrap();
@@ -3115,7 +3346,7 @@ async fn raw_read_frame_keeps_group_across_cancelled_call() {
 		.unwrap()
 		.expect("cancelled read_frame must not lose the group's first frame");
 	assert_eq!(frame.payload, payload);
-	assert_eq!(frame.timestamp_us, 3_000);
+	assert_eq!(frame.timestamp_us, Some(3_000));
 
 	assert!(
 		tokio::time::timeout(TIMEOUT, consumer.read_frame())
@@ -3161,7 +3392,7 @@ async fn raw_read_frame_drops_aborted_pending_group() {
 	track
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 4_000,
+			timestamp_us: Some(4_000),
 		})
 		.unwrap();
 	let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
@@ -3170,7 +3401,7 @@ async fn raw_read_frame_drops_aborted_pending_group() {
 		.unwrap()
 		.expect("an aborted pending group must not block later groups");
 	assert_eq!(frame.payload, payload);
-	assert_eq!(frame.timestamp_us, 4_000);
+	assert_eq!(frame.timestamp_us, Some(4_000));
 }
 
 /// `next_group` and `read_frame` share one ordered cursor. A cancelled
@@ -3187,7 +3418,7 @@ async fn raw_read_frame_and_next_group_share_the_cursor() {
 	first
 		.write_frame(MoqFrame {
 			payload: b"first".to_vec(),
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 	first.finish().unwrap();
@@ -3207,7 +3438,7 @@ async fn raw_read_frame_and_next_group_share_the_cursor() {
 	track
 		.write_frame(MoqFrame {
 			payload: b"second".to_vec(),
-			timestamp_us: 0,
+			timestamp_us: Some(0),
 		})
 		.unwrap();
 	let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
@@ -3224,8 +3455,9 @@ async fn raw_read_frame_terminal_cancel_releases_demand() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("status".into(), None).unwrap();
 	let consumer = track.consume(None).unwrap();
+	let demand = track.demand().unwrap();
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, demand.used())
 		.await
 		.expect("timed out waiting for the subscriber")
 		.unwrap();
@@ -3249,7 +3481,7 @@ async fn raw_read_frame_terminal_cancel_releases_demand() {
 		Ok(None) => panic!("cancelled read returned EOF"),
 	}
 
-	tokio::time::timeout(TIMEOUT, track.unused())
+	tokio::time::timeout(TIMEOUT, demand.unused())
 		.await
 		.expect("timed out waiting for demand to drop")
 		.unwrap();
@@ -3315,22 +3547,33 @@ fn without_runtime() {
 
 		let broadcast = create_announced(&origin, "test");
 		let init = opus_head();
-		let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
+		let media = MoqMediaTrackProducer::audio(
+			&broadcast,
+			MoqMediaTarget::Named { name: None },
+			audio_init(MoqAudioFormat::Opus, init),
+		)
+		.unwrap();
 		media
 			.write_frame(MoqFrame {
 				payload: b"hello".to_vec(),
-				timestamp_us: 1000,
+				timestamp_us: Some(1000),
 			})
 			.unwrap();
 
 		let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-		let announcement = pollster::block_on(announced.next()).unwrap().unwrap();
-		assert_eq!(announcement.prefix(), "test");
+		let announcement = match pollster::block_on(announced.next()).unwrap().unwrap() {
+			MoqAnnounceEvent::Start { announce } => announce,
+			other => panic!("expected an announcement, got {other:?}"),
+		};
+		assert_eq!(announcement.prefix, "test");
 		let _bc = pollster::block_on(consumer.request_broadcast("test".into())).unwrap();
 
-		let client = MoqClient::new();
-		client.set_tls_verify(false).unwrap();
-		client.set_consume(Some(origin)).unwrap();
+		let client = MoqClient::new(MoqClientConfig {
+			tls: insecure_tls(),
+			consume: Some(origin),
+			..Default::default()
+		})
+		.unwrap();
 
 		announced.cancel();
 		client.cancel();
@@ -3349,10 +3592,13 @@ fn without_runtime() {
 async fn server_client_roundtrip() {
 	// Server side: bind, set a publish origin, accept incoming sessions.
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	server.set_publish(Some(server_origin.clone())).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3369,15 +3615,18 @@ async fn server_client_roundtrip() {
 			.expect("accept returned None");
 		assert_eq!(request.path(), "/test");
 		assert_eq!(request.query().as_deref(), Some("foo=bar"));
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
 	// Client side: connect, subscribe via a consume origin.
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_consume(Some(client_origin.clone())).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(client_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -3391,37 +3640,44 @@ async fn server_client_roundtrip() {
 	// Publish a broadcast on the server side.
 	let broadcast = create_announced(&server_origin, "hello");
 	let init = opus_head();
-	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, init),
+	)
+	.unwrap();
 
 	// Receive the announcement on the client side via the consume origin.
 	let consumer = client_origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out waiting for announcement over the wire")
-		.unwrap()
-		.expect("expected an announcement");
-	assert_eq!(announcement.prefix(), "hello");
+	let announcement = next_announced(&announced).await;
+	assert_eq!(announcement.prefix, "hello");
 
 	// Subscribe to the audio track and verify a frame round-trips.
 	let bc = await_announced(&consumer, "hello").await;
-	let catalog_consumer = bc.subscribe_catalog().await.unwrap();
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&bc).await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
 		.unwrap()
 		.expect("expected a catalog");
 	let (track_name, audio) = catalog.audio.iter().next().unwrap();
-	let media_consumer = bc
-		.subscribe_media(track_name.clone(), audio.container.clone(), None)
-		.await
-		.unwrap();
+	let media_consumer = MoqMediaContainerConsumer::subscribe(
+		&bc,
+		MoqMediaContainerConfig {
+			name: track_name.clone(),
+			container: audio.container.clone(),
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap();
 
 	let payload = b"hello over the wire".to_vec();
 	media
 		.write_frame(MoqFrame {
 			payload: payload.clone(),
-			timestamp_us: 1_000_000,
+			timestamp_us: Some(1_000_000),
 		})
 		.unwrap();
 
@@ -3437,21 +3693,24 @@ async fn server_client_roundtrip() {
 	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	cs.shutdown();
+	cs.shutdown().await.unwrap();
 	server_session.cancel(0);
 	server.cancel();
 }
 
 #[tokio::test]
 async fn server_client_roundtrip_auto_origin() {
-	// Same shape as `server_client_roundtrip` but the client never calls
-	// `set_publish` / `set_consume`: the auto-created origin sides on
+	// Same shape as `server_client_roundtrip` but the client config omits
+	// origins: the auto-created origin sides on
 	// `MoqClientSession` are what drive publishing and subscribing.
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	server.set_publish(Some(server_origin.clone())).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3466,13 +3725,16 @@ async fn server_client_roundtrip_auto_origin() {
 			.await
 			.expect("accept errored")
 			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
-	// No set_publish / set_consume, so this uses the auto-origin path.
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
+	// No configured origins, so this uses the auto-origin path.
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		..Default::default()
+	})
+	.unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -3489,15 +3751,16 @@ async fn server_client_roundtrip_auto_origin() {
 	// Server publishes; client receives via the auto consumer.
 	let broadcast = create_announced(&server_origin, "hello");
 	let init = opus_head();
-	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, init),
+	)
+	.unwrap();
 
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out waiting for announcement over the wire")
-		.unwrap()
-		.expect("expected an announcement");
-	assert_eq!(announcement.prefix(), "hello");
+	let announcement = next_announced(&announced).await;
+	assert_eq!(announcement.prefix, "hello");
 
 	// With neither side wired, both share one origin, so a broadcast announced on this
 	// session's publisher is discoverable through its own consumer.
@@ -3512,32 +3775,40 @@ async fn server_client_roundtrip_auto_origin() {
 
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	cs.shutdown();
+	cs.shutdown().await.unwrap();
 	server_session.cancel(0);
 	server.cancel();
 }
 
 #[tokio::test]
-async fn server_set_bind_validates() {
-	let server = MoqServer::new();
-	assert!(server.set_bind("127.0.0.1:0".into()).is_ok());
-	assert!(server.set_bind("[::]:443".into()).is_ok());
-	assert!(server.set_bind("localhost:4443".into()).is_ok());
-	assert!(matches!(
-		server.set_bind("localhost:443:8443".into()),
-		Err(crate::error::MoqError::Bind(_))
-	));
-	assert!(matches!(
-		server.set_bind("not-an-address".into()),
-		Err(crate::error::MoqError::Bind(_))
-	));
+async fn server_new_validates_the_config() {
+	let server = |bind: &str| {
+		MoqServer::new(MoqServerConfig {
+			bind: Some(bind.into()),
+			..Default::default()
+		})
+	};
+	assert!(server("127.0.0.1:0").is_ok());
+	assert!(server("[::]:443").is_ok());
+	assert!(server("localhost:4443").is_ok());
+	assert!(matches!(server("localhost:443:8443"), Err(MoqError::Config(_))));
+	assert!(matches!(server("not-an-address"), Err(MoqError::Config(_))));
+
+	let version = MoqServer::new(MoqServerConfig {
+		versions: vec!["moq-lite-99".into()],
+		..Default::default()
+	});
+	assert!(matches!(version, Err(MoqError::Config(_))));
 }
 
 #[tokio::test]
 async fn server_cert_fingerprints_available_after_listen() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	// Not available before listen().
 	assert!(matches!(
@@ -3559,9 +3830,12 @@ async fn server_cert_fingerprints_available_after_listen() {
 
 #[tokio::test]
 async fn server_cert_fingerprints_rejected_after_cancel() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3583,15 +3857,22 @@ async fn server_cert_fingerprints_rejected_after_cancel() {
 /// cancel has to unwind an in-flight run rather than an idle state.
 #[tokio::test]
 async fn server_cancel_releases_the_bound_port() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
 	// Park an accept on the server lock, the state a live server is closed in.
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
-	wait_for_config_error(|| server.set_publish(None), |err| matches!(err, MoqError::Busy)).await;
+	wait_for_config_error(
+		|| server.cert_fingerprints().map(drop),
+		|err| matches!(err, MoqError::Busy),
+	)
+	.await;
 
 	server.cancel();
 
@@ -3601,9 +3882,12 @@ async fn server_cancel_releases_the_bound_port() {
 	std::net::UdpSocket::bind(&addr).expect("cancel should release the socket before it returns");
 
 	// No retry: the socket is already closed, so this must succeed on the first try.
-	let rebound = MoqServer::new();
-	rebound.set_bind(addr.clone()).unwrap();
-	rebound.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let rebound = MoqServer::new(MoqServerConfig {
+		bind: Some(addr.clone()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	rebound.listen().await.expect("the port should rebind immediately");
 
 	let accept = tokio::time::timeout(TIMEOUT, accept)
@@ -3619,9 +3903,12 @@ async fn server_cancel_releases_the_bound_port() {
 async fn request_double_respond_returns_already_responded() {
 	use crate::error::MoqError;
 
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
 	let url = format!("https://{addr}");
@@ -3634,8 +3921,8 @@ async fn request_double_respond_returns_already_responded() {
 			.expect("accept returned None");
 
 		// Accept once, then try a second response. It must error.
-		let session = request.accept().await.expect("first ok succeeds");
-		let second_ok = request.accept().await;
+		let session = request.accept(None, None).await.expect("first ok succeeds");
+		let second_ok = request.accept(None, None).await;
 		assert!(
 			matches!(second_ok, Err(MoqError::AlreadyResponded)),
 			"second ok() must fail"
@@ -3648,9 +3935,12 @@ async fn request_double_respond_returns_already_responded() {
 		session
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		..Default::default()
+	})
+	.unwrap();
 	let _session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -3668,9 +3958,12 @@ async fn request_double_respond_returns_already_responded() {
 #[tokio::test]
 async fn request_per_session_publish_override() {
 	// The server's publish origin is empty; a per-request override is used instead.
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = server.listen().await.expect("listen failed");
 	let url = format!("https://{addr}");
@@ -3686,15 +3979,20 @@ async fn request_per_session_publish_override() {
 			.expect("accept errored")
 			.expect("accept returned None");
 		// Override publish on a per-request basis.
-		request.set_publish(Some(override_for_task)).unwrap();
-		request.accept().await.expect("ok succeeds")
+		request
+			.accept(Some(override_for_task), None)
+			.await
+			.expect("ok succeeds")
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_consume(Some(client_origin.clone())).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(client_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -3710,12 +4008,8 @@ async fn request_per_session_publish_override() {
 
 	let consumer = client_origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out waiting for override announcement")
-		.unwrap()
-		.expect("expected an announcement");
-	assert_eq!(announcement.prefix(), "override-only");
+	let announcement = next_announced(&announced).await;
+	assert_eq!(announcement.prefix, "override-only");
 
 	broadcast.close().unwrap();
 	cs.cancel(0);
@@ -3730,10 +4024,13 @@ async fn request_per_session_publish_override() {
 #[tokio::test]
 async fn client_reconnects_and_resumes_announcements() {
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	server.set_publish(Some(server_origin.clone())).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3754,7 +4051,7 @@ async fn client_reconnects_and_resumes_announcements() {
 			.await
 			.expect("first accept errored")
 			.expect("first accept returned None");
-		let first = first.accept().await.expect("first handshake failed");
+		let first = first.accept(None, None).await.expect("first handshake failed");
 		if first_tx.send(first).is_err() {
 			panic!("test body gone");
 		}
@@ -3765,23 +4062,19 @@ async fn client_reconnects_and_resumes_announcements() {
 			.await
 			.expect("second accept errored")
 			.expect("second accept returned None");
-		second.accept().await.expect("second handshake failed")
+		second.accept(None, None).await.expect("second handshake failed")
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_consume(Some(client_origin.clone())).unwrap();
-	// Fast retries so the test doesn't wait out the default 1s backoff.
-	client
-		.set_backoff(MoqBackoff {
-			initial_us: 50_000,
-			multiplier: 2,
-			max_us: 200_000,
-			timeout_us: 0,
-		})
-		.unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(client_origin.clone()),
+		// Fast retries so the test doesn't wait out the default 1s backoff.
+		backoff: fast_backoff(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -3838,12 +4131,8 @@ async fn client_reconnects_and_resumes_announcements() {
 
 	let consumer = client_origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("timed out waiting for the post-reconnect announcement")
-		.unwrap()
-		.expect("expected an announcement");
-	assert_eq!(announcement.prefix(), "after-reconnect");
+	let announcement = next_announced(&announced).await;
+	assert_eq!(announcement.prefix, "after-reconnect");
 
 	broadcast.close().unwrap();
 	cs.cancel(0);
@@ -3855,9 +4144,12 @@ async fn client_reconnects_and_resumes_announcements() {
 /// the session, surfacing through `closed()` instead of a redial.
 #[tokio::test]
 async fn one_shot_client_close_surfaces_through_closed() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3872,13 +4164,16 @@ async fn one_shot_client_close_surfaces_through_closed() {
 			.await
 			.expect("accept errored")
 			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -3905,9 +4200,12 @@ async fn one_shot_client_close_surfaces_through_closed() {
 /// test_server_request_close, which drives the same path through the bindings.
 #[tokio::test]
 async fn rejected_session_surfaces_through_closed() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3925,10 +4223,13 @@ async fn rejected_session_surfaces_through_closed() {
 		}
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 
 	// Either the dial fails outright, or the optimistic connect resolves and the
 	// rejection lands as the session's terminal close. Both must surface within
@@ -3951,8 +4252,11 @@ async fn rejected_session_surfaces_through_closed() {
 /// loop or not; the kt BindingsSmokeTest relies on this to fail fast.
 #[tokio::test]
 async fn cancel_before_connect_fails_fast() {
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	client.cancel();
 	let result = tokio::time::timeout(
 		Duration::from_secs(5),
@@ -3974,9 +4278,12 @@ async fn cancel_before_connect_fails_fast() {
 /// `recv_datagram`) sits on that path; `status` is just the easiest to drive.
 #[tokio::test]
 async fn cancelled_status_does_not_swallow_the_next_transition() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3993,20 +4300,16 @@ async fn cancelled_status_does_not_swallow_the_next_transition() {
 			.await
 			.expect("accept errored")
 			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client
-		.set_backoff(MoqBackoff {
-			initial_us: 50_000,
-			multiplier: 2,
-			max_us: 200_000,
-			timeout_us: 0,
-		})
-		.unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		backoff: fast_backoff(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -4190,9 +4493,12 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 }
 
 async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
@@ -4206,13 +4512,16 @@ async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) 
 			.await
 			.expect("accept errored")
 			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 	let client_session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -4257,33 +4566,29 @@ async fn session_protocol_codes_cross_the_ffi() {
 		server.cancel();
 	}
 }
-
 #[tokio::test]
-async fn client_setters_busy_during_connect_and_cancelled_after() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+async fn client_cancel_aborts_a_pending_connect() {
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 
-	// The server never accepts, so connect holds the client lock in established().
+	// The server never accepts, so connect parks in established().
 	let connecting = client.clone();
-	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
-
-	assert!(matches!(
-		wait_for_config_error(|| client.set_tls_verify(false), |err| matches!(err, MoqError::Busy)).await,
-		MoqError::Busy
-	));
-	assert!(matches!(client.set_publish(None), Err(MoqError::Busy)));
-	assert!(matches!(client.set_bind("127.0.0.1:0".into()), Err(MoqError::Busy)));
+	let connect = spawn_parked(async move { connecting.connect(format!("https://{addr}")).await }).await;
 
 	client.cancel();
-	assert!(matches!(client.set_tls_verify(true), Err(MoqError::Cancelled)));
-	assert!(matches!(client.set_publish(None), Err(MoqError::Cancelled)));
 
 	let connect_err = tokio::time::timeout(TIMEOUT, connect)
 		.await
@@ -4294,84 +4599,28 @@ async fn client_setters_busy_during_connect_and_cancelled_after() {
 }
 
 #[tokio::test]
-async fn client_setters_apply_after_connect_returns() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	let addr = server.listen().await.expect("listen failed");
-
-	let accept_server = server.clone();
-	let accept = tokio::spawn(async move {
-		let request = accept_server
-			.accept()
-			.await
-			.expect("accept errored")
-			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
-	});
-
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
-		.await
-		.expect("connect timed out")
-		.expect("connect failed");
-
-	// A finished connect releases the lock; later setters apply to the next dial.
-	client.set_quic_max_streams(2048).unwrap();
-	client.set_reconnect(false).unwrap();
-
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
-		.await
-		.expect("accept timed out")
-		.expect("accept task panicked");
-	session.shutdown();
-	server_session.cancel(0);
-	server.cancel();
-}
-
-#[tokio::test]
-async fn server_setters_busy_during_accept_cancelled_after_and_frozen_after_listen() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+async fn server_cert_fingerprints_busy_during_accept_and_cancelled_after() {
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	server.listen().await.expect("listen failed");
-
-	assert!(matches!(server.set_bind("127.0.0.1:1".into()), Err(MoqError::Bind(_))));
-	assert!(matches!(
-		server.set_tls_generate(vec!["other".into()]),
-		Err(MoqError::Bind(_))
-	));
-	assert!(matches!(
-		server.set_tls_cert(vec!["cert.pem".into()]),
-		Err(MoqError::Bind(_))
-	));
-	assert!(matches!(
-		server.set_tls_key(vec!["key.pem".into()]),
-		Err(MoqError::Bind(_))
-	));
-
-	// Origins are captured at accept, so they still apply between accepts.
-	server.set_publish(None).unwrap();
-	server.set_consume(None).unwrap();
+	server
+		.cert_fingerprints()
+		.expect("fingerprints available between accepts");
 
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
 
-	assert!(matches!(
-		wait_for_config_error(|| server.set_publish(None), |err| matches!(err, MoqError::Busy)).await,
-		MoqError::Busy
-	));
-	assert!(matches!(server.set_consume(None), Err(MoqError::Busy)));
-	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Busy)));
+	wait_for_config_error(
+		|| server.cert_fingerprints().map(drop),
+		|err| matches!(err, MoqError::Busy),
+	)
+	.await;
 
 	server.cancel();
-	assert!(matches!(server.set_publish(None), Err(MoqError::Cancelled)));
-	assert!(matches!(
-		server.set_bind("127.0.0.1:0".into()),
-		Err(MoqError::Cancelled)
-	));
 	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Cancelled)));
 
 	let accept_err = tokio::time::timeout(TIMEOUT, accept)
@@ -4381,84 +4630,112 @@ async fn server_setters_busy_during_accept_cancelled_after_and_frozen_after_list
 	assert!(matches!(accept_err, Err(MoqError::Cancelled)));
 }
 
+// Queue accept behind another operation so the origin arguments must survive the
+// caller releasing its handles before the handshake starts on the FFI runtime.
 #[tokio::test]
-async fn request_origin_setters_apply_or_error() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	let addr = server.listen().await.expect("listen failed");
+async fn request_accept_inherits_overrides_and_captures_origins() {
+	for (override_publish, override_consume) in [(false, false), (true, false), (false, true), (true, true)] {
+		let default_publish = MoqOriginProducer::new(MoqOriginConfig::default());
+		let default_consume = MoqOriginProducer::new(MoqOriginConfig::default());
+		let fresh = MoqOriginProducer::new(MoqOriginConfig::default());
+		let publish = override_publish.then(|| fresh.clone());
+		let consume = override_consume.then(|| fresh.clone());
+		let expected_publish = publish.as_ref().unwrap_or(&default_publish).inner().hop();
+		let expected_consume = consume.as_ref().unwrap_or(&default_consume).consume();
+		let captured = Arc::downgrade(&fresh);
+		let server = MoqServer::new(MoqServerConfig {
+			bind: Some("127.0.0.1:0".into()),
+			tls: localhost_tls(),
+			publish: Some(default_publish),
+			consume: Some(default_consume),
+			..Default::default()
+		})
+		.unwrap();
+		let addr = server.listen().await.unwrap();
+		let client = MoqClient::new(MoqClientConfig {
+			tls: insecure_tls(),
+			bind: Some("127.0.0.1:0".into()),
+			once: true,
+			..Default::default()
+		})
+		.unwrap();
+		let connecting = client.clone();
+		let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
+		let request = tokio::time::timeout(TIMEOUT, server.accept())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+		let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+		let holding = request.clone();
+		let hold = tokio::spawn(async move {
+			holding
+				.hold_lock(|| async move {
+					let _ = held_tx.send(());
+					let _ = release_rx.await;
+				})
+				.await
+		});
+		tokio::time::timeout(TIMEOUT, held_rx).await.unwrap().unwrap();
+		let accepting = request.clone();
+		let accept = spawn_parked(async move { accepting.accept(publish, consume).await }).await;
+		drop(fresh);
+		if override_publish || override_consume {
+			assert!(
+				captured.upgrade().is_some(),
+				"accept must own the origin arguments while queued"
+			);
+		}
+		release_tx.send(()).unwrap();
+		tokio::time::timeout(TIMEOUT, hold).await.unwrap().unwrap().unwrap();
+		let session = tokio::time::timeout(TIMEOUT, accept).await.unwrap().unwrap().unwrap();
+		let client_session = tokio::time::timeout(TIMEOUT, connect).await.unwrap().unwrap().unwrap();
+		assert_eq!(session.publish().inner().hop(), expected_publish);
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
-
-	let connecting = client.clone();
-	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
-
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
-		.await
-		.expect("accept timed out")
-		.expect("accept errored")
-		.expect("accept returned None");
-
-	request.set_publish(None).unwrap();
-	request.set_consume(None).unwrap();
-
-	let (held_tx, held_rx) = tokio::sync::oneshot::channel();
-	let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-	let holding = request.clone();
-	let hold = holding.hold_lock(|| async move {
-		let _ = held_tx.send(());
-		let _ = release_rx.await;
-	});
-	tokio::pin!(hold);
-	tokio::select! {
-		biased;
-		result = &mut hold => panic!("lock holder returned before release: {result:?}"),
-		held = held_rx => held.expect("lock holder dropped"),
+		// Incoming broadcasts reach the selected consume origin, independently
+		// of which publish side was selected.
+		let announced = expected_consume.announced(MoqAnnounceConfig::default()).unwrap();
+		let broadcast = create_announced(&client_session.publish(), "incoming");
+		assert_eq!(next_announced(&announced).await.prefix, "incoming");
+		if override_publish && override_consume {
+			// Both explicit arguments referred to one fresh origin, so the
+			// publish handle must see broadcasts arriving on the consume side.
+			let shared = session
+				.publish()
+				.consume()
+				.announced(MoqAnnounceConfig::default())
+				.unwrap();
+			assert_eq!(next_announced(&shared).await.prefix, "incoming");
+		}
+		assert!(matches!(
+			request.accept(None, None).await,
+			Err(MoqError::AlreadyResponded)
+		));
+		broadcast.close().unwrap();
+		client_session.cancel(0);
+		session.cancel(0);
+		server.cancel();
 	}
-
-	assert!(matches!(
-		wait_for_config_error(|| request.set_publish(None), |err| matches!(err, MoqError::Busy)).await,
-		MoqError::Busy
-	));
-	assert!(matches!(request.set_consume(None), Err(MoqError::Busy)));
-
-	release_tx.send(()).expect("lock holder should still be waiting");
-	tokio::time::timeout(TIMEOUT, hold)
-		.await
-		.expect("lock holder timed out")
-		.expect("lock holder failed");
-
-	let session = tokio::time::timeout(TIMEOUT, request.accept())
-		.await
-		.expect("handshake timed out")
-		.expect("handshake failed");
-
-	assert!(matches!(request.set_publish(None), Err(MoqError::AlreadyResponded)));
-	assert!(matches!(request.set_consume(None), Err(MoqError::AlreadyResponded)));
-
-	let _cs = tokio::time::timeout(TIMEOUT, connect)
-		.await
-		.expect("connect timed out")
-		.expect("connect task panicked")
-		.expect("connect failed");
-	session.cancel(0);
-	server.cancel();
 }
 
 #[tokio::test]
-async fn request_origin_setters_cancelled_after_cancel() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+async fn request_accept_cancelled_after_cancel() {
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 
 	let connecting = client.clone();
 	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
@@ -4469,10 +4746,36 @@ async fn request_origin_setters_cancelled_after_cancel() {
 		.expect("accept errored")
 		.expect("accept returned None");
 
-	request.set_publish(None).unwrap();
+	let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+	let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+	let holding = request.clone();
+	let hold = tokio::spawn(async move {
+		holding
+			.hold_lock(|| async move {
+				let _ = held_tx.send(());
+				let _ = release_rx.await;
+			})
+			.await
+	});
+	tokio::time::timeout(TIMEOUT, held_rx).await.unwrap().unwrap();
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let captured = Arc::downgrade(&origin);
+	let accepting = request.clone();
+	let accept = spawn_parked(async move { accepting.accept(Some(origin), None).await }).await;
+	assert!(captured.upgrade().is_some());
+
 	request.cancel();
-	assert!(matches!(request.set_publish(None), Err(MoqError::Cancelled)));
-	assert!(matches!(request.set_consume(None), Err(MoqError::Cancelled)));
+	assert!(matches!(request.accept(None, None).await, Err(MoqError::Cancelled)));
+	assert!(matches!(request.reject(403).await, Err(MoqError::Cancelled)));
+
+	let result = tokio::time::timeout(TIMEOUT, accept).await.unwrap().unwrap();
+	assert!(matches!(result, Err(MoqError::Cancelled)));
+	let result = tokio::time::timeout(TIMEOUT, hold).await.unwrap().unwrap();
+	assert!(matches!(result, Err(MoqError::Cancelled)));
+	assert!(
+		captured.upgrade().is_none(),
+		"cancel must release the queued origin arguments"
+	);
 
 	client.cancel();
 	let _ = tokio::time::timeout(TIMEOUT, connect).await;
@@ -4495,10 +4798,13 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	}
 
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	server.set_publish(Some(server_origin.clone())).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
@@ -4507,13 +4813,16 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	let accept_server = server.clone();
 	let accept = tokio::spawn(async move {
 		let request = accept_server.accept().await.unwrap().expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_consume(Some(client_origin.clone())).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		consume: Some(client_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
 		.await
 		.expect("connect timed out")
@@ -4577,18 +4886,21 @@ fn published_catalog(
 #[tokio::test]
 async fn json_tracks_are_advertised_in_the_catalog() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let snapshot = broadcast
-		.publish_json_snapshot(
-			"status".into(),
-			MoqJsonSnapshotConfig {
-				delta_ratio: 4,
-				compression: true,
-			},
-		)
-		.unwrap();
-	let stream = broadcast
-		.publish_json_stream("events".into(), MoqJsonStreamConfig { compression: false })
-		.unwrap();
+	let snapshot = MoqJsonSnapshotProducer::new(
+		&broadcast,
+		&broadcast.publish_track("status".into(), None).unwrap(),
+		MoqJsonSnapshotConfig {
+			delta_ratio: 4,
+			compression: true,
+		},
+	)
+	.unwrap();
+	let stream = MoqJsonStreamProducer::new(
+		&broadcast,
+		&broadcast.publish_track("events".into(), None).unwrap(),
+		MoqJsonStreamConfig { compression: false },
+	)
+	.unwrap();
 
 	let catalog = published_catalog(&broadcast);
 	let entry = catalog.json.tracks.get("status").expect("snapshot track advertised");
@@ -4609,28 +4921,28 @@ async fn json_tracks_are_advertised_in_the_catalog() {
 	assert!(published_catalog(&broadcast).json.tracks.is_empty());
 }
 
-/// Binary tracks carry their mode and (optional) media type in the catalog.
+/// Flate tracks carry their mode and (optional) media type in the catalog.
 #[tokio::test]
-async fn binary_tracks_are_advertised_in_the_catalog() {
+async fn flate_tracks_are_advertised_in_the_catalog() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let thumb = broadcast
-		.publish_binary_snapshot(
-			"thumbnail".into(),
-			MoqBinaryConfig {
-				compression: false,
-				mime: Some("image/jpeg".into()),
-			},
-		)
-		.unwrap();
-	let log = broadcast
-		.publish_binary_stream(
-			"log".into(),
-			MoqBinaryConfig {
-				compression: false,
-				mime: None,
-			},
-		)
-		.unwrap();
+	let thumb = MoqFlateSnapshotProducer::new(
+		&broadcast,
+		&broadcast.publish_track("thumbnail".into(), None).unwrap(),
+		MoqFlateConfig {
+			compression: false,
+			mime: Some("image/jpeg".into()),
+		},
+	)
+	.unwrap();
+	let log = MoqFlateStreamProducer::new(
+		&broadcast,
+		&broadcast.publish_track("log".into(), None).unwrap(),
+		MoqFlateConfig {
+			compression: false,
+			mime: None,
+		},
+	)
+	.unwrap();
 	thumb.update(vec![0xff, 0xd8, 0xff]).unwrap();
 	log.append(vec![1, 2, 3]).unwrap();
 
@@ -4653,30 +4965,28 @@ async fn binary_tracks_are_advertised_in_the_catalog() {
 }
 
 /// A second data track under a name the catalog already carries is refused, leaving the first.
+///
+/// The broadcast refuses a duplicate track itself, so the collision comes from a track created on
+/// another broadcast. The refused track's handle stays open for the caller.
 #[tokio::test]
 async fn data_track_names_cannot_collide() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let first = broadcast
-		.publish_json_snapshot(
-			"state".into(),
-			MoqJsonSnapshotConfig {
-				delta_ratio: 0,
-				compression: false,
-			},
-		)
-		.unwrap();
+	let first = MoqJsonSnapshotProducer::new(
+		&broadcast,
+		&broadcast.publish_track("state".into(), None).unwrap(),
+		MoqJsonSnapshotConfig {
+			delta_ratio: 0,
+			compression: false,
+		},
+	)
+	.unwrap();
+	let other = MoqBroadcastProducer::new().unwrap();
+	let track = other.publish_track("state".into(), None).unwrap();
 	assert!(
-		broadcast
-			.publish_binary_stream(
-				"state".into(),
-				MoqBinaryConfig {
-					compression: false,
-					mime: None,
-				},
-			)
-			.is_err(),
+		MoqJsonStreamProducer::new(&broadcast, &track, MoqJsonStreamConfig { compression: false }).is_err(),
 		"a duplicate data track name should fail"
 	);
+	assert_eq!(track.demand().unwrap().name(), "state");
 	assert_eq!(
 		published_catalog(&broadcast)
 			.json
@@ -4686,4 +4996,123 @@ async fn data_track_names_cannot_collide() {
 		Some(hang::catalog::Mode::Snapshot)
 	);
 	first.finish().unwrap();
+}
+
+/// Real sockets exercise the FFI runtime and both accepted/client session handles.
+async fn shutdown_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = server.listen().await.unwrap();
+	let accepting = server.clone();
+	let accepted = tokio::spawn(async move {
+		accepting
+			.accept()
+			.await
+			.unwrap()
+			.unwrap()
+			.accept(None, None)
+			.await
+			.unwrap()
+	});
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
+	let connected = client.connect(format!("https://{addr}")).await.unwrap();
+	(server, connected, accepted.await.unwrap())
+}
+
+#[tokio::test]
+async fn shutdown_delivers_the_finished_track() {
+	for client_publishes in [false, true] {
+		let (server, client, accepted) = tokio::time::timeout(TIMEOUT, shutdown_pair()).await.expect("pair");
+		let (publisher, subscriber) = if client_publishes {
+			(&client, &accepted)
+		} else {
+			(&accepted, &client)
+		};
+		let broadcast = create_announced(&publisher.publish(), "tail");
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		let remote = await_announced(&subscriber.consume(), "tail").await;
+		let reader = tokio::time::timeout(TIMEOUT, remote.subscribe_track("data".into(), None))
+			.await
+			.expect("subscribe")
+			.unwrap();
+		let receiving = tokio::spawn(async move {
+			let frame = reader.read_frame().await?;
+			let end = reader.read_frame().await?;
+			Ok::<_, MoqError>((frame, end))
+		});
+		tokio::time::timeout(TIMEOUT, track.demand().unwrap().used())
+			.await
+			.expect("used")
+			.unwrap();
+		let closing = publisher.clone();
+		crate::ffi::detached(async move {
+			let group = track.append_group()?;
+			group.write_frame(MoqFrame {
+				timestamp_us: Some(0),
+				payload: b"last".to_vec(),
+			})?;
+			group.finish()?;
+			track.finish()?;
+			closing.shutdown().await?;
+			Ok::<(), MoqError>(())
+		})
+		.await
+		.unwrap();
+		let (frame, end) = tokio::time::timeout(TIMEOUT, receiving)
+			.await
+			.expect("read")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.unwrap().payload, b"last");
+		assert!(end.is_none());
+		client.cancel(0);
+		accepted.cancel(0);
+		server.cancel();
+	}
+}
+
+#[tokio::test]
+async fn shutdown_times_out_on_an_unfinished_track() {
+	for client_publishes in [false, true] {
+		let (server, client, accepted) = shutdown_pair().await;
+		let (publisher, subscriber) = if client_publishes {
+			(&client, &accepted)
+		} else {
+			(&accepted, &client)
+		};
+		let broadcast = create_announced(&publisher.publish(), "live");
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		let remote = await_announced(&subscriber.consume(), "live").await;
+		let reader = remote.subscribe_track("data".into(), None).await.unwrap();
+		let receiving = tokio::spawn(async move { reader.read_frame().await });
+		tokio::time::timeout(TIMEOUT, track.demand().unwrap().used())
+			.await
+			.unwrap()
+			.unwrap();
+		let start = std::time::Instant::now();
+		let err = publisher.shutdown().await.expect_err("unfinished track must time out");
+		// The documented one second of draining, so an immediate bail still fails here.
+		assert!(
+			start.elapsed() >= Duration::from_secs(1),
+			"gave up draining after {:?}",
+			start.elapsed()
+		);
+		assert!(
+			matches!(err, MoqError::Protocol { details } if details.kind == crate::error::MoqProtocolKind::DeliveryTimeout)
+		);
+		let _ = tokio::time::timeout(TIMEOUT, receiving).await.unwrap().unwrap();
+		client.cancel(0);
+		accepted.cancel(0);
+		server.cancel();
+	}
 }

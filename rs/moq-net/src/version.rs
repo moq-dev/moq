@@ -267,13 +267,13 @@ impl TryFrom<coding::Version> for Version {
 }
 
 impl coding::Decode<Version> for Version {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, coding::DecodeError> {
+	fn decode(r: &mut coding::Decoder<'_>, version: Version) -> Result<Self, coding::DecodeError> {
 		coding::Version::decode(r, version).and_then(|v| v.try_into().map_err(|_| coding::DecodeError::InvalidValue))
 	}
 }
 
 impl coding::Encode<Version> for Version {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, v: Version) -> Result<(), coding::EncodeError> {
+	fn encode(&self, w: &mut coding::Encoder<'_>, v: Version) -> Result<(), coding::EncodeError> {
 		coding::Version::from(*self).encode(w, v)
 	}
 }

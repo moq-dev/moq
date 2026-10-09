@@ -125,10 +125,7 @@ impl Producer {
 
 	/// Poll until there are no active consumers. Errors if the channel closes first.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map(|used| match used {
-			Some(()) => Ok(()),
-			None => Err(self.close_error()),
-		})
+		self.state.poll_unused(waiter).map_err(|_| self.close_error())
 	}
 
 	/// Whether at least one active consumer exists right now.
@@ -143,10 +140,7 @@ impl Producer {
 
 	/// Poll until at least one active consumer exists. Errors if the channel closes first.
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map(|used| match used {
-			Some(()) => Ok(()),
-			None => Err(self.close_error()),
-		})
+		self.state.poll_used(waiter).map_err(|_| self.close_error())
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, State>> {
@@ -716,7 +710,7 @@ mod tests {
 
 	/// The headline case: two encoders on one connection must not each target the
 	/// whole estimate.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn concurrent_tracks_split_the_estimate() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -742,8 +736,8 @@ mod tests {
 
 	/// An unwatched track releases its reservation, since `publish_capture` stops
 	/// encoding entirely while nothing is subscribed.
-	#[tokio::test]
-	async fn an_idle_track_claims_nothing() {
+	#[test]
+	fn an_idle_track_claims_nothing() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
 		estimate.set(Some(bps(2_000_000))).unwrap();
@@ -768,7 +762,7 @@ mod tests {
 
 	/// Demand transitions have to wake a parked share, not just change what a later
 	/// `peek` would see; the encoder is sitting in a `select!` on `changed`.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_share_wakes_when_a_sibling_goes_idle() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -825,7 +819,7 @@ mod tests {
 	/// waker armed. Reservations cap the slice, so most estimate changes don't reach
 	/// it, and a poll that returned the value without arming anything would park the
 	/// encoder with nothing left to wake it.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn an_unchanged_slice_keeps_watching_the_estimate() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -851,7 +845,7 @@ mod tests {
 	}
 
 	/// The same, for the other input: a sibling's demand.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_parked_share_is_woken_by_sibling_demand() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -876,7 +870,7 @@ mod tests {
 
 	/// A share follows the estimate's own lifecycle: unavailable while disconnected
 	/// (hold the current rate), terminal once the session is gone for good.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_share_follows_the_estimate_lifecycle() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -899,8 +893,8 @@ mod tests {
 
 	/// A closed track's entry can't linger: it would be walked on every poll for the
 	/// rest of the connection, and a long-lived publisher churns tracks.
-	#[tokio::test]
-	async fn a_closed_track_is_pruned() {
+	#[test]
+	fn a_closed_track_is_pruned() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
 
@@ -919,7 +913,7 @@ mod tests {
 	/// Dropping the reservation hands the room back. The registry only ever prunes
 	/// tracks that have *closed*, so a claim left behind by a track that is still
 	/// publishing would stand for the rest of the connection.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn dropping_a_reservation_releases_it() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -953,8 +947,8 @@ mod tests {
 	/// A sender whose ceiling moved (a capture reopening at a resolution it negotiated
 	/// with the device) changes the claim in place. Re-reserving instead would claim
 	/// twice, since nothing releases the first entry while the track is still alive.
-	#[tokio::test]
-	async fn update_changes_the_claim_in_place() {
+	#[test]
+	fn update_changes_the_claim_in_place() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
 		estimate.set(Some(bps(6_000_000))).unwrap();
@@ -985,7 +979,7 @@ mod tests {
 
 	/// A reader parked on `changed` has to be woken by its own reservation moving, not
 	/// just by the estimate or a sibling: the encoder is sitting in a `select!` on it.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn update_wakes_a_parked_reader() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -1007,7 +1001,7 @@ mod tests {
 
 	/// The registry is the allocator's, not a share's: a share that outlives every
 	/// allocator reports the estimate as gone rather than keeping the channel open.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_share_outliving_the_allocator_reports_closed() {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
@@ -1026,7 +1020,7 @@ mod tests {
 	/// holds its rate for the former and stops watching for the latter.
 	/// Reporting closure as `Ok(None)` would spin any `select!` over `changed()`,
 	/// because a closed channel is always immediately ready.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn closed_is_distinct_from_unavailable() {
 		let producer = Producer::new();
 		let mut consumer = producer.consume();

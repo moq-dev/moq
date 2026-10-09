@@ -10,8 +10,7 @@ work and deferred mobile phases are complete before #700 closes.
 
 This quest owns the cross-phase completion proof, not another implementation.
 Use the Rust capture path and the existing binding APIs: Rust owns capture
-and codecs on mobile, settled in the 2026-09-30 audit
-([Mobile ownership](/quest/m1/mobile-ownership.md)). Record the supported
+and codecs on mobile, settled in the 2026-09-30 audit. Record the supported
 path, limitations, and reproducible device results; wire repeatable coverage
 into CI and identify the hardware evidence separately. Update the
 native/mobile getting-started docs with the working path.

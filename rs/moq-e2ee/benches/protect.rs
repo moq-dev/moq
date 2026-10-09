@@ -6,8 +6,9 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use moq_e2ee::Credential;
 use moq_e2ee::credential::Config;
-use moq_e2ee::{Credential, Epoch};
+use moq_net::Epoch;
 use moq_net::Timestamp;
 
 fn credential() -> Credential {

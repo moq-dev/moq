@@ -18,35 +18,120 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 	pub driver: Driver<S>,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
+	/// Whether the peer's SETUP arrived, read by [`crate::Session::setup`].
+	pub setup: crate::session::Setup,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
 /// the session, so the caller can inspect the advertised path (and gate on it) before
 /// serving. lite-05+ only.
 ///
-/// Blocks on the peer's Setup Stream, which every lite-05+ endpoint opens at startup.
-/// Almost always the first unidirectional stream; any other uni stream that races
-/// ahead of it is `STOP_SENDING`-ed and skipped (we don't support proactive uni
-/// PUBLISH, so nothing legitimate precedes the SETUP today). The eventual home for
-/// out-of-order tolerance is the full session loop with deferred origin binding.
+/// Other uni streams racing ahead of SETUP are held for the normal session
+/// classifier. QUIC stream credit bounds the held queue.
 ///
-/// Pass the returned [`Setup`] to [`start`] as its `peer_setup` so PROBE gating still
-/// resolves without re-reading the (consumed) stream.
+/// Pass the result to [`start`] as its `peer_setup` so capability gating resolves
+/// without re-reading SETUP, and every held stream is handed back to the driver.
 pub async fn accept_setup<S: crate::transport::poll::Session>(
 	session: &mut S,
 	version: Version,
-) -> Result<Setup, Error> {
-	loop {
-		let stream = session.accept_uni().await.map_err(Error::from_transport)?;
-		let mut reader = Reader::new(stream, version);
+) -> Result<AcceptedSetup<S>, Error> {
+	let mut accept = SetupAccept::<S> {
+		version,
+		pending: Vec::new(),
+		early: Vec::new(),
+		setup: None,
+	};
+	kio::wait(|waiter| accept.poll(session, waiter)).await
+}
 
-		match reader.decode::<DataType>().await? {
-			DataType::Setup => return reader.decode::<Setup>().await,
-			// A non-SETUP uni stream this early is unexpected (GROUP needs a prior
-			// subscribe). Reject it and keep waiting rather than failing the session.
-			_ => reader.abort(&Error::UnexpectedStream),
+struct SetupAccept<S: crate::transport::poll::Session> {
+	version: Version,
+	pending: Vec<Reader<S::RecvStream, Version>>,
+	early: Vec<Reader<S::RecvStream, Version>>,
+	setup: Option<Reader<S::RecvStream, Version>>,
+}
+
+impl<S: crate::transport::poll::Session> SetupAccept<S> {
+	fn poll(&mut self, session: &mut S, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup<S>, Error>> {
+		let Self {
+			version,
+			pending,
+			early,
+			setup,
+		} = self;
+		let version = *version;
+
+		let mut cx = Context::from_waker(waiter.waker());
+		let mut accept_error = None;
+		while let Poll::Ready(stream) = session.poll_accept_uni(&mut cx) {
+			match stream {
+				Ok(stream) => pending.push(Reader::new(stream, version)),
+				Err(err) => {
+					accept_error = Some(Error::from_transport(err));
+					break;
+				}
+			}
 		}
+		let mut index = 0;
+		while index < pending.len() {
+			let kind = match pending[index].poll_varint_peek(&mut cx) {
+				Poll::Pending => {
+					index += 1;
+					continue;
+				}
+				Poll::Ready(Ok(kind)) => kind,
+				Poll::Ready(Err(
+					Error::Cancel
+					| Error::Stream(_)
+					| Error::Remote(_)
+					| Error::Transport(_)
+					| Error::Decode(crate::DecodeError::Short),
+				)) => {
+					pending.swap_remove(index);
+					continue;
+				}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+			};
+			let mut reader = pending.swap_remove(index);
+			if kind != DataType::Setup as u64 {
+				early.push(reader);
+				continue;
+			}
+			if setup.is_some() {
+				return Poll::Ready(Err(Error::ProtocolViolation));
+			}
+			ready!(reader.poll_decode::<DataType>(&mut cx))?;
+			*setup = Some(reader);
+		}
+		// A closed transport can still yield a complete buffered SETUP. Decode it
+		// before reporting the terminal error from accepting the next stream.
+		let result = setup
+			.as_mut()
+			.map(|reader| reader.poll_decode::<Setup>(&mut cx))
+			.unwrap_or(Poll::Pending);
+		let setup = match result {
+			Poll::Ready(result) => result?,
+			Poll::Pending => match accept_error {
+				Some(err) => return Poll::Ready(Err(err)),
+				None => return Poll::Pending,
+			},
+		};
+		// A stream need not have delivered even its type yet. Keep it intact for the
+		// session instead of letting it block SETUP or dropping it at the handoff.
+		early.append(pending);
+		Poll::Ready(Ok(AcceptedSetup {
+			setup,
+			early: std::mem::take(early),
+		}))
 	}
+}
+
+/// The peer's pre-read SETUP and the streams held until it arrived.
+pub struct AcceptedSetup<S: crate::transport::poll::Session> {
+	/// The SETUP decoded before origin binding.
+	pub setup: Setup,
+	/// Streams with their type still buffered for the session classifier.
+	pub early: Vec<Reader<S::RecvStream, Version>>,
 }
 
 /// Everything one moq-lite session needs to start.
@@ -85,7 +170,10 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The peer's SETUP, when it was already read before [`start`] (e.g. a server that
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
-	pub peer_setup: Option<Setup>,
+	pub peer_setup: Option<AcceptedSetup<S>>,
+
+	/// What the peer may make this session hold.
+	pub limits: crate::session::Limits,
 }
 
 /// Start a lite session.
@@ -105,6 +193,7 @@ where
 		version,
 		mut our_setup,
 		peer_setup,
+		limits,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -140,6 +229,10 @@ where
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+	let subscriptions =
+		crate::session::Slots::new(limits.subscriptions).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+	let announces =
+		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets
@@ -151,10 +244,23 @@ where
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
 	let peer_setup_slot = PeerSetup::default();
-	if let Some(setup) = peer_setup {
-		peer_setup_slot.set(setup);
-	}
+	let early = if let Some(accepted) = peer_setup {
+		peer_setup_slot.set(accepted.setup);
+		accepted.early
+	} else {
+		Vec::new()
+	};
 	let peer_setup = peer_setup_slot;
+
+	// Lite-05+ records the peer's SETUP from its Setup Stream. Before that, only the
+	// legacy bidi handshake carries one, and it was read before the session started.
+	let setup = if version.has_setup_stream() {
+		crate::session::Setup::Lite(peer_setup.clone())
+	} else if setup_stream.is_some() {
+		crate::session::Setup::Read
+	} else {
+		crate::session::Setup::Never
+	};
 
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
 	// signal), the protocol tasks below hold the other. moq-lite lets either side
@@ -172,8 +278,9 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
+		subscriptions,
 	});
-	let subscriber = Subscriber::new(SubscriberConfig {
+	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
 		origin: subscribe,
@@ -187,6 +294,7 @@ where
 		cost: our_cost,
 		going_away: goaway.going_away.clone(),
 	});
+	subscriber.announces = announces;
 
 	let driver = Driver {
 		local_close: Default::default(),
@@ -196,7 +304,7 @@ where
 		goaway: Some(SendGoaway::new(runtime, session.clone(), goaway, version)),
 		session_stream: setup_stream,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber),
+		subscriber: SubscriberDriver::new(subscriber, early),
 		session,
 	};
 
@@ -204,6 +312,7 @@ where
 		recv_bandwidth: recv_bw_consumer,
 		driver,
 		goaway: goaway_handle,
+		setup,
 	})
 }
 
@@ -256,13 +365,18 @@ where
 		Poll::Ready(res)
 	}
 
+	/// Start withdrawing this session's announcements.
+	pub(crate) fn close(&self) {
+		self.publisher.close();
+	}
+
 	/// Whether no stream still owes the peer data, for a draining close.
 	pub(crate) fn drained(&self) -> bool {
 		self.publisher.drained()
 	}
 
 	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 
 		// The send-side machines never end the session; completion just retires them.
 		if let Some(setup) = &mut self.setup
@@ -439,7 +553,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				SendGoawayState::Waiting => {
@@ -521,6 +635,117 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 				}
 				SendGoawayState::Enforce(enforce) => return enforce.poll(waiter),
 			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::coding::Encode;
+
+	#[moq_net_sim::test]
+	async fn accept_setup_does_not_wait_on_an_early_stream_header() {
+		let version = Version::Lite05;
+		let mut setup = Vec::new();
+		DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
+		Setup::default()
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
+		let mut session =
+			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
+		let accepted = accept_setup(&mut session, version).await.unwrap();
+		assert_eq!(accepted.early.len(), 1);
+	}
+
+	#[moq_net_sim::test]
+	async fn accept_setup_refuses_two_incomplete_setup_streams() {
+		use futures::FutureExt;
+		let mut session =
+			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1], vec![1]]);
+		assert!(matches!(
+			accept_setup(&mut session, Version::Lite05).now_or_never(),
+			Some(Err(Error::ProtocolViolation))
+		));
+	}
+
+	#[moq_net_sim::test]
+	async fn duplicate_setup_closes_the_session() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for complete in [false, true] {
+				let mut first = Vec::new();
+				DataType::Setup
+					.encode(&mut crate::coding::Encoder::new(&mut first, version.into()), version)
+					.unwrap();
+				if complete {
+					Setup::default()
+						.encode(&mut crate::coding::Encoder::new(&mut first, version.into()), version)
+						.unwrap();
+				}
+				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
+					.with_incoming_unis(vec![first.clone(), first]);
+				let log = session.log.clone();
+				let mut started = start(Config {
+					runtime: crate::time::Clock::sim(),
+					session,
+					setup_stream: None,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					version,
+					our_setup: Setup::default(),
+					peer_setup: None,
+					limits: Default::default(),
+				})
+				.unwrap();
+				let _ = started.driver.poll(&kio::Waiter::noop());
+				assert!(
+					log.closes()
+						.iter()
+						.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+					"{version:?}, complete={complete}: duplicate SETUP must close the session"
+				);
+			}
+		}
+	}
+
+	/// A SETUP that ends before its body decodes leaves nothing to wait on, since the
+	/// Setup Stream is already claimed.
+	#[moq_net_sim::test]
+	async fn truncated_setup_closes_the_session() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut truncated = Vec::new();
+			DataType::Setup
+				.encode(
+					&mut crate::coding::Encoder::new(&mut truncated, version.into()),
+					version,
+				)
+				.unwrap();
+			let session =
+				crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![truncated]);
+			let log = session.log.clone();
+			let mut started = start(Config {
+				runtime: crate::time::Clock::sim(),
+				session,
+				setup_stream: None,
+				publish: None,
+				subscribe: None,
+				peer_hop: None,
+				version,
+				our_setup: Setup::default(),
+				peer_setup: None,
+				limits: Default::default(),
+			})
+			.unwrap();
+			let _ = started.driver.poll(&kio::Waiter::noop());
+			assert!(
+				log.closes()
+					.iter()
+					.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+				"{version:?}: a truncated SETUP must close the session"
+			);
 		}
 	}
 }

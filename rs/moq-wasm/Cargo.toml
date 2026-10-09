@@ -25,11 +25,13 @@ crate-type = ["cdylib", "rlib"]
 # (native filesystem), unsupported on wasm32. Gating `fs` behind a native-only
 # cfg in those crates is a prerequisite for browser media muxing.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+bytes = { workspace = true }
 console_error_panic_hook = "0.1"
 futures = { workspace = true }
 getrandom = { workspace = true } # wasm_js backend for rand-via-moq-net; cfg flag in .cargo/config.toml
 js-sys = "0.3"
 moq-net = { workspace = true }
+thiserror = { workspace = true }
 tracing-wasm = "0.2"
 url = { workspace = true }
 # Pinned to the wasm-bindgen-cli version in the Nix dev shell: the bindgen
@@ -37,4 +39,11 @@ url = { workspace = true }
 wasm-bindgen = "=0.2.127"
 wasm-bindgen-futures = "0.4"
 web-async = { workspace = true }
+web-transport-trait = { workspace = true }
 web-transport-wasm = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+moq-net = { path = "../moq-net" }
+thiserror = { workspace = true }
+web-transport-trait = { workspace = true }

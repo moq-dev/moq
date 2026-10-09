@@ -14,7 +14,7 @@ package moq
 
 // A Rust staticlib does not carry the link options its dependencies declare, so
 // every system library has to be named here. The same list, for the same reason,
-// lives in rs/libmoq/native-libs/ for C consumers of libmoq; keep the two in step
+// lives in rs/moq-c/native-libs/ for C consumers of moq-c; keep the two in step
 // when moq-ffi gains a dependency. The moq-video / moq-audio entries cover
 // hardware H.264/H.265 encode and decode plus capture, and openh264 (the software
 // H.264 fallback) is C++.

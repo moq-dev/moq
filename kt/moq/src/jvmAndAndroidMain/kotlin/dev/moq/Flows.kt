@@ -9,56 +9,6 @@ import kotlinx.coroutines.flow.onCompletion
 import uniffi.moq.MoqException
 
 /**
- * Stream of catalog updates. Terminates when the underlying track ends.
- *
- * The Flow's [onCompletion] forwards Kotlin coroutine cancellation to the
- * native consumer's `cancel()` so structured concurrency propagates through
- * to the QUIC stream.
- */
-fun CatalogConsumer.updates(): Flow<Catalog> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
-/**
- * Subscribe to the catalog track and return the first catalog, cancelling the
- * subscription before returning. Convenience for callers that only need the
- * current catalog rather than a stream of updates (use [updates] for that).
- */
-suspend fun BroadcastConsumer.catalog(): Catalog {
-    val consumer = subscribeCatalog()
-    try {
-        return consumer.next() ?: throw MoqException.Closed()
-    } finally {
-        consumer.cancel()
-    }
-}
-
-/** Stream of decoded media frames in decode order. */
-fun MediaConsumer.frames(): Flow<MediaFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
-/** Stream of decoded frames from one finite, fetched media group. */
-fun MediaGroupConsumer.frames(): Flow<MediaFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
-/**
  * Stream of decoded audio frames in the layout declared by the
  * [AudioDecoderOutput] the consumer was created with.
  */
@@ -72,33 +22,10 @@ fun AudioConsumer.frames(): Flow<AudioFrame> = flow {
 }
 
 /**
- * Stream of decoded video frames in the layout declared by the
- * [VideoDecoderOutput] the consumer was created with.
+ * Stream of decoded video frames. Each owns the decoder's surface: close it
+ * (or `use` it) when done, since held frames stall the decoder.
  */
 fun VideoConsumer.frames(): Flow<VideoDecodedFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
-/**
- * Stream of JSON values (as strings) from a snapshot track, yielding the latest reconstructed
- * value. A consumer that has fallen behind collapses the backlog to the latest.
- */
-fun JsonSnapshotConsumer.values(): Flow<String> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
-/** Stream of JSON records (as strings) from a stream track, in order. */
-fun JsonStreamConsumer.values(): Flow<String> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -193,23 +120,13 @@ fun GroupConsumer.frames(): Flow<Frame> = flow {
 }
 
 /**
- * Stream of route announcements and retractions matching [config].
+ * Stream of announce events, as `announced(config).updates()`.
  *
- * Acquires the subscription on first collection and cancels it when collection
- * ends, so callers never touch the underlying handle. Use the raw
- * `announced(config)` if you need to hold and cancel the handle yourself.
+ * Collect it once: the handle is cancelled when collection ends, however it ends.
  */
-fun OriginConsumer.announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceUpdate> {
-    val consumer = this
-    return flow {
-        val announced = consumer.announced(config)
-        try {
-            while (true) {
-                currentCoroutineContext().ensureActive()
-                emit(announced.next() ?: break)
-            }
-        } finally {
-            announced.cancel()
-        }
+fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(next() ?: break)
     }
-}
+}.onCompletion { cancel() }

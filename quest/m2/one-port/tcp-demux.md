@@ -27,11 +27,33 @@ onto its own task with a bounded read timeout; that task peeks, optionally
 terminates TLS, and yields `Accepted`. An idle or slow client stalls only
 its own task, so a peer that connects and sends nothing cannot block later
 accepts. The peek is non-destructive on `TcpStream` and on the rustls
-stream alike.
+stream alike. Reuse the handshake bound `listen.timeout` already sets
+(`moq_tokio::listen::Config::timeout`) rather than a new knob.
 
-Tests: an HTTP request, a WebSocket upgrade, a raw RTMP C0, and an RTMPS C0
-against one listener each land in the right arm.
+The TLS arm also carries `tls://` qmux, served today by its own `listen.tcp`
+listener with TLS. It negotiates a moq ALPN in the TLS handshake, so split
+the decrypted arm on ALPN: a moq ALPN goes to the qmux server and an HTTP
+ALPN to the router. A connection with no ALPN keeps the decrypted-byte
+sniff, since RTMPS clients negotiate none (`moq-rtmp` documents an empty
+ALPN list): `0x03` is RTMP, anything else is HTTP.
+
+Decided 2026-10-08: under one acceptor, the client-certificate request from
+[mTLS on tls://](/quest/m2/tls-listener-mtls.md) is optional (never required)
+and sits on the moq-ALPN TLS config only, so browsers and RTMPS clients on
+the same port are never asked for one. Whichever lands second keeps `tls://`
+client-certificate verification and the `MtlsUnsupported` lift working.
+
+Keep the accepted `TcpStream`'s handle reachable after it is boxed: the
+relay already captures socket stats at accept for qmux (`SocketStats` in
+`web.rs`), and [WebSocket bitrate caps](/quest/m2/rate-websocket.md) set
+socket buffer sizes on the same socket.
+
+Tests: an HTTP request, a WebSocket upgrade, a raw RTMP C0, an RTMPS C0 with
+no ALPN, and a `tls://` qmux client against one listener each land in the
+right arm.
 
 ## Related
 
 - [UDP demux](/quest/m2/one-port/udp-demux.md) - the UDP half
+- [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - client-certificate verification on the `tls://` arm this acceptor carries
+- [WebSocket bitrate caps](/quest/m2/rate-websocket.md) - sizes the kernel buffers of the socket this acceptor boxes

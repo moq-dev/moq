@@ -39,7 +39,7 @@ async function main() {
 		}
 	}
 
-	connection.close();
+	await connection.close();
 	origin.close();
 }
 

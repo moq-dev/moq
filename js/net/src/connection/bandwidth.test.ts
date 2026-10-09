@@ -52,7 +52,7 @@ test("a connection samples the send rate onto the allocator", async () => {
 
 		const track = new TrackProducer("video").accept({ priority: 60 });
 		track.subscribe();
-		const reserved = allocator.reserve(track, 4_000_000);
+		const reserved = allocator.reserve(track.demand(), 4_000_000);
 
 		await waitUntil(() => reserved.peek() === 2_000_000);
 	} finally {
@@ -75,11 +75,11 @@ test("two publishers on one connection split the estimate by priority", async ()
 
 		const audio = new TrackProducer("audio").accept({ priority: 80 });
 		audio.subscribe();
-		const audioShare = allocator.reserve(audio, 128_000);
+		const audioShare = allocator.reserve(audio.demand(), 128_000);
 
 		const video = new TrackProducer("video").accept({ priority: 60 });
 		video.subscribe();
-		const videoShare = allocator.reserve(video, 4_000_000);
+		const videoShare = allocator.reserve(video.demand(), 4_000_000);
 
 		await waitUntil(() => audioShare.peek() !== undefined && videoShare.peek() !== undefined);
 
@@ -103,10 +103,10 @@ test("an idle track on a live connection claims nothing", async () => {
 
 		const watched = new TrackProducer("watched").accept({ priority: 60 });
 		watched.subscribe();
-		const watchedShare = allocator.reserve(watched, 4_000_000);
+		const watchedShare = allocator.reserve(watched.demand(), 4_000_000);
 
 		const idle = new TrackProducer("idle").accept({ priority: 60 });
-		const idleShare = allocator.reserve(idle, 4_000_000);
+		const idleShare = allocator.reserve(idle.demand(), 4_000_000);
 
 		await waitUntil(() => watchedShare.peek() === 2_000_000);
 		expect(idleShare.peek()).toBeUndefined();
@@ -130,7 +130,7 @@ test("a private connection still exposes an allocator", async () => {
 
 		const track = new TrackProducer("video").accept({ priority: 60 });
 		track.subscribe();
-		const reserved = allocator.reserve(track, 4_000_000);
+		const reserved = allocator.reserve(track.demand(), 4_000_000);
 
 		await waitUntil(() => reserved.peek() === 2_000_000);
 	} finally {
