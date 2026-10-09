@@ -10,8 +10,9 @@ PR that removes it instead of a nightly run.
 
 Found by [#5070](https://github.com/moq-dev/moq/pull/5070): `test/drain/drain.ts`
 still called the deleted `writeString`, and only its review caught it. Today
-`js/justfile`'s `check` runs each workspace package's `check` script, and
-`test/drain` is neither a root workspace nor has one. Give each `test/`
-TypeScript package a `tsc --noEmit` check that `just check` runs (as a
-workspace or from the `test` justfile), and make sure the scoped `just check`
-picks it up when a `js/` package it imports changes.
+`js/justfile`'s `check` runs each root workspace's `check` script.
+`test/drain` is a root workspace but has no `check` script or tsconfig, so it
+is skipped; `test/wasm` and `test/interop/clients/js-native` also lack a
+`check` script. Give each `test/` TypeScript workspace a `tsc --noEmit` check,
+and make sure the scoped `just check` picks it up when a `js/` package it
+imports changes.

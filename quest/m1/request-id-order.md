@@ -16,8 +16,8 @@ cannot hold more than the window open"), bounding only how many are open.
 
 - First confirm what drafts 14 to 16 require of an out-of-order or repeated
   Request ID and which session error they name; follow that.
-- Keep a high-water mark per peer and refuse anything at or below it, in both
-  languages, beside the existing window checks.
+- Keep a high-water mark of the IDs the peer allocates and refuse anything at
+  or below it, in both languages, beside the existing window checks.
 - Tests: a repeated ID and a lower ID are each refused with the drafts' error;
   in-order IDs and the MAX_REQUEST_ID grant are unchanged.
 
