@@ -45,9 +45,10 @@ int main()
 	}
 
 	// A call parked on the runtime, which only a shutdown can end without a peer.
-	auto server = moq::Server::init();
-	TestOk(server->set_bind("127.0.0.1:0"), "set_bind");
-	TestOk(server->set_tls_generate({"localhost"}), "set_tls_generate");
+	moq::ServerConfig config;
+	config.bind = "127.0.0.1:0";
+	config.tls.generate = {"localhost"};
+	auto server = TestOk(moq::Server::init(config), "server init");
 	TestOk(server->listen().get(), "listen");
 	auto pending = server->accept();
 	if (pending.wait_for(std::chrono::milliseconds(50)) != std::future_status::timeout) {

@@ -161,24 +161,6 @@ bool MoQOutput::Start()
 		return false;
 	}
 
-	auto next = std::make_shared<Attempt>();
-	next->client = moq::Client::init();
-	next->url = server;
-
-	// Advanced settings live on the service alongside the URL and path. With the group
-	// switched off the client keeps the library defaults.
-	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
-	std::string invalid;
-	if (!MoQSettings::Configure(service_settings, *next->client, &invalid)) {
-		// Refusing to start beats connecting with a setting the user asked for
-		// quietly dropped.
-		LOG_ERROR("Invalid advanced MoQ settings: %s", invalid.c_str());
-		std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
-		obs_output_set_last_error(output, ("Invalid advanced MoQ settings: " + invalid).c_str());
-		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
-		return false;
-	}
-
 	// Create the broadcast on an origin of our own, then announce it so subscribers
 	// can discover it. Stop() finishes it, so each Start creates a fresh one.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
@@ -192,10 +174,28 @@ bool MoQOutput::Start()
 		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
 		return false;
 	}
-	if (auto wired = next->client->set_publish(next_origin); !wired) {
-		LOG_ERROR("Failed to publish through the client: %s", wired.error().to_string().c_str());
+
+	// Advanced settings live on the service alongside the URL and path. With the group
+	// switched off the client keeps the library defaults.
+	moq::ClientConfig config;
+	config.publish = next_origin;
+	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
+	MoQSettings::Configure(service_settings, config);
+	auto client = moq::Client::init(config);
+	if (!client) {
+		// Refusing to start beats connecting with a setting the user asked for
+		// quietly dropped.
+		std::string invalid = client.error().to_string();
+		LOG_ERROR("Invalid advanced MoQ settings: %s", invalid.c_str());
+		std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
+		obs_output_set_last_error(output, ("Invalid advanced MoQ settings: " + invalid).c_str());
+		obs_output_signal_stop(output, OBS_OUTPUT_CONNECT_FAILED);
 		return false;
 	}
+
+	auto next = std::make_shared<Attempt>();
+	next->client = *client;
+	next->url = server;
 
 	LOG_INFO("Connecting to MoQ server: %s", MoQRedactUrl(server).c_str());
 
@@ -654,7 +654,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	hint.optimize_for_latency = true;
 	config.hint = hint;
 
-	auto track = broadcast->publish_video(config);
+	auto track = moq::MediaTrackProducer::video(broadcast, moq::MediaTarget::kNamed{}, config);
 	if (!track) {
 		LOG_ERROR("Failed to initialize video track: %s", track.error().to_string().c_str());
 		video_tracks[encoder] = nullptr;
@@ -715,7 +715,7 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 	if (extra_data && extra_size > 0)
 		config.data.assign(extra_data, extra_data + extra_size);
 
-	auto track = broadcast->publish_audio(config);
+	auto track = moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, config);
 	if (!track) {
 		LOG_ERROR("Failed to initialize audio track: %s", track.error().to_string().c_str());
 		audio_tracks[encoder] = nullptr;

@@ -161,7 +161,7 @@ struct Track {
 	// Decodes one frame and hands it to OBS, under ctx->mutex.
 	Decode decode;
 
-	std::shared_ptr<moq::MediaConsumer> consumer;
+	std::shared_ptr<moq::MediaContainerConsumer> consumer;
 	std::optional<moq::Continuation> call;
 };
 
@@ -176,7 +176,7 @@ struct Connection {
 	std::shared_ptr<moq::Session> session;
 	std::shared_ptr<moq::AnnouncedBroadcast> announced;
 	std::shared_ptr<moq::BroadcastConsumer> consumer;
-	std::shared_ptr<moq::CatalogConsumer> catalog;
+	std::shared_ptr<moq::MediaCatalogConsumer> catalog;
 
 	// The connect, then the session's status transitions.
 	std::optional<moq::Continuation> session_call;
@@ -272,7 +272,7 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				    moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result);
 static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				   moq::expected<std::shared_ptr<moq::CatalogConsumer>> result);
+				   moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>> result);
 static void moq_source_watch_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
 static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				 moq::expected<moq::ConnectionStatus> result);
@@ -423,7 +423,13 @@ static void moq_source_reconnect(struct moq_source *ctx)
 	conn->broadcast = ctx->broadcast;
 	// The source dials with the defaults. Neither origin side is wired, so the
 	// session's consume side carries the remote's announcements.
-	conn->client = moq::Client::init();
+	auto client = moq::Client::init(moq::ClientConfig{});
+	if (!client) {
+		// Already disconnected and blanked above.
+		LOG_ERROR("Failed to create MoQ client: %s", client.error().to_string().c_str());
+		return;
+	}
+	conn->client = *client;
 	ctx->connection = conn;
 
 	LOG_INFO("Connecting to MoQ server: %s", MoQRedactUrl(conn->url).c_str());
@@ -475,13 +481,15 @@ static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_pt
 	}
 
 	conn->consumer = *result;
-	conn->broadcast_call = conn->consumer->subscribe_catalog().then(
-		ctx->worker.Executor(), moq_source_current<moq::expected<std::shared_ptr<moq::CatalogConsumer>>>(
-						ctx, conn, moq_source_on_catalogs));
+	conn->broadcast_call =
+		moq::MediaCatalogConsumer::subscribe(conn->consumer)
+			.then(ctx->worker.Executor(),
+			      moq_source_current<moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>>>(
+				      ctx, conn, moq_source_on_catalogs));
 }
 
 static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				   moq::expected<std::shared_ptr<moq::CatalogConsumer>> result)
+				   moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>> result)
 {
 	if (!result) {
 		LOG_ERROR("Failed to subscribe to catalog: %s", result.error().to_string().c_str());
@@ -571,7 +579,7 @@ moq_source_first_rendition(const std::unordered_map<std::string, Rendition> &ren
 
 static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				     const std::shared_ptr<Track> &track,
-				     moq::expected<std::shared_ptr<moq::MediaConsumer>> result);
+				     moq::expected<std::shared_ptr<moq::MediaContainerConsumer>> result);
 static void moq_source_read_track(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				  const std::shared_ptr<Track> &track);
 static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
@@ -610,16 +618,16 @@ static void moq_source_on_resolved(struct moq_source *ctx, const std::shared_ptr
 		LOG_ERROR("Failed to resolve %s track broadcast: %s", track->kind, result.error().to_string().c_str());
 		return;
 	}
-	track->call = (*result)
-			      ->subscribe_media(track->name, track->container, std::nullopt)
-			      .then(ctx->worker.Executor(),
-				    moq_source_track_current<moq::expected<std::shared_ptr<moq::MediaConsumer>>>(
-					    ctx, conn, track, moq_source_on_subscribed));
+	track->call =
+		moq::MediaContainerConsumer::subscribe(*result, {track->name, track->container})
+			.then(ctx->worker.Executor(),
+			      moq_source_track_current<moq::expected<std::shared_ptr<moq::MediaContainerConsumer>>>(
+				      ctx, conn, track, moq_source_on_subscribed));
 }
 
 static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				     const std::shared_ptr<Track> &track,
-				     moq::expected<std::shared_ptr<moq::MediaConsumer>> result)
+				     moq::expected<std::shared_ptr<moq::MediaContainerConsumer>> result)
 {
 	if (!result) {
 		LOG_ERROR("Failed to subscribe to %s track: %s", track->kind, result.error().to_string().c_str());

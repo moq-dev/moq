@@ -186,18 +186,15 @@ long long obs_data_get_int(obs_data_t *, const char *)
 } // extern "C"
 
 // Stands in for the advanced settings: reconnect fast, so a dropped session is
-// back within a test's patience.
+// back within a test's patience. An unparseable bind address is what moq-ffi refuses
+// when it builds the client.
 namespace MoQSettings {
-bool Configure(obs_data_t *, moq::Client &client, std::string *error)
+void Configure(obs_data_t *, moq::ClientConfig &config)
 {
-	if (!g_settings_ok) {
-		*error = "bind: invalid address";
-		return false;
-	}
-	moq::Backoff backoff{};
-	backoff.initial_us = 10'000;
-	backoff.max_us = 50'000;
-	return client.set_backoff(backoff).has_value();
+	if (!g_settings_ok)
+		config.bind = "not an address";
+	config.backoff.initial_us = 10'000;
+	config.backoff.max_us = 50'000;
 }
 } // namespace MoQSettings
 
@@ -292,7 +289,7 @@ std::optional<moq::Catalog> relayCatalog(const std::shared_ptr<moq::BroadcastCon
 {
 	if (!broadcast)
 		return std::nullopt;
-	auto catalogs = TestOk(broadcast->subscribe_catalog().get(), "subscribe_catalog");
+	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(broadcast).get(), "catalog consumer");
 	for (;;) {
 		auto next = catalogs->next();
 		if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
@@ -380,8 +377,9 @@ int main()
 		CHECK(catalog.has_value());
 		if (catalog) {
 			const auto &[name, rendition] = *catalog->video.begin();
-			auto media = TestOk(broadcast->subscribe_media(name, rendition.container, std::nullopt).get(),
-					    "subscribe_media");
+			auto media = TestOk(
+				moq::MediaContainerConsumer::subscribe(broadcast, {name, rendition.container}).get(),
+				"container consumer");
 			// Read a frame first, so the relay is subscribed before the last one is written.
 			auto next = media->next();
 			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
