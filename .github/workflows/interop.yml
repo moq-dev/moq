@@ -107,7 +107,7 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # Registry installs and the release matrix run only on main, nightly or
-      # on demand. A dev branch intentionally permits unpublished API breaks.
+      # on demand: a break only needs catching before the next release.
       - name: Released wire compatibility
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         run: nix develop --command just test wire-compat

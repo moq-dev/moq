@@ -45,7 +45,7 @@ if (command === "sign") {
 	install();
 	const origin = new Moq.Origin.Producer();
 	const broadcast = origin.createBroadcast(Moq.Path.from(args[1]));
-	const track = broadcast.createTrack("data");
+	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MICRO });
 	broadcast.announce();
 	const connection = await connect({
 		url: new URL(args[0]),
@@ -53,7 +53,11 @@ if (command === "sign") {
 		websocket: { enabled: false },
 	});
 	console.log("published");
-	while (!track.used.peek()) await track.used.changed();
+	// `demand()` replaced the producer's own `used` after @moq/net 0.4.2, and this one
+	// client runs against both packages.
+	type Used = { peek(): boolean; changed(): Promise<unknown> };
+	const used: Used = "demand" in track ? track.demand().used : (track as unknown as { used: Used }).used;
+	while (!used.peek()) await used.changed();
 	const group = track.appendGroup();
 	group.writeFrame({
 		payload: new TextEncoder().encode("compat-fetch"),

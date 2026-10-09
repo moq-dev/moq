@@ -7,15 +7,6 @@ use std::{env, fs};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args().collect();
     match args[1].as_str() {
-        "fetch-supported" => {
-            let version: hang::moq_net::Version = args[2].parse()?;
-            let supported = match version {
-                hang::moq_net::Version::Lite(version) => version.has_track_stream(),
-                hang::moq_net::Version::Ietf(_) => true,
-                _ => return Err("unknown protocol family".into()),
-            };
-            println!("{supported}");
-        }
         "encode" => {
             let catalog = Catalog::<()>::from_str(
                 r#"{"video":{"renditions":{"video":{"codec":"avc3.42001e","container":{"kind":"legacy"}}}},"audio":{"renditions":{}}}"#,

@@ -519,19 +519,16 @@ run_subscriber() {
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
             # SIGTERM that fires when no data arrives within the timeout.
             if [[ "${INTEROP_FETCH_TRACK:-0}" == 1 ]]; then
-                # Discover the name from the decoded catalog, never today's naming convention.
-                (cd "$CLIENTS/js-native" && node --import tsx subscribe.ts subscribe --url "$URL" --broadcast "$broadcast" \
+                # Discover the track from the decoded catalog, never today's naming
+                # convention, and a group live demand is filling.
+                (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && node --import tsx subscribe.ts subscribe --url "$URL" --broadcast "$broadcast" \
                     --timeout "$TIMEOUT" --track-file "$HARNESS_RUN/$broadcast.track") || return
-                local track binary index=0 group_sequence=""
-                track=$(cat "$HARNESS_RUN/$broadcast.track")
+                local track group binary index=0
+                { read -r track && read -r group; } <"$HARNESS_RUN/$broadcast.track" || return
+                # Both readers FETCH that group by its observed ID, which waits for it to finish.
                 for binary in "$MOQ" "${INTEROP_SUB_MOQ:-$MOQ}"; do
-                    local group_flags=()
-                    [[ -n "$group_sequence" ]] && group_flags=(--group "$group_sequence")
                     timeout -k 3 "$TIMEOUT" "$binary" --connect "$URL" ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} \
-                        --broadcast "$broadcast" fetch "$track" ${group_flags[@]+"${group_flags[@]}"} --json >"$HARNESS_RUN/$broadcast.$index.json" || return
-                    # The first reader creates real demand and completes an actual group.
-                    # The second must fetch that same retained group by its observed ID.
-                    group_sequence=$(python3 -c 'import json,sys;print(json.loads(open(sys.argv[1]).readline())["group"])' "$HARNESS_RUN/$broadcast.$index.json") || return
+                        --broadcast "$broadcast" fetch "$track" --group "$group" --json >"$HARNESS_RUN/$broadcast.$index.json" || return
                     index=$((index + 1))
                 done
                 python3 - "$HARNESS_RUN/$broadcast.0.json" "$HARNESS_RUN/$broadcast.1.json" <<'PYCODE'

@@ -63,8 +63,9 @@ cp "$DIR/compat/client.ts" "$DIR/compat/transport.ts" "$DIR/clients/js-native/su
 python3 - "$HARNESS_RUN/versions.json" "$HARNESS_RUN/js/package.json" <<'PY'
 import json, sys
 versions = json.load(open(sys.argv[1]))
-deps = {name: versions[name] for name in ("@moq/net", "@moq/hang", "@moq/auth")}
-deps.update({"@moq/web-transport": "^0.1.4", "@moq/json": "*", "tsx": "^4.23.15"})
+deps = {name: version for name, version in versions.items() if name.startswith("@moq/")}
+# tsx only loads the TypeScript clients and never touches the wire.
+deps["tsx"] = "^4.23.15"
 json.dump({"private": True, "type": "module", "dependencies": deps}, open(sys.argv[2], "w"))
 PY
 (cd "$HARNESS_RUN/js" && bun install)
@@ -79,8 +80,21 @@ for source in current released js-current js-released; do
         js-current) bun "$DIR/compat/client.ts" sign "$HARNESS_RUN/key.jwk" ;;
         js-released) bun "$HARNESS_RUN/js/client.ts" sign "$HARNESS_RUN/key.jwk" ;;
     esac >"$HARNESS_RUN/$source.jwt"
-    for verifier in "$CURRENT" "$RELEASED"; do
-        "$verifier" auth verify --key "$HARNESS_RUN/key.jwk" --in "$HARNESS_RUN/$source.jwt" >"$HARNESS_RUN/claims.json"
+    for verifier in current released; do
+        if [[ "$verifier" == current ]]; then bin="$CURRENT"; else bin="$RELEASED"; fi
+        "$bin" auth verify --key "$HARNESS_RUN/key.jwk" --in "$HARNESS_RUN/$source.jwt" >"$HARNESS_RUN/$source.$verifier.claims"
+        # `auth verify` prints the claims' Rust Debug form, the CLI's only output.
+        python3 - "$HARNESS_RUN/$source.$verifier.claims" <<'PY'
+import re, sys
+text = re.sub(r"\s+", "", open(sys.argv[1]).read())
+def patterns(field):
+    block = re.search(field + r":Patterns\(\[(.*?)\]", text)
+    assert block, f"no {field} in {text}"
+    return re.findall(r'Pattern\("([^"]*)"\)', block.group(1))
+root = re.search(r'root:"([^"]*)"', text)
+claims = (root and root.group(1), patterns("publish"), patterns("subscribe"))
+assert claims == ("compat", ["video/**"], ["**"]), f"token scope changed: {claims}"
+PY
     done
     bun "$DIR/compat/client.ts" verify "$HARNESS_RUN/key.jwk" "$HARNESS_RUN/$source.jwt"
     bun "$HARNESS_RUN/js/client.ts" verify "$HARNESS_RUN/key.jwk" "$HARNESS_RUN/$source.jwt"
@@ -117,48 +131,72 @@ for source in current released js-current js-released; do
     echo "PASS catalog/container written by $source"
 done
 
+# Every cell runs, so one nightly names every break; the run fails at the end.
+failed=()
+cell() {
+    local name="$1"
+    shift
+    echo "=== $name ==="
+    if "$@"; then
+        echo "PASS $name"
+    else
+        echo "FAIL $name"
+        failed+=("$name")
+    fi
+}
+
+# FETCH support differs by draft and by build, so the released binaries alone
+# decide it: when they fetch a group from one another, every mixed cell must too.
+fetch() {
+    local relay="$1" pub="$2" sub="$3" js="$4" transport="$5" version="$6"
+    RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+        INTEROP_NATIVE_CLIENT="$js" INTEROP_COMPAT_TRANSPORT="$transport" INTEROP_FETCH_TRACK=1 \
+        bash "$DIR/interop.sh" --publishers rust --subscribers rust
+}
+
 # Existing media drivers: current publisher -> released clients and the reverse,
 # through either relay. The relay offers only one version, so JS cannot silently
 # negotiate its preferred draft instead of the draft this cell names.
 while read -r version; do
-    current_fetch=$("$TARGET/compat-hang-current/debug/compat-container" fetch-supported "$version")
-    released_fetch=$("$TARGET/compat-hang-released/debug/compat-container" fetch-supported "$version")
-    if [[ "$released_fetch" == true && "$current_fetch" != true ]]; then
-        echo "checkout removed published FETCH capability for $version" >&2
-        exit 1
+    released_relay="$HARNESS_RUN/released/bin/moq-relay"
+    if fetch "$released_relay" "$RELEASED" "$RELEASED" "$HARNESS_RUN/js" "$HARNESS_RUN/js/transport.ts" "$version" >"$HARNESS_RUN/$version.fetch-baseline.log" 2>&1; then
+        released_fetch=true
+    else
+        released_fetch=false
+        echo "SKIP $version FETCH: the released binaries do not fetch from one another ($HARNESS_RUN/$version.fetch-baseline.log)"
     fi
     for relay_source in current released; do
-        if [[ "$relay_source" == current ]]; then relay="$TARGET/debug/moq-relay"; else relay="$HARNESS_RUN/released/bin/moq-relay"; fi
+        if [[ "$relay_source" == current ]]; then relay="$TARGET/debug/moq-relay"; else relay="$released_relay"; fi
         for source in current released; do
+            # Each side's JS environment and the version-pinning transport beside it.
             if [[ "$source" == current ]]; then
-                pub="$CURRENT"
-                sub="$RELEASED"
-                js="$HARNESS_RUN/js"
-                transport="$js/transport.ts"
+                pub="$CURRENT" sub="$RELEASED" publisher_js="$DIR/compat"
+                own_js="$DIR/clients/js-native" own_transport="$DIR/compat/transport.ts"
+                other_js="$HARNESS_RUN/js" other_transport="$HARNESS_RUN/js/transport.ts"
             else
-                pub="$RELEASED"
-                sub="$CURRENT"
-                js="$DIR/clients/js-native"
-                transport="$DIR/compat/transport.ts"
+                pub="$RELEASED" sub="$CURRENT" publisher_js="$HARNESS_RUN/js"
+                own_js="$HARNESS_RUN/js" own_transport="$HARNESS_RUN/js/transport.ts"
+                other_js="$DIR/clients/js-native" other_transport="$DIR/compat/transport.ts"
             fi
-            echo "=== $version relay=$relay_source publisher=$source consumers=opposite ==="
-            RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-                INTEROP_NATIVE_CLIENT="$js" INTEROP_COMPAT_TRANSPORT="$transport" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
-            if [[ "$source" == current ]]; then publisher_js="$DIR/compat"; else publisher_js="$HARNESS_RUN/js"; fi
+            name="$version relay=$relay_source publisher=$source"
+            cell "$name media" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+                INTEROP_NATIVE_CLIENT="$other_js" INTEROP_COMPAT_TRANSPORT="$other_transport" INTEROP_DECODE=1 bash "$DIR/interop.sh" --subscribers rust,js-native-node
             # Drive JS publication from actual subscriber demand. The CLI's newest-group
             # read uses SUBSCRIBE here, independently of one-shot FETCH support.
-            RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
+            cell "$name js-publish" env RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
                 INTEROP_JS_PUBLISH_CLIENT="$publisher_js" INTEROP_READ_CURRENT=1 bash "$DIR/interop.sh" --publishers js-native --subscribers rust
-            if [[ "$current_fetch" == true && "$released_fetch" == true ]]; then
-                # JS does not implement IETF FETCH in either direction. Both Rust
-                # sources fetch the same completed group and compare exact payloads.
-                echo "INFO JS IETF FETCH unsupported; exercising both Rust implementations"
-                RELAY_BIN="$relay" MOQ_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-                    INTEROP_COMPAT_TRANSPORT="$DIR/compat/transport.ts" INTEROP_FETCH_TRACK=1 bash "$DIR/interop.sh" --publishers rust --subscribers rust
-            else
-                echo "SKIP $version FETCH: not offered by both protocol implementations"
+            if [[ "$released_fetch" == true ]]; then
+                # JS does not implement IETF FETCH in either direction, so both Rust
+                # sources fetch the same group and compare exact payloads. The
+                # publisher's own JS finds the group, so a catalog break fails only
+                # the media cell.
+                cell "$name fetch" fetch "$relay" "$pub" "$sub" "$own_js" "$own_transport" "$version"
             fi
         done
     done
 done <"$HARNESS_RUN/shared"
+if ((${#failed[@]})); then
+    printf 'FAIL %s\n' "${failed[@]}" >&2
+    exit 1
+fi
 echo "wire compatibility: token, session, catalog, and container lanes passed"

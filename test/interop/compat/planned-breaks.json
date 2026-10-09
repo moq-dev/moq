@@ -1,10 +1,10 @@
 {
 	"moq-lite-07-wip": {
-		"reason": "Approved under /recommended: this draft is unpublished and its wire may change. Released @moq/net 0.4.1 cannot decode current relay announcements (long buffer) while the Rust reader succeeds. Compare stable lite and IETF drafts; reassess this measured exception when any affected release changes.",
+		"reason": "Approved under /recommended: this draft is unpublished and its wire may change. Remeasured against these releases: released moq-cli and @moq/net reject current lite-07-wip sessions (long buffer, invalid value). Compare stable lite and IETF drafts; reassess this measured exception when any affected release changes.",
 		"releases": {
-			"moq-cli": "0.13.0",
-			"moq-relay": "0.16.0",
-			"@moq/net": "0.4.1"
+			"moq-cli": "0.14.2",
+			"moq-relay": "0.17.2",
+			"@moq/net": "0.4.2"
 		}
 	}
 }

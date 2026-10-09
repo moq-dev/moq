@@ -72,7 +72,8 @@ if (import.meta.main) {
 				data.versions.map((v: { num: string; yanked: boolean }) => ({ version: v.num, yanked: v.yanked })),
 			);
 		}
-		for (const name of ["@moq/net", "@moq/auth", "@moq/hang"]) {
+		// Every package the clients import directly, so no range drifts between nightlies.
+		for (const name of ["@moq/net", "@moq/auth", "@moq/hang", "@moq/json", "@moq/web-transport"]) {
 			const data = await registry(`https://registry.npmjs.org/${encodeURIComponent(name)}`);
 			result[name] = newest(Object.keys(data.versions).map((version) => ({ version })));
 		}

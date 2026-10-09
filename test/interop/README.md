@@ -111,11 +111,11 @@ binaries when available on Linux x86\_64, with an exact-version `cargo install`
 fallback. Run inside `nix develop` with GitHub CLI registry access.
 
 Four sources sign JWTs: current and published Rust CLI, and current and
-published `@moq/auth`. All four verify every token; the JavaScript readers also
-assert normalized permission scope. Current and released `hang` and
-`@moq/hang` encode and decode one another's catalogs and legacy frame headers,
-checking the exact timestamp and payload. These are format checks, independent
-of a media decoder.
+published `@moq/auth`. Both Rust CLIs and both JavaScript packages verify every
+token and assert its normalized root and permission scope. Current and released
+`hang` and `@moq/hang` encode and decode one another's catalogs and legacy frame
+headers, checking the exact timestamp and payload. These are format checks,
+independent of a media decoder.
 
 The session lanes derive supported drafts from each CLI's `--connect-version`
 choices. The relay offers only the cell's version, and JavaScript checks the
@@ -125,21 +125,20 @@ sources. Rust exports must decode to a video frame through ffmpeg. The existing
 JS subscriber reconstructs the catalog and decodes the container. JS publishers
 write one group after actual subscriber demand, and opposite-source Rust
 readers verify its bytes through a live subscription. Both Rust versions also
-fetch the same completed media group and compare every frame's exact payload.
-FETCH support is derived from each Rust library's protocol capabilities; older
-lite drafts without FETCH are logged and skipped. Losing a published FETCH
-capability fails the run. JS IETF FETCH is unsupported in both directions and
-is logged as a capability boundary; Rust covers this operation.
+FETCH the group a live subscriber is filling and compare every frame's exact
+payload. The released relay, publisher, and CLI decide FETCH support per draft:
+when they fetch from one another, every mixed cell must too; otherwise the
+draft's FETCH is logged and skipped. JS IETF FETCH is unsupported in both
+directions; Rust covers this operation.
 
+Every cell runs, and the run lists each failing cell before it fails.
 Checkout-only versions are logged and omitted. Removing a released version
 fails before sessions start. A maintainer-approved deliberate removal belongs
 in `compat/planned-breaks.json` as a protocol name mapped to its approval,
 reason, and the exact affected release versions. Every exception is logged.
 Entries become errors once an affected release changes or no longer offers the
-version, forcing removal or a fresh review. The measured lite-07-wip exception
-was approved because the draft is unpublished; future WIP drafts receive no
-automatic exception. `dev` does not run
-this release comparison because its unpublished breaks are intentional.
+version, forcing removal or a fresh review. Future WIP drafts receive no
+automatic exception.
 
 ## Media QA
 

@@ -80,7 +80,10 @@ async function run(): Promise<void> {
 
 		const [name, config] = video;
 		if (values["track-file"]) {
-			writeFileSync(values["track-file"], name);
+			// Name a group that live demand is filling, so a FETCH of it never races eviction.
+			const group = await bc.track(name).subscribe({ priority: 0 }).recvGroup();
+			if (!group) throw new Error(`${name} ended before its first group`);
+			writeFileSync(values["track-file"], `${name}\n${group.sequence}\n`);
 			return;
 		}
 		let format: Container.Format;
