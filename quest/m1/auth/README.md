@@ -105,6 +105,8 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   non-canonical grant pattern, or an out-of-range `Expires`, closes the
   session with PROTOCOL_VIOLATION in Rust and JS
 - [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
+- [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
+  refused up front and held to the grant through a gate its dispatcher owns
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
