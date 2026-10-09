@@ -1334,6 +1334,26 @@ mod tests {
 		assert!(decode_message::<Subscribe>(&body, Version::Draft20).is_err());
 	}
 
+	/// Draft-22's LOCATION_FILTER is a Location Filter Type with no Length, so Next Object
+	/// is the single byte 0x05 and the parameter after it starts right behind it.
+	#[test]
+	fn subscribe_decodes_a_draft22_next_object() {
+		#[rustfmt::skip]
+		let body = subscribe_body(&[
+			0x04, // Number of Parameters
+			0x10, 0x01, // FORWARD (0x10) = 1
+			0x10, 0x40, // SUBSCRIBER_PRIORITY (0x20) = 64
+			0x01, 0x05, // LOCATION_FILTER (0x21): Next Object
+			0x01, 0x01, // GROUP_ORDER (0x22) = Ascending
+		]);
+
+		let msg: Subscribe = decode_message(&body, Version::Draft22).unwrap();
+		assert_eq!(msg.filter, Filter::NextObject);
+		assert_eq!(msg.subscriber_priority, 64);
+		assert_eq!(msg.group_order, GroupOrder::Ascending);
+		assert_eq!(encode_message(&msg, Version::Draft22), body);
+	}
+
 	/// FORWARD=0 is legal on every draft. It decodes so the request can be refused,
 	/// rather than closing the session.
 	#[test]
