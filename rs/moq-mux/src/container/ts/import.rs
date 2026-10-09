@@ -287,7 +287,8 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			if let Some(section) = self.sections.get_mut(&pid) {
-				let units = section.packet(&pkt, self.last_pts.or(self.start_pts), self.input.offset())?;
+				let clock = self.last_pts.or(self.start_pts).zip(self.input.offset());
+				let units = section.packet(&pkt, clock)?;
 				self.published |= units > 0;
 				self.liveness.delivered(pid, units);
 				continue;
@@ -1236,14 +1237,15 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	}
 
 	/// Consume one 188-byte TS packet, publishing each completed section and returning how
-	/// many. `pts` is the current media clock used to timestamp a section (its arrival on the
-	/// timeline; the splice time itself is inside the section bytes), if one is running.
-	/// `offset` is what the media shifted by, which a SCTE-35 section absorbs too; until it is
-	/// known, completed sections are held for [`release`](Self::release).
-	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>, offset: Option<Offset>) -> anyhow::Result<u64> {
+	/// many. `clock` is the current media clock used to timestamp a section (its arrival on the
+	/// timeline; the splice time itself is inside the section bytes), paired with the offset the
+	/// media shifted by, which a SCTE-35 section absorbs too. Until this importer has one,
+	/// completed sections are held for [`release`](Self::release): the input may have its offset
+	/// from another importer before this one sees a timestamp.
+	fn packet(&mut self, pkt: &[u8], clock: Option<(Timestamp, Offset)>) -> anyhow::Result<u64> {
 		self.reassembler.push(pkt, &mut self.held);
-		match offset {
-			Some(offset) => self.release(pts, offset),
+		match clock {
+			Some((pts, offset)) => self.release(Some(pts), offset),
 			None => Ok(0),
 		}
 	}
@@ -3897,12 +3899,21 @@ pub(super) mod test {
 		splice_onto_a_clock_in_use(CueAt::BeforePrivate).await;
 	}
 
+	/// An input another importer already anchored still holds a cue until this importer has a
+	/// timestamp to stamp it with.
+	#[tokio::test(start_paused = true)]
+	async fn a_splice_on_an_anchored_input_waits_for_its_media() {
+		splice_onto_a_clock_in_use(CueAt::BeforeVideoOnAnAnchoredInput).await;
+	}
+
 	/// Where the cue arrives relative to the first PES.
 	enum CueAt {
 		AfterVideo,
 		BeforeVideo,
 		/// Ahead of a private PES at the first picture's PTS, which anchors the input.
 		BeforePrivate,
+		/// Ahead of the first picture, on an input placed before the import starts.
+		BeforeVideoOnAnAnchoredInput,
 	}
 
 	async fn splice_onto_a_clock_in_use(at: CueAt) {
@@ -3925,7 +3936,14 @@ pub(super) mod test {
 		.unwrap();
 		// A capture took the clock, which reads ten seconds: the feed shifts nine seconds later.
 		let _capture = catalog.clock();
-		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let anchored = matches!(at, CueAt::BeforeVideoOnAnAnchoredInput);
+		let input = catalog.input();
+		if anchored {
+			// The shift then depends on the wall clock, so only its consistency is checked.
+			let first = Timestamp::from_scale(picture(0), 90_000).unwrap();
+			input.place(first, std::time::SystemTime::now()).unwrap();
+		}
+		let mut import = super::Import::new(broadcast, input.reserve());
 
 		let mut bytes = synth_pmt(
 			&[
@@ -3938,7 +3956,7 @@ pub(super) mod test {
 		let cue_packet = packet(true, 0, 0, &splice_insert(picture(5)));
 		match at {
 			CueAt::AfterVideo => {}
-			CueAt::BeforeVideo => bytes.extend_from_slice(&cue_packet),
+			CueAt::BeforeVideo | CueAt::BeforeVideoOnAnAnchoredInput => bytes.extend_from_slice(&cue_packet),
 			CueAt::BeforePrivate => {
 				bytes.extend_from_slice(&cue_packet);
 				bytes.extend_from_slice(&pes_packet(PRIVATE_PID, picture(0)));
@@ -4007,12 +4025,17 @@ pub(super) mod test {
 		let adjustment = u64::from(cue[4] & 1) << 32 | u64::from(u32::from_be_bytes(cue[5..9].try_into().unwrap()));
 		let pts_time = u64::from(cue[20] & 1) << 32 | u64::from(u32::from_be_bytes(cue[21..25].try_into().unwrap()));
 		assert_eq!(pts_time, picture(5), "the splice time itself is untouched");
-		assert_eq!(adjustment, 810_000, "the nine seconds the media shifted");
+		if !anchored {
+			assert_eq!(adjustment, 810_000, "the nine seconds the media shifted");
+		}
 		assert_eq!(pictures.len(), 20, "{pictures:?}");
-		assert_eq!(
-			(pts_time + adjustment) & MASK,
-			pictures[5],
-			"the splice lands on the picture it names: {pictures:?}"
+		// A wall-derived shift isn't a whole number of ticks, so the exported picture may round
+		// one tick lower than the section's shift.
+		let slack = u64::from(anchored);
+		let splice = (pts_time + adjustment) & MASK;
+		assert!(
+			(pictures[5]..=pictures[5] + slack).contains(&splice),
+			"the splice at {splice} lands on the picture it names: {pictures:?}"
 		);
 	}
 
