@@ -96,7 +96,7 @@ export class Subscribe {
 			params.subscriberPriority = this.subscriberPriority;
 			params.groupOrder = GROUP_ORDER;
 			params.forward = this.forward;
-			params.subscriptionFilter = Filter.encode(this.filter, version);
+			params.subscriptionFilter = this.filter;
 
 			// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-20. An older peer reads
 			// either as an unknown parameter, which is a protocol violation, so they are
@@ -176,8 +176,7 @@ export class Subscribe {
 		}
 
 		// An absent LOCATION_FILTER means the subscription is unfiltered.
-		const raw = params.subscriptionFilter;
-		const filter = raw !== undefined ? Filter.decode(raw, version) : { kind: "unfiltered" as const };
+		const filter = params.subscriptionFilter ?? { kind: "unfiltered" as const };
 		const rawFill = params.fillParameters;
 		const fill = rawFill !== undefined ? Filter.decodeFill(rawFill, version) : undefined;
 
