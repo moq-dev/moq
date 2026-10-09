@@ -62,8 +62,8 @@ test("metadata clears when entries disappear or broadcast becomes inactive", asy
 	const preview = new Json.Snapshot.Producer({
 		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
 	});
-	user.update({ name: "Alice" });
-	preview.update({ info: { video: true } });
+	user.update({ value: { name: "Alice" }, at: Net.Time.Timestamp.now() });
+	preview.update({ value: { info: { video: true } }, at: Net.Time.Timestamp.now() });
 	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
 	try {
 		await flush();

@@ -75,8 +75,8 @@ signals.run((effect) => {
     const net = effect.get(broadcast.net);
     if (!net) return;
 
-    // A day-long retention so a late viewer still replays the last value. JSON
-    // values are stamped when written, so the track declares a timescale.
+    // A day-long retention so a late viewer still replays the last value. Each
+    // value is stamped with when it was written, so the track declares a timescale.
     const track = net.createTrack("meta.json", {
         timescale: Moq.Time.Timescale.MILLI,
         maxAge: Moq.Time.Milli(86_400_000),
@@ -84,7 +84,7 @@ signals.run((effect) => {
     effect.cleanup(() => track.close());
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
-    meta.update(current);
+    meta.update({ value: current, at: Moq.Time.Timestamp.now() });
 });
 ```
 

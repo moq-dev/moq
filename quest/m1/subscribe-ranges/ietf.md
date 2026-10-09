@@ -21,10 +21,16 @@ SUBSCRIBE, as open #4974 does for fetch-only demand.
 Serving downstream lifts the one-group refusal ("FETCH spanning several
 groups not supported") in `run_fetch_stream`
 (`rs/moq-net/src/ietf/publisher.rs`) for every draft, including draft-20's
-`FetchType::Filtered` once [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md)
-serves it.
+`FetchType::Filtered`. Capping at the Largest Object also lifts the draft-20
+refusal of a filter bounded by it ("FETCH relative to Largest Object not
+supported"): no filter, a relative start, or an absolute start with no end.
+
+The same FETCH-end path sets End of Track only when the read hits FIN, so a
+bounded FETCH that ends exactly at the track's last object reports
+`end_of_track: false` (found while landing #4971; it predates it). Set it only
+when the track has finished and the FETCH reaches its final object, never from
+a live track's Largest Object, and test both cases.
 
 ## Required
 
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - the range requests this answers
-- [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - serves draft-20 FETCH through the same group-span path this widens (#4971)
