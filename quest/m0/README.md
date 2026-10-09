@@ -66,6 +66,7 @@ remain and no release waits on them.
 - [Capped stream END_OF_GROUP](/quest/m0/ietf-end-of-track-location.md) - a stream capped by the subscription's end Location never claims END_OF_GROUP; moving End of Track's Location is deferred
 - [End of Group status](/quest/m0/ietf-end-of-group-status.md) - an End of Group status on a stream whose header already marks the group's end is accepted, so imquic's last object per group arrives
 - [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - every Go, Python, and C++ publisher cell passes reliably once the serve budget lands, and a cell fails when a connection idles out
+- [FFI cancelled reads](/quest/m0/ffi-cancel-read.md) - cancelling a moq-ffi read in any binding leaves its data for the next read, so the C++ probe stops flaking
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [JS track takeover](/quest/m0/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does, so a re-announced `@moq/publish` catalog never restarts its groups
