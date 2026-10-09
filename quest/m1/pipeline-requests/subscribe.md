@@ -36,7 +36,8 @@ Facts (2026-10-08, `origin/main` 11ee77d5d, after #5053):
   `begin_subscription` registers a `TrackEntry` holding that producer and its
   timescale; a group whose id has no entry is cancelled, not left unread
   (`subscriber.rs:816`). JS `runGroup` (`subscriber.ts:1145`) drops a group
-  for an id with no registered subscription, and writes the group before it
+  for a past id with no registered subscription (an id it has not allocated
+  yet is a protocol error), and writes the group before it
   waits on the timescale.
 
 Decisions:

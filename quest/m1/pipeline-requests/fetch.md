@@ -3,8 +3,8 @@
 ## Goal
 
 A fetch-only reader's first FETCH goes upstream together with the request for
-the track's info, on moq-lite and moq-transport, at every hop, removing a
-round trip per hop. The fetched group is still handed out only once that
+the track's info, on moq-lite and moq-transport (except draft-17, which stays
+serial), at every hop, removing a round trip per hop. The fetched group is still handed out only once that
 route's info is known and passes the origin's consistency check. Peers that
 send them serially keep working unchanged.
 
