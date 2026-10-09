@@ -34,8 +34,8 @@ export bailed on "missed a decode deadline".
   default sessions end subscriptions on failover instead of resuming them.
 - Decided: no exporter-side guard. A unit due at or behind the TS schedule's
   `next` still bails. Once the stitch is gone, a stale unit reaching the
-  schedule is a bug to fail loud on. The replaced broadcast's state is dropped
-  by [Export ts](/quest/m0/broadcast-epoch/export-ts.md).
+  schedule is a bug to fail loud on. The export drops the replaced broadcast's
+  state through `ts::Export::follow`.
 - Fix the module docs that claim an epochless front is never swapped
   (`front.rs` header, `origin.rs` around `pick`): today that holds only when
   the replacement is in the front's own table.
