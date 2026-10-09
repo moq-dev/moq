@@ -343,11 +343,14 @@ export class Frame {
 
 		// Defined on every implemented draft, whether or not the header marks the group's end.
 		if (status === END_OF_TRACK) return new Frame({ endOfTrack: true });
+		// Allowed even when the header marks the group's end: that bit only lets a FIN imply it,
+		// and imquic sends both.
+		if (status === GROUP_END) return new Frame();
 
 		if (flags.hasEnd) {
 			// Empty frame
 			if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
-		} else if (status === 0 || status === GROUP_END) {
+		} else if (status === 0) {
 			// TODO status === 0 should be an empty frame, but moq-rs seems to be sending it incorrectly on group end.
 			return new Frame();
 		}

@@ -1006,6 +1006,34 @@ test("a clear FIRST_OBJECT at object 0 is the whole group", async () => {
 });
 
 /**
+ * The END_OF_GROUP header bit only lets a FIN imply the group's end, so an explicit
+ * END_OF_GROUP status on the same stream ends the group there rather than failing it.
+ */
+test("an END_OF_GROUP status on a marked stream finishes the group", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	const flags = groupFlags(true);
+	expect(flags.hasEnd).toBe(true);
+	// Objects 0..4, then object 5 as a zero-length END_OF_GROUP (0x3) status.
+	const objects = new Uint8Array([...encodeObjects([0, 0, 0, 0, 0]), 0, 0, 0x3]);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags }),
+		new Reader(undefined, objects, VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	expect(group?.sequence).toBe(3);
+	if (!group) return;
+	for (let i = 0; i < 5; i++) {
+		expect(await group.readString()).toBe("object 0");
+	}
+	expect(await group.readFrame()).toBeUndefined();
+	expect(await group.closed).toBeNull();
+
+	track.close();
+});
+
+/**
  * A clear FIRST_OBJECT whose first ID is not 0 still has a hole at the front, so the
  * stream is dropped and the track resumes at the next group.
  */
