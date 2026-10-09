@@ -474,11 +474,18 @@ impl TransportParameters {
                     }
                     params.max_datagram_frame_size = Some(r.get()?);
                 }
-                TransportParameterId::GreaseQuicBit => match len {
-                    0 => params.grease_quic_bit = true,
-                    _ => return Err(Error::Malformed),
-                },
-                TransportParameterId::MinAckDelayDraft07 => params.min_ack_delay = Some(r.get()?),
+                TransportParameterId::GreaseQuicBit => {
+                    if len != 0 || params.grease_quic_bit {
+                        return Err(Error::Malformed);
+                    }
+                    params.grease_quic_bit = true;
+                }
+                TransportParameterId::MinAckDelayDraft07 => {
+                    if params.min_ack_delay.is_some() {
+                        return Err(Error::Malformed);
+                    }
+                    params.min_ack_delay = Some(r.get()?);
+                }
                 _ => {
                     macro_rules! parse {
                         {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {
@@ -926,6 +933,36 @@ mod test {
             TransportParameters::read(Side::Client, &mut buf.as_slice()),
             Err(Error::Malformed)
         );
+    }
+
+    #[test]
+    fn read_duplicate_grease_quic_bit_and_min_ack_delay() {
+        let cases = [
+            TransportParameters {
+                grease_quic_bit: true,
+                ..TransportParameters::default()
+            },
+            TransportParameters {
+                min_ack_delay: Some(2_000u32.into()),
+                ..TransportParameters::default()
+            },
+        ];
+        for params in cases {
+            let mut once = Vec::new();
+            params.write(&mut once);
+            assert_eq!(
+                TransportParameters::read(Side::Client, &mut once.as_slice()).unwrap(),
+                params
+            );
+
+            let mut twice = Vec::new();
+            params.write(&mut twice);
+            params.write(&mut twice);
+            assert_eq!(
+                TransportParameters::read(Side::Client, &mut twice.as_slice()),
+                Err(Error::Malformed)
+            );
+        }
     }
 
     #[test]
