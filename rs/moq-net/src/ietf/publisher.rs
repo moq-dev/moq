@@ -328,6 +328,31 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 	}
 }
 
+/// How a subscription's serve loop ended, short of the peer cancelling it.
+#[derive(Debug)]
+enum Served {
+	/// The track and any fill finished, or serving ended with this error.
+	Track(Result<(), Error>),
+	/// An update could not be applied, its parameters unsupported or its renewal refused
+	/// (drafts 16 section 9.11.1, 18 section 10.9.1). The update was already answered, and
+	/// PUBLISH_DONE says UPDATE_FAILED.
+	UpdateFailed(Error),
+}
+
+impl Served {
+	/// The PUBLISH_DONE status and reason this end reports.
+	fn status(&self) -> (ietf::PublishDoneStatus, &'static str) {
+		match self {
+			Self::Track(Ok(())) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
+			Self::Track(Err(Error::Unauthorized | Error::Session(crate::SessionError::Unauthorized))) => {
+				(ietf::PublishDoneStatus::Unauthorized, "not granted")
+			}
+			Self::Track(Err(_)) => (ietf::PublishDoneStatus::InternalError, "internal error"),
+			Self::UpdateFailed(_) => (ietf::PublishDoneStatus::UpdateFailed, "update failed"),
+		}
+	}
+}
+
 /// What woke an announce-forwarding loop.
 enum NamespaceEvent {
 	/// The session or stream ended, with the result to surface.
@@ -903,7 +928,7 @@ where
 					}
 					if gate.poll_denied(waiter).is_ready() {
 						tracing::info!(broadcast = %absolute, track = %track_name, "subscription no longer authorized");
-						return Poll::Ready(Some(Err(Error::Unauthorized)));
+						return Poll::Ready(Some(Served::Track(Err(Error::Unauthorized))));
 					}
 					Poll::Pending
 				})
@@ -911,7 +936,12 @@ where
 			};
 
 			let completed = served.is_some();
-			let res = served.unwrap_or(Ok(()));
+			let served = served.unwrap_or(Served::Track(Ok(())));
+			let (status, reason) = served.status();
+			let res = match served {
+				Served::Track(res) => res,
+				Served::UpdateFailed(err) => Err(err),
+			};
 
 			// Draft-14 on carries no end location in PUBLISH_DONE: an END_OF_TRACK object is
 			// what tells the subscriber where the track ended. A cancelled subscription is
@@ -949,14 +979,6 @@ where
 			let streams = track_serve.opened();
 
 			// Send PublishDone
-			let (status, reason) = match &res {
-				Ok(()) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
-				Err(Error::Unauthorized) | Err(Error::Session(crate::SessionError::Unauthorized)) => {
-					(ietf::PublishDoneStatus::Unauthorized, "not granted")
-				}
-				Err(Error::Unsupported) => (ietf::PublishDoneStatus::UpdateFailed, "update failed"),
-				Err(_) => (ietf::PublishDoneStatus::InternalError, "internal error"),
-			};
 			let _ = stream.writer.varint(ietf::PublishDone::ID).await;
 			let _ = stream
 				.writer
@@ -986,7 +1008,7 @@ where
 		fill: impl std::future::Future<Output = ()>,
 		mut request_grant: Option<crate::auth::RequestGrant>,
 		namespace: crate::PathOwned,
-	) -> Option<Result<(), Error>> {
+	) -> Option<Served> {
 		let mut session = self.session.clone();
 		let mut fill = std::pin::pin!(fill);
 		let mut fill_done = false;
@@ -1019,11 +1041,11 @@ where
 		loop {
 			// Handle one queued update before reading the next, so answers stay in order.
 			if let Some(update) = renewal.next() {
-				if let Err(err) = self
+				if let Err(served) = self
 					.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut renewal, update)
 					.await
 				{
-					return Some(Err(err));
+					return Some(served);
 				}
 				continue;
 			}
@@ -1098,9 +1120,9 @@ where
 			let answer = self.version != Version::Draft14;
 
 			match turn {
-				Turn::Served(res) => return Some(res),
+				Turn::Served(res) => return Some(Served::Track(res)),
 				Turn::Cancelled => return None,
-				Turn::Ended(err) => return Some(Err(err)),
+				Turn::Ended(err) => return Some(Served::Track(Err(err))),
 				Turn::Renewal(request_update::Verdict {
 					verdict,
 					grant: res,
@@ -1112,7 +1134,7 @@ where
 					// re-armed at the new expiry.
 					if rg.renew(verdict, res) {
 						if answer && let Err(err) = self.write_request_ok(&mut stream.writer, rid).await {
-							return Some(Err(err));
+							return Some(Served::Track(Err(err)));
 						}
 						continue;
 					}
@@ -1124,27 +1146,29 @@ where
 							.write_subscribe_error(&mut stream.writer, rid, &Error::Unauthorized, "renewal not granted")
 							.await
 					{
-						return Some(Err(err));
+						return Some(Served::Track(Err(err)));
 					}
-					return Some(Err(Error::Unsupported));
+					return Some(Served::UpdateFailed(Error::Unauthorized));
 				}
 				// An update behind a pending verdict waits its turn, so its answer follows the
 				// verdict's.
 				Turn::Update(update) if renewal.pending() => match renewal.queue(update, self.version) {
 					Ok(()) => {}
 					Err(request_update::Overflow::Session) => {
-						return Some(Err(request_update::too_many(&mut self.session.clone())));
+						return Some(Served::Track(Err(request_update::too_many(&mut self.session.clone()))));
 					}
 					// Below draft 19 no limit is negotiated, so this is a local memory guard: end
 					// this request, never the session.
-					Err(request_update::Overflow::Request) => return Some(Err(Error::ProtocolViolation)),
+					Err(request_update::Overflow::Request) => {
+						return Some(Served::Track(Err(Error::ProtocolViolation)));
+					}
 				},
 				Turn::Update(update) => {
-					if let Err(err) = self
+					if let Err(served) = self
 						.apply_subscription_update(stream, serve, &namespace, &request_grant, &mut renewal, update)
 						.await
 					{
-						return Some(Err(err));
+						return Some(served);
 					}
 				}
 			}
@@ -1157,7 +1181,7 @@ where
 	/// holds no grant to renew), owes one answer so the peer's MAX_REQUEST_UPDATES credit is
 	/// restored.
 	///
-	/// An error ends the request.
+	/// An error is how the request ends.
 	async fn apply_subscription_update(
 		&self,
 		stream: &mut Stream<S, Version>,
@@ -1166,10 +1190,11 @@ where
 		request_grant: &Option<crate::auth::RequestGrant>,
 		renewal: &mut request_update::Renewal<super::request_stream::Update>,
 		update: super::request_stream::Update,
-	) -> Result<(), Error> {
+	) -> Result<(), Served> {
 		// Draft 14 answers no update. Drafts 15 and 16 answer on the control stream, naming the
 		// update's own Request ID; later drafts name none.
 		let answer = self.version != Version::Draft14;
+		let failed = |err| Served::Track(Err(err));
 		if update.unsupported {
 			if answer {
 				self.write_subscribe_error(
@@ -1178,14 +1203,15 @@ where
 					&Error::Unsupported,
 					"REQUEST_UPDATE parameters not supported",
 				)
-				.await?;
+				.await
+				.map_err(failed)?;
 			}
-			return Err(Error::Unsupported);
+			return Err(Served::UpdateFailed(Error::Unsupported));
 		}
 		if let Some(priority) = update.priority {
 			let mut subscription = serve.track.subscription();
 			subscription.priority = super::priority::from_wire(priority);
-			serve.track.update(subscription)?;
+			serve.track.update(subscription).map_err(failed)?;
 		}
 		if let (Some(token), true) = (update.authorization_token, request_grant.is_some()) {
 			let verdict = self
@@ -1195,7 +1221,9 @@ where
 			return Ok(());
 		}
 		if answer {
-			self.write_request_ok(&mut stream.writer, update.request_id).await?;
+			self.write_request_ok(&mut stream.writer, update.request_id)
+				.await
+				.map_err(failed)?;
 		}
 		Ok(())
 	}
@@ -4276,7 +4304,10 @@ mod serve_tests {
 				crate::Path::new("room").to_owned(),
 			)
 			.await;
-		assert!(matches!(served, Some(Err(Error::Unsupported))), "{served:?}");
+		assert!(
+			matches!(served, Some(Served::UpdateFailed(Error::Unsupported))),
+			"{served:?}"
+		);
 	}
 
 	/// The request stream's control messages and every data stream's first FIN or reset,
@@ -4477,6 +4508,45 @@ mod serve_tests {
 		wire.assert_streams_closed_before_publish_done();
 	}
 
+	/// A track that ends with an Unsupported error (a relay refusing a copy whose metadata
+	/// changed does) ends its subscription with INTERNAL_ERROR: UPDATE_FAILED is only for an
+	/// update the publisher could not apply.
+	#[moq_net_sim::test]
+	async fn an_unsupported_track_error_is_not_a_failed_update() {
+		let version = Version::Draft18;
+		let h = serve(version);
+		let mut session = ScriptedSession::per_stream(vec![vec![]]);
+		let mut stream = Stream::open(&mut session, version).await.unwrap();
+		let mut serving = TrackServe::new(
+			h.session.clone(),
+			h.track.subscribe(None),
+			RequestId(0),
+			version,
+			ServeRange::default(),
+			None,
+		);
+		h.track.clone().abort(Error::Unsupported).unwrap();
+		let mut finished = false;
+		let served = h
+			.publisher
+			.run_subscription(
+				&mut stream,
+				&mut serving,
+				&mut finished,
+				async {},
+				None,
+				crate::Path::new("room").to_owned(),
+			)
+			.await
+			.expect("the track's error ends the subscription");
+		assert!(matches!(served, Served::Track(Err(Error::Unsupported))), "{served:?}");
+		assert_eq!(served.status().0, ietf::PublishDoneStatus::InternalError);
+		assert_eq!(
+			Served::UpdateFailed(Error::Unsupported).status().0,
+			ietf::PublishDoneStatus::UpdateFailed
+		);
+	}
+
 	/// Draft-21 §9.5: a failed REQUEST_UPDATE is answered with REQUEST_ERROR, then the
 	/// subscription ends with PUBLISH_DONE(UPDATE_FAILED).
 	///
@@ -4657,7 +4727,10 @@ mod serve_tests {
 					crate::Path::new("room").to_owned(),
 				)
 				.await;
-			assert!(matches!(served, Some(Err(Error::Unsupported))), "{version}: {served:?}");
+			assert!(
+				matches!(served, Some(Served::UpdateFailed(Error::Unsupported))),
+				"{version}: {served:?}"
+			);
 			// The answer is all that was written: [type, length (2), Request ID, ...].
 			let written = session.log.writes.lock().unwrap().clone();
 			match version {
@@ -7557,11 +7630,11 @@ mod serve_tests {
 			}
 			assert!(!ended, "{version:?}: an accepted renewal keeps the subscription");
 		} else {
-			// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused renewal ends
-			// only this subscription, promptly and without the old 60s grant having to lapse,
-			// through the PUBLISH_DONE UPDATE_FAILED path (Err(Unsupported) at line ~966). The
-			// update is answered first: nothing on draft-14, exactly one keyed REQUEST_ERROR to
-			// the update's Request ID (0x40) on draft-15/16. The session stays up.
+			// Per drafts 16 section 9.11.1 / 18 section 10.9.1, a refused renewal ends only
+			// this subscription, promptly and without the old 60s grant having to lapse, with
+			// PUBLISH_DONE UPDATE_FAILED. The update is answered first: nothing on draft-14,
+			// exactly one keyed REQUEST_ERROR to the update's Request ID (0x40) on draft-15/16.
+			// The session stays up.
 			let mut result = None;
 			for _ in 0..200 {
 				let _ = futures::poll!(acceptor.as_mut());
@@ -7577,8 +7650,14 @@ mod serve_tests {
 				"{version:?}: the renewal was answered"
 			);
 			assert!(
-				matches!(result, Some(Err(Error::Unsupported))),
-				"{version:?}: a refused renewal ends the subscription at once (UPDATE_FAILED), got {result:?}"
+				matches!(result, Some(Err(Error::Unauthorized))),
+				"{version:?}: a refused renewal ends the subscription at once, got {result:?}"
+			);
+			let (status, _) = Wire::read(&h.log, version).publish_done.expect("PUBLISH_DONE was sent");
+			assert_eq!(
+				status,
+				ietf::PublishDoneStatus::UpdateFailed.code(version),
+				"{version:?}: UPDATE_FAILED"
 			);
 			let written = h.log.writes.lock().unwrap()[before..].to_vec();
 			match version {
@@ -8254,11 +8333,17 @@ mod serve_tests {
 			"acceptor never answered both tokens"
 		);
 		assert!(
-			matches!(result, Some(Err(Error::Unsupported))),
-			"a refused renewal ends the subscription at once via the UPDATE_FAILED path, got {result:?}"
+			matches!(result, Some(Err(Error::Unauthorized))),
+			"a refused renewal ends the subscription at once, got {result:?}"
+		);
+		let (status, _) = Wire::read(&h.log, VERSION).publish_done.expect("PUBLISH_DONE was sent");
+		assert_eq!(
+			status,
+			ietf::PublishDoneStatus::UpdateFailed.code(VERSION),
+			"UPDATE_FAILED"
 		);
 		// Draft-17+ answers the refused update with exactly one unkeyed REQUEST_ERROR before the
-		// subscription ends; the dispatcher then maps Err(Unsupported) to PUBLISH_DONE.
+		// subscription ends.
 		let written = h.log.writes.lock().unwrap().clone();
 		let error = request_error_bytes(VERSION, RequestId(0), "renewal not granted").await;
 		assert_eq!(
