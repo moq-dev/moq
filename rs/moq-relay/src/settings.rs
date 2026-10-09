@@ -75,20 +75,17 @@ struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_CONNECT_API", cli("--cluster-connect-api"))]
 	connect_api: Option<String>,
 
+	#[usage(env = "MOQ_CLUSTER_CONNECT_API_TLS_ROOT", cli("--cluster-connect-api-tls-root"))]
+	connect_api_tls_root: Option<Vec<String>>,
+
 	#[usage(env = "MOQ_CLUSTER_NODE", cli("--cluster-node"))]
 	node: Option<String>,
-
-	#[usage(env = "MOQ_CLUSTER_MESH", cli("--cluster-mesh"))]
-	mesh: Option<String>,
 
 	#[usage(env = "MOQ_CLUSTER_TOKEN", cli("--cluster-token"))]
 	token: Option<String>,
 
 	#[usage(env = "MOQ_CLUSTER_TIER", cli("--cluster-tier"))]
 	tier: Option<String>,
-
-	#[usage(env = "MOQ_CLUSTER_LINGER", cli("--cluster-linger"))]
-	linger: Option<String>,
 
 	#[cfg(feature = "cluster-lan")]
 	#[usage(flatten)]

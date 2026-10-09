@@ -17,8 +17,9 @@ mod front;
 mod bytes;
 pub(crate) mod clock;
 mod datagram;
+mod expiry;
 mod requests;
-pub(crate) mod resume;
+mod resume;
 mod subscription;
 mod time;
 mod timed;
@@ -47,7 +48,7 @@ pub mod origin {
 
 /// Subscribing to route (un)announcements from an origin.
 pub mod announce {
-	pub use super::origin_impl::{AnnounceConsumer as Consumer, AnnounceKind as Kind, AnnounceUpdate as Update};
+	pub use super::origin_impl::{Announce, AnnounceConsumer as Consumer, AnnounceEvent as Event};
 }
 
 // Hop identity and the `Consume` conversion trait aren't part of a role

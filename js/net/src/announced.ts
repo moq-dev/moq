@@ -8,14 +8,7 @@ import type { Route } from "./hop.js";
 import type * as Path from "./path.js";
 
 /**
- * What an {@link Update} reports about its prefix.
- *
- * @public
- */
-export type Kind = "announced" | "updated" | "retracted";
-
-/**
- * A route announcement, update, or retraction.
+ * A route over a prefix, delivered inside an {@link Event}.
  *
  * An announcement is always a prefix, never a broadcast: a route claims that
  * {@link prefix} and every path beneath it can be served. By convention a publisher
@@ -25,18 +18,26 @@ export type Kind = "announced" | "updated" | "retracted";
  *
  * @public
  */
-export interface Update {
+export interface Announce {
 	/**
 	 * The prefix the route covers, relative to the origin (for a session, its URL path).
 	 */
 	prefix: Path.Valid;
 	/** What the filter's wildcards stood for, when this prefix pins all of them. */
 	captures: Path.Pattern[] | undefined;
-	/** Whether the prefix was announced, re-priced, or retracted. */
-	kind: Kind;
 	/** Hops and cost of the route; on a retraction, its last advertised values. */
 	route: Route;
 }
+
+/**
+ * What an announcement stream yields.
+ *
+ * `start`: a route now covers the prefix. `update`: the route covering it changed
+ * hops or cost, in place. `end`: no route covers it any more.
+ *
+ * @public
+ */
+export type Event = { kind: "start" | "update" | "end" } & Announce;
 
 /**
  * Options for an announcement stream.
@@ -53,14 +54,9 @@ export interface Options {
 	hidden?: boolean;
 }
 
-/** Whether a route covers the path after an update of this {@link Kind}. */
-export function isActive(kind: Kind): boolean {
-	return kind !== "retracted";
-}
-
 /** Reactive backing state shared by announcement producers and consumers. */
 class AnnounceState {
-	queue = new Signal<Update[]>([]);
+	queue = new Signal<Event[]>([]);
 	closed = new Once<Error | null>();
 }
 
@@ -94,11 +90,11 @@ export class Producer {
 		return makeConsumer(this.#state);
 	}
 
-	/** Writes an announcement to the queue. */
-	append(update: Update) {
+	/** Writes an event to the queue. */
+	append(event: Event) {
 		if (this.#state.closed.peek() !== undefined) throw new Error("announcements are closed");
 		this.#state.queue.mutate((queue) => {
-			queue.push(update);
+			queue.push(event);
 		});
 	}
 
@@ -136,17 +132,17 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 	}
 
-	/** The announcements as they arrive, until the stream closes. */
-	async *[Symbol.asyncIterator](): AsyncGenerator<Update, void, undefined> {
+	/** The events as they arrive, until the stream closes. */
+	async *[Symbol.asyncIterator](): AsyncGenerator<Event, void, undefined> {
 		for (;;) {
-			const update = await this.next();
-			if (!update) return;
-			yield update;
+			const event = await this.next();
+			if (!event) return;
+			yield event;
 		}
 	}
 
-	/** Returns the next announcement. */
-	async next(): Promise<Update | undefined> {
+	/** Returns the next event, or undefined once the stream closes. */
+	async next(): Promise<Event | undefined> {
 		for (;;) {
 			const announce = this.#state.queue.peek().shift();
 			if (announce) return announce;

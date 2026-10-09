@@ -14,10 +14,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
+use std::time::Duration;
 
-use fixed_resample::ResamplingCons;
 #[cfg(feature = "aec")]
 use fixed_resample::ResamplingProd;
+use fixed_resample::{ReadStatus, ResamplingCons};
 
 #[cfg(feature = "aec")]
 use crate::resample::Remix;
@@ -105,6 +106,7 @@ pub(super) enum Command {
 		id: u64,
 		cons: ResamplingCons<f32>,
 		gain: Arc<Gain>,
+		completion: Arc<super::sink::Completion>,
 	},
 	/// Stop mixing a sink, because it was dropped or is being rebuilt for a new
 	/// device.
@@ -119,6 +121,9 @@ pub(super) struct Entry {
 	id: u64,
 	cons: ResamplingCons<f32>,
 	gain: Arc<Gain>,
+	completion: Arc<super::sink::Completion>,
+	/// Device deadline of the last period containing this sink's samples.
+	played_at: Duration,
 	/// Gain actually applied, chasing [`Gain::target`] a step at a time.
 	applied: f32,
 }
@@ -213,17 +218,35 @@ impl Mixer {
 		}
 	}
 
+	/// Complete sinks whose final playback deadline the callback clock has reached.
+	pub(super) fn complete(&self, now: Duration) {
+		// A device can queue several periods ahead of the speaker. The callback
+		// clock, rather than an empty ring, proves the final period has played.
+		for entry in &self.entries {
+			if now >= entry.played_at {
+				entry.completion.played(&entry.cons);
+			}
+		}
+	}
+
 	/// Fill one device buffer, interleaved at the device's channel count.
-	pub(super) fn fill(&mut self, out: &mut [f32]) {
+	pub(super) fn fill(&mut self, out: &mut [f32], played_at: Duration) {
 		loop {
 			match self.commands.try_recv() {
-				Ok(Command::Add { id, cons, gain }) => {
+				Ok(Command::Add {
+					id,
+					cons,
+					gain,
+					completion,
+				}) => {
 					// Start silent and ramp up, so a sink joining mid-playback
 					// doesn't click.
 					let entry = Entry {
 						id,
 						cons,
 						gain,
+						completion,
+						played_at: Duration::ZERO,
 						applied: 0.0,
 					};
 
@@ -285,7 +308,13 @@ impl Mixer {
 				// stays on the timeline instead of queueing up and jumping when
 				// it unmutes. The status only reports under/overflow, which the
 				// channel has already corrected for.
-				let _ = entry.cons.read_interleaved(&mut scratch[..samples], false);
+				let status = entry.cons.read_interleaved(&mut scratch[..samples], false);
+				if !matches!(
+					status,
+					ReadStatus::InputNotReady | ReadStatus::UnderflowOccurred { num_frames_read: 0 }
+				) {
+					entry.played_at = played_at;
+				}
 
 				let target = entry.gain.volume();
 				let mut applied = entry.applied;
@@ -393,7 +422,16 @@ mod tests {
 
 			let id = self.next;
 			self.next += 1;
-			self.commands.send(Command::Add { id, cons, gain }).unwrap();
+			self.commands
+				.send(Command::Add {
+					id,
+					cons,
+					gain,
+					completion: Arc::new(super::super::sink::Completion::new(
+						super::super::driver::Commands::default(),
+					)),
+				})
+				.unwrap();
 			(id, prod)
 		}
 
@@ -404,7 +442,8 @@ mod tests {
 		/// consumer has read once, exactly as it does for the real device before
 		/// its first callback.
 		fn fill(&mut self, out: &mut [f32]) {
-			self.mixer.fill(out);
+			self.mixer.complete(Duration::ZERO);
+			self.mixer.fill(out, Duration::ZERO);
 		}
 
 		/// Fill twice and hand back the buffer, so assertions look at gain that has
@@ -412,6 +451,35 @@ mod tests {
 		fn settle(&mut self, out: &mut [f32]) {
 			self.fill(out);
 			self.fill(out);
+		}
+	}
+
+	/// Measurement-only harness: no device and no timing acceptance threshold.
+	#[test]
+	#[ignore = "run with just rs bench-playback"]
+	fn benchmark_mixer_callbacks() {
+		for sinks in [1, 8, 32, MAX_SINKS] {
+			for frames in [128, 480, 1024, 2048] {
+				let mut harness = Harness::with_depth(Layout::Stereo, MAX_SINKS);
+				let mut prods: Vec<_> = (0..sinks).map(|_| harness.add(Arc::new(Gain::new())).1).collect();
+				let mut out = vec![0.0; frames * STEREO];
+				harness.fill(&mut out);
+				let pcm = vec![0.25 / sinks as f32; frames * STEREO];
+				let mut elapsed = std::time::Duration::ZERO;
+				for _ in 0..1000 {
+					for prod in &mut prods {
+						prod.push_interleaved(&pcm);
+					}
+					let start = std::time::Instant::now();
+					harness.fill(std::hint::black_box(&mut out));
+					elapsed += start.elapsed();
+					std::hint::black_box(&out);
+				}
+				println!(
+					"sinks={sinks} frames={frames}: {:.1} ns/callback",
+					elapsed.as_nanos() as f64 / 1000.0
+				);
+			}
 		}
 	}
 

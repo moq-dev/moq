@@ -39,6 +39,18 @@ impl Version {
 		}
 	}
 
+	/// Whether SUBSCRIBE_OK carries the publisher's largest (group, frame), which a
+	/// subscriber takes as where the live feed is. Added in lite-07; an earlier answer
+	/// says nothing about the live edge.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_largest(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the version has lite-05's dedicated TRACK stream and related stream
 	/// layout changes.
 	///
@@ -184,6 +196,15 @@ impl Version {
 		}
 	}
 
+	/// Whether subscription completion waits for the subscriber's FIN.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
 	/// requests decode as not opted in.
 	#[allow(clippy::match_like_matches_macro)]
@@ -199,6 +220,30 @@ impl Version {
 	/// from a live announcement on the same stream. Added in lite-07.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_announce_compression(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether the stream error table has NOT_FETCHABLE, for a FETCH that reached a
+	/// datagram. Added in lite-07; earlier versions say NOT_FOUND instead.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_not_fetchable(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether announcements and track requests carry the publisher epoch, the
+	/// identity that says two routes serve the same bytes. Added in lite-07.
+	/// Older versions carry nothing, so a received route has no epoch and is
+	/// never resumed through another route.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_epoch(self) -> bool {
 		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,

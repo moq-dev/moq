@@ -1,4 +1,5 @@
-# Kotlin objects are AutoCloseable, and `close()` there only releases the handle.
-# A generated `close()` would collide with it, so Kotlin names the method `end()`.
+# Kotlin objects are AutoCloseable, and `close()` there releases the handle,
+# which ends the broadcast only once no `dynamic()` handle remains. The
+# generated forced end is `end()` so it doesn't collide with it.
 [bindings.kotlin.rename]
 "MoqBroadcastProducer.close" = "end"

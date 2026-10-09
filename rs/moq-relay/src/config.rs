@@ -704,25 +704,6 @@ duration = "30s"
 		toml::to_string(&unset).expect("serialize None");
 	}
 
-	/// A released TOML value still survives the merge so the refusal can name it.
-	#[test]
-	fn cli_does_not_clobber_toml_linger() {
-		let _env = EnvGuard::clear(&["MOQ_CLUSTER_LINGER"]);
-
-		let toml = r#"
-[cluster]
-linger = "30s"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("linger-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let err = Config::parse_and_merge(args).expect_err("must refuse").to_string();
-		assert!(err.contains("--cluster-linger"), "{err}");
-	}
-
 	/// Preferred addresses loaded from TOML survive when the CLI omits them.
 	#[test]
 	fn cli_does_not_clobber_toml_preferred_addresses() {
@@ -1349,7 +1330,7 @@ uid = [1001]
 		.expect("config load");
 
 		assert!(
-			config.auth.validate().is_ok(),
+			config.auth.validate(false).is_ok(),
 			"CLI public flags must admit anonymous sessions"
 		);
 		assert_eq!(config.auth.public_subscribe, vec!["demo/**".parse().unwrap()]);

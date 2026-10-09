@@ -126,9 +126,6 @@ impl Relay {
 			.clone()
 			.or_else(|| config.cluster.node.clone())
 			.unwrap_or_default();
-		config
-			.auth
-			.validate_client_ca(!(config.listen.tls.root.is_empty() && config.web.https.root.is_empty()))?;
 		// No `[auth]` source means the embedder decides: it takes the admissions
 		// before `run`, which refuses to start if nobody did.
 		let (auth, admissions) = match config.auth.is_empty() {
@@ -136,7 +133,10 @@ impl Relay {
 				let (auth, admissions) = auth::Auth::embedded(node);
 				(auth, Some(admissions))
 			}
-			false => (config.auth.init(node, &config.connect.tls)?, None),
+			false => {
+				let client_ca = !(config.listen.tls.root.is_empty() && config.web.https.root.is_empty());
+				(config.auth.init(node, &config.connect.tls, client_ca)?, None)
+			}
 		};
 
 		#[cfg(feature = "cluster-lan")]

@@ -12,8 +12,6 @@
 //!   raw bitstream to a broadcast.
 //! - [`catalog`] publishes and subscribes to the broadcast catalog,
 //!   the JSON manifest listing every track and how to decode it.
-//! - [`clock`](mod@clock) holds the broadcast [`Clock`] and the translators
-//!   that move a source's own timestamps onto it.
 //! - [`import`](mod@import) is the front door for callers who only have
 //!   a format string. It picks the right concrete importer for you.
 //! - [`select`] picks which renditions of a broadcast to keep, on either
@@ -30,11 +28,12 @@
 
 pub mod binary;
 pub mod catalog;
-pub mod clock;
+mod clock;
 pub mod codec;
 pub mod container;
 mod error;
 pub mod import;
+mod jitter;
 pub mod json;
 mod pace;
 pub mod rate;
@@ -42,7 +41,7 @@ pub mod select;
 mod source;
 pub mod timeline;
 
-pub use clock::{Clock, SourceMap};
+pub use clock::Clock;
 pub use error::*;
 pub use pace::Pacer;
 pub use source::{Binding, Source};

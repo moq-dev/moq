@@ -40,6 +40,19 @@ pub struct Options {
 	/// can't at all, and at `hang`'s priorities audio outranks video, so it is only
 	/// ever squeezed on a link that can't carry audio alone.
 	pub bandwidth: moq_net::bandwidth::Allocator,
+	/// The minimum audio carried by each group. The packet that reaches it closes
+	/// the group, and the next packet opens a new one.
+	///
+	/// Defaults to zero, a group per packet. Each group costs the relay a stream
+	/// and its bookkeeping, so raising this trades per-group overhead for coarser
+	/// loss: a viewer that falls behind skips a whole group, and a lost packet
+	/// stalls the rest of its group until retransmitted. Packets still forward as
+	/// they are encoded rather than buffered until the group fills. A longer
+	/// [`Settings::frame_duration`] (up to 60 ms for Opus) also packs more audio
+	/// per group, at the cost of encoder latency. An unfinished group remains open
+	/// across a pause or [`Producer::reset_epoch`] until the next write; use
+	/// [`Producer::discontinuity`] to close it when capture stops.
+	pub group_duration: std::time::Duration,
 }
 
 impl Default for Options {
@@ -48,6 +61,7 @@ impl Default for Options {
 			track: None,
 			settings: Settings::default(),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			group_duration: std::time::Duration::ZERO,
 		}
 	}
 }
@@ -70,6 +84,10 @@ pub struct Producer<E: CatalogExt = ()> {
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
 	_ext: std::marker::PhantomData<fn() -> E>,
 	pending: Vec<f32>,
+	/// Codec samples a group carries before the packet reaching it closes the group.
+	group_samples: u64,
+	/// Codec samples in the open group.
+	grouped: u64,
 	/// Samples emitted since the current epoch (reset by [`reset_epoch`](Self::reset_epoch)).
 	frames_produced: u64,
 	/// Wall-clock anchor in microseconds, taken from the first frame after each
@@ -164,11 +182,15 @@ impl<E: CatalogExt> Reserved<E> {
 
 		self.track.set(encoder.catalog())?;
 
+		let group_samples = options.group_duration.as_nanos() * u128::from(encoder.codec_rate());
+		let group_samples = u64::try_from(group_samples.div_ceil(1_000_000_000)).unwrap_or(u64::MAX);
+
 		Ok(Registered {
 			encoder,
 			input,
 			remix,
 			resampler,
+			group_samples,
 		})
 	}
 
@@ -182,6 +204,8 @@ impl<E: CatalogExt> Reserved<E> {
 			track: self.track,
 			_ext: self._ext,
 			pending: Vec::new(),
+			group_samples: registered.group_samples,
+			grouped: 0,
 			frames_produced: 0,
 			epoch_us: None,
 			pending_discontinuity: false,
@@ -201,6 +225,7 @@ pub(crate) struct Registered {
 	input: Input,
 	remix: Option<Remix>,
 	resampler: Option<Resampler>,
+	group_samples: u64,
 }
 
 /// What a capture publication needs while its layout is still undiscovered.
@@ -374,7 +399,7 @@ impl<E: CatalogExt> Producer<E> {
 			)?;
 			self.frames_produced += self.encoder.frame_size() as u64;
 			self.activity = packet.activity;
-			Self::publish(&mut self.track, packet, timestamp)?;
+			self.publish(packet, timestamp)?;
 			self.decoder_boundary = false;
 		}
 
@@ -395,26 +420,29 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(Timestamp::from_micros(micros)?)
 	}
 
-	fn publish(
-		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
-		encoded: Encoded,
-		timestamp: Timestamp,
-	) -> Result<(), Error> {
-		// Publish each audio packet as its own moq-lite group: write it as a keyframe, then cut
-		// (below) so the relay forwards it without waiting for the next. Codecs can recover
-		// independently after a dropped group.
+	fn publish(&mut self, encoded: Encoded, timestamp: Timestamp) -> Result<(), Error> {
+		// Every packet decodes on its own, so a group may start at any of them: the first packet
+		// after a cut opens one. Codecs recover independently after a dropped group.
+		let keyframe = self.track.needs_keyframe();
+		if keyframe {
+			self.grouped = 0;
+		}
 		let mux_frame = MuxFrame {
 			timestamp,
 			payload: encoded.payload,
-			keyframe: true,
+			keyframe,
 			duration: None,
 		};
-		track.write(mux_frame)?;
-		// No boundary to give: the next packet bounds this one, and Opus frames have a
-		// deterministic duration anyway. Cut before observing the flush so a failed observation
-		// never leaves the group open.
-		track.cut(None)?;
-		track.flush(timestamp, Instant::now())?;
+		self.track.write(mux_frame)?;
+		self.grouped += self.encoder.frame_size() as u64;
+		// Cut as soon as the group is long enough rather than when the next packet arrives, so
+		// the relay sees it finish without waiting. No boundary to give: the next packet bounds
+		// this one, and codec frames have a deterministic duration anyway. Cut before observing
+		// the flush so a failed observation never leaves the group open.
+		if self.grouped >= self.group_samples {
+			self.track.cut(None)?;
+		}
+		self.track.flush(timestamp, Instant::now())?;
 		Ok(())
 	}
 
@@ -510,7 +538,7 @@ impl<E: CatalogExt> Producer<E> {
 			for packet in packets {
 				let timestamp = Self::timestamp(epoch_us, self.frames_produced, delay, codec_rate)?;
 				self.activity = packet.activity;
-				Self::publish(&mut self.track, packet, timestamp)?;
+				self.publish(packet, timestamp)?;
 				self.frames_produced += frame_size as u64;
 			}
 		}
@@ -577,7 +605,7 @@ mod tests {
 	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
 	#[tokio::test]
 	async fn finish_publishes_the_opus_lookahead_tail() {
-		for frames in [960, 860] {
+		for (group_ms, frames) in [(0, 960), (0, 860), (100, 2_880), (100, 2_780)] {
 			let input = Input {
 				format: Format::F32,
 				sample_rate: 48_000,
@@ -585,6 +613,7 @@ mod tests {
 			};
 			let options = Options {
 				track: Some("audio".to_string()),
+				group_duration: Duration::from_millis(group_ms),
 				settings: Settings {
 					layout: Layout::Mono,
 					bitrate: Some(moq_net::bandwidth::Rate::from_bps(128_000)),
@@ -603,7 +632,7 @@ mod tests {
 				&decoder_config,
 				"audio",
 				DecodeOptions {
-					max_age: Duration::from_secs(1),
+					max_delay: Duration::from_secs(1),
 					..DecodeOptions::new()
 				},
 			)
@@ -654,7 +683,7 @@ mod tests {
 			consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 				.await
 				.unwrap(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
@@ -781,7 +810,7 @@ mod tests {
 			&decoder_config,
 			"audio",
 			DecodeOptions {
-				max_age: Duration::from_millis(500),
+				max_delay: Duration::from_millis(500),
 				..DecodeOptions::new()
 			},
 		)
@@ -905,6 +934,105 @@ mod tests {
 		pts
 	}
 
+	/// The packet that reaches the group duration closes its group, so a minimum that
+	/// isn't a whole number of packets rounds up.
+	#[tokio::test]
+	async fn group_duration_packs_packets_per_group() {
+		for (group_ms, expected) in [(0, [1, 1]), (30, [2, 2]), (100, [5, 5])] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let consumer = broadcast.consume();
+			let input = Input {
+				format: Format::F32,
+				sample_rate: 48_000,
+				layout: Layout::Mono,
+			};
+			let options = Options {
+				track: Some("audio".to_string()),
+				group_duration: Duration::from_millis(group_ms),
+				..Options::default()
+			};
+			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+			let mut track = consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.await
+				.unwrap();
+
+			for index in 0..10 {
+				producer.write(&full_frame(index * 20_000)).unwrap();
+			}
+
+			let mut sizes = Vec::new();
+			for _ in expected {
+				let mut group = track.recv_group().await.unwrap().expect("a group");
+				let mut frames = 0;
+				while group.read_frame().await.unwrap().is_some() {
+					frames += 1;
+				}
+				sizes.push(frames);
+			}
+			assert_eq!(sizes, expected, "group duration {group_ms} ms");
+		}
+	}
+
+	/// Timeline breaks close a partial group and reset the resumed group's packet count.
+	#[tokio::test]
+	async fn group_duration_restarts_after_a_timeline_break() {
+		for deferred in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let consumer = broadcast.consume();
+			let input = Input {
+				format: Format::F32,
+				sample_rate: 48_000,
+				layout: Layout::Mono,
+			};
+			let options = Options {
+				track: Some("audio".to_string()),
+				group_duration: Duration::from_millis(100),
+				..Options::default()
+			};
+			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+			let mut track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+
+			for index in 0..2 {
+				producer.write(&full_frame(index * 20_000)).unwrap();
+			}
+			let mut partial = track.recv_group().await.unwrap().expect("partial group");
+			for _ in 0..2 {
+				assert!(
+					partial.read_frame().await.unwrap().is_some(),
+					"packets forward before the group fills"
+				);
+			}
+			assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
+
+			if deferred {
+				producer.reset_epoch();
+				assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
+			} else {
+				producer.discontinuity().unwrap();
+				assert!(partial.read_frame().await.unwrap().is_none());
+			}
+			for index in 0..5 {
+				producer.write(&full_frame(1_000_000 + index * 20_000)).unwrap();
+			}
+			assert!(partial.read_frame().await.unwrap().is_none());
+			let mut resumed = track.recv_group().await.unwrap().expect("resumed group");
+			assert_eq!(
+				resumed.sequence,
+				partial.sequence + 2,
+				"one marker separates the epochs"
+			);
+			for _ in 0..5 {
+				assert!(resumed.read_frame().await.unwrap().is_some());
+			}
+			assert!(resumed.read_frame().await.unwrap().is_none());
+		}
+	}
+
 	#[tokio::test]
 	async fn epoch_anchors_to_first_frame_timestamp() {
 		// The first frame's timestamp becomes the epoch (regression guard: the
@@ -935,7 +1063,7 @@ mod tests {
 			let track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 				.await
 				.unwrap();
 			let mut reader = moq_mux::container::Consumer::new(
@@ -986,7 +1114,7 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 			.await
 			.unwrap();
 		let mut reader =

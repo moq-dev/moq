@@ -13,7 +13,8 @@ class Session:
     """An established MoQ connection, returned by `Client` and `Request.accept()`.
 
     Hold the session to keep the connection alive; dropping it closes the
-    connection. As an async context manager it shuts down gracefully on exit::
+    connection. As an async context manager it drains on a clean exit and
+    cancels on an error::
 
         session = await request.accept()
         async with session:
@@ -27,7 +28,12 @@ class Session:
         return self
 
     async def __aexit__(self, *exc) -> None:
-        self.shutdown()
+        # A body error is the failure worth reporting. Draining behind it would wait
+        # out the deadline and replace it with a delivery timeout.
+        if exc[0] is None:
+            await self.shutdown()
+        else:
+            self.cancel(0)
 
     async def closed(self) -> None:
         """Wait until the session is over.
@@ -65,9 +71,9 @@ class Session:
         """Close the session with the given error code."""
         self._inner.cancel(code)
 
-    def shutdown(self) -> None:
-        """Graceful shutdown; equivalent to `cancel(0)` (0 means no error)."""
-        self._inner.shutdown()
+    async def shutdown(self) -> None:
+        """Drain finished tracks within one second, raising if delivery times out."""
+        await self._inner.shutdown()
 
     def publish(self) -> OriginProducer:
         """The publish-side origin: where local broadcasts are advertised to

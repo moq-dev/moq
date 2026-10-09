@@ -8,29 +8,23 @@ description: The media layer
 [![crates.io](https://img.shields.io/crates/v/hang)](https://crates.io/crates/hang)
 [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)
 
-The [hang media format](/concept/hang) on top of `moq-net`: a live catalog
-describing renditions with WebCodecs-style decoder configs, and containers
-that carry a timestamp with every frame.
+The [hang media format](/concept/hang) on top of `moq-net`: the catalog that
+describes renditions with WebCodecs-style decoder configs, and the frame that
+carries a timestamp with each payload.
 
-- **Catalog producer and consumer.** Typed `VideoConfig`, `AudioConfig` and text renditions, the `json` and `binary` data track sections, shared video properties (display size, rotation, flip), stalled hints, cross-broadcast rendition references, and the `archive` entry (timeline track, optional replay path, store URL, and format version). Extend it with your own sections through a lock or `#[serde(flatten)]`, or read unknown sections as raw JSON.
-- **Containers.** `legacy`, `cmaf`, and `loc`, decoded for you; unknown kinds pass through untouched.
-- **`Ordered`** reads a media track as timestamped frames, reorders groups, and skips ones that fall past your max age.
-- **Codecs described**: H.264, H.265, VP8, VP9, AV1, AAC, Opus, PCM.
+- **Catalog.** `Catalog` types video, audio, and text renditions, the `json` and `binary` data tracks, and the `archive` entry. Add your own sections through its type parameter, or read unknown ones as raw JSON. `Catalog::subscribe(&broadcast)` follows it live.
+- **Frames.** `container::Frame` encodes and decodes the `legacy` container, and `container::track_info` declares a media track. A rendition may instead declare `cmaf` or `loc`; an unknown container kind is kept rather than failing the catalog.
+- **Codecs described**: H.264, H.265, VP8, VP9, AV1, AAC, Opus, PCM, FLAC, MP3, MP2, AC-3, E-AC-3.
 
 ```bash
 cargo add hang
 ```
 
-`Catalog::<E>::subscribe(&broadcast).await?` opens the uncompressed catalog
-track and returns a typed consumer; `consumer.next().await?` yields root updates.
-Updates exceeding `catalog::MAX_RENDITIONS` are refused with
-`Error::TooManyRenditions`. Media retention uses the public
-`container::MAX_AGE` constant.
-
-Producing media is usually done through [`moq-mux`](/lib/rs/moq-mux) (from a
-container) or [`moq-video`](/lib/rs/moq-video) and
-[`moq-audio`](/lib/rs/moq-audio) (from a device), which build the catalog for
-you. Examples:
+hang is the format, not the pipeline. [`moq-mux`](/lib/rs/moq-mux) produces the
+catalog for you and decodes any container in group order
+(`moq_mux::container::Consumer`), skipping groups that fall past your max delay.
+[`moq-video`](/lib/rs/moq-video) and [`moq-audio`](/lib/rs/moq-audio) publish
+from a device. Examples:
 [`video.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)
 and
 [`subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).

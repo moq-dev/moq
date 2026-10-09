@@ -4,6 +4,7 @@
 		"types": ["bun", "vite/client"]
 	},
 	"include": [
+		"close.ts",
 		"driver.ts",
 		"harness.ts",
 		"harness.browser.ts",

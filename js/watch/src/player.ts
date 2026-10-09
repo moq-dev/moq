@@ -22,7 +22,7 @@ export type PlayerInput = {
 	catalogFormat: Getter<CatalogFormat | undefined>;
 	/** Catalog supplied when the format is `manual`. */
 	catalog: Getter<Catalog.Root | undefined>;
-	/** Connection probe used for rendition selection and delay. */
+	/** Connection probe used for rendition selection. */
 	probe: Getter<Moq.Connection.Probe | undefined>;
 	/** Canvas to paint video into. */
 	canvas: Getter<HTMLCanvasElement | undefined>;
@@ -117,7 +117,7 @@ export class Player {
 		this.text = new Text.Source({ broadcast: this.broadcast, target: this.in.captions });
 		this.#signals.cleanup(() => this.text.close());
 
-		this.sync = new Sync({ delay: this.in.delay, buffer: this.in.buffer, probe: this.in.probe });
+		this.sync = new Sync({ delay: this.in.delay, buffer: this.in.buffer });
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.video = new Video.Decoder({ source: videoSource, sync: this.sync, enabled: this.#videoEnabled });

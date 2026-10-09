@@ -2,55 +2,71 @@
 
 ## Goal
 
-The work in flight now, in three independent tracks. Relay hardening: legal
+The work in flight now, in two independent tracks. Relay hardening: legal
 moq-transport input never fails a session ahead of Seattle interop on
 2026-10-12, every resource a peer can make the relay hold is bounded by what
-it sent or by a budget, and no peer input panics the process. Routing: a
-service claims the prefix it could serve instead of enumerating broadcasts.
-Audio playout: the target is a measured estimate of arrival timing in both
-languages, and a browser regression fails a nightly run.
+it sent or by a budget, and no peer input panics the process. Identity: nothing treats who published a route as what it carries; a path and
+the epoch on its route are the only content identity, and every first-party
+publisher that can restart mints a fresh epoch, so #4741 stalls nobody.
 
 ## Plan
 
 The release API gates (#3829..#3878) and the release that followed them are
-done. moq.pro tracks this repository as a submodule rather than a release, so
-no release quest gates this milestone. The Pronto GPU integration lives in
-moq.pro.
+done. moq.pro pins this repository's `release` line, so the release gate below
+also keeps #4741 from reaching it early.
 
-The branch flip ranks first: it is a short cutover that every later PR
-targets. Relay hardening: IETF interop leads the rest, since only those
-quests block Seattle. IETF stream types came from m1 in the 2026-09-30 audit
-because a session ended by legal input is exactly what Seattle would hit. The DoS hardening
-from an external review on 2026-09-29, verified against `main`, stays in m0
-as security work. Its quests describe fixes, not exploits.
+Relay hardening left in m0 is idle fronts: per-session request caps landed
+in #4820, and the rest of the 2026-09-29 DoS review moved to m1 with
+relay session limits.
 
-Routing: the wildcard line is prefix-only on the wire; its resolve and demand
-work is done on the line branch and waits to land. Serving the relay's
-ingested-only view (`origin::Consumer::local()`) to localhost workers belongs
-to moq.pro's edge, which embeds moq-relay; it moved there on 2026-09-28.
+Routing: Wildcard landed in #4403, so a service claims the prefix it could
+serve instead of enumerating broadcasts. Serving the relay's ingested-only
+view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
+edge, which embeds moq-relay; it moved there on 2026-09-28.
+Pools of claim workers (transcoders) also need the relay to forget a front
+nobody reads (found 2026-10-07).
+A demand poll that loses a reader's wake keeps an unread front and its
+upstream subscription alive (found 2026-10-08).
 
-Audio playout: the jitter target replaces the round-trip guess. The browser
-audio quality harness in `test/audio-quality/` has landed; it grades playout
-nightly and records the traces it replays. Its native lane is a standalone m1
-quest, since nothing here waits on it. The [A/V clock](/quest/m1/av-clock.md)
-moved to m1 in the 2026-09-30 audit: it waits on the whole jitter line and is
-a published `@moq/watch` break on dev.
+Interop: Fastly's moq-relay-interop report (run of 2026-09-23, build
+7ee2b02) was triaged against `main` on 2026-10-07. Its SETUP, UNSUBSCRIBE
+and error-code items were already fixed. Fastly's reruns that day found
+that a relay moves End of Track's Location and refuses imquic's End of
+Group status. The fixes below LOCATION_FILTER come from them and go ahead
+of Seattle. The cold-relay Largest stays compliant with INVALID_RANGE
+(decided 2026-10-08), and the deviations doc landed in #5022.
+An imquic draft-22 rig (2026-10-08) hit LOCATION_FILTER and a clear
+FIRST_OBJECT at object 0 (#5027); the [release line](/quest/m0/release-22/README.md)
+backports both with moq-noq 1.3.4 so Seattle peers get a fixed 0.17.x.
 
-Published API or wire breaks still land on dev; each quest's Plan says so.
+Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
+gates the next release (decided 2026-10-03:
+#4741 resumes an un-epoched republish into the old broadcast and stalls its
+viewers). #4741 can merge to main, but no release ships until first-party
+publishers mint epochs. Backport patches cut from `release` don't carry
+#4741 and aren't gated (decided 2026-10-08).
+
+Liveness: a serve loop with work always ready never yields, which starved
+an FFI publisher's QUIC driver and fails hosted Interop's go lanes (found
+2026-10-08 landing #4225). The [serve budget](/quest/m0/serve-budget.md)
+bounds every kio task's loop. The Go and Python interop cells it fails
+moved here from m1 the same day, because the stall masks interop on every
+wire PR and hides as slow passes; the harness now fails a cell whose
+connection idles out.
+
+Audio playout: the jitter target is default in both languages (#4162); the
+[line](/quest/m1/audio-jitter-target/README.md) moved to m1 in the
+2026-10-08 audit, since only a manual browser proof and a native trace replay
+remain and no release waits on them.
 
 ## Required
 
-- [Branch flip](/quest/m0/branch-flip.md) - `dev` becomes the default `main` trunk and today's `main` becomes `release`, where publishing runs
-- [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - a request stream FIN stops updates without cancelling, and REQUEST_UPDATE on a subscribe is parsed
-- [JS unknown bidi](/quest/m0/ietf-unknown-bidi.md) - an unknown moq-transport bidi stream type closes the session in JS, as in Rust
-- [moq-lite early streams](/quest/m0/lite-early-streams.md) - a lite uni stream that arrives before SETUP is held until SETUP lands, and a second SETUP is fatal
-- [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
-- [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - noq carries quinn's stream reassembly cap and the connection receive window is finite by default
+- [Serve budget](/quest/m0/serve-budget.md) - a kio task that always has work ready yields after a budget, so a fast publisher can't starve its own QUIC driver
+- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.4, before Seattle
+- [Capped stream END_OF_GROUP](/quest/m0/ietf-end-of-track-location.md) - a stream capped by the subscription's end Location never claims END_OF_GROUP; moving End of Track's Location is deferred
+- [End of Group status](/quest/m0/ietf-end-of-group-status.md) - an End of Group status on a stream whose header already marks the group's end is accepted, so imquic's last object per group arrives
+- [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - every Go and Python publisher cell passes reliably once the serve budget lands, and a cell fails when a connection idles out
+- [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
-- [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers
-- [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
-- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
-
-## Related
-
-- [Pronto GPU integration](https://github.com/moq-dev/moq.pro/tree/main/quest/m0/pronto/gpu) - CARLA bridge, release adoption and desktop installation
+- [JS track takeover](/quest/m0/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does, so a re-announced `@moq/publish` catalog never restarts its groups
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription

@@ -17,16 +17,16 @@ pub enum ControlType {
 }
 
 impl Decode<Version> for ControlType {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let t = u64::decode(r, version)?;
+	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		let t = r.varint()?;
 		t.try_into().map_err(|_| DecodeError::InvalidValue)
 	}
 }
 
 impl Encode<Version> for ControlType {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		let v: u64 = (*self).into();
-		v.encode(w, version)?;
+		w.varint(v)?;
 		Ok(())
 	}
 }
@@ -41,16 +41,16 @@ pub enum DataType {
 }
 
 impl Decode<Version> for DataType {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let t = u64::decode(r, version)?;
+	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		let t = r.varint()?;
 		t.try_into().map_err(|_| DecodeError::InvalidValue)
 	}
 }
 
 impl Encode<Version> for DataType {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		let v: u64 = (*self).into();
-		v.encode(w, version)?;
+		w.varint(v)?;
 		Ok(())
 	}
 }

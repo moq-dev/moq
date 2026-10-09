@@ -4,27 +4,30 @@
 # Removes the relay's withdrawal of a publisher it lost. Each announced route
 # holds an origin handle whose drop retracts it; wrapping that in `ManuallyDrop`
 # means a route outlives the session that announced it, so a crashed publisher's
-# name stays announced with nothing behind it.
+# name stays announced with nothing behind it. Explicit withdrawals still consume
+# the handle, so only the implicit retraction on session loss is removed.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
-index 8a0259fec..0b6035640 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -2842,7 +2842,8 @@ struct AnnouncedRoute {
+@@ -3515 +3515 @@ fn withdraw(&mut self, path: &PathOwned) {
+-			entry.dynamic.withdrawn();
++			std::mem::ManuallyDrop::into_inner(entry.dynamic).withdrawn();
+@@ -3568,7 +3568,8 @@
  	/// without recomputing the chain.
  	route: crate::origin::Route,
  	/// Dropping it retracts the route and rejects its queued requests.
 -	dynamic: crate::origin::Dynamic,
 +	// MUTATION: never dropped, so a route outlives the session that announced it.
 +	dynamic: std::mem::ManuallyDrop<crate::origin::Dynamic>,
- 	/// One minted source per requested path, each closed when its guard drops.
- 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
+ 	/// Closes as the route goes, which closes every source it minted.
+ 	live: kio::Producer<()>,
  	/// Whether the GOAWAY drain already re-priced this route.
-@@ -2858,7 +2859,7 @@ impl AnnouncedRoute {
+@@ -3584,7 +3585,7 @@
  	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic, wake: Arc<RouteWake>) -> Self {
  		Self {
  			route,
 -			dynamic,
 +			dynamic: std::mem::ManuallyDrop::new(dynamic),
- 			sources: HashMap::new(),
+ 			live: Default::default(),
  			drained: false,
  			waker: std::task::Waker::from(wake.clone()),

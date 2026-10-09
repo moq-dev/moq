@@ -4,7 +4,6 @@ import { Time } from "@moq/net";
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
 import type { AudioConfig, VideoConfig } from "../catalog";
-import type { Recorder as TimelineRecorder } from "../timeline";
 import type { Format as ContainerFormat } from "./format";
 import type { Frame } from "./types";
 
@@ -59,16 +58,6 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro):
 	return data;
 }
 
-/** Options for a legacy-container {@link Producer}. */
-export interface ProducerProps {
-	/**
-	 * Report each group open (sequence + start timestamp) into the broadcast's timeline, so
-	 * consumers can index the media without downloading it. Mint one via
-	 * {@link Timeline.Producer.track}.
-	 */
-	timeline?: TimelineRecorder;
-}
-
 /** Writes legacy-container frames into a MoQ track, starting a new group on each keyframe. */
 export class Producer {
 	#track: Moq.Track.Producer;
@@ -76,39 +65,40 @@ export class Producer {
 	#previous?: Time.Micro;
 	#reordered = false;
 	#group?: Moq.Group.Producer;
-	#timeline?: TimelineRecorder;
-	// The newest timestamp written, reported to the timeline when the track closes: the last
-	// group has no successor to bound it, so its segment would be published a group short.
+	// The newest timestamp written in the current group, which estimates its end.
 	#end?: Time.Micro;
-	// Exclusive presentation end of finished groups. A frame below this is refused.
+	// Furthest timestamp in finished groups, used only for discontinuity markers.
 	#liveEdge?: Time.Micro;
+	// The current group start and the previous group start, which bounds its frames.
+	#start?: Time.Micro;
+	#floor?: Time.Micro;
 	// Gap between consecutive timestamps, used to close the last group when no successor exists.
 	#interval?: Time.Micro;
-	// A cut's marker is the newest group, so another one would say nothing new.
+	// A discontinuity's marker is the newest group, so another one would say nothing new.
 	#marked = false;
 
 	/** Wrap a track to publish legacy-container frames into it. */
-	constructor(track: Moq.Track.Producer, format: Format, props: ProducerProps = {}) {
+	constructor(track: Moq.Track.Producer, format: Format) {
 		this.#format = format;
 		this.#track = track;
-		this.#timeline = props.timeline;
 	}
 
-	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe, or if the timestamp sits below the live edge earlier groups reached. */
+	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe, a group start goes backwards, or a frame is below the previous group start. */
 	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
+		const floor = keyframe ? this.#start : this.#floor;
+		if (floor !== undefined && timestamp < floor) {
+			throw new Error("frame timestamp is below the previous group start");
+		}
 		this.#marked = false;
 		if (keyframe) {
 			const rewound = this.#previous !== undefined && timestamp < this.#previous;
 			this.#close(rewound ? undefined : timestamp);
 			if (rewound) this.#interval = undefined;
-			this.#refuse(timestamp);
 			this.#group = this.#track.appendGroup();
-			// Report the group the moment it opens: its start is this keyframe's timestamp.
-			this.#timeline?.record(this.#group.sequence, timestamp, true);
+			this.#floor = this.#start;
+			this.#start = timestamp;
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");
-		} else {
-			this.#refuse(timestamp);
 		}
 
 		this.#group?.writeFrame({
@@ -130,24 +120,26 @@ export class Producer {
 	 * continue it. Call it when the timeline is about to jump, e.g. an encoder pausing for lack of
 	 * demand or switching source; the next keyframe already rolls the group over on its own.
 	 *
-	 * `end` is where the content stops, estimated from the frame cadence when omitted. After closing
-	 * the group, this publishes a marker group of one empty frame at `end`, or at the live edge
-	 * without one. Without the marker, a group's reach runs to its successor's first frame, so the
-	 * group before a pause reads as live until whatever resumes it, and a subscriber joining
-	 * mid-break is handed that stale media. The marker bounds it, and it is the latest group a
-	 * joiner lands on. Data tracks only close the group, since an empty payload is data. No marker
-	 * is written until a frame follows the last one. Throws if `end` precedes the last video frame.
+	 * `end` is where the content stops. Without one the group closes with no end estimated from the
+	 * frame cadence, since whatever resumes may land sooner than one frame later and an end past it
+	 * reads as a rewind. After closing the group, this publishes a marker group of one empty frame at
+	 * `end`, or at the live edge without one. Without the marker, a group's reach runs to its
+	 * successor's first frame, so the group before a pause reads as live until whatever resumes it,
+	 * and a subscriber joining mid-break is handed that stale media. The marker bounds it, and it is
+	 * the latest group a joiner lands on. Data tracks only close the group, since an empty payload is
+	 * data. No marker is written until a frame follows the last one. Throws if `end` precedes the last
+	 * video frame.
 	 */
-	cut(end?: Time.Micro) {
+	discontinuity(end?: Time.Micro) {
+		// Nothing is measured across the break, so a missing end has no cadence to estimate from.
+		// An explicit end keeps the cadence until #close validates it, in case it throws.
+		if (end === undefined) this.#interval = undefined;
 		this.#close(end);
-		// Nothing is measured across the break.
 		this.#interval = undefined;
 		const timestamp = end ?? this.#liveEdge;
 		if (this.#format.kind === "data" || this.#marked || timestamp === undefined) return;
 
 		const group = this.#track.appendGroup();
-		this.#timeline?.record(group.sequence, timestamp, false);
-		this.#timeline?.end(timestamp);
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array(), timestamp),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
@@ -175,8 +167,6 @@ export class Producer {
 				: undefined;
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		this.#format.finishGroup(this.#group, this.#reordered ? undefined : end);
-		const bound = end ?? this.#end;
-		if (bound !== undefined) this.#timeline?.end(bound);
 		this.#group.close();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
@@ -186,12 +176,6 @@ export class Producer {
 		this.#end = undefined;
 		this.#previous = undefined;
 		this.#reordered = false;
-	}
-
-	#refuse(timestamp: Time.Micro) {
-		if (this.#liveEdge !== undefined && timestamp < this.#liveEdge) {
-			throw new Error("frame timestamp is below the live edge");
-		}
 	}
 
 	/** Close the track and current group, optionally with an error. */

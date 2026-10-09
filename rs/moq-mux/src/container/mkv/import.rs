@@ -43,12 +43,18 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	catalog: crate::catalog::Producer<E>,
 	container: hang::catalog::Container,
 
-	/// Held until the Tracks element is processed, so the catalog is withheld from the broadcast
-	/// until every rendition is in (and, when composed with other importers, until they finish too).
+	/// Held until the first block anchors the clock, so the catalog is withheld from the broadcast
+	/// until every rendition is in and its root `clock` is final (and, when composed with other
+	/// importers, until they release theirs too).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
+	/// Bytes already dropped from the front of `buffer`, so a tag's offset in it is absolute.
+	consumed: u64,
+	/// Where the latest handled tag starts, as an absolute offset. A drain pass restarts from a
+	/// replay point, so any tag starting at or before it was already handled.
+	handled: Option<u64>,
 	/// Whether the Tracks element has been processed.
 	tracks_seen: bool,
 
@@ -82,9 +88,6 @@ struct MkvTrack {
 	kind: TrackKind,
 	track: Media,
 	group: Option<moq_net::group::Producer>,
-	/// Highest block timestamp (Matroska ticks: cluster_ts + block_relative) already emitted.
-	/// Used to dedup re-parsed blocks across decode() calls.
-	last_emitted_ticks: Option<i64>,
 }
 
 enum Media {
@@ -138,6 +141,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			container,
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
+			consumed: 0,
+			handled: None,
 			tracks_seen: false,
 			timestamp_scale_ns: DEFAULT_TIMESTAMP_SCALE_NS,
 			cluster_timestamp: 0,
@@ -168,9 +173,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Run the iterator over the buffered bytes, processing every fully-parsed top-level tag.
 	///
-	/// On each call, the iterator restarts from the beginning of the retained buffer. Tag
-	/// handling is idempotent (state flags for header/tracks, per-track timestamp dedup for
-	/// blocks). After parsing stops (UnexpectedEOF or end of buffer), bytes up to the start
+	/// On each call, the iterator restarts from the beginning of the retained buffer, so tags
+	/// already handled are skipped by their absolute offset. After parsing stops (UnexpectedEOF or end of buffer), bytes up to the start
 	/// of the most-recently emitted top-level tag are discarded so memory does not grow
 	/// unboundedly.
 	fn drain(&mut self) -> Result<()> {
@@ -195,8 +199,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// We restart the iterator from the beginning of the retained buffer on every
 		// drain pass. Once data is replayed mid-Segment, ebml-iterable would otherwise
 		// reject Segment children (Cluster, Tracks, etc.) as appearing without their
-		// parent. Allowing hierarchy problems plus our own dedup logic on emitted
-		// blocks gives us idempotent streaming behavior.
+		// parent. Allowing hierarchy problems plus skipping tags by offset gives us
+		// idempotent streaming behavior.
 		iter.allow_errors(&[AllowableErrors::HierarchyProblems]);
 		// Don't synthesize Master::End tags when the buffer ends mid-element.
 		iter.emit_master_end_when_eof(false);
@@ -207,6 +211,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			match iter.next() {
 				Some(Ok(tag)) => {
 					last_offset = iter.last_emitted_tag_offset();
+					// A Master::End reports its master's start, so it is skipped here too.
+					let start = self.consumed + last_offset as u64;
+					if self.handled.is_some_and(|handled| start <= handled) {
+						continue;
+					}
+					self.handled = Some(start);
 					self.handle_tag(tag)?;
 				}
 				Some(Err(TagIteratorError::UnexpectedEOF { .. })) => break,
@@ -227,6 +237,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// If we never emitted anything (very first call with too few bytes), keep everything.
 		if last_offset > 0 {
 			self.buffer.advance(last_offset);
+			self.consumed += last_offset as u64;
 		}
 
 		Ok(())
@@ -248,14 +259,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					}
 				}
 			}
-			// Idempotency: if the parser restarts mid-stream and `last_offset`
-			// happens to point at Tracks (i.e. Tracks was the last fully-emitted
-			// tag), we'll see it again. Process once.
+			// A second Tracks element would redeclare a published track set.
 			MatroskaSpec::Tracks(Master::Full(children)) if !self.tracks_seen => {
-				self.handle_tracks(children)?;
+				// Only `finish()` releases the reservation before Tracks, since a block needs a track.
+				let reserved = self.initial_reservation.clone().ok_or(Error::TracksAfterFinish)?;
+				self.handle_tracks(&reserved, children)?;
 				self.tracks_seen = true;
-				// The full track set is declared now; release the reservation so the catalog publishes.
-				self.initial_reservation = None;
+				// The reservation stays held until the first block anchors the clock, unless no track
+				// was declared: then no block ever will.
+				if self.tracks.is_empty() {
+					self.initial_reservation = None;
+				}
 			}
 			MatroskaSpec::Cluster(Master::Start) => {
 				self.cluster_timestamp = 0;
@@ -290,10 +304,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Err(Error::MissingDocType.into())
 	}
 
-	fn handle_tracks(&mut self, entries: Vec<MatroskaSpec>) -> Result<()> {
+	fn handle_tracks(&mut self, reserved: &crate::catalog::Reserved<E>, entries: Vec<MatroskaSpec>) -> Result<()> {
 		for entry in entries {
 			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry
-				&& let Err(e) = self.add_track(children)
+				&& let Err(e) = self.add_track(reserved, children)
 			{
 				tracing::warn!(error = ?e, "skipping MKV track");
 			}
@@ -301,7 +315,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn add_track(&mut self, children: Vec<MatroskaSpec>) -> Result<()> {
+	fn add_track(&mut self, reserved: &crate::catalog::Reserved<E>, children: Vec<MatroskaSpec>) -> Result<()> {
 		let mut track_number: Option<u64> = None;
 		let mut track_type: Option<u64> = None;
 		let mut codec_id: Option<String> = None;
@@ -353,18 +367,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			TrackKind::Video => {
 				let mut config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Video(match &self.initial_reservation {
-					Some(reserved) => reserved.video(track, wire, config)?,
-					None => self.catalog.video(track, wire, config)?,
-				})
+				Media::Video(reserved.video(track, wire, config)?)
 			}
 			TrackKind::Audio => {
 				let mut config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Audio(match &self.initial_reservation {
-					Some(reserved) => reserved.audio(track, wire, config)?,
-					None => self.catalog.audio(track, wire, config)?,
-				})
+				Media::Audio(reserved.audio(track, wire, config)?)
 			}
 		};
 
@@ -374,7 +382,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				kind,
 				track: media,
 				group: None,
-				last_emitted_ticks: None,
 			},
 		);
 
@@ -419,18 +426,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::NegativeBlockTimestamp.into());
 		}
 
-		// Skip blocks we've already emitted on a previous decode() pass (buffer replay).
-		if let Some(last) = track.last_emitted_ticks
-			&& block_ticks <= last
-		{
-			return Ok(());
-		}
-		track.last_emitted_ticks = Some(block_ticks);
-
 		let pts_ns = (block_ticks as u64)
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
 		let timestamp = Timestamp::from_nanos(pts_ns)?;
+		// The first block is live on arrival. Anchor before releasing the reservation, so the
+		// first snapshot carries the final clock; Tracks declared every track, so any track's
+		// block releases it.
+		self.catalog.anchor(timestamp)?;
+		self.initial_reservation = None;
 
 		// Audio tracks: always treat as keyframes (matches fmp4 behavior).
 		let keyframe = matches!(track.kind, TrackKind::Audio) || keyframe;
@@ -472,6 +476,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		// No frame follows to anchor the clock, so publish the declared track set now.
+		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
 			if let Some(g) = track.group.take() {
 				g.finish()?;

@@ -5,13 +5,14 @@
 # public registry to catch packaging breakage), this builds every client from
 # the workspace source. It proves the code in the tree interoperates across
 # implementations before anything is published: a relay built from rs/moq-relay,
-# clients built from rs/moq-cli, py/, js/, and rs/libmoq, all talking to each
+# clients built from rs/moq-cli, py/, js/, and rs/moq-c, all talking to each
 # other. There's no apt/brew/npm/PyPI here, just cargo/bun/uv/cc.
 #
 # It stands up a moq-relay, then for each publisher language publishes an H.264
 # broadcast and confirms every subscriber sees data flowing before the timeout.
 # Every publisher but the Rust CLI also carries audio. The browser subscriber
-# verifies rendered WebCodecs output, player pause/resume, and that audio.
+# verifies rendered WebCodecs output, player pause/resume, and that audio, then
+# that a session the relay refuses hands Chromium the close code and reason.
 set -euo pipefail
 
 INTEROP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -37,7 +38,7 @@ URL=""
 NEGATIVE=0
 MEDIA=0
 
-# Cargo profile for the relay/cli/libmoq builds. Debug compiles faster, which is
+# Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
 PROFILE="${INTEROP_PROFILE:-debug}"
 
@@ -169,7 +170,7 @@ require_tools() {
         exit 1
     fi
     # Resolve the cargo target dir once (honors a custom CARGO_TARGET_DIR, which
-    # the self-hosted CI runner sets), so the built binaries and libmoq's header
+    # the self-hosted CI runner sets), so the built binaries and moq-c's header
     # are found wherever cargo actually writes them.
     TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
         sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
@@ -298,7 +299,7 @@ prepare_go() {
     fi
 }
 
-# Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
+# Build moq-c (the C staticlib + cbindgen header) and compile the C subscriber
 # against it. cargo writes libmoq.a to the profile dir, and build.rs writes
 # moq.h into its OUT_DIR, which only cargo's JSON messages name.
 prepare_c() {
@@ -307,28 +308,28 @@ prepare_c() {
         mark_broken c "no C compiler ($cc) on PATH"
         return
     }
-    echo "building c client (workspace libmoq + cc)..."
+    echo "building c client (workspace moq-c + cc)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
-        mark_broken c "cargo build -p libmoq failed"
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-c --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
+        mark_broken c "cargo build -p moq-c failed"
         sed 's/^/        /' "$HARNESS_RUN/c-build.log" >&2 || true
         return
     fi
-    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep libmoq |
+    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep -F '/moq-c#' |
         sed -n 's/.*"out_dir":"\([^"]*\)".*/\1/p' | tail -1) || true
     header="$out_dir/include/moq.h"
     lib="$TARGET_BASE/$PROFILE/libmoq.a"
     [[ -f "$header" && -f "$lib" ]] || {
-        mark_broken c "libmoq artifacts missing ($header / $lib)"
+        mark_broken c "moq-c artifacts missing ($header / $lib)"
         return
     }
     # cargo can't inject libmoq.a's native deps into an external link, so read
-    # them from the same list moq.pc and CMake use.
+    # them from the same list moq-c.pc and CMake use.
     local native_libs
     case "$(uname -s)" in
-        Darwin) native_libs="$WORKSPACE/rs/libmoq/native-libs/apple.txt" ;;
-        *) native_libs="$WORKSPACE/rs/libmoq/native-libs/linux.txt" ;;
+        Darwin) native_libs="$WORKSPACE/rs/moq-c/native-libs/apple.txt" ;;
+        *) native_libs="$WORKSPACE/rs/moq-c/native-libs/linux.txt" ;;
     esac
     os_libs=()
     while read -r entry; do
@@ -678,6 +679,25 @@ else
         start_publisher "$pub" "$broadcast"
         run_round "$pub" "$broadcast" "$PUB_PID"
     done
+
+    # The relay refuses a token on its public rules, and Chromium has to read the close code and
+    # reason it sends. Chromium is the strict peer here, so no Rust client stands in for it.
+    if needs js; then
+        echo "=== browser close code ==="
+        if is_broken js; then
+            echo "  FAIL  refused session (browser client unavailable)"
+            overall=1
+        else
+            started=$SECONDS
+            if (cd "$CLIENTS/js" && bun close.ts --url "$URL" --timeout "$TIMEOUT") >"$HARNESS_RUN/close.log" 2>&1; then
+                echo "  PASS  refused session ($((SECONDS - started))s)"
+            else
+                echo "  FAIL  refused session ($((SECONDS - started))s)"
+                sed 's/^/        /' "$HARNESS_RUN/close.log" >&2 || true
+                overall=1
+            fi
+        fi
+    fi
 fi
 
 if [[ "$overall" -eq 0 ]]; then

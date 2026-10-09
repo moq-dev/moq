@@ -96,7 +96,7 @@ export class Subscribe {
 			params.subscriberPriority = this.subscriberPriority;
 			params.groupOrder = GROUP_ORDER;
 			params.forward = this.forward;
-			params.subscriptionFilter = Filter.encode(this.filter, version);
+			params.subscriptionFilter = this.filter;
 
 			// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-20. An older peer reads
 			// either as an unknown parameter, which is a protocol violation, so they are
@@ -150,7 +150,7 @@ export class Subscribe {
 			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority, filter, forward });
 		}
 		// v15+: fields are in parameters
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "subscribe");
 		const subscriberPriority = params.subscriberPriority ?? 128;
 		let groupOrder = params.groupOrder ?? GROUP_ORDER;
 		if (groupOrder > 2) {
@@ -176,8 +176,7 @@ export class Subscribe {
 		}
 
 		// An absent LOCATION_FILTER means the subscription is unfiltered.
-		const raw = params.subscriptionFilter;
-		const filter = raw !== undefined ? Filter.decode(raw, version) : { kind: "unfiltered" as const };
+		const filter = params.subscriptionFilter ?? { kind: "unfiltered" as const };
 		const rawFill = params.fillParameters;
 		const fill = rawFill !== undefined ? Filter.decodeFill(rawFill, version) : undefined;
 
@@ -301,13 +300,15 @@ export class SubscribeOk {
 				largest = { groupId, objectId };
 			}
 
-			await Parameters.decode(r, version); // ignore parameters
+			properties.maxCacheDuration = (await Parameters.decode(r, version)).maxCacheDuration;
 		} else {
 			// v15+: parameters followed by Track Properties (draft-17+). LARGEST_OBJECT is
 			// required on every draft once the track has content, so rejecting it would tear
 			// down a session over a parameter compliant publishers must send.
-			largest = (await Parameters.decode(r, version)).largest;
+			const params = await Parameters.decode(r, version, "subscribe-ok");
+			largest = params.largest;
 			properties = await Properties.decode(r, version);
+			if (version === Version.DRAFT_15) properties.maxCacheDuration = params.maxCacheDuration;
 		}
 
 		return new SubscribeOk({ requestId, trackAlias, largest, properties });
@@ -411,7 +412,7 @@ export class SubscribeUpdate {
 		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			const requestId = await r.u62();
 			await r.u62(); // subscription_request_id
-			await Parameters.decode(r, version);
+			await Parameters.decode(r, version, "subscribe-update");
 			return new SubscribeUpdate({ requestId });
 		} else {
 			// v17+: REQUEST_UPDATE
@@ -419,7 +420,7 @@ export class SubscribeUpdate {
 			if (version === Version.DRAFT_17) {
 				await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 			}
-			await Parameters.decode(r, version);
+			await Parameters.decode(r, version, "subscribe-update");
 			return new SubscribeUpdate({ requestId });
 		}
 	}

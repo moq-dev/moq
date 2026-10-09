@@ -2,7 +2,7 @@
 // has to catch is the corpus drifting from the algorithm it claims to encode: a checked-in
 // file edited by hand to make a failing implementation pass would otherwise go unnoticed.
 //
-// Grading an implementation is each language's own test suite, since neither exists yet.
+// Grading an implementation is each language's own test suite, e.g. js/hang's jitter.test.ts.
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
-import { HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -59,11 +59,10 @@ test("AnnounceBroadcast round-trips on draft-06", async () => {
 	const hops = [HopSchema.parse(7n)];
 	// An absent cost encodes as zero and decodes explicitly.
 	const gotActive = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops }, Version.DRAFT_06);
-	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: { warm: 0n, cold: 0n } });
+	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: 0n });
 
-	// Asymmetric on purpose: the two magnitudes travel independently, so a swapped
-	// or shared encode would round-trip a symmetric pair unnoticed.
-	const cost = { warm: 12n, cold: 30n };
+	// A priced start round-trips its one static cost.
+	const cost = 12n;
 	const gotCost = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops, cost }, Version.DRAFT_06);
 	expect(gotCost).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost });
 
@@ -88,7 +87,7 @@ test("AnnounceBroadcast drops the route cost before draft-06", async () => {
 	// Pre-lite-06 has no room for a cost on the wire, so one set locally is
 	// simply not sent, keeping mixed-version meshes ranking on hop count.
 	const got = await roundTrip(
-		{ status: "active", suffix: Path.from("room/cam"), hops: [], cost: { warm: 9n, cold: 9n } },
+		{ status: "active", suffix: Path.from("room/cam"), hops: [], cost: 9n },
 		Version.DRAFT_05,
 	);
 	expect(got).toEqual({ status: "active", suffix: Path.from("room/cam"), hops: [], cost: undefined });
@@ -287,7 +286,7 @@ const GOLDEN_RESOLVED = [
 // Pinned from the Rust encoder (`lite::compress::tests::golden_stream_is_pinned`), so the
 // JS decoder is checked against real compressed output.
 const GOLDEN =
-	"001600000a726f6f6d2f612f63616d00029111a222000000000d0102036d69630101b3330100000209000101c04444010000010101000c020101620201c05555010000";
+	"001600000a726f6f6d2f612f63616d0000029111a2220000000d0102036d6963000101b33301000208000101c044440100010101000c02010162000201c055550100";
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
@@ -295,12 +294,12 @@ test("AnnounceHistory resolves the Rust encoder's compressed stream", async () =
 
 // JS always encodes literally; Rust decodes these bytes too (`js_literal_stream_decodes`).
 const JS_LITERAL =
-	"001600000a726f6f6d2f612f63616d00029111a222000000001600000a726f6f6d2f612f6d69630002b333a222000000020b000002c04444a2220000000101010013000006726f6f6d2f620002c05555a222000000";
+	"001600000a726f6f6d2f612f63616d0000029111a2220000001600000a726f6f6d2f612f6d6963000002b333a2220000020a000002c04444a22200000101010013000006726f6f6d2f62000002c05555a2220000";
 
 test("the literal draft-07 stream matches what Rust decodes", async () => {
 	const wire = await bytes(async (w) => {
 		const v = Version.DRAFT_07;
-		const cost = { warm: 0n, cold: 0n };
+		const cost = 0n;
 		await encodeAnnounceBroadcast(
 			w,
 			{ status: "active", suffix: Path.from("room/a/cam"), hops: [hop(0x1111n), relay], cost },
@@ -384,22 +383,62 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 	const ceiling = 2n ** 62n - 1n;
 	const huge = 2n ** 64n - 1n;
 	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
-		const got = await roundTrip(
-			{ status: "active", suffix: Path.from("x"), hops: [], cost: { warm: huge, cold: huge } },
-			version,
-		);
-		expect(got).toMatchObject({ cost: { warm: ceiling, cold: ceiling } });
+		const got = await roundTrip({ status: "active", suffix: Path.from("x"), hops: [], cost: huge }, version);
+		expect(got).toMatchObject({ cost: ceiling });
 	}
 
-	// ANNOUNCE_START: path base, path keep, empty suffix, hop base, no hops, hop keep, then
-	// warm and cold at 2^64-1, which only lite-07's varints can carry.
+	// ANNOUNCE_START: path base, path keep, empty suffix, no epoch, hop base, no hops, hop
+	// keep, then a cost of 2^64-1, which only lite-07's varints can carry.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
-		await w.u53(24);
-		for (const b of [0, 0, 0, 0, 0, 0]) await w.u8(b);
-		await w.u62(huge);
+		await w.u53(16);
+		for (const b of [0, 0, 0, 0, 0, 0, 0]) await w.u8(b);
 		await w.u62(huge);
 	}, Version.DRAFT_07);
 	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
-	expect(got).toMatchObject({ cost: { warm: ceiling, cold: ceiling } });
+	expect(got).toMatchObject({ cost: ceiling });
+});
+
+test("wip start and update carry one static cost", async () => {
+	const v = Version.DRAFT_07;
+	const start = await bytes(
+		(w) => encodeAnnounceBroadcast(w, { status: "active", suffix: Path.empty(), hops: [], cost: Cost.zero }, v),
+		v,
+	);
+	// Path base, path keep, empty suffix, no epoch, hop base, no hops, hop keep, cost.
+	expect([...start]).toEqual([0, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+	const update = await bytes(
+		(w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [], cost: Cost.zero }, v),
+		v,
+	);
+	expect([...update]).toEqual([2, 5, 0, 0, 0, 0, 0]);
+});
+
+test("lite06 ignores a legacy cold price and writes its saturation ceiling", async () => {
+	const v = Version.DRAFT_06;
+	for (const cold of [0n, 3n, 2n ** 62n - 1n]) {
+		const wire = await bytes(async (w) => {
+			await w.u53(0);
+			const body = await bytes(async (b) => {
+				await b.string("");
+				await b.u53(0);
+				await b.u62(12n);
+				await b.u62(cold);
+			}, v);
+			await w.u53(body.length);
+			await w.write(body);
+		}, v);
+		expect(await decodeAnnounceBroadcast(new Reader(undefined, wire, v), v)).toMatchObject({ cost: 12n });
+	}
+	const wire = await bytes(
+		(w) => encodeAnnounceBroadcast(w, { status: "active", suffix: Path.empty(), hops: [], cost: 12n }, v),
+		v,
+	);
+	const r = new Reader(undefined, wire, v);
+	expect(await r.u53()).toBe(0);
+	await r.u53();
+	await r.string();
+	await r.u53();
+	expect(await r.u62()).toBe(12n);
+	expect(await r.u62()).toBe(2n ** 62n - 1n);
 });

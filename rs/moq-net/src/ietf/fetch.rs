@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::{
 	Path,
-	coding::{Decode, DecodeError, Encode, EncodeError},
+	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	ietf::{
 		Filter, GroupOrder, Location, Opaque, Parameters, RequestId,
 		namespace::{decode_namespace, encode_namespace},
@@ -45,7 +45,7 @@ pub enum FetchType<'a> {
 }
 
 impl Encode<Version> for FetchType<'_> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match self {
 			FetchType::Standalone {
 				namespace,
@@ -53,9 +53,9 @@ impl Encode<Version> for FetchType<'_> {
 				start,
 				end,
 			} => {
-				1u8.encode(w, version)?;
-				encode_namespace(w, namespace, version)?;
-				track.encode(w, version)?;
+				w.u8(1);
+				encode_namespace(w, namespace)?;
+				w.string(track)?;
 				start.encode(w, version)?;
 				end.encode(w, version)?;
 			}
@@ -63,17 +63,17 @@ impl Encode<Version> for FetchType<'_> {
 				subscriber_request_id,
 				group_offset,
 			} => {
-				2u8.encode(w, version)?;
+				w.u8(2);
 				subscriber_request_id.encode(w, version)?;
-				group_offset.encode(w, version)?;
+				w.varint(*group_offset)?;
 			}
 			FetchType::AbsoluteJoining {
 				subscriber_request_id,
 				group_id,
 			} => {
-				3u8.encode(w, version)?;
+				w.u8(3);
 				subscriber_request_id.encode(w, version)?;
-				group_id.encode(w, version)?;
+				w.varint(*group_id)?;
 			}
 			// Draft-20 has no Fetch Type tag to write.
 			FetchType::Filtered { .. } => return Err(EncodeError::Version),
@@ -83,12 +83,12 @@ impl Encode<Version> for FetchType<'_> {
 }
 
 impl Decode<Version> for FetchType<'_> {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		let fetch_type = u64::decode(buf, version)?;
+	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let fetch_type = buf.varint()?;
 		Ok(match fetch_type {
 			0x1 => {
-				let namespace = decode_namespace(buf, version)?;
-				let track = Cow::<str>::decode(buf, version)?;
+				let namespace = decode_namespace(buf)?;
+				let track = Cow::Owned(buf.string()?);
 				let start = Location::decode(buf, version)?;
 				let end = Location::decode(buf, version)?;
 				FetchType::Standalone {
@@ -100,7 +100,7 @@ impl Decode<Version> for FetchType<'_> {
 			}
 			0x2 => {
 				let subscriber_request_id = RequestId::decode(buf, version)?;
-				let group_offset = u64::decode(buf, version)?;
+				let group_offset = buf.varint()?;
 				FetchType::RelativeJoining {
 					subscriber_request_id,
 					group_offset,
@@ -108,7 +108,7 @@ impl Decode<Version> for FetchType<'_> {
 			}
 			0x3 => {
 				let subscriber_request_id = RequestId::decode(buf, version)?;
-				let group_id = u64::decode(buf, version)?;
+				let group_id = buf.varint()?;
 				FetchType::AbsoluteJoining {
 					subscriber_request_id,
 					group_id,
@@ -133,27 +133,30 @@ pub struct Fetch<'a> {
 	/// that ends in Timed-Out gaps we cannot write, so the request is refused rather than
 	/// left to wait without it. Never encoded; we send no fill timeout.
 	pub fill_timeout: bool,
+	/// Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES,
+	/// draft-20+). Always `true` before draft-20, which has no way to opt out.
+	pub properties_wanted: bool,
 }
 
 impl Message for Fetch<'_> {
 	const ID: u64 = 0x16;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		// GROUP_ORDER allows only Ascending or Descending, so no preference is an absent
 		// parameter rather than a 0 the peer must treat as a protocol violation.
 		let group_order = (self.group_order != GroupOrder::Any).then_some(self.group_order);
 
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
+			w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 
 		match version {
 			Version::Draft14 => {
-				self.subscriber_priority.encode(w, version)?;
+				w.u8(self.subscriber_priority);
 				self.group_order.encode(w, version)?;
 				self.fetch_type.encode(w, version)?;
-				0u8.encode(w, version)?; // no parameters
+				w.u8(0); // no parameters
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
 				self.fetch_type.encode(w, version)?;
@@ -172,110 +175,116 @@ impl Message for Fetch<'_> {
 				else {
 					return Err(EncodeError::Version);
 				};
-				encode_namespace(w, namespace, version)?;
-				track.encode(w, version)?;
+				encode_namespace(w, namespace)?;
+				w.string(track)?;
+				// INCLUDE_PROPERTIES defaults to 1, so only the opt-out is worth bytes.
+				let include_properties = (!self.properties_wanted).then_some(false);
 				encode_params!(w, version,
 					0x20 => self.subscriber_priority,
 					0x21 => *filter,
 					0x22 => group_order,
+					0x35 => include_properties,
 				);
 			}
 		}
 		Ok(())
 	}
 
-	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
 		if version == Version::Draft17 {
-			let _required_request_id_delta = u64::decode(buf, version)?;
+			let _required_request_id_delta = buf.varint()?;
 		}
 
-		// The token is ignored: the session's grant is what authorizes the request, and
-		// INCLUDE_PROPERTIES only shapes a FETCH_OK we don't send on draft-20.
-		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout) = match version {
-			Version::Draft14 => {
-				let subscriber_priority = u8::decode(buf, version)?;
-				let group_order = GroupOrder::decode(buf, version)?;
-				let fetch_type = FetchType::decode(buf, version)?;
-				Parameters::skip(buf, version)?;
-				(fetch_type, Some(subscriber_priority), Some(group_order), false, false)
-			}
-			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
-				let fetch_type = FetchType::decode(buf, version)?;
-				decode_params!(buf, version,
-					0x03 => _authorization_token: Vec<Opaque>,
-					0x0A => fill_timeout: Option<u64>,
-					0x20 => subscriber_priority: Option<u8>,
-					0x22 => group_order: Option<GroupOrder>,
-					0x25 => subgroup_filter: Vec<Opaque>,
-					0x26 => object_id_filter: Vec<Opaque>,
-					0x27 => priority_filter: Vec<Opaque>,
-					0x28 => object_property_filter: Vec<Opaque>,
-				);
-				let range_filters = [
-					subgroup_filter,
-					object_id_filter,
-					priority_filter,
-					object_property_filter,
-				]
-				.iter()
-				.any(|filter| !filter.is_empty());
-
-				// An unknown message parameter is a protocol violation, so each stays rejected
-				// on the drafts that predate it: FILL_TIMEOUT arrived in draft-18.
-				let has_fill_timeout = !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17);
-				if (fill_timeout.is_some() && !has_fill_timeout) || (range_filters && !has_range_filters(version)) {
-					return Err(DecodeError::InvalidValue);
+		// The token is ignored: the session's grant is what authorizes the request.
+		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout, properties_wanted) =
+			match version {
+				Version::Draft14 => {
+					let subscriber_priority = buf.u8()?;
+					let group_order = GroupOrder::decode(buf, version)?;
+					let fetch_type = FetchType::decode(buf, version)?;
+					Parameters::skip(buf)?;
+					(
+						fetch_type,
+						Some(subscriber_priority),
+						Some(group_order),
+						false,
+						false,
+						true,
+					)
 				}
+				Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
+					let fetch_type = FetchType::decode(buf, version)?;
+					decode_params!(buf, version,
+						0x03 => _authorization_token: Vec<Opaque>,
+						0x0A => fill_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
+						0x20 => subscriber_priority: Option<u8>,
+						0x22 => group_order: Option<GroupOrder>,
+						0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
+						0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
+						0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
+						0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
+					);
+					let range_filters = [
+						subgroup_filter,
+						object_id_filter,
+						priority_filter,
+						object_property_filter,
+					]
+					.iter()
+					.any(|filter| !filter.is_empty());
 
-				(
-					fetch_type,
-					subscriber_priority,
-					group_order,
-					range_filters,
-					fill_timeout.is_some(),
-				)
-			}
-			// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
-			_ => {
-				let namespace = decode_namespace(buf, version)?;
-				let track = Cow::<str>::decode(buf, version)?;
-				decode_params!(buf, version,
-					0x03 => _authorization_token: Vec<Opaque>,
-					0x0A => fill_timeout: Option<u64>,
-					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter: Option<Filter>,
-					0x22 => group_order: Option<GroupOrder>,
-					0x25 => subgroup_filter: Vec<Opaque>,
-					0x26 => object_id_filter: Vec<Opaque>,
-					0x27 => priority_filter: Vec<Opaque>,
-					0x28 => object_property_filter: Vec<Opaque>,
-					0x35 => _include_properties: Option<bool>,
-				);
-				let range_filters = [
-					subgroup_filter,
-					object_id_filter,
-					priority_filter,
-					object_property_filter,
-				]
-				.iter()
-				.any(|filter| !filter.is_empty());
+					(
+						fetch_type,
+						subscriber_priority,
+						group_order,
+						range_filters,
+						fill_timeout.is_some(),
+						true,
+					)
+				}
+				// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
+				_ => {
+					let namespace = decode_namespace(buf)?;
+					let track = Cow::Owned(buf.string()?);
+					decode_params!(buf, version,
+						0x03 => _authorization_token: Vec<Opaque>,
+						0x0A => fill_timeout: Option<u64>,
+						0x20 => subscriber_priority: Option<u8>,
+						0x21 => filter: Option<Filter>,
+						0x22 => group_order: Option<GroupOrder>,
+						0x25 => subgroup_filter: Vec<Opaque>,
+						0x26 => object_id_filter: Vec<Opaque>,
+						0x27 => priority_filter: Vec<Opaque>,
+						0x28 => object_property_filter: Vec<Opaque>,
+						0x35 => include_properties: Option<bool>,
+					);
+					let range_filters = [
+						subgroup_filter,
+						object_id_filter,
+						priority_filter,
+						object_property_filter,
+					]
+					.iter()
+					.any(|filter| !filter.is_empty());
 
-				let fetch_type = FetchType::Filtered {
-					namespace,
-					track,
-					// An absent LOCATION_FILTER fetches the whole track.
-					filter: filter.unwrap_or(Filter::Unfiltered),
-				};
-				(
-					fetch_type,
-					subscriber_priority,
-					group_order,
-					range_filters,
-					fill_timeout.is_some(),
-				)
-			}
-		};
+					let fetch_type = FetchType::Filtered {
+						namespace,
+						track,
+						// An absent LOCATION_FILTER fetches the whole track.
+						filter: filter.unwrap_or(Filter::Unfiltered),
+					};
+					(
+						fetch_type,
+						subscriber_priority,
+						group_order,
+						range_filters,
+						fill_timeout.is_some(),
+						// Defaults to 1, so an absent parameter means the requester wants them.
+						include_properties.unwrap_or(true),
+					)
+				}
+			};
 
 		Ok(Self {
 			request_id,
@@ -285,6 +294,7 @@ impl Message for Fetch<'_> {
 			fetch_type,
 			range_filters,
 			fill_timeout,
+			properties_wanted,
 		})
 	}
 }
@@ -295,11 +305,14 @@ pub struct FetchOk {
 	pub group_order: GroupOrder,
 	pub end_of_track: bool,
 	pub end_location: Location,
+	/// The track's properties, as SUBSCRIBE_OK carries them: MAX_CACHE_DURATION from the
+	/// draft-14/15 parameters, the Track Properties block from draft-16 on.
+	pub properties: super::Properties,
 }
 impl Message for FetchOk {
 	const ID: u64 = 0x18;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
@@ -311,22 +324,24 @@ impl Message for FetchOk {
 		match version {
 			Version::Draft14 => {
 				self.group_order.encode(w, version)?;
-				self.end_of_track.encode(w, version)?;
+				w.bool(self.end_of_track);
 				self.end_location.encode(w, version)?;
-				0u8.encode(w, version)?; // no parameters
+				w.u8(0); // no parameters
 			}
 			_ => {
 				// GROUP_ORDER is not a legal FETCH_OK parameter in any draft after 14; the order
 				// of the response is whatever the FETCH asked for.
-				self.end_of_track.encode(w, version)?;
+				w.bool(self.end_of_track);
 				self.end_location.encode(w, version)?;
 				encode_params!(w, version,);
+				// Track Properties are the final field, so nothing may follow.
+				self.properties.encode(w, version)?;
 			}
 		}
 		Ok(())
 	}
 
-	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(buf, version)?)
 		} else {
@@ -336,27 +351,36 @@ impl Message for FetchOk {
 		match version {
 			Version::Draft14 => {
 				let group_order = GroupOrder::decode(buf, version)?;
-				let end_of_track = bool::decode(buf, version)?;
+				let end_of_track = buf.bool()?;
 				let end_location = Location::decode(buf, version)?;
-				Parameters::skip(buf, version)?;
+				let properties = super::Properties {
+					max_cache_duration: Parameters::skip(buf)?.map(std::time::Duration::from_millis),
+					..Default::default()
+				};
 				Ok(Self {
 					request_id,
 					group_order,
 					end_of_track,
 					end_location,
+					properties,
 				})
 			}
 			_ => {
-				let end_of_track = bool::decode(buf, version)?;
+				let end_of_track = buf.bool()?;
 				let end_location = Location::decode(buf, version)?;
-				// GROUP_ORDER isn't legal here, but keep accepting it so a peer that still sends
-				// it doesn't have its session torn down over a hint.
+				// MAX_CACHE_DURATION and GROUP_ORDER are legal on FETCH_OK only in draft-15.
+				// Draft-16 still knows GROUP_ORDER, so one here is ignored. From draft-17
+				// it closes the session.
 				decode_params!(buf, version,
-					0x22 => group_order: Option<GroupOrder>,
+					0x04 => max_cache_duration: Option<u64> where version == Version::Draft15,
+					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15,
 				);
-				// FETCH_OK may declare a timescale; we don't surface it yet, and a fetched
-				// object without an interpretable timestamp is stamped on arrival.
-				let _ = super::Properties::decode(buf, version)?;
+				// The timescale is read but not surfaced yet: a fetched object without its
+				// own units arrives untimed.
+				let mut properties = super::Properties::decode(buf, version)?;
+				if version == Version::Draft15 {
+					properties.max_cache_duration = max_cache_duration.map(std::time::Duration::from_millis);
+				}
 
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 
@@ -365,6 +389,7 @@ impl Message for FetchOk {
 					group_order,
 					end_of_track,
 					end_location,
+					properties,
 				})
 			}
 		}
@@ -381,17 +406,17 @@ pub struct FetchError<'a> {
 impl Message for FetchError<'_> {
 	const ID: u64 = 0x19;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
-		self.error_code.encode(w, version)?;
-		self.reason_phrase.encode(w, version)?;
+		w.varint(self.error_code)?;
+		w.string(&self.reason_phrase)?;
 		Ok(())
 	}
 
-	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
-		let error_code = u64::decode(buf, version)?;
-		let reason_phrase = Cow::<str>::decode(buf, version)?;
+		let error_code = buf.varint()?;
+		let reason_phrase = Cow::Owned(buf.string()?);
 		Ok(Self {
 			request_id,
 			error_code,
@@ -407,12 +432,12 @@ pub struct FetchCancel {
 impl Message for FetchCancel {
 	const ID: u64 = 0x17;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
 	}
 
-	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
 		Ok(Self { request_id })
 	}
@@ -428,14 +453,14 @@ impl FetchHeader {
 }
 
 impl Encode<Version> for FetchHeader {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
 	}
 }
 
 impl Decode<Version> for FetchHeader {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
 		Ok(Self { request_id })
 	}
@@ -520,15 +545,15 @@ impl FetchObject {
 }
 
 impl Encode<Version> for FetchObject {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		match self {
 			Self::EndOfRange { reason, group, object } => {
 				if !Self::END_OF_RANGE.contains(reason) {
 					return Err(EncodeError::InvalidState);
 				}
-				reason.encode(w, version)?;
-				group.encode(w, version)?;
-				object.encode(w, version)?;
+				w.varint(*reason)?;
+				w.varint(*group)?;
+				w.varint(*object)?;
 			}
 			Self::Object {
 				subgroup,
@@ -556,22 +581,22 @@ impl Encode<Version> for FetchObject {
 				if properties.is_some() {
 					flags |= flag::PROPERTIES;
 				}
-				flags.encode(w, version)?;
+				w.varint(flags)?;
 
 				if let Some(group) = group {
-					group.encode(w, version)?;
+					w.varint(*group)?;
 				}
 				if let FetchSubgroup::Explicit(subgroup) = subgroup {
-					subgroup.encode(w, version)?;
+					w.varint(*subgroup)?;
 				}
 				if let Some(object) = object {
-					object.encode(w, version)?;
+					w.varint(*object)?;
 				}
 				if let Some(priority) = priority {
-					priority.encode(w, version)?;
+					w.u8(*priority);
 				}
 				if let Some(properties) = properties {
-					properties.encode(w, version)?;
+					w.bytes(properties)?;
 				}
 			}
 		}
@@ -580,8 +605,8 @@ impl Encode<Version> for FetchObject {
 }
 
 impl Decode<Version> for FetchObject {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		let flags = u64::decode(buf, version)?;
+	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let flags = buf.varint()?;
 
 		// Anything at or above 128 is a named value rather than a set of flags, and only
 		// the three End of Range markers are defined.
@@ -591,14 +616,14 @@ impl Decode<Version> for FetchObject {
 			}
 			return Ok(Self::EndOfRange {
 				reason: flags,
-				group: u64::decode(buf, version)?,
-				object: u64::decode(buf, version)?,
+				group: buf.varint()?,
+				object: buf.varint()?,
 			});
 		}
 
 		// Wire order: Group ID Delta, Subgroup ID, Object ID Delta, Priority, Properties.
 		let group = match flags & flag::GROUP_ID != 0 {
-			true => Some(u64::decode(buf, version)?),
+			true => Some(buf.varint()?),
 			false => None,
 		};
 
@@ -608,22 +633,26 @@ impl Decode<Version> for FetchObject {
 				0 => FetchSubgroup::Zero,
 				1 => FetchSubgroup::Prior,
 				2 => FetchSubgroup::PriorPlusOne,
-				_ => FetchSubgroup::Explicit(u64::decode(buf, version)?),
+				_ => FetchSubgroup::Explicit(buf.varint()?),
 			},
 		};
 
 		let object = match flags & flag::OBJECT_ID != 0 {
-			true => Some(u64::decode(buf, version)?),
+			true => Some(buf.varint()?),
 			false => None,
 		};
 
 		let priority = match flags & flag::PRIORITY != 0 {
-			true => Some(u8::decode(buf, version)?),
+			true => Some(buf.u8()?),
 			false => None,
 		};
 
 		let properties = match flags & flag::PROPERTIES != 0 {
-			true => Some(Vec::<u8>::decode(buf, version)?),
+			true => {
+				let super::group::ObjectExtensionsLength(size) =
+					super::group::ObjectExtensionsLength::decode(buf, version)?;
+				Some(buf.slice(size)?.to_vec())
+			}
 			false => None,
 		};
 
@@ -640,17 +669,17 @@ impl Decode<Version> for FetchObject {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::BytesMut;
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version).unwrap();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
 		buf.to_vec()
 	}
 
 	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		M::decode_msg(&mut buf, version)
+		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
 	}
 
 	#[test]
@@ -667,6 +696,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -690,6 +720,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -706,6 +737,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			properties: Default::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -730,6 +762,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft16);
@@ -753,6 +786,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -769,6 +803,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			properties: Default::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -786,6 +821,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			properties: Default::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft16);
@@ -803,6 +839,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			properties: Default::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -827,6 +864,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -843,6 +881,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			properties: Default::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -863,6 +902,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			properties: Default::default(),
 		};
 
 		#[rustfmt::skip]
@@ -885,33 +925,47 @@ mod tests {
 	/// Reading a Fetch Type there instead takes the namespace's field count for one.
 	#[test]
 	fn test_fetch_v20_decodes_every_parameter() {
+		// Groups 128 through 130. The group takes two bytes, so draft-20's Length (4) and
+		// draft-22's Location Filter Type (0x03) differ, and reading one as the other
+		// misframes every parameter after it.
 		#[rustfmt::skip]
-		let body = [FETCH_HEAD, &[
-			0x07, // Number of Parameters
-			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
-			0x07, 0x64, // FILL_TIMEOUT (0x0A) = 100, a varint
-			0x16, 0x40, // SUBSCRIBER_PRIORITY (0x20) = 64
-			0x01, 0x03, 0x04, 0x00, 0x02, // LOCATION_FILTER (0x21): groups 4 through 6
-			0x01, 0x01, // GROUP_ORDER (0x22) = Ascending
-			0x04, 0x02, 0x00, 0x05, // OBJECTID_FILTER (0x26): SetID 0, from 5
-			0x0F, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
-		]].concat();
+		let cases: [(Version, &[u8]); 3] = [
+			(Version::Draft20, &[0x01, 0x04, 0x80, 0x80, 0x00, 0x02]),
+			(Version::Draft21, &[0x01, 0x04, 0x80, 0x80, 0x00, 0x02]),
+			(Version::Draft22, &[0x01, 0x03, 0x80, 0x80, 0x00, 0x02]),
+		];
 
-		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+		for (version, location_filter) in cases {
+			#[rustfmt::skip]
+			let body = [FETCH_HEAD, &[
+				0x07, // Number of Parameters
+				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
+				0x07, 0x64, // FILL_TIMEOUT (0x0A) = 100, a varint
+				0x16, 0x40, // SUBSCRIBER_PRIORITY (0x20) = 64
+			], location_filter, &[
+				0x01, 0x01, // GROUP_ORDER (0x22) = Ascending
+				0x04, 0x02, 0x00, 0x05, // OBJECTID_FILTER (0x26): SetID 0, from 5
+				0x0F, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
+			]].concat();
+
 			let fetch: Fetch = decode_message(&body, version).unwrap_or_else(|e| panic!("{version}: {e}"));
 			assert_eq!(fetch.request_id, RequestId(1));
 			assert_eq!(fetch.subscriber_priority, 64);
 			assert_eq!(fetch.group_order, GroupOrder::Ascending);
 			assert!(fetch.range_filters, "{version}");
 			assert!(fetch.fill_timeout, "{version}");
+			assert!(!fetch.properties_wanted, "{version}");
 			assert_eq!(
 				fetch.fetch_type,
 				FetchType::Filtered {
 					namespace: Path::new("live"),
 					track: "video".into(),
 					filter: Filter::Absolute {
-						start: Location { group: 4, object: 0 },
-						end: Some(crate::ietf::EndLocation { group: 6, object: None }),
+						start: Location { group: 128, object: 0 },
+						end: Some(crate::ietf::EndLocation {
+							group: 130,
+							object: None,
+						}),
 					},
 				},
 				"{version}"
@@ -934,6 +988,7 @@ mod tests {
 			},
 			range_filters: false,
 			fill_timeout: false,
+			properties_wanted: true,
 		};
 
 		#[rustfmt::skip]
@@ -945,9 +1000,28 @@ mod tests {
 		assert_eq!(encode_message(&fetch, Version::Draft20), expected);
 		assert_eq!(decode_message::<Fetch>(&expected, Version::Draft20).unwrap(), fetch);
 
+		// Only the opt-out is written, as a uint8 with no Length.
+		let opted_out = Fetch {
+			properties_wanted: false,
+			..fetch.clone()
+		};
+		#[rustfmt::skip]
+		let expected = [FETCH_HEAD, &[
+			0x03, // Number of Parameters
+			0x20, 0x80, // SUBSCRIBER_PRIORITY = 128
+			0x02, 0x02, // GROUP_ORDER (0x22) = Descending
+			0x13, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
+		]].concat();
+		assert_eq!(encode_message(&opted_out, Version::Draft20), expected);
+		assert_eq!(decode_message::<Fetch>(&expected, Version::Draft20).unwrap(), opted_out);
+
 		// The tagged forms have no spelling from draft-20 on, and this one none before it.
 		let mut buf = Vec::new();
-		assert!(fetch.encode_msg(&mut buf, Version::Draft19).is_err());
+		assert!(
+			fetch
+				.encode_msg(&mut Encoder::new(&mut buf, Version::Draft19.into()), Version::Draft19)
+				.is_err()
+		);
 	}
 
 	/// FILL_TIMEOUT arrived in draft-18 and the Range Filters in draft-19; each is still
@@ -986,19 +1060,37 @@ mod tests {
 #[cfg(test)]
 mod object_tests {
 	use super::*;
-	use bytes::{Buf as _, BytesMut};
+	use bytes::Buf as _;
 
 	const VERSION: Version = Version::Draft20;
 
 	fn round_trip(object: &FetchObject) -> (Vec<u8>, FetchObject) {
-		let mut buf = BytesMut::new();
-		object.encode(&mut buf, VERSION).expect("encode");
+		let mut buf = Vec::new();
+		object
+			.encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
+			.expect("encode");
 
 		let mut bytes = bytes::Bytes::from(buf.to_vec());
-		let decoded = FetchObject::decode(&mut bytes, VERSION).expect("decode");
+		let decoded = crate::coding::decode_buf(&mut bytes, VERSION, FetchObject::decode).expect("decode");
 		assert!(!bytes.has_remaining(), "the object header is fully consumed");
 
 		(buf.to_vec(), decoded)
+	}
+
+	/// A fetch stream is read until a whole object header has arrived, so a properties
+	/// length the peer declares is refused at its prefix rather than buffered.
+	#[test]
+	fn oversized_properties_are_refused_at_the_prefix() {
+		let mut wire = Vec::new();
+		Encoder::new(&mut wire, VERSION.into())
+			.varint(flag::PROPERTIES)
+			.unwrap();
+		Encoder::new(&mut wire, VERSION.into())
+			.varint((super::super::group::MAX_OBJECT_EXTENSIONS + 1) as u64)
+			.unwrap();
+
+		let err = FetchObject::decode_slice(&wire, VERSION).unwrap_err();
+		assert!(matches!(err, DecodeError::MessageTooLarge { .. }), "{err:?}");
 	}
 
 	/// The first Object carries absolute IDs and a priority, because "same as the prior
@@ -1087,6 +1179,45 @@ mod object_tests {
 	fn an_undefined_value_is_refused() {
 		// 0x8D, one past End of Non-Existent Range, in the draft-17+ leading-ones form.
 		let mut bytes = bytes::Bytes::from_static(&[0x80, 0x8D, 0x00, 0x00]);
-		assert!(FetchObject::decode(&mut bytes, VERSION).is_err());
+		assert!(crate::coding::decode_buf(&mut bytes, VERSION, FetchObject::decode).is_err());
+	}
+}
+
+#[cfg(test)]
+mod cache_duration_tests {
+	use super::*;
+	use std::time::Duration;
+
+	/// FETCH_OK carries MAX_CACHE_DURATION where SUBSCRIBE_OK does, so a track fetched with no
+	/// subscription still learns its retention window.
+	#[test]
+	fn max_cache_duration_is_read_in_each_drafts_field() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for age in [0u64, 30_000] {
+				let mut payload = match version {
+					Version::Draft14 => vec![0, 1, 0, 0, 0, 1, 4],
+					Version::Draft15 => vec![0, 0, 0, 0, 1, 4],
+					Version::Draft16 => vec![0, 0, 0, 0, 0, 4],
+					_ => vec![0, 0, 0, 0, 4],
+				};
+				Encoder::new(&mut payload, version.into()).varint(age).unwrap();
+				let got = FetchOk::decode_msg(&mut Decoder::new(&payload, version.into()), version).unwrap();
+				assert_eq!(
+					got.properties.max_cache_duration,
+					Some(Duration::from_millis(age)),
+					"{version}"
+				);
+			}
+		}
 	}
 }

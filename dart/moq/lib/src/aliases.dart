@@ -40,7 +40,7 @@ typedef OriginDynamic = MoqOriginDynamic;
 /// A requested broadcast not yet accepted: fulfill it with a producer or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
-/// A stream of route announcements and retractions under a prefix.
+/// A stream of announce events under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
 
 /// A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery.
@@ -49,8 +49,21 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// A pending wait for a route to cover a specific path.
 typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
 
-/// A single route announcement or retraction: its path, route metadata, and active flag.
-typedef AnnounceUpdate = MoqAnnounceUpdate;
+/// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
+typedef Announce = MoqAnnounce;
+
+/// What an [AnnounceConsumer] yields: [AnnounceEventStart],
+/// [AnnounceEventUpdate], or [AnnounceEventEnd].
+typedef AnnounceEvent = MoqAnnounceEvent;
+
+/// A route now covers the prefix; the stream had none there.
+typedef AnnounceEventStart = StartMoqAnnounceEvent;
+
+/// The route covering the prefix changed hops or cost.
+typedef AnnounceEventUpdate = UpdateMoqAnnounceEvent;
+
+/// No route covers the prefix any more; carries its last route.
+typedef AnnounceEventEnd = EndMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
@@ -136,7 +149,7 @@ typedef Frame = MoqFrame;
 /// A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts.
 typedef MediaFrame = MoqMediaFrame;
 
-/// The catalog description of a video track, including whether the publisher recommends temporarily avoiding it.
+/// The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming).
 typedef Video = MoqVideo;
 
 /// Caller-provided catalog fields for a video track.
@@ -151,7 +164,7 @@ typedef VideoProperties = MoqVideoProperties;
 /// A single video codec an importer can parse.
 typedef VideoFormat = MoqVideoFormat;
 
-/// The catalog description of an audio track: codec, sample rate, channels, and container.
+/// The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container.
 typedef Audio = MoqAudio;
 
 /// An audio codec, its required init bytes, and an optional label.

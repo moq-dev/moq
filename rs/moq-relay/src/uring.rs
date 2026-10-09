@@ -21,7 +21,7 @@ use std::task::Poll;
 
 use anyhow::Context as _;
 
-use crate::{auth, cluster, shutdown};
+use crate::{auth, cluster, refusals::Refusal, shutdown};
 
 /// A stop signal a worker parks on, wakeable from the shared runtime.
 #[derive(Default)]
@@ -425,16 +425,6 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		quic.qlog.is_none(),
 		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
 	);
-	for (name, window) in [
-		("quic.receive_window", quic.receive_window),
-		("quic.stream_receive_window", quic.stream_receive_window),
-		("quic.send_window", quic.send_window),
-	] {
-		anyhow::ensure!(
-			window.is_none(),
-			"io_uring workers run fixed flow-control windows; drop {name} or use the tokio workers"
-		);
-	}
 
 	let mut transport = moq_uring::quic::Transport::default();
 	#[cfg(feature = "qlog")]
@@ -448,6 +438,12 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
+	// Unset stays `None`, so the worker keeps its own credits. A set window
+	// has to land here: dropping it would leave the operator believing a
+	// limit that the workers are not running.
+	transport.receive_window = quic.receive_window;
+	transport.stream_receive_window = quic.stream_receive_window;
+	transport.send_window = quic.send_window;
 	transport.congestion = match quic.congestion_control {
 		Some(moq_tokio::quic::CongestionControl::Loss) => moq_uring::quic::Congestion::Loss,
 		// Unset means the backend's own default, and live media wants a steady
@@ -655,7 +651,7 @@ async fn serve_connection(
 
 	let request = moq_net::Server::new()
 		.with_versions(serve.versions.clone())
-		.accept_request_lite(std::time::Instant::now(), transport)
+		.accept_request_lite(std::time::Instant::now(), moq_uring::transport::Session::new(transport))
 		.await
 		.context("moq handshake failed")?;
 
@@ -673,55 +669,62 @@ async fn serve_connection(
 		}
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
+	let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path.clone());
+	auth_request.query = query;
+	auth_request.remote = Some(remote);
+	auth_request.local = Some(serve.local);
+	// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
+	auth_request.server_name = sni.or_else(|| {
+		url.as_ref()
+			.and_then(|url| url.host_str())
+			.filter(|host| !host.is_empty())
+			.map(str::to_owned)
+	});
+	auth_request.alpn = alpn.clone();
+	auth_request.role = request.role().and_then(crate::auth::role);
+	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 	let mut registration = None;
-	let lan = cluster::Cluster::is_lan_path(&path);
-	let lease = if lan {
-		match cluster::Cluster::lan_credential(&path) {
+	let admitted = if cluster::Cluster::is_lan_path(&path) {
+		let lease = match cluster::Cluster::lan_credential(&path) {
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
 				Some(true) => serve.auth.admit_fixed("/", serve.cluster.lan_peer_grant()),
 				Some(false) => {
+					serve.cluster.refusals.record(Refusal::Lan);
 					request.close(moq_net::Error::Unauthorized);
 					anyhow::bail!("LAN peer did not present this listener's membership proof");
 				}
 				None => {
+					serve.cluster.refusals.record(Refusal::Lan);
 					request.close(moq_net::Error::Unauthorized);
 					anyhow::bail!("/.cluster request refused: LAN discovery is not enabled");
 				}
 			},
 			None => {
+				serve.cluster.refusals.record(Refusal::Lan);
 				request.close(moq_net::Error::Unauthorized);
 				anyhow::bail!("LAN peer did not present a membership proof");
 			}
+		};
+		match serve.cluster.scope(lease, &auth_request) {
+			Ok(admitted) => admitted,
+			Err(err) => {
+				serve.cluster.refusals.record((&err).into());
+				request.close(moq_net::Error::Unauthorized);
+				return Err(err.into());
+			}
 		}
 	} else {
-		let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path);
-		auth_request.query = query;
-		auth_request.remote = Some(remote);
-		auth_request.local = Some(serve.local);
-		// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
-		auth_request.server_name = sni.or_else(|| {
-			url.as_ref()
-				.and_then(|url| url.host_str())
-				.filter(|host| !host.is_empty())
-				.map(str::to_owned)
-		});
-		auth_request.alpn = alpn.clone();
-		auth_request.role = request.role().map(|role| match role {
-			moq_net::Role::Publisher => moq_auth::Role::Publisher,
-			_ => moq_auth::Role::Subscriber,
-		});
-		auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 		if identity.is_some() {
 			tracing::debug!(id, "client certificate verified; reported to the auth server");
 		}
-
 		let auth = serve.auth.clone();
+		let cluster = serve.cluster.clone();
 		let sessions = serve.sessions.clone();
 		match serve
 			.tokio
 			.spawn(async move {
-				let lease = auth.admit(auth_request.clone()).await?;
-				Ok::<_, crate::auth::Error>((lease, sessions.register(auth_request)))
+				let admitted = cluster.admit(&auth, auth_request.clone()).await?;
+				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await
 			.context("auth task failed")?
@@ -731,6 +734,7 @@ async fn serve_connection(
 				admitted
 			}
 			Err(err) => {
+				serve.cluster.refusals.record((&err).into());
 				// The status is what separates "your credential is bad" from "the
 				// auth server is down". Collapsing both into Unauthorized tells a
 				// client to stop reconnecting through an outage it could have
@@ -747,28 +751,19 @@ async fn serve_connection(
 		}
 	};
 
-	let role = request.role();
-	let grants = match crate::connection::authorize(
-		&serve.cluster,
-		lease.token(),
-		role,
-		identity.is_some() || lan,
-		&moq_tokio::server::Transport::Quic,
-	) {
-		Ok(grants) => grants,
-		Err(err) => {
-			request.close(moq_net::Error::Unauthorized);
-			return Err(err);
-		}
-	};
+	let cluster::Admitted {
+		lease,
+		publisher,
+		subscriber,
+		stats,
+	} = admitted;
 
-	let lease = lease.with_stats(grants.stats.clone());
-	let mut request = request.with_stats(grants.stats);
-	if let Some(subscribe) = grants.subscribe {
-		request = request.with_publisher(subscribe);
+	let mut request = request.with_stats(stats);
+	if let Some(subscriber) = subscriber {
+		request = request.with_publisher(subscriber);
 	}
-	if let Some(publish) = grants.publish {
-		request = request.with_subscriber(publish);
+	if let Some(publisher) = publisher {
+		request = request.with_subscriber(publisher);
 	}
 	let (session, driver) = request.ok().await?;
 	let driver_handle = handle.clone();
@@ -779,7 +774,12 @@ async fn serve_connection(
 		}
 	});
 
-	tracing::info!(id, version = %session.version(), transport = %moq_tokio::server::Transport::Quic, "negotiated");
+	// Only a WebTransport session carries a URL.
+	let transport = match url {
+		Some(_) => moq_tokio::Transport::WebTransport,
+		None => moq_tokio::Transport::Quic,
+	};
+	tracing::info!(id, version = %session.version(), %transport, "negotiated");
 
 	// The session handle is Send + Sync however its transport is driven, so
 	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers
@@ -798,32 +798,32 @@ async fn serve_connection(
 mod tests {
 	use super::*;
 
-	/// The worker's transport settings have no window knobs, so a configured one is
-	/// refused at startup rather than left as a setting the operator believes is in
-	/// force. Each is named separately so the message points at the right line.
+	/// A window the operator set has to reach the worker. Refusing it, or
+	/// accepting the config and leaving the field unset, would both hide it.
+	///
+	/// `Config` is non-exhaustive, so the windows are filled in after `default`
+	/// rather than in a struct literal.
 	#[test]
-	fn windows_are_refused() {
-		type Set = fn(&mut moq_tokio::quic::Config);
-		let cases: [(&str, Set); 3] = [
-			("quic.receive_window", |quic| quic.receive_window = Some(64 << 20)),
-			("quic.stream_receive_window", |quic| {
-				quic.stream_receive_window = Some(8 << 20)
-			}),
-			("quic.send_window", |quic| quic.send_window = Some(32 << 20)),
-		];
+	#[allow(clippy::field_reassign_with_default)]
+	fn windows_are_applied() {
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.receive_window = Some(64 << 20);
+		quic.stream_receive_window = Some(8 << 20);
+		quic.send_window = Some(32 << 20);
 
-		for (name, set) in cases {
-			let mut quic = moq_tokio::quic::Config::default();
-			set(&mut quic);
-
-			let err = transport(&quic.resolve()).expect_err("a window must be refused");
-			assert!(err.to_string().contains(name), "{err}");
-		}
+		let transport = transport(&quic.resolve()).expect("windows must be accepted");
+		assert_eq!(transport.receive_window, Some(64 << 20));
+		assert_eq!(transport.stream_receive_window, Some(8 << 20));
+		assert_eq!(transport.send_window, Some(32 << 20));
 	}
 
-	/// Leaving the windows unset is the ordinary case and must still build.
+	/// Leaving the windows unset is the ordinary case. The worker then keeps
+	/// its own credits rather than inheriting another backend's default.
 	#[test]
 	fn defaults_are_accepted() {
-		transport(&moq_tokio::quic::Config::default().resolve()).expect("defaults must build");
+		let transport = transport(&moq_tokio::quic::Config::default().resolve()).expect("defaults must build");
+		assert_eq!(transport.receive_window, None);
+		assert_eq!(transport.stream_receive_window, None);
+		assert_eq!(transport.send_window, None);
 	}
 }

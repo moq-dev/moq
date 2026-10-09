@@ -270,10 +270,11 @@ class AudioConsumer:
 class VideoConsumer:
     """Async iterator of decoded video frames.
 
-    Built via :meth:`BroadcastConsumer.decode_video`. Each frame is
-    tightly packed in its own ``format`` and carries its own ``width``
-    and ``height``: ``output.resize`` is best effort, so read the frame
-    rather than assuming it took.
+    Built via :meth:`BroadcastConsumer.decode_video`. Each frame owns its
+    decoded picture until it is garbage collected; ``frame.pixels(format)``
+    converts it to tightly packed CPU pixels. Each carries its own
+    ``width()`` and ``height()``: ``output.resize`` is best effort, so read
+    the frame rather than assuming it took.
     """
 
     def __init__(self, inner: MoqVideoConsumer) -> None:
@@ -471,8 +472,8 @@ class BroadcastConsumer:
         bitstream, or a :class:`Container` directly. Pass a bare container for the
         dynamic flow, where you subscribe before the catalog exists.
         ``subscription`` tunes delivery priority, group
-        range, and the max age; omit for defaults. Raise
-        :attr:`Subscription.max_age_us` to buffer instead of skipping a
+        range, and the max delay; omit for defaults. Raise
+        :attr:`Subscription.max_delay_us` to buffer instead of skipping a
         stalled group.
         """
         container = track if isinstance(track, Container) else track.container
@@ -508,7 +509,7 @@ class BroadcastConsumer:
         ``await broadcast.catalog()`` followed by
         ``catalog.audio[name]``). Only Opus and AAC-LC tracks are supported;
         AAC is decode only, since nothing here encodes it.
-        Use ``output.max_age_us`` to
+        Use ``output.max_delay_us`` to
         control how aggressively stalled groups get skipped. That's
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``min_buffer_us`` jitter-buffer floor, which is a
@@ -530,9 +531,8 @@ class BroadcastConsumer:
         An unrecognized codec raises here; a recognized one no native backend
         handles raises when the decoder opens, both before the first frame.
 
-        ``output.format`` picks the packed CPU layout frames arrive in and
-        defaults to :attr:`VideoPixelFormat.I420`, which is what a decoder
-        produces natively; each frame repeats the layout it was decoded to.
+        Each frame converts to a packed CPU layout on demand with
+        ``frame.pixels(format)``.
 
         ``output.resize`` asks the decoder for a different size and is best
         effort, so read each frame's own dimensions.

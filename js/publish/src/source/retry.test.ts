@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import { Camera } from "./camera";
 import { Microphone } from "./microphone";
@@ -30,6 +30,7 @@ class FakeTrack extends EventTarget {
 
 class FakeMediaDevices extends EventTarget {
 	tracks: FakeTrack[] = [];
+	errors: Error[] = [];
 
 	// getUserMedia rejects, the way it does once the last device is gone.
 	missing = false;
@@ -51,6 +52,8 @@ class FakeMediaDevices extends EventTarget {
 
 	async getUserMedia(): Promise<MediaStream> {
 		this.attempts += 1;
+		const error = this.errors.shift();
+		if (error) throw error;
 		if (this.denied) throw new DOMException("Permission denied", "NotAllowedError");
 		if (this.missing) throw new Error("NotFoundError");
 
@@ -177,10 +180,168 @@ function published(media: Media | undefined): unknown {
 	return "track" in source ? source.track : source;
 }
 
+function fakeTime(): Disposable {
+	jest.useFakeTimers();
+	return { [Symbol.dispose]: () => jest.useRealTimers() };
+}
+
 for (const [kind, create] of [
 	["camera", (enabled: Signal<boolean>) => new Camera({ enabled })],
 	["microphone", (enabled: Signal<boolean>) => new Microphone({ enabled })],
 ] as const) {
+	for (const name of ["NotReadableError", "AbortError"]) {
+		test(`${kind} retries ${name} without reporting a terminal error`, async () => {
+			using _time = fakeTime();
+			using media = install(new FakeMediaDevices());
+			const enabled = new Signal(false);
+			const source = create(enabled);
+			try {
+				// Settle discovery before starting so it cannot refund this attempt's budget.
+				await settle();
+				media.errors = [new DOMException("temporarily unavailable", name)];
+				enabled.set(true);
+				await settle();
+				expect(media.attempts).toBe(1);
+				expect(source.out.error.peek()).toBeUndefined();
+				expect(source.out.source.peek()).toBeUndefined();
+
+				jest.advanceTimersByTime(Retry.DELAY.initial);
+				await settle();
+				expect(media.attempts).toBe(2);
+				expect(published(source.out.source.peek())).toBe(media.latest());
+				expect(source.out.error.peek()).toBeUndefined();
+			} finally {
+				source.close();
+			}
+		});
+
+		test(`${kind} retains ${name} after exhausting the retry budget`, async () => {
+			using _time = fakeTime();
+			using media = install(new FakeMediaDevices());
+			const enabled = new Signal(false);
+			const source = create(enabled);
+			try {
+				await settle();
+				const errors = Array.from(
+					{ length: Retry.LIMIT + 1 },
+					(_, i) => new DOMException(`failure ${i}`, name),
+				);
+				media.errors = [...errors];
+				enabled.set(true);
+				await settle();
+				for (let i = 0; i < Retry.LIMIT; i++) {
+					expect(media.attempts).toBe(i + 1);
+					expect(source.out.error.peek()).toBeUndefined();
+					jest.advanceTimersToNextTimer();
+					await settle();
+				}
+				expect(media.attempts).toBe(Retry.LIMIT + 1);
+				expect(source.out.source.peek()).toBeUndefined();
+				expect(source.out.error.peek()).toBe(errors.at(-1));
+				jest.advanceTimersByTime(Retry.SETTLED);
+				await settle();
+				expect(media.attempts).toBe(Retry.LIMIT + 1);
+				expect(source.out.error.peek()).toBe(errors.at(-1));
+
+				enabled.set(false);
+				await settle();
+				expect(source.out.error.peek()).toBeUndefined();
+				enabled.set(true);
+				await settle();
+				expect(media.attempts).toBe(Retry.LIMIT + 2);
+				expect(published(source.out.source.peek())).toBe(media.latest());
+			} finally {
+				source.close();
+			}
+		});
+	}
+
+	for (const error of [
+		new DOMException("denied", "NotAllowedError"),
+		new TypeError("bad constraints"),
+		new Error("unknown"),
+	]) {
+		test(`${kind} does not retry ${error.name}`, async () => {
+			using _time = fakeTime();
+			using media = install(new FakeMediaDevices());
+			const enabled = new Signal(false);
+			const source = create(enabled);
+			try {
+				await settle();
+				media.errors = [error];
+				enabled.set(true);
+				await settle();
+				expect(source.out.error.peek()).toBe(error);
+				jest.advanceTimersByTime(Retry.SETTLED);
+				await settle();
+				expect(media.attempts).toBe(1);
+				expect(source.out.source.peek()).toBeUndefined();
+				expect(source.out.error.peek()).toBe(error);
+			} finally {
+				source.close();
+			}
+		});
+	}
+
+	for (const close of [false, true]) {
+		test(`${kind} cancels a pending retry when ${close ? "closed" : "disabled"}`, async () => {
+			using _time = fakeTime();
+			using media = install(new FakeMediaDevices());
+			const enabled = new Signal(false);
+			const source = create(enabled);
+			try {
+				await settle();
+				media.errors = [new DOMException("busy", "NotReadableError")];
+				enabled.set(true);
+				await settle();
+				expect(media.attempts).toBe(1);
+				expect(source.out.error.peek()).toBeUndefined();
+				if (close) source.close();
+				else enabled.set(false);
+				await settle();
+				jest.advanceTimersByTime(Retry.SETTLED);
+				await settle();
+				expect(media.attempts).toBe(1);
+				expect(source.out.source.peek()).toBeUndefined();
+				expect(source.out.error.peek()).toBeUndefined();
+			} finally {
+				source.close();
+			}
+		});
+	}
+
+	for (const reject of [false, true]) {
+		test(`${kind} ignores a ${reject ? "rejection" : "stream"} arriving after cancellation`, async () => {
+			using _time = fakeTime();
+			using media = install(new FakeMediaDevices());
+			const pending = Promise.withResolvers<MediaStream>();
+			const open = spyOn(media, "getUserMedia").mockImplementationOnce(() => pending.promise);
+			const enabled = new Signal(false);
+			const source = create(enabled);
+			try {
+				await settle();
+				enabled.set(true);
+				await settle();
+				expect(open).toHaveBeenCalledTimes(1);
+				enabled.set(false);
+				await settle();
+				const track = new FakeTrack();
+				if (reject) pending.reject(new DOMException("aborted", "AbortError"));
+				else pending.resolve({ getTracks: () => [track] } as unknown as MediaStream);
+				await settle();
+				if (!reject) expect(track.stopped).toBe(true);
+				jest.advanceTimersByTime(Retry.SETTLED);
+				await settle();
+				expect(open).toHaveBeenCalledTimes(1);
+				expect(source.out.error.peek()).toBeUndefined();
+				expect(source.out.source.peek()).toBeUndefined();
+			} finally {
+				source.close();
+				open.mockRestore();
+			}
+		});
+	}
+
 	test(`${kind} reports a refusal and stops retrying until capture is reset`, async () => {
 		using media = install(new FakeMediaDevices());
 		media.denied = true;
@@ -201,6 +362,56 @@ for (const [kind, create] of [
 		await waitUntil(() => source.out.source.peek() !== undefined);
 		expect(media.attempts).toBe(2);
 		source.close();
+	});
+
+	test(`${kind} reports an ended track that exhausts the retry budget`, async () => {
+		using _time = fakeTime();
+		using media = install(new FakeMediaDevices());
+		const enabled = new Signal(false);
+		const source = create(enabled);
+		try {
+			// Settle discovery before starting so it cannot refund this attempt's budget.
+			await settle();
+			enabled.set(true);
+			await settle();
+			expect(published(source.out.source.peek())).toBe(media.latest());
+			expect(source.out.error.peek()).toBeUndefined();
+
+			for (let i = 0; i < Retry.LIMIT; i++) {
+				media.latest().end();
+				await settle();
+				expect(source.out.error.peek()).toBeUndefined();
+				jest.advanceTimersToNextTimer();
+				await settle();
+				expect(media.attempts).toBe(i + 2);
+				expect(published(source.out.source.peek())).toBe(media.latest());
+				expect(source.out.error.peek()).toBeUndefined();
+			}
+
+			media.latest().end();
+			await settle();
+			expect(media.attempts).toBe(Retry.LIMIT + 1);
+			expect(source.out.source.peek()).toBeUndefined();
+			const error = source.out.error.peek();
+			expect(error?.name).toBe("AbortError");
+			expect(error?.message).toBe("The media track ended");
+
+			jest.advanceTimersByTime(Retry.SETTLED);
+			await settle();
+			expect(media.attempts).toBe(Retry.LIMIT + 1);
+			expect(source.out.error.peek()).toBe(error);
+
+			enabled.set(false);
+			await settle();
+			expect(source.out.error.peek()).toBeUndefined();
+			enabled.set(true);
+			await settle();
+			expect(media.attempts).toBe(Retry.LIMIT + 2);
+			expect(published(source.out.source.peek())).toBe(media.latest());
+			expect(source.out.error.peek()).toBeUndefined();
+		} finally {
+			source.close();
+		}
 	});
 }
 

@@ -50,8 +50,8 @@ public final class BroadcastConsumer: Sendable {
 
     /// Subscribe to a media track, delivering frames in decode order. `container`
     /// comes from the catalog. `subscription` tunes delivery priority, group ordering
-    /// priority, group range, and the max age; omit for defaults. Raise
-    /// `Subscription.maxAgeUs` to buffer instead of skipping a stalled group.
+    /// priority, group range, and the max delay; omit for defaults. Raise
+    /// `Subscription.maxDelayUs` to buffer instead of skipping a stalled group.
     public func subscribeMedia(
         name: String,
         container: Container,
@@ -85,9 +85,9 @@ public final class BroadcastConsumer: Sendable {
     /// Subscribe to a video track and decode it inside the bindings.
     /// `catalogVideo` is the matching rendition from the catalog.
     ///
-    /// `output.format` picks the packed CPU layout every frame arrives in and
-    /// defaults to I420; each frame repeats the layout it was decoded to.
-    /// `output.resize` is best effort, so read each frame's own dimensions.
+    /// Each frame converts to a packed CPU layout on demand via
+    /// `pixels(format:)`. `output.resize` is best effort, so read each frame's
+    /// own dimensions.
     public func decodeVideo(
         name: String,
         catalogVideo: Video,
@@ -348,11 +348,6 @@ public final class BroadcastProducer: Sendable {
     ///
     /// Tracks already subscribed carry on to their own end. Closing again is a no-op.
     public func close() throws {
-        try ffi.close()
-    }
-
-    @available(*, deprecated, renamed: "close", message: "A broadcast end carries no cause.")
-    public func finish() throws {
         try ffi.close()
     }
 }

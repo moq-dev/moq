@@ -136,10 +136,7 @@ export class Game {
 		});
 		this.#signals.cleanup(() => this.audioSource.close());
 
-		this.sync = new Watch.Sync({
-			delay: this.delay,
-			probe: connection.probe,
-		});
+		this.sync = new Watch.Sync({ delay: this.delay });
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.#signals.run(this.#runPixelBudget.bind(this));
@@ -305,13 +302,13 @@ export class Game {
 		const viewerBroadcast = origin.createBroadcast(
 			Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`),
 		);
-		viewerBroadcast.announce();
+		viewerBroadcast.announce({ epoch: Moq.Epoch.mint() });
 		effect.cleanup(() => {
 			viewerBroadcast.close();
 			this.viewerId.set(undefined);
 		});
 
-		const track = viewerBroadcast.createTrack("command");
+		const track = viewerBroadcast.createTrack("command", { timescale: Moq.Time.Timescale.MILLI });
 		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 		effect.cleanup(() => producer.finish());
 		effect.run(this.#runCommandTrack.bind(this, track, producer));

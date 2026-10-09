@@ -50,7 +50,7 @@ pub(super) struct Video<O> {
 	pub frames: Arc<Mutex<VecDeque<moq_video::Frame>>>,
 	pub changed: Arc<tokio::sync::Notify>,
 	pub output: O,
-	pub max_age: Duration,
+	pub max_delay: Duration,
 }
 
 /// The production sink and the deterministic buffered decoder used by tests.
@@ -93,7 +93,7 @@ impl<O: Output> Video<O> {
 					{
 						self.output.send(Event::Wake);
 					}
-					buffer.push(frame, self.max_age);
+					buffer.push(frame, self.max_delay);
 				} else {
 					buffer.ended = true;
 				}
@@ -225,7 +225,11 @@ impl<O: Output> Video<O> {
 
 #[cfg(test)]
 mod tests {
-	use super::super::{args::Args, fake::Recorder, media::Media};
+	use super::super::{
+		args::{Args, Delay},
+		fake::Recorder,
+		media::Media,
+	};
 	use super::*;
 	use hang::moq_net;
 
@@ -276,7 +280,7 @@ mod tests {
 			origin: moq_tokio::origin::spawn().consume(),
 			broadcast: "room".into(),
 			args: Args {
-				delay: delay.into(),
+				delay: Delay::Fixed(delay),
 				catalog_format: None,
 				select: Default::default(),
 			},
@@ -287,13 +291,13 @@ mod tests {
 		}
 	}
 
-	fn playback(media: &Media<Recorder>, max_age: Duration) -> Video<Recorder> {
+	fn playback(media: &Media<Recorder>, max_delay: Duration) -> Video<Recorder> {
 		Video {
 			presentation: media.presentation.clone(),
 			frames: media.video.clone(),
 			changed: media.drained.clone(),
 			output: media.output.clone(),
-			max_age,
+			max_delay,
 		}
 	}
 
@@ -313,7 +317,7 @@ mod tests {
 			.unwrap();
 		let subscriber = track
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_age(delay))
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
 			.await
 			.unwrap();
 		let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data);
@@ -432,7 +436,7 @@ mod tests {
 			.unwrap();
 		let subscriber = track
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_max_age(delay))
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
 			.await
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(

@@ -1,20 +1,20 @@
 cmake_minimum_required(VERSION 3.28)
 
-# Build the in-tree libmoq by default. Release-only builds clear MOQ_LOCAL and
+# Build the in-tree moq-c by default. Release-only builds clear MOQ_LOCAL and
 # must select the published archive explicitly, so this never silently drifts
 # to an old static version.
-set(MOQ_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to the moq repo (builds rs/libmoq in-tree)")
-set(MOQ_VERSION "" CACHE STRING "Published libmoq version (required without MOQ_LOCAL)")
+set(MOQ_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to the moq repo (builds rs/moq-c in-tree)")
+set(MOQ_VERSION "" CACHE STRING "Published moq-c version (required without MOQ_LOCAL)")
 
 # One predicate for both the version derivation here and the link/fetch choice
 # below, so the two can't drift apart.
 set(_moq_local_build FALSE)
-if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/rs/libmoq/CMakeLists.txt")
+if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/rs/moq-c/CMakeLists.txt")
   set(_moq_local_build TRUE)
 endif()
 
 if(_moq_local_build)
-  set(_moq_manifest "${MOQ_LOCAL}/rs/libmoq/Cargo.toml")
+  set(_moq_manifest "${MOQ_LOCAL}/rs/moq-c/Cargo.toml")
   file(STRINGS "${_moq_manifest}" _moq_version_lines REGEX "^version = \"[^\"]+\"$")
   list(LENGTH _moq_version_lines _moq_version_count)
   if(NOT _moq_version_count EQUAL 1)
@@ -24,7 +24,7 @@ if(_moq_local_build)
   string(REGEX REPLACE "^version = \"([^\"]+)\"$" "\\1" _moq_link_version "${_moq_version_line}")
 else()
   if(NOT MOQ_VERSION)
-    message(FATAL_ERROR "MOQ_VERSION is required when MOQ_LOCAL does not contain rs/libmoq")
+    message(FATAL_ERROR "MOQ_VERSION is required when MOQ_LOCAL does not contain rs/moq-c")
   endif()
   set(_moq_link_version "${MOQ_VERSION}")
 endif()
@@ -67,28 +67,28 @@ endif()
 target_link_libraries(obs-moq PRIVATE OBS::libobs)
 
 if(_moq_local_build)
-  add_subdirectory("${MOQ_LOCAL}/rs/libmoq" moq)
-  target_link_libraries(obs-moq PRIVATE moq)
+  add_subdirectory("${MOQ_LOCAL}/rs/moq-c" moq)
+  target_link_libraries(obs-moq PRIVATE moq::c)
 else()
   include(FetchContent)
   FetchContent_Declare(
     moq
     URL
-      https://github.com/moq-dev/moq/releases/download/libmoq-v${_moq_link_version}/moq-${_moq_link_version}-${MOQ_TARGET}.${MOQ_ARCHIVE}
+      https://github.com/moq-dev/moq/releases/download/moq-c-v${_moq_link_version}/moq-c-${_moq_link_version}-${MOQ_TARGET}.${MOQ_ARCHIVE}
   )
   FetchContent_MakeAvailable(moq)
 
-  find_package(moq REQUIRED PATHS ${moq_SOURCE_DIR} NO_DEFAULT_PATH)
-  target_link_libraries(obs-moq PRIVATE moq::moq)
+  find_package(moq-c REQUIRED PATHS ${moq_SOURCE_DIR} NO_DEFAULT_PATH)
+  target_link_libraries(obs-moq PRIVATE moq::c)
 endif()
 
-# libmoq is a Rust static library; its std runtime pulls in symbols from Windows
+# moq-c is a Rust static library; its std runtime pulls in symbols from Windows
 # system libraries (e.g. NtCreateNamedPipeFile from ntdll) that MSVC does not
 # auto-resolve when the archive is linked into this module. These are the OS
 # import libraries reported by `rustc --print native-static-libs` that aren't
 # linked by default; they resolve by name from the Windows SDK (no hard-coded
-# paths). The libmoq package config also declares these, but linking them here
-# keeps the plugin buildable against any libmoq (local dev tree or prebuilt
+# paths). The moq-c package config also declares these, but linking them here
+# keeps the plugin buildable against any moq-c (local dev tree or prebuilt
 # release) whose config may predate that declaration. Duplicate links are
 # harmless.
 if(WIN32)

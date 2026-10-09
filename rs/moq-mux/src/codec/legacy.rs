@@ -157,11 +157,6 @@ impl Import {
 		self.track.name()
 	}
 
-	/// The exclusive presentation end earlier groups have reached, if any.
-	pub fn live_edge(&self) -> Option<Timestamp> {
-		self.track.live_edge()
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;

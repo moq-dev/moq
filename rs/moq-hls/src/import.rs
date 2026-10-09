@@ -49,7 +49,7 @@ const ANCHOR_SEGMENTS: usize = 3;
 /// How many consecutive failed steps retire a rendition (see [`TrackState::evict`]).
 ///
 /// Enough to ride out a transient fetch error or a stale playlist, short enough that a
-/// genuinely dead variant stops holding the broadcast's timeline back within a few seconds.
+/// genuinely dead variant leaves the catalog within a few seconds.
 const MAX_RENDITION_FAILURES: usize = 3;
 
 /// Configuration for the HLS import loop.
@@ -316,9 +316,9 @@ impl Sink {
 	/// Mint an fMP4 importer that publishes only the roles in `select`.
 	///
 	fn importer(&self, select: &select::Broadcast) -> Fmp4 {
-		// `reserve()` (not `clone()`) so the catalog isn't published until every
-		// importer's tracks resolve, keeping one-shot muxers from seeing a partial
-		// catalog (moq-mux reservation gate).
+		// `reserve()` (not `clone()`) so this init's tracks publish together.
+		// The pass holds a separate reservation across every rendition; this one
+		// only covers the tracks this init segment declares.
 		Fmp4::new(self.broadcast.clone(), self.catalog.reserve()).with_select(select.clone())
 	}
 }
@@ -364,11 +364,9 @@ impl TrackState {
 
 	/// Give up on this rendition's current importer generation after repeated failures.
 	///
-	/// An enrolled track gates *every* segment record until it reports past the boundary, so a
-	/// rendition that stopped making progress freezes the whole broadcast's timeline rather
-	/// than just its own playlist. Dropping the importer closes its recorders (and retires its
-	/// catalog entries), letting the healthy renditions publish again; a later successful step
-	/// rebuilds it from the init segment.
+	/// Dropping the importer closes its recorders and retires its catalog entries, so players
+	/// stop selecting a rendition that no longer advances; a later successful step rebuilds it
+	/// from the init segment.
 	fn evict(&mut self) {
 		self.importer = None;
 		self.map = None;
@@ -556,6 +554,13 @@ impl TrackState {
 		// `consume_segments` resolves the effective map before every segment, so a missing
 		// importer means the playlist never carried an `EXT-X-MAP`.
 		let importer = self.importer.as_mut().ok_or(Error::MissingMap)?;
+		// Only a discontinuity starts a new media timeline; a sequence skip must keep advancing.
+		if self
+			.next_discontinuity
+			.is_some_and(|previous| previous != discontinuity_sequence)
+		{
+			importer.discontinuity();
+		}
 		if reanchored {
 			importer.seek(group_sequence)?;
 		}
@@ -717,12 +722,14 @@ impl Import {
 	async fn step(&mut self, on_error: OnError) -> Result<StepOutcome> {
 		self.ensure_tracks().await?;
 
-		// Reserve the timeline for the whole pass, the way each importer reserves the catalog.
-		// Renditions are ingested one at a time, and a record is immutable once published
-		// against the tracks enrolled at that moment, so a record flushed mid-pass would omit
-		// every rendition that hasn't loaded its init segment yet (a permanent EXT-X-GAP) and
-		// fold that rendition's first groups into whichever segment flushes next.
-		let _reserved = self.sink.catalog.timeline().reserve();
+		// Hold the catalog across the pass. A rendition reserves only once its init
+		// segment loads, and that reservation ends at its first frame, before the next
+		// rendition is ingested. Without this, the first rendition publishes alone.
+		// The hold ends with the pass: a rendition that has no segments yet, or whose
+		// init fetch fails, never reserves, and must not withhold the catalog for the
+		// rest of the import. Every pass holds, not only the first, because a quiet
+		// playlist publishes nothing and the first catalog may be a later pass.
+		let _catalog = self.sink.catalog.reserve();
 
 		let mut wrote_segments = 0;
 		let mut target_duration = None;
@@ -1015,9 +1022,12 @@ fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64>
 mod tests {
 	use super::*;
 	use std::path::{Path, PathBuf};
+	use std::sync::Arc;
 	use std::sync::atomic::{AtomicUsize, Ordering};
+	use std::task::Poll;
 	use tokio::io::AsyncWriteExt as _;
 	use tokio::net::TcpListener;
+	use tokio::sync::Notify;
 
 	static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -1398,10 +1408,8 @@ mod tests {
 		assert_eq!(import.video[0].next_sequence, Some(2));
 	}
 
-	/// An enrolled track gates every timeline record until it reports past the boundary, so a
-	/// rendition that has stopped making progress would otherwise freeze the whole broadcast's
-	/// timeline (and every healthy rendition's playlist with it). After a few consecutive
-	/// failures its importer is dropped, which closes its recorders.
+	/// A rendition that has stopped making progress is dropped after a few consecutive
+	/// failures, which closes its recorders and retires its catalog entries.
 	#[tokio::test]
 	async fn a_persistently_failing_rendition_is_evicted() {
 		let (init, fragments) = fmp4_parts(2);
@@ -1433,10 +1441,7 @@ mod tests {
 		}
 
 		import.step(OnError::Warn).await.unwrap();
-		assert!(
-			import.video[0].importer.is_none(),
-			"the dead rendition stops gating the broadcast's timeline"
-		);
+		assert!(import.video[0].importer.is_none(), "the dead rendition is retired");
 	}
 
 	/// A live window longer than `ANCHOR_SEGMENTS` is joined mid-playlist, which means the
@@ -1559,6 +1564,145 @@ mod tests {
 		assert_eq!(hls.video.len(), 1);
 		assert!(hls.video[0].select.has_video() && hls.video[0].select.has_audio());
 		assert!(hls.audio.is_none());
+	}
+
+	/// The catalog consumer jumps to the newest snapshot, so this looks while the second
+	/// rendition's playlist is still withheld: on a pass that publishes early, that read is
+	/// already the first catalog, and it must list every rendition.
+	#[tokio::test]
+	async fn first_catalog_lists_every_rendition() {
+		let (init, fragments) = fmp4_parts(2);
+		let mut media = init.clone();
+		media.extend_from_slice(&fragments[0]);
+		media.extend_from_slice(&fragments[1]);
+		let playlist = format!(
+			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n",
+			init.len(),
+			fragments[0].len(),
+			init.len(),
+			fragments[1].len()
+		);
+		let master = "\
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aud\"
+video.m3u8
+";
+
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let arrived = Arc::new(Notify::new());
+		let release = Arc::new(Notify::new());
+		let server = serve_gated(
+			listener,
+			vec![
+				("/master.m3u8".to_string(), master.as_bytes().to_vec()),
+				("/video.m3u8".to_string(), playlist.as_bytes().to_vec()),
+				("/audio.m3u8".to_string(), playlist.into_bytes()),
+				("/media.mp4".to_string(), media),
+			],
+			"/audio.m3u8".to_string(),
+			arrived.clone(),
+			release.clone(),
+		);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut consumer = catalog.consume().unwrap();
+		let cfg = Config::new(Url::parse(&format!("http://{address}/master.m3u8")).unwrap());
+		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
+
+		// Keep the import alive across the read: dropping it tears the catalog track down,
+		// and the consumer would see that instead of the snapshot.
+		let importing = tokio::spawn(async move {
+			let result = import.init().await;
+			(result, import)
+		});
+
+		// Video has finished ingesting: its playlist, init, and segments all precede this fetch.
+		arrived.notified().await;
+		let published_early = match consumer.poll_next(&kio::Waiter::noop()) {
+			Poll::Pending => false,
+			Poll::Ready(Ok(Some(snapshot))) => {
+				assert!(
+					!snapshot.video.renditions.is_empty() && !snapshot.audio.renditions.is_empty(),
+					"first catalog listed video {} and audio {}",
+					snapshot.video.renditions.len(),
+					snapshot.audio.renditions.len()
+				);
+				true
+			}
+			other => panic!("catalog consumer failed before the second rendition: {other:?}"),
+		};
+
+		release.notify_one();
+		let (result, _import) = importing.await.unwrap();
+		result.unwrap();
+
+		if !published_early {
+			let snapshot = match consumer.poll_next(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(snapshot))) => snapshot,
+				other => panic!("expected the first catalog, got {other:?}"),
+			};
+			assert!(!snapshot.video.renditions.is_empty(), "video rendition missing");
+			assert!(!snapshot.audio.renditions.is_empty(), "audio rendition missing");
+		}
+		server.abort();
+	}
+
+	/// Answer `routes` over HTTP/1.1. `gate` is held until `release`, which is how the test
+	/// observes the catalog after one rendition and before the next.
+	fn serve_gated(
+		listener: TcpListener,
+		routes: Vec<(String, Vec<u8>)>,
+		gate: String,
+		arrived: Arc<Notify>,
+		release: Arc<Notify>,
+	) -> tokio::task::JoinHandle<()> {
+		tokio::spawn(async move {
+			loop {
+				let (mut stream, _) = listener.accept().await.unwrap();
+				let mut request = Vec::new();
+				loop {
+					let mut chunk = [0; 1024];
+					let read = stream.read(&mut chunk).await.unwrap();
+					if read == 0 {
+						break;
+					}
+					request.extend_from_slice(&chunk[..read]);
+					if request.windows(4).any(|window| window == b"\r\n\r\n") {
+						break;
+					}
+				}
+				if request.is_empty() {
+					continue;
+				}
+
+				let path = request_path(&request).unwrap_or("");
+				if path == gate {
+					arrived.notify_one();
+					release.notified().await;
+				}
+				let body = routes
+					.iter()
+					.find(|(name, _)| name == path)
+					.map(|(_, body)| body.as_slice())
+					.unwrap_or_else(|| panic!("unexpected request for {path}: {}", String::from_utf8_lossy(&request)));
+				let mut response = format!(
+					"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+					body.len()
+				)
+				.into_bytes();
+				response.extend_from_slice(body);
+				stream.write_all(&response).await.unwrap();
+			}
+		})
+	}
+
+	fn request_path(request: &[u8]) -> Option<&str> {
+		let request = std::str::from_utf8(request).ok()?;
+		let target = request.lines().next()?.split_whitespace().nth(1)?;
+		Some(target.split('?').next().unwrap_or(target))
 	}
 
 	#[test]

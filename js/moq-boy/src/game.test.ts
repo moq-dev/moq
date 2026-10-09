@@ -3,7 +3,7 @@ import * as Moq from "@moq/net";
 
 // Bun cannot load the blob-URL worklet import used by the audio decoder. This test never provides
 // an audio rendition, so the decoder never creates an AudioContext or reaches the worklet.
-mock.module("../../watch/src/audio/render-worklet.ts?worklet", () => ({ default: "blob:fake-render" }));
+mock.module("../../watch/src/audio/render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
 
 const { Game } = await import("./game");
 

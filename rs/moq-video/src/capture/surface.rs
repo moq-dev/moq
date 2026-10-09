@@ -6,7 +6,7 @@ use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 
 use crate::frame::Surface;
-use crate::frame::macos::PixelBuffer;
+use crate::frame::apple::PixelBuffer;
 
 /// Extract the `CVPixelBuffer` from a sample buffer as a zero-copy surface.
 pub(super) fn surface_frame(sample_buffer: &CMSampleBuffer) -> Option<Surface> {

@@ -168,9 +168,9 @@ public final class Session: Sendable {
         ffi.cancel(code: code)
     }
 
-    /// Graceful shutdown. Alias for `cancel(code: 0)`.
-    public func shutdown() {
-        ffi.shutdown()
+    /// Drain finished tracks within one second, throwing if delivery times out.
+    public func shutdown() async throws {
+        try await ffi.shutdown()
     }
 
     /// Snapshot the current connection statistics (RTT, bandwidth estimates,

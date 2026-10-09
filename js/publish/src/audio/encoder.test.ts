@@ -4,10 +4,10 @@ import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Baseline } from "../jitter";
 import type { AudioFrame, Format } from "./capture";
-import { Encoder, resolve } from "./encoder";
+import { type Codec, Encoder, resolve, toEncoderConfig } from "./encoder";
 
 // Bun does not load Vite's worklet URL imports from the public audio entrypoint.
-mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
+mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
 
 const Audio = await import("./index");
 
@@ -55,6 +55,13 @@ describe("resolve", () => {
 	});
 });
 
+describe("toEncoderConfig", () => {
+	test("configures voice without DTX", () => {
+		const config = toEncoderConfig(resolve(captured, "opus"), "voice", {});
+		expect(config.opus).toEqual({ application: "voip", signal: "voice", frameDuration: 20_000 } as never);
+	});
+});
+
 // Like Chrome's Opus encoder, it holds the newest chunks until later input pushes them out, and
 // stamps each chunk from the first input's timestamp plus the audio encoded since, so a jump in
 // input timestamps never reaches the output.
@@ -62,7 +69,7 @@ class LaggingAudioEncoder {
 	static readonly LAG = 2;
 
 	// Called on configure; the encoder publishes its pipeline synchronously right after.
-	static onConfigure: (() => void) | undefined;
+	static onConfigure: ((config: AudioEncoderConfig) => void) | undefined;
 
 	state: CodecState = "unconfigured";
 	#output: EncodedAudioChunkOutputCallback;
@@ -74,9 +81,9 @@ class LaggingAudioEncoder {
 		this.#output = init.output;
 	}
 
-	configure(): void {
+	configure(config: AudioEncoderConfig): void {
 		this.state = "configured";
-		LaggingAudioEncoder.onConfigure?.();
+		LaggingAudioEncoder.onConfigure?.(config);
 	}
 
 	encode(data: AudioData): void {
@@ -185,21 +192,40 @@ class Feed {
 	}
 }
 
-// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes].
-async function setup(baseline = new Baseline()) {
-	const configured = new Promise<void>((resolve) => {
-		LaggingAudioEncoder.onConfigure = resolve;
+// Resolves on the next AudioEncoder configure; the encoder publishes its pipeline synchronously after.
+function configured(): Promise<AudioEncoderConfig> {
+	return new Promise((resolve) => {
+		LaggingAudioEncoder.onConfigure = (config) => {
+			LaggingAudioEncoder.onConfigure = undefined;
+			resolve(config);
+		};
 	});
+}
 
-	const track = new Moq.Track.Producer("audio").accept();
+// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes]
+// and how many frames each group carries.
+async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: Time.Milli) {
+	const configuring = configured();
+
+	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const written: [number, number][] = [];
+	const groups: number[] = [];
+	const appended: ReturnType<typeof track.appendGroup>[] = [];
 	const writes = { onWrite: undefined as (() => void) | undefined };
-	const writeFrame = track.writeFrame.bind(track);
-	track.writeFrame = (frame) => {
-		const [timestamp, payload] = Moq.Varint.decode(frame.payload);
-		written.push([timestamp, payload.byteLength]);
-		writeFrame(frame);
-		writes.onWrite?.();
+	const appendGroup = track.appendGroup.bind(track);
+	track.appendGroup = () => {
+		const group = appendGroup();
+		appended.push(group);
+		const index = groups.push(0) - 1;
+		const writeFrame = group.writeFrame.bind(group);
+		group.writeFrame = (frame) => {
+			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
+			written.push([timestamp, payload.byteLength]);
+			groups[index]++;
+			writeFrame(frame);
+			writes.onWrite?.();
+		};
+		return group;
 	};
 
 	const rendition = {
@@ -219,20 +245,28 @@ async function setup(baseline = new Baseline()) {
 		blocked: new Signal(false),
 	};
 
+	const enabled = new Signal(true);
 	const encoder = new Encoder("audio", {
 		broadcast: { audio: () => rendition, baseline } as never,
 		capture: capture as never,
+		enabled,
+		codec,
+		groupDuration,
 	});
 
-	await configured;
-	LaggingAudioEncoder.onConfigure = undefined;
+	const config = await configuring;
 
 	return {
+		config,
 		encoder,
+		enabled,
+		capture,
 		track,
 		rendition,
 		feed,
 		written,
+		groups,
+		appended,
 		writes,
 		[Symbol.dispose]() {
 			encoder.close();
@@ -280,6 +314,95 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 	]);
 });
 
+// A pause with a subscriber attached breaks the timeline just as losing demand does: a subscriber
+// that stays across it, or joins during it, must not read the audio before it as live.
+test("disabling with a subscriber attached marks where submitted audio ends", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { enabled, feed, written, writes } = env;
+
+	let index = 0;
+	const push = async (count: number) => {
+		for (let i = 0; i < count; i++, index++) {
+			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+	};
+
+	await push(4); // two written, two held
+
+	const marked = new Promise<void>((resolve) => {
+		writes.onWrite = resolve;
+	});
+	enabled.set(false);
+	await marked;
+	writes.onWrite = undefined;
+
+	await push(2); // nothing publishing
+	const resumed = configured();
+	enabled.set(true);
+	await resumed;
+	await push(3); // a fresh AudioEncoder, so one written and two held
+
+	expect(written).toEqual([
+		[20_000, 1],
+		[40_000, 1],
+		[100_000, 0],
+		[140_000, 1],
+	]);
+});
+
+// A muted rendition stays in the catalog, so a viewer deselects it with a one-field delta instead of
+// seeing it removed and re-added.
+test("disabling keeps the rendition in the catalog with enabled: false", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { encoder, enabled, capture, rendition } = env;
+
+	const before = encoder.out.catalog.peek();
+	expect(before).toBeDefined();
+	expect(before?.enabled).toBeUndefined();
+
+	enabled.set(false);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+	expect(rendition.config.peek()).toEqual({ ...before, enabled: false } as never);
+	expect(encoder.out.active.peek()).toBe(false);
+
+	// Muting released the microphone, so re-enabling waits on its format without dropping the rendition.
+	const format = capture.out.format.peek();
+	capture.out.format.set(undefined as never);
+	enabled.set(true);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+
+	capture.out.format.set(format);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual(before);
+});
+
+// Closing tears down the subscription and the pipeline, which both end the epoch; cleanups run
+// last-in, first-out, so the marker lands once and before the rendition closes the track.
+test("closing with a subscriber attached marks the end once before the track closes", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { encoder, track, feed, written } = env;
+
+	for (let i = 0; i < 4; i++) {
+		await feed.push({ timestamp: Time.Micro(20_000 + i * 20_000), channels: [new Float32Array(960)] });
+	}
+	await feed.drain(); // two written, two held
+
+	encoder.close();
+
+	expect(written).toEqual([
+		[20_000, 1],
+		[40_000, 1],
+		[100_000, 0],
+	]);
+	expect(track.closed.peek()).toBeDefined();
+});
+
 // A push that completes several frames is still one continuous stream, so it must not restart the
 // encoder and drop the chunks it holds.
 test("a push completing several frames keeps the encoder running", async () => {
@@ -301,28 +424,87 @@ test("a push completing several frames keeps the encoder running", async () => {
 	]);
 });
 
+// The first frame at the minimum opens the next group. A timeline break closes the group early,
+// so the first frame after it opens a fresh one.
+test("a group duration packs frames until the minimum and restarts after a break", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Baseline(), undefined, Time.Milli(100));
+	const { enabled, feed, written, groups, appended, writes } = env;
+
+	let index = 0;
+	const push = async (count: number) => {
+		for (let i = 0; i < count; i++, index++) {
+			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+	};
+
+	await push(7); // five written, two held
+	expect(groups).toEqual([5]);
+	expect(appended[0].closed.peek()).toBeUndefined();
+	await push(2); // the next frame opens a new group and closes the first
+	expect(groups).toEqual([5, 2]);
+	expect(appended[0].closed.peek()).toBeNull();
+
+	const marked = new Promise<void>((resolve) => {
+		writes.onWrite = resolve;
+	});
+	enabled.set(false);
+	await marked;
+	writes.onWrite = undefined;
+
+	const resumed = configured();
+	enabled.set(true);
+	await resumed;
+	await push(4); // a fresh AudioEncoder, so two written and two held
+
+	expect(written.map(([timestamp]) => timestamp)).toEqual([
+		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 200_000, 200_000, 220_000,
+	]);
+	// 120ms opens the next group, closing the five frames at 20-100ms. The break ends the
+	// 120-140ms group early, so resumed frames start a fresh group after the marker.
+	expect(groups).toEqual([5, 2, 1, 2]);
+});
+
+// Chromium stamps Opus output by counting the samples emitted, so every frame DTX suppresses pulls
+// later audio earlier. A plain-JS caller passing the old knob must not reach the encoder.
+test("never enables Opus DTX", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Baseline(), { mime: "opus", usedtx: true } as Codec);
+	expect(env.config.opus?.usedtx).toBeUndefined();
+});
+
 // Another rendition on the same broadcast flushing with far less lateness leaves this one trailing
 // it, which the catalog advertises as `delay`.
 test("a rendition trailing the broadcast's earliest advertises delay", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	const baseline = new Baseline();
-	using env = await setup(baseline);
-	const { encoder, feed } = env;
+	const clock = spyOn(performance, "now").mockReturnValue(200);
 
-	expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
+	try {
+		const baseline = new Baseline();
+		using env = await setup(baseline);
+		const { encoder, feed } = env;
 
-	// A sibling that flushes each frame the instant it is captured.
-	baseline.observe(0, performance.now() * 1000);
+		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
-	// Captured 100ms ago, so this rendition flushes at least that late.
-	const start = performance.now() * 1000 - 100_000;
-	for (let index = 0; index < 4; index++) {
-		await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+		// A sibling that flushes each frame the instant it is captured.
+		baseline.observe(0, performance.now() * 1000);
+
+		// Captured 100ms ago, with a clock origin that keeps timestamps nonnegative.
+		const start = performance.now() * 1000 - 100_000;
+		for (let index = 0; index < 4; index++) {
+			await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+
+		expect(env.written).toEqual([
+			[100_000, 1],
+			[120_000, 1],
+		]);
+		expect(encoder.out.catalog.peek()).toMatchObject({ delay: 100 });
+	} finally {
+		clock.mockRestore();
 	}
-	await feed.drain();
-
-	expect(env.written.length).toBe(2);
-	expect(encoder.out.catalog.peek()?.delay).toBeGreaterThanOrEqual(100);
 });
 
 // Regression: codec settings that can't resolve left the encoder unsettled, so `<moq-publish>` never
@@ -354,6 +536,48 @@ test("settles when the codec settings can't resolve", async () => {
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeDefined();
 		expect(encoder.settled.peek()).toBe(true);
+	} finally {
+		encoder.close();
+		error.mockRestore();
+	}
+});
+
+// A fade the gain can't ramp over is refused like any other bad setting, rather than ramping wrong.
+test("refuses the rendition while the fade is invalid", async () => {
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal(undefined) },
+		out: {
+			root: new Signal(undefined),
+			format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
+			frames: new Signal(undefined),
+		},
+		blocked: new Signal(false),
+	};
+	const encoder = new Encoder("audio", { capture: capture as never, fade: Time.Milli(-1) });
+
+	try {
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
+		expect(encoder.settled.peek()).toBe(true);
+		expect(error).toHaveBeenCalled();
+
+		encoder.fade.set(Time.Milli(0));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeDefined();
+
+		encoder.fade.set(Time.Milli(Number.NaN));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
+
+		encoder.fade.set(Time.Milli(0));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeDefined();
+
+		// An endless ramp would never finish a mute.
+		encoder.fade.set(Time.Milli(Number.POSITIVE_INFINITY));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
 	} finally {
 		encoder.close();
 		error.mockRestore();

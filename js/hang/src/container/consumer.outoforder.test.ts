@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
@@ -41,16 +41,16 @@ async function drain(consumer: Consumer): Promise<[number, number | undefined][]
 	return seen;
 }
 
-// A publisher serving a subscriber's max age hands over the head of the window alongside
+// A publisher serving a subscriber's max delay hands over the head of the window alongside
 // the live edge, and groups go out newest-first, so the head arrives *after* the group
 // that is already playing. Arriving in that order is not a reason to throw it away:
 // audio writes into a timestamp-indexed ring and video drops a late frame at render, and the
-// subscription's own max age already bounds how far back one can be.
+// subscription's own max delay already bounds how far back one can be.
 test("out-of-order groups are delivered rather than dropped", async () => {
-	const track = new Track.Producer("test").accept({ maxAge: Time.Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(5000) }), {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Time.Milli(30_000) });
+	const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxAge: 5000 as Time.Milli,
+		maxDelay: 5000 as Time.Milli,
 	});
 
 	// The live edge lands first, and delivery starts there rather than waiting.
@@ -77,10 +77,10 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 // drained (the decode loop consumes faster than the network delivers). Removing it at that
 // instant silently truncates its tail, so removal must wait for the group to finish.
 test("a below-cursor group still downloading is not truncated", async () => {
-	const track = new Track.Producer("test").accept({ maxAge: Time.Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(5000) }), {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Time.Milli(30_000) });
+	const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxAge: 5000 as Time.Milli,
+		maxDelay: 5000 as Time.Milli,
 	});
 
 	// The live edge group arrives first and starts delivery (still open).
@@ -110,4 +110,43 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	live.close();
 	track.close();
 	consumer.close();
+});
+
+// The floor belongs to the latest group, not to delayed history within max delay.
+test("delayed older groups survive a floor established by two newer groups", async () => {
+	const clock = spyOn(performance, "now").mockReturnValue(200);
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Time.Milli(30_000) });
+	const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(5000) }), {
+		format: new LegacyFormat("data"),
+		maxDelay: Time.Milli(5000),
+	});
+	async function nextFrame() {
+		for (;;) {
+			const next = await consumer.next();
+			if (!next || next.frame) return next;
+		}
+	}
+	try {
+		publish(track, 3, 30);
+		expect((await nextFrame())?.group).toBe(3);
+
+		const latest = new Group.Producer(4);
+		track.writeGroup(latest);
+		publishFrame(latest, 40, 4);
+		expect((await nextFrame())?.group).toBe(4);
+
+		// Group 1's 10ms frame is valid history, below group 4's 30ms floor.
+		publish(track, 1, 10);
+		const backlog = await nextFrame();
+		expect(backlog?.group).toBe(1);
+		expect(backlog?.frame?.timestamp).toBe(Time.Micro(10_000));
+
+		// Delivering the backlog must not erase the floor for group 4 itself.
+		publishFrame(latest, 29, 5);
+		await expect(nextFrame()).rejects.toThrow("below the previous group start");
+	} finally {
+		consumer.close();
+		track.close();
+		clock.mockRestore();
+	}
 });

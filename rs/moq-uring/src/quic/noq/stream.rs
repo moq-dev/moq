@@ -118,15 +118,10 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		}
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
 		// The trait (like W3C sendOrder) sends HIGHER values first, and so
 		// does noq.
-		let _ = self
-			.shared
-			.conn
-			.borrow_mut()
-			.send_stream(self.id)
-			.set_priority(i32::from(order));
+		let _ = self.shared.conn.borrow_mut().send_stream(self.id).set_priority(order);
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {

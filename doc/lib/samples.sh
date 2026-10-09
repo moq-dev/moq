@@ -8,11 +8,11 @@ set -euo pipefail
 #
 # Inputs a sample leaves undefined (`opus_init_bytes`, `pts`) come from a prelude
 # the caller compiles alongside. Imports are hoisted above the functions, where
-# Kotlin, Swift, and C require them.
+# Go, Dart, Kotlin, Swift, and C require them.
 #
-# Usage: samples.sh python|kotlin|swift|c FILE...
+# Usage: samples.sh python|kotlin|swift|c|go|dart FILE...
 
-lang="${1:?usage: samples.sh python|kotlin|swift|c FILE...}"
+lang="${1:?usage: samples.sh python|kotlin|swift|c|go|dart FILE...}"
 shift
 
 awk -v lang="$lang" '
@@ -21,11 +21,13 @@ BEGIN {
 	if (lang == "python") { opener = "async def _sample_%d() -> None:"; closer = "    pass\n"; indent = "    " }
 	else if (lang == "kotlin") { hoist = "^import "; opener = "suspend fun docSample%d() {"; closer = "}\n" }
 	else if (lang == "swift") { hoist = "^import "; opener = "func docSample%d() async throws {"; closer = "}\n" }
+	else if (lang == "go") { hoist = "^import "; opener = "func docSample%d() {"; closer = "}\n" }
+	else if (lang == "dart") { hoist = "^import "; opener = "Future<void> docSample%d() async {"; closer = "}\n" }
 	else if (lang == "c") { hoist = "^#include "; opener = "static int doc_sample_%d(void) {"; closer = "    return 0;\n}\n" }
 	else { print "samples.sh: unknown language " lang > "/dev/stderr"; exit 2 }
 	comment = (lang == "python") ? "#" : "//"
 }
-FNR == 1 { inside = 0 }
+FNR == 1 { inside = 0; import_block = 0 }
 !inside && $0 ~ ("^```" lang "([ \t]|$)") {
 	inside = 1
 	skip = ($0 ~ /[ \t]ignore([ \t]|$)/)
@@ -37,16 +39,24 @@ FNR == 1 { inside = 0 }
 	next
 }
 inside && /^```/ {
-	inside = 0
+	inside = 0; import_block = 0
 	if (!skip) body[++nbody] = closer
 	next
 }
 inside && !skip {
+	if (lang == "go" && $0 ~ /^import[ \t]+\(/) { import_block = 1; next }
+	if (import_block) {
+		if ($0 ~ /^[ \t]*\)/) { import_block = 0; next }
+		if ($0 ~ /^[ \t]*$/) next
+		sub(/^[ \t]+/, "")
+		$0 = "import " $0
+	}
 	if (hoist != "" && $0 ~ hoist) { if (!($0 in seen)) { seen[$0] = 1; imports[++nimports] = $0 } }
 	else body[++nbody] = ($0 == "") ? "" : indent $0
 }
 END {
 	if (n == 0) { print "samples.sh: no " lang " samples found" > "/dev/stderr"; exit 1 }
+	if (lang == "go") print "package docs\n"
 	for (i = 1; i <= nimports; i++) print imports[i]
 	print ""
 	for (i = 1; i <= nbody; i++) print body[i]

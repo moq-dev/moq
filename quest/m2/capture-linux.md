@@ -35,5 +35,3 @@ unimplemented, because xdg-desktop-portal owns source selection:
 
 - [Windows capture parity](/quest/m2/capture-windows.md) - the same gaps,
   through Windows.Graphics.Capture and WASAPI
-- [X11 capture transport](/quest/m2/x11-capture-shm.md) - making the X11 half
-  that landed cheap enough for a full-screen share

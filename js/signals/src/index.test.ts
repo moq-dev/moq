@@ -82,6 +82,17 @@ describe("Signal", () => {
 		expect(seen).toEqual([{ a: 2 }]);
 		dispose();
 	});
+
+	test("any number of subscribers is legitimate", async () => {
+		const signal = new Signal(0);
+		let notified = 0;
+		const disposes = Array.from({ length: 1000 }, () => signal.subscribe(() => notified++));
+
+		signal.set(1);
+		await settle();
+		expect(notified).toBe(1000);
+		for (const dispose of disposes) dispose();
+	});
 });
 
 describe("Effect", () => {
@@ -312,6 +323,35 @@ describe("Effect", () => {
 		}
 	});
 
+	test("teardown runs last-in, first-out, nested effects included", async () => {
+		// Something registered later may depend on something registered earlier, such as a nested
+		// effect using its parent's connection, so it has to be released first.
+		const sig = new Signal(0);
+		const order: string[] = [];
+		const effect = new Effect((inner) => {
+			inner.get(sig);
+			inner.cleanup(() => order.push("first"));
+			inner.run((nested) => {
+				nested.cleanup(() => order.push("nested first"));
+				nested.cleanup(() => order.push("nested second"));
+			});
+			inner.cleanup(() => order.push("third"));
+		});
+
+		try {
+			await settle();
+			sig.set(1);
+			await settle();
+
+			expect(order).toEqual(["third", "nested second", "nested first", "first"]);
+			order.length = 0;
+		} finally {
+			effect.close();
+		}
+
+		expect(order).toEqual(["third", "nested second", "nested first", "first"]);
+	});
+
 	test("a cleanup registered during close still runs", async () => {
 		// Teardown that cascades still completes: `cleanup` appends onto the list close() is
 		// draining rather than dropping it on the floor.
@@ -375,17 +415,17 @@ describe("Effect", () => {
 	});
 
 	test("closing from a rerun cleanup runs each teardown once", async () => {
-		// `#run` and `close` share one drain, so a cleanup that closes the effect hands off at the
-		// cursor rather than starting a second pass over callbacks that already ran.
+		// `#run` and `close` share one drain, so a cleanup that closes the effect keeps popping the
+		// same list rather than starting a second pass over callbacks that already ran.
 		const sig = new Signal(0);
 		const ran: string[] = [];
 		const effect = new Effect((inner) => {
 			inner.get(sig);
+			inner.cleanup(() => ran.push("b"));
 			inner.cleanup(() => {
 				ran.push("a");
 				inner.close();
 			});
-			inner.cleanup(() => ran.push("b"));
 		});
 
 		try {
@@ -433,19 +473,18 @@ describe("Effect", () => {
 	});
 
 	test("cancelling a nested run during teardown does not skip the next cleanup", async () => {
-		// The disposer `run` hands back removes itself from the parent. Doing that by splicing
-		// shifts every later entry down, stepping the drain's cursor over a cleanup that has not
-		// run yet, so it never fires and leaks whatever it owned.
+		// The disposer `run` hands back removes itself from the parent while that list is being
+		// drained. The cleanup still pending below it must not be stepped over or leaked.
 		const sig = new Signal(0);
 		const ran: string[] = [];
 		const effect = new Effect((inner) => {
 			inner.get(sig);
+			inner.cleanup(() => ran.push("first"));
 			const dispose = inner.run(() => {});
 			inner.cleanup(() => {
-				ran.push("middle");
+				ran.push("last");
 				dispose();
 			});
-			inner.cleanup(() => ran.push("last"));
 		});
 
 		try {
@@ -453,7 +492,7 @@ describe("Effect", () => {
 			sig.set(1);
 			await settle();
 
-			expect(ran).toEqual(["middle", "last"]);
+			expect(ran).toEqual(["last", "first"]);
 		} finally {
 			effect.close();
 		}
@@ -729,10 +768,10 @@ describe("Effect", () => {
 		}
 	});
 
-	test("a spawn that outlived its run sees that run aborted and cancelled", async () => {
+	test("a spawn that outlived its run sees that run aborted", async () => {
 		// The scope a stale task reads has to be its own, not the incoming run's: an abort
-		// signal that never fires would scope its listeners to the next run, and a cancel
-		// promise that never resolves would park it forever.
+		// signal that never fires would scope its listeners to the next run, and a race that
+		// never settles would park it forever.
 		const tick = new Signal(0);
 		const target = new EventTarget();
 		let events = 0;
@@ -750,7 +789,7 @@ describe("Effect", () => {
 				await gate.promise;
 				aborted = e.abort.aborted;
 				e.event(target, "ping", () => events++);
-				await e.cancel;
+				await e.race();
 				cancelled = true;
 			});
 		});
@@ -1248,4 +1287,110 @@ describe("spawn retention", () => {
 		expect(runs).toBe(2);
 		effect.close();
 	});
+});
+
+describe("Signal.race", () => {
+	test("starts lazily, shares listeners, and restarts after the last subscriber leaves", async () => {
+		const first = counted<number>();
+		const second = counted<string>();
+		const pending = Signal.race(first, second);
+		expect(first.listeners).toBe(0);
+		expect(second.listeners).toBe(0);
+		const stop = pending.subscribe(() => {});
+		const cancel = pending.changed(() => {});
+		expect(first.listeners).toBe(1);
+		expect(second.listeners).toBe(1);
+		stop();
+		expect(first.listeners).toBe(1);
+		cancel();
+		cancel();
+		expect(first.listeners).toBe(0);
+		expect(second.listeners).toBe(0);
+
+		const result = race([pending]);
+		expect(first.listeners).toBe(1);
+		second.once.set("changed");
+		expect(await result).toBe("changed");
+		expect(await pending).toBe("changed");
+		expect(pending.peek()).toBe("changed");
+		expect(first.listeners).toBe(0);
+		expect(second.listeners).toBe(0);
+	});
+
+	test("direct await releases every source", async () => {
+		const first = counted<number>();
+		const second = counted<string>();
+		const pending = Signal.race(first, second);
+		const result = (async () => await pending)();
+		await flush();
+		first.once.set(7);
+		expect(await result).toBe(7);
+		expect(first.listeners).toBe(0);
+		expect(second.listeners).toBe(0);
+	});
+
+	test("a losing outer race releases every source", async () => {
+		const source = counted<number>();
+		for (let i = 0; i < 1000; i++) {
+			expect(await race([Signal.race(source), Promise.resolve(i)])).toBe(i);
+			expect(source.listeners).toBe(0);
+		}
+	});
+
+	test("effect teardown releases every source", async () => {
+		const effect = new Effect();
+		const source = counted<number>();
+		const pending = effect.race(Signal.race(source));
+		expect(source.listeners).toBe(1);
+		effect.close();
+		expect(await pending).toBeUndefined();
+		expect(source.listeners).toBe(0);
+	});
+
+	test("one losing subscriber leaves another subscriber's wait alive", async () => {
+		const source = counted<number>();
+		const pending = Signal.race(source);
+		const remaining = race([pending]);
+		expect(await race([pending, Promise.resolve("other")])).toBe("other");
+		expect(source.listeners).toBe(1);
+		source.once.set(9);
+		expect(await remaining).toBe(9);
+		expect(source.listeners).toBe(0);
+	});
+
+	test("an undefined change settles direct and nested waits, including later waits", async () => {
+		const source = new Signal<number | undefined>(1);
+		const pending = Signal.race(source);
+		const nested = race([pending]);
+		source.set(undefined);
+		expect(await nested).toBeUndefined();
+		expect(await pending).toBeUndefined();
+		expect(await race([pending, "later"])).toBeUndefined();
+	});
+
+	test("promise-valued changes retain fulfillment and rejection", async () => {
+		const source = new Signal<Promise<number>>(Promise.resolve(0));
+		const changed: GetPromise<number> = Signal.race(source);
+		const fulfilled = race([changed]);
+		source.set(Promise.resolve(1));
+		expect(await fulfilled).toBe(1);
+		expect(changed.peek()).toBe(1);
+		const rejected = race([Signal.race(source)]);
+		source.set(Promise.reject(new Error("failed")));
+		await expect(rejected).rejects.toThrow("failed");
+	});
+});
+
+test("await Signal.race subscribes before already queued microtasks run", async () => {
+	const source = new Signal(0);
+	queueMicrotask(() => source.set(1));
+	expect(await Signal.race(source)).toBe(1);
+});
+
+test("races from another package copy release their source listeners", async () => {
+	const module = "./index.ts?signal-race-copy";
+	const copy = (await import(module)) as typeof import("./index.ts");
+	const source = counted<number>();
+	expect(await race([copy.Signal.race(source), Promise.resolve("other")])).toBe("other");
+	expect(source.listeners).toBe(0);
 });

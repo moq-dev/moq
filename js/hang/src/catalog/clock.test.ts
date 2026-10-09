@@ -17,7 +17,7 @@ const FIXTURE = {
 		},
 	},
 	clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
-	archive: { track: "timeline.z", timescale: 1000, durationMax: 2000 },
+	archive: { timelines: { video: "video.timeline.z" }, timescale: 1000, durationMax: 2000 },
 };
 
 test("timescale defaults to microseconds", () => {

@@ -74,8 +74,10 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 		let cluster_run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 
 		loop {
-			let update = discovered.next().await.expect("peer origin closed");
-			if update.kind.is_active() && update.prefix.as_str() == ".hidden/test" {
+			if let moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Update(announce) =
+				discovered.next().await.expect("peer origin closed")
+				&& announce.prefix.as_str() == ".hidden/test"
+			{
 				break;
 			}
 		}

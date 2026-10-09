@@ -1,3 +1,4 @@
+import { heapStats } from "bun:jsc";
 import { expect, spyOn, test } from "bun:test";
 import {
 	FrameTooLarge,
@@ -533,6 +534,89 @@ test("Writer reset forwards only a stream error code", async () => {
 test("closed is stable, so racing it per frame does not allocate", async () => {
 	const reader = new Reader(new ReadableStream<Uint8Array>(), undefined, QUIC);
 	expect(reader.closed).toBe(reader.closed);
+});
+
+test("stop after FIN allocates nothing and sends nothing", async () => {
+	const cancelled: unknown[] = [];
+	const reader = new Reader(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new Uint8Array([7]));
+				controller.close();
+			},
+			cancel(reason) {
+				cancelled.push(reason);
+			},
+		}),
+		undefined,
+		QUIC,
+	);
+	expect(await reader.u8()).toBe(7);
+	expect(await reader.done()).toBe(true);
+
+	// Built outside the window. A caller that already holds an error, and one that passes only
+	// the code, must neither construct another nor hand the transport a reset.
+	const reason = new StreamError(StreamCode.Cancel, { message: "cancel" });
+	const before = heapStats().objectTypeCounts;
+	for (let i = 0; i < 32; i++) reader.stop(reason);
+	for (let i = 0; i < 32; i++) reader.stop(StreamCode.Cancel);
+	const after = heapStats().objectTypeCounts;
+	// A collection between the snapshots can only lower a live count. The regression
+	// retains an error and a promise per stop, which still shows up as a rise.
+	expect(after.Error ?? 0).toBeLessThanOrEqual(before.Error ?? 0);
+	expect(after.Promise ?? 0).toBeLessThanOrEqual(before.Promise ?? 0);
+	expect(cancelled).toEqual([]);
+	await reader.closed;
+});
+
+test("stop mid-stream still cancels with the code", async () => {
+	const cancelled = Promise.withResolvers<unknown>();
+	const reader = new Reader(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new Uint8Array([1]));
+			},
+			cancel: cancelled.resolve,
+		}),
+		undefined,
+		QUIC,
+	);
+	expect(await reader.u8()).toBe(1);
+	reader.stop(StreamCode.Cancel);
+	const stopped = await cancelled.promise;
+	expect((stopped as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.Cancel);
+});
+
+test("a numeric stop sends only a code the negotiated draft shares", async () => {
+	const stop = (version: StreamVersion, code: StreamCode) => {
+		const cancelled = Promise.withResolvers<unknown>();
+		const reader = new Reader(
+			new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(new Uint8Array([1]));
+				},
+				cancel: cancelled.resolve,
+			}),
+			undefined,
+			version,
+		);
+		reader.stop(code);
+		return cancelled.promise;
+	};
+
+	// 0x4 is GOING_AWAY here, but UNKNOWN_OBJECT_STATUS on draft-16.
+	const draft16 = await stop(Version.DRAFT_16, StreamCode.GoingAway);
+	expect((draft16 as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.Internal);
+	const draft18 = await stop(Version.DRAFT_18, StreamCode.GoingAway);
+	expect((draft18 as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.GoingAway);
+});
+
+test("Writer reset still reads a bare number as Internal", async () => {
+	const aborted = Promise.withResolvers<unknown>();
+	const writer = new Writer(new WritableStream({ abort: aborted.resolve }), Version.DRAFT_18);
+	writer.reset(StreamCode.GoingAway);
+	const reason = await aborted.promise;
+	expect((reason as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.Internal);
 });
 
 // Deadlines for the stalled fixtures below: one they always blow through, and one they

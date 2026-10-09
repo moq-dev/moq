@@ -75,6 +75,28 @@ test("push and pop round-trip", async () => {
 	]);
 });
 
+test("a cut is invisible to the consumer", async () => {
+	const live = new Live();
+	await live.push(0);
+	live.producer.cut();
+	live.producer.cut();
+	await live.push(1);
+
+	expect(await live.finish()).toEqual([
+		{ push: { index: 0, value: { n: 0 } } },
+		{ push: { index: 1, value: { n: 1 } } },
+	]);
+});
+
+test("reset makes the next edit a header", () => {
+	const encoder = new Encoder<Rec>({});
+	encoder.push({ n: 0 }).commit();
+	expect(encoder.push({ n: 1 }).keyframe).toBe(false);
+
+	encoder.reset();
+	expect(encoder.push({ n: 2 }).keyframe).toBe(true);
+});
+
 test("concurrent consumer reads are rejected", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer<Rec>({ track: track.subscribe() });

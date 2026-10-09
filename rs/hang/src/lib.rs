@@ -22,7 +22,7 @@ pub mod catalog;
 /// The container is the contents of each media track.
 pub mod container;
 
-/// The timeline indexes the broadcast's aligned segments.
+/// Per-track timelines index each track's spans.
 pub mod timeline;
 
 /// Export the moq-net version we use.

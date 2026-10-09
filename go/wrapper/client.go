@@ -203,6 +203,7 @@ type Client struct {
 	consumer  *OriginConsumer
 	session   *Session
 	closeOnce sync.Once
+	closeErr  error
 }
 
 // Dial connects to a MoQ server and returns the established client. Cancel ctx
@@ -324,11 +325,11 @@ func (c *Client) Session() *Session {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		if c.session != nil {
-			c.session.Shutdown()
+			c.closeErr = c.session.Shutdown(context.Background())
 		}
 		if c.inner != nil {
 			c.inner.Cancel()
 		}
 	})
-	return nil
+	return c.closeErr
 }

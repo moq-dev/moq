@@ -1,5 +1,5 @@
 {
-	"note": "Measured 2026-09-28 on a shared Linux workstation: two full 60 s runs and one 20 s run, seed 7. Each ceiling is twice the worse run, rounded up to two significant figures, with a floor (5 underruns/min, 20 gap ms/min, 1 skip/min, 100 discarded ms/min, 1% stalled, 1% silence) so one runner hiccup does not fail a clean row; target_ms_p95 is the worst measured plus one 20 ms bucket. The fixed-250 control measured zero on every counter. Every auto row records today's shallow target (#3477: 43 ms for Opus, underrunning thousands of quanta a minute), so its ceilings catch a regression past that floor and nothing better; the jitter target work is expected to tighten them. Not yet measured on the nightly runner, which has no audio device; re-record from its first runs. Updated 2026-09-29: mild and wide now use shared order-preserving Gaussian jitter; bursty and step are new. Those 16 rows were re-recorded for 60 s each, seed 7, on the same shared Linux workstation with concurrent bounded builds. Their ceilings use twice the measurement rounded upward to two significant figures and the same floors above; target_ms_p95 adds one 20 ms bucket. Other rows retain their previous measurements. These remain current-player regression ceilings, not target audio quality; re-record on the nightly runner before tightening them. The replay rows are deterministic, so their ceilings are exactly what they measured on 2026-10-01, through the end of each recording, with no headroom: any regression fails them, and an improvement should be tightened in.",
+	"note": "Measured 2026-09-28 on a shared Linux workstation: two full 60 s runs and one 20 s run, seed 7. Each ceiling is twice the worse run, rounded up to two significant figures, with a floor (5 underruns/min, 20 gap ms/min, 1 skip/min, 100 discarded ms/min, 1% stalled, 1% silence) so one runner hiccup does not fail a clean row; target_ms_p95 is the worst measured plus one 20 ms bucket. The fixed-250 control measured zero on every counter. Every auto row records today's shallow target (#3477: 43 ms for Opus, underrunning thousands of quanta a minute), so its ceilings catch a regression past that floor and nothing better; the jitter target work is expected to tighten them. Not yet measured on the nightly runner, which has no audio device; re-record from its first runs. Updated 2026-09-29: mild and wide now use shared order-preserving Gaussian jitter; bursty and step are new. Those 16 rows were re-recorded for 60 s each, seed 7, on the same shared Linux workstation with concurrent bounded builds. Their ceilings use twice the measurement rounded upward to two significant figures and the same floors above; target_ms_p95 adds one 20 ms bucket. Other rows retain their previous measurements. These remain current-player regression ceilings, not target audio quality; re-record on the nightly runner before tightening them. The replay rows are deterministic, so their ceilings are exactly what they measured on 2026-10-01, through the end of each recording, with no headroom: any regression fails them, and an improvement should be tightened in. Updated 2026-10-04: the replay rows now resolve \"auto\" from the measured arrival estimator instead of the round trip, and were re-measured exactly on the audio-jitter-target line; underruns fell to at most 2 a minute, while a run dry now re-stalls and refills to the target, which shows up as stalled and silent share.",
 	"rows": [
 		{
 			"runtime": "chromium",
@@ -343,13 +343,13 @@
 			"rate": 44100,
 			"profile": "local-aac",
 			"ring": "isolated",
-			"underruns_per_min": 102.9,
-			"underrun_ms_per_min": 290.8,
+			"underruns_per_min": 0,
+			"underrun_ms_per_min": 0,
 			"skip_aheads_per_min": 2,
-			"discarded_ms_per_min": 93.6,
-			"stalled_share": 0,
-			"silence_share": 0.005,
-			"target_ms_p95": 186
+			"discarded_ms_per_min": 81.1,
+			"stalled_share": 0.025,
+			"silence_share": 0.025,
+			"target_ms_p95": 203.2
 		},
 		{
 			"runtime": "replay",
@@ -357,41 +357,41 @@
 			"rate": 44100,
 			"profile": "local-aac",
 			"ring": "plain",
-			"underruns_per_min": 102.9,
-			"underrun_ms_per_min": 290.8,
+			"underruns_per_min": 2,
+			"underrun_ms_per_min": 4.9,
+			"skip_aheads_per_min": 0,
+			"discarded_ms_per_min": 0,
+			"stalled_share": 0.017,
+			"silence_share": 0.015,
+			"target_ms_p95": 203.2
+		},
+		{
+			"runtime": "replay",
+			"codec": "aac",
+			"rate": 44100,
+			"profile": "relay-bbb",
+			"ring": "isolated",
+			"underruns_per_min": 2,
+			"underrun_ms_per_min": 0.5,
+			"skip_aheads_per_min": 0,
+			"discarded_ms_per_min": 0,
+			"stalled_share": 0.033,
+			"silence_share": 0.024,
+			"target_ms_p95": 223.2
+		},
+		{
+			"runtime": "replay",
+			"codec": "aac",
+			"rate": 44100,
+			"profile": "relay-bbb",
+			"ring": "plain",
+			"underruns_per_min": 0,
+			"underrun_ms_per_min": 0,
 			"skip_aheads_per_min": 2,
-			"discarded_ms_per_min": 93.6,
-			"stalled_share": 0,
-			"silence_share": 0.005,
-			"target_ms_p95": 186
-		},
-		{
-			"runtime": "replay",
-			"codec": "aac",
-			"rate": 44100,
-			"profile": "relay-bbb",
-			"ring": "isolated",
-			"underruns_per_min": 0,
-			"underrun_ms_per_min": 0,
-			"skip_aheads_per_min": 0,
-			"discarded_ms_per_min": 0,
-			"stalled_share": 0,
-			"silence_share": 0,
-			"target_ms_p95": 289
-		},
-		{
-			"runtime": "replay",
-			"codec": "aac",
-			"rate": 44100,
-			"profile": "relay-bbb",
-			"ring": "plain",
-			"underruns_per_min": 0,
-			"underrun_ms_per_min": 0,
-			"skip_aheads_per_min": 0,
-			"discarded_ms_per_min": 0,
-			"stalled_share": 0,
-			"silence_share": 0,
-			"target_ms_p95": 289
+			"discarded_ms_per_min": 87.9,
+			"stalled_share": 0.017,
+			"silence_share": 0.017,
+			"target_ms_p95": 223.2
 		},
 		{
 			"runtime": "replay",
@@ -399,13 +399,13 @@
 			"rate": 48000,
 			"profile": "relay-mic",
 			"ring": "isolated",
-			"underruns_per_min": 225.9,
-			"underrun_ms_per_min": 588.2,
-			"skip_aheads_per_min": 0,
-			"discarded_ms_per_min": 0,
-			"stalled_share": 0,
-			"silence_share": 0.01,
-			"target_ms_p95": 123
+			"underruns_per_min": 2,
+			"underrun_ms_per_min": 2.7,
+			"skip_aheads_per_min": 4,
+			"discarded_ms_per_min": 510.8,
+			"stalled_share": 0.017,
+			"silence_share": 0.027,
+			"target_ms_p95": 420
 		},
 		{
 			"runtime": "replay",
@@ -413,13 +413,13 @@
 			"rate": 48000,
 			"profile": "relay-mic",
 			"ring": "plain",
-			"underruns_per_min": 225.9,
-			"underrun_ms_per_min": 588.2,
-			"skip_aheads_per_min": 0,
-			"discarded_ms_per_min": 0,
-			"stalled_share": 0,
-			"silence_share": 0.01,
-			"target_ms_p95": 123
+			"underruns_per_min": 0,
+			"underrun_ms_per_min": 0,
+			"skip_aheads_per_min": 4,
+			"discarded_ms_per_min": 564.6,
+			"stalled_share": 0.017,
+			"silence_share": 0.027,
+			"target_ms_p95": 420
 		}
 	]
 }

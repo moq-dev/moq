@@ -40,4 +40,4 @@ watch.paused = false;
 declare global {
 	var audioQuality: Probe;
 }
-globalThis.audioQuality = probe(watch);
+globalThis.audioQuality = probe(watch, params.get("capture") === "true");

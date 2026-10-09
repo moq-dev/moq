@@ -2,7 +2,7 @@
 	"name": "@moq/flate",
 	"type": "module",
 	"version": "0.1.3",
-	"description": "Group-scoped DEFLATE: a stream of self-delimited frames sharing one compression window.",
+	"description": "Opaque MoQ tracks, optionally compressed with group-scoped DEFLATE: latest-value snapshots or append-log streams.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {
 		"type": "git",
@@ -20,6 +20,8 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
+		"@moq/net": "workspace:^",
+		"@moq/signals": "workspace:^",
 		"pako": "^3.0.2"
 	},
 	"devDependencies": {

@@ -6,6 +6,7 @@
 
 #[macro_use]
 mod parameters;
+pub mod active_count;
 mod adapter;
 pub mod cluster;
 mod control;
@@ -26,6 +27,7 @@ mod publish;
 mod publish_namespace;
 mod publisher;
 mod request;
+mod request_stream;
 mod session;
 pub mod solicit;
 mod subscribe;
@@ -36,13 +38,14 @@ mod track;
 mod version;
 
 use control::Control;
+pub(crate) use control::initial_max_request_id;
 pub use datagram::*;
 pub use fetch::*;
 pub use filter::*;
 pub use goaway::*;
 pub use group::*;
 pub use location::*;
-pub use message::Message;
+pub use message::{Body, Message};
 pub use parameters::*;
 pub use properties::Properties;
 pub use publish::*;
