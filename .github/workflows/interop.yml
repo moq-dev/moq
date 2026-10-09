@@ -27,6 +27,7 @@ on:
       - "package.json"
       # The Go client builds against the modules this script stages.
       - "sh/go/**"
+      - "cpp/moq/**"
       - ".github/workflows/interop.yml"
 
 concurrency:

@@ -27,4 +27,4 @@ In m3 until an Unreal consumer asks; the C++ package it links already exists.
 
 ## Required
 
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the package the module links landed on this line (#4187) and reaches main with it
+- [First C++ package release](/quest/m1/cpp-release.md) - the tarball the module links

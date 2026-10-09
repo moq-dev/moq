@@ -305,8 +305,7 @@ mod tests {
 			let decoded = super::super::decode(
 				fragment.data.clone(),
 				None,
-				timescale,
-				crate::container::fmp4::Kind::Video,
+				super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
 			)
 			.unwrap();
 			assert_eq!(decoded.len(), 1);

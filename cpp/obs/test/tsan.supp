@@ -1,0 +1,10 @@
+# ThreadSanitizer suppressions for `just obs test`.
+#
+# moq-ffi is Rust built without the sanitizer, so the synchronization inside it
+# (tokio's atomics and parking, the handoffs between its threads) is invisible and
+# reads as a race wherever memory crosses it. That includes the generated bindings'
+# future plumbing, which hands its state to Rust on one thread and gets it back in a
+# Rust callback on another. This matches reports with a Rust frame on either stack:
+# the symbolizer leaves Rust's v0-mangled names as they are, and every one starts
+# with _R, which no demangled C++ name does.
+race:^_R
