@@ -12,7 +12,7 @@
 // One set of keys on an obs_data_t backs every surface that edits them: the service
 // properties page, the dock's advanced dialog, and the output that reads them at connect
 // time. The fields are described once in Fields() so both UIs are generated from the
-// same list; adding a knob means adding a Field entry and one setter call in Configure.
+// same list; adding a knob means adding a Field entry and one config field in Configure.
 namespace MoQSettings {
 
 // Whether any of this applies. With it off the output dials with the library defaults and
@@ -77,11 +77,12 @@ void Defaults(obs_data_t *settings);
 // Add the checkable "Advanced" group to a properties list.
 void AddProperties(obs_properties_t *props);
 
-// Apply these settings to a client before it connects.
+// Fill a client's config from these settings before the client is built.
 //
-// Returns false with the offending setting and moq-ffi's reason in `error` when a value
-// is rejected, such as a bind address that doesn't parse; the caller should refuse to
-// start rather than dial with a setting the user asked for silently dropped.
-bool Configure(obs_data_t *settings, moq::Client &client, std::string *error);
+// moq-ffi validates the record when it builds the client: a value it rejects, such as a
+// bind address that doesn't parse, fails `moq::Client::init` with a `Config` error naming
+// it, and the caller should refuse to start rather than dial with a setting the user asked
+// for silently dropped.
+void Configure(obs_data_t *settings, moq::ClientConfig &config);
 
 } // namespace MoQSettings

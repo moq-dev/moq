@@ -153,30 +153,15 @@ public final class TrackProducer: Sendable {
         self.ffi = ffi
     }
 
-    /// The track's name.
-    public var name: String {
-        get throws { try ffi.name() }
-    }
-
     /// A read handle for this track (local pub/sub, no origin needed).
     /// `subscription` tunes delivery priority, group range, and staleness; omit for defaults.
     public func consume(subscription: Subscription? = nil) throws -> TrackConsumer {
         TrackConsumer(try ffi.consume(subscription: subscription))
     }
 
-    /// A watch-only handle to whether the track has subscribers.
+    /// A watch-only handle to the track's name and whether it has subscribers.
     public func demand() throws -> TrackDemand {
         TrackDemand(try ffi.demand())
-    }
-
-    /// Suspend until the track has at least one active consumer. Prefer `demand()`.
-    public func used() async throws {
-        try await ffi.used()
-    }
-
-    /// Suspend until the track has no active consumers. Prefer `demand()`.
-    public func unused() async throws {
-        try await ffi.unused()
     }
 
     /// Serve fetches for groups that are not currently cached.

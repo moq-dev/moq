@@ -71,27 +71,40 @@ Incoming server requests expose the query-free `Path()` before `Accept()`. It
 is consistent across transports and returns an empty string for the root or
 missing path. `Query()` returns the encoded query and may contain credentials.
 
+Media lives in `moq.dev/moq/media`. `NewAudioTrackProducer` / `NewVideoTrackProducer`
+take a broadcast, a `Named` or `Requested` target, and an `AudioInit` / `VideoInit`.
+A `Named` target chooses a track name or lets the importer derive one; a `Requested`
+target takes over a subscriber's pending request. A duplicate name fails.
+`VideoInit.Hint` seeds fields the bitstream cannot supply. `NewContainerProducer` /
+`NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks.
+`NewCatalogProducer` holds its broadcast weakly and owns catalog properties and sections.
+`NewCatalogConsumer`, `NewContainerConsumer`, and `NewContainerGroupConsumer` read
+catalog snapshots, live media, and one fetched media group. Frames and `Flush` use
+`time.Duration`; `Demand()` owns track names and subscriber waits.
+
 `BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
-`TrackRequest.Accept()` for raw tracks, or `BroadcastProducer.PublishAudioOnTrack()` /
-`PublishVideoOnTrack()`
-for media tracks whose timescale should be selected by the importer.
+`TrackRequest.Accept()` for raw tracks, or pass the request as `media.Requested`
+so the media importer selects the timescale.
 
-`PublishAudio`, `PublishVideo`, `PublishContainer`, their `OnTrack` variants, and
-`PublishVideoStream` / `PublishContainerStream` accept
-`WithVideoHint(moq.VideoHint{...})` for video catalog fields that are known
-before the stream reveals them.
-
-`WithAudioTrack(name)` / `WithVideoTrack(name)` name the track instead of
-deriving a unique name from the format. A duplicate name fails, and the
-`OnTrack` variants refuse it because the request already names the track.
-
-JSON tracks are available in two modes. `PublishJSONSnapshot` / `SubscribeJSONSnapshot`
-carry lossy latest state, while `PublishJSONStream` / `SubscribeJSONStream` carry every
-record in order. Producers accept any `encoding/json` value; consumers return
+JSON tracks live in the `moq.dev/moq/json` subpackage, mirroring the `moq-json` crate.
+Import it under an alias next to `encoding/json`. Each type wraps a track:
+`NewSnapshotProducer` / `NewStreamProducer` take over a `TrackProducer` and advertise it
+in the broadcast's catalog, and `NewSnapshotConsumer` / `NewStreamConsumer` take over a
+`TrackConsumer` that has not read a group yet. Snapshots carry lossy latest state; streams
+carry every record in order. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
 
-Publishing takes `JSONSnapshotOptions` or `JSONStreamOptions`; both subscribe calls take
-`JSONSubscribeOptions`, where only `Compression` has to match the producer.
+```go
+import moqjson "moq.dev/moq/json"
+
+broadcast, _ := client.CreateBroadcast("room")
+track, _ := broadcast.PublishTrack("status", nil)
+status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
+_ = status.Update(map[string]any{"viewers": 42})
+```
+
+Producers take `SnapshotOptions` or `StreamOptions`; both consumers take
+`ConsumerOptions`, where only `Compression` has to match the producer.
 
 ## Errors
 

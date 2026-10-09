@@ -1,4 +1,4 @@
-package moq
+package bridge
 
 import (
 	"context"
@@ -36,7 +36,7 @@ func TestRunHandleReleasesAResultNobodyReceived(t *testing.T) {
 		cancelCtx()
 	}()
 
-	val, err := runHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
+	val, err := CallHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
 		close(started)
 		<-finish
 		return stub, nil
@@ -70,7 +70,7 @@ func TestRunHandleIgnoresAResultThatIsNoHandle(t *testing.T) {
 		cancelCtx()
 	}()
 
-	_, err := runHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
+	_, err := CallHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
 		close(started)
 		<-finish
 		close(returned)
@@ -94,7 +94,7 @@ func TestRunHandleStartsNothingForADoneContext(t *testing.T) {
 	cancelCtx()
 
 	called := false
-	val, err := runHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
+	val, err := CallHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
 		called = true
 		return &stubHandle{destroyed: make(chan struct{})}, nil
 	})
@@ -118,7 +118,7 @@ func TestRunHidesCallerCancelFromAnObjectOwnedCall(t *testing.T) {
 	defer cancelCtx()
 
 	got := make(chan context.Context, 1)
-	_, err := runCancellable(ctx, func() {}, func(callCtx context.Context) (int, error) {
+	_, err := Call(ctx, func() {}, func(callCtx context.Context) (int, error) {
 		got <- callCtx
 		return 1, nil
 	})
@@ -139,7 +139,7 @@ func TestRunPassesCallerCancelWhenThereIsNoObjectCancel(t *testing.T) {
 	defer cancelCtx()
 
 	got := make(chan context.Context, 1)
-	_, err := runCancellable(ctx, nil, func(callCtx context.Context) (int, error) {
+	_, err := Call(ctx, nil, func(callCtx context.Context) (int, error) {
 		got <- callCtx
 		return 1, nil
 	})
@@ -167,7 +167,7 @@ func TestRunCancelsTheObjectWhenCtxEndsDuringTheCall(t *testing.T) {
 		cancelCtx()
 	}()
 
-	_, err := runCancellable(ctx, func() { close(objectCancelled) }, func(callCtx context.Context) (int, error) {
+	_, err := Call(ctx, func() { close(objectCancelled) }, func(callCtx context.Context) (int, error) {
 		close(started)
 		<-objectCancelled
 		select {
@@ -198,7 +198,7 @@ func TestRunCancelsTheObjectWhenCtxEndsDuringTheCall(t *testing.T) {
 func TestRunHandleReturnsAResultThatWon(t *testing.T) {
 	stub := &stubHandle{destroyed: make(chan struct{})}
 
-	val, err := runHandle(context.Background(), nil, func(context.Context) (*stubHandle, error) {
+	val, err := CallHandle(context.Background(), nil, func(context.Context) (*stubHandle, error) {
 		return stub, nil
 	})
 	if err != nil {

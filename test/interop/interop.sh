@@ -34,7 +34,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_NATIVE_CLIENT INTEROP_DECODE INTEROP_JS_PUBLISH_CLIENT INTEROP_COMPAT_TRANSPORT INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -140,7 +140,7 @@ needs() {
 
 # True if any browser/native JS client is in play (they share one bun install).
 needs_js() {
-    needs js || needs js-native-node || needs js-native-bun
+    needs js || needs js-native || needs js-native-node || needs js-native-bun
 }
 
 harness_begin interop "$RERUN"
@@ -194,6 +194,13 @@ require_tools() {
 # Build moq-relay + moq-cli from the workspace. The relay is the spine of the
 # test, so a failure here aborts rather than marking a single client broken.
 build_relay_cli() {
+    if [[ -n "$RELAY" && -n "$MOQ" ]]; then
+        [[ -x "$RELAY" && -x "$MOQ" ]] || {
+            echo "override binaries are not executable" >&2
+            exit 1
+        }
+        return
+    fi
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
     echo "building moq-relay + moq-cli ($PROFILE)..."
@@ -241,12 +248,24 @@ prepare_python() {
 # @moq/* packages resolve to this checkout's source) and build the browser page.
 prepare_js() {
     have bun || {
-        for v in js js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun not found"; done
+        for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun not found"; done
         return
     }
+    # Staged released-compat clients bring their own packages; check every one given.
+    if [[ -n "${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
+        [[ -z "${INTEROP_NATIVE_CLIENT:-}" || -f "$INTEROP_NATIVE_CLIENT/subscribe.ts" ]] || {
+            echo "missing staged native client" >&2
+            exit 1
+        }
+        [[ -z "${INTEROP_JS_PUBLISH_CLIENT:-}" || -f "$INTEROP_JS_PUBLISH_CLIENT/client.ts" ]] || {
+            echo "missing staged publisher" >&2
+            exit 1
+        }
+        return
+    fi
     echo "installing js clients (workspace @moq/* via bun)..."
     if ! (cd "$WORKSPACE" && bun install --frozen-lockfile) >"$HARNESS_RUN/js-install.log" 2>&1; then
-        for v in js js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
+        for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
         sed 's/^/        /' "$HARNESS_RUN/js-install.log" >&2 || true
         return
     fi
@@ -447,34 +466,54 @@ if harness_probe "$URL/certificate.sha256"; then
     exit 1
 fi
 
+# Released-wire compatibility (compat.sh) pins one version and may run released
+# binaries that predate AUTH, so it runs anonymous: it compares the wire, and the
+# default matrix covers auth.
+COMPAT=0
+[[ -n "${INTEROP_VERSION:-}" ]] && COMPAT=1
+
 # The relay's auth server: `moq auth serve` verifying every token this run mints
 # against one fresh key. It answers only POST, so readiness is any HTTP reply.
-harness_port auth
-AUTH_URL="http://127.0.0.1:${HARNESS_PORT}/"
-auth_up() { curl -s -o /dev/null --max-time 1 "$AUTH_URL"; }
-if auth_up; then
-    echo "error: something is already listening on $AUTH_URL" >&2
-    exit 1
-fi
-KEY="$HARNESS_RUN/key.jwk"
-"$MOQ" auth generate --out "$KEY"
-harness_spawn auth "$HARNESS_RUN/auth.log" "$MOQ" auth serve --listen "127.0.0.1:${HARNESS_PORT}" --key "$KEY"
-AUTH_PID="$HARNESS_PID"
-deadline=$((SECONDS + 30))
-until auth_up; do
-    if ((SECONDS >= deadline)) || harness_exited "$AUTH_PID"; then
-        echo "auth server never became ready" >&2
-        sed 's/^/  auth: /' "$HARNESS_RUN/auth.log" >&2 || true
+if [[ "$COMPAT" -eq 0 ]]; then
+    harness_port auth
+    AUTH_URL="http://127.0.0.1:${HARNESS_PORT}/"
+    auth_up() { curl -s -o /dev/null --max-time 1 "$AUTH_URL"; }
+    if auth_up; then
+        echo "error: something is already listening on $AUTH_URL" >&2
         exit 1
     fi
-    sleep 0.05
-done
+    KEY="$HARNESS_RUN/key.jwk"
+    "$MOQ" auth generate --out "$KEY"
+    harness_spawn auth "$HARNESS_RUN/auth.log" "$MOQ" auth serve --listen "127.0.0.1:${HARNESS_PORT}" --key "$KEY"
+    AUTH_PID="$HARNESS_PID"
+    deadline=$((SECONDS + 30))
+    until auth_up; do
+        if ((SECONDS >= deadline)) || harness_exited "$AUTH_PID"; then
+            echo "auth server never became ready" >&2
+            sed 's/^/  auth: /' "$HARNESS_RUN/auth.log" >&2 || true
+            exit 1
+        fi
+        sleep 0.05
+    done
+fi
 
 echo "starting relay on 127.0.0.1:${PORT}..."
 # interop.toml is the source of truth; rewrite its ports into a scratch copy so the
 # committed file never has to be edited for a run.
-sed -e "s|:4443\"|:${PORT}\"|g" -e "s|http://127.0.0.1:4440/|${AUTH_URL}|" \
-    "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
+if [[ "$COMPAT" -eq 1 ]]; then
+    # Anonymous, offering only the pinned version, which comes from the executable's
+    # advertised CLI choices.
+    sed -e "s|:4443\"|:${PORT}\"|g" -e '/^version = \[/,/^\]/d' -e 's|^url = "http://127.0.0.1:4440/"|public = "**"|' \
+        "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
+    sed -i "/\[listen\]/a version = [\"${INTEROP_VERSION}\"]" "$HARNESS_RUN/relay.toml"
+    [[ "$(grep -c '^version = ' "$HARNESS_RUN/relay.toml")" == 1 && "$(grep -c '^public = ' "$HARNESS_RUN/relay.toml")" == 1 ]] || {
+        echo "relay.toml needs exactly one pinned [listen] version and anonymous access" >&2
+        exit 1
+    }
+else
+    sed -e "s|:4443\"|:${PORT}\"|g" -e "s|http://127.0.0.1:4440/|${AUTH_URL}|" \
+        "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
+fi
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
@@ -485,8 +524,12 @@ harness_endpoint relay "$URL"
 
 # ── tokens ──────────────────────────────────────────────────────────────────
 # Print the relay URL carrying a fresh token; the arguments are `moq auth sign`'s
-# (`--publish P`, `--subscribe S`).
+# (`--publish P`, `--subscribe S`). Compat runs anonymous, so it prints the bare URL.
 token_url() {
+    if [[ "$COMPAT" -eq 1 ]]; then
+        printf '%s' "$URL"
+        return
+    fi
     local token
     token=$("$MOQ" auth sign --key "$KEY" "$@")
     printf '%s/?jwt=%s' "$URL" "$token"
@@ -496,13 +539,14 @@ token_url() {
 CLI_LOG="${RUST_LOG:-info},moq_net::auth=debug"
 
 # The lite version with AUTH, which no client offers by default. The clients the
-# harness reads a grant or a refusal from dial it.
-AUTH_VERSION="moq-lite-07-wip"
+# harness reads a grant or a refusal from dial it. Compat dials its pinned version.
+AUTH_VERSION="${INTEROP_VERSION:-moq-lite-07-wip}"
 
 # The clients that print the grant they received as an `auth granted` line. The
 # binding clients (python, go, c, gst) have no grant to print until moq-ffi
 # exposes one, and the browser's shared connection keeps its session private.
 prints_grant() {
+    [[ "$COMPAT" -eq 0 ]] || return 1
     case "$1" in
         rust | js-native-node | js-native-bun) return 0 ;;
         *) return 1 ;;
@@ -570,6 +614,9 @@ run_publisher() {
         cpp)
             ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast"
             ;;
+        js-native)
+            bun "$INTEROP_JS_PUBLISH_CLIENT/client.ts" publish "$url" "$broadcast"
+            ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
             # WebCodecs (lazily, once a subscriber creates demand).
@@ -600,9 +647,19 @@ start_publisher() {
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_native() {
     local out
-    out=$( (cd "$CLIENTS/js-native" && "$@") 2>&1) || true
+    out=$( (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && "$@") 2>&1) || true
     printf '%s\n' "$out" >&2
     printf '%s\n' "$out" | grep -q '^received '
+}
+
+# Write a track name and the group a live JS subscriber saw on it to
+# $HARNESS_RUN/<broadcast>.track. Extra args go to subscribe.ts (e.g. --track).
+# shellcheck disable=SC2329  # reached from run_subscriber, which 'harness_spawn' invokes
+observe_group() {
+    local broadcast="$1"
+    shift
+    (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && node --import tsx subscribe.ts subscribe --url "$URL" --broadcast "$broadcast" \
+        --timeout "$TIMEOUT" --track-file "$HARNESS_RUN/$broadcast.track" "$@")
 }
 
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
@@ -612,9 +669,58 @@ run_subscriber() {
         rust)
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
             # SIGTERM that fires when no data arrives within the timeout.
+            if [[ "${INTEROP_FETCH_TRACK:-0}" == 1 ]]; then
+                # Discover the track from the decoded catalog, never today's naming
+                # convention, and a group live demand is filling.
+                observe_group "$broadcast" || return
+                local track group binary index=0
+                { read -r track && read -r group; } <"$HARNESS_RUN/$broadcast.track" || return
+                # Both readers FETCH that group by its observed ID, which waits for it to finish.
+                for binary in "$MOQ" "${INTEROP_SUB_MOQ:-$MOQ}"; do
+                    timeout -k 3 "$TIMEOUT" "$binary" --connect "$URL" ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} \
+                        --broadcast "$broadcast" fetch "$track" --group "$group" --json >"$HARNESS_RUN/$broadcast.$index.json" || return
+                    index=$((index + 1))
+                done
+                python3 - "$HARNESS_RUN/$broadcast.0.json" "$HARNESS_RUN/$broadcast.1.json" <<'PYCODE'
+import base64, json, sys
+outputs=[]
+sequence=None
+for path in sys.argv[1:]:
+    frames=[json.loads(line) for line in open(path)]
+    assert frames, "FETCH returned no frames"
+    payloads=[]
+    for index, frame in enumerate(frames):
+        payload=base64.b64decode(frame["payload"], validate=True)
+        if sequence is None: sequence=frame["group"]
+        assert frame["group"] == sequence and frame["frame"] == index and frame["size"] == len(payload), frame
+        payloads.append(payload)
+    outputs.append(payloads)
+assert outputs[0] == outputs[1], "current/released FETCH changed the immutable group's payloads"
+PYCODE
+                return
+            fi
+            if [[ "${INTEROP_FETCH_DATA:-0}" == 1 ]]; then
+                # The JS fixture writes one group on `data` once a subscriber wants it. A
+                # live subscriber observes it; the reader then FETCHes it by that ID.
+                observe_group "$broadcast" --track data || return
+                local track group
+                { read -r track && read -r group; } <"$HARNESS_RUN/$broadcast.track" || return
+                timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} \
+                    --broadcast "$broadcast" fetch "$track" --group "$group" >"$HARNESS_RUN/$broadcast.fetch" || return
+                [[ "$(cat "$HARNESS_RUN/$broadcast.fetch")" == "compat-fetch" ]]
+                return
+            fi
+            if [[ "${INTEROP_DECODE:-0}" == 1 ]]; then
+                # ffmpeg actually decodes the exported media; mux headers alone cannot pass.
+                (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
+                    ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
+                    ffmpeg -hide_banner -loglevel error -i - -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw"
+                [[ -s "$HARNESS_RUN/$broadcast.raw" ]]
+                return
+            fi
             local n
-            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$url" --connect-version "$AUTH_VERSION" \
-                --broadcast "$broadcast" export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
+            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$url" \
+                --connect-version "$AUTH_VERSION" --broadcast "$broadcast" export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
             [[ "${n:-0}" -ge 1 ]]
             ;;
         python)
@@ -781,6 +887,7 @@ run_media() {
 # binding publishers enforce the grant too, but surface it only through their
 # bindings, and the browser elements have no way to offer $AUTH_VERSION.
 enforces_grant() {
+    [[ "$COMPAT" -eq 0 ]] || return 1
     case "$1" in
         rust) return 0 ;;
         *) return 1 ;;

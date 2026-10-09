@@ -136,6 +136,55 @@ Subscriber names: `rust`, `python`, `go`, `cpp`, `js` (browser), `js-native-node
 A client whose source build fails fails only its own matrix cells (see
 `mark_broken` in `interop.sh`); it never aborts the rest of the run.
 
+## Released wire compatibility
+
+`just test wire-compat` compares this checkout with the newest stable,
+non-yanked crates.io and npm releases. The existing Interop workflow runs it
+nightly and on demand on `main`. Registry installation is omitted from PR runs;
+resolver and removed-version regressions run through `just test harness`.
+
+The run records exact releases, npm's resolved lockfile, both CLI help outputs,
+and each matrix cell in the harness artifacts. It uses checksummed GitHub
+binaries when available on Linux x86\_64, with an exact-version `cargo install`
+fallback. Run inside `nix develop` with GitHub CLI registry access.
+
+Four sources sign JWTs: current and published Rust CLI, and current and
+published `@moq/auth`. Both Rust CLIs and both JavaScript packages verify every
+token and assert its normalized root and permission scope. Current and released
+`hang` and `@moq/hang` encode and decode one another's catalogs and legacy frame
+headers, checking the exact timestamp and payload. These are format checks,
+independent of a media decoder.
+
+The session lanes take the moq-lite drafts from each CLI's `--connect-version`
+choices. IETF drafts are left out on purpose: our clients and relays always
+prefer moq-lite with each other, and `just test interop` covers IETF. The relay
+offers only the cell's version, and JavaScript checks the negotiated version.
+The relay is anonymous here, since released binaries may predate AUTH; the
+default matrix covers tokens and grants.
+Current Rust media publishers feed released Rust and JS readers, then released
+publishers feed current readers, through both relay sources. Rust exports must
+decode to a video frame through ffmpeg. The existing JS subscriber
+reconstructs the catalog and decodes the container.
+
+Each `moq-net` library states whether a draft has FETCH (lite-05 onward
+today). A draft without it in both is logged and its FETCH lanes skipped; one
+the release supports and the checkout dropped fails. Both Rust versions FETCH the group the
+publisher's own JS subscriber observed and compare every frame's exact
+payload. JS publishers write one group after that subscriber's demand, and the
+opposite-source Rust CLI FETCHes it by the same observed ID.
+
+Every session cell runs, and the run counts the cells that ran and were
+skipped, then lists each failing cell before it fails.
+Checkout-only versions are logged and omitted. Removing a released version
+fails before sessions start. A maintainer-approved break belongs in
+`compat/planned-breaks.json` with its reason and the exact affected release
+versions. Keyed by a protocol name it drops that version; with `cells` it
+skips only the named lanes, optionally narrowed to versions, a relay source,
+or a publisher source. Every skipped cell is logged with the break's name.
+Entries become errors once an affected release changes or no longer offers a
+listed version, forcing removal or a fresh review. Future WIP drafts receive
+no automatic exception.
+
 ## Media QA
 
 The matrix asks "did bytes arrive and did a pixel light up". That passes on a

@@ -36,10 +36,47 @@ These land with the next breaking release, not the 2026-09-23 train.
   now carries `moq_net::Error`, so it is no longer `PartialEq`. moq-mux's
   `Error::Binary` is `Error::Flate`. In TypeScript, import `Snapshot` and
   `Stream` from `@moq/flate`.
-- **moq-ffi flate tracks.** `publish_binary_snapshot` / `publish_binary_stream`
-  are `publish_flate_snapshot` / `publish_flate_stream`, taking
-  `MoqFlateConfig` and returning `MoqFlateSnapshotProducer` /
-  `MoqFlateStreamProducer`. The C `moq_publish_binary_*` calls are unchanged.
+- **moq-ffi data tracks wrap a track.** The broadcast's
+  `publish_binary_*`, `publish_json_*`, and `subscribe_json_*` are gone.
+  Create the track with `publish_track` or `subscribe_track`, then construct
+  `MoqFlateSnapshotProducer` / `MoqFlateStreamProducer` (taking
+  `MoqFlateConfig`) or `MoqJsonSnapshotProducer` / `MoqJsonStreamProducer`
+  from the broadcast and the track, or `MoqJsonSnapshotConsumer` /
+  `MoqJsonStreamConsumer` from the track. The wrappers keep JSON under its own
+  namespace: `moq.json` in Python, `moq.dev/moq/json` in Go, `dev.moq.json` in
+  Kotlin, `package:moq/json.dart` in Dart, and `Json` in Swift. The C
+  `moq_publish_binary_*` calls are unchanged.
+- **moq-ffi clients and servers take a config record.** `MoqClient::new()` and
+  `MoqServer::new()` plus their setters are `MoqClient::new(MoqClientConfig)` and
+  `MoqServer::new(MoqServerConfig)`, with nested `tls`, `quic`, `websocket`, and
+  `backoff` records and a new `versions` list. A value the native side cannot use
+  fails construction with `MoqError::Config`, including a bad bind address that
+  used to fail later as `Bind`. The `subscribe` origin is `consume` everywhere:
+  Python's `Client(..., subscribe=)` is `consume=`, Go's `WithSubscribeOrigin` is
+  `WithConsumeOrigin`. A server request's `set_publish` / `set_consume` are
+  arguments to `accept(publish, consume)`, where null inherits the server's
+  origin (Go: `Accept(ctx, nil, nil)`). Go's `Requests(ctx)` iterators are
+  `All(ctx)`, and its `Status*` constants are `ConnectionStatus*`; Kotlin and
+  Dart read announcements as `announced(config).updates()`.
+- **moq-ffi media lives in a `media` namespace.** The broadcast's
+  `publish_audio`, `publish_video`, `publish_container`, their `_on_track` and
+  `_stream` variants, `set_video_properties`, `set_catalog_section`,
+  `subscribe_catalog`, `subscribe_media`, and `fetch_media_group` are gone.
+  Construct `MoqMediaTrackProducer::audio` / `video` (from the broadcast, a
+  `MoqMediaTarget::Named` or `Requested` target, and the init record),
+  `MoqMediaContainerProducer`, `MoqMediaCatalogProducer`,
+  `MoqMediaCatalogConsumer::subscribe`, `MoqMediaContainerConsumer::subscribe`,
+  or `MoqMediaContainerGroupConsumer::fetch` instead. Producers drop `name`,
+  `used`, and `unused`; read them through `demand()`. The wrappers expose these
+  as `moq.media` in Python, `moq.dev/moq/media` in Go, `dev.moq.media` in
+  Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift.
+- **Python and Go durations are native.** `Frame`, `Datagram`, `Subscription`,
+  `TrackInfo`, and `ConnectionStats` carry `timedelta` in Python and
+  `time.Duration` in Go instead of microsecond integers: `max_delay_us` is
+  `max_delay`, `timestamp_us` is `timestamp`, and `rtt_us` is `rtt`. A frame
+  timestamp read from an untimed track is `None` / `nil`. A Python string
+  passed where a list of strings belongs (`tls_roots="ca.pem"`) raises
+  `TypeError` instead of splitting into characters.
 - **Demand is read through `demand()`.** In Rust, `track::Producer`'s
   `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`,
   and so are `group::Producer`'s `used` and `unused`.

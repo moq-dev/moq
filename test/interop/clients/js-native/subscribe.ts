@@ -12,6 +12,7 @@
  *
  * @module
  */
+import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -36,6 +37,8 @@ const { positionals, values } = parseArgs({
 		url: { type: "string" },
 		broadcast: { type: "string" },
 		timeout: { type: "string", default: "20" },
+		"track-file": { type: "string" },
+		track: { type: "string" },
 	},
 });
 
@@ -48,16 +51,35 @@ if (role !== "subscribe" || !url || !broadcast || !Number.isFinite(timeoutMs) ||
 	process.exit(2);
 }
 
+// The .hang catalog lives on the "catalog.json" track. It's a @moq/json snapshot+delta
+// value, reconstructed by Json.Snapshot.Consumer. A lazy publisher may announce video in a
+// later update, so keep reading until one has it.
+async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.VideoConfig]> {
+	const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
+	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
+	for (;;) {
+		const root = await catalog.next();
+		if (!root) throw new Error("catalog ended without a video track");
+		const first = Object.entries(root.video?.renditions ?? {})[0];
+		if (first) return first;
+	}
+}
+
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
-	// The grant arrives over AUTH, which only the work-in-progress moq-lite-07 carries and
-	// no client offers by default. The WebSocket fallback cannot offer it, so it stays off.
-	const connection = await Moq.Connection.connect({
-		url: new URL(url as string),
-		consume: origin,
-		webtransport: { protocols: ["moq-lite-07-wip"] },
-		websocket: { enabled: false },
-	});
+	// A released-compat run pins its version through its own transport and runs anonymous.
+	// Otherwise the grant arrives over AUTH, which only the work-in-progress moq-lite-07
+	// carries and no client offers by default. The WebSocket fallback cannot offer it, so it
+	// stays off.
+	const compat = process.env.INTEROP_COMPAT_TRANSPORT;
+	const connection: Moq.Connection.Established = compat
+		? await (await import(compat)).connect({ url: new URL(url as string), consume: origin })
+		: await Moq.Connection.connect({
+				url: new URL(url as string),
+				consume: origin,
+				webtransport: { protocols: ["moq-lite-07-wip"] },
+				websocket: { enabled: false },
+			});
 	// The grant the relay sent, in the Rust client's `auth granted` shape, so the harness can
 	// check it against the token this cell minted.
 	const printGrant = (grant: Moq.Auth.Grant | undefined) => {
@@ -66,8 +88,11 @@ async function run(): Promise<void> {
 		const subscribe = JSON.stringify(grant.subscribe);
 		console.error(`auth granted publish=${publish} subscribe=${subscribe}`);
 	};
-	printGrant(connection.auth.grant.peek());
-	const unwatch = connection.auth.grant.subscribe(printGrant);
+	let unwatch = () => {};
+	if (!compat) {
+		printGrant(connection.auth.grant.peek());
+		unwatch = connection.auth.grant.subscribe(printGrant);
+	}
 	let requested: Moq.Origin.Requesting | undefined;
 	try {
 		const path = Moq.Path.from(broadcast as string);
@@ -78,19 +103,17 @@ async function run(): Promise<void> {
 			bc = requested.active.peek();
 		}
 
-		// The .hang catalog lives on the "catalog.json" track. It's a @moq/json
-		// snapshot+delta value, reconstructed by Json.Snapshot.Consumer. A lazy publisher may
-		// announce video in a later update, so keep reading until one has it.
-		const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
-		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
-		let video: [string, Catalog.VideoConfig] | undefined;
-		while (!video) {
-			const root = await catalog.next();
-			if (!root) throw new Error("catalog ended without a video track");
-			video = Object.entries(root.video?.renditions ?? {})[0];
+		if (values["track-file"]) {
+			// Name a group that live demand is filling, so a FETCH of it never races eviction.
+			// The track is `--track`, or the catalog's first video rendition.
+			const name = values.track ?? (await video(bc))[0];
+			const group = await bc.track(name).subscribe({ priority: 0 }).recvGroup();
+			if (!group) throw new Error(`${name} ended before its first group`);
+			writeFileSync(values["track-file"], `${name}\n${group.sequence}\n`);
+			return;
 		}
 
-		const [name, config] = video;
+		const [name, config] = await video(bc);
 		let format: Container.Format;
 		if (config.container.kind === "legacy") {
 			format = new Container.Legacy.Format(config);

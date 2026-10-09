@@ -71,11 +71,12 @@ public:
 		for (int attempt = 0; attempt < 20 && http_fd < 0; attempt++) {
 			if (server)
 				server->cancel();
-			server = moq::Server::init();
-			TestOk(server->set_bind("127.0.0.1:0"), "set_bind");
-			TestOk(server->set_tls_generate({"localhost"}), "set_tls_generate");
-			TestOk(server->set_publish(origin), "set_publish");
-			TestOk(server->set_consume(origin), "set_consume");
+			moq::ServerConfig config;
+			config.bind = "127.0.0.1:0";
+			config.tls.generate = {"localhost"};
+			config.publish = origin;
+			config.consume = origin;
+			server = TestOk(moq::Server::init(config), "server init");
 			addr = TestOk(server->listen().get(), "listen");
 			http_fd = BindFingerprint();
 		}
@@ -142,7 +143,7 @@ private:
 			auto request = server->accept().get();
 			if (!request || !*request)
 				return;
-			auto session = (*request)->accept().get();
+			auto session = (*request)->accept(nullptr, nullptr).get();
 			if (!session)
 				continue;
 			std::lock_guard<std::mutex> lock(mutex);
