@@ -1188,9 +1188,9 @@ Set to 0x0 to indicate a SUBSCRIBE_OK message.
 **Group**:
 The absolute sequence number of the first group served when the subscription resolves.
 It MUST be greater than or equal to the requested `Group Start`.
-Groups between the requested floor and this group are unavailable.
-A group at or above the requested floor that is still within `Subscriber Max Age`, created or becoming available later, is delivered.
-This group is not itself a new floor.
+This group is not a new floor.
+A subscriber SHOULD NOT wait for a group between the requested floor and this group.
+The publisher still delivers such a group if it is created or becomes available later, while it is within `Subscriber Max Age`.
 A subscriber whose `Subscriber Max Age` resolves the start to the latest group learns that sequence here.
 
 There is no matching frame field, because the start frame is never in doubt: a partial group is only delivered when it was asked for, so the subscription starts either exactly where it asked or at the beginning of a later group (see [Positions](#positions)).
@@ -1391,7 +1391,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
-- SUBSCRIBE_OK `Group` names the first group served when the subscription resolves. Groups between the requested floor and that group are unavailable. A later group at or above the floor and within Subscriber Max Age is still delivered. The announced group is not a new floor.
+- SUBSCRIBE_OK `Group` names the first group served when the subscription resolves. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.

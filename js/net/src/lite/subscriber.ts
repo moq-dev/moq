@@ -1008,8 +1008,8 @@ export class Subscriber {
 
 			if ("start" in resp) {
 				entry.start = resp.start.group;
-				// The groups the SUBSCRIBE asked for below it are unavailable, whatever the
-				// demand asks later.
+				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
+				// demand asks later. One that still arrives is delivered.
 				if (entry.requested !== undefined) entry.tail.account(entry.requested, entry.start);
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");

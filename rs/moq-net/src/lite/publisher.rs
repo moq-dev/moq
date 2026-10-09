@@ -2845,7 +2845,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			largest,
 		}))?;
 		// SUBSCRIBE_START names the first group served now. Groups already skipped between
-		// the requested floor and this group stay unavailable. A later group at or above an
+		// the requested floor and this group are not served. A later group at or above an
 		// explicit floor, still inside the subscriber's max age, is delivered, so the cursor
 		// stays at that floor.
 		//

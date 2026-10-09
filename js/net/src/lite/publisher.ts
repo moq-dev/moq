@@ -960,11 +960,10 @@ export class Publisher {
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this sequence becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
-					const pin = bounds.startGroup === undefined && !resolvesStart(this.version);
-					if (pin || bounds.endGroup !== undefined) {
+					if (bounds.startGroup === undefined && !resolvesStart(this.version)) {
 						hooks.replaceGroups(track, {
-							...(pin ? { start: { included: group.sequence } } : {}),
-							...(bounds.endGroup === undefined ? {} : { end: { included: bounds.endGroup } }),
+							start: { included: group.sequence },
+							end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
 						});
 					}
 					if (
