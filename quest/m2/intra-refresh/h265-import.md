@@ -28,8 +28,8 @@ a track with no keyframes at all and fails the group invariant.
   exactly as the H.264 quest does, sharing the measurement and catalog
   mutation.
 - Fixture: synthetic NAL sequences beside the existing suffix-SEI tests, since
-  x265's intra refresh emits no recovery-point SEI; a real NVENC HEVC clip is verified by hand
-  when the NVENC quest lands.
+  x265's intra refresh emits no recovery-point SEI. Verify by hand with an
+  externally encoded clip (ffmpeg `hevc_nvenc` with intra refresh).
 
 ## Required
 

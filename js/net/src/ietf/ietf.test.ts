@@ -1949,21 +1949,48 @@ test("Subscribe: FORWARD=0 decodes", async () => {
 });
 
 // A draft-20 FETCH names the track up front and carries its range in LOCATION_FILTER.
-test("Fetch v20: decodes every legal parameter", async () => {
+// Groups 128 through 130: the group takes two bytes, so draft-20's Length (4) and
+// draft-22's Location Filter Type (0x03) differ, and reading one as the other misframes
+// every parameter after it.
+for (const [version, locationFilter] of [
+	[Version.DRAFT_20, [0x01, 0x04, 0x80, 0x80, 0x00, 0x02]],
+	[Version.DRAFT_21, [0x01, 0x04, 0x80, 0x80, 0x00, 0x02]],
+	[Version.DRAFT_22, [0x01, 0x03, 0x80, 0x80, 0x00, 0x02]],
+] as const) {
+	test(`Fetch ${version}: decodes every legal parameter`, async () => {
+		const body = framed([
+			...TRACK_HEAD,
+			0x07, // Number of Parameters
+			...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
+			...[0x07, 0x64], // FILL_TIMEOUT (0x0A)
+			...[0x16, 0x40], // SUBSCRIBER_PRIORITY (0x20)
+			...locationFilter, // LOCATION_FILTER (0x21)
+			...[0x01, 0x01], // GROUP_ORDER (0x22)
+			...[0x04, 0x02, 0x00, 0x05], // OBJECTID_FILTER (0x26)
+			...[0x0f, 0x00], // INCLUDE_PROPERTIES (0x35)
+		]);
+
+		const msg = await decodeVersioned(body, Fetch.decode, version);
+		expect(msg.requestId).toBe(1n);
+	});
+}
+
+// Draft-22's LOCATION_FILTER is a Location Filter Type with no Length, so Next Object is the
+// single byte 0x05 and the parameter after it starts right behind it.
+test("Subscribe draft-22: Next Object is 0x21 0x05", async () => {
 	const body = framed([
 		...TRACK_HEAD,
-		0x07, // Number of Parameters
-		...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
-		...[0x07, 0x64], // FILL_TIMEOUT (0x0A)
-		...[0x16, 0x40], // SUBSCRIBER_PRIORITY (0x20)
-		...[0x01, 0x03, 0x04, 0x00, 0x02], // LOCATION_FILTER (0x21)
-		...[0x01, 0x01], // GROUP_ORDER (0x22)
-		...[0x04, 0x02, 0x00, 0x05], // OBJECTID_FILTER (0x26)
-		...[0x0f, 0x00], // INCLUDE_PROPERTIES (0x35)
+		0x04, // Number of Parameters
+		...[0x10, 0x01], // FORWARD (0x10) = 1
+		...[0x10, 0x40], // SUBSCRIBER_PRIORITY (0x20) = 64
+		...[0x01, 0x05], // LOCATION_FILTER (0x21): Next Object
+		...[0x01, 0x02], // GROUP_ORDER (0x22) = Descending
 	]);
 
-	const msg = await decodeVersioned(body, Fetch.decode, Version.DRAFT_20);
-	expect(msg.requestId).toBe(1n);
+	const msg = await decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_22);
+	expect(msg.filter).toEqual({ kind: "nextObject" });
+	expect(msg.subscriberPriority).toBe(64);
+	expect(await encodeVersioned(msg, Version.DRAFT_22)).toEqual(body);
 });
 
 // The tagged forms through draft-19, with a token.

@@ -35,4 +35,5 @@ Gate on the plan's jank harness and N-player sweep, both nightly.
 
 ## Related
 
+- [WebGPU renderer](/quest/m1/webgpu-renderer.md) - the renderer this moves into the worker; it already takes an `OffscreenCanvas`
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - changes the worklet this feeds

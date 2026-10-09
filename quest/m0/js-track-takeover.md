@@ -10,6 +10,10 @@ sequences that were written within the broadcast.
 
 ## Plan
 
+Decided 2026-10-08: moved to m0, since
+[publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md)
+gates the release and its fix is this one.
+
 Decided 2026-10-06 while settling #4929: that PR coalesces JS publishing-side
 subscriptions per name and accepts the `duplicate track` throw for now; this
 quest brings JS to parity. Drop unused entries only when no track holds them

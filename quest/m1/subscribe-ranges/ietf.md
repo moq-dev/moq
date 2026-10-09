@@ -17,8 +17,6 @@ group already cached is discarded as a duplicate. Cap a downstream FETCH at
 the Largest Object, as the moq-transport drafts require. A relay with only
 fetch demand learns the upstream's Largest from TRACK_STATUS without a
 SUBSCRIBE, since #4974.
-[Cross-relay FETCH over moq-transport](/quest/m1/ietf-peer-fetch-old.md)
-fixes the same FETCH path refusing held groups as `old`.
 
 Serving downstream lifts the one-group refusal ("FETCH spanning several
 groups not supported") in `run_fetch_stream`

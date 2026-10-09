@@ -10,8 +10,8 @@ with thousands of routes connects as fast per route as one joining a handful.
 
 The moq-lite publisher's initial replay (`AnnounceRun::init` in
 `rs/moq-net/src/lite/publisher.rs`) de-duplicates by scanning the pending list
-for every route it drains: `initial.retain` on Lite05+, `init.contains` on
-the Lite01/02 init. That is quadratic in the replay size.
+for every route it drains: `initial.retain` on Lite05+, and `init.retain`
+then `init.push` on the Lite01/02 init. That is quadratic in the replay size.
 
 Measured with `session_join_broadcasts` (2026-09-25, one relay, Apple M4):
 lite-06 join takes 128 µs with 1 announced broadcast, 317 µs with 64, and

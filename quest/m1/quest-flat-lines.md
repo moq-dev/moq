@@ -72,9 +72,6 @@ Remaining:
   - #4133 qos: lag-splice landed on the line (#5009). Its egress `lag`
     histogram splits into its own quest requiring stats-split (decided
     2026-10-08); follow the qos README for what the line lands without it.
-- Child PRs still based on a line merge into it first, or GitHub closes them
-  with the branch: #4675 (auth/request-token) needs the updated auth line
-  merged in.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.

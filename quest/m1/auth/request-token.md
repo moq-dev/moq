@@ -18,9 +18,9 @@ request token authorizing its own request (the fallback after the session
 grant, refresh by REQUEST_UPDATE, and a per-request relay lease on
 `moq_auth::Client`) is deferred until a moq-transport peer needs it; re-plan
 it then from [#4675](https://github.com/moq-dev/moq/pull/4675), which built
-it. #4675 is too large to review as one change, so it splits: the
-decode-and-close part lands first as this quest, and the grant and lease work
-parks on its branch. The decode needs neither [Relay tokens](/quest/m1/auth/relay-refresh.md)
+it. #4675 was too large to review as one change and closed unmerged; its
+branch is gone, so the grant and lease work survives only at its head commit
+`29ed74e78`. The decode-and-close part lands as this quest. The decode needs neither [Relay tokens](/quest/m1/auth/relay-refresh.md)
 nor a lease.
 
 - Decode with the SETUP option's structure and rules
@@ -44,11 +44,11 @@ nor a lease.
   same per-message decode.
 - 0x13 and 0x17 join the shared session registry: `SessionError`
   (`rs/moq-net/src/error.rs`) and `SessionCode` (`js/net/src/error.ts`).
-  Lite codes below 32 carry moq-transport's meaning, so add both rows to the
-  Session Error Codes table in `drafts/draft-lcurley-moq-lite.md` and to
-  `session_codes_round_trip`, as [Malformed moq-transport
-  input](/quest/m2/ietf-malformed-close.md) does for its codes. No
-  per-version mapping. That adds two codes to moq-lite's wire registry.
+  That registry is moq-lite's too, and lite codes below 32 carry
+  moq-transport's meaning, so add both rows to the Session Error Codes table
+  in `drafts/draft-lcurley-moq-lite.md` and to the
+  `session_codes_round_trip` test. No per-version mapping. That adds two
+  codes to moq-lite's wire registry.
 - `js/net` mirrors the decode.
 - Tests, one legacy and one strict draft, Rust and JS: a `REGISTER` token on
   a request closes with `AUTH_TOKEN_CACHE_OVERFLOW`, a `DELETE` or
