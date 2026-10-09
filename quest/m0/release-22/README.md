@@ -35,5 +35,4 @@ backports), and send the reporter the branch.
 ## Required
 
 - [noq 1.3.4 on release](/quest/m0/release-22/noq.md) - `release` builds on moq-noq 1.3.4
-- [FIRST_OBJECT backport](/quest/m0/release-22/first-object.md) - #5027 on `release`, Rust and JS
 - [LOCATION_FILTER backport](/quest/m0/release-22/location-filter.md) - the draft-22 filter form on `release`, Rust and JS
