@@ -11,11 +11,11 @@ stream unless asked:
 - A replacement (a newer epoch, or another instance of an epochless route)
   ends the export with an error that names `--stitch`. On an epochless route
   every return is a replacement.
-- `--stitch` opts in to following a replacement. The caller drops its
-  `ts::Export` and builds a new one on the new broadcast, with a full program
-  switch: a new PMT from the new catalog, so tracks, codecs, and PIDs may
+- `--stitch` opts in to following a replacement. The export is rebuilt on the
+  new broadcast with a full program switch: a new PMT from the new catalog, so tracks, codecs, and PIDs may
   change, plus PCR and continuity discontinuities. Nothing from the old
-  broadcast survives except the output pipe or SRT connection.
+  broadcast survives except the output pipe or SRT connection, and the
+  PSI version numbers.
 
 Non-goal: identical output across a replacement. Two legs that are
 byte-identical within an epoch may differ after one (#5101).
@@ -35,7 +35,7 @@ publisher that stays alive holds the export on a replaced broadcast.
 - Drive both flags from announcements, as players do: `Start`, `Restart`, and
   `End` with their epochs. An export that fails while its broadcast is still
   announced exits 1 without lingering, as today.
-- Same epoch within `--linger`: re-request it and keep the same `Export`.
+- Same epoch within `--linger`: `follow` continues the same stream.
   It is the same content, so the existing skip handling covers the gap (late
   frames drop, and a forward leap opens a new generation). Within an epoch,
   moq-net already resumes across routes, so this only matters once every
@@ -44,21 +44,26 @@ publisher that stays alive holds the export on a replaced broadcast.
   export on the old broadcast until it ends. If the path then serves a
   different instance, the export exits 1 with an error naming `--stitch`.
 - With `--stitch`: on `Restart` (or `End` then `Start` with another
-  instance) build a fresh `Export` at once. Every PID's first packet carries
-  `discontinuity_indicator`, the PMT `version_number` advances (the only value
-  handed from the old `Export`), and each elementary stream starts at a
-  keyframe. Rejected: continuing only when the layout is identical, and
+  instance) `follow` it at once, which builds a fresh `Export`. Every PID's first packet carries
+  `discontinuity_indicator`, the PAT and PMT `version_number`s advance (the only
+  values handed from the old `Export`, since a version-caching demux such as
+  TSDuck's ignores a changed PAT under an unchanged version), and each
+  elementary stream starts at a keyframe. Rejected: continuing only when the layout is identical, and
   deleting `--linger`. Exiting does not hide the switch from a receiver
   downstream of `tsp`, it only drops the flags.
 - moq-srt's egress (`rs/moq-srt/src/ts.rs`) gets the same two options and keeps
   its SRT connection across a stitch. Its linger defaults to 0, like the CLI:
   an `End` that nothing replaces within the linger closes the SRT stream, so
   a finished broadcast never leaves a caller connected indefinitely.
-- Open, decide at start: how the PMT version crosses to the new `Export`,
-  since both callers live outside `moq-mux`. Recommended: a method that
-  consumes the old export and returns its successor on a new source (such as
-  `Export::stitch(self, source)`), so the version never becomes a public knob.
-  Alternative: a builder option seeding the PSI version.
+- Decided: the SRT policy lives on `moq_srt::Config` as `linger: Duration`
+  (default 0) and `stitch: bool` (default false), mirrored as CLI flags.
+- Decided: one successor operation, `ts::Export::follow(self, broadcast) ->
+  Export`, used by both callers. On the same epoch it continues the stream
+  with the same PSI. On another instance it does the full program switch,
+  carrying the PAT and PMT `version_number`s, both advanced. The caller calls
+  it for a replacement only under `--stitch`. Rejected: separate continue and
+  stitch methods, and a builder policy that has the export watch announces
+  itself.
 - Decided: the TS output has no epoch. A re-import of an export is out of
   scope.
 - Fold in the stale wording from the marker audit: a marker group only
@@ -75,6 +80,8 @@ publisher that stays alive holds the export on a replaced broadcast.
     writes a new PMT version, flags every PID's first packet, starts each
     stream at a keyframe, and writes nothing from the old broadcast after the
     break.
+  - A stitch that keeps the transport-stream ID but moves the PMT PID
+    advances the PAT version.
   - Update #4504's relay-backed CLI tests, and add the stitch case for SRT
     egress, plus an unreplaced `End` closing the SRT stream at the linger.
 - Docs: the `--linger` paragraph in `doc/bin/cli.md` (plus `--stitch`), any
@@ -82,7 +89,8 @@ publisher that stays alive holds the export on a replaced broadcast.
   `--linger`.
 
 Public API: breaking, `ts::Export::resume` is removed and `restarts()` is
-renamed. New: the successor operation above. CLI: new `--stitch` on `export ts` and SRT egress, and `--linger`
+renamed. New: `ts::Export::follow`, and `linger` and `stitch` on
+`moq_srt::Config`. CLI: new `--stitch` on `export ts` and SRT egress, and `--linger`
 no longer follows a replacement. Wire: none.
 
 ## Required
