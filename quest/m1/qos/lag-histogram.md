@@ -14,17 +14,17 @@ last partial interval.
 ## Plan
 
 Decided 2026-10-08: split out of the QoS line so the dashboard and publisher
-timeliness can require a histogram that exists on `main`. The implementation
-already lives on the line branch
-([#4133](https://github.com/moq-dev/moq/pull/4133)): the sampler (#4298,
-`rs/moq-net/src/stats.rs`), the splice fixes (#5009), and the final sample
-(#4451). This quest lands it on `main` once stats-split has, rebased from the
-per-path `publisher.json` and `subscriber.json` map rows it writes today onto
-stats-split's totals and prefix tracks.
+timeliness can require a histogram that exists on `main`. This quest lands it
+on `main` once stats-split has, moved from the per-path `publisher.json` and
+`subscriber.json` map rows it writes today onto stats-split's totals and
+prefix tracks.
 
-Decided 2026-10-09: #4133 closes without landing, since every code change it
-has over `main` is this histogram; its code is kept on `wip/4133-lag-histogram`
-as this quest's starting point. Porting it is not mechanical:
+Decided 2026-10-09: the QoS line
+([#4133](https://github.com/moq-dev/moq/pull/4133)) closed without landing,
+since every code change it had over `main` is this histogram. Its code is kept
+on `wip/4133-lag-histogram` as this quest's starting point: the sampler
+(#4298, `rs/moq-net/src/stats.rs`), the splice fixes (#5009), and the final
+sample (#4451). Porting it is not mechanical:
 
 - `main` moved to caller-supplied time (#4437) and removed the frozen test
   clock (`model::clock::advance`). The sampler reads wall time in
@@ -37,11 +37,16 @@ as this quest's starting point. Porting it is not mechanical:
 
 Open review findings on #4133 to fix while porting:
 
-- A timestamp regression hides a stalled viewer.
-- A copy served across a no-route gap stays watched.
-- A partial write is charged the frame's full declared size.
-- `Dropped::add` saturates instead of overflowing.
-- Sweep dead frontier entries when the list fills.
+- A timestamp regression hides a stalled viewer
+  ([3](https://github.com/moq-dev/moq/pull/4133#issuecomment-6053929743)).
+- A copy served across a no-route gap stays watched
+  ([B](https://github.com/moq-dev/moq/pull/4133#issuecomment-6053929743)).
+- A partial write is charged the frame's full declared size
+  ([P2](https://github.com/moq-dev/moq/pull/4133#pullrequestreview-5452586850)).
+- `Dropped::add` should saturate instead of overflowing
+  ([comment](https://github.com/moq-dev/moq/pull/4133#discussion_r4215691174)).
+- Bound the frontier list when `Registry::report` is not called
+  ([comment](https://github.com/moq-dev/moq/pull/4133#discussion_r4215691184)).
 
 Keep the histogram contract the dashboard reads: buckets keyed by upper edge
 (`"50ms"` to `"5s"`, then `"inf"`, empty buckets omitted), cumulative and
