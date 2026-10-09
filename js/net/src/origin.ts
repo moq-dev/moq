@@ -182,6 +182,8 @@ export interface RequestSlot {
 	readonly route: Signal<Resolution | undefined>;
 	/** The front a detached slot took from the table, closed with its last handle. */
 	retired?: broadcast.Consumer;
+	/** The route a detached slot asked to take over under the same epoch, until it answers. */
+	failover?: RouteEntry;
 }
 
 /** One path resolution and the epoch of the route that can currently serve it. */
@@ -536,8 +538,11 @@ class OriginState {
 	reroute(path: Path.Valid, slot: RequestSlot): void {
 		const current = slot.route.peek();
 		if (current?.front && current.source) {
-			const detached = this.detached.get(path)?.has(slot) ?? false;
-			if (!this.serves(path, current.source, current.epoch, detached)) {
+			if (this.detached.get(path)?.has(slot)) {
+				this.failover(path, slot, current.source, current.epoch);
+				return;
+			}
+			if (!this.serves(path, current.source, current.epoch, false)) {
 				this.drop(path, slot, unroutable());
 				return;
 			}
@@ -547,10 +552,35 @@ class OriginState {
 				this.retire(path, slot);
 				return;
 			}
-			// Winning again: a detached slot keeps the front it took.
-			if (detached) return;
 		}
 		slot.route.set(this.route(path, slot));
+	}
+
+	/**
+	 * Keep a detached slot on its instance: on its own source while that serves, else on another
+	 * route of the same epoch, which serves the same bytes, keeping the old front until that one
+	 * answers. Without such a route the slot ends.
+	 */
+	failover(path: Path.Valid, slot: RequestSlot, source: object, epoch: Epoch.Valid | undefined): void {
+		if (this.serves(path, source, epoch, true)) return;
+		const entry =
+			epoch === undefined
+				? undefined
+				: this.bestEntry(path, (candidate) => !candidate.server || candidate.route.peek().epoch !== epoch);
+		if (!entry?.server) {
+			this.drop(path, slot, unroutable());
+			return;
+		}
+		const served = entry.server.served.get(path);
+		if (!served || served.closed.peek() !== undefined) {
+			slot.failover = entry;
+			entry.server.enqueue(path);
+			return;
+		}
+		slot.failover = undefined;
+		slot.retired?.close();
+		slot.retired = served;
+		slot.route.set({ front: served, epoch, source: entry.identity });
 	}
 
 	/**
@@ -623,6 +653,10 @@ class OriginState {
 	 * per candidate.
 	 */
 	refuse(path: Path.Valid, entry: RouteEntry, err: Error): void {
+		// A detached slot failing over to this route ends with its answer.
+		for (const other of [...(this.detached.get(path) ?? [])]) {
+			if (other.failover === entry) this.drop(path, other, err);
+		}
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
 		// Only the route the request is waiting on speaks for it; one superseded by another
@@ -640,6 +674,7 @@ class OriginState {
 			});
 		}
 		this.detach(path, slot);
+		slot.failover = undefined;
 		slot.answer?.close();
 		slot.answer = undefined;
 		slot.route.set(undefined);

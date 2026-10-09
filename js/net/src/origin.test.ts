@@ -1542,6 +1542,57 @@ test("a request on a replaced instance ends once its source goes", async () => {
 
 // Without an epoch nothing says a standby serves the winner's bytes: the winner going ends the
 // request instead of handing it to the standby.
+// A request left on a replaced instance still fails over within that instance: another route
+// of its epoch serves the same bytes, so the request moves there rather than ending, while
+// fresh requests resolve the newer epoch.
+test("a request on a replaced epoch fails over to another route of it", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("replicated");
+	const newer = Epoch.parse("01900000-0000-7000-8000-000000000002");
+
+	const primary = new BroadcastProducer();
+	const keepPrimary = primary.consume();
+	const disposePrimary = serve(origin, path, () => keepPrimary.clone(), Route.normalize({ epoch: EPOCH }));
+	const replica = new BroadcastProducer();
+	const disposeReplica = serve(origin, path, provider(replica), Route.normalize({ epoch: EPOCH, cost: 5n }));
+	const request = consumer.request(path);
+	await settle();
+	const first = request.active.peek();
+	expect(first).toBeDefined();
+
+	const restarted = new BroadcastProducer();
+	const disposeRestarted = serve(origin, path, provider(restarted), Route.normalize({ epoch: newer }));
+	await settle();
+	expect(request.active.peek()).toBe(first);
+
+	disposePrimary();
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+	const failed = request.active.peek();
+	expect(failed).toBeDefined();
+	expect(failed).not.toBe(first);
+	expect(failed?.epoch).toBe(EPOCH);
+
+	const fresh = consumer.request(path);
+	await settle();
+	expect(fresh.active.peek()?.epoch).toBe(newer);
+
+	// The replica going too ends it: nothing else serves its epoch.
+	disposeReplica();
+	await settle();
+	expect(request.closed.peek()).toBeInstanceOf(StreamError);
+
+	fresh.close();
+	request.close();
+	disposeRestarted();
+	keepPrimary.close();
+	primary.close();
+	replica.close();
+	restarted.close();
+	origin.close();
+});
+
 test("a request ends when its winning source goes, even with a standby", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

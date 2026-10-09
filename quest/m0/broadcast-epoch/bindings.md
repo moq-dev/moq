@@ -18,8 +18,7 @@ audio timeline re-anchor `reset_epoch` are renamed so "epoch" has one meaning.
 - Rename the audio re-anchor the same way (decided 2026-10-08, since it also
   says "epoch"): `moq_audio::encode::Producer::reset_epoch`, its moq-ffi
   method, the wrappers that expose it, and moq-boy's copy.
-- `MoqAnnounceEvent::Restart` lands in moq-ffi with
-  Restart; each wrapper maps it.
+- `MoqAnnounceEvent::Restart` lands in moq-ffi; each wrapper maps it.
 - Update `doc/lib/{py,swift,kt,go,dart}` per the cross-package sync table,
   and run `just test smoke --all`.
 

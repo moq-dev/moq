@@ -51,8 +51,7 @@ Decided:
   hard switch that ended subscriptions in flight with `Unroutable` (decided
   2026-10-06 for epochs, and 2026-10-07 in #5013 for routes without one) is
   reversed (2026-10-07): subscriptions stay sticky on their route and an
-  explicit `Restart` announce event tells players to follow, through
-  Restart. When the newest goes and
+  explicit `Restart` announce event tells players to follow. When the newest goes and
   an older one is still live, the older one wins again as a new broadcast.
 - [Claim-served epochs](/quest/m1/claim-epochs.md), where a
   lite-07 claim's answer carries the served broadcast's own epoch, no longer
