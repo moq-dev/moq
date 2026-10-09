@@ -2370,4 +2370,116 @@ mod tests {
 		assert!(!driver.is_finished(), "the repeated withdrawal ended the session");
 		assert!(log.closes().is_empty(), "closed the session: {:?}", log.closes());
 	}
+
+	/// A SUBSCRIBE for `room/video` whose parameters are one AUTHORIZATION TOKEN holding
+	/// `token`, framed as a control message.
+	fn subscribe_with_token(version: Version, token: &[u8]) -> Vec<u8> {
+		let msg = ietf::Subscribe {
+			request_id: RequestId(0),
+			track_namespace: crate::Path::new("room"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: ietf::GroupOrder::Descending,
+			filter: ietf::Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
+			forward: true,
+			range_filters: false,
+		};
+		let mut body = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut body, version.into());
+		match version {
+			Version::Draft14 => {
+				msg.encode_msg(&mut w, version).unwrap();
+				// Replace the empty parameter block with the token.
+				assert_eq!(body.pop(), Some(0));
+			}
+			// The request ID, namespace and name; every parameter but the token defaults.
+			_ => w.slice(&[0, 1, 4, b'r', b'o', b'o', b'm', 5, b'v', b'i', b'd', b'e', b'o']),
+		}
+		let mut w = crate::coding::Encoder::new(&mut body, version.into());
+		w.varint(1).unwrap();
+		w.varint(u64::from(ietf::ParameterBytes::AuthorizationToken)).unwrap();
+		w.bytes(token).unwrap();
+
+		let mut payload = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut payload, version.into());
+		w.varint(ietf::Subscribe::ID).unwrap();
+		w.u16(body.len() as u16);
+		w.slice(&body);
+		payload
+	}
+
+	/// A request's AUTHORIZATION TOKEN decodes by the SETUP option's rules, so one this
+	/// endpoint cannot use closes the session with the draft's code. Draft-14 carries the
+	/// request on the control stream, a strict draft on its own stream.
+	#[moq_net_sim::test]
+	async fn a_request_token_that_cannot_be_used_closes_the_session() {
+		for version in [Version::Draft14, Version::Draft22] {
+			for (token, expected, why) in [
+				(
+					&[0x01, 0x07, 0x00][..],
+					SessionError::AuthTokenCacheOverflow,
+					"REGISTER",
+				),
+				(&[0x00, 0x07][..], SessionError::UnknownAuthTokenAlias, "DELETE"),
+				(&[0x02, 0x07][..], SessionError::UnknownAuthTokenAlias, "USE_ALIAS"),
+				(
+					&[0x03][..],
+					SessionError::KeyValueFormatting,
+					"USE_VALUE without a type",
+				),
+				(
+					&[0x04, 0x00][..],
+					SessionError::KeyValueFormatting,
+					"an unknown alias type",
+				),
+			] {
+				let payload = subscribe_with_token(version, token);
+				let mut session = match version {
+					Version::Draft14 => crate::lite::test_transport::ScriptedSession::new(payload),
+					_ => {
+						crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload])
+					}
+				};
+				let log = session.log.clone();
+				let setup = match version {
+					Version::Draft14 => Some(Stream::open(&mut session, version).await.unwrap()),
+					_ => None,
+				};
+				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let (driver, _goaway, _) = start(Config {
+					runtime: crate::time::Clock::sim(),
+					session,
+					setup,
+					request_id_max: None,
+					limits: Default::default(),
+					client: false,
+					publish: Some(origin.consume()),
+					subscribe: None,
+					peer_hop: None,
+					cost: None,
+					version,
+					path: None,
+					authority: None,
+					peer_setup_stream: None,
+					peer_declared: Some(peer::Peer::default()),
+					auth: crate::auth::Handle::new(false),
+					early_unis: Vec::new(),
+				})
+				.unwrap();
+
+				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+					.await
+					.unwrap_or_else(|_| panic!("{version:?} {why}: the session stayed up"))
+					.expect_err("the token must fail the session");
+				assert_eq!(SessionError::from(&err), expected, "{version:?} {why}");
+				assert_eq!(
+					log.closes(),
+					vec![(expected.to_code(), err.to_string())],
+					"{version:?} {why}"
+				);
+			}
+		}
+	}
 }

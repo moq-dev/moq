@@ -167,13 +167,24 @@ impl Encode<Version> for Parameters {
 }
 
 impl Parameters {
-	/// Consume a draft-14 message parameter block, returning its first MAX_CACHE_DURATION
-	/// (0x04), the one parameter we act on.
-	///
+	/// Consume a draft-14 request's parameter block, decoding every AUTHORIZATION TOKEN
+	/// (0x03) by [`super::token::RequestToken`]'s rules.
+	pub fn skip_request(r: &mut Decoder<'_>) -> Result<(), DecodeError> {
+		Self::skip(r, true)?;
+		Ok(())
+	}
+
+	/// Consume a draft-14 response's parameter block, returning its first
+	/// MAX_CACHE_DURATION (0x04), the one parameter we act on.
+	pub fn skip_response(r: &mut Decoder<'_>) -> Result<Option<u64>, DecodeError> {
+		Self::skip(r, false)
+	}
+
 	/// Draft-14 section 9.2 has a receiver ignore unrecognized parameters and allow their
 	/// duplicates, and lets AUTHORIZATION TOKEN repeat, so unlike [`Parameters::decode`],
-	/// which SETUP uses, a repeat is not refused.
-	pub fn skip(r: &mut Decoder<'_>) -> Result<Option<u64>, DecodeError> {
+	/// which SETUP uses, a repeat is not refused. A token on a message that does not list it,
+	/// a response, is ignored like any other parameter.
+	fn skip(r: &mut Decoder<'_>, request: bool) -> Result<Option<u64>, DecodeError> {
 		let count = r.varint()?;
 		if count > MAX_PARAMS {
 			return Err(DecodeError::TooMany);
@@ -189,6 +200,9 @@ impl Parameters {
 					if kind == 0x04 {
 						cache_duration.get_or_insert(value);
 					}
+				}
+				_ if request && kind == u64::from(ParameterBytes::AuthorizationToken) => {
+					super::token::RequestToken::param_decode(r, Version::Draft14)?;
 				}
 				_ => {
 					let len = usize::try_from(r.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
@@ -1211,24 +1225,33 @@ mod tests {
 	/// instance instead of failing the message as a duplicate.
 	#[test]
 	fn test_param_repeat_allowed() {
+		use super::super::token::RequestToken;
+		use crate::setup::Token;
+
+		let token = |kind| {
+			RequestToken(Token {
+				kind,
+				value: vec![0xAA],
+			})
+		};
 		for version in [Version::Draft15, Version::Draft16, Version::Draft17, Version::Draft20] {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, version.into());
 			w.varint(2).unwrap();
 			w.varint(0x03).unwrap();
-			Opaque(vec![0xAA]).param_encode(&mut w, version).unwrap();
+			token(0).param_encode(&mut w, version).unwrap();
 			// The second key: absolute before draft-16, a zero delta after.
 			let second: u64 = if version == Version::Draft15 { 0x03 } else { 0 };
 			w.varint(second).unwrap();
-			Opaque(vec![0xBB]).param_encode(&mut w, version).unwrap();
+			token(1).param_encode(&mut w, version).unwrap();
 
 			let mut r = Decoder::new(&buf, version.into());
-			let tokens = (|| -> Result<Vec<Opaque>, DecodeError> {
-				decode_params!(&mut r, version, 0x03 => tokens: Vec<Opaque>);
+			let tokens = (|| -> Result<Vec<RequestToken>, DecodeError> {
+				decode_params!(&mut r, version, 0x03 => tokens: Vec<RequestToken>);
 				Ok(tokens)
 			})()
 			.unwrap_or_else(|e| panic!("{version}: {e}"));
-			assert_eq!(tokens, vec![Opaque(vec![0xAA]), Opaque(vec![0xBB])], "{version}");
+			assert_eq!(tokens, vec![token(0), token(1)], "{version}");
 			assert!(r.is_empty(), "{version}");
 		}
 	}
@@ -1240,13 +1263,35 @@ mod tests {
 		#[rustfmt::skip]
 		let block = [
 			0x04, // Number of Parameters
-			0x03, 0x01, 0xAA, // AUTHORIZATION TOKEN
-			0x03, 0x01, 0xBB, // and again
+			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN: USE_VALUE, type 0
+			0x03, 0x03, 0x03, 0x01, 0xBB, // and again, type 1
 			0x3E, 0x05, // an unknown varint parameter
 			0x3E, 0x06, // and again
 		];
 		let mut r = Decoder::new(&block, Version::Draft14.into());
-		Parameters::skip(&mut r).unwrap();
+		Parameters::skip_request(&mut r).unwrap();
+		assert!(r.is_empty());
+	}
+
+	/// A draft-14 request decodes every token; a response ignores one, as section 9.2 has
+	/// for a parameter on a message that does not list it.
+	#[test]
+	fn test_skip_decodes_draft14_request_tokens() {
+		#[rustfmt::skip]
+		let block = [
+			0x02, // Number of Parameters
+			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN: USE_VALUE, type 0
+			0x03, 0x02, 0x02, 0x07, // and a USE_ALIAS, never registered
+		];
+		let mut r = Decoder::new(&block, Version::Draft14.into());
+		let err = Parameters::skip_request(&mut r).unwrap_err();
+		assert!(
+			matches!(err, DecodeError::Session(crate::SessionError::UnknownAuthTokenAlias)),
+			"{err:?}"
+		);
+
+		let mut r = Decoder::new(&block, Version::Draft14.into());
+		assert_eq!(Parameters::skip_response(&mut r).unwrap(), None);
 		assert!(r.is_empty());
 	}
 }

@@ -29,7 +29,7 @@ subset drops. What a peer actually observes against this implementation:
 - **History is one group.** A `FETCH` returns one group from the cache, or on drafts 14 through 19 the saved prefix of the group a new subscription just joined. A range of groups is refused, as is a draft 20+ `LOCATION_FILTER` that ends at Largest Object rather than an absolute End Location. On draft 20 and later, `FETCH_OK`'s End Location is the requested end, capped at Largest Object: a range holding no objects gets an empty fetch stream, and only a start past Largest Object is refused, with `INVALID_RANGE`. A relay's copy with no upstream subscription can't know Largest Object short of the track's end, so it echoes the requested end instead. JavaScript publishing refuses every `FETCH`. Datagrams are never fetchable. A Rust reader that only fetches learns the track from `TRACK_STATUS` instead of subscribing, so a finished track stays fetchable; draft 17 still subscribes, since its `TRACK_STATUS` answer cannot say whether the track is timed.
 - **Timing.** A track whose `SUBSCRIBE_OK` declares no `TIMESCALE` is untimed, as is every track on drafts 14 through 16. A Rust reader that never subscribed takes the units from `TRACK_STATUS` on draft 18 and later.
 - **Strict SETUP and parameters.** Repeated unknown `SETUP` options, GREASE included, are accepted if well-formed; a repeated known option is rejected. On draft 17 and later, a `GROUP_ORDER` other than Ascending (1) or Descending (2) closes the session. Message parameters follow the negotiated draft's lists: drafts 14 and 15 ignore an unknown or misplaced parameter, draft 16 ignores one defined only for another message but closes the session on an unknown one, and draft 17 and later close it on both.
-- **One credential per session**, carried in `SETUP` and forwarded to the [auth server](/bin/relay/auth#the-contract) unverified. A token attached to an individual request is ignored. An alias reference or a second token closes the session.
+- **One credential per session**, carried in `SETUP` and forwarded to the [auth server](/bin/relay/auth#the-contract) unverified. A second token closes the session. We advertise no token cache, so an alias reference closes it with `UNKNOWN_AUTH_TOKEN_ALIAS`, and a registration on a request with `AUTH_TOKEN_CACHE_OVERFLOW`. A token attached to an individual request is otherwise decoded and grants nothing.
 - **Refused, not fatal.** A legal request this stack does not serve is rejected on its own and the session stays up: `FORWARD=0`, range filters, `TRACK_STATUS` to a JavaScript publisher, `SUBSCRIBE_TRACKS`, and the fetch forms above. On draft 19 and later, and in Rust on drafts 14 through 16, a subscription update may change only priority; any other update ends that subscription.
 - **Datagrams** are a single normal object at object 0, forwarded without renumbering. Anything else is dropped, and a malformed one closes the session. Rust and JavaScript both carry them on every draft.
 - **Priority.** Higher is served first. The IETF default of 128 is this stack's 127, and a track that never sets one is 127.
@@ -49,7 +49,7 @@ See [Encryption](/concept/hang#encryption).
 
 ### Deliberate deviations
 
-These three answers differ from the draft on purpose. They are the
+These four answers differ from the draft on purpose. They are the
 product's model, not bugs, and the relay does not change them.
 
 - **One publisher per path.** A broadcast path names one piece of content, so a
@@ -73,6 +73,11 @@ product's model, not bugs, and the relay does not change them.
   requires an established upstream subscription before `SUBSCRIBE_OK`. From
   moq-lite 05 the track stream answers first, and a missing track is refused
   before `SUBSCRIBE_OK`.
+- **An unknown token alias closes the session.** No alias is ever registered,
+  so a `DELETE` or `USE_ALIAS` token names one that does not exist.
+  [Draft 21 §8.9](https://www.ietf.org/archive/id/draft-ietf-moq-transport-21.html#section-8.9)
+  rejects the message, but `UNKNOWN_AUTH_TOKEN_ALIAS` exists only as a session
+  termination code, so we close the session with it.
 
 ## MSF
 

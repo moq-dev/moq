@@ -1,16 +1,17 @@
-//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-21 section 9.1.4).
+//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-21 section 9.1.4) and
+//! Message Parameter.
 //!
 //! The value is the Token structure of section 8.9: an Alias Type, then fields that
 //! type selects. We advertise no `MAX_AUTH_TOKEN_CACHE_SIZE`, so its default of 0 means
 //! no alias is ever registered and every token arrives by value.
 
 use crate::{
-	Error, SessionError,
+	DecodeError, Error, SessionError,
 	coding::{Decoder, EncodeError, Encoder},
 	setup::Token,
 };
 
-use super::{ParameterBytes, Parameters, Version};
+use super::{Param, ParameterBytes, Parameters, Version};
 
 /// Retire a registered alias.
 const DELETE: u64 = 0x0;
@@ -28,37 +29,65 @@ const USE_VALUE: u64 = 0x3;
 pub fn from_setup(params: &Parameters, version: Version) -> Result<Option<Token>, Error> {
 	params
 		.get_bytes(ParameterBytes::AuthorizationToken)
-		.map(|value| decode(value, version))
+		.map(|value| decode(value, version, true).map_err(Error::Session))
 		.transpose()
 }
 
 /// Present `token` in our SETUP, by value.
 #[cfg_attr(not(test), expect(dead_code))]
 pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> Result<(), EncodeError> {
+	params.set_bytes(ParameterBytes::AuthorizationToken, encode(token, version)?);
+	Ok(())
+}
+
+/// An `AUTHORIZATION TOKEN` parameter on a request message, decoded by the SETUP option's
+/// rules except that a registration overflows the cache instead of falling back to a value.
+///
+/// The parameter may repeat, so a request decodes it as a `Vec` and every instance is checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestToken(pub Token);
+
+impl Param for RequestToken {
+	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		w.bytes(&encode(&self.0, version)?)
+	}
+
+	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let value = r.bytes()?;
+		Ok(Self(decode(value, version, false).map_err(DecodeError::Session)?))
+	}
+}
+
+/// Encode `token` by value.
+fn encode(token: &Token, version: Version) -> Result<Vec<u8>, EncodeError> {
 	let mut value = Vec::new();
 	let mut w = Encoder::new(&mut value, version.into());
 	w.varint(USE_VALUE)?;
 	w.varint(token.kind)?;
 	w.slice(&token.value);
-	params.set_bytes(ParameterBytes::AuthorizationToken, value);
-	Ok(())
+	Ok(value)
 }
 
-/// Decode a Token structure, refusing what a SETUP cannot carry.
-fn decode(buf: &[u8], version: Version) -> Result<Token, Error> {
+/// Decode a Token structure, refusing what this endpoint cannot accept.
+fn decode(buf: &[u8], version: Version, setup: bool) -> Result<Token, SessionError> {
 	// Section 8.9: a structure that cannot be decoded closes with KEY_VALUE_FORMATTING_ERROR.
-	let malformed = |_| Error::Session(SessionError::KeyValueFormatting);
+	let malformed = |_| SessionError::KeyValueFormatting;
 	let mut r = Decoder::new(buf, version.into());
 
 	match r.varint().map_err(malformed)? {
 		USE_VALUE => {}
-		// With no cache, section 9.1.4 treats a registration as a value; the alias is unused.
-		REGISTER => {
+		// With no cache, section 9.1.4 treats a registration in SETUP as a value; the alias is
+		// unused.
+		REGISTER if setup => {
 			r.varint().map_err(malformed)?;
 		}
-		// Section 9.1.4: nothing can have been registered before SETUP.
-		DELETE | USE_ALIAS => return Err(Error::ProtocolViolation),
-		_ => return Err(Error::Session(SessionError::KeyValueFormatting)),
+		// Section 8.9: a registration past the cache size of 0 closes the session.
+		REGISTER => return Err(SessionError::AuthTokenCacheOverflow),
+		// Section 9.1.3: a cache size of 0 prohibits aliases, so none was ever registered.
+		// Section 8.9 rejects the message, but 0x17 is only a session code (section 12.2), so
+		// the session closes; doc/concept/standard.md records the deviation.
+		DELETE | USE_ALIAS => return Err(SessionError::UnknownAuthTokenAlias),
+		_ => return Err(SessionError::KeyValueFormatting),
 	}
 
 	let kind = r.varint().map_err(malformed)?;
@@ -203,15 +232,91 @@ mod tests {
 		}
 	}
 
+	/// A cache size of 0 means no alias was ever registered.
 	#[test]
-	fn an_alias_reference_is_a_protocol_violation() {
+	fn an_alias_reference_is_an_unknown_alias() {
 		for version in VERSIONS {
 			for alias_type in [DELETE, USE_ALIAS] {
 				let params = structure(version, &[alias_type, 7], &[]);
 				let err = from_setup(&params, version).unwrap_err();
 				assert!(
-					matches!(err, Error::ProtocolViolation),
+					matches!(err, Error::Session(SessionError::UnknownAuthTokenAlias)),
 					"{version:?} {alias_type}: {err:?}"
+				);
+			}
+		}
+	}
+
+	/// A request's token as a message parameter value: the length-prefixed structure.
+	fn request(version: Version, fields: &[u64], value: &[u8]) -> Result<RequestToken, DecodeError> {
+		let mut raw = Vec::new();
+		let mut w = Encoder::new(&mut raw, version.into());
+		for field in fields {
+			w.varint(*field).unwrap();
+		}
+		w.slice(value);
+		let mut param = Vec::new();
+		Encoder::new(&mut param, version.into()).bytes(&raw).unwrap();
+
+		let mut r = Decoder::new(&param, version.into());
+		let token = RequestToken::param_decode(&mut r, version)?;
+		assert!(r.is_empty(), "{version:?}");
+		Ok(token)
+	}
+
+	#[test]
+	fn a_request_token_round_trips_on_every_draft() {
+		for version in VERSIONS {
+			let mut param = Vec::new();
+			RequestToken(token())
+				.param_encode(&mut Encoder::new(&mut param, version.into()), version)
+				.unwrap();
+			let mut r = Decoder::new(&param, version.into());
+			assert_eq!(
+				RequestToken::param_decode(&mut r, version).unwrap(),
+				RequestToken(token()),
+				"{version:?}"
+			);
+		}
+	}
+
+	/// Only SETUP falls back to a value: on a request, a registration overflows the cache.
+	#[test]
+	fn a_request_registration_overflows_the_cache() {
+		for version in VERSIONS {
+			let err = request(version, &[REGISTER, 7, token().kind], &token().value).unwrap_err();
+			assert!(
+				matches!(err, DecodeError::Session(SessionError::AuthTokenCacheOverflow)),
+				"{version:?}: {err:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn a_request_alias_reference_is_an_unknown_alias() {
+		for version in VERSIONS {
+			for alias_type in [DELETE, USE_ALIAS] {
+				let err = request(version, &[alias_type, 7], &[]).unwrap_err();
+				assert!(
+					matches!(err, DecodeError::Session(SessionError::UnknownAuthTokenAlias)),
+					"{version:?} {alias_type}: {err:?}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn an_undecodable_request_token_is_a_formatting_error() {
+		for version in VERSIONS {
+			for (fields, why) in [
+				(&[][..], "no alias type"),
+				(&[USE_VALUE][..], "no token type"),
+				(&[0x4, 0][..], "an unknown alias type"),
+			] {
+				let err = request(version, fields, &[]).unwrap_err();
+				assert!(
+					matches!(err, DecodeError::Session(SessionError::KeyValueFormatting)),
+					"{version:?} {why}: {err:?}"
 				);
 			}
 		}

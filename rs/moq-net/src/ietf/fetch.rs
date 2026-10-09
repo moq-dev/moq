@@ -196,14 +196,14 @@ impl Message for Fetch<'_> {
 			let _required_request_id_delta = buf.varint()?;
 		}
 
-		// The token is ignored: the session's grant is what authorizes the request.
+		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout, properties_wanted) =
 			match version {
 				Version::Draft14 => {
 					let subscriber_priority = buf.u8()?;
 					let group_order = GroupOrder::decode(buf, version)?;
 					let fetch_type = FetchType::decode(buf, version)?;
-					Parameters::skip(buf)?;
+					Parameters::skip_request(buf)?;
 					(
 						fetch_type,
 						Some(subscriber_priority),
@@ -216,7 +216,7 @@ impl Message for Fetch<'_> {
 				Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
 					let fetch_type = FetchType::decode(buf, version)?;
 					decode_params!(buf, version,
-						0x03 => _authorization_token: Vec<Opaque>,
+						0x03 => _authorization_token: Vec<super::token::RequestToken>,
 						0x0A => fill_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 						0x20 => subscriber_priority: Option<u8>,
 						0x22 => group_order: Option<GroupOrder>,
@@ -248,7 +248,7 @@ impl Message for Fetch<'_> {
 					let namespace = decode_namespace(buf)?;
 					let track = Cow::Owned(buf.string()?);
 					decode_params!(buf, version,
-						0x03 => _authorization_token: Vec<Opaque>,
+						0x03 => _authorization_token: Vec<super::token::RequestToken>,
 						0x0A => fill_timeout: Option<u64>,
 						0x20 => subscriber_priority: Option<u8>,
 						0x21 => filter: Option<Filter>,
@@ -354,7 +354,7 @@ impl Message for FetchOk {
 				let end_of_track = buf.bool()?;
 				let end_location = Location::decode(buf, version)?;
 				let properties = super::Properties {
-					max_cache_duration: Parameters::skip(buf)?.map(std::time::Duration::from_millis),
+					max_cache_duration: Parameters::skip_response(buf)?.map(std::time::Duration::from_millis),
 					..Default::default()
 				};
 				Ok(Self {

@@ -74,9 +74,9 @@ impl Message for SubscribeNamespace<'_> {
 		}
 		let request_id = RequestId::decode(r, version)?;
 		let namespace = decode_namespace(r)?;
-		// The token is ignored: the session's grant is what authorizes the request.
+		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
-			0x03 => _authorization_token: Vec<super::Opaque>,
+			0x03 => _authorization_token: Vec<super::token::RequestToken>,
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
 
@@ -170,13 +170,13 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 			_ => SubscribeOptions::Namespace,
 		};
 
-		// The token is ignored: the session's grant is what authorizes the request.
+		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		// FORWARD is legal here in draft-15 through draft-17. The value is checked (only
 		// 0 or 1) and then dropped: a namespace subscription has no objects to forward.
 		// Draft-14 has no such parameter, so an unlisted id is ignored. Draft-18 moved
 		// FORWARD onto SUBSCRIBE_TRACKS and closes if it shows up on the new message.
 		decode_params!(r, version,
-			0x03 => _authorization_token: Vec<super::Opaque>,
+			0x03 => _authorization_token: Vec<super::token::RequestToken>,
 			0x10 => _forward: Option<bool> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);

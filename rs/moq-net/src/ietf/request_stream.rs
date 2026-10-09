@@ -112,7 +112,7 @@ impl Update {
 				let _end_group = data.varint()?;
 				let priority = data.u8()?;
 				let forward = data.bool()?;
-				Parameters::skip(data)?;
+				Parameters::skip_request(data)?;
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
@@ -133,7 +133,7 @@ impl Update {
 		}
 		decode_params!(data, version,
 			0x02 => object_timeout: Option<u64>,
-			0x03 => token: Vec<Opaque>,
+			0x03 => token: Vec<super::token::RequestToken>,
 			0x06 => subgroup_timeout: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 			0x10 => forward: Option<bool>,
 			0x20 => priority: Option<u8>,

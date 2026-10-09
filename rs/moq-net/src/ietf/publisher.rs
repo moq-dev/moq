@@ -4169,8 +4169,8 @@ mod serve_tests {
 		)
 		.await;
 
-		// REQUEST_UPDATE, Request ID 2, one AUTHORIZATION TOKEN (0x03) parameter.
-		request.push(&[0x02, 0, 5, 2, 1, 0x03, 1, 0x00]);
+		// REQUEST_UPDATE, Request ID 2, one AUTHORIZATION TOKEN (0x03): USE_VALUE, type 0.
+		request.push(&[0x02, 0, 6, 2, 1, 0x03, 2, 0x03, 0x00]);
 		moq_net_sim::timeout(std::time::Duration::from_secs(10), serve)
 			.await
 			.expect("the failed update ends the subscription")
@@ -4600,6 +4600,31 @@ mod serve_tests {
 
 			let code = refusal_code(&h.log.writes.lock().unwrap()[mark..], version);
 			assert_eq!(code, Some(unauthorized(version)), "{version}: narrowed while resolving");
+		}
+	}
+
+	/// A request's USE_VALUE token decodes but grants nothing yet, so a TRACK_STATUS outside
+	/// the session grant is still refused.
+	#[moq_net_sim::test]
+	async fn a_request_token_does_not_widen_the_grant() {
+		let nothing = crate::auth::Grant {
+			publish: Default::default(),
+			subscribe: Default::default(),
+			expires: None,
+		};
+		for version in [Version::Draft14, Version::Draft22] {
+			let mut h = serve(version);
+			let auth = crate::auth::Handle::new(false);
+			auth.authorize(&nothing);
+			h.publisher = h.publisher.clone().with_auth(auth);
+
+			let mut body = track_status("room", true, version);
+			// Replace the empty parameter block with an AUTHORIZATION TOKEN: USE_VALUE, type 0.
+			assert_eq!(body.pop(), Some(0), "{version}");
+			body.extend([0x01, 0x03, 0x03, 0x03, 0x00, 0xAA]);
+
+			let unauthorized = request::to_code(&Error::Unauthorized, request::Kind::TrackStatus, version);
+			assert_eq!(answer_code(&h, body, version).await, Some(unauthorized), "{version}");
 		}
 	}
 
