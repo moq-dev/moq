@@ -7,8 +7,9 @@ checked against the grant when it is dispatched and held to it for its whole
 life: resolution, reads, and writes. A new request type cannot be served
 without a gate. Per-handler checks already missed standalone FETCH and
 TRACK_STATUS in Rust and the TRACK re-check and setup announces in JS, all
-fixed in #4039. Behavior stays the same: no wire or public API change, and
-the existing auth tests are the regression net.
+fixed in #4039, as were the joining FETCH and the TRACK_STATUS and TRACK_INFO
+answers while they are written. Behavior stays the same: no wire or public API
+change, and the existing auth tests are the regression net.
 
 ## Plan
 
@@ -28,8 +29,7 @@ Today `auth::Gate` is built inside each handler: the IETF publisher's
 SUBSCRIBE, standalone FETCH, and TRACK_STATUS; the IETF subscriber; and the
 lite publisher and subscriber. JS checks `#denied` and `#watch` per handler.
 A joining FETCH carries its subscription's namespace and holds its own gate,
-since the cache it answers from outlives the subscription. JS TRACK_INFO is
-re-checked after it resolves but not while its answer is written.
+since the cache it answers from outlives the subscription.
 
 ## Related
 

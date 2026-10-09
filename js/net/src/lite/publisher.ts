@@ -1143,11 +1143,19 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
-		if (this.#denied(msg.broadcast)) {
+		const hold = new AbortController();
+		// Armed before the first check and held until the answer is acknowledged, so a grant
+		// that shrinks while the answer is blocked on flow control resets it, never sends it.
+		const watch = this.#watch(msg.broadcast, () => {
+			console.debug(`track info revoked: broadcast=${msg.broadcast} track=${msg.track}`);
+			hold.abort();
+			stream.writer.reset(unauthorized(msg.broadcast));
+		});
+		if (watch.revoked()) {
+			watch.dispose();
 			stream.writer.reset(unauthorized(msg.broadcast));
 			return;
 		}
-		const hold = new AbortController();
 		// Watched from the start, so a requester leaving while the reply is still blocked on
 		// flow control lets go of the track too.
 		void stream.reader.done().then(
@@ -1166,8 +1174,7 @@ export class Publisher {
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
-			// The grant may have narrowed while the broadcast and its track resolved.
-			if (this.#denied(msg.broadcast)) throw unauthorized(msg.broadcast);
+			if (watch.revoked()) throw unauthorized(msg.broadcast);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.close();
@@ -1176,6 +1183,8 @@ export class Publisher {
 			hold.abort();
 			console.debug(`track unknown: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.reset(error(err));
+		} finally {
+			watch.dispose();
 		}
 	}
 

@@ -4688,6 +4688,8 @@ mod serve_tests {
 				.await
 				.unwrap_or_else(|_| panic!("{version}: still answering after the grant narrowed"));
 			assert!(matches!(res, Err(Error::Unauthorized)), "{version}: {res:?}");
+			// The sink logs a write only once its gate lets it through, so even the parked
+			// first write never landed.
 			assert!(
 				session.log.writes.lock().unwrap()[mark..].is_empty(),
 				"{version}: the answer went out after the grant narrowed"

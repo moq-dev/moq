@@ -1783,6 +1783,69 @@ test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", as
 	}
 });
 
+// A TRACK_INFO blocked on flow control when the grant shrinks is reset: the rest of the
+// answer never reaches the wire once the stream drains.
+test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const handle = origin.dynamic(Path.from("live"));
+	const requests = handle.requested();
+	const grant = new Signal<Grant | undefined>(grantOf("live"));
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
+		grant,
+		ready: Promise.resolve(),
+	});
+
+	// The first write (the length prefix) parks until released.
+	let release = () => {};
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let parked = () => {};
+	const writing = new Promise<void>((resolve) => {
+		parked = resolve;
+	});
+	const written: Uint8Array[] = [];
+	const stream = new Stream({
+		version: Version.DRAFT_06,
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			async write(chunk) {
+				parked();
+				await blocked;
+				written.push(chunk);
+			},
+		}),
+	});
+
+	const resets = spyOn(Writer.prototype, "reset");
+	const produced = new BroadcastProducer();
+	produced.createTrack("video", { timescale: Timescale.MILLI });
+	try {
+		const serving = publisher.runTrackInfo(new TrackMessage(Path.from("live/cam"), "video"), stream);
+		const request = await requests.next();
+		if (request.done) throw new Error("the handler never saw the request");
+		request.value.accept(produced);
+		await writing;
+
+		grant.set(grantOf("other"));
+		release();
+		await serving;
+
+		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");
+		// Only the in-flight length prefix; the body never followed it.
+		expect(written.length).toBe(1);
+	} finally {
+		resets.mockRestore();
+		produced.close();
+		handle.close();
+		publisher.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});
+
 // The grant watch is armed before the first check, so a shrink that lands while the broadcast
 // is still resolving resets the subscription instead of being missed for good.
 test("lite draft-06: a grant that shrinks while the broadcast resolves resets the subscription", async () => {
