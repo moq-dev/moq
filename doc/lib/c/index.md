@@ -7,11 +7,12 @@ description: moq-c, the stable C ABI over the Rust core
 
 [![GitHub release](https://img.shields.io/github/v/release/moq-dev/moq?filter=moq-c-v*\&label=moq-c)](https://github.com/moq-dev/moq/releases?q=moq-c)
 
-`moq-c` exposes MoQ to C, C++, and any language with a C FFI through a
+`moq-c` exposes MoQ to C and any language with a C FFI through a
 stable ABI: a generated `moq.h`, a static `libmoq.a` that links the whole Rust
-runtime in, and a pkg-config file for its native link dependencies. The
-[OBS plugin](/bin/obs) is built on it. Releases through 0.6 were named
-`libmoq`.
+runtime in, and a pkg-config file for its native link dependencies. Releases
+through 0.6 were named `libmoq`. C++ projects should prefer the
+[C++ package](/lib/cpp/) (`moq-cpp`): the same core as RAII objects and
+futures instead of handles and callbacks.
 
 ## Install
 
