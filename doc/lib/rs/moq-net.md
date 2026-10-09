@@ -17,6 +17,7 @@ What you use it for, beyond what the concept page already describes:
 
 - **An origin outlives the session.** Broadcasts are created on the origin, and a reconnect announces them again. Closing the session does not delete them.
 - **Requests can pin an epoch.** `consumer.request_broadcast(path, Some(epoch))` resolves only through a route announcing that [publisher epoch](/concept/moq-lite#publisher-epochs); `None` takes whichever route wins. The resolved consumer names its epoch in `info().epoch`, pinned or not.
+- **Rank several CDNs.** Dial each with its own subscribe handle, `origin.clone().with_preference(rank)` (lower wins), all on one origin. Requests use the preferred link that has a route and fail over to the next; see [multiple CDNs](/concept/moq-lite#multiple-cdns).
 - **Follow restarts.** `AnnounceEvent::Restart` says another publisher instance now serves the prefix: request the path again. A broadcast already resolved stays on the old instance until dropped or its route goes.
 - **One track per name.** Concurrent subscriptions share one request and producer. A producer that replaces an ended one continues the name's group and datagram sequences; only a new broadcast restarts them.
 - **Publish only while someone is watching.** `demand()` on a track, group, or broadcast says whether a subscriber is attached, which is how capture and transcode skip work nobody asked for. Holding a broadcast consumer is not demand. Holding a track consumer is, so drop one you are not reading. A shared fetch stays up until its last reader leaves.

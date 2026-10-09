@@ -211,6 +211,8 @@ export interface RouteEntry {
 	/** The paths the entry may serve beneath its prefix, when its producer is scoped. */
 	readonly claim?: Path.Patterns;
 	readonly route: Signal<Route>;
+	/** The rank of the link the entry arrived on; see {@link Producer.withPreference}. */
+	readonly preference: number;
 	readonly originated: boolean;
 	readonly server?: ServeState;
 }
@@ -218,6 +220,7 @@ export interface RouteEntry {
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
 interface Candidate extends Advertised {
 	readonly exact: boolean;
+	readonly preference: number;
 }
 
 /**
@@ -226,7 +229,7 @@ interface Candidate extends Advertised {
  */
 function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): number {
 	const order =
-		compareRoutes(a.route, b.route) ||
+		compareRoutes(a.route, b.route, a.preference, b.preference) ||
 		Number(b.exact) - Number(a.exact) ||
 		a.route.hops.length - b.route.hops.length;
 	if (order !== 0) return order;
@@ -235,15 +238,17 @@ function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): numb
 	return ha < hb ? -1 : ha > hb ? 1 : 0;
 }
 
-/** Orders two routes by preference: the newest epoch with none last, then identified before
- * anonymous, then lower static cost. */
-function compareRoutes(a: Route, b: Route): number {
+/** Orders two routes by preference: the newest epoch with none last, then the lower link
+ * preference, then identified before anonymous, then lower static cost. */
+function compareRoutes(a: Route, b: Route, aPreference: number, bPreference: number): number {
 	if (a.epoch !== b.epoch) {
 		// An older epoch is a publisher that was replaced.
 		if (a.epoch === undefined) return 1;
 		if (b.epoch === undefined) return -1;
 		return a.epoch > b.epoch ? -1 : 1;
 	}
+	// Links to different operators rank by preference, so their metrics are never compared.
+	if (aPreference !== bPreference) return aPreference - bPreference;
 	const anonymous = Number(isAnonymous(a)) - Number(isAnonymous(b));
 	if (anonymous !== 0) return anonymous;
 	if (a.cost !== b.cost) return a.cost < b.cost ? -1 : 1;
@@ -269,7 +274,7 @@ function preferredEntry(
 		}
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		let order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+		let order = compareRoutes(a, b, entry.preference, best.preference) || a.hops.length - b.hops.length;
 		// Hashed only on a tie, so the common single-route prefix never pays for it.
 		if (order === 0) {
 			const ha = spreadHash(path, a.hops);
@@ -463,13 +468,24 @@ class OriginState {
 			const list: Candidate[] = [];
 			for (const entry of entries) {
 				if (skip?.(entry)) continue;
-				list.push({ identity: entry.identity, route: entry.route.peek(), claim: entry.claim, exact: false });
+				list.push({
+					identity: entry.identity,
+					route: entry.route.peek(),
+					claim: entry.claim,
+					exact: false,
+					preference: entry.preference,
+				});
 			}
 			if (list.length > 0) out.set(path, list);
 		}
 		const advertised = this.advertisedLocal.peek();
 		for (const [path, front] of this.local.peek() ?? []) {
-			const local = { identity: front, route: advertised?.get(path) ?? Route.default, exact: true };
+			const local = {
+				identity: front,
+				route: advertised?.get(path) ?? Route.default,
+				exact: true,
+				preference: 0,
+			};
 			const list = out.get(path);
 			if (list) list.push(local);
 			else out.set(path, [local]);
@@ -776,7 +792,7 @@ class OriginState {
 		const local = this.advertisedLocal.peek()?.get(path);
 		if (!local || !this.local.peek()?.has(path)) return false;
 		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
-		return compareRoutes(local, entry.route.peek()) <= 0;
+		return compareRoutes(local, entry.route.peek(), 0, entry.preference) <= 0;
 	}
 
 	/**
@@ -885,6 +901,7 @@ export interface RequestOptions {
 export class Producer implements Table {
 	#state = new OriginState();
 	#scope = Scope.all;
+	#preference = 0;
 	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
 
 	// The reader backing the passthroughs, so holding a Producer never requires the
@@ -922,7 +939,31 @@ export class Producer implements Table {
 		const producer = new Producer();
 		producer.#state = this.#state;
 		producer.#scope = scope;
+		producer.#preference = this.#preference;
 		producer.#reader = makeConsumer(this.#state, scope);
+		return producer;
+	}
+
+	/**
+	 * Rank the link this handle (and any handle derived from it) is given to: lower wins, and
+	 * every handle starts at 0.
+	 *
+	 * Applies to what {@link dynamic} advertises, which is how a session lands its peer's
+	 * routes, not to a broadcast published here. A route with a newer epoch still wins, but
+	 * among the rest preference decides before cost, so links to different operators rank by
+	 * this instead of comparing their metrics. Hand each CDN's session its own rank to use the
+	 * primary while it has a route and fail over to the next. Mirrors
+	 * `origin::Producer::with_preference` in rs/moq-net.
+	 */
+	withPreference(preference: number): Producer {
+		if (!Number.isInteger(preference) || preference < 0 || preference > 0xffff_ffff) {
+			throw new RangeError("preference must be a u32");
+		}
+		const producer = new Producer();
+		producer.#state = this.#state;
+		producer.#scope = this.#scope;
+		producer.#preference = preference;
+		producer.#reader = makeConsumer(this.#state, this.#scope);
 		return producer;
 	}
 
@@ -1049,6 +1090,7 @@ export class Producer implements Table {
 			scope: this.#scope,
 			claim: this.#scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)])),
 			route: new Signal(route),
+			preference: this.#preference,
 			originated,
 			server,
 		};
