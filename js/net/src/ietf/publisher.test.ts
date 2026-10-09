@@ -1821,6 +1821,76 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 });
 
 /**
+ * Relative 1 floors demand at the current group. It is not `live` (that asks a relay for
+ * the retained window) and not an unfiltered start at group 0.
+ */
+test("draft-20: relative 1 floors demand at the current group", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	for (let i = 0; i < 3; i++) writeGroup(track, 1);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "relative", groups: 1n },
+		}),
+	);
+
+	try {
+		expect(track.subscription.peek()).toMatchObject({
+			live: false,
+			groups: { start: { included: 2 } },
+		});
+
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the current group was never served");
+		expect(await readGroup(served)).toEqual({
+			sequence: 2,
+			firstObject: true,
+			endOfGroup: true,
+			objects: [{ id: 0, payload: "2.0" }],
+		});
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * Draft-20 unfiltered stays a floor at group 0, the retained cache, not `live`.
+ */
+test("draft-20: an unfiltered subscription floors demand at the origin", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 1);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "unfiltered" },
+		}),
+	);
+
+	try {
+		expect(track.subscription.peek()).toMatchObject({
+			live: false,
+			groups: { start: { included: 0 } },
+		});
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/**
  * The draft's own current-group join: a Next Object subscription for the live tail, plus a
  * StartGroup=1 fill for the head already published. The two must meet exactly, so the head
  * arrives once, on the fetch stream, and the subscription picks up at the next object.

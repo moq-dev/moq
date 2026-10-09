@@ -2736,14 +2736,33 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 				{
 					return Poll::Ready(Step::Info(name.clone(), asked.source, result));
 				}
-				// The query's subscription goes with the last reader.
-				if io.held.is_some()
+				// The query's subscription goes with the last reader. While readers remain
+				// it tracks their aggregate: the query opened it with the demand at that
+				// moment, and a later narrowing has to reach the source. A stale `live`
+				// there keeps the aggregate asking for the retained window.
+				let held_demand = if io.held.is_some()
 					&& let Some(accepted) = &mut io.accepted
 				{
-					while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
-					if accepted.subscription().is_none() {
-						io.held = None;
+					let mut changed = false;
+					while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {
+						changed = true;
 					}
+					match accepted.subscription() {
+						None => Some(None),
+						Some(demand) if changed => Some(Some(demand)),
+						Some(_) => None,
+					}
+				} else {
+					None
+				};
+				match held_demand {
+					Some(None) => io.held = None,
+					Some(Some(demand)) => {
+						if let Some(held) = &mut io.held {
+							let _ = held.update(demand);
+						}
+					}
+					None => {}
 				}
 				// Settled once the copy closes: a group still open below a declared end is
 				// owed until then, and a session closing first means it never came.

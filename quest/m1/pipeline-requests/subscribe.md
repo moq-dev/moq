@@ -94,6 +94,5 @@ blocks the Related quests below; whichever lands second rebases.
 ## Related
 
 - [Pipelined first FETCH](/quest/m1/pipeline-requests/fetch.md) - the same change for fetch-only readers
-- [lite-07 Live flag](/quest/m1/lite-live.md) - reshapes the same SUBSCRIBE fields
 - [One max_age meaning](/quest/m1/cache-max-age.md) - the staleness rule that makes the wire clamp redundant
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - replaces the SUBSCRIBE floor with ranges

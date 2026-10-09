@@ -401,17 +401,19 @@ export class Publisher {
 
 			// The wire request tells an upstream what we need; the cursor is what actually
 			// trims this subscriber, since the producer fans every cached group out to every
-			// sink regardless. The current group (`relative` 1) is moq-lite's live edge, and
-			// so is an absent start (a relative filter on an empty track); every other
-			// resolved start is a floor. The range's end is the inclusive last group; the
-			// model's `endGroup` is exclusive.
-			const live = !range.start || (msg.filter.kind === "relative" && msg.filter.groups === 1n);
+			// sink regardless. A resolved start is a floor, including relative 1 at the
+			// current group. That is not `live` (this serving budget would ask a relay for
+			// the retained window) and not an unfiltered {0, 0}. An absent start, a relative
+			// filter before any group exists, is still the live edge: there is no group to
+			// floor at yet. The range's end is the inclusive last group; the model's
+			// `endGroup` is exclusive.
+			const live = !range.start;
 			track.update({
 				priority,
 				maxDelay: Milli(Varint.MAX_U53),
 				live,
 				groups: {
-					start: range.start && !live ? { included: Number(range.start.group) } : undefined,
+					start: range.start ? { included: Number(range.start.group) } : undefined,
 					end: range.end ? { included: Number(range.end.group) } : undefined,
 				},
 			});
