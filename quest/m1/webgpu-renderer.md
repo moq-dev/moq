@@ -43,9 +43,13 @@ added this quest). Re-planned from issue #703, whose stub quest the
 - Selection happens once, before the renderer touches the canvas, so a
   canvas only ever gets the one context it will keep. WebGPU counts as
   supported when `navigator.gpu` exists, `requestAdapter()` returns an
-  adapter that is not a software fallback (`adapter.info.isFallbackAdapter`),
+  adapter that is not a software fallback (`adapter.info.isFallbackAdapter`,
+  or the deprecated `adapter.isFallbackAdapter` on older Chrome),
   `requestDevice()` succeeds, and a 1x1 `VideoFrame` imports through
-  `importExternalTexture` (a try/catch probe; Firefox Android lacks it).
+  `importExternalTexture` with neither an exception nor a validation error
+  (checked with a `"validation"` error scope, since an invalid import
+  returns a texture instead of throwing; Firefox Android lacks it). The
+  renderer keeps the probe's device rather than requesting a second one.
   Only then does the renderer call `getContext("webgpu")`, else
   `getContext("2d")`. There is no runtime fallback: a renderer never switches
   paths on a canvas it already drew to. Decided 2026-10-08. Rejected: WebGPU
