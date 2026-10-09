@@ -1336,27 +1336,14 @@ where
 		}
 	}
 
-	/// Answer a FETCH within one group: a standalone range of the named track, or a
-	/// joining FETCH's prefix of its subscription's group.
+	/// Answer a FETCH within one group: a standalone or filtered range of the named track,
+	/// or a joining FETCH's prefix of its subscription's group.
 	///
 	/// The answer is buffered before replying: FETCH_OK names where the response ends,
 	/// which a range running past the track only learns by reading it, and a refusal can
 	/// still replace it until then.
 	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let priority = super::priority::from_wire(msg.subscriber_priority);
-
-		// Draft-20 moved the range into LOCATION_FILTER, which decodes to
-		// `FetchType::Filtered` but is not served yet.
-		if Filter::is_draft20(self.version) {
-			return self
-				.reject_fetch(
-					stream,
-					msg.request_id,
-					&Error::Unsupported,
-					"FETCH not supported on draft-20",
-				)
-				.await;
-		}
 
 		// Serving a Range Filter unfiltered would deliver objects the subscriber excluded.
 		if msg.range_filters {
@@ -1383,7 +1370,46 @@ where
 				.await;
 		}
 
-		let (track, start, end, timescale, joined) = match msg.fetch_type {
+		// Draft-20's LOCATION_FILTER is answered as the standalone range it spells.
+		let fetch_type = match msg.fetch_type {
+			FetchType::Filtered {
+				namespace,
+				track,
+				filter: Filter::Absolute { start, end: Some(end) },
+			} => {
+				// The filter's End Object is inclusive, where a standalone one is the last
+				// object plus one. Without one, both include the whole End Group.
+				let Some(object) = end.object.map_or(Some(0), |object| object.checked_add(1)) else {
+					return self
+						.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "End Object overflows")
+						.await;
+				};
+				FetchType::Standalone {
+					namespace,
+					track,
+					start,
+					end: Location {
+						group: end.group,
+						object,
+					},
+				}
+			}
+			// Every other filter ends at Largest Object, so the one-group rule below cannot
+			// check it without resolving that first.
+			FetchType::Filtered { .. } => {
+				return self
+					.reject_fetch(
+						stream,
+						msg.request_id,
+						&Error::Unsupported,
+						"FETCH relative to Largest Object not supported",
+					)
+					.await;
+			}
+			other => other,
+		};
+
+		let (track, start, end, timescale, joined) = match fetch_type {
 			FetchType::Standalone {
 				namespace,
 				track,
@@ -1425,7 +1451,7 @@ where
 					Ok(joined) => joined,
 					Err((err, reason)) => return self.reject_fetch(stream, msg.request_id, &err, reason).await,
 				};
-				let start = match msg.fetch_type {
+				let start = match fetch_type {
 					FetchType::RelativeJoining { group_offset, .. } => end.group.saturating_sub(group_offset),
 					FetchType::AbsoluteJoining { group_id, .. } if group_id <= end.group => group_id,
 					_ => {
@@ -1450,7 +1476,7 @@ where
 					true,
 				)
 			}
-			// Refused above: only draft-20 decodes this form.
+			// Rewritten as standalone or refused above.
 			FetchType::Filtered { .. } => {
 				return self
 					.reject_fetch(stream, msg.request_id, &Error::Unsupported, "not supported")
@@ -1495,6 +1521,37 @@ where
 			Some(Err(err)) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 			None => return Ok(()),
 		};
+		let draft20 = Filter::is_draft20(self.version);
+		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
+		// Draft-20 caps the response at Largest Object, and refuses a start past it (section
+		// 10.13). Both only bite when Largest Object is in the fetched group or behind it, so
+		// this is its Object ID there, or `Some(None)` when the group holds nothing at or
+		// past it. The cache knows it at the track's end, or when a live feed's newest object
+		// it can name is in or behind this group. Otherwise (a relay's copy with no upstream
+		// subscription, or a newest group it cannot read) it neither caps nor refuses: the
+		// read waits out an unfinished group, so echoing the requested end over a finished
+		// one only says objects it never held do not exist.
+		let largest = match end_of_track {
+			true => Some(group.end().checked_sub(1)),
+			false if !joined && track.is_live() => match live_edge(&track).largest {
+				Some(largest) if largest.group == group.sequence => Some(Some(largest.object)),
+				// Behind a group that holds nothing: every start in it is past Largest Object.
+				Some(largest) if largest.group < group.sequence && group.frames.is_empty() => Some(None),
+				_ => None,
+			},
+			false => None,
+		};
+		let past_largest = largest.is_some_and(|largest| largest.is_none_or(|object| start.object > object));
+		if draft20 && past_largest {
+			return self
+				.reject_fetch(
+					stream,
+					msg.request_id,
+					&Error::InvalidRange,
+					"start past Largest Object",
+				)
+				.await;
+		}
 
 		// A standalone FETCH keeps each object's Timestamp, in the track's own units, as a
 		// subscriber learned them from SUBSCRIBE_OK. FETCH_OK doesn't declare them yet.
@@ -1515,7 +1572,6 @@ where
 			}
 			(end, false)
 		} else {
-			let end_of_track = group.complete && track.final_sequence() == group.sequence.checked_add(1);
 			// A group that ends the track ends the response at its last object; otherwise
 			// the response ends where it was asked to.
 			match end_of_track {
@@ -1528,6 +1584,27 @@ where
 				),
 				false => (end, false),
 			}
+		};
+		// Draft-20's End Location is inclusive: the requested end, capped at Largest Object
+		// (section 10.14). Objects missing before it do not exist. A whole-group request has
+		// no End Object to report, so it covers what the finished group holds, and at least
+		// the start an empty answer covered.
+		let end_location = match draft20 {
+			true => {
+				let requested = match until {
+					Some(until) => until - 1,
+					None => group.end().saturating_sub(1).max(start.object),
+				};
+				let object = match largest.flatten() {
+					Some(largest) => requested.min(largest),
+					None => requested,
+				};
+				Location {
+					group: group.sequence,
+					object,
+				}
+			}
+			false => end_location,
 		};
 
 		// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
@@ -4919,32 +4996,28 @@ mod serve_tests {
 		}
 	}
 
-	#[moq_net_sim::test]
-	async fn a_joining_fetch_is_not_supported_on_draft20() {
-		let h = serve(Version::Draft20);
-		let mut buf = bytes::Bytes::from(joining_fetch(&h, 0).await.unwrap());
-		assert_eq!(
-			crate::coding::decode_varint(&mut buf, Version::Draft20).unwrap(),
-			ietf::RequestError::ID
-		);
-		assert_eq!(
-			crate::coding::decode_buf(&mut buf, Version::Draft20, ietf::RequestError::decode)
-				.unwrap()
-				.error_code,
-			0x3
-		);
-		assert!(buf.is_empty());
-	}
-
-	/// Every draft that carries a standalone FETCH.
-	const FETCH_DRAFTS: [Version; 6] = [
+	/// Every draft, each carrying a standalone FETCH or draft-20's filtered one.
+	const FETCH_DRAFTS: [Version; 9] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
 		Version::Draft19,
+		Version::Draft20,
+		Version::Draft21,
+		Version::Draft22,
 	];
+
+	/// FETCH_OK's End Location for a response whose last object is `last`: one past it
+	/// before draft 20, and the object itself from then on.
+	fn end_location(version: Version, group: u64, last: u64) -> Location {
+		let object = match Filter::is_draft20(version) {
+			true => last,
+			false => last + 1,
+		};
+		Location { group, object }
+	}
 
 	/// Groups `0..count`, each holding `g-0` and `g-1`, skipping `hole`.
 	fn publish_pairs(h: &mut Serve, count: u64, hole: Option<u64>) {
@@ -4960,7 +5033,36 @@ mod serve_tests {
 	}
 
 	/// Run a standalone FETCH of `room/video`, returning what the peer reads back.
+	///
+	/// `end` is spelled as drafts 14 to 19 do: the last object plus one, or 0 for the whole
+	/// End Group. From draft 20 the same range goes out as an inclusive LOCATION_FILTER.
 	async fn standalone_fetch(h: &Serve, start: Location, end: Location, group_order: GroupOrder) -> bytes::Bytes {
+		let namespace = crate::Path::new("room");
+		let track = "video".into();
+		let fetch_type = match Filter::is_draft20(h.publisher.version) {
+			true => FetchType::Filtered {
+				namespace,
+				track,
+				filter: Filter::Absolute {
+					start,
+					end: Some(EndLocation {
+						group: end.group,
+						object: end.object.checked_sub(1),
+					}),
+				},
+			},
+			false => FetchType::Standalone {
+				namespace,
+				track,
+				start,
+				end,
+			},
+		};
+		run_fetch(h, fetch_type, group_order).await
+	}
+
+	/// Run a FETCH, returning what the peer reads back.
+	async fn run_fetch(h: &Serve, fetch_type: FetchType<'static>, group_order: GroupOrder) -> bytes::Bytes {
 		let version = h.publisher.version;
 		let mark = h.log.writes.lock().unwrap().len();
 		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
@@ -4972,12 +5074,7 @@ mod serve_tests {
 					request_id: FETCH_ID,
 					subscriber_priority: 128,
 					group_order,
-					fetch_type: FetchType::Standalone {
-						namespace: crate::Path::new("room"),
-						track: "video".into(),
-						start,
-						end,
-					},
+					fetch_type,
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
@@ -5058,15 +5155,231 @@ mod serve_tests {
 			)
 			.await;
 			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(ok.end_location, Location { group: 3, object: 0 }, "{version}");
+			let end = match Filter::is_draft20(version) {
+				true => Location { group: 2, object: 1 },
+				false => Location { group: 3, object: 0 },
+			};
+			assert_eq!(ok.end_location, end, "{version}");
 			assert!(!ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([2]), "{version}");
 			assert!(h.log.resets().is_empty(), "{version}");
 		}
 	}
 
-	/// The last group of a finished track ends the response one past its last object,
-	/// with End of Track set.
+	/// A range ending inside its group stops at its End Object, which draft 20 counts
+	/// inclusively and older drafts count as one past.
+	#[moq_net_sim::test]
+	async fn a_standalone_fetch_stops_at_its_end_object() {
+		for version in FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 5, None);
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 2, object: 0 },
+				Location { group: 2, object: 1 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, end_location(version, 2, 0), "{version}");
+			assert!(!ok.end_of_track, "{version}");
+			assert_eq!(objects, pairs([2])[..1].to_vec(), "{version}");
+		}
+	}
+
+	/// A group holding no objects at or past the start is answered empty, on draft 20 with
+	/// an End Location covering the range asked for (section 10.13). The whole group covers
+	/// at least its start.
+	#[moq_net_sim::test]
+	async fn a_standalone_fetch_past_the_last_object_is_empty() {
+		for version in FETCH_DRAFTS {
+			for (end, covered) in [(0, 2), (6, 5)] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 5, None);
+				settle().await;
+
+				let buf = standalone_fetch(
+					&h,
+					Location { group: 2, object: 2 },
+					Location { group: 2, object: end },
+					GroupOrder::Ascending,
+				)
+				.await;
+				let (ok, objects) = fetch_answer(buf, version);
+				assert_eq!(objects, Vec::new(), "{version} end={end}");
+				if Filter::is_draft20(version) {
+					assert_eq!(
+						ok.end_location,
+						Location {
+							group: 2,
+							object: covered
+						},
+						"{version}"
+					);
+				}
+			}
+		}
+	}
+
+	/// How much a draft-20 publisher knows of Largest Object.
+	#[derive(Clone, Copy, Debug)]
+	enum Largest {
+		/// The track is finished: its last object.
+		Finished,
+		/// A live feed: the newest object, here behind a newer group with no objects yet.
+		Live,
+		/// A relay's copy with no upstream subscription: unknown.
+		Idle,
+		/// An idle copy that learned a later end of track: still unknown.
+		IdleEnded,
+		/// A live feed whose newest group is a datagram the cache cannot read: unknown.
+		Datagram,
+		/// A live feed whose newest group was aborted mid-write: unknown.
+		Aborted,
+	}
+
+	/// Groups 0 to 4 of two objects each, with Largest Object known as `largest` says.
+	fn publish_largest(h: &mut Serve, largest: Largest) -> Option<group::Producer> {
+		publish_pairs(h, 5, None);
+		match largest {
+			Largest::Finished => {
+				h.track.finish().unwrap();
+				None
+			}
+			Largest::Live => Some(h.track.create_group(group::Info { sequence: 5 }).unwrap()),
+			Largest::Idle => {
+				h.track.set_idle();
+				None
+			}
+			Largest::IdleEnded => {
+				h.track.set_idle();
+				h.track.finish_at(10).unwrap();
+				None
+			}
+			Largest::Datagram => {
+				h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
+				None
+			}
+			Largest::Aborted => {
+				let mut newer = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+				newer.write_frame(timestamp(), b"5-0".to_vec()).unwrap();
+				newer.abort(Error::Cancel).unwrap();
+				None
+			}
+		}
+	}
+
+	/// On draft 20, a start past Largest Object is refused INVALID_RANGE (section 10.13),
+	/// wherever the publisher knows it. Where it does not, it answers empty.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_past_the_largest_object_is_refused() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			for largest in [
+				Largest::Finished,
+				Largest::Live,
+				Largest::Idle,
+				Largest::IdleEnded,
+				Largest::Datagram,
+				Largest::Aborted,
+			] {
+				let mut h = serve(version);
+				let _newer = publish_largest(&mut h, largest);
+				settle().await;
+
+				let buf = standalone_fetch(
+					&h,
+					Location { group: 4, object: 2 },
+					Location { group: 4, object: 6 },
+					GroupOrder::Ascending,
+				)
+				.await;
+				match largest {
+					Largest::Finished | Largest::Live => assert_eq!(
+						fetch_refusal(buf, version),
+						invalid_range(version),
+						"{version} {largest:?}"
+					),
+					_ => {
+						let (ok, objects) = fetch_answer(buf, version);
+						assert_eq!(
+							ok.end_location,
+							Location { group: 4, object: 5 },
+							"{version} {largest:?}"
+						);
+						assert_eq!(objects, Vec::new(), "{version} {largest:?}");
+					}
+				}
+			}
+		}
+	}
+
+	/// On a live feed whose newest group finished with no objects, Largest Object sits in the
+	/// group before it, so a draft-20 FETCH of the empty group starts past it.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_of_an_empty_newest_group_is_refused() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 5, None);
+			let empty = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+			empty.finish().unwrap();
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 5, object: 0 },
+				Location { group: 5, object: 4 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			assert_eq!(fetch_refusal(buf, version), invalid_range(version), "{version}");
+		}
+	}
+
+	/// On draft 20, an End Object past a finished group's last object is still the End
+	/// Location reported (section 10.14), unless the group holds Largest Object, which caps
+	/// it. A relay's idle copy does not know Largest Object, so it echoes the request.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_past_a_group_end_reports_the_requested_end() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			for (group, largest, reported) in [
+				(2, Largest::Live, 7),
+				(4, Largest::Live, 1),
+				(4, Largest::Finished, 1),
+				(4, Largest::Idle, 7),
+				(4, Largest::IdleEnded, 7),
+				(4, Largest::Datagram, 7),
+				(4, Largest::Aborted, 7),
+			] {
+				let mut h = serve(version);
+				let _newer = publish_largest(&mut h, largest);
+				settle().await;
+
+				let buf = standalone_fetch(
+					&h,
+					Location { group, object: 0 },
+					Location { group, object: 8 },
+					GroupOrder::Ascending,
+				)
+				.await;
+				let (ok, objects) = fetch_answer(buf, version);
+				assert_eq!(
+					ok.end_location,
+					Location {
+						group,
+						object: reported
+					},
+					"{version} group {group} {largest:?}"
+				);
+				assert_eq!(ok.end_of_track, matches!(largest, Largest::Finished), "{version}");
+				assert_eq!(objects, pairs([group]), "{version}");
+			}
+		}
+	}
+
+	/// The last group of a finished track ends the response at its last object, with End
+	/// of Track set.
 	#[moq_net_sim::test]
 	async fn a_standalone_fetch_of_the_last_group_reports_the_end_of_track() {
 		for version in FETCH_DRAFTS {
@@ -5083,28 +5396,38 @@ mod serve_tests {
 			)
 			.await;
 			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(ok.end_location, Location { group: 4, object: 2 }, "{version}");
+			assert_eq!(ok.end_location, end_location(version, 4, 1), "{version}");
 			assert!(ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([4])[1..].to_vec(), "{version}");
 		}
 	}
 
-	/// Draft-20 carries the range in LOCATION_FILTER, which is not read yet.
+	/// A draft-20 filter bounded by Largest Object is refused, even when that bound would
+	/// land in the start group: the one-group rule needs it resolved first.
 	#[moq_net_sim::test]
-	async fn a_draft20_fetch_is_refused() {
+	async fn a_draft20_fetch_relative_to_largest_object_is_refused() {
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
-			let mut h = serve(version);
-			publish_pairs(&mut h, 3, None);
-			settle().await;
+			for filter in [
+				Filter::Unfiltered,
+				Filter::NextObject,
+				Filter::Relative(1),
+				Filter::Absolute {
+					start: Location { group: 2, object: 0 },
+					end: None,
+				},
+			] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 3, None);
+				settle().await;
 
-			let buf = standalone_fetch(
-				&h,
-				Location { group: 1, object: 0 },
-				Location { group: 1, object: 0 },
-				GroupOrder::Ascending,
-			)
-			.await;
-			assert_eq!(fetch_refusal(buf, version), 0x3, "{version}");
+				let fetch_type = FetchType::Filtered {
+					namespace: crate::Path::new("room"),
+					track: "video".into(),
+					filter,
+				};
+				let buf = run_fetch(&h, fetch_type, GroupOrder::Ascending).await;
+				assert_eq!(fetch_refusal(buf, version), 0x3, "{version}: {filter:?}");
+			}
 		}
 	}
 

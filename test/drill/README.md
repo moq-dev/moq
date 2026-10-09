@@ -4,7 +4,7 @@ Media flowing on a healthy loopback proves delivery and nothing else. These
 drills disrupt a live session through a real relay over real QUIC and check what
 happens next: cancellation, a relay dying mid-group, a publisher coming back
 under a name it already used, and bursts of small groups crossing a two-relay
-cluster, with its peer link steady or flapping.
+cluster, with its peer link steady, flapping, or on moq-transport.
 
 The drills themselves are ordinary Rust integration tests in
 `rs/moq-relay/tests/drills.rs`, so `just check` already runs them whenever
@@ -31,6 +31,7 @@ checks that what the fault owned was released.
 | `interrupted_publisher_republishes_new_content` | A publisher vanishes with no finish and no unannounce, then a new one publishes the same name | the withdrawal of the dead publisher's broadcast | the name stops being announced, and the republished name serves the new publisher's content rather than the dead one's cache |
 | `bursts_cross_a_cluster` | Bursts of one-frame groups cross from an origin relay to a clustered edge relay; the subscriber reads newest-only and FETCHes every group it misses | how many groups missed the live subscription, which live groups were reset, and the slowest group's latency | every group arrives, live or by FETCH, within 10s of being written; a lost group fails by name (FETCH failed, FETCH unanswered, live group stalled), and the newest group comes live |
 | `bursts_cross_a_flapping_peer` | The same bursts, with the peer link cut as the second burst is written and restored once the edge withdraws the route | how long the link was down before the withdrawal, and the reads and FETCHes the flap failed | the route comes back and every group still arrives within 10s of being written, or of the route's return when it arrives after it; only a failure the flap caused is retried, on the restored route, so a hang on the dead one past the relays' idle timeout or a withdrawal with the link up still fails |
+| `bursts_cross_a_transport_peer` | The same bursts, with the relays peering over `moq-transport-19`, so the edge recovers gaps with IETF FETCHes | as `bursts_cross_a_cluster` | as `bursts_cross_a_cluster`: a group the origin still holds is served, never refused |
 | `no_publisher_never_delivers` | none: the negative control | - | with nothing publishing, nothing is announced and no broadcast resolves |
 
 A moq publisher is never blocked by a slow reader: `write_frame` is synchronous
@@ -179,7 +180,7 @@ drill fails, these are where the mechanism is pinned.
 | cancel under backpressure | `kio::loom::{last_consumer_wakes_unused, consumer_churn_resolves_unused, first_consumer_wakes_used}`, `moq-net tests/loom.rs::{subscriber_wakes_parked_demand, concurrent_tracks_drain_a_shared_pool}` | `lite` (`SUBSCRIBE` / `SUBSCRIBE_UPDATE` encodings) |
 | relay killed mid-group | `kio::loom::{racing_last_producer_drops_still_close, queue_close_wakes_a_parked_pop, write_wakes_a_parked_consumer}`, `moq-net tests/loom.rs::publisher_drop_resolves_a_parked_subscriber` | `lite` and `ietf` (a truncated stream must fail to decode, never decode into something else), regression `ietf/subscribe-absolute-filter` |
 | interrupted publisher republishes | `kio::loom::{write_wakes_a_parked_consumer, weak_upgrade_never_resurrects_a_closed_channel}`, `moq-net tests/loom.rs::back_to_back_groups_arrive_in_order` | `path` (the broadcast name is a path: normalization, prefixes, and the wire round-trip) |
-| bursts across a cluster, steady or flapping | `moq-net tests/loom.rs::{a_fetch_never_joins_a_withdrawn_attempt, back_to_back_groups_arrive_in_order}` | `lite` (`FETCH` encodings) |
+| bursts across a cluster, steady, flapping, or on moq-transport | `moq-net tests/loom.rs::{a_fetch_never_joins_a_withdrawn_attempt, back_to_back_groups_arrive_in_order}` | `lite` (`FETCH` encodings) |
 
 Run them with `just rs loom` and `just rs fuzz <target>`. The committed fuzz
 findings under `rs/moq-net/fuzz/regressions/` replay on stable as part of

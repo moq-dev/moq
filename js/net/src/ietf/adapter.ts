@@ -83,6 +83,7 @@ const Route = {
 	MaxRequestId: 5, // Update flow control
 	Ignore: 6, // Connection-level, no routing
 	GoAway: 7, // Terminal
+	Update: 8, // Spend the update's own request ID, then follow up on its target
 } as const;
 type Route = (typeof Route)[keyof typeof Route];
 
@@ -166,6 +167,9 @@ export class ControlStreamAdapter implements Session {
 		client: boolean,
 		window: bigint = REQUEST_WINDOW,
 	) {
+		// Routing assumes the shared control stream's layout, such as an update's two ids.
+		if (version >= Version.DRAFT_17)
+			throw new Error(`control stream adapter is for drafts 14 to 16, not ${version}`);
 		this.#quic = quic;
 		this.#reader = controlStream.reader;
 		this.#reader.version = version;
@@ -329,6 +333,12 @@ export class ControlStreamAdapter implements Session {
 					continue;
 				}
 
+				if (classified.route === Route.Update) {
+					this.#admitUpdate(classified.ownRequestId);
+					this.#pushMessage(classified.requestId, typeId, size, body);
+					continue;
+				}
+
 				const { route, requestId } = classified;
 
 				switch (route) {
@@ -347,9 +357,6 @@ export class ControlStreamAdapter implements Session {
 						this.#closeStream(requestId);
 						break;
 					case Route.FollowUp:
-						// REQUEST_UPDATE consumes its own request ID. One that names an open
-						// request is not a new ID; the routing quest owns where the bytes go.
-						if (typeId === 0x02) this.#admitUpdate(requestId);
 						this.#pushMessage(requestId, typeId, size, body);
 						break;
 					case Route.MaxRequestId:
@@ -489,13 +496,12 @@ export class ControlStreamAdapter implements Session {
 	}
 
 	/**
-	 * An update spends a request ID and does not keep a stream, so the slot it took
-	 * is retired immediately. Naming an open request does not spend one.
+	 * An update spends its own request ID like any request but keeps no stream, so the
+	 * slot is retired at once. The ID is spent even when the target is already gone.
 	 */
 	#admitUpdate(requestId: bigint): void {
-		if (this.#open.has(requestId)) return;
-		this.#checkPeer(requestId);
-		this.#checkLive();
+		this.#admitHeld(requestId);
+		this.#open.delete(requestId);
 		this.#retire();
 	}
 
@@ -686,7 +692,11 @@ export class ControlStreamAdapter implements Session {
 	async #classify(
 		typeId: number,
 		body: Uint8Array,
-	): Promise<{ route: typeof Route.GoAway } | { route: Exclude<Route, typeof Route.GoAway>; requestId: bigint }> {
+	): Promise<
+		| { route: typeof Route.GoAway }
+		| { route: typeof Route.Update; ownRequestId: bigint; requestId: bigint }
+		| { route: Exclude<Route, typeof Route.GoAway | typeof Route.Update>; requestId: bigint }
+	> {
 		const readRequestId = async (): Promise<bigint> => {
 			const r = new Reader(undefined, body, this.version);
 			return await r.u62();
@@ -708,9 +718,12 @@ export class ControlStreamAdapter implements Session {
 		switch (typeId) {
 			// === FollowUp: route to existing stream ===
 			case 0x02: {
-				// SubscribeUpdate / REQUEST_UPDATE
-				const requestId = await readRequestId();
-				return { route: Route.FollowUp, requestId };
+				// SUBSCRIBE_UPDATE / REQUEST_UPDATE: the update's own Request ID, then the request
+				// it changes (Subscription Request ID on 14 and 15, Existing Request ID on 16).
+				const r = new Reader(undefined, body, this.version);
+				const ownRequestId = await r.u62();
+				const requestId = await r.u62();
+				return { route: Route.Update, ownRequestId, requestId };
 			}
 
 			// === NewRequest: create virtual stream ===

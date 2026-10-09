@@ -2246,8 +2246,8 @@ impl TrackIo {
 async fn run_front(task: FrontTask, origin: TasksWeak) {
 	let mut in_flight = serve_front(task).await;
 	// Each keeps its copy for the readers still on their way, then lets go as an unread
-	// track parks, so the copy never keeps its source subscribed for nobody. A plain
-	// `is_used` suffices: the front closed its broadcast, which refuses every lookup, so
+	// track parks, so the copy never keeps its source subscribed for nobody. Unread once
+	// is unread for good: the front closed its broadcast, which refuses every lookup, so
 	// no reader can arrive once the last one left.
 	kio::wait(|waiter| {
 		// Dropped without a release, so a reader on its way keeps the copy; it stays held
@@ -2256,10 +2256,9 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 			return Poll::Ready(());
 		}
 		for io in std::mem::take(&mut in_flight) {
-			io.weak.poll_unused(waiter);
-			match io.weak.is_used() {
-				true => in_flight.push(io),
-				false => io.routes.release(),
+			match io.weak.poll_unused(waiter) {
+				Poll::Pending => in_flight.push(io),
+				Poll::Ready(_) => io.routes.release(),
 			}
 		}
 		match in_flight.is_empty() {
@@ -2338,6 +2337,8 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 		Ended(Arc<str>, u64, Result<(), Error>, bool),
 		Demand(Arc<str>),
 		Holders,
+		/// The broadcast closed: nobody can hold it again.
+		Closed,
 		Deadline,
 		Table,
 	}
@@ -2756,12 +2757,15 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					let delivered = copy.latest().is_some();
 					return Poll::Ready(Step::Ended(name.clone(), *source, result, delivered));
 				}
-				// Watch the demand edge in whichever direction is unmet.
-				match io.used {
-					true => io.weak.poll_unused(waiter),
-					false => io.weak.poll_used(waiter),
-				}
-				if io.weak.is_used() != io.used {
+				// Watch the demand edge in whichever direction is unmet. Only `Pending`
+				// parks, so an answer steps and the handler looks again, polling anew when
+				// nothing changed. A closed track is unread: it owes one `Unused` if
+				// recorded read, and is no edge after.
+				let edge = match io.used {
+					true => io.weak.poll_unused(waiter).is_ready(),
+					false => matches!(io.weak.poll_used(waiter), Poll::Ready(Ok(()))),
+				};
+				if edge {
 					return Poll::Ready(Step::Demand(name.clone()));
 				}
 			}
@@ -2770,8 +2774,11 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 				true => broadcast.poll_unheld(waiter),
 				false => broadcast.poll_held(waiter),
 			};
-			if edge.is_ready() {
-				return Poll::Ready(Step::Holders);
+			match edge {
+				Poll::Ready(Ok(())) => return Poll::Ready(Step::Holders),
+				// Answers at once from here on, so it must end the front, not be polled again.
+				Poll::Ready(Err(_)) => return Poll::Ready(Step::Closed),
+				Poll::Pending => {}
 			}
 			if deadline.poll(waiter).is_ready() {
 				return Poll::Ready(Step::Deadline);
@@ -2879,7 +2886,12 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 			}
 			Step::Demand(name) => {
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.used = io.weak.is_used();
+				// Read again: the edge may have flipped back since it fired, and the next
+				// wait parks on it.
+				if io.weak.is_used() == io.used {
+					continue;
+				}
+				io.used = !io.used;
 				if !io.used {
 					// Nothing will be spliced now: let go of the copies a query
 					// holds, or the source stays subscribed with nobody reading.
@@ -2905,6 +2917,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					false => Event::Unheld,
 				}
 			}
+			Step::Closed => Event::Retired,
 			Step::Deadline => {
 				// Cleared here so a fired deadline cannot keep firing; the machine
 				// re-arms what is still parked.
@@ -6187,6 +6200,68 @@ mod tests {
 			.expect("a fresh front");
 		assert!(!fresh.is_closed());
 		assert_eq!(fronts(), 1);
+	}
+
+	/// A track that ends while read is unread from then on, even with its reader still
+	/// holding it: the front sees it go unread once and lets it linger, rather than
+	/// keeping it read forever or spinning on it while it lingers ended and unread.
+	#[moq_net_sim::test]
+	async fn a_track_ending_while_read_lets_its_front_retire() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let upstream = broadcast::Info::new().produce();
+		let source = upstream.create_track("video", None).unwrap();
+		let fronts = || producer.shared.lock().fronts.len();
+
+		let pending = consumer.request_broadcast("room/alice", None);
+		queued(&server).await.accept(&upstream);
+		let resolved = pending.await.expect("resolves");
+		let reader = resolved.track("video").unwrap();
+		settle(|| source.demand().is_used()).await;
+
+		// The source refuses the track before delivering, which ends it for the reader.
+		source.abort(Error::NotFound).unwrap();
+		drop(resolved);
+
+		moq_net_sim::sleep(track::IDLE_LINGER).await;
+		settle(|| fronts() == 0).await;
+		drop(reader);
+	}
+
+	/// A front whose broadcast closes under it ends, rather than polling a holder edge
+	/// that a closed broadcast answers at once. Nothing but the front closes it today, so
+	/// the test does; a regression spins inside one poll and hangs the test.
+	#[moq_net_sim::test]
+	async fn a_front_whose_broadcast_closes_ends() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _published = producer.publish("room/alice", Route::default()).unwrap();
+		let path = consumer.absolute("room/alice").to_owned();
+		let broadcast = broadcast::Info::new().produce();
+		// Held, so the front waits on its holder rather than retiring on its own.
+		let holder = broadcast.consume();
+		let watch = consumer.shared.lock().watch(&consumer.shared, &path);
+		let task = FrontTask {
+			shared: consumer.shared.clone(),
+			broadcast: broadcast.clone(),
+			path,
+			horizon: Horizon::default(),
+			watch,
+			request: kio::Producer::default(),
+			timers: consumer.timers.clone(),
+		};
+		let mut front = std::pin::pin!(serve_front(task));
+		assert!(front.as_mut().now_or_never().is_none(), "the front ended early");
+
+		broadcast.close();
+		let in_flight = moq_net_sim::timeout(Duration::from_secs(1), front)
+			.await
+			.expect("the front outlived its broadcast");
+		assert!(in_flight.is_empty());
+		drop(holder);
 	}
 
 	/// The filtered front a peer session gets for a chain through it goes once the peer

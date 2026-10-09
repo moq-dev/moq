@@ -2598,16 +2598,18 @@ impl TrackWeak {
 		}
 	}
 
-	/// Park `waiter` for the next consumer appearing; a no-op once one exists.
-	/// Feeds [`crate::broadcast::Demand`], which recomputes on wake.
-	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) {
-		let _ = self.state.poll_used(waiter);
+	/// `Ready(Ok)` while anyone reads the open track, `Ready(Err)` once it closed, and
+	/// otherwise park `waiter` for the next reader. Only `Pending` registers: act on the
+	/// answer, not a later [`Self::is_used`], or a reader leaving in between is never seen.
+	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
+		self.state.poll_used(waiter)
 	}
 
-	/// Park `waiter` for the last consumer (or the track) going away; a no-op
-	/// once none remain. Feeds [`crate::broadcast::Demand`].
-	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) {
-		let _ = self.state.poll_unused(waiter);
+	/// `Ready(Ok)` while nobody reads the track, `Ready(Err)` once it closed, and
+	/// otherwise park `waiter` for the last reader leaving. Only `Pending` registers,
+	/// as with [`Self::poll_used`].
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
+		self.state.poll_unused(waiter)
 	}
 }
 
@@ -2919,6 +2921,15 @@ impl Consumer {
 	fn serving(&self) -> Option<Consumer> {
 		let routes = self.state.read().routes.clone()?;
 		routes.serving()
+	}
+
+	/// Whether the cache is fed live, so the newest object it holds is the track's largest.
+	/// A relay's copy with no upstream subscription is not, even once it learns the end.
+	pub(crate) fn is_live(&self) -> bool {
+		if let Some(serving) = self.serving() {
+			return serving.is_live();
+		}
+		self.state.read().feed == Feed::Live
 	}
 
 	/// Fetching a single past group, without holding a live subscription.

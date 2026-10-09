@@ -3577,8 +3577,8 @@ where
 		Ok(true)
 	}
 
-	/// Fetch a group from the publisher to fill a cache miss, with a standalone FETCH for
-	/// this subscription's track. It asks from the frame the reader wants through the end
+	/// Fetch a group from the publisher to fill a cache miss, with a standalone (or
+	/// draft-20 filtered) FETCH for this subscription's track. It asks from the frame the reader wants through the end
 	/// of the group, so a publisher that evicted the prefix can still answer.
 	///
 	/// The group is accepted only once FETCH_OK arrives, so a refusal reaches every
@@ -3593,11 +3593,7 @@ where
 	) {
 		let sequence = request.sequence();
 		let start = request.frame_start();
-		// Our FETCH still encodes the Fetch Type field that draft-20 removed.
-		if Filter::is_draft20(self.version) {
-			request.reject(Error::Unsupported);
-			return;
-		}
+		let draft20 = Filter::is_draft20(self.version);
 
 		let fetch_id = match self.control.next_request_id(&self.runtime).await {
 			Ok(id) => id,
@@ -3613,6 +3609,36 @@ where
 			Err(err) => return request.reject(err),
 		};
 
+		let namespace = broadcast.clone();
+		let track = name.as_str().into();
+		let from = ietf::Location {
+			group: sequence,
+			object: start,
+		};
+		let fetch_type = match draft20 {
+			// No End Object includes the whole End Group.
+			true => FetchType::Filtered {
+				namespace,
+				track,
+				filter: Filter::Absolute {
+					start: from,
+					end: Some(ietf::EndLocation {
+						group: sequence,
+						object: None,
+					}),
+				},
+			},
+			// An End Object of 0 is the whole End Group.
+			false => FetchType::Standalone {
+				namespace,
+				track,
+				start: from,
+				end: ietf::Location {
+					group: sequence,
+					object: 0,
+				},
+			},
+		};
 		let res = async {
 			stream.writer.varint(ietf::Fetch::ID).await?;
 			stream
@@ -3621,19 +3647,7 @@ where
 					request_id: fetch_id,
 					subscriber_priority: super::priority::to_wire(request.priority()),
 					group_order: GroupOrder::Ascending,
-					// An End Object of 0 is the whole End Group.
-					fetch_type: FetchType::Standalone {
-						namespace: broadcast.clone(),
-						track: name.as_str().into(),
-						start: ietf::Location {
-							group: sequence,
-							object: start,
-						},
-						end: ietf::Location {
-							group: sequence,
-							object: 0,
-						},
-					},
+					fetch_type,
 					range_filters: false,
 					fill_timeout: false,
 					// The copy learned the track before any fetch, from SUBSCRIBE_OK or
@@ -3675,9 +3689,31 @@ where
 			}
 		};
 
+		// Draft-20's End Location is inclusive, so step one past it as older drafts spell it.
+		let mut end = ok.end_location;
+		if draft20 {
+			let Some(object) = end.object.checked_add(1) else {
+				request.reject(Error::ProtocolViolation);
+				let _ = stream.writer.close().await;
+				return;
+			};
+			end.object = object;
+		}
+
+		// From draft-20 an empty answer still covers its start, so an End Location before it
+		// is malformed and closes the session (section 10.14), before it can mark the track's end.
+		if draft20 && (end.group, end.object) <= (sequence, start) {
+			let err = Error::ProtocolViolation;
+			tracing::warn!(group = sequence, ?end, "FETCH_OK's End Location is before its start");
+			self.session
+				.clone()
+				.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
+			request.reject(err);
+			return;
+		}
+
 		// The publisher knows where the track ends, which a range FETCH downstream needs.
 		if ok.end_of_track {
-			let end = ok.end_location;
 			let Some(final_sequence) = end.group.checked_add(u64::from(end.object > 0)) else {
 				request.reject(Error::ProtocolViolation);
 				let _ = stream.writer.close().await;
@@ -3686,15 +3722,14 @@ where
 			request.finish_track_at(final_sequence);
 		}
 
-		// An empty answer opens no fetch stream at all.
-		let end = ok.end_location;
+		// Before draft-20, an empty answer opens no fetch stream at all.
 		if (end.group, end.object) <= (sequence, start) {
 			request.reject(Error::NotFound);
 			let _ = stream.writer.close().await;
 			return;
 		}
-		// An exclusive End Location inside the group is its Largest Object plus one, so
-		// the stream owes every object up to it. One past the group covers it whole.
+		// An exclusive End Location inside the group bounds the stream; before draft-20 the
+		// stream also owes every object up to it. One past the group covers it whole.
 		let end = (end.group == sequence).then_some(end.object);
 
 		// Joined fetches still count until they pick the accepted group up from the cache.
@@ -3882,7 +3917,8 @@ where
 	}
 
 	/// Decode one group's objects: all in the producer's group, numbered from `start` with
-	/// no gaps, and through `end` (exclusive) when FETCH_OK named one inside the group.
+	/// no gaps, and never past `end` (exclusive) when FETCH_OK named one inside the group.
+	/// Before draft-20 they must also reach it.
 	async fn recv_group_fetch_objects(
 		&self,
 		stream: &mut Reader<S::RecvStream, Version>,
@@ -3944,8 +3980,9 @@ where
 		}
 
 		// A clean FIN short of the promised end would otherwise cache a truncated group as
-		// a complete one.
-		if end.is_some_and(|end| next < end) {
+		// a complete one. Draft-20's End Location is the range covered, not the last object
+		// sent: objects missing before it do not exist (section 10.13).
+		if !Filter::is_draft20(self.version) && end.is_some_and(|end| next < end) {
 			tracing::warn!(
 				sequence,
 				next,
@@ -8768,37 +8805,42 @@ mod stitch_tests {
 		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
 	}
 
-	/// FETCH_OK's End Location inside the group promises every object before it. A stream
-	/// that FINs short of it, or runs past it, fails the group instead of caching it.
+	/// FETCH_OK's End Location inside the group bounds the stream: one that runs past it
+	/// fails the group instead of caching it. Before draft-20 the End Location also promises
+	/// every object before it, so a stream that FINs short fails too. From draft-20 it is the
+	/// range covered, and the objects missing before it do not exist (section 10.13).
 	#[moq_net_sim::test]
-	async fn a_group_fetch_must_reach_its_end_location() {
+	async fn a_group_fetch_stays_within_its_end_location() {
 		const END: u64 = 3;
-		for (count, complete) in [(2, false), (3, true), (4, false)] {
-			let payloads: Vec<&[u8]> = [b"a", b"b", b"c", b"d"][..count].iter().map(|p| &p[..]).collect();
-			let mut run = GroupFetchRun::new(VERSION, group_fetch_objects(SEQUENCE, 0, &payloads)).await;
+		for version in [Version::Draft19, VERSION] {
+			let short = Filter::is_draft20(version);
+			for (count, complete) in [(2, short), (3, true), (4, false)] {
+				let payloads: Vec<&[u8]> = [b"a", b"b", b"c", b"d"][..count].iter().map(|p| &p[..]).collect();
+				let mut run = GroupFetchRun::new(version, group_fetch_objects(SEQUENCE, 0, &payloads)).await;
 
-			let group = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
-			let mut consumer = group.consume();
-			let slot = kio::Producer::new(GroupFetch::Ready {
-				producer: group,
-				timescale: None,
-				start: 0,
-				end: Some(END),
-			});
-			let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
-			assert_eq!(res.is_ok(), complete, "{count} objects: {res:?}");
+				let group = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+				let mut consumer = group.consume();
+				let slot = kio::Producer::new(GroupFetch::Ready {
+					producer: group,
+					timescale: None,
+					start: 0,
+					end: Some(END),
+				});
+				let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
+				assert_eq!(res.is_ok(), complete, "{version} {count} objects: {res:?}");
 
-			let mut read = 0;
-			let end = loop {
-				match consumer.read_frame().await {
-					Ok(Some(_)) => read += 1,
-					Ok(None) => break Ok(read),
-					Err(err) => break Err(err),
+				let mut read = 0;
+				let end = loop {
+					match consumer.read_frame().await {
+						Ok(Some(_)) => read += 1,
+						Ok(None) => break Ok(read),
+						Err(err) => break Err(err),
+					}
+				};
+				match complete {
+					true => assert_eq!(end.expect("a complete group"), count as u64, "{version}"),
+					false => assert!(end.is_err(), "{version} {count} objects: the group must fail, not end"),
 				}
-			};
-			match complete {
-				true => assert_eq!(end.expect("a complete group"), END),
-				false => assert!(end.is_err(), "{count} objects: the group must fail, not end"),
 			}
 		}
 	}
@@ -9681,13 +9723,13 @@ mod joining_fetch_tests {
 		assert!(fetch.await.is_err(), "the accepted group was aborted");
 	}
 
-	/// A cache miss for a group's tail asks upstream from the frame the reader wants and
-	/// numbers what arrives from there, so a publisher that evicted the prefix can answer.
+	/// From draft-20 an End Location before the FETCH's start is malformed (section 10.14):
+	/// the session closes with PROTOCOL_VIOLATION rather than reading it as an empty answer.
 	#[moq_net_sim::test]
-	async fn a_group_fetch_asks_from_the_wanted_frame() {
-		const VERSION: Version = Version::Draft19;
+	async fn a_draft20_end_location_before_the_start_closes_the_session() {
+		const VERSION: Version = Version::Draft20;
 		const GROUP: u64 = 4;
-		const START: u64 = 2;
+		const START: u64 = 3;
 
 		let ok = message_bytes(
 			ietf::FetchOk::ID,
@@ -9696,42 +9738,15 @@ mod joining_fetch_tests {
 				group_order: GroupOrder::Ascending,
 				end_of_track: false,
 				end_location: ietf::Location {
-					group: GROUP + 1,
-					object: 0,
+					group: GROUP,
+					object: START - 1,
 				},
 				properties: Default::default(),
 			},
 			VERSION,
 		);
 
-		// The fetch stream answering our first request id, from object START on.
-		let mut objects = Vec::new();
-		crate::coding::Encoder::new(&mut objects, VERSION.into())
-			.varint(ietf::FetchHeader::TYPE)
-			.unwrap();
-		ietf::FetchHeader {
-			request_id: RequestId(1),
-		}
-		.encode(&mut crate::coding::Encoder::new(&mut objects, VERSION.into()), VERSION)
-		.unwrap();
-		for (index, payload) in [b"c", b"d"].iter().enumerate() {
-			let first = index == 0;
-			ietf::FetchObject::Object {
-				subgroup: ietf::FetchSubgroup::Zero,
-				group: first.then_some(GROUP),
-				object: first.then_some(START),
-				priority: first.then_some(0),
-				properties: None,
-			}
-			.encode(&mut crate::coding::Encoder::new(&mut objects, VERSION.into()), VERSION)
-			.unwrap();
-			crate::coding::Encoder::new(&mut objects, VERSION.into())
-				.varint(1u64)
-				.unwrap();
-			objects.extend_from_slice(&payload[..]);
-		}
-
-		let session = ScriptedSession::per_stream_eof(vec![ok, objects.to_vec()]);
+		let session = ScriptedSession::per_stream_eof(vec![ok]);
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let subscriber = Subscriber::new(
 			crate::time::Clock::sim(),
@@ -9758,6 +9773,113 @@ mod joining_fetch_tests {
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
 		let request = dynamic.requested_group().await.expect("no group requested");
 
+		subscriber
+			.clone()
+			.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
+			.await;
+
+		assert!(matches!(fetch.await, Err(Error::ProtocolViolation)));
+		let violation = SessionError::from(&Error::ProtocolViolation).to_code();
+		assert!(
+			session.log.closes().iter().any(|(code, _)| *code == violation),
+			"{:?}",
+			session.log.closes()
+		);
+	}
+
+	/// A cache miss for a group's tail asks upstream from the frame the reader wants and
+	/// numbers what arrives from there, so a publisher that evicted the prefix can answer.
+	#[moq_net_sim::test]
+	async fn a_group_fetch_asks_from_the_wanted_frame() {
+		for version in [Version::Draft19, Version::Draft20, Version::Draft22] {
+			group_fetch_from_frame(version).await;
+		}
+	}
+
+	async fn group_fetch_from_frame(version: Version) {
+		const GROUP: u64 = 4;
+		const START: u64 = 2;
+		const LAST: u64 = START + 1;
+		let draft20 = Filter::is_draft20(version);
+
+		// The whole group, as each draft answers it: draft 20 names the last object, and
+		// older drafts one past the group.
+		let end_location = match draft20 {
+			true => ietf::Location {
+				group: GROUP,
+				object: LAST,
+			},
+			false => ietf::Location {
+				group: GROUP + 1,
+				object: 0,
+			},
+		};
+		let ok = message_bytes(
+			ietf::FetchOk::ID,
+			&ietf::FetchOk {
+				request_id: None,
+				group_order: GroupOrder::Ascending,
+				end_of_track: false,
+				end_location,
+				properties: Default::default(),
+			},
+			version,
+		);
+
+		// The fetch stream answering our first request id, from object START on.
+		let mut objects = Vec::new();
+		crate::coding::Encoder::new(&mut objects, version.into())
+			.varint(ietf::FetchHeader::TYPE)
+			.unwrap();
+		ietf::FetchHeader {
+			request_id: RequestId(1),
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut objects, version.into()), version)
+		.unwrap();
+		for (index, payload) in [b"c", b"d"].iter().enumerate() {
+			let first = index == 0;
+			ietf::FetchObject::Object {
+				subgroup: ietf::FetchSubgroup::Zero,
+				group: first.then_some(GROUP),
+				object: first.then_some(START),
+				priority: first.then_some(0),
+				properties: None,
+			}
+			.encode(&mut crate::coding::Encoder::new(&mut objects, version.into()), version)
+			.unwrap();
+			crate::coding::Encoder::new(&mut objects, version.into())
+				.varint(1u64)
+				.unwrap();
+			objects.extend_from_slice(&payload[..]);
+		}
+
+		let session = ScriptedSession::per_stream_eof(vec![ok, objects.to_vec()]);
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session.clone(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::default().with_timescale(None),
+		);
+		let dynamic = track.dynamic();
+		let consumer = track.consume();
+		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, group::Fetch::default().with_frame_start(START)));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		let request = dynamic.requested_group().await.expect("no group requested");
+
 		let serving = moq_net_sim::spawn(subscriber.clone().run_group_fetch(
 			Path::new("broadcast").to_owned(),
 			"video".into(),
@@ -9768,7 +9890,7 @@ mod joining_fetch_tests {
 
 		// The fetch stream, as the peer would open it.
 		let (_, recv) = session.clone().open_bi().await.unwrap();
-		let mut stream = Reader::new(recv, VERSION);
+		let mut stream = Reader::new(recv, version);
 		subscriber.clone().recv_fill(&mut stream).await.expect("group fetch");
 		serving.await.expect("run_group_fetch");
 
@@ -9780,27 +9902,40 @@ mod joining_fetch_tests {
 		}
 		assert_eq!(payloads, [b"c".to_vec(), b"d".to_vec()]);
 
-		let messages = decode_messages(&session.log, VERSION);
+		let messages = decode_messages(&session.log, version);
 		let fetch = messages.iter().find(|(id, _)| *id == ietf::Fetch::ID).expect("FETCH");
-		let mut body = Decoder::new(&fetch.1, VERSION.into());
-		let msg = ietf::Fetch::decode_msg(&mut body, VERSION).unwrap();
-		let FetchType::Standalone { start, end, .. } = msg.fetch_type else {
-			panic!("a group fetch is standalone: {:?}", msg.fetch_type);
+		let mut body = Decoder::new(&fetch.1, version.into());
+		let msg = ietf::Fetch::decode_msg(&mut body, version).unwrap();
+		let from = ietf::Location {
+			group: GROUP,
+			object: START,
 		};
-		assert_eq!(
-			start,
-			ietf::Location {
-				group: GROUP,
-				object: START
+		match msg.fetch_type {
+			// No End Object is the whole End Group.
+			FetchType::Filtered { filter, .. } if draft20 => assert_eq!(
+				filter,
+				Filter::Absolute {
+					start: from,
+					end: Some(ietf::EndLocation {
+						group: GROUP,
+						object: None
+					}),
+				},
+				"{version}: through the end of the group"
+			),
+			// An End Object of 0 is the whole End Group.
+			FetchType::Standalone { start, end, .. } if !draft20 => {
+				assert_eq!(start, from, "{version}");
+				assert_eq!(
+					end,
+					ietf::Location {
+						group: GROUP,
+						object: 0
+					},
+					"{version}: through the end of the group"
+				);
 			}
-		);
-		assert_eq!(
-			end,
-			ietf::Location {
-				group: GROUP,
-				object: 0
-			},
-			"through the end of the group"
-		);
+			other => panic!("{version}: unexpected group fetch: {other:?}"),
+		}
 	}
 }

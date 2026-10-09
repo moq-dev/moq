@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/net";
-import { Error as NetError, Time } from "@moq/net";
+import { Error as NetError, type Timed } from "@moq/net";
 
 import { type Config as CodecConfig, Encoder, type Pending } from "./encoder.ts";
 
@@ -34,9 +34,10 @@ export class Producer<T> {
 	 * second group. The track is aborted rather than closed cleanly, so a consumer sees the failure
 	 * instead of a log that merely looks complete.
 	 *
-	 * `at` is when the value was captured, written as its frame timestamp. Defaults to now.
+	 * `at` is when the value was captured, written as its frame timestamp. Omit it only on an
+	 * untimed track: it is never filled in.
 	 */
-	append(value: T, at: Time.Timestamp = Time.Timestamp.now()): void {
+	append({ value, at }: Timed<T>): void {
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// the record stays uncommitted until the write lands.
