@@ -47,6 +47,7 @@ An ordered log of self-contained records, one JSON value per frame, all riding a
 
 ```ts
 import { Stream } from "@moq/json";
+import { Time } from "@moq/net";
 
 const producer = new Stream.Producer({ track });
 producer.append({ value: { event: "started" }, at: Time.Timestamp.now() });
