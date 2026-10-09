@@ -109,7 +109,7 @@ test("a rejected record ends the track without opening a group", async () => {
 	const subscriber = track.subscribe().ordered();
 	const producer = new Producer<unknown>({ track });
 
-	expect(() => producer.append(undefined)).toThrow("not representable as JSON");
+	expect(() => producer.append({ value: undefined })).toThrow("not representable as JSON");
 
 	// Nothing was appended, so the log has no group for a consumer to enter and wait in.
 	expect(subscriber.latest()).toBeUndefined();
@@ -160,11 +160,11 @@ test("a rejected record leaves the producer able to retry", () => {
 
 	// Closing the track makes every write fail, standing in for any post-appendGroup rejection.
 	track.close();
-	expect(() => producer.append({ n: 1 })).toThrow();
+	expect(() => producer.append({ value: { n: 1 } })).toThrow();
 
 	// The retry fails on the same closed track, but it must fail for that reason rather than the
 	// encoder having latched itself shut.
-	expect(() => producer.append({ n: 2 })).not.toThrow("compression desynchronized");
+	expect(() => producer.append({ value: { n: 2 } })).not.toThrow("compression desynchronized");
 });
 
 test("a failed write on the very first record still ends the track", async () => {
@@ -182,7 +182,7 @@ test("a failed write on the very first record still ends the track", async () =>
 		throw failure;
 	});
 	try {
-		expect(() => producer.append("x")).toThrow(failure);
+		expect(() => producer.append({ value: "x" })).toThrow(failure);
 	} finally {
 		write.mockRestore();
 	}

@@ -25,7 +25,7 @@ test("every payload survives in order", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track });
 	const expected = payloads(5);
-	for (const payload of expected) producer.append(payload);
+	for (const payload of expected) producer.append({ value: payload });
 	producer.finish();
 
 	expect(await drain(track.subscribe(), false)).toEqual(expected);
@@ -35,7 +35,7 @@ test("compressed roundtrip in order", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
 	const expected = payloads(20);
-	for (const payload of expected) producer.append(payload);
+	for (const payload of expected) producer.append({ value: payload });
 	producer.finish();
 
 	expect(await drain(track.subscribe(), true)).toEqual(expected);
@@ -44,7 +44,7 @@ test("compressed roundtrip in order", async () => {
 test("the whole log rides one group, never rolled", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
-	for (const payload of payloads(50)) producer.append(payload);
+	for (const payload of payloads(50)) producer.append({ value: payload });
 	producer.finish();
 
 	const subscriber = track.subscribe().ordered();
@@ -56,7 +56,7 @@ test("the shared window shrinks repetitive payloads", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
 	const payload = new TextEncoder().encode("the quick brown fox".repeat(16));
-	for (let n = 0; n < 8; n++) producer.append(payload);
+	for (let n = 0; n < 8; n++) producer.append({ value: payload });
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
@@ -94,7 +94,7 @@ test("a second concurrent read is refused rather than served the first one's gro
 	// group for a second one and fail a perfectly good log. Rust gets this from `&mut self`.
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track });
-	producer.append(payloads(1)[0]);
+	producer.append({ value: payloads(1)[0] });
 	producer.finish();
 
 	const consumer = new Consumer({ track: track.subscribe() });
@@ -134,7 +134,7 @@ test("a failed write ends the log for a reader already inside the group", async 
 	// park on a group nothing will ever finish.
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
-	producer.append(payloads(1)[0]);
+	producer.append({ value: payloads(1)[0] });
 
 	const consumer = new Consumer({ track: track.subscribe(), compression: "deflate" });
 	expect(await consumer.next()).toBeDefined();
@@ -146,14 +146,14 @@ test("a failed write ends the log for a reader already inside the group", async 
 		throw failure;
 	});
 	try {
-		expect(() => producer.append(payloads(2)[1])).toThrow(failure);
+		expect(() => producer.append({ value: payloads(2)[1] })).toThrow(failure);
 	} finally {
 		write.mockRestore();
 	}
 
 	// Surfaces the terminal error rather than hanging on the still-open group.
 	await expect(consumer.next()).rejects.toThrow(failure);
-	expect(() => producer.append(payloads(3)[2])).toThrow();
+	expect(() => producer.append({ value: payloads(3)[2] })).toThrow();
 });
 
 // A payload past the group budget is refused before anything is written, so the log carries on: the
@@ -163,13 +163,15 @@ for (const compression of [false, true]) {
 	test(`an oversized payload is refused and the log continues (compression=${compression})`, async () => {
 		const track = new Track.Producer("test");
 		const producer = new Producer({ track, compression: compression ? "deflate" : "none" });
-		producer.append(payloads(1)[0]);
+		producer.append({ value: payloads(1)[0] });
 
 		const huge = new Uint8Array(DEFAULT_MAX_FRAME_SIZE + 1);
-		expect(() => producer.append(huge.subarray(0, Group.MAX_GROUP_CACHE_BYTES))).toThrow(NetError.GroupTooLarge);
-		expect(() => producer.append(huge)).toThrow(NetError.GroupTooLarge);
+		expect(() => producer.append({ value: huge.subarray(0, Group.MAX_GROUP_CACHE_BYTES) })).toThrow(
+			NetError.GroupTooLarge,
+		);
+		expect(() => producer.append({ value: huge })).toThrow(NetError.GroupTooLarge);
 
-		producer.append(payloads(2)[1]);
+		producer.append({ value: payloads(2)[1] });
 		producer.finish();
 		expect(await drain(track.subscribe(), compression)).toEqual(payloads(2));
 	});
@@ -184,7 +186,9 @@ test("the group budget is within the decoder's cap", () => {
 test("a refused first payload publishes nothing", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
-	expect(() => producer.append(new Uint8Array(DEFAULT_MAX_FRAME_SIZE + 1))).toThrow(NetError.GroupTooLarge);
+	expect(() => producer.append({ value: new Uint8Array(DEFAULT_MAX_FRAME_SIZE + 1) })).toThrow(
+		NetError.GroupTooLarge,
+	);
 	producer.finish();
 
 	expect(await track.subscribe().ordered().nextGroup()).toBeUndefined();
@@ -197,10 +201,10 @@ for (const compression of [false, true]) {
 		const track = new Track.Producer("test");
 		const producer = new Producer({ track, compression: compression ? "deflate" : "none" });
 		const frame = (n: number) => new Uint8Array(new Uint32Array([n]).buffer);
-		for (let n = 0; n < Group.MAX_GROUP_FRAMES; n++) producer.append(frame(n));
+		for (let n = 0; n < Group.MAX_GROUP_FRAMES; n++) producer.append({ value: frame(n) });
 
-		expect(() => producer.append(frame(-1))).toThrow(NetError.GroupTooLarge);
-		expect(() => producer.append(frame(-2))).toThrow(NetError.GroupTooLarge);
+		expect(() => producer.append({ value: frame(-1) })).toThrow(NetError.GroupTooLarge);
+		expect(() => producer.append({ value: frame(-2) })).toThrow(NetError.GroupTooLarge);
 		producer.finish();
 
 		const out = await drain(track.subscribe(), compression);
@@ -238,7 +242,7 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 	const reactions = await pendingReactions(async () => {
 		for (let n = 0; n < 1000; n++) {
 			const next = consumer.next();
-			producer.append(new Uint8Array([n & 0xff]));
+			producer.append({ value: new Uint8Array([n & 0xff]) });
 			expect((await next)?.[0]).toBe(n & 0xff);
 		}
 	});
@@ -248,11 +252,21 @@ test("blocked reads leave nothing behind on the pending group read", async () =>
 	producer.finish();
 });
 
+test("a payload without a timestamp goes out untimed", async () => {
+	const track = new Track.Producer("test").accept({});
+	const producer = new Producer({ track });
+	producer.append({ value: new Uint8Array([1]) });
+	producer.finish();
+
+	const group = await track.subscribe().ordered().nextGroup();
+	expect((await group?.readFrame())?.timestamp).toBeUndefined();
+});
+
 test("each record keeps its capture timestamp", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track });
-	producer.append(new Uint8Array([1]), Time.Timestamp.fromMillis(1_000));
-	producer.append(new Uint8Array([2]), Time.Timestamp.fromMillis(2_000));
+	producer.append({ value: new Uint8Array([1]), at: Time.Timestamp.fromMillis(1_000) });
+	producer.append({ value: new Uint8Array([2]), at: Time.Timestamp.fromMillis(2_000) });
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();

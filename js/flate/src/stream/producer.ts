@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/net";
-import { Group, Error as NetError, Time } from "@moq/net";
+import { Group, Error as NetError, type Timed } from "@moq/net";
 import { Encoder as Flate } from "../codec.ts";
 
 import { type Compression, isDeflate } from "../compression.ts";
@@ -49,9 +49,10 @@ export class Producer {
 	 * second group. The group is aborted rather than closed cleanly, so a consumer sees the failure
 	 * instead of a log that merely looks complete. Every later append fails on the closed track.
 	 *
-	 * `at` is when the payload was captured, written as its frame timestamp. Defaults to now.
+	 * `at` is when the payload was captured, written as its frame timestamp. Omit it only on an
+	 * untimed track: it is never filled in.
 	 */
-	append(payload: Uint8Array, at: Time.Timestamp = Time.Timestamp.now()): void {
+	append({ value: payload, at }: Timed<Uint8Array>): void {
 		// Check before compressing: encoding advances the window, so a payload refused afterwards
 		// would leave the encoder ahead of every reader. The worst case is checked rather than the
 		// actual size for the same reason. Also checked before the group is opened, so a refused

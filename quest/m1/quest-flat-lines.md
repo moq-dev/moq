@@ -69,9 +69,10 @@ Remaining:
     pin from `.2`, then check `OBS (macOS)`.
   - #4519 ffi-shape waits on
     [Bindings](/quest/m0/broadcast-epoch/bindings.md).
-  - #4133 qos: lag-splice landed on the line (#5009). Its egress `lag`
-    histogram splits into its own quest requiring stats-split (decided
-    2026-10-08); follow the qos README for what the line lands without it.
+  - #4133 qos: closed without landing (2026-10-09). Every change it had over
+    `main` is the egress `lag` histogram, which
+    [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) ports from the
+    branch once stats-split lands.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.

@@ -3,7 +3,7 @@ import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
-import { createMockTransportPair } from "./mock.ts";
+import { createMockTransportPair, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { TAIL_GRACE_MS, Tail } from "./tail.ts";
@@ -58,15 +58,15 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 	async (alpn) => {
 		const { video, reader, close } = await session(alpn);
 		try {
-			video.writeString("0");
+			video.writeFrame(textFrame("0"));
 			expect(await reader.readString()).toBe("0");
-			video.writeString("1");
+			video.writeFrame(textFrame("1"));
 			expect(await reader.readString()).toBe("1");
 
 			video.finishAt(3);
 			expect(await reader.finished()).toBe(3);
 
-			video.writeString("2");
+			video.writeFrame(textFrame("2"));
 			video.close();
 			expect(await readAll(reader)).toEqual(["2"]);
 			expect(await reader.closed).toBeNull();
@@ -85,12 +85,12 @@ test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_20])(
 	async (alpn) => {
 		const { video, reader, close } = await session(alpn);
 		try {
-			video.writeString("0");
+			video.writeFrame(textFrame("0"));
 			expect(await reader.readString()).toBe("0");
 
 			video.finishAt(4);
-			video.writeString("1");
-			video.writeString("2");
+			video.writeFrame(textFrame("1"));
+			video.writeFrame(textFrame("2"));
 			const ended = performance.now();
 			video.close();
 
