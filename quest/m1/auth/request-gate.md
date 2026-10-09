@@ -27,8 +27,9 @@ Decisions settled while planning (2026-10-09):
 Today `auth::Gate` is built inside each handler: the IETF publisher's
 SUBSCRIBE, standalone FETCH, and TRACK_STATUS; the IETF subscriber; and the
 lite publisher and subscriber. JS checks `#denied` and `#watch` per handler.
-A joining FETCH inherits its subscription's gate rather than resolving a
-namespace of its own.
+A joining FETCH carries its subscription's namespace and holds its own gate,
+since the cache it answers from outlives the subscription. JS TRACK_INFO is
+re-checked after it resolves but not while its answer is written.
 
 ## Related
 

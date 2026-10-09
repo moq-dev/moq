@@ -393,6 +393,8 @@ enum Joined {
 		end: Location,
 		cache: track::Consumer,
 		timescale: Option<Timescale>,
+		/// The subscription's namespace, which the fetch is held to the grant on.
+		namespace: crate::PathOwned,
 	},
 }
 
@@ -776,6 +778,7 @@ where
 						},
 						cache: cache.clone(),
 						timescale,
+						namespace: msg.track_namespace.to_owned(),
 					},
 					(Filter::NextObject, None) => Joined::Empty,
 					_ => Joined::Unsupported,
@@ -1464,10 +1467,10 @@ where
 			other => other,
 		};
 
-		// A joining FETCH rides its subscription's grant; a standalone one is checked here,
-		// before it reaches the origin, and again while its group loads.
-		let mut gate = None;
-		let (track, start, end, timescale, joined) = match fetch_type {
+		// Every FETCH is held to the grant while its group loads and its response is written.
+		// A standalone one is also checked here, before it reaches the origin; a joining one
+		// was checked when its subscription was.
+		let (track, start, end, timescale, joined, mut gate) = match fetch_type {
 			FetchType::Standalone {
 				namespace,
 				track,
@@ -1479,11 +1482,8 @@ where
 						.reject_fetch(stream, msg.request_id, &Error::Unauthorized, "not granted")
 						.await;
 				}
-				gate = Some(crate::auth::Gate::new(
-					self.auth.clone(),
-					namespace.to_owned(),
-					crate::auth::Direction::Publish,
-				));
+				let gate =
+					crate::auth::Gate::new(self.auth.clone(), namespace.to_owned(), crate::auth::Direction::Publish);
 
 				// An End Object of 0 asks for the whole End Group.
 				let end = match end.object {
@@ -1508,7 +1508,7 @@ where
 				};
 
 				// The track's timescale is only known once its group is read, below.
-				(track, start, end, None, false)
+				(track, start, end, None, false, gate)
 			}
 			FetchType::RelativeJoining {
 				subscriber_request_id, ..
@@ -1516,10 +1516,13 @@ where
 			| FetchType::AbsoluteJoining {
 				subscriber_request_id, ..
 			} => {
-				let (end, cache, timescale) = match self.joined(&mut stream, subscriber_request_id).await? {
+				let (end, cache, timescale, namespace) = match self.joined(&mut stream, subscriber_request_id).await? {
 					Ok(joined) => joined,
 					Err((err, reason)) => return self.reject_fetch(stream, msg.request_id, &err, reason).await,
 				};
+				// The cache outlives the subscription, so the fetch holds its own gate rather
+				// than trusting the subscription's to stop it.
+				let gate = crate::auth::Gate::new(self.auth.clone(), namespace, crate::auth::Direction::Publish);
 				let start = match fetch_type {
 					FetchType::RelativeJoining { group_offset, .. } => end.group.saturating_sub(group_offset),
 					FetchType::AbsoluteJoining { group_id, .. } if group_id <= end.group => group_id,
@@ -1543,6 +1546,7 @@ where
 					end,
 					timescale,
 					true,
+					gate,
 				)
 			}
 			// Rewritten as standalone or refused above.
@@ -1581,9 +1585,7 @@ where
 				if super::request_stream::poll_cancel(&mut stream, &mut finished, self.version, &mut cx).is_ready() {
 					return Poll::Ready(None);
 				}
-				if let Some(gate) = gate.as_mut()
-					&& gate.poll_denied(waiter).is_ready()
-				{
+				if gate.poll_denied(waiter).is_ready() {
 					return Poll::Ready(Some(Err(Error::Unauthorized)));
 				}
 				waiter.poll_future(read.as_mut()).map(Some)
@@ -1735,9 +1737,7 @@ where
 		let res = {
 			let mut respond = std::pin::pin!(respond);
 			kio::wait(|waiter| {
-				if let Some(gate) = gate.as_mut()
-					&& gate.poll_denied(waiter).is_ready()
-				{
+				if gate.poll_denied(waiter).is_ready() {
 					return Poll::Ready(Err(Error::Unauthorized));
 				}
 				waiter.poll_future(respond.as_mut())
@@ -1765,7 +1765,8 @@ where
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		subscribe_id: RequestId,
-	) -> Result<Result<(Location, track::Consumer, Option<Timescale>), (Error, &'static str)>, Error> {
+	) -> Result<Result<(Location, track::Consumer, Option<Timescale>, crate::PathOwned), (Error, &'static str)>, Error>
+	{
 		// Request streams can arrive out of order. Wait on registration, while bounding
 		// the lifetime of a request whose subscription never arrives or resolves.
 		let joined = {
@@ -1802,7 +1803,12 @@ where
 		let refusal = match joined {
 			Err(Error::Timeout) => (Error::Timeout, "subscription not ready"),
 			Err(err) => return Err(err),
-			Ok(Some(Joined::Group { end, cache, timescale })) => return Ok(Ok((end, cache, timescale))),
+			Ok(Some(Joined::Group {
+				end,
+				cache,
+				timescale,
+				namespace,
+			})) => return Ok(Ok((end, cache, timescale, namespace))),
 			Ok(None) => (
 				match self.version {
 					Version::Draft14
@@ -1893,18 +1899,35 @@ where
 			None => return Ok(()),
 		};
 
-		stream.writer.varint(ietf::TrackStatusOk::id(self.version)).await?;
-		stream
-			.writer
-			.encode(&ietf::TrackStatusOk {
+		// The answer stays gated until the transport takes it: one parked on stream credit
+		// when the grant narrows is reset rather than delivered.
+		let respond = async {
+			let ok = ietf::TrackStatusOk {
 				request_id: match self.version {
 					Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(request_id),
 					_ => None,
 				},
 				largest: live_edge(&track).largest,
 				properties: track_properties(&info, msg.properties_wanted),
+			};
+			stream.writer.varint(ietf::TrackStatusOk::id(self.version)).await?;
+			stream.writer.encode(&ok).await?;
+			Ok::<(), Error>(())
+		};
+		let res = {
+			let mut respond = std::pin::pin!(respond);
+			kio::wait(|waiter| {
+				if gate.poll_denied(waiter).is_ready() {
+					return Poll::Ready(Err(Error::Unauthorized));
+				}
+				waiter.poll_future(respond.as_mut())
 			})
-			.await?;
+			.await
+		};
+		if let Err(err) = res {
+			stream.writer.abort(&err);
+			return Err(err);
+		}
 
 		// The answer is all this stream carries. See [`Self::reject_subscribe`] for why the
 		// close is not optional.
@@ -4603,6 +4626,76 @@ mod serve_tests {
 		}
 	}
 
+	/// A TRACK_STATUS answer parked on its request stream when the grant narrows is reset,
+	/// never delivered once the stream drains.
+	#[moq_net_sim::test]
+	async fn track_status_narrowed_while_answering_is_reset() {
+		for version in ALL_VERSIONS {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+			let _track = broadcast.create_track("video", None).unwrap();
+			settle().await;
+
+			let bi = kio::Producer::new(true);
+			let session = SinkSession::gated_bi(bi.consume());
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+			let auth = crate::auth::Handle::new(false);
+			let publisher = Publisher::new(
+				crate::time::Clock::sim(),
+				session.clone(),
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				peer_setup,
+				version,
+			)
+			.with_auth(auth.clone());
+
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let mark = session.log.writes.lock().unwrap().len();
+			// The request stream stops taking writes, so the answer parks on it.
+			let Ok(mut writable) = bi.write() else {
+				panic!("request stream gate closed");
+			};
+			*writable = false;
+			drop(writable);
+			let mut answer = std::pin::pin!(publisher.clone().run_track_status_stream(
+				stream,
+				ietf::TrackStatus {
+					request_id: RequestId(REQUEST_ID),
+					track_namespace: crate::Path::new("room"),
+					track_name: "video".into(),
+					properties_wanted: true,
+				},
+			));
+			for _ in 0..100 {
+				assert!(futures::poll!(answer.as_mut()).is_pending(), "{version}: never parked");
+				moq_net_sim::yield_now().await;
+			}
+
+			auth.authorize(&crate::auth::Grant {
+				publish: Default::default(),
+				subscribe: Default::default(),
+				expires: None,
+			});
+			let Ok(mut writable) = bi.write() else {
+				panic!("request stream gate closed");
+			};
+			*writable = true;
+			drop(writable);
+			let res = moq_net_sim::timeout(std::time::Duration::from_secs(1), answer)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: still answering after the grant narrowed"));
+			assert!(matches!(res, Err(Error::Unauthorized)), "{version}: {res:?}");
+			assert!(
+				session.log.writes.lock().unwrap()[mark..].is_empty(),
+				"{version}: the answer went out after the grant narrowed"
+			);
+			assert!(!session.log.resets().is_empty(), "{version}: the answer was not reset");
+		}
+	}
+
 	/// Run one TRACK_STATUS to its end, returning the refusal code it got, if any.
 	async fn answer_code(h: &Serve, body: Vec<u8>, version: Version) -> Option<u64> {
 		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
@@ -6165,6 +6258,120 @@ mod serve_tests {
 				.unwrap_or_else(|_| panic!("{version}: still responding after the grant narrowed"));
 			assert!(matches!(res, Err(Error::Unauthorized)), "{version}: {res:?}");
 			drop(credit);
+		}
+	}
+
+	/// A joining FETCH answers from its subscription's cache, which outlives the
+	/// subscription, so it holds its own gate: one parked on stream credit when the grant
+	/// narrows stops there, and nothing reaches the wire once credit returns.
+	#[moq_net_sim::test]
+	async fn a_joining_fetch_narrowed_while_responding_stops() {
+		const PAYLOAD: &[u8] = b"joined-prefix";
+
+		for version in JOINING_DRAFTS {
+			for fetch_type in [
+				FetchType::RelativeJoining {
+					subscriber_request_id: RequestId(REQUEST_ID),
+					group_offset: 0,
+				},
+				FetchType::AbsoluteJoining {
+					subscriber_request_id: RequestId(REQUEST_ID),
+					group_id: 0,
+				},
+			] {
+				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+				let track = broadcast.create_track("video", None).unwrap();
+				let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+				group.write_frame(timestamp(), PAYLOAD.to_vec()).unwrap();
+				settle().await;
+
+				// Request streams flow, but no uni stream credit is granted until the end.
+				let bi = kio::Producer::new(true);
+				let credit = kio::Producer::new(false);
+				let session = SinkSession::gated_bi(bi.consume()).with_open_uni_gate(credit.consume());
+				let peer_setup = peer::PeerSetup::default();
+				peer_setup.set(peer::Peer::default());
+				let auth = crate::auth::Handle::new(false);
+				let publisher = Publisher::new(
+					crate::time::Clock::sim(),
+					session.clone(),
+					origin.consume(),
+					Control::new(None, false),
+					None,
+					peer_setup,
+					version,
+				)
+				.with_auth(auth.clone());
+
+				let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+				let mut subscription = std::pin::pin!(
+					publisher
+						.clone()
+						.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+				);
+				let joined = publisher.joins.wait(|joins| match joins.get(&RequestId(REQUEST_ID)) {
+					Some(Some(_)) => Poll::Ready(()),
+					_ => Poll::Pending,
+				});
+				match futures::future::select(std::pin::pin!(joined), subscription.as_mut()).await {
+					futures::future::Either::Left(_) => {}
+					futures::future::Either::Right((res, _)) => panic!("{version}: subscription ended: {res:?}"),
+				}
+
+				let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+				let mark = session.log.writes.lock().unwrap().len();
+				let mut fetch = std::pin::pin!(publisher.clone().run_fetch_stream(
+					stream,
+					ietf::Fetch {
+						request_id: FETCH_ID,
+						subscriber_priority: 128,
+						group_order: GroupOrder::Ascending,
+						fetch_type,
+						range_filters: false,
+						fill_timeout: false,
+						properties_wanted: true,
+					},
+				));
+				// Driven until FETCH_OK is out, so the fetch is parked on uni stream credit.
+				for _ in 0..100 {
+					assert!(
+						futures::poll!(fetch.as_mut()).is_pending(),
+						"{version}: never waited on credit"
+					);
+					if session.log.writes.lock().unwrap().len() > mark {
+						break;
+					}
+					moq_net_sim::yield_now().await;
+				}
+				assert!(
+					session.log.writes.lock().unwrap().len() > mark,
+					"{version}: FETCH_OK never went out"
+				);
+
+				auth.authorize(&crate::auth::Grant {
+					publish: Default::default(),
+					subscribe: Default::default(),
+					expires: None,
+				});
+				let res = moq_net_sim::timeout(std::time::Duration::from_secs(1), fetch)
+					.await
+					.unwrap_or_else(|_| panic!("{version}: still responding after the grant narrowed"));
+				assert!(matches!(res, Err(Error::Unauthorized)), "{version}: {res:?}");
+
+				let Ok(mut open) = credit.write() else {
+					panic!("credit gate closed");
+				};
+				*open = true;
+				drop(open);
+				let _ = futures::poll!(subscription.as_mut());
+				settle().await;
+				assert_eq!(
+					occurrences(&session.log, PAYLOAD),
+					0,
+					"{version}: revoked media reached the wire"
+				);
+			}
 		}
 	}
 
