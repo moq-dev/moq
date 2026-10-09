@@ -568,7 +568,7 @@ run_publisher() {
             ffmpeg_h264 | "$GO_INTEROP" publish --url "$url" --broadcast "$broadcast"
             ;;
         cpp)
-            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$URL" --broadcast "$broadcast"
+            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast"
             ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
@@ -625,7 +625,7 @@ run_subscriber() {
             "$GO_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         cpp)
-            "$CPP_INTEROP" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
+            "$CPP_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         c)
             "$C_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
