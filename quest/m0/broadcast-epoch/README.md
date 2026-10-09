@@ -52,7 +52,7 @@ Decided:
   2026-10-06 for epochs, and 2026-10-07 in #5013 for routes without one) is
   reversed (2026-10-07): subscriptions stay sticky on their route and an
   explicit `Restart` announce event tells players to follow, through
-  [Restart](/quest/m0/broadcast-epoch/restart.md). When the newest goes and
+  Restart. When the newest goes and
   an older one is still live, the older one wins again as a new broadcast.
 - [Claim-served epochs](/quest/m1/claim-epochs.md), where a
   lite-07 claim's answer carries the served broadcast's own epoch, no longer
@@ -94,7 +94,6 @@ then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 
 ## Required
 
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - a replaced broadcast reaches announce consumers as an explicit Restart, subscriptions stay sticky, and new requests never join a replaced route's front
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one

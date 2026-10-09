@@ -64,7 +64,15 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 					if (!event) break;
 					if (!originWire.accepts(event.prefix)) continue;
 
-					if (event.kind !== "end") {
+					if (event.kind === "restart") {
+						// Another publisher instance: a fresh route, so nothing resolved through the
+						// old one is joined again. Inserted before the old one leaves, so local
+						// readers see one restart rather than an end and a start.
+						const handle = originWire.receive(event.prefix, event.route);
+						inserted.get(event.prefix)?.close();
+						inserted.set(event.prefix, handle);
+						void drive(handle, conn);
+					} else if (event.kind !== "end") {
 						const existing = inserted.get(event.prefix);
 						if (existing) {
 							existing.update(event.route);

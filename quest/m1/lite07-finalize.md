@@ -73,7 +73,6 @@ is published; older versions are unchanged.
 ## Required
 
 - [lite-07 Live flag](/quest/m1/lite-live.md) - SUBSCRIBE carries `Live` apart from its floor
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - lite-07 carries the `Restart` announce
 - [In-band auth](/quest/m1/auth/README.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`

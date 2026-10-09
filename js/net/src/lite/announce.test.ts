@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
 import { Cost, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
@@ -69,8 +70,31 @@ test("AnnounceBroadcast round-trips on draft-06", async () => {
 	const gotEnded = await roundTrip({ status: "endedId", id: 3n }, Version.DRAFT_06);
 	expect(gotEnded).toEqual({ status: "endedId", id: 3n });
 
-	const gotRestart = await roundTrip({ status: "restart", id: 3n, hops, cost }, Version.DRAFT_06);
-	expect(gotRestart).toEqual({ status: "restart", id: 3n, hops, cost });
+	const gotUpdate = await roundTrip({ status: "update", id: 3n, hops, cost }, Version.DRAFT_06);
+	expect(gotUpdate).toEqual({ status: "update", id: 3n, hops, cost });
+});
+
+test("AnnounceBroadcast carries a restart only on draft-07", async () => {
+	const hops = [HopSchema.parse(7n)];
+	const epoch = Epoch.mint();
+	for (const msg of [
+		{ status: "restart" as const, id: 3n, epoch, hops, cost: 12n },
+		{ status: "restart" as const, id: 3n, epoch: undefined, hops, cost: 12n },
+	]) {
+		expect(await roundTrip(msg, Version.DRAFT_07)).toEqual(msg);
+	}
+
+	// Older versions send an end and a start instead, and skip the type as unknown.
+	await expect(
+		bytes((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 1n, hops: [] }, Version.DRAFT_06), Version.DRAFT_06),
+	).rejects.toThrow();
+	const encoded = await bytes(async (w) => {
+		await w.u53(3);
+		await w.u53(1);
+		await w.u8(1);
+	}, Version.DRAFT_06);
+	const reader = new Reader(undefined, encoded, Version.DRAFT_06);
+	expect(await decodeAnnounceBroadcast(reader, Version.DRAFT_06)).toEqual({ status: "skipped" });
 });
 
 test("AnnounceBroadcast skips an unknown type on draft-06", async () => {
@@ -99,7 +123,7 @@ test("AnnounceBroadcast rejects cross-version forms", async () => {
 	).rejects.toThrow();
 	await expect(
 		bytes(
-			(w) => encodeAnnounceBroadcast(w, { status: "restart", id: 1n, hops: [] }, Version.DRAFT_05),
+			(w) => encodeAnnounceBroadcast(w, { status: "update", id: 1n, hops: [] }, Version.DRAFT_05),
 			Version.DRAFT_05,
 		),
 	).rejects.toThrow();
@@ -261,7 +285,7 @@ async function resolveStream(data: Uint8Array) {
 			case "active":
 				out.push({ start: history.start(msg) });
 				break;
-			case "restart":
+			case "update":
 				out.push({ update: msg.id, hops: history.update(msg).hops });
 				break;
 			case "endedId":
@@ -310,7 +334,7 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 			{ status: "active", suffix: Path.from("room/a/mic"), hops: [hop(0x3333n), relay], cost },
 			v,
 		);
-		await encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [hop(0x4444n), relay], cost }, v);
+		await encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [hop(0x4444n), relay], cost }, v);
 		await encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, v);
 		await encodeAnnounceBroadcast(
 			w,
@@ -408,7 +432,7 @@ test("wip start and update carry one static cost", async () => {
 	// Path base, path keep, empty suffix, no epoch, hop base, no hops, hop keep, cost.
 	expect([...start]).toEqual([0, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
 	const update = await bytes(
-		(w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [], cost: Cost.zero }, v),
+		(w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [], cost: Cost.zero }, v),
 		v,
 	);
 	expect([...update]).toEqual([2, 5, 0, 0, 0, 0, 0]);

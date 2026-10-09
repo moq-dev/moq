@@ -8,7 +8,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
-import { AnnounceRequest } from "./announce.ts";
+import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
@@ -122,6 +122,56 @@ test.each([
 	pair.client.close();
 	pair.server.close();
 });
+
+test.each([Version.DRAFT_06, Version.DRAFT_07])(
+	"a republish restarts the advertisement (version %s)",
+	async (version) => {
+		const pair = createMockTransportPair(ALPN_05);
+		const origin = new OriginProducer();
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const old = publish(origin, Path.from("cam"));
+
+		const written: Uint8Array[] = [];
+		const stream = new Stream({
+			version: version,
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({
+				write(chunk) {
+					written.push(new Uint8Array(chunk));
+				},
+			}),
+		});
+		const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+		const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+		await settle();
+		const initial = written.length;
+
+		// Another broadcast at the path, without an epoch: another instance.
+		const republished = publish(origin, Path.from("cam"));
+		await settle();
+		const bytes = Uint8Array.from(written.slice(initial).flatMap((chunk) => [...chunk]));
+		const reader = new Reader(undefined, bytes, version);
+		const messages: AnnounceBroadcast[] = [];
+		while (!(await reader.done())) messages.push(await decodeAnnounceBroadcast(reader, version));
+		if (version === Version.DRAFT_07) {
+			expect(messages).toMatchObject([{ status: "restart", id: 0n }]);
+		} else {
+			expect(messages).toMatchObject([
+				{ status: "endedId", id: 0n },
+				{ status: "active", suffix: "cam" },
+			]);
+		}
+
+		stream.close();
+		await running;
+		publisher.close();
+		republished.close();
+		old.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+	},
+);
 
 // Delivers `sequences` in the given order, finishes the track, and returns the
 // SUBSCRIBE_END the publisher put on the wire.
