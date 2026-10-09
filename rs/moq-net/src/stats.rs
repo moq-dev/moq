@@ -526,7 +526,7 @@ impl Traffic {
 /// one session came to its [`crate::session::Limits`].
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
-/// sessions track. Serialize writes both the canonical names and the legacy
+/// presence or totals track. Serialize writes both the canonical names and the legacy
 /// `sessions`/`sessions_closed` spellings; deserialize accepts either, with
 /// the canonical name winning when both are present.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -620,9 +620,9 @@ impl Presence {
 /// etc. traffic. Each tracked broadcast keeps a per-tier counter set on both its
 /// publisher and subscriber sides.
 ///
-/// The default tier ([`Tier::default`]) is unprefixed: its published tracks are
-/// `publisher.json`, `subscriber.json`, and `sessions.json`. A named tier
-/// prefixes every track with its label, so `Tier::new("region/sjc")` records on
+/// The default tier ([`Tier::default`]) is unprefixed: its published traffic
+/// tracks are `publisher.json` and `subscriber.json`. A named tier prefixes them
+/// with its label, so `Tier::new("region/sjc")` records on
 /// `region/sjc/publisher.json`. The label is an arbitrary path chosen by business
 /// logic; an empty label is the default tier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -767,6 +767,9 @@ pub struct TrafficEntry {
 	pub publisher: Traffic,
 	/// Ingress counters (this node consuming from peers).
 	pub subscriber: Traffic,
+	/// This is the entry's final readout: no guard holds it, so the registry
+	/// pruned it, and a later entry at the same key starts from zero.
+	pub closed: bool,
 }
 
 /// One `(tier, root)` row of a [`Report`].
@@ -779,6 +782,9 @@ pub struct SessionEntry {
 	pub root: PathOwned,
 	/// The cumulative connect/disconnect gauge.
 	pub presence: Presence,
+	/// This is the root's final readout: its last session disconnected, so the
+	/// registry pruned it, and a later session under the root starts from zero.
+	pub closed: bool,
 }
 
 /// Settings for a [`Registry`]. Construct with [`Config::new`] and chain the
@@ -830,7 +836,7 @@ struct Shared {
 	retired: Lock<Snapshot>,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
 	/// Connected-session gauges keyed by `(tier, auth root)`. Independent of any
-	/// broadcast; surfaced on the per-tier session tracks. A tier's inner map is
+	/// broadcast; surfaced in the totals and presence tracks. A tier's inner map is
 	/// created the first time a session records under it.
 	sessions: Lock<HashMap<Tier, HashMap<PathOwned, Arc<SessionCounters>>>>,
 }
@@ -1004,9 +1010,9 @@ impl Registry {
 	/// Clears `report`, keeping its capacity so a caller draining on an
 	/// interval reuses one report instead of allocating per drain, then fills
 	/// every `(broadcast, tier)` traffic readout and every `(tier, root)`
-	/// session gauge. Entries no guard references anymore are then dropped
-	/// (their final values are still in the report, so a publisher draining on
-	/// an interval emits the closing readout exactly once). A pruned path that
+	/// session gauge. Entries no guard references anymore are dropped after
+	/// their final readout, which is marked `closed`, so a publisher draining on
+	/// an interval sees the closing readout exactly once. A pruned path that
 	/// sees traffic again restarts from zero; see the module docs on counter
 	/// resets. Leaves the report empty for a disabled registry.
 	pub fn report(&self, report: &mut Report) {
@@ -1016,66 +1022,51 @@ impl Registry {
 			return;
 		};
 		let mut retired = shared.retired.lock();
-		{
-			let mut entries = shared.entries.lock();
-			for (path, entry) in entries.iter() {
-				let tiers = entry.tiers.lock().expect("stats tiers poisoned");
-				for (tier, counters) in tiers.iter() {
-					report.traffic.push(TrafficEntry {
-						path: path.clone(),
-						tier: tier.clone(),
-						publisher: counters.publisher.snapshot(),
-						subscriber: counters.subscriber.snapshot(),
-					});
-				}
-			}
-			// Prune entries no guard holds anymore: with only the map's Arc
-			// left, no future bump can land, so the entry is done. (A guard
-			// created after the readout above still holds the Arc and keeps
-			// its entry alive.)
-			entries.retain(|_, entry| {
-				if Arc::strong_count(entry) > 1 {
-					return true;
-				}
-				let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
-				tiers.retain(|tier, counters| {
-					if Arc::strong_count(counters) > 1 {
-						return true;
-					}
+		// Each readout decides its prune first. Counters only the map holds can't
+		// be reached by any guard (a new one needs the map lock held here), so
+		// their readout is final: it is marked closed, folded into the retired
+		// totals, and dropped, with no bump able to land after it.
+		shared.entries.lock().retain(|path, entry| {
+			let free = Arc::strong_count(entry) == 1;
+			let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
+			tiers.retain(|tier, counters| {
+				let closed = free && Arc::strong_count(counters) == 1;
+				let publisher = counters.publisher.snapshot();
+				let subscriber = counters.subscriber.snapshot();
+				report.traffic.push(TrafficEntry {
+					path: path.clone(),
+					tier: tier.clone(),
+					publisher,
+					subscriber,
+					closed,
+				});
+				if closed {
 					let totals = retired.traffic.entry(tier.clone()).or_default();
-					totals[Role::Publisher.idx()].add(counters.publisher.snapshot());
-					totals[Role::Subscriber.idx()].add(counters.subscriber.snapshot());
-					false
-				});
-				!tiers.is_empty()
-			});
-		}
-		{
-			let mut sessions = shared.sessions.lock();
-			for (tier, roots) in sessions.iter() {
-				for (root, counters) in roots.iter() {
-					report.sessions.push(SessionEntry {
-						tier: tier.clone(),
-						root: root.clone(),
-						presence: counters.snapshot(),
-					});
+					totals[Role::Publisher.idx()].add(publisher);
+					totals[Role::Subscriber.idx()].add(subscriber);
 				}
-			}
-			for (tier, roots) in sessions.iter_mut() {
-				roots.retain(|_, counters| {
-					if Arc::strong_count(counters) > 1 {
-						return true;
-					}
-					retired
-						.sessions
-						.entry(tier.clone())
-						.or_default()
-						.add(counters.snapshot());
-					false
+				!closed
+			});
+			!free || !tiers.is_empty()
+		});
+
+		shared.sessions.lock().retain(|tier, roots| {
+			roots.retain(|root, counters| {
+				let closed = Arc::strong_count(counters) == 1;
+				let presence = counters.snapshot();
+				report.sessions.push(SessionEntry {
+					tier: tier.clone(),
+					root: root.clone(),
+					presence,
+					closed,
 				});
-			}
-			sessions.retain(|_, roots| !roots.is_empty());
-		}
+				if closed {
+					retired.sessions.entry(tier.clone()).or_default().add(presence);
+				}
+				!closed
+			});
+			!roots.is_empty()
+		});
 	}
 }
 
@@ -1108,8 +1099,8 @@ impl Handle {
 	/// Record a connected session authenticated under `root` on this tier. Hold
 	/// the returned guard for the session's lifetime; dropping it bumps
 	/// `sessions_ended`. Counts presence regardless of any data flow, so a
-	/// session that merely connects is still billable. Surfaced on the session
-	/// track for this tier, keyed by `root`.
+	/// session that merely connects is still billable. Surfaced in this tier's
+	/// totals and in `root`'s presence track.
 	pub fn session(&self, root: impl AsPath) -> Session {
 		Session::new(self.stats.clone(), self.tier.clone(), root)
 	}
@@ -1823,6 +1814,7 @@ mod tests {
 		assert_eq!(row.publisher.bytes, 42);
 		assert_eq!(row.publisher.subscriptions_started, 1);
 		assert!(!row.publisher.is_idle(), "subscription guard still open");
+		assert!(!row.closed, "a held entry is not final");
 		assert!(
 			stats.shared().entries.lock().contains_key(&key),
 			"live entry kept across drains"
@@ -1841,6 +1833,7 @@ mod tests {
 			.expect("closing values still reported once");
 		assert_eq!(row.publisher.subscriptions_ended, 1);
 		assert!(row.publisher.is_idle());
+		assert!(row.closed, "the closing readout is marked final");
 		assert!(
 			!stats.shared().entries.lock().contains_key(&key),
 			"fully-closed entry pruned"
@@ -1889,6 +1882,7 @@ mod tests {
 			.find(|row| row.root.as_str() == "acme")
 			.expect("root present");
 		assert_eq!(row.presence.active(), 1);
+		assert!(!row.closed);
 
 		drop(session);
 		let report = drain(&stats);
@@ -1898,6 +1892,7 @@ mod tests {
 			.find(|row| row.root.as_str() == "acme")
 			.expect("final gauge reported once");
 		assert_eq!(row.presence.active(), 0);
+		assert!(row.closed, "the final gauge is marked closed");
 		assert!(drain(&stats).sessions.is_empty(), "root pruned after the last drain");
 		assert!(session_snapshot(&stats, &Tier::default(), "acme").is_none());
 	}

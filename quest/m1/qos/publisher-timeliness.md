@@ -28,8 +28,8 @@ milliseconds, and the re-anchor happens on its own as old minima expire.
 Document the window length beside the bucket edges.
 
 Aggregate as a byte-weighted cumulative histogram of drift on the ingress
-(`Role::Subscriber`) side of [stats totals and prefix
-tracks](/quest/m0/broadcast-epoch/stats-split.md), which lands first and
+(`Role::Subscriber`) side of the stats totals and [prefix
+tracks](/quest/m0/broadcast-epoch/prefix-tracks.md), which land first and
 retires the per-path rows (decided in the 2026-10-06 audit), with the same
 bucket edges and the same monotonic contract as the egress `lag` histogram. Beside it keep two cumulative
 counters: `timestamp_regressions`, frames whose timestamp is below the
@@ -56,7 +56,7 @@ excluded.
 ## Required
 
 - [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the egress histogram whose type and edges this reuses
-- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the totals and prefix tracks the drift histogram lands on
+- [Stats prefix tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) - the prefix tracks the drift histogram lands on, beside the totals
 
 ## Related
 

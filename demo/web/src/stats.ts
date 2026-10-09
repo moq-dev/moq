@@ -11,9 +11,10 @@
  * Per-node tracks we read:
  *   publisher.json   egress  (relay -> downstream viewers)
  *   subscriber.json  ingress (upstream publishers -> relay)
- *   sessions.json    sessions by auth root
+ *   totals.json      per-tier totals, read here for sessions
  *
- * Each frame is `{ "<broadcast path>": Snapshot }`. Counters are cumulative;
+ * A traffic frame is `{ "<broadcast path>": Snapshot }` and a totals frame is
+ * `{ "<tier>": { publisher, subscriber, sessions } }`. Counters are cumulative;
  * "active" = started - ended. The relay includes every entry it still holds
  * counters for, idle ones too, so the latest frame is a snapshot of now. We sample the aggregate on an interval
  * to derive per-second throughput rates for the charts. A relay built after the
@@ -74,12 +75,17 @@ interface SessionCounters {
 	sessions_ended?: number;
 	sessions_closed?: number;
 }
-type SessionFrame = Record<string, SessionCounters>;
+
+// One tier's totals; only the sessions are read here.
+interface Totals {
+	sessions?: SessionCounters;
+}
+type TotalsFrame = Record<string, Totals>;
 
 interface NodeStats {
 	egress: BroadcastFrame; // publisher.json
 	ingress: BroadcastFrame; // subscriber.json
-	sessions: SessionFrame; // sessions.json
+	totals: TotalsFrame; // totals.json
 }
 
 // Canonical spelling wins when a frame carries both names.
@@ -161,7 +167,7 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: N
 		s[node] = {
 			egress: {},
 			ingress: {},
-			sessions: {},
+			totals: {},
 		};
 	});
 
@@ -188,7 +194,7 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: N
 
 	sub("publisher.json", "egress");
 	sub("subscriber.json", "ingress");
-	sub("sessions.json", "sessions");
+	sub("totals.json", "totals");
 }
 
 // ---- Aggregation ----------------------------------------------------------
@@ -227,8 +233,8 @@ function aggregate(ingress: BroadcastFrame, egress: BroadcastFrame) {
 	return { broadcasters, viewers, tracks, ingressBytes, egressBytes, announceBytes, fetches, datagrams };
 }
 
-const countSessions = (f: SessionFrame) =>
-	Object.values(f).reduce((n, s) => n + active(sessionsStarted(s), sessionsEnded(s)), 0);
+const countSessions = (f: TotalsFrame) =>
+	Object.values(f).reduce((n, t) => n + active(sessionsStarted(t.sessions ?? {}), sessionsEnded(t.sessions ?? {})), 0);
 
 // ---- Time-series history ---------------------------------------------------
 
@@ -265,7 +271,7 @@ function sampleNode(t: number, stats: NodeStats): Sample {
 		broadcasters: totals.broadcasters,
 		viewers: totals.viewers,
 		tracks: totals.tracks,
-		sessions: countSessions(stats.sessions),
+		sessions: countSessions(stats.totals),
 	};
 }
 
@@ -520,18 +526,14 @@ ui.run((effect) => {
 			};
 		});
 
-	// Sessions connected under each auth root, counted regardless of data flow.
-	const sessionRows = Object.keys(stats.sessions)
+	// Sessions connected on each tier, counted regardless of data flow.
+	const sessionRows = Object.keys(stats.totals)
 		.sort()
-		.map((root) => {
-			const s = stats.sessions[root] ?? {};
+		.map((tier) => {
+			const s = stats.totals[tier]?.sessions ?? {};
 			return {
-				key: root,
-				cells: [
-					root || "(none)",
-					String(active(sessionsStarted(s), sessionsEnded(s))),
-					String(sessionsStarted(s)),
-				],
+				key: tier,
+				cells: [tier || "(default)", String(active(sessionsStarted(s), sessionsEnded(s))), String(sessionsStarted(s))],
 			};
 		});
 
@@ -545,9 +547,9 @@ ui.run((effect) => {
 		["broadcast", "viewers", "tracks", "egress", "frames", "groups", "datagrams", "fetches", "announce"],
 		egressRows(stats.egress),
 	);
-	renderTable($("node-session-roots"), ["auth root", "connected", "total"], sessionRows);
+	renderTable($("node-session-tiers"), ["tier", "connected", "total"], sessionRows);
 
-	const sessions = countSessions(stats.sessions);
+	const sessions = countSessions(stats.totals);
 	$("node-sessions").textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
 });
 

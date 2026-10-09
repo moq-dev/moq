@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 /// the relay accepts (and every cluster dial). The producer publishes a single
 /// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
 /// unset) on the cluster origin, under a fresh epoch each run. Each broadcast
-/// carries plain `.json` tracks
-/// (a JSON map of broadcast path to a cumulative counter snapshot per frame)
-/// plus compressed `.json.z` siblings; see `moq_stats` for the wire format and
-/// per-field semantics.
+/// carries plain `.json` tracks of cumulative counters (per-tier totals,
+/// per-path traffic, and per-root presence on request) plus compressed
+/// `.json.z` siblings; see `moq_stats` for the wire format and per-field
+/// semantics.
 #[derive(usage::Args, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]

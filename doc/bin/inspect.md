@@ -74,8 +74,8 @@ curl http://localhost:4443/fetch/.stats/node/local/host/publisher.json | jq
 ```
 
 The node name (`local/host` here) is `stats.node`. Each fetch returns the
-newest snapshot: a JSON object of cumulative counters keyed by broadcast path.
-`publisher.json` is egress, `subscriber.json` is ingress, and `sessions.json`
-counts sessions per auth root. Fetch twice and divide by the interval for a
+newest snapshot of cumulative counters. `totals.json` sums each tier's traffic
+and sessions, `publisher.json` is egress per broadcast path, and
+`subscriber.json` is ingress. Fetch twice and divide by the interval for a
 rate. The `.json.z` twins carry compressed patches, which these tools print as
 raw bytes. [Stats](/concept/stats) describes every field.
