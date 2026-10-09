@@ -36,7 +36,7 @@ import {
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { cancelled, finCancels } from "./request_stream.ts";
-import { type Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
+import { type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
 	SubscribeNamespaceEntry,
@@ -491,15 +491,20 @@ export class Publisher {
 			const unsubscribed = new Promise<void>((resolve) => {
 				unsubscribe = resolve;
 			});
+			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
 			const updates = (async () => {
-				if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16)
-					return stream.reader.closed;
 				for (;;) {
 					if (await stream.reader.done()) {
-						if (finCancels(version)) return;
+						if (legacy || finCancels(version)) return;
 						return stream.writer.closed;
 					}
 					if ((await stream.reader.u53()) !== 0x02) throw new Error("unexpected message on subscribe stream");
+					if (legacy) {
+						// Not applied yet, but read anyway: an unread update keeps the adapter's
+						// stream from closing, which is how UNSUBSCRIBE arrives.
+						await SubscribeUpdate.decode(stream.reader, version);
+						continue;
+					}
 					const params = await Message.decode(stream.reader, async (r) => {
 						await r.u62();
 						if (version === Version.DRAFT_17) await r.u62();
@@ -527,10 +532,7 @@ export class Publisher {
 					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
 				}
 			})();
-			const requestEnded =
-				version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
-					? updates
-					: race([updates, stream.writer.closed]);
+			const requestEnded = legacy ? updates : race([updates, stream.writer.closed]);
 			void requestEnded.then(
 				() => {
 					if (!finished) unsubscribe();

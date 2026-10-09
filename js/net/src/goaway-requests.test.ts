@@ -10,7 +10,7 @@ import { ALPN, Version as IetfVersion } from "./ietf/version.ts";
 import { Goaway } from "./lite/goaway.ts";
 import { StreamId } from "./lite/stream.ts";
 import { ALPN_06, Version as LiteVersion } from "./lite/version.ts";
-import { createMockTransportPair, type MockTransport } from "./mock.ts";
+import { createMockTransportPair, type MockTransport, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
@@ -115,9 +115,9 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			const track = req.accept({ timescale: Timescale.MILLI });
-			if (req.name === "video" && armVideo) track.writeString("one");
-			if (req.name === "later") track.writeString("from-draining");
-			if (req.name === "audio") track.writeString("from-replacement");
+			if (req.name === "video" && armVideo) track.writeFrame(textFrame("one"));
+			if (req.name === "later") track.writeFrame(textFrame("from-draining"));
+			if (req.name === "audio") track.writeFrame(textFrame("from-replacement"));
 			served.push(track);
 		}
 	})();
@@ -163,7 +163,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(request.active.peek()).toBe(front);
 
 		for (const producer of served) {
-			if (producer.closed.peek() === undefined) producer.writeString("two");
+			if (producer.closed.peek() === undefined) producer.writeFrame(textFrame("two"));
 		}
 		expect(await video.readString()).toBe("two");
 

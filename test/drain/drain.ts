@@ -116,7 +116,10 @@ const publisher = new Moq.Connection({ url: new URL(`http://127.0.0.1:${bPort}/`
 let lastPublished = -1;
 const ticker = setInterval(() => {
 	const group = track.appendGroup();
-	group.writeString(String(group.sequence));
+	group.writeFrame({
+		payload: new TextEncoder().encode(String(group.sequence)),
+		timestamp: Moq.Time.Timestamp.now(),
+	});
 	group.close();
 	lastPublished = group.sequence;
 }, GROUP_INTERVAL_MS);
