@@ -1217,7 +1217,8 @@ SUBSCRIBE_OK Message {
 Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
 **Group**:
-The absolute sequence number of the first group served when the subscription resolves.
+The absolute sequence number where delivery starts when the subscription resolves.
+Group streams can arrive out of order, so it need not be the first group sent.
 It MUST be greater than or equal to the requested `Group Start`.
 This group is not a new floor.
 A subscriber SHOULD NOT wait for a group between the requested floor and this group.
@@ -1422,7 +1423,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
-- SUBSCRIBE_OK `Group` names the first group served when the subscription resolves. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
+- SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.

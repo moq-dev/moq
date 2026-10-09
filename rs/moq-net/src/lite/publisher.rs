@@ -2958,13 +2958,13 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			group: start,
 			largest,
 		}))?;
-		// SUBSCRIBE_START names the first group served now. Groups already skipped between
+		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
 		// the requested floor and this group are not served. A later group at or above an
 		// explicit floor, still inside the subscriber's max age, is delivered, so the cursor
 		// stays at that floor.
 		//
 		// A pre-06 subscription that named no group is the exception: those drafts define an
-		// absent Group Start as the latest group, and the first group served becomes the
+		// absent Group Start as the latest group, and the resolved start becomes the
 		// floor. Lite-06 encodes a floor of group 0 as 0, which decodes as no named floor;
 		// that 0 is group 0, so it is not pinned. Raised, not assigned: an update that
 		// landed while the group was held may already have raised it past.
