@@ -6,7 +6,7 @@
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { FrameTooLarge, GroupTooLarge, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
-import { Timestamp } from "./time.ts";
+import type { Timestamp } from "./time.ts";
 
 /** Maximum bytes of frames in a group. A write that would exceed this aborts with {@link GroupTooLarge}. */
 export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
@@ -272,21 +272,6 @@ export class Producer {
 				else appendFrame(mirror, frame);
 			}
 		}
-	}
-
-	/** Write a string as a single UTF-8 encoded frame, stamped with {@link Timestamp.now}, so the track must be timed. */
-	writeString(str: string) {
-		this.writeFrame({ payload: new TextEncoder().encode(str), timestamp: Timestamp.now() });
-	}
-
-	/** Write a value as a single JSON-encoded frame, stamped with {@link Timestamp.now}, so the track must be timed. */
-	writeJson(json: unknown) {
-		this.writeString(JSON.stringify(json));
-	}
-
-	/** Write a boolean as a single one-byte frame, stamped with {@link Timestamp.now}, so the track must be timed. */
-	writeBool(bool: boolean) {
-		this.writeFrame({ payload: new Uint8Array([bool ? 1 : 0]), timestamp: Timestamp.now() });
 	}
 
 	/** True once the group has been closed. */
