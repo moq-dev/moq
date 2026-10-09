@@ -1,4 +1,4 @@
-# Draft-22 media on the 0.17 release line
+# [S] Draft-22 media on the 0.17 release line
 
 ## Goal
 
@@ -32,7 +32,3 @@ This README's own work, after the children merge: bump `@moq/net` on
 backports (0.17.3; 0.17.2 already shipped, and #4944 predates the
 backports), and send the reporter the branch.
 
-## Required
-
-- [noq 1.3.4 on release](/quest/m0/release-22/noq.md) - `release` builds on moq-noq 1.3.4
-- [LOCATION_FILTER backport](/quest/m0/release-22/location-filter.md) - the draft-22 filter form on `release`, Rust and JS

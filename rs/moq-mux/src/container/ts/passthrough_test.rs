@@ -63,8 +63,19 @@ impl Imported {
 /// Import `data` in chunks of `chunk` bytes and read back every object.
 async fn import(data: &[u8], chunk: usize, pcr_pid: Option<u16>) -> anyhow::Result<Imported> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default())?;
+	import_onto(broadcast, catalog, data, chunk, pcr_pid).await
+}
+
+/// [`import`] onto an existing `catalog` of `broadcast`.
+async fn import_onto(
+	broadcast: moq_net::broadcast::Producer,
+	catalog: crate::catalog::Producer,
+	data: &[u8],
+	chunk: usize,
+	pcr_pid: Option<u16>,
+) -> anyhow::Result<Imported> {
+	let consumer = broadcast.consume();
 	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve())?;
 	if let Some(pid) = pcr_pid {
 		passthrough = passthrough.with_pcr_pid(pid);
@@ -720,6 +731,50 @@ async fn a_flagged_jump_forward_starts_a_group_behind_a_break() {
 			"a skipped sequence marks the break, random access {random_access}"
 		);
 		assert_eq!(imported.section().random_access, random_access);
+	}
+}
+
+/// A capture that took the catalog's clock first keeps it: the import shifts every object by one
+/// offset that lands the first at now, so the timeline still never steps back and a flagged jump
+/// still adds its step.
+#[tokio::test(start_paused = true)]
+async fn an_import_shifts_onto_a_clock_already_in_use() {
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 3_600_000 * MS, 50, 10, 4);
+	mux.packet(0x100, Flags::pcr(3_620_000 * MS).discontinuity());
+	mux.fill(0x101, 4);
+	paced(&mut mux, 0x100, 3_620_040 * MS, 50, 10, 4);
+	let data = mux.bytes();
+	let verbatim = import(&data, data.len(), None).await.unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let clock = catalog.clock();
+	let fixed = catalog.snapshot().clock;
+	tokio::time::advance(Duration::from_secs(5)).await;
+	let before = clock.now().as_micros() as u64;
+	let shifted = import_onto(broadcast, catalog.clone(), &data, data.len(), None)
+		.await
+		.unwrap();
+	let after = clock.now().as_micros() as u64;
+
+	assert_eq!(catalog.snapshot().clock, fixed, "the import never moves the clock");
+	let first = shifted.objects[0].micros;
+	assert!(
+		(before..=after).contains(&first),
+		"lands at now: {before} {first} {after}"
+	);
+	let offset = first as i64 - verbatim.objects[0].micros as i64;
+	assert!(offset < 0, "an hour in shifts back onto the capture's five seconds");
+	assert_eq!(shifted.objects.len(), verbatim.objects.len());
+	for (shifted, verbatim) in shifted.objects.iter().zip(&verbatim.objects) {
+		assert_eq!((shifted.group, &shifted.payload), (verbatim.group, &verbatim.payload));
+		assert_eq!(
+			shifted.micros as i64 - verbatim.micros as i64,
+			offset,
+			"one offset for every object"
+		);
 	}
 }
 

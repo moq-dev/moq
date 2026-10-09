@@ -33,11 +33,14 @@ export interface Announce {
  * What an announcement stream yields.
  *
  * `start`: a route now covers the prefix. `update`: the route covering it changed
- * hops or cost, in place. `end`: no route covers it any more.
+ * hops or cost, in place. `restart`: another publisher instance now serves the prefix (a
+ * newer epoch, or another route without one), so request it afresh; what was already
+ * resolved stays on the old one until dropped or its route goes. `end`: no route covers it
+ * any more.
  *
  * @public
  */
-export type Event = { kind: "start" | "update" | "end" } & Announce;
+export type Event = { kind: "start" | "update" | "restart" | "end" } & Announce;
 
 /**
  * Options for an announcement stream.
