@@ -284,6 +284,10 @@ struct Slot {
 	// Whether this incarnation came from the live publisher and can replace older
 	// subscription content. Fetch-only backfill stays cached but never anchors drift.
 	visible: bool,
+
+	// Held while this is the live edge (see `TrackState::protects`), so an ended track
+	// sharing the group leaves it alone.
+	protection: Option<cache::Protection>,
 }
 
 /// Heap the track keeps per cached group, excluding the group itself
@@ -753,7 +757,9 @@ impl TrackState {
 
 	/// Expire an ended track's idle groups, whose closed channel refuses the write
 	/// [`Self::evict_expired_scan`] takes: abort them in place, releasing their frames,
-	/// and leave the slots, which every read path already skips.
+	/// and leave the slots, which every read path already skips. A group another track
+	/// still holds as its live edge stays, since tracks can share a group (a warm copy
+	/// adopts the relay copy's).
 	pub(super) fn expire_closed(&self, scan: ExpiryScan) {
 		for (sequence, stamp) in &self.evict {
 			let Some(slot) = self.lookup.get(sequence) else {
@@ -761,6 +767,7 @@ impl TrackState {
 			};
 			if slot.stamp == *stamp
 				&& !slot.group.is_aborted()
+				&& !slot.group.cache_protected()
 				&& slot
 					.group
 					.cache_accessed_tick(scan.gc.then_some(scan.now))
@@ -861,9 +868,10 @@ impl TrackState {
 			return;
 		}
 		if let Some(latest) = self.latest_group
-			&& let Some(slot) = self.lookup.get(&latest)
+			&& let Some(slot) = self.lookup.get_mut(&latest)
 		{
 			slot.group.cache_demote();
+			slot.protection = None;
 			self.evict.push_back((latest, slot.stamp));
 		}
 	}
@@ -945,9 +953,10 @@ impl TrackState {
 			// pool's access average) like any other cached group.
 			if let Some(latest) = self.latest_group
 				&& sequence > latest
-				&& let Some(prev) = self.lookup.get(&latest)
+				&& let Some(prev) = self.lookup.get_mut(&latest)
 			{
 				prev.group.cache_demote();
+				prev.protection = None;
 				self.evict.push_back((latest, prev.stamp));
 			}
 			self.latest_group = Some(sequence);
@@ -964,6 +973,7 @@ impl TrackState {
 				group: group.clone(),
 				stamp,
 				visible,
+				protection: self.protects(sequence).then(|| group.cache_protect()),
 			},
 		);
 		if visible {
@@ -7275,6 +7285,57 @@ mod test {
 			stale_finished.peek_group(0).is_none(),
 			"a sealed track's latest expired"
 		);
+	}
+
+	/// An ended track that shares a group with a live one leaves it while it is the live
+	/// track's latest, and expires it like any other idle group once it is not. A group
+	/// only ended tracks share expires even while stale consumers keep them all.
+	#[tokio::test]
+	async fn closed_track_expires_a_shared_group_unless_live_edge() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		// The first pass dates the activity it has not seen yet; the next one expires it.
+		let sweep = || {
+			for _ in 0..2 {
+				crate::model::clock::advance(Duration::from_secs(2));
+				pool.sweep();
+			}
+		};
+		let adopt = |name: &str, group: &group::Producer| {
+			let mut track = track_producer_pooled(name, pool.clone());
+			track.adopt_group(group.clone(), true).unwrap();
+			track.finish().unwrap();
+			let stale = track.consume();
+			drop(track);
+			stale
+		};
+
+		let live = track_producer_pooled("live", pool.clone());
+		let group = live.append_group().unwrap();
+		group.finish().unwrap();
+		let stale = adopt("ended", &group);
+		drop(group);
+
+		sweep();
+		assert!(live.consume().peek_group(0).is_some(), "the live edge stays");
+		assert!(
+			stale.peek_group(0).is_some(),
+			"and so does the ended track's share of it"
+		);
+
+		live.append_group().unwrap().finish().unwrap();
+		sweep();
+		assert!(stale.peek_group(0).is_none(), "once demoted, it expires");
+
+		let group = live.append_group().unwrap();
+		group.finish().unwrap();
+		let (first, second) = (adopt("first", &group), adopt("second", &group));
+		drop(group);
+		live.finish().unwrap();
+		drop(live);
+
+		sweep();
+		assert!(first.peek_group(2).is_none(), "ended tracks alone don't keep it");
+		assert!(second.peek_group(2).is_none(), "for each other");
 	}
 
 	/// An abort after every group below the declared end finished leaves the end standing.
