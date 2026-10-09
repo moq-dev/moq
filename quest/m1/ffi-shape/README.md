@@ -44,6 +44,9 @@ Settled shape:
   submodules, Go subpackages (`moq.dev/moq/json`, aliased on import next to
   `encoding/json`), Kotlin packages, Dart libraries, Swift caseless-enum
   namespaces.
+- `MoqError` variants name their fields (`Transport { message }`), so no
+  binding exposes a positional `v1` (as C++ does today).
+  Decided while iterating on #4079.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
 - moq-ffi and its generated consumers, including `cpp/obs` (above). The

@@ -62,42 +62,61 @@ the C package, `moq-c`, without colliding.
 
 ## Example
 
-```cpp
+Every fallible call returns `moq::expected`, and nothing throws. The samples
+unwrap results with this helper, which stops the program on an error; a real
+app branches on the error instead (see [Errors](#errors)).
+
+```cpp ignore
 #include <moq/moq.hpp>
 #include <cstdio>
+#include <cstdlib>
 
-// Subscribe. Every fallible call returns moq::expected; nothing throws.
-auto client = moq::Client::init();
-auto session = client->connect("https://relay.example.com").get();
-if (!session) {
-    std::fprintf(stderr, "connect: %s\n", session.error().to_string().c_str());
-    return;
+// Unwraps a result, or prints the error and aborts.
+template <typename T>
+T ok(moq::expected<T> result) {
+    if (!result) {
+        std::fprintf(stderr, "moq: %s\n", result.error().to_string().c_str());
+        std::abort();
+    }
+    return std::move(*result);
 }
 
-auto announced = (*session)->consume()->announced_broadcast("my-stream.hang");
-auto broadcast = (*announced)->available().get();
-auto catalogs = (*broadcast)->subscribe_catalog().get();
-auto catalog = (*catalogs)->next().get();
-if (catalog && *catalog) {
-    for (const auto &[name, video] : (*catalog)->video) {
-        auto media = (*broadcast)->subscribe_media(name, video.container, std::nullopt).get();
-        auto frame = (*media)->next().get();   // std::nullopt once the track ends
+void ok(moq::expected<void> result) {
+    if (!result) {
+        std::fprintf(stderr, "moq: %s\n", result.error().to_string().c_str());
+        std::abort();
+    }
+}
+```
+
+```cpp
+// Subscribe.
+auto client = moq::Client::init();
+auto session = ok(client->connect("https://relay.example.com").get());
+auto announced = ok(session->consume()->announced_broadcast("my-stream.hang"));
+auto broadcast = ok(announced->available().get());
+auto catalogs = ok(broadcast->subscribe_catalog().get());
+if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
+    for (const auto &[name, video] : catalog->video) {
+        auto media = ok(broadcast->subscribe_media(name, video.container, std::nullopt).get());
+        auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }
 ```
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
-// opus_init, packet, and rgba come from your encoder or capture source.
-auto broadcast = (*session)->publish()->create_broadcast("my-stream.hang");
-auto audio = (*broadcast)->publish_audio({moq::AudioFormat::kOpus, opus_init});
-(void)(*audio)->write_frame({packet, 20'000});
+// session is connected as above; opus_init, packet, and rgba come from your
+// encoder or capture source.
+auto broadcast = ok(session->publish()->create_broadcast("my-stream.hang"));
+auto audio = ok(broadcast->publish_audio({moq::AudioFormat::kOpus, opus_init}));
+ok(audio->write_frame({packet, 20'000}));
 
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
-auto video = (*broadcast)->encode_video({moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr);
-(void)(*video)->write({0, rgba});
-(void)(*broadcast)->announce({});
-(void)(*broadcast)->close();    // keep the producer alive while publishing, then close explicitly
+auto video = ok(broadcast->encode_video({moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
+ok(video->write({0, rgba}));
+ok(broadcast->announce({}));
+ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
 ## Futures
@@ -118,7 +137,7 @@ An async call returns `moq::Future<T>`, which delivers a `moq::expected<T>`:
   future's state, and reading an invalid future aborts.
 
 ```cpp
-auto reading = (*media)->next();
+auto reading = media->next();
 auto continuation = std::move(reading).then(moq::inline_executor, [](moq::expected<std::optional<moq::MediaFrame>> frame) {
     // Runs on the executor thread: hand the frame off, never block here.
 });
@@ -126,7 +145,7 @@ auto continuation = std::move(reading).then(moq::inline_executor, [](moq::expect
 
 ```cpp ignore
 // Inside a coroutine; the result is still a moq::expected.
-auto frame = co_await (*media)->next();
+auto frame = co_await media->next();
 ```
 
 ## Executor
@@ -162,6 +181,10 @@ rejections are their own cases, so you don't retry them. `error.to_string()`
 gives the message Rust's `Display` does, for logs; branch on the case, not the
 text. A Rust panic or a misused future (`get()` twice) aborts with a message on
 stderr instead of throwing.
+
+Check a result before reading it. With exceptions off below C++23, reading the
+value of an error is undefined, through `*result` and `value()` alike, since
+the bundled `tl::expected` has nothing to throw.
 
 Everything else maps one to one onto the
 [shared feature list](/lib/#what-every-binding-can-do): each generated

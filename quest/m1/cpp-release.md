@@ -33,3 +33,4 @@ first run of that path.
 
 - [Client settings parity](/quest/m1/obs-client-config.md) - the OBS Advanced settings the migration dropped come back
 - [Session report parity](/quest/m1/obs-session-report.md) - the dock shows the negotiated protocol and the reconnect failure again
+- [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - each type has one name and `moq::expected` one type before the API ships
