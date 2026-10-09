@@ -28,6 +28,7 @@ export * as Origin from "./origin.ts";
 export * as Path from "./path.ts";
 /** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */
 export * as Time from "./time.ts";
+export type { Timed } from "./timed.ts";
 /** Track role handles. */
 export * as Track from "./track.ts";
 /** Varint encoding and decoding, in QUIC's format and moq-transport's leading-ones format. */
