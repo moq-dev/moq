@@ -38,15 +38,16 @@ This line only reports the counters.
 
 Decided (2026-10-06 audit): [stats totals and prefix
 tracks](/quest/m0/broadcast-epoch/stats-split.md) lands first, since it is m0
-and gates the release; #4133 rebases its histograms onto stats-split's totals
-and prefix tracks rather than the per-path `publisher.json` and
-`subscriber.json` map rows it writes today, which stats-split retires.
-Rejected: #4133 first, which would make stats-split carry the lag histogram
-and dropped counters across.
+and gates the release; the lag histogram lands on stats-split's totals and
+prefix tracks rather than the per-path `publisher.json` and
+`subscriber.json` map rows, which stats-split retires.
+Rejected: the histogram first, which would make stats-split carry the lag
+histogram and dropped counters across.
 
 Decided (2026-10-08): the egress histogram is its own quest,
 [viewer lag histogram](/quest/m1/qos/lag-histogram.md), since every other
-child reads it and it exists only on the line branch.
+child reads it. The line's PR, #4133, closed without landing (2026-10-09);
+its code is kept on `wip/4133-lag-histogram`.
 
 Decided (2026-09-28): the line's moq-stats changes break the published
 crate. Client stats left the line (2026-09-29)
