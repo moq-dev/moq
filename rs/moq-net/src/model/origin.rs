@@ -398,7 +398,7 @@ pub struct Route {
 	/// epoch serve the same bytes, so a subscription resumes from one to another.
 	/// Among routes at one prefix the newest epoch wins, and a route without one
 	/// ranks last and is never resumed through another route. Changing it on a
-	/// standing advertisement (including dropping it) retracts and announces afresh.
+	/// standing advertisement (including dropping it) is an [`AnnounceEvent::Restart`].
 	pub epoch: Option<crate::Epoch>,
 
 	/// The chain of origins the route has traversed, oldest first. Each relay
@@ -3709,12 +3709,12 @@ impl Dynamic {
 	/// Replace the route in place, taken as given.
 	///
 	/// At the same [`Route::epoch`], consumers observe another active update for
-	/// the same prefix and sessions forward it as a restart, so re-pricing never
+	/// the same prefix and sessions forward it as an update, so re-pricing never
 	/// looks like new content. Another epoch, or none, names another publisher
-	/// instance: consumers see the old broadcast end and a new one start, the
-	/// broadcasts served through the old one end, and requests still waiting on it
-	/// are refused with [`Error::Unroutable`]. To re-price, start from the
-	/// current route: `dynamic.update(dynamic.route().with_cost(cost))`.
+	/// instance: consumers see a restart, the broadcasts served through the old one
+	/// end, and requests still waiting on it are refused with [`Error::Unroutable`].
+	/// To re-price, start from the current route:
+	/// `dynamic.update(dynamic.route().with_cost(cost))`.
 	///
 	/// The prefix is fixed at announce time: to move a route, drop this and call
 	/// [`Producer::dynamic`] again. Fails with [`Error::Closed`] once the origin's
@@ -4496,9 +4496,12 @@ impl Consumer {
 	/// route retracting with no replacement ends the broadcast, and the next request
 	/// re-serves the path; tracks already in flight carry on to their own end. The
 	/// broadcast also ends once no handle holds it and none of its tracks has been read
-	/// for a linger, and the next request re-serves the path then too. A
-	/// newer epoch winning the path ends even those with [`Error::Unroutable`], so
-	/// readers request the new broadcast instead of stalling on the old one.
+	/// for a linger, and the next request re-serves the path then too.
+	///
+	/// Another instance winning the path (a newer epoch, or another route without
+	/// one) leaves the broadcast to its readers until its routes go, while the next
+	/// request resolves the winner on a fresh broadcast. [`Consumer::announced`]
+	/// reports that as [`AnnounceEvent::Restart`], so readers know to request again.
 	///
 	/// Pass an owned [`crate::Epoch`] to refuse a different publisher instance, both
 	/// when requesting and when an asynchronous answer resolves. `None` leaves lookup
@@ -8096,11 +8099,20 @@ mod tests {
 		let mut fresh = replaced.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&new_track, &mut fresh, b"new").await;
 		deliver(&old_track, &mut subscription, b"still").await;
+
+		// The old publisher goes, and its subscription with it.
+		drop(old_track);
+		drop(old);
+		assert!(
+			!matches!(next_group(&mut subscription).await, Ok(Some(_))),
+			"the old subscription outlived its route"
+		);
+		deliver(&new_track, &mut fresh, b"after").await;
 	}
 
 	/// A request in the same tick as a newer epoch's announcement is never handed
 	/// the old front: its watcher has not noticed the replacement yet, but the
-	/// request mints a front on the new epoch instead of joining one that is ending.
+	/// request mints a front on the new epoch instead of joining the replaced one.
 	#[moq_net_sim::test]
 	async fn a_request_racing_a_newer_epoch_skips_the_old_front() {
 		let producer = origin(1).produce();
@@ -8131,7 +8143,7 @@ mod tests {
 			!named.is_clone(&resolved),
 			"a request naming the new epoch got the old one"
 		);
-		assert!(!bare.is_clone(&resolved), "a bare request joined the superseded front");
+		assert!(!bare.is_clone(&resolved), "a bare request joined the replaced front");
 		assert!(named.is_clone(&bare), "both share the new front");
 		assert_eq!(
 			bare.info().epoch.as_ref(),
