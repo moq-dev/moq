@@ -63,7 +63,6 @@ remain and no release waits on them.
 
 - [Serve budget](/quest/m0/serve-budget.md) - a kio task that always has work ready yields after a budget, so a fast publisher can't starve its own QUIC driver
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.4, before Seattle
-- [Capped stream END_OF_GROUP](/quest/m0/ietf-end-of-track-location.md) - a stream capped by the subscription's end Location never claims END_OF_GROUP; moving End of Track's Location is deferred
 - [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - every Go, Python, and C++ publisher cell passes reliably once the serve budget lands, and a cell fails when a connection idles out
 - [FFI cancelled reads](/quest/m0/ffi-cancel-read.md) - cancelling a moq-ffi read in any binding leaves its data for the next read, so the C++ probe stops flaking
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
