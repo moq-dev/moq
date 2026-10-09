@@ -1,4 +1,4 @@
-name: Release C++
+name: Release Cpp
 
 # Builds the moq C++ package (cpp/moq) for every target and publishes one archive per
 # target to a cpp-v<version> GitHub release. The vcpkg and Conan packages fetch these.

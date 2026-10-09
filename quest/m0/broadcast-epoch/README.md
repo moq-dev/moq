@@ -51,8 +51,7 @@ Decided:
   hard switch that ended subscriptions in flight with `Unroutable` (decided
   2026-10-06 for epochs, and 2026-10-07 in #5013 for routes without one) is
   reversed (2026-10-07): subscriptions stay sticky on their route and an
-  explicit `Restart` announce event tells players to follow, through
-  [Restart](/quest/m0/broadcast-epoch/restart.md). When the newest goes and
+  explicit `Restart` announce event tells players to follow. When the newest goes and
   an older one is still live, the older one wins again as a new broadcast.
 - [Claim-served epochs](/quest/m1/claim-epochs.md), where a
   lite-07 claim's answer carries the served broadcast's own epoch, no longer
@@ -94,7 +93,6 @@ then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 
 ## Required
 
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - a replaced broadcast reaches announce consumers as an explicit Restart, subscriptions stay sticky, and new requests never join a replaced route's front
 - [No stitch](/quest/m0/broadcast-epoch/no-stitch.md) - an epochless track ends on an upstream error instead of re-splicing onto whatever instance now wins upstream
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Export ts](/quest/m0/broadcast-epoch/export-ts.md) - `export ts` and SRT egress linger only for the same epoch, and switch to a replacement only with `--stitch`, as a full program switch

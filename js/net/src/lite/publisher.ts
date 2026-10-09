@@ -14,7 +14,7 @@ import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
-import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import type { Fetch } from "./fetch.ts";
@@ -34,6 +34,7 @@ import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./tra
 import {
 	hasAnnounceId,
 	hasAnnounceOk,
+	hasAnnounceRestart,
 	hasDatagrams,
 	hasLargest,
 	hasProbeRtt,
@@ -460,12 +461,12 @@ export class Publisher {
 		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
 
-		// Keyed by suffix, valued by identity plus route, so a republish diffs as
-		// ended-then-active and a re-price as a restart.
+		// Keyed by suffix, valued by identity plus route, so a republish diffs as a restart
+		// and a re-price as an update.
 		let active = new Map<Path.Valid, Advertised>();
 
-		// Lite06+: announce ids. Every active we send implicitly assigns the next
-		// per-stream ordinal; ended/restart reference the id instead of repeating the path.
+		// Lite06+: announce ids. Every active we send implicitly assigns the next per-stream
+		// ordinal; ended/update/restart reference the id instead of repeating the path.
 		let nextAnnounceId = 0n;
 		const announceIds = new Map<Path.Valid, bigint>();
 
@@ -488,7 +489,7 @@ export class Publisher {
 			);
 		};
 
-		const restart = async (suffix: Path.Valid, route: Route) => {
+		const update = async (suffix: Path.Valid, route: Route) => {
 			if (!hasAnnounceId(this.version)) {
 				await retract(suffix);
 				await announce(suffix, route);
@@ -499,10 +500,26 @@ export class Publisher {
 				await announce(suffix, route);
 				return;
 			}
+			console.debug(`announce: broadcast=${suffix} update=true`);
+			await encodeAnnounceBroadcast(
+				stream.writer,
+				{ status: "update", id, hops: wireHops(route), cost: route.cost },
+				this.version,
+			);
+		};
+
+		// Another publisher instance: ANNOUNCE_RESTART on lite-07, an end and a start before it.
+		const restart = async (suffix: Path.Valid, route: Route) => {
+			const id = announceIds.get(suffix);
+			if (id === undefined || !hasAnnounceRestart(this.version)) {
+				await retract(suffix);
+				await announce(suffix, route);
+				return;
+			}
 			console.debug(`announce: broadcast=${suffix} restart=true`);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "restart", id, hops: wireHops(route), cost: route.cost },
+				{ status: "restart", id, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
 				this.version,
 			);
 		};
@@ -615,18 +632,17 @@ export class Publisher {
 
 				const updated = visible(latest);
 
-				for (const [suffix, snap] of active) {
-					const cur = updated.get(suffix);
-					// A new epoch is another broadcast, even from the same entry.
-					if (!cur || cur.identity !== snap.identity || cur.route.epoch !== snap.route.epoch)
-						await retract(suffix);
+				for (const suffix of active.keys()) {
+					if (!updated.has(suffix)) await retract(suffix);
 				}
 				for (const [suffix, snap] of updated) {
 					const prev = active.get(suffix);
-					if (!prev || prev.identity !== snap.identity || prev.route.epoch !== snap.route.epoch) {
+					if (!prev) {
 						await announce(suffix, snap.route);
-					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
+					} else if (!sameInstance(prev, snap)) {
 						await restart(suffix, snap.route);
+					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
+						await update(suffix, snap.route);
 					}
 				}
 

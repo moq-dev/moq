@@ -24,7 +24,7 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   ANNOUNCE_START carries the prefix (keeping today's Path Base/Keep
   compression), a Route ID, the origin's cost for that prefix, and the epoch,
   and lite-07's restart message from
-  [Restart](/quest/m0/broadcast-epoch/restart.md) keeps its meaning. On a
+  Restart keeps its meaning. On a
   route without an epoch, the source is the origin node and its ANNOUNCE: a
   new one at the same path is a restart.
   ANNOUNCE_UPDATE re-prices it and ANNOUNCE_END ends one broadcast while the
@@ -140,6 +140,3 @@ release.
 
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - the numbers that confirm the design before the wire is written
 
-## Related
-
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - the lite-07 restart message ANNOUNCE_START sits beside

@@ -64,5 +64,4 @@ subscriptions across a swap. Report it in the PR.
 
 ## Required
 
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - the announce event a swap to another epoch produces instead of a handover
 - [One max_age meaning](/quest/m1/cache-max-age.md) - the rule that gives up a resumed group no route continues

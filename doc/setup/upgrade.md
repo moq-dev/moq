@@ -19,6 +19,17 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **A replaced broadcast restarts announce consumers, and subscriptions stay.**
+  Rust's `AnnounceEvent` gains `Restart`, `@moq/net`'s announce events gain the
+  `"restart"` kind, moq-ffi's `MoqAnnounceEvent` gains `Restart`, and libmoq's
+  `moq_announce_kind` gains `MOQ_ANNOUNCE_KIND_RESTART`: another publisher
+  instance now serves the prefix (a newer epoch, or another route without one,
+  including a reconnect), so request the path again. A newer epoch no longer
+  ends subscriptions with `Unroutable`; they stay on the old instance until
+  dropped or its route goes. A restart was an end then a start, and still is on
+  moq-lite 06 and older and moq-transport. moq-lite 07 adds `ANNOUNCE_RESTART`
+  (0x3), and lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it
+  always meant.
 - **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
   catalog codec string and dimensions are enough, `moq export fmp4` writes an
   `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,
@@ -126,8 +137,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   out-of-tolerance count beside its `streams` rows. It is no longer `Eq`.
 - **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
-  source's own timestamps and let the catalog clock map them to wall time;
-  pin that mapping with `Config::with_clock` when the source's zero is known.
+  source's own timestamps and let the catalog clock map them to wall time.
+  An importer whose first frame arrives once the clock is in use (taken with
+  `catalog.clock()`, published in a catalog, or pinned with
+  `Config::with_clock`) shifts its timestamps onto it, so its first frame lands
+  at now; a `with_clock` catalog no longer keeps an importer's timestamps
+  verbatim. Importers sharing a timestamp base reserve through one
+  `catalog.timebase()`.
 - **moq-net owns its transport traits.** `moq_net::web_transport_trait` is
   gone, and `transport::poll::{Session, SendStream, RecvStream}` no longer
   extend `web_transport_trait::poll`. They carry their own `poll_*` methods,
@@ -151,9 +167,8 @@ These land with the next breaking release, not the 2026-09-23 train.
 - **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
   `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
   instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
-  `Instant` with `.at(catalog.clock().capture(instant)?)`, reading
-  `catalog.clock()` at write time, since an importer's first frame re-anchors
-  it. A timestamp ahead of now is published rather than refused.
+  `Instant` with `.at(catalog.clock().capture(instant)?)`. A timestamp ahead
+  of now is published rather than refused.
 - **moq-mux importers publish the catalog at their first frame.** The fMP4,
   MKV, and MPEG-TS importers used to publish it at their init segment (`moov`,
   `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the

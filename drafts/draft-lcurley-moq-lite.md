@@ -379,17 +379,18 @@ The publisher replies with a single ANNOUNCE_OK message followed by announcement
 - ANNOUNCE_START: a matching route over a path prefix is available.
 - ANNOUNCE_END: a previously started route is no longer advertised.
 - ANNOUNCE_UPDATE: a previously started advertisement was atomically updated (new hops or cost).
+- ANNOUNCE_RESTART: another publisher instance now serves a previously started advertisement.
 
 ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) and the number of initial announcements, which lets the subscriber deliver the initial set as a batch (see [ANNOUNCE_OK](#announce-ok)).
 
 Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per advertisement.
 The id never appears on the wire; both endpoints derive it from the message order on the (reliable, ordered) stream.
-ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the route's prefix.
+ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART reference the Announce ID instead of repeating the route's prefix.
 
 Each route has at most one current advertisement per stream.
-A second ANNOUNCE_START for an already-advertised route is a protocol violation; an ANNOUNCE_UPDATE atomically updates the current advertisement's metadata while keeping its id live.
+A second ANNOUNCE_START for an already-advertised route is a protocol violation; an ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces the current advertisement while keeping its id live.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END or ANNOUNCE_UPDATE referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a route that is already advertised, or any announcement before ANNOUNCE_OK.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END, ANNOUNCE_UPDATE, or ANNOUNCE_RESTART referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a route that is already advertised, or any announcement before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all routes are now unavailable.
 
 A route covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
@@ -397,7 +398,7 @@ A publisher answering a request stream presents each of its routes clamped to th
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
 
 #### Compression {#announce-compression}
-An ANNOUNCE_START or ANNOUNCE_UPDATE MAY copy the head of a path or the tail of a Hop ID list from a live advertisement on the same stream, its base.
+An ANNOUNCE_START, ANNOUNCE_UPDATE, or ANNOUNCE_RESTART MAY copy the head of a path or the tail of a Hop ID list from a live advertisement on the same stream, its base.
 A `Base` field names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Base`, so 1 names the latest ANNOUNCE_START, and 0 names no base.
 The receiver resolves every base against the advertisements live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing.
 A publisher MAY always send a `Base` of 0.
@@ -426,7 +427,9 @@ A publisher MUST NOT advertise a path whose entries contain the Hop ID the subsc
 The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
 Of the paths that remain a publisher SHOULD advertise the best, and nothing when every known path contains that Hop ID.
 Selection is per subscriber, so a subscriber that the serving path flows through still receives the best standby path, which is what lets it fail over if its own copy dies.
-The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last qualifying path appearing or disappearing travels as an ANNOUNCE_START or ANNOUNCE_END.
+The per-subscriber winner changing travels as an ANNOUNCE_UPDATE when the new winner serves the same Broadcast, and as an ANNOUNCE_RESTART when it does not: another Epoch, or, between routes without one, another route; the last qualifying path appearing or disappearing travels as an ANNOUNCE_START or ANNOUNCE_END.
+A relay whose resolution of a path beneath a prefix moves to another route without an Epoch while the prefix's own winner stays (see the Spread Hash below) sends an ANNOUNCE_RESTART of that prefix.
+Before moq-lite-07, a publisher sends an ANNOUNCE_END and then an ANNOUNCE_START where it would send an ANNOUNCE_RESTART.
 
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
@@ -439,7 +442,8 @@ When choosing which route to advertise for a prefix, the requested path is the p
 
 Routes with the same Epoch serve the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 A relay MUST NOT move a subscription to a route with a different Epoch, or between routes without one: it stays on its route and ends with it.
-When a newer Epoch wins the path, the relay SHOULD end subscriptions to the older one, even ones in flight, with UNROUTABLE, so subscribers request the new Broadcast rather than stall on one that was replaced.
+When another Broadcast wins the path, subscriptions already open stay on theirs until the subscriber drops them or the route goes; new requests resolve the winner, and the ANNOUNCE_RESTART tells subscribers to request again.
+A receiver of an ANNOUNCE_RESTART (or of the ANNOUNCE_END and ANNOUNCE_START standing in for one) MUST NOT serve a new request under its prefix from anything resolved through the replaced advertisement.
 Epochs compare as their 16 bytes, which for a UUIDv7 orders them by creation time.
 Ordering Epochs minted on different hosts therefore trusts their clocks: a restart on a host whose clock runs behind loses to the older instance until that one is retracted.
 
@@ -882,7 +886,7 @@ Indicate interest for any broadcasts with a path that starts with this prefix.
 1 to also receive hidden routes (see [Hidden Paths](#hidden)), 0 otherwise.
 Any other value is a PROTOCOL_VIOLATION.
 
-The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching routes, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_UPDATE messages for any future updates, subject to [Routing](#routing).
+The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching routes, followed by ANNOUNCE_START, ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART messages for any future updates, subject to [Routing](#routing).
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
 
 
@@ -900,7 +904,7 @@ ANNOUNCE_OK Message {
 
 **Hop ID**:
 The publisher's own Hop ID.
-This is treated as the implicit trailing entry of every ANNOUNCE_START and ANNOUNCE_UPDATE Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
+This is treated as the implicit trailing entry of every ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
 The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. when bridging from an older protocol version) or the endpoint deliberately withholds it to obscure the underlying routing.
 A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assign itself one (a fresh random value per session suffices), so downstream receivers can detect loops through it.
 Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
@@ -914,7 +918,7 @@ A value of `0` is valid and means the publisher is offering no initial available
 
 ## ANNOUNCE_START {#announce-start}
 A publisher sends an ANNOUNCE_START message to advertise a route: a claim that paths under a prefix can be served.
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END and ANNOUNCE_UPDATE (see [Announce](#announce)).
+Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART (see [Announce](#announce)).
 
 Only the suffix is encoded on the wire, as the full route prefix can be constructed by prepending the requested prefix.
 
@@ -952,7 +956,7 @@ An empty suffix advertises the requested prefix itself, which is how a route cov
 The publisher instance the route serves: 16 bytes holding a UUIDv7 [RFC9562], or empty when unknown.
 Any other length, or a UUID of another version or variant, is a PROTOCOL_VIOLATION.
 A relay forwards the Epoch unchanged and MUST NOT invent one for a route that arrived without one.
-The Epoch is fixed for the advertisement's lifetime: a publisher replacing it sends ANNOUNCE_END and a new ANNOUNCE_START, and ANNOUNCE_UPDATE never changes it.
+Only an ANNOUNCE_RESTART changes it; ANNOUNCE_UPDATE never does.
 
 **Hop Base** and **Hop Keep**:
 The Hop ID list ends with the last `Hop Keep` entries of the list advertised by the base that `Hop Base` names (see [Compression](#announce-compression)), following the literal `Hop ID` entries.
@@ -1035,6 +1039,33 @@ Referencing an id that was never assigned, or one already retired by an ANNOUNCE
 As defined for [ANNOUNCE_START](#announce-start).
 `Hop Base` may name this advertisement itself, which resolves against the list being replaced.
 An update whose only change is a Route Cost is valid: it is how a relay re-prices a route without disturbing it.
+
+
+## ANNOUNCE_RESTART {#announce-restart}
+A publisher sends an ANNOUNCE_RESTART message when another publisher instance replaces a previously started advertisement (see [Routing](#routing)), referencing its Announce ID.
+The route's prefix is unchanged and the id stays live.
+Whatever the subscriber resolved under the prefix through the advertisement is the old instance: in-flight subscriptions on it are undisturbed, and a new request resolves afresh.
+
+~~~
+ANNOUNCE_RESTART Message {
+  Type (i) = 0x3
+  Message Length (i)
+  Announce ID (i),
+  Epoch (b),
+  Hops (..),
+  Route Cost (i),
+}
+~~~
+
+**Type**:
+Set to 0x3 to indicate an ANNOUNCE_RESTART message.
+
+**Announce ID**:
+As defined for [ANNOUNCE_UPDATE](#announce-update).
+
+**Epoch**, **Hops**, and **Route Cost**:
+As defined for [ANNOUNCE_START](#announce-start), replacing the advertisement's.
+`Hop Base` may name this advertisement itself, which resolves against the list being replaced.
 
 
 ## SUBSCRIBE
@@ -1497,7 +1528,8 @@ The `Message Length` describes the payload size on the wire.
 - Replaced Warm and Cold Route Cost with one static Route Cost in moq-lite-07-wip; lite-06 retains both fields, reading Warm and writing Cold at saturation.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
-- Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path and ends subscriptions to the older one. Replaces the first-hop identity.
+- Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path for new requests, while subscriptions to the older one stay until their route goes. Replaces the first-hop identity.
+- Added ANNOUNCE_RESTART (0x3): another publisher instance replaces a live advertisement, under a new Epoch or, without one, through another route, including a path beneath a prefix moving to another route. Older versions send ANNOUNCE_END then ANNOUNCE_START for it.
 - An untimed Track's frames and datagrams carry their send time. lite-05 and lite-06 publishers do the same.
 - An open Track Stream is interest in the Track until the subscriber closes it, which a subscriber does once its Subscribe Stream has a response. lite-05 and lite-06 implementations do the same.
 

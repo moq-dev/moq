@@ -109,9 +109,15 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   refused up front and held to the grant through a gate its dispatcher owns
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
-- [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
-  TOKEN` on a moq-transport request decodes by the draft's rules, closing the
-  session on the forms the draft forbids
+- [Request-token decode](/quest/m1/auth/request-token-decode.md) - an
+  `AUTHORIZATION TOKEN` on a moq-transport request decodes by the draft's
+  rules, closing the session on the forms the draft forbids
+- [Setup extensions](/quest/m1/auth/extensions.md) - a side declares which
+  Setup extensions it offers with one `Extensions` struct
+- [Request tokens](/quest/m1/auth/request-token.md) - a token on a
+  moq-transport request authorizes that request and renews it in band
+- [Request leases](/quest/m1/auth/request-lease.md) - moq-relay honors a
+  request token with a lease of its own
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - an

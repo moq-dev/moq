@@ -299,7 +299,7 @@ impl Publish {
 	/// the tracks already in place.
 	///
 	/// Stdin is a live feed with its own zero: the container importers publish its timestamps
-	/// verbatim and anchor the catalog clock so the first frame is live on arrival.
+	/// so the first frame is live on arrival, verbatim unless `config` pins the catalog clock.
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		format: &PublishFormat,
@@ -681,6 +681,9 @@ pub(crate) mod tests {
 		settle().await;
 		let config = moq_mux::catalog::Config::default().with_catalog(Catalog::<tscat::Ext>::default());
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+		// Reserve before the hand-written tracks below, so their catalog edits are withheld and
+		// the import still places the clock, keeping bbb's PTS those tracks are stamped against.
+		let reserved = catalog.reserve();
 
 		// Section-framed verbatim stream (SCTE-35, stream_type 0x86).
 		let section = broadcast
@@ -739,7 +742,7 @@ pub(crate) mod tests {
 		pes_producer.finish().unwrap();
 
 		// Add the real video/audio (moves `broadcast` into the importer).
-		let mut import = Import::new(broadcast, catalog.reserve());
+		let mut import = Import::new(broadcast, reserved);
 		import.decode(&BytesMut::from(BBB)).unwrap();
 		import.finish().unwrap();
 

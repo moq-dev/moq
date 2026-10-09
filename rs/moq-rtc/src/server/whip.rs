@@ -213,8 +213,9 @@ mod tests {
 	}
 
 	/// An encoder reconnecting to the same broadcast while its stale session is still
-	/// open replaces the stale broadcast at once: each offer is its own epoch, so
-	/// viewers re-request instead of stalling on the old one.
+	/// open restarts the broadcast at once: each offer is its own epoch, so a fresh
+	/// request reaches the reconnect, while the stale viewer stays on the old one until
+	/// it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_session() {
 		let server = Server::new(crate::server::Config::default());
@@ -231,18 +232,16 @@ mod tests {
 
 		let _fresh_session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
 		// The session binds a real UDP socket, so this runs on the wall clock.
-		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		let stale_viewer = tokio::time::timeout(std::time::Duration::from_millis(200), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
-					Ok(None) => panic!("the stale broadcast ended cleanly"),
-					Err(err) => return err,
+					other => return other.map(|_| ()),
 				}
 			}
 		})
-		.await
-		.expect("the stale viewer stalled");
-		assert!(matches!(ended, moq_net::Error::Unroutable), "{ended:?}");
+		.await;
+		assert!(stale_viewer.is_err(), "the stale viewer ended: {stale_viewer:?}");
 		let fresh = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected session");
 	}
