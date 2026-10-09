@@ -34,8 +34,7 @@
 //! A value timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
 //! and the entry advertises how late values reach the transport as its `jitter` and `delay`, the
 //! way a media rendition does. A capture [`Instant`](std::time::Instant) converts with
-//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock, read at write time since an
-//! importer's first frame re-anchors it:
+//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock:
 //!
 //! ```no_run
 //! # fn example(
@@ -540,7 +539,10 @@ mod test {
 		let published = catalog.snapshot().clock;
 		let before = catalog.clock().now();
 		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
-		let first = catalog.input().shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap()).unwrap();
+		let first = catalog
+			.input()
+			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
+			.unwrap();
 		assert_eq!(catalog.snapshot().clock, published, "the clock never moves");
 		assert!(before <= first, "the importer lands at now: {before:?} {first:?}");
 		status.update(&json!({ "live": true })).unwrap();

@@ -3821,6 +3821,128 @@ pub(super) mod test {
 		);
 	}
 
+	/// A `splice_insert` section splicing at `pts_time`, with no `pts_adjustment` and a valid CRC.
+	fn splice_insert(pts_time: u64) -> Vec<u8> {
+		// table_id, length (filled below), protocol_version, pts_adjustment, cw_index, tier, and a
+		// 15-byte splice_insert command.
+		let mut section = vec![0xfc, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xf0, 15, 0x05];
+		section.extend_from_slice(&1u32.to_be_bytes()); // splice_event_id
+		section.push(0x7f); // not cancelled
+		section.push(0xcf); // out of network, program splice, no duration, not immediate
+		section.push(0xfe | ((pts_time >> 32) as u8 & 1)); // time_specified, then the PTS
+		section.extend_from_slice(&(pts_time as u32).to_be_bytes());
+		section.extend_from_slice(&[0, 1, 0, 0]); // unique_program_id, avail_num, avails_expected
+		section.extend_from_slice(&[0, 0]); // descriptor_loop_length
+		section[2] = (section.len() - 3 + 4) as u8;
+		let crc = super::psi::CRC.checksum(&section);
+		section.extend_from_slice(&crc.to_be_bytes());
+		section
+	}
+
+	/// A TS import joining a clock already in use shifts its media onto that clock, so its
+	/// SCTE-35 sections absorb the same shift in `pts_adjustment`: in the export, a splice time
+	/// lands on the exported picture it names, and the section still verifies.
+	#[tokio::test(start_paused = true)]
+	async fn a_splice_follows_its_media_onto_a_clock_in_use() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		const VIDEO_PID: u16 = 0x0050;
+		const CUE_PID: u16 = 0x0021;
+		const MASK: u64 = (1 << 33) - 1;
+		// Ten pictures a second from one second in; the cue splices at the sixth.
+		let picture = |k: u64| 90_000 + k * 9_000;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		// A capture took the clock, which reads ten seconds: the feed shifts nine seconds later.
+		let _capture = catalog.clock();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let mut bytes = synth_pmt(
+			&[
+				(StreamType::H264, VIDEO_PID),
+				(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
+			],
+			true,
+		);
+		for k in 0..20 {
+			bytes.extend_from_slice(&audio_pes_packet(
+				VIDEO_PID,
+				k as u8,
+				picture(k),
+				&annexb_au(k % 10 == 0),
+			));
+			if k == 0 {
+				bytes.extend_from_slice(&packet(true, 0, 0, &splice_insert(picture(5))));
+			}
+		}
+		import.decode(&bytes).unwrap();
+		import.finish().unwrap();
+
+		let exporter = crate::container::ts::Export::with_ts(
+			crate::source::announced(&consumer),
+			crate::catalog::CatalogFormat::Hang,
+		)
+		.await
+		.unwrap();
+		let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
+		let mut ts = Vec::new();
+		while let Ok(Some(frame)) = tokio::time::timeout(RECORDING_MAX_AGE * 3, exporter.next())
+			.await
+			.map(|r| r.unwrap())
+		{
+			ts.extend_from_slice(&frame.payload);
+		}
+
+		let stamp = |b: &[u8]| {
+			u64::from((b[0] >> 1) & 7) << 30
+				| u64::from(b[1]) << 22
+				| u64::from(b[2] >> 1) << 15
+				| u64::from(b[3]) << 7
+				| u64::from(b[4] >> 1)
+		};
+		let mut pictures = Vec::new();
+		let mut cue = None;
+		for packet in ts.as_chunks::<188>().0 {
+			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+			if packet[1] & 0x40 == 0 || packet[3] & 0x10 == 0 {
+				continue;
+			}
+			let start = 4 + if packet[3] & 0x20 != 0 {
+				usize::from(packet[4]) + 1
+			} else {
+				0
+			};
+			let payload = &packet[start..];
+			if pid == CUE_PID {
+				let section = &payload[1 + usize::from(payload[0])..];
+				let len = 3 + (usize::from(section[1] & 0x0f) << 8 | usize::from(section[2]));
+				cue = Some(section[..len].to_vec());
+			} else if payload.starts_with(&[0, 0, 1]) && (0xe0..=0xef).contains(&payload[3]) {
+				pictures.push(stamp(&payload[9..14]));
+			}
+		}
+
+		let cue = cue.expect("the cue is exported");
+		assert_eq!(super::psi::CRC.checksum(&cue), 0, "the section's CRC verifies");
+		let adjustment = u64::from(cue[4] & 1) << 32 | u64::from(u32::from_be_bytes(cue[5..9].try_into().unwrap()));
+		let pts_time = u64::from(cue[20] & 1) << 32 | u64::from(u32::from_be_bytes(cue[21..25].try_into().unwrap()));
+		assert_eq!(pts_time, picture(5), "the splice time itself is untouched");
+		assert_eq!(adjustment, 810_000, "the nine seconds the media shifted");
+		assert_eq!(pictures.len(), 20, "{pictures:?}");
+		assert_eq!(
+			(pts_time + adjustment) & MASK,
+			pictures[5],
+			"the splice lands on the picture it names: {pictures:?}"
+		);
+	}
+
 	/// A PUSI TS packet on `pid`: a bounded audio PES (stream_id 0xC0) carrying
 	/// `payload` (whole codec frames or a fragment of one), sized exactly via
 	/// adaptation-field stuffing so the PES completes (and flushes) on this packet.

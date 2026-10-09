@@ -1359,6 +1359,118 @@ async fn import_publishes_decode_times_on_an_arrival_clock() {
 	);
 }
 
+/// The most a shifted timestamp rounds down, in microseconds: under one unit of bbb's track scales.
+const TICK: u128 = 1_000;
+
+/// What fixes the catalog's clock before an fMP4 import's first fragment.
+#[derive(Clone, Copy, Debug)]
+enum Earlier {
+	/// A data track, whose registration publishes the catalog.
+	Data,
+	/// A capture, which takes the clock and stamps on its own copy.
+	Capture,
+}
+
+/// Something stamps on the catalog clock before an fMP4 import whose decode times start at
+/// `start_us`. The import offsets onto that clock instead of moving it: its first fragment lands
+/// at now on the earlier source's timeline, which keeps advancing with no rewind.
+async fn join_after(earlier: Earlier, start_us: u64) {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+
+	let mut data = match earlier {
+		Earlier::Data => {
+			let track = broadcast.create_track("telemetry", None).unwrap();
+			let mut stream = catalog.binary_stream(track, crate::binary::Config::default()).unwrap();
+			stream.append(&b"before"[..]).unwrap();
+			Some(stream)
+		}
+		Earlier::Capture => None,
+	};
+	let mut stamps = data.as_ref().map(|stream| stream.consume());
+	let clock = catalog.clock();
+	let fixed = catalog.snapshot().clock;
+
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	let before = clock.now().as_micros();
+	fmp4.decode(&live_session(start_us, 20)).unwrap();
+	let after = clock.now().as_micros();
+	if let Some(stream) = data.as_mut() {
+		stream.append(&b"after"[..]).unwrap();
+	}
+	fmp4.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.clock, fixed, "{earlier:?}: the import never moves the clock");
+	let published = crate::container::test_util::published(&consumer, &snapshot).await;
+	let video = &published[snapshot.video.renditions.keys().next().unwrap()];
+	// The offset rounds down to the track's own units.
+	assert!(
+		(before - TICK..=after).contains(&video[0]),
+		"{earlier:?}: the first fragment lands at now: {before} {} {after}",
+		video[0]
+	);
+	assert!(
+		video.windows(2).all(|w| (w[1] - w[0]).abs_diff(100_000) <= 1),
+		"the fragments keep their spacing: {video:?}"
+	);
+
+	if let Some(stamps) = stamps.as_mut() {
+		let waiter = kio::Waiter::noop();
+		let mut times = Vec::new();
+		while let std::task::Poll::Ready(Ok(Some(mut group))) = stamps.poll_recv_group(&waiter) {
+			while let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
+				times.push(frame.timestamp.unwrap().as_micros());
+			}
+		}
+		assert_eq!(times.len(), 2);
+		assert!(
+			times[0] <= times[1],
+			"{earlier:?}: the data track never rewinds: {times:?}"
+		);
+	}
+}
+
+/// A data track registered first fixes the clock; a feed an hour in still lands at now.
+#[tokio::test]
+async fn an_import_joins_a_data_tracks_clock() {
+	join_after(Earlier::Data, 3_600_000_000).await;
+}
+
+/// A capture that took the clock first keeps it; a feed at zero lands on its timeline rather than
+/// stepping it back ten seconds.
+#[tokio::test]
+async fn an_import_joins_a_captures_clock() {
+	join_after(Earlier::Capture, 0).await;
+}
+
+/// A `with_clock` catalog is fixed from the start, so even the first import shifts onto it.
+#[tokio::test]
+async fn an_import_shifts_onto_an_explicit_clock() {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let clock = crate::Clock::new();
+	let config = crate::catalog::Config::default().with_clock(clock);
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	let before = clock.now().as_micros();
+	fmp4.decode(&live_session(3_600_000_000, 5)).unwrap();
+	let after = clock.now().as_micros();
+	fmp4.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.clock, Some(clock.wall()));
+	let published = crate::container::test_util::published(&consumer, &snapshot).await;
+	let first = published[snapshot.video.renditions.keys().next().unwrap()][0];
+	assert!((before - TICK..=after).contains(&first), "{before} {first} {after}");
+}
+
 /// A source whose decode times restart is a new epoch: the import refuses the rewind rather than
 /// re-anchoring it forward, keeping everything published before it.
 #[tokio::test]

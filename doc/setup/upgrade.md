@@ -89,8 +89,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   out-of-tolerance count beside its `streams` rows. It is no longer `Eq`.
 - **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
-  source's own timestamps and let the catalog clock map them to wall time;
-  pin that mapping with `Config::with_clock` when the source's zero is known.
+  source's own timestamps and let the catalog clock map them to wall time.
+  An importer whose first frame arrives once the clock is in use (taken with
+  `catalog.clock()`, published in a catalog, or pinned with
+  `Config::with_clock`) shifts its timestamps onto it, so its first frame lands
+  at now; a `with_clock` catalog no longer keeps an importer's timestamps
+  verbatim. Importers sharing a timestamp base reserve through one
+  `catalog.input()`.
 - **moq-net owns its transport traits.** `moq_net::web_transport_trait` is
   gone, and `transport::poll::{Session, SendStream, RecvStream}` no longer
   extend `web_transport_trait::poll`. They carry their own `poll_*` methods,
@@ -114,9 +119,8 @@ These land with the next breaking release, not the 2026-09-23 train.
 - **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
   `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
   instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
-  `Instant` with `.at(catalog.clock().capture(instant)?)`, reading
-  `catalog.clock()` at write time, since an importer's first frame re-anchors
-  it. A timestamp ahead of now is published rather than refused.
+  `Instant` with `.at(catalog.clock().capture(instant)?)`. A timestamp ahead
+  of now is published rather than refused.
 - **moq-mux importers publish the catalog at their first frame.** The fMP4,
   MKV, and MPEG-TS importers used to publish it at their init segment (`moov`,
   `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the

@@ -33,8 +33,7 @@
 //! A payload timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
 //! and the entry advertises how late payloads reach the transport as its `jitter` and `delay`, the
 //! way a media rendition does. A capture [`Instant`](std::time::Instant) converts with
-//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock, read at write time since an
-//! importer's first frame re-anchors it:
+//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock:
 //!
 //! ```no_run
 //! # fn example(

@@ -562,7 +562,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		self.catalog.estimator()
 	}
 
-	/// The broadcast clock the catalog stamps its tracks on.
+	/// The broadcast clock the catalog stamps its tracks on, read without fixing it.
 	pub(crate) fn clock(&self) -> crate::Clock {
 		self.catalog.current_clock()
 	}

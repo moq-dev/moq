@@ -1437,7 +1437,10 @@ mod test {
 		// The stream starts an hour in; the clock reads five seconds.
 		let first = moq_net::Timestamp::from_micros(3_600_000_000).unwrap();
 		let shifted = catalog.input().shift(first).unwrap();
-		assert!(lateness(catalog.clock(), shifted) < Duration::from_secs(1), "{shifted:?}");
+		assert!(
+			lateness(catalog.clock(), shifted) < Duration::from_secs(1),
+			"{shifted:?}"
+		);
 		assert_eq!(catalog.snapshot().clock.map(|clock| clock.wall), advertised);
 	}
 
@@ -1452,7 +1455,11 @@ mod test {
 		let input = catalog.input();
 
 		let first = moq_net::Timestamp::from_micros(3_600_000_000).unwrap();
-		assert_eq!(input.clone().shift(first).unwrap(), first, "the first input stays verbatim");
+		assert_eq!(
+			input.clone().shift(first).unwrap(),
+			first,
+			"the first input stays verbatim"
+		);
 		let clock = catalog.clock();
 		assert_eq!(catalog.snapshot().clock, Some(clock.wall()), "the anchor is advertised");
 		let drift = clock
@@ -1467,9 +1474,16 @@ mod test {
 		assert_eq!(input.shift(later).unwrap(), later);
 
 		// A separate input starting at zero lands at now, and the clock stays.
-		let other = catalog.input().shift(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
+		let other = catalog
+			.input()
+			.shift(moq_net::Timestamp::from_micros(0).unwrap())
+			.unwrap();
 		assert!(lateness(clock, other) < Duration::from_secs(1), "{other:?}");
-		assert_eq!(catalog.clock().wall(), clock.wall(), "a second input never moves the clock");
+		assert_eq!(
+			catalog.clock().wall(),
+			clock.wall(),
+			"a second input never moves the clock"
+		);
 	}
 
 	/// Taking the clock fixes it, so a copy handed to a capture never goes stale.
@@ -1479,9 +1493,15 @@ mod test {
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let clock = catalog.clock();
 
-		let shifted = catalog.input().shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap()).unwrap();
+		let shifted = catalog
+			.input()
+			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
+			.unwrap();
 		assert_eq!(catalog.clock().wall(), clock.wall());
-		assert!(lateness(clock, shifted) < std::time::Duration::from_secs(1), "{shifted:?}");
+		assert!(
+			lateness(clock, shifted) < std::time::Duration::from_secs(1),
+			"{shifted:?}"
+		);
 	}
 
 	/// The first publish fixes the clock too: a snapshot on the wire is a mapping a reader may have
@@ -1499,9 +1519,15 @@ mod test {
 			.unwrap();
 		let published = catalog.snapshot().clock;
 
-		let shifted = catalog.input().shift(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
+		let shifted = catalog
+			.input()
+			.shift(moq_net::Timestamp::from_micros(0).unwrap())
+			.unwrap();
 		assert_eq!(catalog.snapshot().clock, published);
-		assert!(shifted.as_micros() >= 10_000_000, "{shifted:?} lands at the clock's reading");
+		assert!(
+			shifted.as_micros() >= 10_000_000,
+			"{shifted:?} lands at the clock's reading"
+		);
 	}
 
 	/// An input that knows when its timestamps happened places them there, on a clock it places
@@ -1518,7 +1544,11 @@ mod test {
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		let input = catalog.input();
 		input.place(pts, wall).unwrap();
-		assert_eq!(input.shift(later).unwrap(), later, "it placed the clock, so it stays verbatim");
+		assert_eq!(
+			input.shift(later).unwrap(),
+			later,
+			"it placed the clock, so it stays verbatim"
+		);
 		let placed = catalog.clock();
 		assert_eq!(placed.reading(wall), pts.as_micros() as i128);
 

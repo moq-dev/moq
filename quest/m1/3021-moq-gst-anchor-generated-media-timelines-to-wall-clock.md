@@ -16,7 +16,10 @@ Choose the wall epoch once per broadcast. Prefer GstReferenceTimestampMeta
 only when it names a recognized absolute clock domain; otherwise relate the
 pipeline clock, base time, running time, and local SystemTime. An unidentified
 reference clock is not UTC. Every pad uses the same epoch rather than sampling
-its own. Do not define a GStreamer-specific catalog shape.
+its own. Do not define a GStreamer-specific catalog shape. Set the epoch
+through moq-mux's catalog clock (`Config::with_clock`, or an `Input` placed
+with `place`): the clock is final once taken or published, and a
+`with_clock` catalog shifts every importer onto it.
 
 Decided in the 2026-09-30 audit: a restart is a new broadcast epoch, not a
 forward re-anchor on the old clock (per remove-live; `moqsink` mints a
@@ -30,7 +33,3 @@ delayed first buffers, and multiple pads sharing one epoch.
 ## Closes
 
 - [#3021](https://github.com/moq-dev/moq/issues/3021) - close this issue when the quest finishes
-
-## Related
-
-- [Shared import clock](/quest/m1/shared-clock.md) - when a catalog clock becomes final and how a `with_clock` catalog offsets every importer; set this epoch through that API, either `with_clock` or the first anchor, consistent with its rules
