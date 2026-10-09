@@ -53,8 +53,10 @@ Decided with the maintainer on 2026-10-04 and 2026-10-05:
   in drafts 18 and 21. That registry is moq-lite's too, and lite codes
   below 32 carry moq-transport's meaning, so add the rows to the Session
   Error Codes table in `drafts/draft-lcurley-moq-lite.md` and to
-  `session_codes_round_trip`. No per-version mapping. Where a code is a
-  real burden, the PROTOCOL_VIOLATION fallback in the Goal applies.
+  `session_codes_round_trip`, as [Request
+  tokens](/quest/m1/auth/request-token.md) does for 0x13 and 0x17. No
+  per-version mapping. Where a code is a real burden, the PROTOCOL_VIOLATION
+  fallback in the Goal applies.
 - **Regression tests, not a CI job for the validator.** Add one session or
   codec test per case, each failing without its fix and asserting the
   draft's code, or PROTOCOL_VIOLATION where the fallback is recorded in
@@ -64,6 +66,10 @@ Decided with the maintainer on 2026-10-04 and 2026-10-05:
   `--publisher-no-fetch`, one scenario per run, on a track of about
   150 kbps. A full-bitrate track floods the runner's event log and aborts
   the run.
+- **Record fallbacks** in the "Deliberate deviations" subsection of
+  `doc/concept/standard.md`, dropping the hard-coded count from its intro,
+  and update the "Refused, not fatal" bullet above it wherever a case here
+  now closes the session.
 - **Mirror in `js/net/src/ietf`** in the same PR.
 - Request tokens are out of scope here. AUTH_TOKEN_CACHE_OVERFLOW and the
   request-token decode belong to [Request

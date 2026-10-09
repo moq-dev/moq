@@ -50,6 +50,9 @@ async fn connect_datagram_track() -> Fixture {
 	consumer.routed("bench").await.unwrap();
 	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 	let subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
+	// The subscriber is handed over once TRACK_INFO answers, before its SUBSCRIBE reaches
+	// the publisher, and a datagram only goes to a subscription already there.
+	support::harness::subscribed(&producer).await;
 
 	Fixture {
 		producer,

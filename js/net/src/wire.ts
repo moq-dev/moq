@@ -20,7 +20,8 @@ import type * as track from "./track.ts";
 /** The protocol-facing operations behind a broadcast handle. */
 export interface Broadcast {
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
-	resolveTrackInfo(name: string): Promise<track.Info>;
+	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
+	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
 	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	/**

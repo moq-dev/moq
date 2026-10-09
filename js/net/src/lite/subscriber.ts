@@ -99,6 +99,10 @@ interface SubscribeEntry {
 	end?: number;
 	// Group streams opened by the publisher, when SUBSCRIBE_END carries the count.
 	streams?: number;
+	// The TRACK stream that answered (lite-05+), held open as interest in the track until
+	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
+	// the two.
+	held?: Stream;
 }
 
 /**
@@ -575,11 +579,13 @@ export class Subscriber {
 			endGroup: inclusiveGroupEnd(bounds.end),
 		});
 
-		// Open the stream under a timeout. The stream handle flows back via `state`
-		// so the timeout path can abort it if it finishes opening after the deadline,
+		// Open the stream under a timeout. The stream handles flow back via `state`
+		// so the timeout path can close them if they finish opening after the deadline,
 		// and `cancel` ends a setup still running once the deadline passed, resetting
 		// its TRACK stream so a peer that never answers can't hold one per attempt.
-		const state: { stream?: Stream; cancel: AbortController } = { cancel: new AbortController() };
+		const state: { stream?: Stream; track?: Stream; cancel: AbortController } = {
+			cancel: new AbortController(),
+		};
 		const setup = this.#openSubscribe(state, msg, request, id, timescale);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
@@ -598,13 +604,16 @@ export class Subscriber {
 			request.reject(e);
 			this.#subscribes.delete(id);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
-			// If the stream eventually opens after the timeout, abort it so we
-			// don't leak it. Cover both branches: setup may resolve late, or it
-			// may reject (e.g. encode/decode failure) after the stream is open.
-			setup.then(
-				() => state.stream?.abort(e),
-				() => state.stream?.abort(e),
-			);
+			// Close the streams open now, since a write blocked on flow control may never let
+			// setup settle, and any that open after the timeout once it does. Cover both
+			// branches: setup may resolve late, or it may reject (e.g. encode/decode failure)
+			// after a stream is open.
+			const leave = () => {
+				state.stream?.abort(e);
+				state.track?.close();
+			};
+			leave();
+			setup.then(leave, leave);
 			return;
 		}
 
@@ -665,21 +674,23 @@ export class Subscriber {
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
+			entry.held?.close();
 			this.#subscribes.delete(id);
 		}
 	}
 
 	// Determine the track's immutable properties, accept the request (so the
 	// application's track.Subscriber resolves and incoming groups have a producer to
-	// write into), register it, then open the subscribe stream. `state.stream` is
-	// populated as soon as the subscribe stream opens so the caller can clean it up
-	// on timeout even before this promise settles.
+	// write into), register it, then open the subscribe stream. `state.stream` and
+	// `state.track` are populated as soon as each stream opens so the caller can clean
+	// them up on timeout even before this promise settles.
 	//
-	// On lite-05+ the properties come from a TRACK stream opened first, and the
-	// SUBSCRIBE is accepted implicitly (no SUBSCRIBE_OK). Older drafts carry no
-	// per-track properties, so they resolve to defaults and just drain SUBSCRIBE_OK.
+	// On lite-05+ the properties come from a TRACK stream opened first, held open until
+	// the SUBSCRIBE is answered, and the SUBSCRIBE is accepted implicitly (no
+	// SUBSCRIBE_OK). Older drafts carry no per-track properties, so they resolve to
+	// defaults and just drain SUBSCRIBE_OK.
 	async #openSubscribe(
-		state: { stream?: Stream; cancel: AbortController },
+		state: { stream?: Stream; track?: Stream; cancel: AbortController },
 		msg: Subscribe,
 		request: track.Request,
 		id: bigint,
@@ -690,7 +701,8 @@ export class Subscriber {
 
 		if (supportsTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
-			const info = await this.#trackInfo(msg.broadcast, msg.epoch, msg.track, state.cancel.signal);
+			const { info, stream } = await this.#trackInfo(msg.broadcast, msg.epoch, msg.track, state.cancel.signal);
+			state.track = stream;
 			// The deadline passed as TRACK_INFO landed: the request is already rejected, so don't
 			// register it again or send its SUBSCRIBE.
 			state.cancel.signal.throwIfAborted();
@@ -717,6 +729,7 @@ export class Subscriber {
 				},
 			}),
 			requested: msg.startGroup,
+			held: state.track,
 		};
 		this.#subscribes.set(id, entry);
 
@@ -738,22 +751,21 @@ export class Subscriber {
 		return { stream: state.stream, entry };
 	}
 
-	// Opens a TRACK stream, reads the single TRACK_INFO, and FINs. Lite-05+ only.
+	// Opens a TRACK stream and reads the single TRACK_INFO. Lite-05+ only. The stream
+	// stays open, as interest in the track, until the caller closes it.
 	async #trackInfo(
 		broadcast: Path.Valid,
 		epoch: Epoch.Valid | undefined,
 		track: string,
 		signal?: AbortSignal,
-	): Promise<TrackInfo> {
+	): Promise<{ info: TrackInfo; stream: Stream }> {
 		return this.#exchange(
 			{ version: this.version },
 			async (stream) => {
 				await stream.writer.u53(StreamId.Track);
 				await new TrackMessage(broadcast, track, epoch).encode(stream.writer, this.version);
 				const info = await TrackInfo.decode(stream.reader, this.version);
-				// The publisher FINs after TRACK_INFO; FIN our side too.
-				stream.close();
-				return info;
+				return { info, stream };
 			},
 			signal,
 		);
@@ -792,12 +804,22 @@ export class Subscriber {
 
 	// Resolve a track's immutable model info via a TRACK stream (lite-05+), for the
 	// ConsumeBroadcast backing track.Consumer.query(). On older drafts there's no TRACK
-	// stream, so this rejects rather than fabricating defaults.
-	async resolveTrackInfo(broadcast: Path.Valid, track: string, epoch?: Epoch.Valid): Promise<track.Info> {
+	// stream, so this rejects rather than fabricating defaults. The TRACK stream stays
+	// open until `hold` aborts, so the publisher keeps the track for whoever asked here;
+	// aborting it before TRACK_INFO resets the stream.
+	async resolveTrackInfo(
+		broadcast: Path.Valid,
+		track: string,
+		epoch?: Epoch.Valid,
+		hold?: AbortSignal,
+	): Promise<track.Info> {
 		if (!supportsTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
-		return this.#toModelInfo(await this.#trackInfo(broadcast, epoch, track));
+		const { info, stream } = await this.#trackInfo(broadcast, epoch, track, hold);
+		if (hold && !hold.aborted) hold.addEventListener("abort", () => stream.close(), { once: true });
+		else stream.close();
+		return this.#toModelInfo(info);
 	}
 
 	// Open a FETCH stream for one group and stream its bare frames into a group, for the
@@ -894,7 +916,13 @@ export class Subscriber {
 		priority: number,
 		group: netGroup.Producer,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
-		const info = await untilClosed(group, this.#trackInfo(broadcast, epoch, track));
+		const answered = this.#trackInfo(broadcast, epoch, track);
+		// Only the properties are needed, so the TRACK stream closes however the wait ends.
+		answered.then(
+			({ stream }) => stream.close(),
+			() => {},
+		);
+		const { info } = await untilClosed(group, answered);
 		return this.#exchange({ sendOrder: sendOrder({ priority }), version: this.version }, async (stream) => {
 			await stream.writer.u53(StreamId.Fetch);
 			await new FetchMessage({ broadcast, epoch, track, priority, group: sequence }).encode(
@@ -968,6 +996,9 @@ export class Subscriber {
 	async #runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
+			// The publisher answered, so its demand stands on the subscription from here.
+			entry.held?.close();
+			entry.held = undefined;
 			if (!resp) {
 				if (entry.end === undefined)
 					throw new ProtocolViolation("subscribe stream ended without SUBSCRIBE_END");
@@ -1369,7 +1400,7 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	constructor(subscriber: Subscriber, path: Path.Valid, epoch: Epoch.Valid | undefined, state?: never) {
 		super(state);
 		overrideBroadcastWire(this, {
-			resolveTrackInfo: (name) => subscriber.resolveTrackInfo(path, name, epoch),
+			resolveTrackInfo: (name, hold) => subscriber.resolveTrackInfo(path, name, epoch, hold),
 			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, epoch),
 		});
 		this.#subscriber = subscriber;

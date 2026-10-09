@@ -609,7 +609,12 @@ For example, h.264 with no `description` field would be annex.b encoded, while h
 For a text track, the remainder is the cue in the track's declared `format` (for example a `WEBVTT` segment).
 
 ## cmaf
-Each frame is a complete fragmented MP4 fragment (`moof`+`mdat`), carrying its own timestamps.
+Each frame is a complete fragmented MP4 fragment (`moof`+`mdat`).
+The frame timestamp is the presentation time of the fragment's earliest sample; the fragment's own timestamps only place its samples relative to that sample.
+A consumer MUST present each sample at the frame timestamp plus its offset from the earliest sample, even when `tfdt` says otherwise.
+A frame on an untimed track has no timestamp, so its samples present at the fragment's own timestamps.
+A timed track's timescale MUST equal the init segment's `mdhd` timescale, so the frame timestamp carries the earliest sample's time exactly.
+A fragment's runs MUST lie back to back in the `mdat`, in `trun` order, with each `data_offset` counting from the first byte of the `moof`.
 Audio samples MUST be marked as sync samples, including samples inside a group.
 A sync sample does not declare an audio group boundary; the publisher chooses those boundaries.
 
@@ -1068,6 +1073,14 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
+- Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks.
+- Allowed a DVR to delete timeline objects no checkpoint recovery needs, oldest first.
+- Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.
+- Added optional `bitrate` and `jitter` fields to `json` and `binary` track entries.
+- Added the optional `delay` rendition field: how far a rendition's minimum flush lateness trails the broadcast's earliest rendition, never lowered once advertised and never subtracted across renditions.
+- Recommended namespaced keys for application root sections.
+- Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
 - Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
 - Replaced the broadcast's one aligned timeline with one timeline per track: the catalog `archive` entry's `track` became a `timelines` map from each indexed track, the catalog included, to its timeline track.
 - Replaced the segment record with a per-track record: `sequence`, `pts`, `duration`, and a `start`/`end` range of group and frame positions, dropping cross-track pacing and completeness.
@@ -1080,16 +1093,14 @@ This document has no IANA actions.
 ## moq-hang-03
 {:numbered="false"}
 
-- Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
 - Clarified that CMAF audio samples are sync samples independently of publisher group boundaries.
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
-- Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised.
+- Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
 - For video, an empty codec payload is the exclusive end of the frame before it. A video publisher SHOULD end each group with one when the exclusive end is known. Audio retains its terminal-trimming marker before codec drain packets.
 A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration. A consumer skips it and does not submit it to a decoder. Audio terminal-packet trimming is unchanged.
 - Specified version 1 recording objects: JSON track properties and binary group/frame tables with ascending, delta-encoded group sequences.
 - Addressed track objects by inclusive group bounds and timeline objects by consecutive segment IDs, with incremental discovery and per-track omission on storage failure.
 - Restricted retention updates to segment commits and removed completion markers.
-- Allowed a DVR to delete timeline objects no checkpoint recovery needs, oldest first.
 - Limited recorded group and segment IDs and frame timestamps to JSON-safe integers, including delta reconstruction.
 - Compared existing track properties by parsed values rather than JSON serialization.
 - Required exclusive DVR restart recovery to remove unreferenced group objects left by interrupted expiration.
@@ -1097,12 +1108,7 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - A marker group of one empty frame declares a discontinuity. Empty groups mean nothing. Timestamps only move forward; a group below the live edge is malformed. A delivered sequence hole is a playhead event unless contiguous within 1 ms.
 - A publisher that stops producing and may resume on the same track SHOULD publish a discontinuity marker when it stops.
 - An audio endpoint bounds only the terminal packets that follow it in its own group.
-- Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.
 - Replaced the archive timeline `wall` field with a root `clock` section (`wall` plus `timescale`): one fixed broadcast mapping every track and the archive index convert into, independent of any archive. Zero timescales and walls past the JSON-safe integer range are refused.
-- Added optional `bitrate` and `jitter` fields to `json` and `binary` track entries.
-- Added the optional `delay` rendition field: how far a rendition's minimum flush lateness trails the broadcast's earliest rendition, never lowered once advertised and never subtracted across renditions.
-- Recommended namespaced keys for application root sections.
-- Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
 
 # Acknowledgments
 {:numbered="false"}

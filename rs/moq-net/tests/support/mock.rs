@@ -446,6 +446,8 @@ struct SessionSide {
 	conn: Arc<ConnectionState>,
 	/// Uni streams this side opened that the peer has not accepted yet, while held.
 	held: Mutex<Option<Vec<MockRecvStream>>>,
+	/// Bidi streams this side opened that the peer has not accepted yet, while held.
+	held_bidis: Mutex<Option<Vec<(MockSendStream, MockRecvStream)>>>,
 	/// Whether the peer has withheld uni stream credit, parking every open.
 	withheld: Mutex<bool>,
 	/// While set, the uni streams this side opens hold back everything after their first
@@ -512,6 +514,11 @@ impl poll::Session for MockSession {
 		let (mut our_send, peer_recv) = new_stream_pair(&self.side.conn);
 		our_send.withhold_fin = self.side.withhold_bidi_fins.clone();
 		let (peer_send, our_recv) = new_stream_pair(&self.side.conn);
+
+		if let Some(held) = self.side.held_bidis.lock().unwrap().as_mut() {
+			held.push((peer_send, peer_recv));
+			return Poll::Ready(Ok((our_send, our_recv)));
+		}
 
 		// Deliver (peer_send, peer_recv) to the peer's accept_bi.
 		match self.side.peer_bidi.try_push((peer_send, peer_recv)) {
@@ -655,6 +662,21 @@ impl MockSession {
 		self.side.held.lock().unwrap().take();
 	}
 
+	/// Hold back the bidi streams this side opens from now on, until
+	/// [`Self::release_bidis`]: QUIC does not order streams, so the peer may see a later
+	/// stream's data before an earlier stream arrives at all.
+	pub fn hold_bidis(&self) {
+		self.side.held_bidis.lock().unwrap().get_or_insert_default();
+	}
+
+	/// Deliver the held bidi streams to the peer in the order they were opened, and stop
+	/// holding.
+	pub fn release_bidis(&self) {
+		for stream in self.side.held_bidis.lock().unwrap().take().unwrap_or_default() {
+			let _ = self.side.peer_bidi.try_push(stream);
+		}
+	}
+
 	/// Park every uni stream this side opens from now on, like a peer that has granted
 	/// no more stream credit.
 	pub fn withhold_unis(&self) {
@@ -724,6 +746,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		protocol,
 		conn: conn.clone(),
 		held: Mutex::default(),
+		held_bidis: Mutex::default(),
 		withheld: Mutex::default(),
 		split: Mutex::default(),
 		lossy: Mutex::default(),
@@ -740,6 +763,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		protocol,
 		conn,
 		held: Mutex::default(),
+		held_bidis: Mutex::default(),
 		withheld: Mutex::default(),
 		split: Mutex::default(),
 		lossy: Mutex::default(),

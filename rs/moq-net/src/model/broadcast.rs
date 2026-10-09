@@ -148,16 +148,29 @@ impl BroadcastState {
 		!self.requests.is_empty() || self.tracks.iter().any(|track| track.is_used())
 	}
 
-	/// Park `waiter` on every per-track channel feeding [`Self::is_used`]: the
-	/// consumer counts live on those channels, and their flips don't write this
-	/// state, so a watcher registered here alone would miss the edge. `want`
-	/// picks the direction; each channel only arms while its side is unmet.
-	fn register_demand(&self, waiter: &kio::Waiter, want: bool) {
-		for track in self.tracks.iter() {
-			match want {
-				true => track.poll_used(waiter),
-				false => track.poll_unused(waiter),
-			}
+	/// Whether [`Self::is_used`] is `want`, parking `waiter` on the tracks in the way
+	/// otherwise. The consumer counts live on the per-track channels, whose flips don't
+	/// write this state, so each track's own answer decides: a re-read after the polls
+	/// would see a reader that came or went since, with nothing parked to wake on its
+	/// return.
+	fn poll_demand(&self, waiter: &kio::Waiter, want: bool) -> Poll<()> {
+		if want {
+			// A closed track is never read again, so only an open, read one is demand.
+			let used = !self.requests.is_empty()
+				|| self
+					.tracks
+					.iter()
+					.any(|track| matches!(track.poll_used(waiter), Poll::Ready(Ok(()))));
+			return if used { Poll::Ready(()) } else { Poll::Pending };
+		}
+		if !self.requests.is_empty() {
+			return Poll::Pending;
+		}
+		// Every other track is unused already, so the first one still read is what to
+		// wait on: its last reader leaving wakes us to look again.
+		match self.tracks.iter().all(|track| track.poll_unused(waiter).is_ready()) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
 		}
 	}
 }
@@ -399,6 +412,28 @@ impl Producer {
 		self.alive.close();
 	}
 
+	/// Whether any [`Consumer`] handle exists, unlike [`Self::demand`], which counts tracks.
+	pub(crate) fn is_held(&self) -> bool {
+		self.alive.token.is_used()
+	}
+
+	/// `Ready(Ok)` once a [`Consumer`] handle exists, `Ready(Err)` once the broadcast ended.
+	pub(crate) fn poll_held(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
+		self.alive.token.poll_used(waiter)
+	}
+
+	/// `Ready(Ok)` once no [`Consumer`] handle is left, `Ready(Err)` once the broadcast ended.
+	pub(crate) fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
+		self.alive.token.poll_unused(waiter)
+	}
+
+	/// [`Self::close`], unless a [`Consumer`] holds the broadcast or a track it asked for
+	/// still waits for a handler. Atomic with minting a consumer, so a holder either keeps
+	/// the broadcast or only ever sees it closed. Returns whether the broadcast is closed.
+	pub(crate) fn close_unheld(&self) -> bool {
+		self.alive.close_unheld()
+	}
+
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
@@ -447,10 +482,40 @@ impl Alive {
 			state.reject_unserved(Error::Unroutable);
 		}
 		let _ = self.token.close();
+		self.retract();
+	}
 
-		// Drop the announcer for good, so a later `announce` fails with `Closed`. Dropped
-		// outside the announcer lock: the entry's removal re-syncs the origin's cursors
-		// under the origin's own lock.
+	/// See [`Producer::close_unheld`].
+	fn close_unheld(&self) -> bool {
+		let token = {
+			let mut state = self.state.lock();
+			if state.closing {
+				return true;
+			}
+			// A queued track is a reader on its way that let go of its handle.
+			if !state.requests.is_empty() {
+				return false;
+			}
+			// Held under the lock a consumer's first mint takes, so none appears until the
+			// close below lands.
+			let token = match self.token.write_unused() {
+				kio::Unused::Idle(token) => token,
+				kio::Unused::Used => return false,
+				kio::Unused::Closed => return true,
+			};
+			state.closing = true;
+			state.reject_unserved(Error::Unroutable);
+			token
+		};
+		token.close();
+		self.retract();
+		true
+	}
+
+	/// Drop the announcer for good, so a later `announce` fails with `Closed`. Dropped
+	/// outside the announcer lock: the entry's removal re-syncs the origin's cursors under
+	/// the origin's own lock.
+	fn retract(&self) {
 		let announcer = self.announcer.lock().take();
 		drop(announcer);
 	}
@@ -485,6 +550,14 @@ pub(crate) struct SourceGuard(Producer);
 impl SourceGuard {
 	pub fn new(producer: Producer) -> Self {
 		Self(producer)
+	}
+}
+
+impl std::ops::Deref for SourceGuard {
+	type Target = Producer;
+
+	fn deref(&self) -> &Producer {
+		&self.0
 	}
 }
 
@@ -911,16 +984,7 @@ impl Demand {
 		if self.alive.poll_closed(waiter).is_ready() {
 			return Poll::Ready(Err(Error::Dropped));
 		}
-		let ready = self.state.poll(waiter, |state| {
-			// The consumer counts live on the per-track channels, whose flips
-			// don't write this state: park on those channels too so the edge
-			// wakes us, then recompute here.
-			state.register_demand(waiter, want);
-			match state.is_used() == want {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		});
+		let ready = self.state.poll(waiter, |state| state.poll_demand(waiter, want));
 		match ready {
 			Poll::Ready(_) => Poll::Ready(Ok(())),
 			Poll::Pending => Poll::Pending,
@@ -1045,6 +1109,26 @@ mod test {
 		producer.close();
 		assert!(matches!(demand.used().await, Err(Error::Dropped)));
 		assert!(matches!(demand.unused().await, Err(Error::Dropped)));
+	}
+
+	/// One read track keeps the broadcast in demand however many others are unread, and
+	/// its last reader leaving wakes a parked `unused`.
+	#[moq_net_sim::test]
+	async fn demand_unused_waits_for_every_track() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let demand = producer.demand();
+		let _video = producer.create_track("video", None).unwrap();
+		let _audio = producer.create_track("audio", None).unwrap();
+
+		let video = consumer.track("video").unwrap();
+		assert!(
+			demand.poll_unused(&kio::Waiter::noop()).is_pending(),
+			"a read track is demand"
+		);
+
+		let (unused, ()) = futures::join!(expect(demand.unused()), async { drop(video) });
+		unused.unwrap();
 	}
 
 	/// A consumer demand handle distinguishes lost demand from a dropped producer.
@@ -1380,6 +1464,31 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	/// Closing an unheld broadcast yields to a consumer handle, and to a track a reader
+	/// asked for before letting go, which no handler has taken yet. A handle minted from a
+	/// weak once it closes sees it closed, so it never holds a broadcast that is ending.
+	#[test]
+	fn close_unheld_yields_to_holders() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let weak = consumer.weak();
+		assert!(producer.is_held());
+		assert!(!producer.close_unheld(), "closed under a holder");
+
+		let track = consumer.track("video").unwrap();
+		drop(consumer);
+		assert!(!producer.is_held());
+		assert!(!producer.close_unheld(), "closed under a track on its way");
+
+		let request = dynamic.assert_request();
+		drop(track);
+		drop(request);
+		assert!(producer.close_unheld());
+		assert!(weak.consume().is_closed());
+		assert!(producer.close_unheld(), "closing twice is a no-op");
 	}
 
 	/// A reserved name nobody accepts is the parking case a publisher has to be able to

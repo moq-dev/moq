@@ -2598,16 +2598,18 @@ impl TrackWeak {
 		}
 	}
 
-	/// Park `waiter` for the next consumer appearing; a no-op once one exists.
-	/// Feeds [`crate::broadcast::Demand`], which recomputes on wake.
-	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) {
-		let _ = self.state.poll_used(waiter);
+	/// `Ready(Ok)` while anyone reads the open track, `Ready(Err)` once it closed, and
+	/// otherwise park `waiter` for the next reader. Only `Pending` registers: act on the
+	/// answer, not a later [`Self::is_used`], or a reader leaving in between is never seen.
+	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
+		self.state.poll_used(waiter)
 	}
 
-	/// Park `waiter` for the last consumer (or the track) going away; a no-op
-	/// once none remain. Feeds [`crate::broadcast::Demand`].
-	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) {
-		let _ = self.state.poll_unused(waiter);
+	/// `Ready(Ok)` while nobody reads the track, `Ready(Err)` once it closed, and
+	/// otherwise park `waiter` for the last reader leaving. Only `Pending` registers,
+	/// as with [`Self::poll_used`].
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<std::result::Result<(), kio::Closed>> {
+		self.state.poll_unused(waiter)
 	}
 }
 
@@ -2734,10 +2736,11 @@ pub(crate) enum DemandState {
 
 /// A handle to a single track within a broadcast.
 ///
-/// Obtained from [`broadcast::Consumer::track`]. Holding it sends nothing
-/// to the publisher; it just names a track you can [`subscribe`](Self::subscribe)
-/// to (a live, ongoing stream of groups) later. The same handle can be subscribed
-/// to multiple times, and clones are cheap.
+/// Obtained from [`broadcast::Consumer::track`]. Holding it counts toward the
+/// track's [`Demand`], but starts no live delivery until you [`subscribe`](Self::subscribe)
+/// to it (a live, ongoing stream of groups); [`fetch_group`](Self::fetch_group) takes one
+/// group without that. The same handle can be subscribed to multiple times, and clones
+/// are cheap.
 #[derive(Clone)]
 pub struct Consumer {
 	name: Arc<str>,

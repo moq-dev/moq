@@ -9,8 +9,9 @@ instead of guessing or reparsing the bitstream.
 
 ## Plan
 
-Deferred to m2 in the 2026-09-30 audit: no renderer consumes colour today, so
-the model waits for one. Encoder colour correctness stays in m1 as
+Decided 2026-10-08 (WebGPU renderer interview): moved to m1. The
+[WebGPU HDR](/quest/m1/webgpu-hdr.md) renderer is the consumer this model
+waited for. Encoder colour correctness stays in m1 as
 [Encoder colour](/quest/m1/color-model.md).
 
 `rs/hang/src/catalog/video/mod.rs` has carried a bare `// TODO color space` since
@@ -55,3 +56,4 @@ stays byte-identical.
 ## Related
 
 - [Encoder colour](/quest/m1/color-model.md) - encoders signal the colour they actually produce
+- [WebGPU renderer](/quest/m1/webgpu-renderer.md) - renders SDR and wide gamut from `VideoFrame.colorSpace` before this lands

@@ -57,8 +57,7 @@ Decisions:
   (maintainer, 2026-10-08); new requests take a fresh front on the winner
   instead of waking it. An idle front (every track
   forgotten, no consumer holding its broadcast, not waiting for coverage)
-  ends instead of moving
-  ([Idle fronts](/quest/m0/idle-fronts.md)). A join or re-price must rehash
+  ends instead of moving. A join or re-price must rehash
   every epoch front below the prefix, since rendezvous moves exactly the paths
   the changed route now wins; only those fronts re-select. A leave wakes only
   the fronts the leaver served or was requesting through.

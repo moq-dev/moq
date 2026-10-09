@@ -96,10 +96,9 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
 - **Sessions** (decided 2026-10-05). `sessions.json` is keyed by auth root
   and loses pruned roots the same way, so fold per-tier `Presence` into the
   totals (session counts) and serve per-root detail as a requested track,
-  the same model as prefix tracks. Open PR #5046 (session outcomes) adds to
-  `sessions.json`, which this retires; it is rewritten against these totals
-  and the per-root requested track, and lands after this (decided
-  2026-10-08).
+  the same model as prefix tracks.
+  [Session outcomes](/quest/m1/session-outcomes.md) Requires this and rides
+  these totals and the per-root requested track (decided 2026-10-08).
 - **Retire the map tracks** (`publisher.json`, `subscriber.json`,
   `sessions.json`, and their `.json.z` siblings) in the same release. Decide
   while implementing whether totals and prefix tracks keep `.json.z`
@@ -113,19 +112,24 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   same format it reads.
 
 Decided 2026-10-08: if prefix tracks and self counters hold up the rest,
-split them into a follow-up quest and land totals, sessions, and the map
-retirement first.
+split them into a follow-up quest and land totals and sessions first; the
+per-root requested track stays in the first release, since session outcomes
+rides it and `sessions.json` retires with it. The
+per-path map retirement moves with prefix tracks and self counters into that
+follow-up: the maps are the only per-path source until prefix tracks exist,
+and moq.pro's Broadcasts page reads prefix tracks the moment the maps retire,
+so a release that retires them first is one moq.pro cannot pin.
 
 Public API: `moq-stats` producer and consumer types. Wire: stats track names
 and payloads.
 
 MoQ Pro adopts it when it pins the release: billing reads totals, its
-Broadcasts page reads one prefix per visible row and group header, its `announced` probe
-reads totals only, and its customer stats feed serves this format summed
-across nodes.
+Broadcasts page reads one prefix per visible row and group header, and its
+customer stats feed serves this format summed across nodes.
 
 ## Related
 
 - [Media stats](/quest/m1/stats/README.md) - publisher and viewer media stats
   stay hang tracks, separate from the relay's stats
+- [Session outcomes](/quest/m1/session-outcomes.md) - adds refusal and end counters to the totals and per-root track this introduces
 - [QoS](/quest/m1/qos/README.md) - stats-split lands first; the egress lag histogram split out of #4133 requires it and rebases onto the totals and prefix tracks

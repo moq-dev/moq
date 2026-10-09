@@ -274,10 +274,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				continue;
 			}
 
-			// Declare the track at the fMP4's native timescale. Frame timestamps are
-			// emitted at this same scale (see below), so they satisfy the track's
-			// timescale invariant and ride the wire for the relay, redundant with the
-			// timing already inside each CMAF fragment.
+			// Declare the track at the fMP4's native timescale, which the moq-hang draft requires
+			// of a CMAF track: frame timestamps are emitted at this same scale (see below), so
+			// each one carries its fragment's earliest presentation time exactly.
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 			let track = self.broadcast.create_track(
 				self.broadcast.unique_name(suffix),
@@ -887,8 +886,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let fragment_bytes = Bytes::from(moof_buf);
 
 			// Carry the fragment's earliest presentation time as the frame timestamp,
-			// in the track's native timescale. The relay reads it off the wire; the
-			// consumer still drives playback from the fragment's internal timing.
+			// in the track's native timescale. Consumers present the fragment at it;
+			// `tfdt` only places the samples relative to each other.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
 			// The first fragment of the import is live on arrival. Anchor before releasing the
 			// reservation, so the first snapshot carries the final clock; the moov declared every

@@ -26,3 +26,8 @@ maintainer at release time:
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the AMD encoder
 - [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - the Intel proof
 - [GPU capacity and health](/quest/m2/gpu-health.md) - keyed by the same device identity; moq.pro's admission still needs vendor code without it
+
+## Related
+
+- [moq.pro: Release multi-vendor GPU input upstream](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/gpu-release.md) - tracks this release
+- [moq.pro: Pin multi-vendor GPU input](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/pronto-gpu-pin.md) - the Pronto bridge adopts it

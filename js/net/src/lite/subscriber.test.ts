@@ -758,6 +758,8 @@ interface FakeStream {
 	// Resolves once the subscriber waits on a read the test has not answered.
 	reading: Promise<void>;
 	aborted: Promise<unknown>;
+	// Resolves once the subscriber FINs its side.
+	finished: Promise<void>;
 	// Every chunk the subscriber wrote.
 	written: Uint8Array[];
 	// Hands the stream to the subscriber, for an open the session was told to park.
@@ -765,17 +767,21 @@ interface FakeStream {
 }
 
 // A session whose streams the test answers by hand and that never fails them on its own, so
-// only Subscriber.close() can end a wait. Opens numbered in `park` wait for `release()`.
-function fakeSession(park: number[] = []) {
+// only Subscriber.close() can end a wait. Opens numbered in `park` wait for `release()`, and
+// writes to those numbered in `stall` never get credit.
+function fakeSession(park: number[] = [], stall: number[] = []) {
 	const streams: FakeStream[] = [];
 	const quic = {
 		createBidirectionalStream: () => {
 			let inbound!: ReadableStreamDefaultController<Uint8Array>;
 			let onRead!: () => void;
 			let onAbort!: (reason: unknown) => void;
+			let onFinish!: () => void;
 			let release!: () => void;
 			const reading = new Promise<void>((resolve) => (onRead = resolve));
 			const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
+			const finished = new Promise<void>((resolve) => (onFinish = resolve));
+			const stalled = stall.includes(streams.length);
 			// No high water mark, so pull() means the subscriber is blocked on a read.
 			const readable = new ReadableStream<Uint8Array>(
 				{
@@ -788,12 +794,16 @@ function fakeSession(park: number[] = []) {
 			);
 			const written: Uint8Array[] = [];
 			const writable = new WritableStream<Uint8Array>({
-				write: (chunk) => void written.push(chunk),
+				write: (chunk) => {
+					written.push(chunk);
+					return stalled ? new Promise<void>(() => {}) : undefined;
+				},
+				close: () => onFinish(),
 				abort: (reason) => void onAbort(reason),
 			});
 			const opened = new Promise((resolve) => (release = () => resolve({ readable, writable })));
 			if (!park.includes(streams.length)) release();
-			streams.push({ inbound, reading, aborted, written, release });
+			streams.push({ inbound, reading, aborted, finished, written, release });
 			return opened;
 		},
 	} as unknown as WebTransport;
@@ -934,6 +944,35 @@ test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE
 		await drainUntil(() => aborted);
 		expect(aborted).toBe(true);
 		expect(streams[1].written).toEqual([]);
+	} finally {
+		subscriber.close();
+		warn.mockRestore();
+		jest.useRealTimers();
+	}
+});
+
+// A SUBSCRIBE write blocked on flow control may never let the setup settle, so the deadline
+// lets go of the held TRACK stream without waiting for it.
+test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its TRACK stream", async () => {
+	jest.useFakeTimers();
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const { quic, streams } = fakeSession([], [1]);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	try {
+		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+		await drainUntil(() => streams.length === 1);
+		await streams[0].reading;
+		await answerTrackInfo(streams[0]);
+		await drainUntil(() => streams.length === 2 && streams[1].written.length > 0);
+
+		let finished = false;
+		void streams[0].finished.then(() => {
+			finished = true;
+		});
+		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS);
+		await drainUntil(() => track.closed.peek() !== undefined);
+		await drainUntil(() => finished);
+		expect(finished).toBe(true);
 	} finally {
 		subscriber.close();
 		warn.mockRestore();

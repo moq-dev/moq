@@ -23,6 +23,23 @@ fn video_hint(init: &VideoInit, default_codec: Option<hang::catalog::VideoCodec>
 	hint
 }
 
+/// The track info for a rendition in `container`. A CMAF track counts in its init's `mdhd` ticks,
+/// as the moq-hang draft requires, so each frame timestamp lands on a media tick.
+fn track_info<E: CatalogExt>(
+	reserved: &crate::catalog::Reserved<E>,
+	priority: u8,
+	container: &hang::catalog::Container,
+) -> Result<moq_net::track::Info> {
+	let info = reserved.track_info(priority);
+	match container {
+		hang::catalog::Container::Cmaf { init, .. } => {
+			let wire = crate::container::fmp4::Wire::from_init(init)?;
+			Ok(info.with_timescale(wire.timescale()?))
+		}
+		_ => Ok(info),
+	}
+}
+
 /// The codec parser fills everything from the init bytes, so the label and container are all the
 /// caller adds.
 fn with_init(init: &AudioInit, mut config: hang::catalog::AudioConfig) -> hang::catalog::AudioConfig {
@@ -190,16 +207,14 @@ impl Track {
 	///
 	/// The caller reserves the track (by name) with
 	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track); the
-	/// importer accepts it here, which is where the track's timescale is set. The rendition is
+	/// importer accepts it here, at the microsecond timescale or a CMAF init's own. The rendition is
 	/// published from the init bytes, since audio has no in-band config to wait for.
 	pub fn audio<E: CatalogExt>(
 		request: moq_net::track::Request,
 		reserved: crate::catalog::Reserved<E>,
 		init: AudioInit,
 	) -> Result<Self> {
-		// Accept at the legacy microsecond timescale, matching the frame timestamps the container
-		// stamps. A codec-specific timescale (e.g. the opus sample rate) would be chosen here.
-		let track = request.accept(reserved.track_info(hang::catalog::PRIORITY.audio));
+		let track = request.accept(track_info(&reserved, hang::catalog::PRIORITY.audio, &init.container)?);
 		let data = init.data.as_ref();
 		let kind = match init.format {
 			AudioFormat::Aac => {
@@ -236,7 +251,11 @@ impl Track {
 	) -> Result<Self> {
 		use hang::catalog::VideoCodec;
 
-		let track = request.accept(reserved.track_info(hang::catalog::PRIORITY.video));
+		let track = request.accept(track_info(
+			&reserved,
+			hang::catalog::PRIORITY.video,
+			&init.hint.container,
+		)?);
 		let data = init.data.as_ref();
 		let kind = match init.format {
 			VideoFormat::Avc1 => {
@@ -611,15 +630,18 @@ impl TrackStream {
 	///
 	/// The caller reserves the track with
 	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track);
-	/// the importer accepts it here at the legacy microsecond timescale (where a codec-specific
-	/// timescale would be chosen). A [`VideoHint`] carrying a codec publishes the catalog before the
+	/// the importer accepts it here, at the microsecond timescale or a CMAF init's own. A [`VideoHint`] carrying a codec publishes the catalog before the
 	/// first frame; any [`VideoInit::data`] seeds the stream (as a call to [`initialize`](Self::initialize)).
 	pub fn video<E: CatalogExt>(
 		request: moq_net::track::Request,
 		reserved: crate::catalog::Reserved<E>,
 		init: VideoInit,
 	) -> Result<Self> {
-		let track = request.accept(reserved.track_info(hang::catalog::PRIORITY.video));
+		let track = request.accept(track_info(
+			&reserved,
+			hang::catalog::PRIORITY.video,
+			&init.hint.container,
+		)?);
 		let hint = video_hint(&init, None);
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match init.format {
@@ -981,6 +1003,29 @@ mod tests {
 		// Dropping the importer retires its rendition from the shared catalog.
 		drop(import);
 		assert!(!catalog.snapshot().audio.renditions.contains_key("0.opus"));
+	}
+
+	/// A CMAF rendition counts in its init's ticks, so its frames can carry the earliest
+	/// presentation time exactly.
+	#[tokio::test(start_paused = true)]
+	async fn cmaf_audio_counts_in_the_init_timescale() {
+		let (broadcast, catalog) = new_broadcast();
+		let config = crate::codec::opus::config(&opus_head()).unwrap();
+		let cmaf = crate::container::fmp4::Muxer::audio(&config)
+			.unwrap()
+			.init()
+			.unwrap()
+			.unwrap();
+		let mut init = AudioInit::new(AudioFormat::Opus, opus_head());
+		init.container = hang::catalog::Container::Cmaf { init: cmaf };
+
+		// The CMAF writer refuses a track at any other scale.
+		let request = broadcast.reserve_track("audio").unwrap();
+		let mut import = Track::audio(request, catalog.reserve(), init).unwrap();
+		import
+			.decode(b"opus payload", Some(Timestamp::from_micros(20_000).unwrap()))
+			.unwrap();
+		import.finish().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -70,7 +70,7 @@ impl Pipeline {
 	) -> Result<Self, Error> {
 		// One shared live decode for every rung of this source: N active rungs
 		// share one subscription and one decoder instead of N.
-		let feed = Feed::new(source.track(&name)?, rendition.clone(), config.feed_decoder());
+		let feed = Feed::new(source.clone(), name.clone(), rendition.clone(), config.feed_decoder());
 
 		let mut ladder = Self {
 			source,
@@ -146,15 +146,13 @@ impl Pipeline {
 
 	/// The rung to serve a requested track with, or `None` if the ladder has no
 	/// such rung right now.
-	pub(crate) fn rung(&mut self, name: &str) -> Result<Option<rung::Rung>, Error> {
-		let Some(published) = self.rungs.iter().find(|published| published.rung.name == name) else {
-			return Ok(None);
-		};
+	pub(crate) fn rung(&mut self, name: &str) -> Option<rung::Rung> {
+		let published = self.rungs.iter().find(|published| published.rung.name == name)?;
 		let (retired, retire) = rung::Retire::channel();
 		self.serving.insert(published.rung.name.clone(), retired);
 
-		Ok(Some(rung::Rung {
-			source: self.source.track(&self.name)?,
+		Some(rung::Rung {
+			source: self.name.clone(),
 			feed: self.feed.clone(),
 			broadcast: self.source.clone(),
 			config: self.rendition.clone(),
@@ -164,7 +162,7 @@ impl Pipeline {
 			active: self.active.clone(),
 			info: published.rung.clone(),
 			retire,
-		}))
+		})
 	}
 
 	/// Resolve the ladder again against a new source catalog snapshot.
@@ -211,7 +209,12 @@ impl Pipeline {
 				let _ = retired.send(true);
 			}
 			self.serving.clear();
-			self.feed = Feed::new(self.source.track(&name)?, rendition.clone(), self.config.feed_decoder());
+			self.feed = Feed::new(
+				self.source.clone(),
+				name.clone(),
+				rendition.clone(),
+				self.config.feed_decoder(),
+			);
 		}
 		self.name = name;
 		self.rendition = rendition;

@@ -134,10 +134,9 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 		(frames, err, moq_net_sim::now())
 	});
 
-	moq_net_sim::timeout(TIMEOUT, track.demand().used())
+	moq_net_sim::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
-		.expect("no subscriber appeared")
-		.unwrap();
+		.expect("no subscriber appeared");
 
 	pair.server_transport.hold_unis();
 	if final_sequence > 0 {
@@ -267,10 +266,9 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 			.subscribe(subscription)
 			.await
 			.expect("subscribe");
-		moq_net_sim::timeout(TIMEOUT, track.demand().used())
+		moq_net_sim::timeout(TIMEOUT, support::harness::subscribed(&track))
 			.await
-			.expect("no subscriber appeared")
-			.unwrap();
+			.expect("no subscriber appeared");
 
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
@@ -332,10 +330,9 @@ async fn a_lost_datagram_never_delays_the_end() {
 			}
 			(groups, moq_net_sim::now())
 		});
-		moq_net_sim::timeout(TIMEOUT, track.demand().used())
+		moq_net_sim::timeout(TIMEOUT, support::harness::subscribed(&track))
 			.await
-			.expect("no subscriber appeared")
-			.unwrap();
+			.expect("no subscriber appeared");
 
 		for datagram in [false, true, false] {
 			if datagram {

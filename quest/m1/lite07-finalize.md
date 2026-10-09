@@ -74,7 +74,7 @@ is published; older versions are unchanged.
 
 - [lite-07 Live flag](/quest/m1/lite-live.md) - SUBSCRIBE carries `Live` apart from its floor
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - lite-07 carries the `Restart` announce
-- [AUTH on the wip lite version](/quest/m1/auth/wip-version.md) - lite-07 carries the Auth Stream and UNAUTHORIZED
+- [In-band auth](/quest/m1/auth/README.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
@@ -85,4 +85,4 @@ is published; older versions are unchanged.
 
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment condition that follows this
 - [Wire compatibility](/quest/m1/wire-compat.md) - the nightly covers lite-07 once a release carries it
-- [moq.pro: lite-07 on cluster dials](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/lite07.md) - the mesh rollout that adopts the finalized version, and the customer rollout after it
+- [moq.pro: lite-07 on cluster dials](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/lite07.md) - the mesh rollout that adopts the finalized version, and the customer rollout after it; moq.pro holds it in m2 until the cut is called

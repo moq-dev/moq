@@ -74,6 +74,5 @@ The BBR app-limited fixes land in `moq-quic` without waiting for the switch.
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate
-- [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
-- [GCC egress experiment](/quest/m3/quic-gcc.md) - a receive-timestamps measurement spike, the
-  first step toward WebRTC-style delay control
+- [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
+- [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures whether receive timestamps give a cheaper, more accurate forward delay than half the RTT

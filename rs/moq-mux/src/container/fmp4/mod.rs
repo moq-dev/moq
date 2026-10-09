@@ -144,6 +144,14 @@ pub enum Error {
 	#[error("invalid data offset")]
 	InvalidDataOffset,
 
+	/// The frame timestamp carries a fragment's earliest presentation time exactly only when the
+	/// track counts in the same ticks as the media.
+	#[error("track timescale {track:?} doesn't match the CMAF mdhd timescale {mdhd:?}")]
+	TimescaleMismatch {
+		track: Option<moq_net::Timescale>,
+		mdhd: moq_net::Timescale,
+	},
+
 	#[error("unknown track {0}")]
 	UnknownTrack(u32),
 
@@ -308,6 +316,11 @@ impl Wire {
 		&self.trak
 	}
 
+	/// The media timescale, which a CMAF track must count in.
+	pub(crate) fn timescale(&self) -> Result<moq_net::Timescale> {
+		Ok(moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?)
+	}
+
 	/// The media kind declared by the track handler.
 	fn kind(&self) -> Result<Kind> {
 		Kind::from_handler(self.trak.mdia.hdlr.handler)
@@ -326,7 +339,13 @@ impl Container for Wire {
 	type Error = Error;
 
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> std::result::Result<(), Self::Error> {
-		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
+		let timescale = self.timescale()?;
+		if group.timescale() != Some(timescale) {
+			return Err(Error::TimescaleMismatch {
+				track: group.timescale(),
+				mdhd: timescale,
+			});
+		}
 		let track_id = self.trak.tkhd.track_id;
 		encode(
 			group,
@@ -351,8 +370,13 @@ impl Container for Wire {
 			return Poll::Ready(Ok(None));
 		};
 
-		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
-		Poll::Ready(Ok(Some(decode(frame.payload, timescale, self.kind()?)?)))
+		let timescale = self.timescale()?;
+		Poll::Ready(Ok(Some(decode(
+			frame.payload,
+			frame.timestamp,
+			timescale,
+			self.kind()?,
+		)?)))
 	}
 }
 
@@ -361,24 +385,46 @@ impl Container for Wire {
 /// `Kind::Audio` says the track's samples are all independently decodable. Packagers flag every
 /// audio sample a sync sample, which as a [`Frame::keyframe`] would open a group per sample,
 /// so an audio sample decodes with the bit clear and the consumer marks the group start.
-pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale, kind: Kind) -> Result<Vec<Frame>> {
+///
+/// `timestamp` is the moq-lite frame timestamp, which is the broadcast timeline: the fragment's
+/// earliest sample presents at it. `tfdt` and the `trun` offsets only place the samples relative
+/// to each other, since a publisher may move a passthrough track to another timeline without
+/// rewriting the payload. An untimed frame (`None`) has no broadcast time, so its samples
+/// present at the time `tfdt` gives them.
+pub(crate) fn decode(
+	data: Bytes,
+	timestamp: Option<Timestamp>,
+	timescale: moq_net::Timescale,
+	kind: Kind,
+) -> Result<Vec<Frame>> {
 	use mp4_atom::DecodeMaybe;
 
 	let mut cursor = std::io::Cursor::new(&data);
 	let mut moof = None;
-	let mut mdat_data = None;
+	let mut mdat = None;
 
-	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
+	loop {
+		let start = cursor.position() as usize;
+		let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? else {
+			break;
+		};
 		match atom {
-			mp4_atom::Any::Moof(m) => moof = Some(m),
-			mp4_atom::Any::Mdat(m) => mdat_data = Some(m.data),
+			mp4_atom::Any::Moof(m) => moof = Some((start, m)),
+			mp4_atom::Any::Mdat(m) => mdat = Some((cursor.position() as usize - m.data.len(), m.data)),
 			_ => {}
 		}
 	}
 
-	let moof = moof.ok_or(Error::NoMoof)?;
-	let mdat_data = mdat_data.ok_or(Error::NoMdat)?;
+	let (moof_start, moof) = moof.ok_or(Error::NoMoof)?;
+	let (mdat_start, mdat_data) = mdat.ok_or(Error::NoMdat)?;
 	let traf = moof.traf.first().ok_or(Error::NoTraf)?;
+
+	// Samples are read from the mdat front to back, so each run must start where the previous
+	// one ended. A run's data_offset counts from the moof's first byte (CMAF's default-base-is-moof).
+	if traf.tfhd.base_data_offset.is_some() {
+		return Err(Error::InvalidDataOffset);
+	}
+	let data_start = mdat_start.checked_sub(moof_start).ok_or(Error::InvalidDataOffset)?;
 	let tfdt = traf.tfdt.as_ref().ok_or(Error::NoTfdt)?;
 	let base_dts = tfdt.base_media_decode_time;
 
@@ -390,12 +436,23 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale, kind: Kind) -> 
 	// DTS, silently collapsing their timestamps, so reject that fragment instead.
 	let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
 
+	// Rounded the way `encode` stamps it, so a timestamp the track carried at another scale
+	// lands back on the tick it was written at.
+	let anchor = timestamp.map(|t| timestamp_ticks(t, timescale)).transpose()?;
+
 	let mut frames = Vec::new();
+	let mut ptss = Vec::with_capacity(total_samples);
 	let mut offset = 0usize;
-	let mut dts = base_dts;
+	let mut dts = i128::from(base_dts);
 	let mut sample_index = 0usize;
 
 	for trun in &traf.trun {
+		if let Some(data_offset) = trun.data_offset
+			&& usize::try_from(data_offset).ok() != Some(data_start + offset)
+		{
+			return Err(Error::InvalidDataOffset);
+		}
+
 		for entry in &trun.entries {
 			let size = entry.size.or(default_size).unwrap_or(0) as usize;
 			let end = offset + size;
@@ -408,10 +465,7 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale, kind: Kind) -> 
 				});
 			}
 
-			let cts = entry.cts.unwrap_or_default() as i64;
-			let pts = dts.checked_add_signed(cts).ok_or(Error::PtsOverflow)?;
-			// Preserve the fmp4 track's native scale through the pipeline.
-			let timestamp = Timestamp::new(pts, timescale)?;
+			ptss.push(dts + i128::from(entry.cts.unwrap_or_default()));
 			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
 			let flags = entry.flags.unwrap_or(0);
 			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
@@ -433,32 +487,48 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale, kind: Kind) -> 
 				.transpose()?;
 
 			frames.push(Frame {
-				timestamp,
+				// Placeholder until the earliest PTS is known.
+				timestamp: Timestamp::ZERO,
 				payload,
 				keyframe,
 				duration,
 			});
 
 			offset = end;
-			dts += sample_duration.unwrap_or(0) as u64;
+			dts += i128::from(sample_duration.unwrap_or(0));
 			sample_index += 1;
 		}
+	}
+
+	let (anchor, earliest) = match anchor {
+		Some(anchor) => (anchor, ptss.iter().copied().min().unwrap_or_default()),
+		None => (0, 0),
+	};
+	for (frame, pts) in frames.iter_mut().zip(ptss) {
+		let ticks = u64::try_from(pts - earliest)
+			.ok()
+			.and_then(|offset| anchor.checked_add(offset))
+			.ok_or(Error::PtsOverflow)?;
+		// Preserve the fmp4 track's native scale through the pipeline.
+		frame.timestamp = Timestamp::new(ticks, timescale)?;
 	}
 
 	Ok(frames)
 }
 
 fn encode(group: &mut moq_net::group::Producer, frames: &[Frame], info: FragmentInfo) -> Result<()> {
-	if frames.is_empty() {
+	// The fragment may carry several samples; the net frame's timestamp is the
+	// fragment's earliest presentation time, which `decode` anchors its samples to.
+	// It is rounded to the track's ticks the same way the samples are, so the two agree.
+	let Some(earliest) = frames.iter().map(|f| f.timestamp).min() else {
 		return Ok(());
-	}
+	};
+	let timestamp = Timestamp::new(timestamp_ticks(earliest, info.timescale)?, info.timescale)?;
 
 	let bytes = encode_fragment(info, frames)?;
-	// The fragment may carry several samples; the net frame's timestamp is the
-	// fragment's earliest presentation time so a relay can order it.
 	let mut writer = group.create_frame(moq_net::frame::Info {
 		size: bytes.len() as u64,
-		timestamp: Some(frames[0].timestamp),
+		timestamp: Some(timestamp),
 	})?;
 	writer.write(bytes)?;
 	writer.finish()?;
@@ -628,11 +698,12 @@ fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u
 
 /// Synthesize a CMAF `Trak` for a video rendition that has no init segment.
 ///
-/// Used by the fMP4 exporter when its source is a `Container::Legacy` track
-/// (Avc3/Hev1/etc. importers that publish raw codec bitstreams). H.264/H.265
-/// need their out-of-band configuration record (`description`), e.g. because the
-/// Avc1 / Hvc1 transform has finished building it from inline parameter sets.
-/// VP8 carries no out-of-band config, so `description` is `None` for it.
+/// Used by the fMP4 exporter when its source is a `Container::Legacy` or `Loc`
+/// track. H.264/H.265 need a configuration record (`description`). When the
+/// catalog codec string determined that record, it lists no parameter sets and
+/// the sample entry is avc3 or hev1; the sets stay in the samples. A record built
+/// from the bitstream still carries them. VP8 carries no out-of-band config, so
+/// `description` is `None` for it.
 pub(crate) fn synthesize_video_trak(
 	track_id: u32,
 	timescale: u64,
@@ -672,14 +743,24 @@ pub(crate) fn synthesize_video_trak(
 	let require_description = || description.ok_or_else(|| Error::MissingVideoDescription(config.codec.to_string()));
 
 	let sample_entry = match &config.codec {
-		VideoCodec::H264(_) => {
+		VideoCodec::H264(h264) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
 			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::from)?;
-			mp4_atom::Codec::from(mp4_atom::Avc1 {
-				visual,
-				avcc,
-				..Default::default()
-			})
+			// Empty parameter-set lists are the in-band sample entry. A record that
+			// still carries them, including one built from the first keyframe, stays avc1.
+			if h264.inline && avcc.sequence_parameter_sets.is_empty() && avcc.picture_parameter_sets.is_empty() {
+				mp4_atom::Codec::from(mp4_atom::Avc3 {
+					visual,
+					avcc,
+					..Default::default()
+				})
+			} else {
+				mp4_atom::Codec::from(mp4_atom::Avc1 {
+					visual,
+					avcc,
+					..Default::default()
+				})
+			}
 		}
 		VideoCodec::H265(h265) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
@@ -1280,7 +1361,7 @@ mod tests {
 		use mp4_atom::Encode;
 
 		// Microsecond timescale so each tick maps 1:1 to the Timestamp's µs.
-		// decode() walks the mdat by sample size and ignores data_offset, so a
+		// Without a data_offset, decode() reads the run from the start of the mdat, so a
 		// hand-built moof+mdat with explicit per-sample durations is enough.
 		let timescale = moq_net::Timescale::MICRO;
 		let moof = mp4_atom::Moof {
@@ -1294,7 +1375,7 @@ mod tests {
 					base_media_decode_time: 0,
 				}),
 				trun: vec![mp4_atom::Trun {
-					data_offset: Some(0),
+					data_offset: None,
 					entries: vec![
 						mp4_atom::TrunEntry {
 							size: Some(2),
@@ -1320,7 +1401,7 @@ mod tests {
 		.encode(&mut buf)
 		.unwrap();
 
-		let frames = decode(Bytes::from(buf), timescale, Kind::Video).unwrap();
+		let frames = decode(Bytes::from(buf), None, timescale, Kind::Video).unwrap();
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[0].duration, Some(ts(33_333)));
@@ -1340,7 +1421,7 @@ mod tests {
 		}];
 
 		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
-		let frames = decode(fragment, timescale, Kind::Video).unwrap();
+		let frames = decode(fragment, None, timescale, Kind::Video).unwrap();
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, Some(ts(33_333)));
@@ -1455,7 +1536,7 @@ mod tests {
 		];
 
 		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
-		let frames = decode(fragment, timescale, Kind::Video).unwrap();
+		let frames = decode(fragment, None, timescale, Kind::Video).unwrap();
 
 		assert_eq!(frames.len(), input.len());
 		for (actual, expected) in frames.iter().zip(&input) {
@@ -1496,12 +1577,12 @@ mod tests {
 			.collect();
 		assert_eq!(flags, vec![0x0200_0000; 3]);
 
-		let audio = decode(fragment.clone(), timescale, Kind::Audio).unwrap();
+		let audio = decode(fragment.clone(), None, timescale, Kind::Audio).unwrap();
 		assert!(
 			audio.iter().all(|frame| !frame.keyframe),
 			"audio never decodes a keyframe"
 		);
-		let video = decode(fragment, timescale, Kind::Video).unwrap();
+		let video = decode(fragment, None, timescale, Kind::Video).unwrap();
 		assert!(
 			video.iter().all(|frame| frame.keyframe),
 			"the sync flag is a video keyframe"
@@ -1529,6 +1610,139 @@ mod tests {
 		assert_eq!(video.kind().unwrap(), Kind::Video);
 	}
 
+	fn sample(micros: u64) -> Frame {
+		Frame {
+			timestamp: ts(micros),
+			payload: Bytes::from_static(&[0xAB]),
+			keyframe: false,
+			duration: Some(ts(33_000)),
+		}
+	}
+
+	fn micros(frames: &[Frame]) -> Vec<u128> {
+		frames.iter().map(|f| f.timestamp.as_micros()).collect()
+	}
+
+	/// The frame timestamp is the broadcast timeline: a passthrough fragment whose `tfdt` still
+	/// carries its source PTS decodes at the frame timestamp, keeping its B-frame order.
+	#[test]
+	fn decode_times_samples_from_the_frame_timestamp() {
+		let timescale = moq_net::Timescale::MICRO;
+		let source = 3_600_000_000;
+		let input = [sample(source), sample(source + 66_000), sample(source + 33_000)];
+		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
+
+		let frames = decode(fragment, Some(ts(10_000_000)), timescale, Kind::Video).unwrap();
+		assert_eq!(micros(&frames), [10_000_000, 10_066_000, 10_033_000]);
+	}
+
+	/// A fragment can open on a sample that presents after a later one (open-GOP leading
+	/// pictures, or a cut mid-GOP). The earliest presentation time is the anchor, on both sides.
+	#[tokio::test]
+	async fn the_frame_timestamp_is_the_earliest_presentation_time() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		let timescale = moq_net::Timescale::MICRO;
+		let wire = Wire::new(synthesize_video_trak(1, 1_000_000, &config, None).unwrap());
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let info = moq_net::track::Info::default().with_timescale(timescale);
+		let track = broadcast.create_track("video", info).unwrap();
+		let mut group = track.append_group().unwrap();
+		let input = [sample(100_000), sample(33_000), sample(66_000)];
+		wire.write(&mut group, &input).unwrap();
+
+		let frame = group.consume().read_frame().await.unwrap().unwrap();
+		assert_eq!(frame.timestamp.unwrap().as_micros(), 33_000);
+
+		let frames = decode(frame.payload.clone(), frame.timestamp, timescale, Kind::Video).unwrap();
+		assert_eq!(micros(&frames), [100_000, 33_000, 66_000]);
+
+		let shifted = decode(frame.payload, Some(ts(5_000_000)), timescale, Kind::Video).unwrap();
+		assert_eq!(micros(&shifted), [5_067_000, 5_000_000, 5_033_000]);
+	}
+
+	/// An untimed track's frames carry no broadcast time, so their samples present at `tfdt`.
+	#[test]
+	fn an_untimed_fragment_decodes_at_its_tfdt() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		let timescale = moq_net::Timescale::MICRO;
+		let wire = Wire::new(synthesize_video_trak(1, 1_000_000, &config, None).unwrap());
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let untimed = moq_net::track::Info::default().with_timescale(None);
+		let track = broadcast.create_track("video", untimed).unwrap();
+		let mut group = track.append_group().unwrap();
+		let source = 3_600_000_000;
+		let input = [sample(source), sample(source + 66_000), sample(source + 33_000)];
+		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
+		group.write_frame(None, fragment).unwrap();
+
+		let Poll::Ready(Ok(Some(frames))) = wire.poll_read(&mut group.consume(), &kio::Waiter::noop()) else {
+			panic!("the fragment is ready");
+		};
+		let source = u128::from(source);
+		assert_eq!(micros(&frames), [source, source + 66_000, source + 33_000]);
+	}
+
+	/// A track at another scale than the media couldn't carry the earliest presentation time
+	/// exactly, so writing a fragment to it fails.
+	#[test]
+	fn write_refuses_a_track_at_another_timescale() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		let wire = Wire::new(synthesize_video_trak(1, 90_000, &config, None).unwrap());
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let track = broadcast.create_track("video", info).unwrap();
+		let mut group = track.append_group().unwrap();
+
+		let err = wire.write(&mut group, &[sample(0)]).unwrap_err();
+		assert!(matches!(err, Error::TimescaleMismatch { .. }), "got {err:?}");
+	}
+
+	/// Samples are read front to back, so a run whose data_offset points anywhere but the next
+	/// sample is refused rather than sliced from the wrong bytes.
+	#[test]
+	fn decode_refuses_a_run_that_skips_bytes() {
+		use mp4_atom::{DecodeMaybe, Encode};
+
+		let timescale = moq_net::Timescale::MICRO;
+		let fragment = encode_fragment(info(1, timescale, 0), &[sample(0), sample(33_000)]).unwrap();
+
+		let mut cursor = std::io::Cursor::new(fragment.as_ref());
+		let Some(mp4_atom::Any::Moof(mut moof)) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() else {
+			panic!("a moof first");
+		};
+		let mdat = &fragment[cursor.position() as usize..];
+		let offset = moof.traf[0].trun[0].data_offset.as_mut().unwrap();
+		*offset += 1;
+
+		let mut skewed = Vec::new();
+		moof.encode(&mut skewed).unwrap();
+		skewed.extend_from_slice(mdat);
+
+		let err = decode(Bytes::from(skewed), None, timescale, Kind::Video).unwrap_err();
+		assert!(matches!(err, Error::InvalidDataOffset), "got {err:?}");
+	}
+
+	/// A frame timestamp the track carries at another scale anchors to the nearest tick, the way
+	/// `encode` stamps it.
+	#[test]
+	fn decode_rounds_the_frame_timestamp_to_the_nearest_tick() {
+		let timescale = moq_net::Timescale::new(90_000).unwrap();
+		let fragment = encode_fragment(info(1, timescale, 0), &[sample(0)]).unwrap();
+
+		// Tick 100 is 1111.1 µs, which a microsecond track truncates to 1111.
+		let frames = decode(fragment, Some(ts(1_111)), timescale, Kind::Video).unwrap();
+		assert_eq!(frames[0].timestamp, Timestamp::new(100, timescale).unwrap());
+	}
+
 	#[test]
 	fn decode_without_duration_reports_none() {
 		// encode_fragment writes no sample-duration for a duration-less frame,
@@ -1542,7 +1756,7 @@ mod tests {
 		}];
 
 		let fragment = encode_fragment(info(1, timescale, 0), &frames).unwrap();
-		let frames = decode(fragment, timescale, Kind::Video).unwrap();
+		let frames = decode(fragment, None, timescale, Kind::Video).unwrap();
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, None);
@@ -1566,7 +1780,7 @@ mod tests {
 					base_media_decode_time: 2_000,
 				}),
 				trun: vec![mp4_atom::Trun {
-					data_offset: Some(0),
+					data_offset: None,
 					entries: vec![mp4_atom::TrunEntry {
 						size: None,
 						duration: None,
@@ -1581,7 +1795,7 @@ mod tests {
 		moof.encode(&mut buf).unwrap();
 		mp4_atom::Mdat { data: vec![0xDE, 0xAD] }.encode(&mut buf).unwrap();
 
-		let frames = decode(Bytes::from(buf), timescale, Kind::Video).unwrap();
+		let frames = decode(Bytes::from(buf), None, timescale, Kind::Video).unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp.as_micros(), 83_333);
 		assert_eq!(frames[0].duration, None);
