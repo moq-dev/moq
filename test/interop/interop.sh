@@ -242,15 +242,13 @@ prepare_js() {
         for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun not found"; done
         return
     }
-    if [[ -n "${INTEROP_NATIVE_CLIENT:-}" ]]; then
-        [[ -f "$INTEROP_NATIVE_CLIENT/subscribe.ts" ]] || {
+    # Staged released-compat clients bring their own packages; check every one given.
+    if [[ -n "${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
+        [[ -z "${INTEROP_NATIVE_CLIENT:-}" || -f "$INTEROP_NATIVE_CLIENT/subscribe.ts" ]] || {
             echo "missing staged native client" >&2
             exit 1
         }
-        return
-    fi
-    if [[ -n "${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
-        [[ -f "$INTEROP_JS_PUBLISH_CLIENT/client.ts" ]] || {
+        [[ -z "${INTEROP_JS_PUBLISH_CLIENT:-}" || -f "$INTEROP_JS_PUBLISH_CLIENT/client.ts" ]] || {
             echo "missing staged publisher" >&2
             exit 1
         }
@@ -466,6 +464,10 @@ sed "s/4443/${PORT}/g" "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
 if [[ -n "${INTEROP_VERSION:-}" ]]; then
     # Version values come from the executable's advertised CLI choices.
     sed -i "/\[listen\]/a version = [\"${INTEROP_VERSION}\"]" "$HARNESS_RUN/relay.toml"
+    [[ "$(grep -c '^version = ' "$HARNESS_RUN/relay.toml")" == 1 ]] || {
+        echo "relay.toml needs exactly one pinned [listen] version" >&2
+        exit 1
+    }
 fi
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then

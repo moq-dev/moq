@@ -166,7 +166,8 @@ fetch() {
 # negotiate its preferred draft instead of the draft this cell names. Only moq-lite
 # drafts are listed: our clients and relays always prefer lite with each other, so
 # IETF between them is not compared here (`just test interop` covers IETF).
-while read -r version; do
+# Fd 3, so a child reading stdin (ffmpeg does) cannot consume the version list.
+while read -r version <&3; do
     released_relay="$HARNESS_RUN/released/bin/moq-relay"
     if fetch "$released_relay" "$RELEASED" "$RELEASED" "$HARNESS_RUN/js" "$HARNESS_RUN/js/transport.ts" "$version" >"$HARNESS_RUN/$version.fetch-baseline.log" 2>&1; then
         released_fetch=true
@@ -202,7 +203,7 @@ while read -r version; do
             cell fetch "$version" "$relay_source" "$source" fetch "$relay" "$pub" "$sub" "$own_js" "$own_transport" "$version"
         done
     done
-done <"$HARNESS_RUN/shared"
+done 3<"$HARNESS_RUN/shared"
 if ((${#failed[@]})); then
     printf 'FAIL %s\n' "${failed[@]}" >&2
     exit 1
