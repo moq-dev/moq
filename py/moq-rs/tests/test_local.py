@@ -390,9 +390,9 @@ async def test_announced_epoch_restarts():
     assert isinstance(restart, moq.AnnounceEventRestart)
     assert restart.announce.route.epoch == second
 
-    with pytest.raises(moq.Error):
+    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
         moq.epoch_time(first.upper())
-    with pytest.raises(moq.Error):
+    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
         broadcast.announce(moq.Route(epoch="not-an-epoch"))
     broadcast.close()
 
