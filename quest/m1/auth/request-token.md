@@ -4,7 +4,8 @@
 
 A moq-transport peer authorizes a SUBSCRIBE or PUBLISH_NAMESPACE with the
 `AUTHORIZATION TOKEN` parameter (`0x03`) on that request, and refreshes it in
-band with a REQUEST_UPDATE, on every supported draft. A request is authorized
+band with an update (SUBSCRIBE_UPDATE on drafts 14 and 15, REQUEST_UPDATE
+from 16), on every supported draft. A request is authorized
 by the session's grant first; when that does not cover it, by the token on the
 request; with neither it is refused `UNAUTHORIZED`. The token's grant covers
 only the request it rode on, never joins the session union, and ends with that
@@ -27,8 +28,8 @@ Decided, so review does not relitigate them:
   session's `auth::Handle`, marked with the request's path and kind, and the
   acceptor's `Grant` is checked against that request alone. With no
   `requests()` consumer a non-empty token is refused `Unsupported`.
-- **Scope.** Honored on SUBSCRIBE, PUBLISH_NAMESPACE, and a REQUEST_UPDATE
-  renewing one; ignored on every other request (2026-10-05).
+- **Scope.** Honored on SUBSCRIBE, PUBLISH_NAMESPACE, and an update renewing
+  one, SUBSCRIBE_UPDATE included; ignored on every other request (2026-10-05).
 - **Refused renewal** follows drafts 16 section 9.11.1 and 18 section 10.9.1:
   REQUEST_ERROR ends only that request, with PUBLISH_DONE `UPDATE_FAILED` for
   a subscription or a closed stream for a namespace. The session stays up and
@@ -38,17 +39,24 @@ Decided, so review does not relitigate them:
   tokens, with no `Client` methods. moq-tokio's `Connection` owns the token
   across reconnects: `Connection::auth()` renews it on a live connection and
   `connect::Config::with_request_token` seeds it. Setting a new token
-  re-presents it on live requests. This takes the request-token slice of
-  `Connection::auth()` from [Relay tokens](/quest/m1/auth/relay-refresh.md)
-  (2026-10-01 Q1 and Q3, 2026-10-05).
+  re-presents it on live requests. This owns the request-token slice of
+  `Connection::auth()`, so it does not wait on
+  [Relay tokens](/quest/m1/auth/relay-refresh.md): whichever lands first adds
+  the handle (2026-10-01 Q1 and Q3, 2026-10-05).
 - **Update credit.** Draft-19+ advertises and enforces MAX_REQUEST_UPDATES,
   closing with TOO_MANY_REQUEST_UPDATES (0x1B); earlier drafts keep a local
-  guard that ends only the request. The sender keeps one renewal in flight per
-  subscription.
+  guard that ends only the request. 0x1B joins the shared session registry as
+  [Request-token decode](/quest/m1/auth/request-token-decode.md) does for 0x13
+  and 0x17: `SessionCode` in `js/net`, moq-lite's Session Error Codes table,
+  and `session_codes_round_trip`. The sender keeps one renewal in flight per
+  subscription on drafts that answer an update. Draft-14 never answers an
+  accepted SUBSCRIBE_UPDATE, so its sender does not wait for one; test two
+  successive replacements with no answers.
 - **Drafts.** Renewal works on every supported draft, 14 through 16 included
-  (2026-10-09).
-- `EXPIRED_AUTH_TOKEN` and `MALFORMED_AUTH_TOKEN` land with
-  [Expired token error](/quest/m1/auth/expired-error.md) (2026-10-01 Q4).
+  (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15.
+- `EXPIRED_AUTH_TOKEN` and `MALFORMED_AUTH_TOKEN` are not this quest's; they
+  land with [Expired token error](/quest/m1/auth/expired-error.md), which
+  does not block it (2026-10-01 Q4).
 
 Fix in #4675 before it merges, each with a regression test. Found by a
 2026-10-09 read of head `29ed74e78`, not yet reproduced:
@@ -75,10 +83,12 @@ tokens, so an acceptor written for session tokens also answers request tokens.
 
 Public API: additive. moq-net gains `auth::RequestKind`, the request a
 `auth::Request` belongs to, `auth::Handle::set_request_token`, and
-`SessionError::TooManyRequestUpdates`. moq-tokio gains `Auth`,
+`SessionError::TooManyRequestUpdates`, mirrored as a `js/net` `SessionCode`.
+moq-tokio gains `Auth`,
 `Connection::auth`, `connect::Config::with_request_token`, and
 `server::Request::auth`. Wire: MAX_REQUEST_UPDATES (0x08) on draft-19+ and
-TOO_MANY_REQUEST_UPDATES (0x1B); the parameter already exists in every
+TOO_MANY_REQUEST_UPDATES (0x1B), which also joins moq-lite's registry; the
+parameter already exists in every
 supported draft.
 
 Follow-ups, planned when a consumer needs them: a JS request-token setter and

@@ -4,8 +4,9 @@
 
 moq-relay verifies a moq-transport request token through `moq_auth::Client`,
 each request getting a lease of its own that is never counted as a session
-grant and ends when the request ends. Today the relay has no `requests()`
-consumer, so it refuses every request token `Unsupported`.
+grant and ends when the request ends. Until this lands the relay has no
+`requests()` consumer, so it refuses every request token `Unsupported`, even
+once [Request tokens](/quest/m1/auth/request-token.md) merges.
 
 ## Plan
 
