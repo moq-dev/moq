@@ -283,11 +283,11 @@ test("update after finish reports the closed track", async () => {
 
 	const track = new Track.Producer("test");
 	const producer = new Producer<Doc>({ track, deltaRatio: 100 });
-	producer.update({ a: 1 });
-	producer.update({ a: 2 }); // a delta, so a group is open
+	producer.update({ value: { a: 1 } });
+	producer.update({ value: { a: 2 } }); // a delta, so a group is open
 	producer.finish();
 
-	expect(() => producer.update({ a: 3 })).toThrow("track is closed");
+	expect(() => producer.update({ value: { a: 3 } })).toThrow("track is closed");
 });
 
 // A root that isn't an object has no recursive merge patch, so it forces a snapshot regardless of
