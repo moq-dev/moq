@@ -2697,6 +2697,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						flags: ietf::GroupFlags {
 							has_extensions: self.timescale.is_some(),
 							first_object: slice.skip == 0,
+							// A stream capped by the range stops before the group may end, so its
+							// FIN cannot claim END_OF_GROUP.
+							has_end: slice.until.is_none(),
 							..Default::default()
 						},
 					};
@@ -5440,6 +5443,39 @@ mod serve_tests {
 			0,
 			"the cap excludes cc"
 		);
+	}
+
+	/// A stream cut short by the range's end Location does not claim END_OF_GROUP, since
+	/// the group goes on past it. A range ending on a whole group still does.
+	#[moq_net_sim::test]
+	async fn capped_group_does_not_claim_its_end() {
+		async fn serve(object: Option<u64>) -> ietf::GroupHeader {
+			let log = crate::lite::test_transport::Log::default();
+			let session = SinkSession::new(log.clone());
+
+			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let subscriber = track.subscribe(None);
+
+			let mut group = track.append_group().unwrap();
+			for payload in [b"aa", b"bb", b"cc"] {
+				group.write_frame(crate::Timestamp::ZERO, payload.as_slice()).unwrap();
+			}
+			group.finish().unwrap();
+			track.finish().unwrap();
+
+			let range = ServeRange {
+				start: Some(Location { group: 0, object: 0 }),
+				end: Some(EndLocation { group: 0, object }),
+			};
+			let mut serve = TrackServe::new(session, subscriber, RequestId(0), Version::Draft20, range, None);
+			kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+
+			let mut buf = bytes::Bytes::from(log.writes.lock().unwrap().clone());
+			crate::coding::decode_buf(&mut buf, Version::Draft20, ietf::GroupHeader::decode).expect("a group header")
+		}
+
+		assert!(!serve(Some(0)).await.flags.has_end, "capped at object 0 of 3");
+		assert!(serve(None).await.flags.has_end, "the whole group");
 	}
 }
 
