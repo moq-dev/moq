@@ -138,6 +138,8 @@ impl Control {
 				return Poll::Ready(Ok(state.request_id_next.increment()));
 			}
 
+			// A check that yielded to the cooperative budget may have allowed it.
+			std::task::ready!(kio::coop::poll_proceed(waiter));
 			if timeout.poll(waiter).is_ready() {
 				tracing::warn!("timed out waiting for MAX_REQUEST_ID");
 				return Poll::Ready(Err(Error::Cancel));

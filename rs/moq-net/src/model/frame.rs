@@ -731,6 +731,8 @@ impl Consumer {
 			let failed = match &res {
 				Poll::Ready(Ok(_)) => return res,
 				Poll::Ready(Err(err)) => Some(err.clone()),
+				// A yield to the cooperative budget is no stall.
+				Poll::Pending if kio::coop::poll_proceed(waiter).is_pending() => return res,
 				Poll::Pending => None,
 			};
 			let (recover, index) = &mut **recover;
@@ -751,6 +753,7 @@ impl Consumer {
 				Poll::Ready(Ok(Some(frame))) => frame,
 				Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending if kio::coop::poll_proceed(waiter).is_pending() => return Poll::Pending,
 				Poll::Pending => {
 					return match self.poll_expired(waiter) {
 						true => Poll::Ready(Err(Error::Old)),

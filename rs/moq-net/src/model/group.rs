@@ -1375,6 +1375,8 @@ impl Consumer {
 					return res;
 				}
 				Poll::Ready(Err(err)) => Some(err.clone()),
+				// A yield to the cooperative budget is no stall.
+				Poll::Pending if kio::coop::poll_proceed(waiter).is_pending() => return res,
 				Poll::Pending => None,
 			};
 			if !recover.wants(failed.as_ref(), waiter) {
@@ -1419,7 +1421,8 @@ impl Consumer {
 		if self.ended {
 			return Some(false);
 		}
-		if !self.poll_expired(waiter) {
+		// A read the cooperative budget turned into `Pending` may have had a frame ready.
+		if kio::coop::poll_proceed(waiter).is_pending() || !self.poll_expired(waiter) {
 			return None;
 		}
 		let truncates = self.expired_truncates();
@@ -1874,20 +1877,22 @@ impl Cursor {
 			state.poll_terminal(index)
 		});
 
+		// Count a fresh batch once here, under no lock, so the drained pops that follow
+		// stay free. Before `ready!`: a poll that yields to the cooperative budget keeps
+		// the batch it filled, and the next poll pops it on the fast path.
+		let (frames, bytes) = self.prefetch.buffered();
+		if frames > 0 {
+			// The refill already updated the eviction rank under the group lock.
+			self.refreshed = self.cache.pool().now();
+			stats.frames(frames);
+			stats.bytes(bytes);
+		}
+
 		match ready!(res) {
 			Ok(Ok(())) => {}
 			Ok(Err(err)) => return Poll::Ready(Err(err)),
 			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
 		}
-
-		// The refill already updated the eviction rank under the group lock.
-		self.refreshed = self.cache.pool().now();
-
-		// A fresh batch was just filled (empty only on a clean end). Count the whole
-		// batch once here, under no lock, so the drained pops that follow stay free.
-		let (frames, bytes) = self.prefetch.buffered();
-		stats.frames(frames);
-		stats.bytes(bytes);
 
 		Poll::Ready(Ok(self.prefetch.pop().inspect(|_| {
 			self.index += 1;
@@ -2034,6 +2039,48 @@ mod test {
 		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(frame.timestamp.unwrap().as_micros(), 20_000);
 		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
+	}
+
+	/// A refill that yields to the cooperative budget keeps its batch, and still counts it.
+	#[test]
+	fn a_budget_yield_keeps_and_counts_the_prefetched_batch() {
+		let stats = crate::stats::Registry::new(crate::stats::Config::new());
+		let meter = stats
+			.tier(crate::stats::Tier::default())
+			.session("root")
+			.egress("demo")
+			.meter();
+
+		let mut producer = Info { sequence: 0 }.produce();
+		for payload in [&b"one"[..], b"two", b"three"] {
+			producer.write_frame(Timestamp::ZERO, Bytes::from(payload)).unwrap();
+		}
+		producer.finish().unwrap();
+		let mut consumer = producer.consume().with_meter(meter);
+
+		let waiter = kio::Waiter::new(std::task::Waker::noop().clone());
+		let starved = kio::coop::budget(|| {
+			crate::util::leave_budget(0);
+			consumer.poll_read_frame(&waiter)
+		});
+		assert!(starved.is_pending(), "the refill yields");
+
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(frame))) = kio::coop::budget(|| consumer.poll_read_frame(&waiter)) {
+			read.push(frame.payload);
+		}
+		assert_eq!(read, [&b"one"[..], b"two", b"three"]);
+
+		let traffic = stats.snapshot().traffic();
+		let (_, _, egress) = traffic
+			.iter()
+			.find(|(_, role, _)| *role == crate::stats::Role::Publisher)
+			.expect("egress row");
+		assert_eq!(
+			(egress.frames, egress.bytes),
+			(3, 11),
+			"the yielded batch is counted once"
+		);
 	}
 
 	/// An untimed frame reads back untimed, and still counts as the group's first frame:

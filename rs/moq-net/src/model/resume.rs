@@ -929,6 +929,8 @@ impl Recover {
 			}
 		}
 
+		// Not if the lookup above yielded to the cooperative budget: it may have found it.
+		ready!(kio::coop::poll_proceed(waiter));
 		// Otherwise ask for the rest. The subscription may still deliver it first.
 		if self.fetch.as_ref().is_none_or(|(asked, _)| *asked != generation) {
 			let options = group::Fetch::default().with_frame_start(index);

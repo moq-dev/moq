@@ -1494,6 +1494,8 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 					tracing::debug!(%err, "source closed");
 					self.ended = true;
 				}
+				// A yield to the cooperative budget, not an empty queue.
+				Poll::Pending if kio::coop::poll_proceed(waiter).is_pending() => break,
 				Poll::Pending => {
 					// The route that minted the source went: close it now.
 					if self.route.poll_closed(waiter).is_ready() {
@@ -2730,6 +2732,14 @@ mod tests {
 		let (_resolved, mut serve) = serve_one(&origin, &subscriber, &mut announced).await;
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
 		announced.withdraw(&path);
+		// Out of cooperative budget, the close waits a turn rather than spinning on a
+		// request poll that keeps yielding.
+		let waiter = kio::Waiter::new(std::task::Waker::noop().clone());
+		let starved = kio::coop::budget(|| {
+			crate::util::leave_budget(0);
+			kio::Task::poll(&mut serve, &waiter)
+		});
+		assert!(starved.is_pending());
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_ready());
 	}
 
@@ -4425,6 +4435,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					{
 						return Poll::Ready(ServeEnd::Finished);
 					}
+					// Settling may have yielded to the cooperative budget instead.
+					ready!(kio::coop::poll_proceed(waiter));
 					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
 						return Poll::Ready(ServeEnd::Idle);
 					}

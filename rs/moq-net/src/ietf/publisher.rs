@@ -1618,6 +1618,8 @@ where
 				if let Poll::Ready(joins) = joins {
 					return Poll::Ready(Ok(joins.get(&subscribe_id).cloned().flatten()));
 				}
+				// A lookup that yielded to the cooperative budget may have found it.
+				ready!(kio::coop::poll_proceed(waiter));
 				if deadline.poll(waiter).is_ready() {
 					return Poll::Ready(if pending { Err(Error::Timeout) } else { Ok(None) });
 				}
@@ -2717,6 +2719,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				Poll::Ready(Ok(None)) => {
 					// Datagrams written before the track finished still go out.
 					self.poll_datagrams(waiter);
+					// Draining never looks again, so a yield to the cooperative budget (in
+					// the datagrams or the end) retries the whole step next turn.
+					ready!(kio::coop::poll_proceed(waiter));
 					self.draining = true;
 					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
 						self.end = Some(end);

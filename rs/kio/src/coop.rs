@@ -14,6 +14,9 @@
 //! the synchronous `try_*` and `read` methods. Waiting on a level (closure, demand)
 //! is not progress, so those polls spend nothing either.
 //!
+//! A yield only postpones, so a caller that reads a `Pending` as a verdict (blocked,
+//! idle, not found) checks [`poll_proceed`] before acting on it.
+//!
 //! Code outside any [`budget`] call is unconstrained.
 
 use std::cell::Cell;
@@ -64,6 +67,20 @@ pub(crate) fn spend(waiter: &Waiter) -> bool {
 			true
 		}
 	})
+}
+
+/// Hold off acting on a `Pending` while this turn's budget is spent.
+///
+/// With the budget spent, a kio poll returns `Pending` even when it had an answer, so
+/// a caller about to treat `Pending` as a verdict (blocked, idle, not found) checks this
+/// first. `Pending` means the budget is spent: the task is woken, and the verdict waits
+/// for a fresh turn. `Ready` means no poll this turn yielded, so its `Pending` was real.
+/// Spends nothing.
+pub fn poll_proceed(waiter: &Waiter) -> std::task::Poll<()> {
+	match waiter.is_noop() || LEFT.get() != Some(0) {
+		true => std::task::Poll::Ready(()),
+		false => exhausted(waiter),
+	}
 }
 
 /// Yield for an exhausted budget: wake the task so it runs again next turn.
@@ -172,6 +189,24 @@ mod tests {
 			"the yield left the item queued"
 		);
 		assert_eq!(queue.try_pop(), Ok(None), "the yield pushed nothing");
+	}
+
+	#[test]
+	fn proceed_holds_off_once_spent() {
+		let producer = Producer::new(1u32);
+		let consumer = producer.consume();
+		let (waiter, wakes) = counted();
+		assert!(poll_proceed(&waiter).is_ready(), "unconstrained outside a budget");
+		budget(|| {
+			for _ in 0..UNITS {
+				assert!(poll_proceed(&waiter).is_ready());
+				assert!(consumer.poll(&waiter, ready).is_ready());
+			}
+			assert_eq!(left(), Some(0), "proceeding spends nothing");
+			assert!(poll_proceed(&waiter).is_pending());
+			assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "holding off wakes the task");
+			assert!(poll_proceed(&Waiter::noop()).is_ready(), "a noop waiter is exempt");
+		});
 	}
 
 	#[test]

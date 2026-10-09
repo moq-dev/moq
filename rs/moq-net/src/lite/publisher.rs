@@ -1907,6 +1907,34 @@ mod test {
 		}
 	}
 
+	/// A finished track's trailing datagram still goes out when the poll that finds the
+	/// groups over runs out of budget: a yield there must not read as "no datagram".
+	#[test]
+	fn a_budget_yield_keeps_the_trailing_datagram() {
+		let waiter = kio::Waiter::new(std::task::Waker::noop().clone());
+		for left in 0..4 {
+			let mut producer = track_producer("test");
+			let mut subscriber = producer.subscribe(None);
+			producer
+				.append_datagram(Timestamp::from_millis(1).unwrap(), &b"last"[..])
+				.unwrap();
+			producer.finish().unwrap();
+
+			let starved = kio::coop::budget(|| {
+				crate::util::leave_budget(left);
+				poll_recv_next(&mut subscriber, true, false, &waiter)
+			});
+			let res = match starved {
+				Poll::Pending => kio::coop::budget(|| poll_recv_next(&mut subscriber, true, false, &waiter)),
+				res => res,
+			};
+			assert!(
+				matches!(&res, Poll::Ready(Ok(Recv::Datagram(datagram))) if &datagram.payload[..] == b"last"),
+				"left {left}: the datagram was skipped"
+			);
+		}
+	}
+
 	/// A relay can ingest back-to-back groups micro-reordered (the upstream leg
 	/// sends newest-first). The older group is cached and in demand, so serving
 	/// must still deliver it; a sequence cursor would skip it permanently.
@@ -2350,15 +2378,11 @@ fn poll_recv_next(
 				Poll::Pending => {}
 			}
 		}
+		// A read above that yielded to the cooperative budget is no answer: decide next turn.
+		ready!(kio::coop::poll_proceed(waiter));
 		// No live data ready: report the boundary (if declared) before signalling Finished, so a
 		// future boundary reaches the subscriber while the trailing groups are still in flight.
-		// Once the groups finished this is a probe whose answer decides between the two, so it
-		// must not yield to the cooperative budget; either way nothing is left to wait on.
-		let probe = match groups_finished {
-			true => &kio::Waiter::noop(),
-			false => waiter,
-		};
-		if emit_boundary && let Poll::Ready(res) = track.poll_finished(probe) {
+		if emit_boundary && let Poll::Ready(res) = track.poll_finished(waiter) {
 			return Poll::Ready(res.map(Recv::Boundary));
 		}
 		if groups_finished {
