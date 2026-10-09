@@ -12,8 +12,9 @@
 //! The driver only offers a front routes that serve its broadcast: those with the
 //! epoch it first resolved, whose tracks resume where they stopped, or its first
 //! route alone when that had no epoch, since nothing says another serves the
-//! same bytes. A newer epoch supersedes the front, ending even the tracks in
-//! flight, so readers re-request the new broadcast rather than stall on the old.
+//! same bytes. Another instance winning the path leaves the front alone: its
+//! readers stay until they leave or its routes go, and new requests get a fresh
+//! front for the winner.
 //!
 //! A front nothing needs retires: once every track is forgotten (after the linger,
 //! so a returning reader still finds the cache) and no consumer holds its broadcast,
@@ -94,9 +95,6 @@ pub(super) enum Event {
 	/// The driver let go of a track the machine asked it to [`Action::Forget`].
 	/// Not fed when a reader arrived first: [`Event::Used`] follows instead.
 	Forgotten { track: Arc<str> },
-	/// A newer publisher instance replaced the broadcast: every track ends now,
-	/// even one in flight, and readers re-request the path.
-	Superseded,
 	/// A consumer took hold of the front's broadcast: a request joined it, or the
 	/// driver declined an [`Action::Retire`] because one did.
 	Held,
@@ -308,7 +306,6 @@ impl Front {
 			Event::Forgotten { track } => {
 				self.tracks.remove(&track);
 			}
-			Event::Superseded => self.supersede(&mut actions),
 			Event::Held => {
 				self.held = true;
 				self.retiring = false;
@@ -669,21 +666,6 @@ impl Front {
 				_ => None,
 			})
 			.min()
-	}
-
-	/// Abort every track still going, then end: unlike a retraction, a newer
-	/// broadcast does not leave readers on the old one's copies.
-	fn supersede(&mut self, actions: &mut Vec<Action>) {
-		for (name, track) in &mut self.tracks {
-			if !track.ended {
-				track.ended = true;
-				actions.push(Action::Abort {
-					track: name.clone(),
-					err: Error::Unroutable,
-				});
-			}
-		}
-		self.end(Error::Unroutable, actions);
 	}
 
 	fn end(&mut self, err: Error, actions: &mut Vec<Action>) {

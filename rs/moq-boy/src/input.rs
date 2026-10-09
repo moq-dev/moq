@@ -65,30 +65,44 @@ pub async fn handle_viewers(
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
 	let mut announced = viewer_origin.announced();
+	// The command reader per viewer, so a restarted viewer replaces the old one's.
+	let mut readers: std::collections::HashMap<String, tokio::task::AbortHandle> = Default::default();
 	loop {
-		let (update, active) = match announced.next().await {
-			Some(moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) => (update, true),
-			Some(moq_net::announce::Event::End(update)) => (update, false),
+		let (update, active, restart) = match announced.next().await {
+			Some(moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) => {
+				(update, true, false)
+			}
+			// The viewer restarted: read the new broadcast instead of the old one.
+			Some(moq_net::announce::Event::Restart(update)) => (update, true, true),
+			Some(moq_net::announce::Event::End(update)) => (update, false, false),
 			None => break,
 		};
 
 		let viewer_id = update.prefix.to_string();
 
 		if active {
+			if !restart && readers.get(&viewer_id).is_some_and(|reader| !reader.is_finished()) {
+				continue;
+			}
 			let Ok(broadcast) = viewer_origin.request_broadcast(&update.prefix, None).await else {
 				continue;
 			};
-			tracing::info!(%viewer_id, "viewer connected");
+			tracing::info!(%viewer_id, restart, "viewer connected");
+			if let Some(old) = readers.remove(&viewer_id) {
+				old.abort();
+			}
 			let cmd_tx = cmd_tx.clone();
 			let vid = viewer_id.clone();
-			tokio::spawn(async move {
+			let reader = tokio::spawn(async move {
 				if let Err(e) = handle_viewer_commands(&vid, broadcast, &cmd_tx).await {
 					tracing::warn!(viewer_id = %vid, error = %e, "viewer command error");
 				}
 				tracing::info!(viewer_id = %vid, "viewer disconnected");
 				let _ = cmd_tx.send(Command::ViewerLeft { viewer_id: vid }).await;
 			});
+			readers.insert(viewer_id, reader.abort_handle());
 		} else {
+			readers.remove(&viewer_id);
 			tracing::info!(%viewer_id, "viewer went offline");
 			let _ = cmd_tx
 				.send(Command::ViewerLeft {

@@ -5840,10 +5840,10 @@ mod tests {
 	}
 
 	/// Two sessions assigned the same identity announce the same anonymous chain.
-	/// The cursor treats that as an identical re-announce, so a reconnect is
-	/// invisible and retracting the stale session leaves the fresh route standing.
+	/// Without an epoch the fresh session is another source, so consumers restart
+	/// once, and retracting the stale session leaves the fresh route standing quietly.
 	#[moq_net_sim::test]
-	async fn reconnecting_peer_joins_the_front_it_replaces() {
+	async fn reconnecting_peer_restarts_the_route() {
 		let peer = crate::Hop::new(777).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
 
@@ -5878,8 +5878,9 @@ mod tests {
 		announced.assert_next_active("room/host");
 
 		// The peer reconnects before the old session is retired: an identical route
-		// from the fresh session joins without any consumer-visible churn.
+		// from the fresh session wins at once, as another source.
 		let _second = connect();
+		announced.assert_next_restarted("room/host");
 		announced.assert_next_wait();
 
 		// Neither route is offered back to the peer they both came from.

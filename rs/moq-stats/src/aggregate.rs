@@ -362,6 +362,15 @@ impl<V: Mergeable> Merged<V> {
 				Poll::Ready(Some(moq_net::announce::Event::End(update))) => {
 					changed |= self.apply_announce(update, false)
 				}
+				// Another publisher instance: the one tracked at the path ends, then the
+				// new one starts, so its reader resolves afresh.
+				Poll::Ready(Some(moq_net::announce::Event::Restart(update))) => {
+					let mut ended = update.clone();
+					let absolute = self.announce.absolute(&update.prefix).to_owned();
+					ended.route.epoch = self.last_announced.get(&absolute).cloned().flatten();
+					changed |= self.apply_announce(ended, false);
+					changed |= self.apply_announce(update, true);
+				}
 				Poll::Ready(None) => return Poll::Ready(Ok(None)),
 				Poll::Pending => break,
 			}
@@ -632,7 +641,9 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::Start(route)
+			| moq_net::announce::Event::Update(route)
+			| moq_net::announce::Event::Restart(route) => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}

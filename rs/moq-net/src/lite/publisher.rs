@@ -693,8 +693,7 @@ impl AnnounceRun {
 		suffix: crate::PathOwned,
 		hops: Hops,
 		cost: crate::origin::Cost,
-		// Fixed while the peer holds the advertisement: the origin delivers a new
-		// epoch as a retraction and a fresh start.
+		// Fixed while the peer holds the advertisement: a new one is a restart.
 		epoch: Option<crate::Epoch>,
 	) -> Result<(), Error> {
 		let (id, wire, chain) = self.encoder.start(suffix.clone(), hops.clone());
@@ -705,6 +704,40 @@ impl AnnounceRun {
 			hops: chain,
 			cost,
 		})?;
+		Ok(())
+	}
+
+	/// Replace the peer's advertisement for `suffix` with another publisher instance:
+	/// ANNOUNCE_RESTART on lite-07, an end and a fresh start before it.
+	fn restart<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		suffix: crate::PathOwned,
+		hops: Hops,
+		cost: crate::origin::Cost,
+		epoch: Option<crate::Epoch>,
+		absolute: &crate::Path,
+	) -> Result<(), Error> {
+		tracing::debug!(route = %absolute, "restart");
+		let id = self.live.get(&suffix).and_then(|advertised| advertised.id);
+		match id {
+			Some(id) if self.version.has_announce_restart() => {
+				self.live.insert(
+					suffix,
+					Advertised {
+						id: Some(id),
+						hops: hops.clone(),
+						cost,
+					},
+				);
+				let hops = self.encoder.update(id, hops);
+				stream.writer.buffer(&lite::AnnounceBroadcast::Restart { id, epoch, hops, cost })?;
+			}
+			_ => {
+				self.retract(stream, suffix.clone(), absolute)?;
+				self.start(stream, suffix, hops, cost, epoch)?;
+			}
+		}
 		Ok(())
 	}
 
@@ -750,7 +783,9 @@ impl AnnounceRun {
 				// We use `try_next()` to synchronously get the initial updates.
 				while let Some(event) = announced.try_next() {
 					let (update, active) = match event {
-						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
+						announce::Event::Start(update)
+						| announce::Event::Update(update)
+						| announce::Event::Restart(update) => (update, true),
 						announce::Event::End(update) => (update, false),
 					};
 					let absolute = origin.absolute(&update.prefix);
@@ -785,7 +820,9 @@ impl AnnounceRun {
 				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost, Option<crate::Epoch>)> = Vec::new();
 				while let Some(event) = announced.try_next() {
 					let (update, active) = match event {
-						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
+						announce::Event::Start(update)
+						| announce::Event::Update(update)
+						| announce::Event::Restart(update) => (update, true),
 						announce::Event::End(update) => (update, false),
 					};
 					let absolute = origin.absolute(&update.prefix);
@@ -880,9 +917,10 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let (update, active) = match next {
-				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true),
-				Some(announce::Event::End(update)) => (update, false),
+			let (update, active, restart) = match next {
+				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true, false),
+				Some(announce::Event::Restart(update)) => (update, true, true),
+				Some(announce::Event::End(update)) => (update, false, false),
 				None => {
 					// The buffer is empty (flushed at the loop top), so FIN now and
 					// wait for the acknowledgement.
@@ -901,12 +939,15 @@ impl AnnounceRun {
 			}
 
 			match self.outgoing(&update.route, &absolute) {
+				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
+					self.restart(stream, suffix, hops, cost, update.route.epoch, &absolute)?;
+				}
 				Some((hops, cost)) => match self.live.get_mut(&suffix) {
 					// The peer would decode what it already holds.
 					Some(advertised) if advertised.hops == hops && advertised.cost == cost => {}
 					// A metadata update on a live advertisement: restart it in
 					// place (lite-05 restarts via a duplicate ANNOUNCE).
-					Some(advertised) if lite::restart_supported(self.version) => {
+					Some(advertised) if lite::update_supported(self.version) => {
 						tracing::debug!(route = %absolute, "reannounce");
 						advertised.hops = hops.clone();
 						advertised.cost = cost;
@@ -915,7 +956,7 @@ impl AnnounceRun {
 								let hops = self.encoder.update(id, hops);
 								stream
 									.writer
-									.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?
+									.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?
 							}
 							// lite-05: a duplicate ANNOUNCE, which assigns no id.
 							None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
@@ -1940,6 +1981,7 @@ mod announce_test {
 	struct Wire {
 		writes: Arc<Mutex<Vec<u8>>>,
 		cursor: usize,
+		version: Version,
 	}
 
 	impl Wire {
@@ -1951,7 +1993,8 @@ mod announce_test {
 		fn take_ok(&mut self) -> lite::AnnounceOk {
 			let buf = self.pending();
 			let mut slice = &buf[..];
-			let ok = crate::coding::decode_buf(&mut slice, VERSION, lite::AnnounceOk::decode).expect("announce ok");
+			let ok =
+				crate::coding::decode_buf(&mut slice, self.version, lite::AnnounceOk::decode).expect("announce ok");
 			self.cursor += buf.len() - slice.len();
 			ok
 		}
@@ -1963,7 +2006,7 @@ mod announce_test {
 			let mut msgs = Vec::new();
 			while !slice.is_empty() {
 				msgs.push(
-					crate::coding::decode_buf(&mut slice, VERSION, lite::AnnounceBroadcast::decode)
+					crate::coding::decode_buf(&mut slice, self.version, lite::AnnounceBroadcast::decode)
 						.expect("announce message")
 						.into_owned(),
 				);
@@ -2005,6 +2048,11 @@ mod announce_test {
 
 	/// Announce one route with cost 7 and run the announce loop against it.
 	async fn harness() -> Harness {
+		harness_on(VERSION).await
+	}
+
+	/// [`harness`] on another version.
+	async fn harness_on(version: Version) -> Harness {
 		let origin = Hop::new(1).unwrap().produce();
 		let announcement = origin
 			.announce(
@@ -2017,17 +2065,21 @@ mod announce_test {
 		let writes = log.writes.clone();
 		let consumer = origin.consume();
 		let mut stream = Stream::<SinkSession, Version> {
-			writer: Writer::new(SinkSend::new(log), VERSION),
-			reader: Reader::new(PendingRecv, VERSION),
+			writer: Writer::new(SinkSend::new(log), version),
+			reader: Reader::new(PendingRecv, version),
 		};
 		let task = moq_net_sim::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = consumer.hop();
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION).await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, version).await
 		});
 		settle().await;
 
-		let mut wire = Wire { writes, cursor: 0 };
+		let mut wire = Wire {
+			writes,
+			cursor: 0,
+			version,
+		};
 		assert_eq!(wire.take_ok().active, 1, "expected one initial announce");
 		match wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, hops, cost, .. }] => {
@@ -2083,7 +2135,7 @@ mod announce_test {
 		moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { id: 0, hops, cost }] => {
+			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
 				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}
@@ -2104,24 +2156,58 @@ mod announce_test {
 	}
 
 	/// A new best route the wire cannot tell apart (another session, same chain and
-	/// cost) sends nothing, in either direction.
+	/// cost) and without an epoch is another source, in either direction: an
+	/// ANNOUNCE_RESTART on lite-07, which may carry an epoch, and an end and a fresh
+	/// start before it.
 	#[moq_net_sim::test]
-	async fn source_flip_is_quiet() {
-		let h = harness().await;
-		let peer = h
+	async fn source_flip_restarts() {
+		for version in [Version::Lite06, Version::Lite07] {
+			let mut h = harness_on(version).await;
+			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
+			let peer = h.origin.clone().peer().announce("cam", route.clone()).unwrap();
+			// A restart waits out the update hold like an update.
+			moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			settle().await;
+			let restarted = |msgs: Vec<lite::AnnounceBroadcast<'static>>| match (version, msgs.as_slice()) {
+				(Version::Lite07, [lite::AnnounceBroadcast::Restart { id: 0, epoch: None, cost, .. }]) => {
+					assert_eq!(*cost, crate::origin::Cost::new(7))
+				}
+				(Version::Lite06, [lite::AnnounceBroadcast::EndedId { .. }, lite::AnnounceBroadcast::Active { suffix, .. }]) => {
+					assert_eq!(suffix.rest.as_str(), "cam")
+				}
+				(_, other) => panic!("expected a restart on {version}, got {other:?}"),
+			};
+			restarted(h.wire.take_announces());
+
+			drop(peer);
+			moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			settle().await;
+			restarted(h.wire.take_announces());
+			h.assert_idle();
+		}
+	}
+
+	/// A newer epoch restarts the advertisement, carrying the epoch on lite-07.
+	#[moq_net_sim::test]
+	async fn a_newer_epoch_restarts_with_it() {
+		let mut h = harness_on(Version::Lite07).await;
+		let epoch = crate::Epoch::mint();
+		let _newer = h
 			.origin
-			.clone()
-			.peer()
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_hops(pub_hops()).with_cost(7),
+				crate::origin::Route::default()
+					.with_epoch(epoch.clone())
+					.with_hops(pub_hops())
+					.with_cost(7),
 			)
 			.unwrap();
+		moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
-		h.assert_idle();
-
-		drop(peer);
-		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, epoch: Some(sent), .. }] => assert_eq!(*sent, epoch),
+			other => panic!("expected a restart, got {other:?}"),
+		}
 		h.assert_idle();
 	}
 
@@ -2171,7 +2257,11 @@ mod announce_test {
 		});
 		settle().await;
 
-		let mut wire = Wire { writes, cursor: 0 };
+		let mut wire = Wire {
+			writes,
+			cursor: 0,
+			version: VERSION,
+		};
 		assert_eq!(wire.take_ok().active, 1, "only the clean route is announced");
 		match wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.rest.as_str(), "local"),
@@ -2210,7 +2300,7 @@ mod announce_test {
 		moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { cost, .. }] => {
+			[lite::AnnounceBroadcast::Update { cost, .. }] => {
 				assert_eq!(*cost, crate::origin::Cost::MAX);
 			}
 			other => panic!("expected a clamped restart, got {other:?}"),

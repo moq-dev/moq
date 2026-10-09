@@ -7,7 +7,8 @@
 //! in the middle of one, and however it changes.
 //!
 //! Older wire versions cannot carry the epoch, so `R` cannot tell the two routes
-//! serve the same bytes: its subscription stays on its route and ends with it.
+//! serve the same bytes: its subscription stays on its route and ends with it, while
+//! a better route restarts the path for new requests.
 //!
 //! Two publishers sharing one explicit epoch, a redundant pair, are one source the
 //! same way.
@@ -17,7 +18,7 @@ mod support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -33,9 +34,15 @@ fn produce_origin(hop: u64) -> origin::Producer {
 
 /// Have `to` pull everything `from` publishes.
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
+	priced_link(version, from, to, None).await
+}
+
+/// [`link`], with `to` pricing the link at `cost` when given.
+async fn priced_link(version: Version, from: &origin::Producer, to: &origin::Producer, cost: Option<u64>) -> MockPair {
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(from.consume());
 	options.client_subscribe = Some(to.clone());
+	options.cost = cost;
 	connect_mock(options).await
 }
 
@@ -128,9 +135,10 @@ impl Topology {
 		(topology, sub)
 	}
 
-	/// Connect the standby route `B -> R`.
+	/// Connect the standby route `B -> R`, priced strictly worse than `A`'s so it
+	/// never wins while `A`'s stands.
 	async fn standby(&mut self) {
-		let b_to_r = link(self.version, &self.relay_b, &self.subscriber).await;
+		let b_to_r = priced_link(self.version, &self.relay_b, &self.subscriber, Some(1_000)).await;
 		self._links.push(b_to_r);
 		settle().await;
 	}
@@ -309,7 +317,8 @@ async fn route_flaps(version: &str) {
 }
 
 /// A wire without epochs: the subscription stays on `A` while `B` stands by, and
-/// ends when `A`'s route goes instead of resuming through `B`.
+/// ends when `A`'s route goes instead of resuming through `B`. A re-request then
+/// lands on `B`.
 async fn route_dies_without_an_epoch(version: &str, trigger: Trigger) {
 	let version: Version = version.parse().unwrap();
 	let (mut topology, sub) = Topology::new(version).await;
@@ -337,6 +346,64 @@ async fn route_dies_without_an_epoch(version: &str, trigger: Trigger) {
 			String::from_utf8_lossy(&frame)
 		),
 	}
+
+	let remote = topology
+		.subscriber
+		.consume()
+		.request_broadcast("live", None)
+		.await
+		.expect("B serves a re-request");
+	let sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+	let mut rx = read(sub);
+	group.write_frame(Timestamp::ZERO, payload(1, 1)).unwrap();
+	group.finish().unwrap();
+	let mut group = topology.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload(2, 0)).unwrap();
+	while next(&mut rx).await != (2, payload(2, 0)) {}
+}
+
+/// A wire without epochs: a better route is another source. `R` restarts the path, the
+/// subscription already on `A` stays there, and a re-request lands on the better route.
+async fn better_route_restarts(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let (mut topology, sub) = Topology::new(version).await;
+	let mut rx = read(sub);
+	topology.standby().await;
+	let consumer = topology.subscriber.consume();
+	let mut announced = consumer.announced();
+	match announced.next().await.expect("announced") {
+		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
+		other => panic!("{version}: expected the route, got {other:?}"),
+	}
+
+	let mut group = topology.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload(0, 0)).unwrap();
+	assert_eq!(next(&mut rx).await, (0, payload(0, 0)), "{version}");
+	let incumbent = consumer.request_broadcast("live", None).await.unwrap();
+
+	topology.trigger(Trigger::BetterRoute).await;
+	match announced.next().await.expect("announced") {
+		announce::Event::Restart(announce) => {
+			assert_eq!(announce.prefix.as_str(), "live");
+			assert_eq!(announce.route.hops.len(), 1, "{version}: the direct route");
+		}
+		other => panic!("{version}: expected a restart, got {other:?}"),
+	}
+
+	// The incumbent's subscription carries on through `A`.
+	group.write_frame(Timestamp::ZERO, payload(0, 1)).unwrap();
+	assert_eq!(next(&mut rx).await, (0, payload(0, 1)), "{version}");
+
+	// A re-request resolves the better route on a fresh broadcast.
+	let replaced = consumer.request_broadcast("live", None).await.unwrap();
+	assert!(!replaced.is_clone(&incumbent), "{version}: joined the replaced front");
+	let sub = replaced.track("video").unwrap().subscribe(None).await.unwrap();
+	let mut fresh = read(sub);
+	group.finish().unwrap();
+	let mut group = topology.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
+	while next(&mut fresh).await != (1, payload(1, 0)) {}
+	assert_eq!(next(&mut rx).await, (1, payload(1, 0)), "{version}: the incumbent stays");
 }
 
 macro_rules! route_change_tests {
@@ -412,10 +479,11 @@ macro_rules! pinned_tests {
 					run(Trigger::Unannounce).await;
 				}
 
-				/// A better route without an epoch does not move the subscription either.
+				/// A better route without an epoch wins new requests and announces as a
+				/// restart, while the incumbent's subscriptions continue.
 				#[moq_net_sim::test]
 				async fn better_route_keeps_the_incumbent() {
-					moq_net_sim::timeout(TEST_TIMEOUT, route_change($version, Trigger::BetterRoute, Position::MidGroup))
+					moq_net_sim::timeout(TEST_TIMEOUT, better_route_restarts($version))
 						.await
 						.expect("timed out");
 				}
