@@ -74,7 +74,10 @@ impl<T> Consumer<T> {
 	/// condition returned by `f` is still pending.
 	///
 	/// A `Ready` from `f` spends a unit of the [cooperative budget](crate::coop); with
-	/// none left, its value is dropped and the task is woken to poll again.
+	/// none left, its value is dropped and the task is woken to poll again. So anything
+	/// `f` commits outside its return value must stay valid when that value is dropped,
+	/// and a caller acting on `Pending` as a verdict checks
+	/// [`poll_proceed`](crate::coop::poll_proceed) first.
 	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
