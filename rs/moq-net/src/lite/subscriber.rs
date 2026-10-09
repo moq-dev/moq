@@ -479,7 +479,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 
 	/// The full chain of an advertisement replacing a live one, or `None` when it is a
 	/// reflected loop or full. See `start_announce`.
-	fn chain(&self, path: &PathOwned, mut hops: crate::Hops, responder_origin: Option<crate::Hop>) -> Option<crate::Hops> {
+	fn chain(
+		&self,
+		path: &PathOwned,
+		mut hops: crate::Hops,
+		responder_origin: Option<crate::Hop>,
+	) -> Option<crate::Hops> {
 		let reflected = match responder_origin {
 			// A chain already naming the sender came back through it; see `start_announce`.
 			Some(responder) => {

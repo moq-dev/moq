@@ -1024,7 +1024,10 @@ mod tests {
 		use std::sync::Barrier;
 
 		let now = std::time::Instant::now();
-		let (origin, mut driver) = origin::Producer::new(origin::Config::default());
+		// The clock never advances here, so nothing may wait out the update hold.
+		let mut config = origin::Config::default();
+		config.update_hold = std::time::Duration::ZERO;
+		let (origin, mut driver) = origin::Producer::new(config);
 		let epoch_a: Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
 		let epoch_b: Epoch = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let mut old = NodeBroadcast::new(&origin, "acme", "a");

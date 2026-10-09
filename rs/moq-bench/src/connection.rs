@@ -367,10 +367,10 @@ async fn subscribe(
 	while selected < want {
 		let update = match announced.next().await {
 			Some(
-						moq_net::announce::Event::Start(update)
-						| moq_net::announce::Event::Update(update)
-						| moq_net::announce::Event::Restart(update),
-					) => update,
+				moq_net::announce::Event::Start(update)
+				| moq_net::announce::Event::Update(update)
+				| moq_net::announce::Event::Restart(update),
+			) => update,
 			Some(moq_net::announce::Event::End(_)) => continue,
 			None => break,
 		};

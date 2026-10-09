@@ -731,7 +731,9 @@ impl AnnounceRun {
 					},
 				);
 				let hops = self.encoder.update(id, hops);
-				stream.writer.buffer(&lite::AnnounceBroadcast::Restart { id, epoch, hops, cost })?;
+				stream
+					.writer
+					.buffer(&lite::AnnounceBroadcast::Restart { id, epoch, hops, cost })?;
 			}
 			_ => {
 				self.retract(stream, suffix.clone(), absolute)?;
@@ -2169,10 +2171,26 @@ mod announce_test {
 			moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 			settle().await;
 			let restarted = |msgs: Vec<lite::AnnounceBroadcast<'static>>| match (version, msgs.as_slice()) {
-				(Version::Lite07, [lite::AnnounceBroadcast::Restart { id: 0, epoch: None, cost, .. }]) => {
+				(
+					Version::Lite07,
+					[
+						lite::AnnounceBroadcast::Restart {
+							id: 0,
+							epoch: None,
+							cost,
+							..
+						},
+					],
+				) => {
 					assert_eq!(*cost, crate::origin::Cost::new(7))
 				}
-				(Version::Lite06, [lite::AnnounceBroadcast::EndedId { .. }, lite::AnnounceBroadcast::Active { suffix, .. }]) => {
+				(
+					Version::Lite06,
+					[
+						lite::AnnounceBroadcast::EndedId { .. },
+						lite::AnnounceBroadcast::Active { suffix, .. },
+					],
+				) => {
 					assert_eq!(suffix.rest.as_str(), "cam")
 				}
 				(_, other) => panic!("expected a restart on {version}, got {other:?}"),
@@ -2205,7 +2223,13 @@ mod announce_test {
 		moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { id: 0, epoch: Some(sent), .. }] => assert_eq!(*sent, epoch),
+			[
+				lite::AnnounceBroadcast::Restart {
+					id: 0,
+					epoch: Some(sent),
+					..
+				},
+			] => assert_eq!(*sent, epoch),
 			other => panic!("expected a restart, got {other:?}"),
 		}
 		h.assert_idle();

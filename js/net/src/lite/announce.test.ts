@@ -86,7 +86,10 @@ test("AnnounceBroadcast carries a restart only on draft-07", async () => {
 
 	// Older versions send an end and a start instead, and skip the type as unknown.
 	await expect(
-		bytes((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 1n, hops: [] }, Version.DRAFT_06), Version.DRAFT_06),
+		bytes(
+			(w) => encodeAnnounceBroadcast(w, { status: "restart", id: 1n, hops: [] }, Version.DRAFT_06),
+			Version.DRAFT_06,
+		),
 	).rejects.toThrow();
 	const encoded = await bytes(async (w) => {
 		await w.u53(3);

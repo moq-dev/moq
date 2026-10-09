@@ -27,10 +27,9 @@ These land with the next breaking release, not the 2026-09-23 train.
   including a reconnect), so request the path again. A newer epoch no longer
   ends subscriptions with `Unroutable`; they stay on the old instance until
   dropped or its route goes. A restart was an end then a start, and still is on
-  moq-lite 06 and older and moq-transport. moq-lite 07 adds ANNOUNCE_RESTART
-  (0x3), and lite-06's ANNOUNCE_RESTART is named ANNOUNCE_UPDATE, as it always
-  meant.
-
+  moq-lite 06 and older and moq-transport. moq-lite 07 adds `ANNOUNCE_RESTART`
+  (0x3), and lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it
+  always meant.
 - **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
   catalog codec string and dimensions are enough, `moq export fmp4` writes an
   `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,

@@ -9,9 +9,9 @@ import {
 	hasAnnounceCompression,
 	hasAnnounceId,
 	hasAnnounceOk,
+	hasAnnounceRestart,
 	hasExcludeHop,
 	hasHidden,
-	hasAnnounceRestart,
 	hasRouteCost,
 	Version,
 } from "./version.ts";

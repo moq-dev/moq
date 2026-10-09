@@ -6627,7 +6627,10 @@ mod tests {
 		// A cheaper second route makes the advertisement worth re-pricing, which is a
 		// path back into the reconciliation that does not go through the retry timer.
 		let _standby = origin
-			.announce("solo-cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
+			.announce(
+				"solo-cam",
+				crate::origin::Route::default().with_epoch(epoch).with_cost(0),
+			)
 			.unwrap();
 
 		for _ in 0..100 {
@@ -6686,7 +6689,10 @@ mod tests {
 		// One epoch, so the warm route re-prices the instance rather than restart it.
 		let epoch = crate::Epoch::mint();
 		let _cold = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+			)
 			.unwrap();
 		settle().await;
 
@@ -6753,7 +6759,10 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let epoch = crate::Epoch::mint();
 		let _cold = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+			)
 			.unwrap();
 		settle().await;
 
@@ -6962,7 +6971,10 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let epoch = crate::Epoch::mint();
 		let _cold = origin
-			.announce("cam", crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4))
+			.announce(
+				"cam",
+				crate::origin::Route::default().with_epoch(epoch.clone()).with_cost(4),
+			)
 			.unwrap();
 		settle().await;
 

@@ -1476,9 +1476,9 @@ mod tests {
 	}
 
 	/// A restart while the old instance is still announced (a route the mesh
-	/// has not withdrawn yet) takes the path at once: the newer epoch replaces
-	/// the old one and ends its subscriptions, so a reader re-requests the new
-	/// broadcast instead of stalling on the old one.
+	/// has not withdrawn yet) takes the path at once: the newer epoch restarts
+	/// it, so a reader re-requests the new broadcast instead of stalling on the
+	/// old one, while the old subscription stays on the old instance.
 	#[tokio::test(start_paused = true)]
 	async fn restart_replaces_a_still_announced_instance() {
 		let origin = produce_origin();
@@ -1501,18 +1501,12 @@ mod tests {
 		let second = node_producer(&origin);
 		let _f2 = feed(second.registry(), Tier::default(), "foo/bar", true, 1, 30).await;
 		drive_tick().await;
-		let [(ended, false, ended_epoch), (started, true, after)] = &take_epochs(&mut events)[..] else {
-			panic!("expected the old epoch to end and the new one to start");
+		let [(started, true, after)] = &take_epochs(&mut events)[..] else {
+			panic!("expected the new epoch to restart the path");
 		};
-		assert_eq!((ended, ended_epoch), (path, before));
 		assert_eq!(started, path);
 		assert!(after > before);
-
-		// The old instance keeps publishing, but its subscription ended.
-		drive_tick().await;
-		use futures::FutureExt;
-		let end = old.next_group().now_or_never().expect("the old subscription ended");
-		assert!(!matches!(end, Ok(Some(_))), "still reading the old epoch");
+		drop(old);
 
 		let stats = origin
 			.consume()

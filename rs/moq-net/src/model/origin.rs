@@ -116,9 +116,10 @@ pub struct Config {
 
 	/// How long an announce cursor holds a changed route before delivering it.
 	///
-	/// A new route and a removed one are delivered at once; only an update or a
-	/// restart (a prefix whose best route changes while it stays reachable) waits, and a
-	/// newer change during the wait replaces it. When a publisher withdraws, a
+	/// A new route, a removed one, and a newer epoch are delivered at once; only an
+	/// update, or a restart onto a route without an epoch (a prefix whose best route
+	/// changes while it stays reachable), waits, and a newer change during the wait
+	/// replaces it. When a publisher withdraws, a
 	/// relay that loses its best route but still holds routes derived from the
 	/// withdrawn one sends nothing while the withdrawal wave removes them, then one
 	/// retraction, instead of advertising each stale path in turn. It must outlast
@@ -659,8 +660,7 @@ impl OriginConsumerState {
 			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => {}
 			// Either nothing is pending or the pending announce was a metadata
 			// update on a delivered route; the consumer still owes a retraction.
-			None
-			| Some(PendingUpdate::Announce(_) | PendingUpdate::Restart(_) | PendingUpdate::Unannounce(_)) => {
+			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Restart(_) | PendingUpdate::Unannounce(_)) => {
 				self.pending.insert(prefix, PendingUpdate::Unannounce(last));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
@@ -672,9 +672,17 @@ impl OriginConsumerState {
 	}
 
 	/// Whether the pending entry at `prefix` changes a route the consumer holds
-	/// to another route, or another instance, rather than adding or removing one.
+	/// to another route, rather than adding or removing one, and so waits out the
+	/// hold. A restart to a route without an epoch waits too, since a withdrawal
+	/// wave's stale path looks just like one; a newer epoch is a publisher's own
+	/// restart and goes at once.
 	fn is_update(&self, prefix: &PathOwned, update: &PendingUpdate) -> bool {
-		matches!(update, PendingUpdate::Announce(_) | PendingUpdate::Restart(_)) && self.delivered.contains(prefix)
+		let held = match update {
+			PendingUpdate::Announce(_) => true,
+			PendingUpdate::Restart((meta, _)) => meta.3.is_none(),
+			_ => false,
+		};
+		held && self.delivered.contains(prefix)
 	}
 
 	/// The first pending prefix ready to deliver, or when the next held one is.
@@ -4400,7 +4408,8 @@ impl Consumer {
 		// discovery, not lookup, so a hidden path resolves like any other.
 		let mut announced = consumer.untagged().with_hidden(true).announced();
 		loop {
-			if let AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) | AnnounceEvent::Restart(announce) = announced.next().await?
+			if let AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) | AnnounceEvent::Restart(announce) =
+				announced.next().await?
 				&& path.has_prefix(&announce.prefix)
 			{
 				return Some(announce.route);

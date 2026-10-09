@@ -403,7 +403,11 @@ async fn better_route_restarts(version: &str) {
 	let mut group = topology.track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
 	while next(&mut fresh).await != (1, payload(1, 0)) {}
-	assert_eq!(next(&mut rx).await, (1, payload(1, 0)), "{version}: the incumbent stays");
+	assert_eq!(
+		next(&mut rx).await,
+		(1, payload(1, 0)),
+		"{version}: the incumbent stays"
+	);
 }
 
 macro_rules! route_change_tests {

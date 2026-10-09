@@ -198,7 +198,10 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	within("routed via B", async {
 		loop {
 			let event = announced.next().await.expect("announce update");
-			if let moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) = event
+			// Without an epoch, B's route is another source: a restart.
+			if let moq_net::announce::Event::Start(update)
+			| moq_net::announce::Event::Update(update)
+			| moq_net::announce::Event::Restart(update) = event
 				&& update.route.cost != moq_net::origin::Cost::DRAIN
 			{
 				break;
@@ -412,6 +415,8 @@ async fn spawn_relay_with_upstream(
 	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Duration::from_secs(2);
+	// Only lite-07 carries the epoch that lets a failover resume the subscription.
+	client_config.version = vec![LITE_07.parse().unwrap()];
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
@@ -462,8 +467,8 @@ async fn spawn_relay_with_upstream(
 /// 3. The draining MID-A leg keeps serving through the handover window, so
 ///    every group published across the swap arrives exactly once.
 /// 4. Once the old leg closes, the SAME subscription keeps flowing: both legs'
-///    routes share TOP as their first hop, so BOTTOM's front re-splices onto
-///    the MID-B leg at a group boundary instead of ending the subscription.
+///    routes carry TOP's epoch on lite-07, so BOTTOM's front re-splices onto
+///    the MID-B leg instead of ending the subscription.
 /// 5. No GOAWAY leaks to the subscriber's own session, and the path never
 ///    retracts under the subscriber.
 async fn cluster_diamond_goaway_seamless_failover_inner() {
@@ -472,7 +477,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn();
 	let broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
+	broadcast
+		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.expect("create broadcast");
 	let track = broadcast.create_track("video", None).expect("create track");
 
 	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone()).await;
@@ -492,6 +499,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Duration::from_secs(2);
+	client_config.version = vec![LITE_07.parse().unwrap()];
 	let mid_a_client = client_config.init(Default::default()).expect("mid-a client init");
 	let (_mid_a_upstream_client, mid_a_upstream) = within(
 		"MID-A connects to TOP",
@@ -640,9 +648,8 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	drop(mid_a_upstream);
 
 	// The subscription was served through the MID-A leg, but its close does not
-	// end it: both legs' routes name TOP as their first hop, so BOTTOM's front
-	// re-splices onto the MID-B leg at a group boundary and the subscription
-	// rides through. Keep publishing and keep reading the SAME subscription.
+	// end it: both legs' routes carry TOP's epoch, so BOTTOM's front re-splices
+	// onto the MID-B leg and the subscription rides through. Keep publishing and keep reading the SAME subscription.
 	const POST_DRAIN_LAST: u64 = LAST_GROUP + 40;
 	let post_publisher = tokio::spawn(async move {
 		for seq in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
