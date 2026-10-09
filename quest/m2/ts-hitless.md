@@ -7,8 +7,8 @@ moments, emit packet-identical TS from their first common packet, across
 skips and source drift, continuity counters included, within one epoch. A ST 2022-7 selector
 can then switch between them hitlessly.
 
-Non-goal: identity across a replaced broadcast. Each leg starts a fresh
-stream on a `Restart` ([Export ts](/quest/m0/broadcast-epoch/export-ts.md)),
+Non-goal: identity across a replaced broadcast. A leg ends on a replacement, or
+starts a fresh stream with `--stitch` ([Export ts](/quest/m0/broadcast-epoch/export-ts.md)),
 so legs may differ after one (#5101, maintainer 2026-10-09: byte-identical
 output across restarts is not supported).
 
