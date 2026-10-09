@@ -567,6 +567,7 @@ impl Default for Messages {
 				properties_wanted: false,
 				forward: true,
 				range_filters: false,
+				authorization_token: None,
 			},
 			// Draft-17+ carries the request id in the control message framing instead.
 			ietf_ok: ietf::SubscribeOk {

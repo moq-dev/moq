@@ -314,7 +314,7 @@ impl Message for Publish<'_> {
 				};
 				let forward = r.bool()?;
 				// parameters
-				Parameters::skip_request(r)?;
+				Parameters::request_tokens(r)?;
 
 				Ok(Self {
 					request_id,

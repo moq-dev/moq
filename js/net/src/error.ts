@@ -50,6 +50,8 @@ export const SessionCode = Object.freeze(
 		Version: 0x15 as SessionCode,
 		/** A token named an alias that was never registered. */
 		UnknownAuthTokenAlias: 0x17 as SessionCode,
+		/** The peer left more request updates unanswered than MAX_REQUEST_UPDATES allows. */
+		TooManyRequestUpdates: 0x1b as SessionCode,
 	} as const),
 );
 

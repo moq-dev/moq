@@ -1152,6 +1152,59 @@ mod tests {
 		params
 	}
 
+	/// An acceptor taken with `Request::auth().requests()` BEFORE `ok()` must govern the
+	/// session the driver then runs, through the REAL accept path (`accept_request` -> `ok`).
+	/// The session's own `auth()` (the handle the driver polls) routes a request token to that
+	/// pre-ok consumer instead of falling to the `Unsupported` default, and granting admits.
+	/// Both a no-AUTH-extension legacy session (draft-14, `Handle::new(false)`) and the modern
+	/// uni-SETUP path (draft-18); a QUIC server has no other point to install the acceptor.
+	#[moq_net_sim::test]
+	async fn a_pre_ok_requests_consumer_governs_the_session_acceptor() {
+		let cases = [
+			(
+				FakeSession::new(ALPN_14, [])
+					.with_bi(legacy_setup(ietf::Version::Draft14, ietf::Parameters::default())),
+				ietf::Version::Draft14,
+			),
+			(
+				FakeSession::new(ALPN_18, [ietf_setup(ietf::Version::Draft18, Some("room/alice"))]),
+				ietf::Version::Draft18,
+			),
+		];
+
+		for (session, version) in cases {
+			let request = Server::new()
+				.accept_request(moq_net_sim::now(), session)
+				.await
+				.unwrap_or_else(|e| panic!("accept at {version:?}: {e}"));
+
+			// Install the acceptor before ok(), as a QUIC server must.
+			let mut requests = request.auth().requests().expect("requests() pre-ok");
+			let (net_session, _driver) = request.ok().await.unwrap_or_else(|e| panic!("ok at {version:?}: {e}"));
+
+			// The session's own handle is the one the driver polls. Verifying a request token on
+			// it must reach the pre-ok consumer; if the handle were not shared it would fall to
+			// the Unsupported default and the consumer would never see this request.
+			let verdict = net_session.auth().verify_request(
+				crate::setup::Token {
+					kind: 1,
+					value: b"jwt".to_vec(),
+				},
+				crate::PathOwned::from("room/alice".to_string()),
+				crate::auth::RequestKind::PublishNamespace,
+			);
+			let received = requests.next().await.expect("the pre-ok consumer receives the request");
+			assert_eq!(received.path(), Some("room/alice"), "{version:?}");
+			assert_eq!(
+				received.kind(),
+				Some(crate::auth::RequestKind::PublishNamespace),
+				"{version:?}"
+			);
+			let _issued = received.accept(crate::auth::Grant::all());
+			assert!(verdict.grant().await.is_ok(), "granting admits at {version:?}");
+		}
+	}
+
 	#[moq_net_sim::test]
 	async fn accept_request_exposes_the_setup_token() {
 		let modern = FakeSession::new(

@@ -203,7 +203,7 @@ impl Message for Fetch<'_> {
 					let subscriber_priority = buf.u8()?;
 					let group_order = GroupOrder::decode(buf, version)?;
 					let fetch_type = FetchType::decode(buf, version)?;
-					Parameters::skip_request(buf)?;
+					Parameters::request_tokens(buf)?;
 					(
 						fetch_type,
 						Some(subscriber_priority),

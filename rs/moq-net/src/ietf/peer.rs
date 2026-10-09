@@ -26,6 +26,13 @@ pub(crate) struct Peer {
 	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
 	/// NAMESPACE messages before the subscription is caught up, in both directions.
 	pub active_count: bool,
+
+	/// MAX_REQUEST_UPDATES: the most unanswered REQUEST_UPDATEs the peer accepts on one
+	/// request stream, if it set a limit (draft-19 section 10.3.1.7). `None` on a draft
+	/// without the option, and when the peer advertised none or `0` (both meaning no limit).
+	/// Recorded for a future sender that paces to this credit; the current sender keeps one
+	/// renewal in flight per request, which stays within any limit without reading it.
+	pub max_request_updates: Option<u64>,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -97,6 +104,7 @@ mod tests {
 			hidden: false,
 			auth: false,
 			active_count: false,
+			max_request_updates: None,
 		};
 
 		let slot = PeerSetup::default();
@@ -110,6 +118,7 @@ mod tests {
 			hidden: true,
 			auth: true,
 			active_count: true,
+			max_request_updates: Some(16),
 		});
 
 		assert_eq!(slot.get().await, first);

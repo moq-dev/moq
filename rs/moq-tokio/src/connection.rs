@@ -484,6 +484,8 @@ struct Shared {
 	send_bw: BandwidthProducer,
 	recv_bw: BandwidthProducer,
 	closed: CloseGuard,
+	/// Attached to each session as its handshake completes, detached once nothing is live.
+	request_token: RequestToken,
 }
 
 impl Shared {
@@ -521,6 +523,11 @@ impl Shared {
 	/// serving throughout, so only the status moves back.
 	fn stayed(&self) {
 		self.status(Status::Connected);
+		// The failed upgrade attached its own session before its handshake failed, so renewals
+		// go back to the session that kept serving.
+		if let Some(session) = &self.state.read().session {
+			self.request_token.attach(session.auth());
+		}
 	}
 
 	fn status(&self, status: Status) {
@@ -530,7 +537,7 @@ impl Shared {
 	}
 
 	/// Nothing is live. Clears the session so a handle can't be handed a closed one,
-	/// and drops the estimates that belonged to it.
+	/// and drops the estimates and the request-token attachment that belonged to it.
 	fn disconnected(&self) {
 		if let Ok(mut state) = self.state.write() {
 			// Count one close per live session; a second call without an
@@ -546,6 +553,7 @@ impl Shared {
 		}
 		let _ = self.send_bw.set(None);
 		let _ = self.recv_bw.set(None);
+		self.request_token.detach();
 	}
 
 	/// Record the error the loop gave up with, for [`Connection::closed`].
@@ -634,6 +642,122 @@ pub struct Snapshot {
 	pub version: Version,
 }
 
+/// The request token a [`Connection`] presents on its own requests and the session it
+/// presents it on, shared across its sessions and shown by length only so it stays out of logs.
+///
+/// The single source of truth across reconnects. Seeding a new session
+/// ([`attach`](Self::attach)) and renewing the token ([`set`](Self::set)) each read and
+/// write under one lock, so neither can leave a session on an older token than the one set
+/// last, and a token set while a session is still handshaking is the one it starts with.
+///
+/// A plain mutex, held only across synchronous work: presenting stores the token in the
+/// session's own cell and wakes its driver, which runs elsewhere and never takes this lock.
+#[derive(Clone, Default)]
+pub(crate) struct RequestToken(std::sync::Arc<std::sync::Mutex<Presenting>>);
+
+#[derive(Default)]
+struct Presenting {
+	token: Option<moq_net::setup::Token>,
+	/// The newest session, which a renewal reaches; `None` while nothing is live.
+	session: Option<Box<dyn Present>>,
+}
+
+/// Where a request token is presented: a session's auth handle.
+pub(crate) trait Present: Send {
+	/// Present `token` on this session's requests from now on.
+	fn present(&self, token: moq_net::setup::Token);
+}
+
+impl Present for moq_net::auth::Handle {
+	fn present(&self, token: moq_net::setup::Token) {
+		self.set_request_token(token);
+	}
+}
+
+impl RequestToken {
+	fn new(token: Option<moq_net::setup::Token>) -> Self {
+		Self(std::sync::Arc::new(std::sync::Mutex::new(Presenting {
+			token,
+			session: None,
+		})))
+	}
+
+	/// The token to present right now, or `None` when none is set.
+	#[cfg(test)]
+	fn get(&self) -> Option<moq_net::setup::Token> {
+		self.0.lock().unwrap().token.clone()
+	}
+
+	/// Replace the token, on the newest session too, and seed every later session with it.
+	fn set(&self, token: moq_net::setup::Token) {
+		let mut presenting = self.0.lock().unwrap();
+		if let Some(session) = &presenting.session {
+			session.present(token.clone());
+		}
+		presenting.token = Some(token);
+	}
+
+	/// Seed `session` with the current token and make it the session later renewals reach.
+	///
+	/// Called once the handshake completes and before the session's driver starts, so its
+	/// first request carries the newest token.
+	pub(crate) fn attach(&self, session: impl Present + 'static) {
+		let mut presenting = self.0.lock().unwrap();
+		if let Some(token) = &presenting.token {
+			session.present(token.clone());
+		}
+		presenting.session = Some(Box::new(session));
+	}
+
+	/// Stop reaching the session once nothing is live; renewals then only update the seed.
+	fn detach(&self) {
+		// Also runs from `Shared`'s drop, so take a poisoned lock rather than panic while unwinding.
+		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).session = None;
+	}
+}
+
+impl std::fmt::Debug for RequestToken {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match &self.0.lock().unwrap().token {
+			Some(token) => write!(f, "kind={} <{} bytes>", token.kind, token.value.len()),
+			None => write!(f, "<none>"),
+		}
+	}
+}
+
+/// Renews the request token a [`Connection`] presents, independent of any one session.
+///
+/// Returned by [`Connection::auth`]. The connection owns the token, so one set here survives
+/// reconnects: the loop seeds every new session from it. Setting a new token on a live
+/// connection also re-presents it on the current session's live requests as a REQUEST_UPDATE,
+/// renewing a token-authorized request in place.
+///
+/// This is the request-token slice of the connection-owned auth handle. Session credentials
+/// and grant union (the relay-token work) are not built here.
+#[derive(Clone)]
+pub struct Auth {
+	token: RequestToken,
+}
+
+impl std::fmt::Debug for Auth {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Auth").field("request_token", &self.token).finish()
+	}
+}
+
+impl Auth {
+	/// Present `token` as the `AUTHORIZATION TOKEN` on this connection's own requests (MoQ
+	/// request-token).
+	///
+	/// Updates the connection's source of truth, so every later session is seeded with it, and
+	/// reaches the live session (if any) so a renewal re-presents on its live requests as a
+	/// REQUEST_UPDATE. A session still handshaking starts with it. Replaces whatever
+	/// [`crate::connect::Config::with_request_token`] seeded.
+	pub fn set_request_token(&self, token: moq_net::setup::Token) {
+		self.token.set(token);
+	}
+}
+
 /// Handle to a connection maintained by a background task.
 ///
 /// The task connects, waits for the session to end, then (unless reconnecting is
@@ -659,6 +783,9 @@ pub struct Connection {
 	/// The last status returned by [`status`](Self::status), for change detection.
 	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
 	last_reported: Option<Status>,
+	/// The request token presented across reconnects, the single source of truth the loop
+	/// seeds each session from. Shared with every [`Auth`] handle from [`auth`](Self::auth).
+	request_token: RequestToken,
 }
 
 /// The connection loop, shared by every [`Connection`] clone and aborted when the
@@ -693,6 +820,11 @@ impl Connection {
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
 
+		// The connection owns the request token (seeded from the dial config), so a renewal
+		// outlives any one session and the loop attaches each new session to the same cell.
+		let request_token = RequestToken::new(client.request_token());
+		let loop_token = request_token.clone();
+
 		let task = tokio::spawn(async move {
 			let reconnect = client.reconnect;
 			let shared = Shared {
@@ -700,6 +832,7 @@ impl Connection {
 				send_bw,
 				recv_bw,
 				closed: task_closed,
+				request_token: loop_token,
 			};
 			if let Err(err) = Self::run(&shared, client, addrs).await {
 				// In one-shot mode the session ending is the expected lifecycle, and
@@ -721,6 +854,7 @@ impl Connection {
 			send_bandwidth,
 			recv_bandwidth,
 			last_reported: None,
+			request_token,
 		}
 	}
 
@@ -1051,7 +1185,7 @@ impl Connection {
 
 			tracing::info!(peer = %Endpoint(url), "connecting");
 
-			let mut dial = std::pin::pin!(client.dial(addr.clone()));
+			let mut dial = std::pin::pin!(client.dial(addr.clone(), &shared.request_token));
 			let dialed = kio::wait(|waiter| {
 				if poll_draining(draining, waiter) {
 					shared.disconnected();
@@ -1244,6 +1378,19 @@ impl Connection {
 		Monitor {
 			state: self.state.clone(),
 			last_presence: moq_net::stats::Presence::default(),
+		}
+	}
+
+	/// Renew the request token this connection presents, across reconnects.
+	///
+	/// Returns an [`Auth`] handle the connection owns rather than the current session: a token
+	/// set through it is the single source of truth the reconnect loop seeds every new session
+	/// from, and setting one on a live connection also re-presents it on the current session as
+	/// a REQUEST_UPDATE. The connection starts from
+	/// [`crate::connect::Config::with_request_token`], and this replaces it.
+	pub fn auth(&self) -> Auth {
+		Auth {
+			token: self.request_token.clone(),
 		}
 	}
 }
@@ -1531,6 +1678,349 @@ fn terminal(state: &State) -> Error {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A request token of kind 0 carrying `value`.
+	fn tok(value: &[u8]) -> moq_net::setup::Token {
+		moq_net::setup::Token {
+			kind: 0,
+			value: value.to_vec(),
+		}
+	}
+
+	/// The request token is shown by length only, never printed, in both the cell and the
+	/// [`Auth`] handle that wraps it.
+	#[test]
+	fn request_token_debug_is_redacted() {
+		let token = RequestToken::new(Some(tok(b"s3cr3t")));
+		assert_eq!(format!("{token:?}"), "kind=0 <6 bytes>");
+		assert_eq!(format!("{:?}", RequestToken::default()), "<none>");
+
+		let auth = Auth { token };
+		let debug = format!("{auth:?}");
+		assert!(!debug.contains("s3cr3t"), "the token leaked into Debug: {debug}");
+		assert!(debug.contains("<6 bytes>"), "{debug}");
+	}
+
+	/// Renewing through the handle updates the connection's source of truth even with no live
+	/// session, so the reconnect loop seeds the next session with the latest token. The live
+	/// session path is covered end to end by
+	/// [`the_first_request_on_a_connected_session_carries_the_token`].
+	#[test]
+	fn renewal_updates_the_reconnect_seed() {
+		let token = RequestToken::new(None);
+		let auth = Auth { token: token.clone() };
+		assert_eq!(token.get(), None);
+
+		// No live session: the cell still updates and does not panic. This is the value a
+		// reconnect reads to seed its session.
+		auth.set_request_token(tok(b"first"));
+		assert_eq!(token.get(), Some(tok(b"first")));
+
+		auth.set_request_token(tok(b"second"));
+		assert_eq!(
+			token.get(),
+			Some(tok(b"second")),
+			"the latest renewal is what the next session is seeded with"
+		);
+	}
+
+	/// A session double that records every token it is presented and parks inside its first
+	/// [`Present::present`] until the test releases it: exactly where a seed or a renewal
+	/// writes the session, after reading the token it writes.
+	struct Parked {
+		presented: std::sync::Arc<std::sync::Mutex<Vec<moq_net::setup::Token>>>,
+		/// Taken by the first present, which reports that it parked and waits to be released.
+		park: std::sync::Mutex<Option<(std::sync::mpsc::Sender<Step>, std::sync::Arc<std::sync::Barrier>)>>,
+	}
+
+	/// How the write under test got as far as the test sees it.
+	enum Step {
+		/// Parked inside its first present.
+		Parked,
+		/// Returned without presenting anything.
+		Returned,
+	}
+
+	impl Parked {
+		fn new(presented: &std::sync::Arc<std::sync::Mutex<Vec<moq_net::setup::Token>>>) -> Self {
+			Self {
+				presented: presented.clone(),
+				park: Default::default(),
+			}
+		}
+	}
+
+	impl Present for Parked {
+		fn present(&self, token: moq_net::setup::Token) {
+			let park = self.park.lock().unwrap().take();
+			if let Some((parked, release)) = park {
+				parked.send(Step::Parked).unwrap();
+				release.wait();
+			}
+			self.presented.lock().unwrap().push(token);
+		}
+	}
+
+	/// Park the first present `write` makes on another thread, then race `renew` against it,
+	/// returning every token the session was presented in order.
+	///
+	/// While `write` is parked mid-present, the cell's lock must still be held, so `renew`
+	/// cannot land between `write`'s read and its write and be overwritten by the older token.
+	fn race_renewal(
+		token: &RequestToken,
+		write: impl FnOnce(&RequestToken, Parked) + Send + 'static,
+		renew: moq_net::setup::Token,
+	) -> Vec<moq_net::setup::Token> {
+		let presented = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+		let (step, steps) = std::sync::mpsc::channel();
+		let parked = Parked::new(&presented);
+		*parked.park.lock().unwrap() = Some((step.clone(), release.clone()));
+
+		let writer = {
+			let token = token.clone();
+			std::thread::spawn(move || {
+				write(&token, parked);
+				let _ = step.send(Step::Returned);
+			})
+		};
+		assert!(
+			matches!(steps.recv(), Ok(Step::Parked)),
+			"the write under test never presented a token"
+		);
+		assert!(
+			token.0.try_lock().is_err(),
+			"a renewal could land between the parked write's read and its write"
+		);
+
+		let renewer = {
+			let token = token.clone();
+			std::thread::spawn(move || token.set(renew))
+		};
+		release.wait();
+		writer.join().expect("writer panicked");
+		renewer.join().expect("renewer panicked");
+		std::mem::take(&mut *presented.lock().unwrap())
+	}
+
+	/// A reconnect seeding its new session cannot replay the token it read over a renewal that
+	/// lands meanwhile: the session ends on the renewal, as the reconnect seed does.
+	#[test]
+	fn a_renewal_racing_the_reconnect_seed_is_not_replayed() {
+		let a = tok(b"token-a");
+		let b = tok(b"token-b");
+		let token = RequestToken::new(Some(a.clone()));
+
+		let presented = race_renewal(&token, |token, session| token.attach(session), b.clone());
+
+		assert_eq!(presented, [a, b.clone()], "seeded with A, then renewed to B");
+		assert_eq!(token.get(), Some(b), "the next reconnect is seeded with B too");
+	}
+
+	/// Two renewals present in the order they land, so the session ends on the one that landed
+	/// last, the same token the next reconnect is seeded with.
+	#[test]
+	fn concurrent_renewals_leave_the_session_on_the_last() {
+		let a = tok(b"token-a");
+		let b = tok(b"token-b");
+		let token = RequestToken::new(None);
+
+		let presented = race_renewal(
+			&token,
+			{
+				let a = a.clone();
+				move |token, session| {
+					// Nothing to seed, so the attach presents nothing and the renewal parks.
+					token.attach(session);
+					token.set(a);
+				}
+			},
+			b.clone(),
+		);
+
+		assert_eq!(presented, [a, b.clone()], "renewed to A, then to B");
+		assert_eq!(token.get(), Some(b), "the next reconnect is seeded with B too");
+	}
+
+	/// Once nothing is live a renewal only updates the seed, and the next attach picks it up.
+	#[test]
+	fn a_renewal_between_sessions_seeds_the_next() {
+		let presented = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let session = || Parked::new(&presented);
+		let token = RequestToken::new(Some(tok(b"token-a")));
+
+		token.attach(session());
+		token.detach();
+		token.set(tok(b"token-b"));
+		assert_eq!(
+			presented.lock().unwrap().len(),
+			1,
+			"a renewal reached a detached session"
+		);
+
+		token.attach(session());
+		assert_eq!(presented.lock().unwrap().last().cloned(), Some(tok(b"token-b")));
+	}
+
+	/// The connection owns the request token across the reconnect loop: the dial config seeds
+	/// the cell the loop presents on each (re)connected session, and renewing through
+	/// [`Connection::auth`] updates that same cell, so a renewal survives into the next session.
+	///
+	/// The live-session presentation and the REQUEST_UPDATE renewal on the wire are covered by
+	/// moq-net's auth suite, which drives the same `session.auth().set_request_token` seam this
+	/// connection calls on every connect.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn the_connection_owns_the_request_token_across_the_loop() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+		let t1 = tok(b"token-one");
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		let config = config.with_request_token(t1.clone());
+		let client = config.init(Default::default()).expect("client");
+
+		// A dead address: the background loop never connects, but the handle and its token
+		// cell exist immediately, which is all this asserts.
+		let conn = client.connect(url("tcp://127.0.0.1:1/"));
+		assert_eq!(
+			conn.request_token.get(),
+			Some(t1),
+			"the dial config seeds the cell the loop presents on each session"
+		);
+
+		let t2 = tok(b"token-two");
+		conn.auth().set_request_token(t2.clone());
+		assert_eq!(
+			conn.request_token.get(),
+			Some(t2),
+			"renewing through auth() updates the source of truth the next session is seeded with"
+		);
+	}
+
+	/// A draft-16 server for the first-request tests: it accepts one session, reports on
+	/// `paused` once the client's SETUP has arrived (the client's handshake then waits on this
+	/// side's reply), holds its SERVER_SETUP until `release` fires, and sends the first
+	/// request-borne token it verifies on the returned receiver.
+	///
+	/// It declines Solicit, so each announce rides its own PUBLISH_NAMESPACE, the request that
+	/// carries a token inline.
+	#[cfg(feature = "tcp")]
+	async fn first_request_token(
+		paused: tokio::sync::oneshot::Sender<()>,
+		release: tokio::sync::oneshot::Receiver<()>,
+	) -> (Url, tokio::sync::oneshot::Receiver<bytes::Bytes>) {
+		let mut cfg = crate::listen::Config::default();
+		cfg.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		cfg.version = vec!["moq-transport-16".parse().unwrap()];
+		cfg.extensions.solicit = false;
+		let mut listener = cfg
+			.init(Default::default())
+			.expect("server")
+			.listen()
+			.await
+			.expect("listen");
+		let addr = listener.tcp_local_addr().expect("tcp listener bound");
+		let url = url(&format!("tcp://{addr}/"));
+		let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+		tokio::spawn(async move {
+			let request = listener.accept().await.expect("the client dials");
+			let _ = paused.send(());
+			let _ = release.await;
+
+			let request = request.with_subscriber(crate::origin::spawn());
+			let mut requests = request.auth().requests().expect("requests are taken before ok");
+			let _session = request.ok().await.expect("accept");
+			let mut first_tx = Some(first_tx);
+			let mut held = Vec::new();
+			while let Some(req) = requests.next().await {
+				if req.path().is_some()
+					&& let Some(tx) = first_tx.take()
+				{
+					let _ = tx.send(req.token().clone());
+				}
+				held.push(req.accept(moq_net::auth::Grant::all()));
+			}
+		});
+		(url, first_rx)
+	}
+
+	/// A draft-16 client presenting `token`, with a broadcast announced before it connects so
+	/// its first PUBLISH_NAMESPACE is pending when the session's driver starts. It declines the
+	/// AUTH extension, so the request token is the only authorizing artifact.
+	#[cfg(feature = "tcp")]
+	fn announcing_client(token: moq_net::setup::Token, url: Url) -> (Connection, moq_net::broadcast::Producer) {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let origin = crate::origin::spawn();
+		let broadcast = origin.create_broadcast("room/alice").expect("broadcast");
+		broadcast.announce(Default::default()).expect("announce");
+
+		let mut cfg = crate::connect::Config::default();
+		cfg.tls.insecure = Some(true);
+		cfg.version = vec!["moq-transport-16".parse().unwrap()];
+		cfg.extensions.auth = false;
+		let client = cfg
+			.with_request_token(token)
+			.init(Default::default())
+			.expect("client")
+			.with_publisher(origin.consume())
+			.with_reconnect(false);
+		(client.connect(url), broadcast)
+	}
+
+	/// A token of kind 0 carrying `value`, and the bytes the acceptor sees.
+	#[cfg(feature = "tcp")]
+	fn request_token(value: &'static [u8]) -> (moq_net::setup::Token, bytes::Bytes) {
+		(tok(value), bytes::Bytes::from_static(value))
+	}
+
+	/// The dial config's token reaches the FIRST request on a connected session: the session
+	/// is attached to the connection's token before its driver starts, and nothing re-sets it
+	/// afterwards, so a session started without it would present nothing.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn the_first_request_on_a_connected_session_carries_the_token() {
+		let (paused_tx, _paused) = tokio::sync::oneshot::channel();
+		let (release, release_rx) = tokio::sync::oneshot::channel();
+		let (url, first) = first_request_token(paused_tx, release_rx).await;
+		release.send(()).unwrap();
+
+		let (token, value) = request_token(b"a");
+		let (_conn, _broadcast) = announcing_client(token, url);
+		let first = tokio::time::timeout(Duration::from_secs(10), first)
+			.await
+			.expect("the first request never reached the server")
+			.expect("server ended");
+		assert_eq!(first, value, "the first request carries the configured token");
+	}
+
+	/// A token set while the handshake is still pending is the one the first request carries:
+	/// the session is seeded when it is created, not from a snapshot taken before dialing. The
+	/// server holds its SERVER_SETUP until the renewal returns, and draft-16 carries the token
+	/// inline on the first PUBLISH_NAMESPACE, which cannot renew in place.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_renewal_during_the_handshake_reaches_the_first_request() {
+		let (paused_tx, paused) = tokio::sync::oneshot::channel();
+		let (release, release_rx) = tokio::sync::oneshot::channel();
+		let (url, first) = first_request_token(paused_tx, release_rx).await;
+
+		let (a, _) = request_token(b"a");
+		let (b, b_value) = request_token(b"b");
+		let (conn, _broadcast) = announcing_client(a, url);
+		paused.await.expect("the client's SETUP reached the server");
+		conn.auth().set_request_token(b);
+		release.send(()).unwrap();
+
+		let first = tokio::time::timeout(Duration::from_secs(10), first)
+			.await
+			.expect("the first request never reached the server")
+			.expect("server ended");
+		assert_eq!(
+			first, b_value,
+			"the first request carries the renewal, not the dial-time token"
+		);
+	}
 
 	/// Updating with an empty CLI preserves a standing TOML value over typed defaults.
 	#[test]
@@ -2057,6 +2547,7 @@ mod tests {
 			send_bw: BandwidthProducer::new(),
 			recv_bw: BandwidthProducer::new(),
 			closed: CloseGuard::default(),
+			request_token: RequestToken::default(),
 		}
 	}
 

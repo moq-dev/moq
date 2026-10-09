@@ -44,8 +44,15 @@ pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> R
 /// rules except that a registration overflows the cache instead of falling back to a value.
 ///
 /// The parameter may repeat, so a request decodes it as a `Vec` and every instance is checked.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RequestToken(pub Token);
+
+// A request message is logged with `Debug`, so the credential shows only its type and length.
+impl std::fmt::Debug for RequestToken {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "RequestToken(kind={}, <{} bytes>)", self.0.kind, self.0.value.len())
+	}
+}
 
 impl Param for RequestToken {
 	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -183,6 +190,21 @@ mod tests {
 			};
 			assert_eq!(from_setup(&params, version).unwrap(), Some(expected), "{version:?}");
 		}
+	}
+
+	/// A request's credential shows only its type and length in a message's `Debug`.
+	#[test]
+	fn a_request_token_debug_hides_the_value() {
+		let debug = format!(
+			"{:?}",
+			RequestToken(Token {
+				kind: 0,
+				value: b"s3cr3t-jwt".to_vec(),
+			})
+		);
+		assert!(!debug.contains("s3cr3t"), "{debug}");
+		assert!(!debug.contains("115"), "{debug}");
+		assert!(debug.contains("<10 bytes>"), "{debug}");
 	}
 
 	#[test]

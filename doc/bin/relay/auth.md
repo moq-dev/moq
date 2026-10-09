@@ -113,6 +113,16 @@ TOKEN` option with Token Type 0. HMAC, RSA, ECDSA, and EdDSA keys all work. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
 `--subscribe`), after which it can never sign a broader token.
 
+### On a request
+
+A moq-transport client may also put the `AUTHORIZATION TOKEN` on a SUBSCRIBE or
+PUBLISH\_NAMESPACE, and renew it in place with an update. The session's
+credential is checked first, so a request it covers is served whatever the
+request carries. moq-relay does not verify request tokens yet: one on a request
+the session's credential does not cover is refused `NOT_SUPPORTED`. An
+application built on moq-net can verify them itself with
+`auth::Handle::requests()`.
+
 ### Claims
 
 | Claim | Meaning |

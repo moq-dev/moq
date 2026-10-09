@@ -361,6 +361,20 @@ impl ConnectError {
 mod tests {
 	use super::*;
 
+	/// A request token seeded on the dial config is kept out of its `Debug` and never
+	/// serialized, since a config is routinely logged and written back.
+	#[test]
+	fn a_request_token_stays_out_of_debug_and_serde() {
+		let config = Config::default().with_request_token(moq_net::setup::Token {
+			kind: 0,
+			value: b"s3cr3t".to_vec(),
+		});
+		assert!(config.request_token.is_some());
+		let debug = format!("{config:?}");
+		assert!(!debug.contains("s3cr3t") && debug.contains("<6 bytes>"), "{debug}");
+		assert!(!toml::to_string(&config).expect("serialize").contains("request_token"));
+	}
+
 	/// The dial config offers every extension unless told otherwise, and leaves the
 	/// default out when serialized.
 	#[test]
@@ -476,6 +490,16 @@ failover_delay = "1s"
 			Addrs::collect([url("moqt://a:4443"), url("moqt://b:4443")]),
 			Some(Addrs::new(url("moqt://a:4443")).or(url("moqt://b:4443")))
 		);
+	}
+}
+
+/// A request token held by a [`Config`], shown by type and length only so it stays out of logs.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct RequestToken(pub moq_net::setup::Token);
+
+impl std::fmt::Debug for RequestToken {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "kind={} <{} bytes>", self.0.kind, self.0.value.len())
 	}
 }
 
@@ -634,6 +658,12 @@ pub struct Config {
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
 
+	/// The `AUTHORIZATION TOKEN` every session presents on its own requests; see
+	/// [`with_request_token`](Self::with_request_token).
+	#[serde(skip)]
+	#[usage(skip)]
+	pub(crate) request_token: Option<RequestToken>,
+
 	/// TLS trust and client-certificate settings (`--connect-tls-*`).
 	#[usage(flatten)]
 	#[serde(default)]
@@ -713,6 +743,7 @@ impl Default for Config {
 			timeout_arg: None,
 			version: Vec::new(),
 			extensions: Default::default(),
+			request_token: None,
 			tls: Default::default(),
 			once: None,
 			reconnect: None,
@@ -727,6 +758,15 @@ impl Default for Config {
 }
 
 impl Config {
+	/// Present `token` as the `AUTHORIZATION TOKEN` on every session's own requests (MoQ
+	/// request-token). It seeds the owning [`crate::Connection`]'s request-token handle, the
+	/// single source of truth across reconnects, so renewing it on a live connection is
+	/// [`crate::Connection::auth`] with [`Auth::set_request_token`](crate::Auth::set_request_token).
+	pub fn with_request_token(mut self, token: moq_net::setup::Token) -> Self {
+		self.request_token = Some(RequestToken(token));
+		self
+	}
+
 	/// Every released spelling this config was parsed from, across this section and
 	/// the TLS and WebSocket ones it owns, each paired with what replaced it.
 	///

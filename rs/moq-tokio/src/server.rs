@@ -1645,6 +1645,17 @@ impl Request {
 		request_ref!(self, r => r.token())
 	}
 
+	/// The session's [`auth::Handle`](moq_net::auth::Handle), for an app that verifies the
+	/// peer's request tokens itself (the `AUTHORIZATION TOKEN` carried on a SUBSCRIBE or
+	/// PUBLISH_NAMESPACE).
+	///
+	/// Take [`requests`](moq_net::auth::Handle::requests) here and answer them before
+	/// [`ok`](Self::ok): the acceptor is fixed on the session driver's first poll, which `ok`
+	/// starts, so a consumer installed afterwards races it.
+	pub fn auth(&self) -> moq_net::auth::Handle {
+		request_ref!(self, r => r.auth())
+	}
+
 	/// The client certificate chain the peer presented, if any, validated
 	/// against a configured [`crate::tls::Listen::root`] during the handshake.
 	///

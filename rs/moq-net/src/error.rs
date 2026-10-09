@@ -59,6 +59,11 @@ pub enum SessionError {
 	#[error("unknown auth token alias")]
 	UnknownAuthTokenAlias,
 
+	/// The peer left more unacknowledged REQUEST_UPDATEs outstanding on one request stream
+	/// than the MAX_REQUEST_UPDATES it was advertised (draft-19 section 10.3.1.7).
+	#[error("too many request updates")]
+	TooManyRequestUpdates,
+
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	#[error("app code={0}")]
 	App(u16),
@@ -83,6 +88,7 @@ impl SessionError {
 			Self::AuthTokenCacheOverflow => 0x13,
 			Self::Version => 0x15,
 			Self::UnknownAuthTokenAlias => 0x17,
+			Self::TooManyRequestUpdates => 0x1B,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -106,6 +112,7 @@ impl SessionError {
 			0x13 => Self::AuthTokenCacheOverflow,
 			0x15 => Self::Version,
 			0x17 => Self::UnknownAuthTokenAlias,
+			0x1B => Self::TooManyRequestUpdates,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -676,6 +683,7 @@ mod tests {
 			SessionError::AuthTokenCacheOverflow,
 			SessionError::Version,
 			SessionError::UnknownAuthTokenAlias,
+			SessionError::TooManyRequestUpdates,
 			SessionError::App(0),
 			SessionError::App(404),
 		];
@@ -694,6 +702,7 @@ mod tests {
 		assert_eq!(SessionError::AuthTokenCacheOverflow.to_code(), 0x13);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
 		assert_eq!(SessionError::UnknownAuthTokenAlias.to_code(), 0x17);
+		assert_eq!(SessionError::TooManyRequestUpdates.to_code(), 0x1B);
 
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
 		// of being given a meaning. A peer on the old placeholders (0x20-0x22) lands here.

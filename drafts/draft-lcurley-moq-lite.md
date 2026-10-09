@@ -298,6 +298,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x17  | UNKNOWN_AUTH_TOKEN_ALIAS | A token named an alias that was never registered. |
 | ------- | ------------- | ----------- |
+|  0x1B  | TOO_MANY_REQUEST_UPDATES | The peer left more request updates unanswered than the endpoint allows. |
+| ------- | ------------- | ----------- |
 
 ### Stream Error Codes
 Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (STOP_SENDING).
@@ -1515,7 +1517,7 @@ The `Message Length` describes the payload size on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
-- Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13) and UNKNOWN_AUTH_TOKEN_ALIAS (0x17) session codes, with moq-transport's meaning.
+- Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13), UNKNOWN_AUTH_TOKEN_ALIAS (0x17), and TOO_MANY_REQUEST_UPDATES (0x1B) session codes, with moq-transport's meaning.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 
 ## moq-lite-06

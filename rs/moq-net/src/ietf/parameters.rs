@@ -17,6 +17,8 @@ pub enum ParameterVarInt {
 	/// Removed in draft-17; only used in draft-14/15/16.
 	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
+	/// MAX_REQUEST_UPDATES, added in draft-19.
+	MaxRequestUpdates = super::request_update::OPTION,
 	/// HOP_ID, from the MoQ Cluster extension.
 	HopId = super::cluster::HOP_ID,
 	/// RELAY_COST, from the MoQ Cluster extension.
@@ -167,30 +169,30 @@ impl Encode<Version> for Parameters {
 }
 
 impl Parameters {
-	/// Consume a draft-14 request's parameter block, decoding every AUTHORIZATION TOKEN
-	/// (0x03) by [`super::token::RequestToken`]'s rules.
-	pub fn skip_request(r: &mut Decoder<'_>) -> Result<(), DecodeError> {
-		Self::skip(r, true)?;
-		Ok(())
+	/// Consume a draft-14 request's parameter block, returning every AUTHORIZATION TOKEN
+	/// (0x03), each decoded by [`super::token::RequestToken`]'s rules.
+	pub fn request_tokens(r: &mut Decoder<'_>) -> Result<Vec<super::token::RequestToken>, DecodeError> {
+		Ok(Self::skip(r, true)?.1)
 	}
 
 	/// Consume a draft-14 response's parameter block, returning its first
 	/// MAX_CACHE_DURATION (0x04), the one parameter we act on.
 	pub fn skip_response(r: &mut Decoder<'_>) -> Result<Option<u64>, DecodeError> {
-		Self::skip(r, false)
+		Ok(Self::skip(r, false)?.0)
 	}
 
 	/// Draft-14 section 9.2 has a receiver ignore unrecognized parameters and allow their
 	/// duplicates, and lets AUTHORIZATION TOKEN repeat, so unlike [`Parameters::decode`],
 	/// which SETUP uses, a repeat is not refused. A token on a message that does not list it,
 	/// a response, is ignored like any other parameter.
-	fn skip(r: &mut Decoder<'_>, request: bool) -> Result<Option<u64>, DecodeError> {
+	fn skip(r: &mut Decoder<'_>, request: bool) -> Result<(Option<u64>, Vec<super::token::RequestToken>), DecodeError> {
 		let count = r.varint()?;
 		if count > MAX_PARAMS {
 			return Err(DecodeError::TooMany);
 		}
 
 		let mut cache_duration = None;
+		let mut tokens = Vec::new();
 		for _ in 0..count {
 			// Parity frames a Key-Value-Pair: even is one varint, odd is length prefixed.
 			let kind = r.varint()?;
@@ -202,7 +204,7 @@ impl Parameters {
 					}
 				}
 				_ if request && kind == u64::from(ParameterBytes::AuthorizationToken) => {
-					super::token::RequestToken::param_decode(r, Version::Draft14)?;
+					tokens.push(super::token::RequestToken::param_decode(r, Version::Draft14)?);
 				}
 				_ => {
 					let len = usize::try_from(r.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
@@ -214,7 +216,7 @@ impl Parameters {
 			}
 		}
 
-		Ok(cache_duration)
+		Ok((cache_duration, tokens))
 	}
 
 	pub fn get_varint(&self, kind: ParameterVarInt) -> Option<u64> {
@@ -1269,7 +1271,9 @@ mod tests {
 			0x3E, 0x06, // and again
 		];
 		let mut r = Decoder::new(&block, Version::Draft14.into());
-		Parameters::skip_request(&mut r).unwrap();
+		let tokens = Parameters::request_tokens(&mut r).unwrap();
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[1].0.kind, 1);
 		assert!(r.is_empty());
 	}
 
@@ -1284,7 +1288,7 @@ mod tests {
 			0x03, 0x02, 0x02, 0x07, // and a USE_ALIAS, never registered
 		];
 		let mut r = Decoder::new(&block, Version::Draft14.into());
-		let err = Parameters::skip_request(&mut r).unwrap_err();
+		let err = Parameters::request_tokens(&mut r).unwrap_err();
 		assert!(
 			matches!(err, DecodeError::Session(crate::SessionError::UnknownAuthTokenAlias)),
 			"{err:?}"

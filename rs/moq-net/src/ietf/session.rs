@@ -10,7 +10,7 @@ use crate::{
 use super::{
 	Control, Message, Publisher, Subscriber, Version, active_count,
 	adapter::ControlStreamAdapter,
-	auth, cluster, hidden, peer, solicit,
+	auth, cluster, hidden, peer, request_update, solicit,
 	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
@@ -133,6 +133,7 @@ where
 		early_unis,
 		extensions,
 	} = config;
+	let request_token = auth.request_token();
 
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
 	// signal), the protocol tasks below hold the other.
@@ -226,7 +227,8 @@ where
 					peer_setup.clone(),
 					version,
 				)
-				.with_auth(auth.clone());
+				.with_auth(auth.clone())
+				.with_request_token(request_token.clone());
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
@@ -246,6 +248,7 @@ where
 					goaway.going_away.clone(),
 				)
 				.with_auth(auth.clone())
+				.with_request_token(request_token.clone())
 				.with_solicit(extensions.solicit);
 				subscriber.announces = announces;
 
@@ -413,9 +416,11 @@ where
 					let auth = auth.clone();
 					let origin = publish.clone();
 					let session = session.clone();
+					let request_token = request_token.clone();
+					let peer_setup = peer_setup.clone();
 					async move {
 						match client {
-							true => enforce_grant(auth, origin, session).await,
+							true => enforce_grant(auth, origin, session, request_token, peer_setup, version).await,
 							false => std::future::pending().await,
 						}
 					}
@@ -429,7 +434,8 @@ where
 					peer_setup.clone(),
 					version,
 				)
-				.with_auth(auth.clone());
+				.with_auth(auth.clone())
+				.with_request_token(request_token.clone());
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
@@ -449,6 +455,7 @@ where
 					goaway.going_away.clone(),
 				)
 				.with_auth(auth.clone())
+				.with_request_token(request_token.clone())
 				.with_solicit(extensions.solicit);
 
 				// Our tokens, one Auth request each, once the peer's SETUP negotiates it.
@@ -730,6 +737,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		hidden: hidden::from_setup(params, version),
 		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
+		max_request_updates: request_update::from_setup(params, version),
 	})
 }
 
@@ -774,6 +782,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		auth::into_setup(&mut parameters, version);
 	}
 	active_count::into_setup(&mut parameters, version);
+	request_update::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -1333,7 +1342,18 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 	auth: crate::auth::Handle,
 	origin: origin::Consumer,
 	mut session: S,
+	request_token: crate::RequestToken,
+	peer_setup: peer::PeerSetup,
+	version: Version,
 ) -> Result<(), Error> {
+	// A request token authorizes an announce outside the connection grant only when the
+	// announce carries it, which is when it rides its own PUBLISH_NAMESPACE request: always on
+	// draft-14/15, and on later drafts unless the peer requires solicitation, which turns every
+	// advertisement into an inline NAMESPACE entry with no token slot. Then the grant still
+	// bounds what we publish.
+	if request_token.peek().is_some() && announces_carry_token(&peer_setup, version).await {
+		return Ok(());
+	}
 	let mut announced = origin.announced();
 	let mut check = crate::auth::Enforce::default();
 	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
@@ -1346,6 +1366,16 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 		&crate::auth::unauthorized_reason(&path),
 	);
 	Err(err)
+}
+
+/// Whether our announces will ride their own PUBLISH_NAMESPACE requests, the only form that
+/// carries a request token, rather than inline NAMESPACE entries. Draft-14/15 predate
+/// NAMESPACE; later drafts send requests unless the peer requires solicitation.
+async fn announces_carry_token(peer_setup: &peer::PeerSetup, version: Version) -> bool {
+	match version {
+		Version::Draft14 | Version::Draft15 => true,
+		_ => !peer_setup.get().await.solicit.unwrap_or(false),
+	}
 }
 
 #[cfg(test)]
@@ -1612,6 +1642,91 @@ mod tests {
 	/// paused in these tests, so each turn costs nothing and only runs the driver until it
 	/// parks again; a busy machine cannot turn a slow announce into a passing silence.
 	const ANNOUNCE_TURNS: usize = 100;
+
+	/// A client that presents a request token authorizes each announce at the server when the
+	/// announce carries the token, so dialing-side grant enforcement stands down for a peer
+	/// that takes unsolicited PUBLISH_NAMESPACE requests: enforcing it would close the client
+	/// for announcing outside the connection grant the token was meant to extend.
+	#[moq_net_sim::test]
+	async fn a_client_may_send_a_token_bearing_request_its_connection_grant_does_not_cover() {
+		let auth = crate::auth::Handle::new(true);
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("room/alice", crate::origin::Route::default()).unwrap();
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			solicit: Some(false),
+			..Default::default()
+		});
+
+		let result = enforce_grant(
+			auth,
+			origin.consume(),
+			session,
+			crate::RequestToken::new(Some(crate::setup::Token {
+				kind: 0,
+				value: b"jwt".to_vec(),
+			})),
+			peer_setup,
+			Version::Draft18,
+		)
+		.await;
+
+		assert!(
+			result.is_ok(),
+			"a token-bearing client must not be closed by grant enforcement"
+		);
+		assert!(
+			log.closes().is_empty(),
+			"the session must stay open for a token-bearing client"
+		);
+	}
+
+	/// When the peer requires solicitation, every advertisement is an inline NAMESPACE entry,
+	/// which has no slot for a request token. A token set for SUBSCRIBE must not let the client
+	/// advertise outside its connection grant there: the grant is still enforced.
+	#[moq_net_sim::test]
+	async fn a_request_token_does_not_lift_the_grant_when_announces_are_inline() {
+		let auth = crate::auth::Handle::new(true);
+		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
+		auth.granted(
+			0,
+			crate::auth::Grant {
+				publish: crate::Pattern::subtree("room/alice").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+			},
+		);
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin
+			.announce("room/bob/cam", crate::origin::Route::default())
+			.unwrap();
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			solicit: Some(true),
+			..Default::default()
+		});
+
+		let result = enforce_grant(
+			auth,
+			origin.consume(),
+			session,
+			crate::RequestToken::new(Some(crate::setup::Token {
+				kind: 0,
+				value: b"jwt".to_vec(),
+			})),
+			peer_setup,
+			Version::Draft18,
+		)
+		.await;
+
+		assert!(matches!(result, Err(Error::Unauthorized)), "{result:?}");
+		assert_eq!(log.closes().len(), 1, "the session closes on the uncovered announce");
+		drop(setup);
+	}
 
 	/// Run a publish-only session against a peer that declared `peer_declared`, returning
 	/// how many times the namespace reached the wire.
@@ -2468,6 +2583,7 @@ mod tests {
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("room/host"),
 				cluster: None,
+				authorization_token: None,
 			})
 			.await
 			.unwrap();
@@ -2577,6 +2693,7 @@ mod tests {
 			properties_wanted: true,
 			forward: true,
 			range_filters: false,
+			authorization_token: None,
 		};
 		let mut body = Vec::new();
 		let mut w = crate::coding::Encoder::new(&mut body, version.into());

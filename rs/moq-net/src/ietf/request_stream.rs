@@ -78,12 +78,26 @@ impl Decode<Version> for FollowUp {
 	}
 }
 
+/// One whole `[type][length][body]` message off a request stream, decoded at once so a read
+/// dropped part-way consumes nothing.
+#[derive(Debug)]
+pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
+
+impl Decode<Version> for Framed {
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let id = r.varint()?;
+		Ok(Self(id, super::Body::decode(r, version)?))
+	}
+}
+
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
 pub(super) struct Update {
 	/// The first Request ID: the update's own on drafts 14-16, which their answer names.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
+	/// The AUTHORIZATION TOKEN renewing the request's credential, the first if it repeats.
+	pub(super) authorization_token: Option<super::token::RequestToken>,
 	pub(super) unsupported: bool,
 }
 
@@ -112,13 +126,14 @@ impl Update {
 				let _end_group = data.varint()?;
 				let priority = data.u8()?;
 				let forward = data.bool()?;
-				Parameters::skip_request(data)?;
+				let authorization_token = Parameters::request_tokens(data)?.into_iter().next();
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
+					authorization_token,
 					unsupported: !forward,
 				});
 			}
@@ -152,12 +167,12 @@ impl Update {
 		Ok(Self {
 			request_id,
 			priority,
+			authorization_token: token.into_iter().next(),
 			unsupported: forward == Some(false)
 				|| filter.is_some()
 				|| fill.is_some()
 				|| object_timeout.is_some()
 				|| subgroup_timeout.is_some()
-				|| !token.is_empty()
 				|| !subgroup_filter.is_empty()
 				|| !object_filter.is_empty()
 				|| !priority_filter.is_empty()
