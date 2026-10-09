@@ -28,15 +28,9 @@ regression test that fails without it:
   invalid value warns and falls back to the default, as `parseDelay` and
   `parseVisible` already do.
 
-Decided 2026-10-08: [End of Group status](/quest/m0/ietf-end-of-group-status.md)
-edits the same status branch in `Frame.decode`; it is m0 and lands first, so
-this rebases onto it.
-
 Public API: none. Wire: none.
 
 ## Related
-
-- [End of Group status](/quest/m0/ietf-end-of-group-status.md) - the same `Frame.decode` status branch, landing first
 
 - [Rust papercuts](/quest/m1/papercuts-rs.md) - the Rust half of the same audit
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - owns the audio ring and its backpressure
