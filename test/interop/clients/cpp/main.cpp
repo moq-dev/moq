@@ -38,8 +38,8 @@ using Clock = std::chrono::steady_clock;
 
 constexpr size_t READ_CHUNK = 64 * 1024;
 
-// SubscribeMedia max age: how much reordering the jitter buffer tolerates.
-constexpr uint64_t MAX_AGE_US = 1'000'000;
+// SubscribeMedia max delay: how much reordering the jitter buffer tolerates.
+constexpr uint64_t MAX_DELAY_US = 1'000'000;
 
 // Synthetic audio: a 48 kHz mono tone, encoded as Opus.
 constexpr const char *AUDIO_TRACK = "tone";
@@ -184,7 +184,7 @@ int subscribe(const std::string &url, const std::string &path, double timeout) {
     const auto &[name, video] = *catalog->video.begin();
 
     moq::Subscription subscription;
-    subscription.max_age_us = MAX_AGE_US;
+    subscription.max_delay_us = MAX_DELAY_US;
     auto media = until(consumer->subscribe_media(name, video.container, subscription), deadline, "subscribe_media");
 
     size_t total = 0;
