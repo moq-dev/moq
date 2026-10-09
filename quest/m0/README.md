@@ -62,13 +62,9 @@ remain and no release waits on them.
 ## Required
 
 - [Serve budget](/quest/m0/serve-budget.md) - a kio task that always has work ready yields after a budget, so a fast publisher can't starve its own QUIC driver
-- [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - moqt-22 LOCATION_FILTER carries its type instead of a Length in Rust and JS, so a draft-22 peer reads our Next Object correctly
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.4, before Seattle
 - [Capped stream END_OF_GROUP](/quest/m0/ietf-end-of-track-location.md) - a stream capped by the subscription's end Location never claims END_OF_GROUP; moving End of Track's Location is deferred
-- [End of Group status](/quest/m0/ietf-end-of-group-status.md) - an End of Group status on a stream whose header already marks the group's end is accepted, so imquic's last object per group arrives
-- [Demand lost wake](/quest/m0/demand-lost-wake.md) - a reader that comes and goes between a demand poll and its re-read never leaves a front or `broadcast::Demand` without a wake
 - [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - every Go and Python publisher cell passes reliably once the serve budget lands, and a cell fails when a connection idles out
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
-- [moq-noq 2.0.2 on main](/quest/m0/noq-2.0.2.md) - `main` carries the max datagram size fix `release` gets in 1.3.4

@@ -1050,35 +1050,15 @@ export class Producer {
 
 	/** Append a frame as its own single-frame group. */
 	writeFrame(frame: Frame) {
-		this.#writeSingle((group) => group.writeFrame(frame));
-	}
-
-	// Write one frame as its own group, aborting the group if the write throws so no
-	// subscriber waits on a group that will never get its frame.
-	#writeSingle(write: (group: GroupProducer) => void): void {
 		const group = this.appendGroup();
 		try {
-			write(group);
+			group.writeFrame(frame);
 		} catch (err) {
+			// Abort the group so no subscriber waits on a group that will never get its frame.
 			group.close(err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
 		group.close();
-	}
-
-	/** Appends a string to the track as its own single-frame group. */
-	writeString(str: string) {
-		this.#writeSingle((group) => group.writeString(str));
-	}
-
-	/** Appends a JSON value to the track as its own single-frame group. */
-	writeJson(json: unknown) {
-		this.#writeSingle((group) => group.writeJson(json));
-	}
-
-	/** Appends a boolean to the track as its own single-frame group. */
-	writeBool(bool: boolean) {
-		this.#writeSingle((group) => group.writeBool(bool));
 	}
 }
 

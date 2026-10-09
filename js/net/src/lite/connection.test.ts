@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { SessionCode } from "../error.ts";
-import { createMockTransportPair, type MockTransport } from "../mock.ts";
+import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
@@ -223,12 +223,12 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			closed = true;
 		});
 		try {
-			producer.appendGroup().writeString("first");
+			producer.appendGroup().writeFrame(textFrame("first"));
 			expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 			fin.enable();
 			const last = producer.appendGroup();
-			last.writeString("last");
+			last.writeFrame(textFrame("last"));
 			last.close();
 			producer.close();
 			const closing = server.close();
@@ -269,7 +269,7 @@ async function servedRawSubscription() {
 	});
 
 	const group = producer.appendGroup();
-	group.writeString("last");
+	group.writeFrame(textFrame("last"));
 	group.close();
 
 	const subscriber = await Stream.open(pair.client, { version });
@@ -369,7 +369,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	broadcast.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
-	group.writeString("last");
+	group.writeFrame(textFrame("last"));
 	group.close();
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
@@ -421,7 +421,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 	broadcast.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
-	group.writeString("last");
+	group.writeFrame(textFrame("last"));
 	group.close();
 	const url = new URL("https://localhost/test");
 	const [client, server] = await Promise.all([

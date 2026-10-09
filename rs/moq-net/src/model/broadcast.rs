@@ -148,16 +148,29 @@ impl BroadcastState {
 		!self.requests.is_empty() || self.tracks.iter().any(|track| track.is_used())
 	}
 
-	/// Park `waiter` on every per-track channel feeding [`Self::is_used`]: the
-	/// consumer counts live on those channels, and their flips don't write this
-	/// state, so a watcher registered here alone would miss the edge. `want`
-	/// picks the direction; each channel only arms while its side is unmet.
-	fn register_demand(&self, waiter: &kio::Waiter, want: bool) {
-		for track in self.tracks.iter() {
-			match want {
-				true => track.poll_used(waiter),
-				false => track.poll_unused(waiter),
-			}
+	/// Whether [`Self::is_used`] is `want`, parking `waiter` on the tracks in the way
+	/// otherwise. The consumer counts live on the per-track channels, whose flips don't
+	/// write this state, so each track's own answer decides: a re-read after the polls
+	/// would see a reader that came or went since, with nothing parked to wake on its
+	/// return.
+	fn poll_demand(&self, waiter: &kio::Waiter, want: bool) -> Poll<()> {
+		if want {
+			// A closed track is never read again, so only an open, read one is demand.
+			let used = !self.requests.is_empty()
+				|| self
+					.tracks
+					.iter()
+					.any(|track| matches!(track.poll_used(waiter), Poll::Ready(Ok(()))));
+			return if used { Poll::Ready(()) } else { Poll::Pending };
+		}
+		if !self.requests.is_empty() {
+			return Poll::Pending;
+		}
+		// Every other track is unused already, so the first one still read is what to
+		// wait on: its last reader leaving wakes us to look again.
+		match self.tracks.iter().all(|track| track.poll_unused(waiter).is_ready()) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
 		}
 	}
 }
@@ -404,14 +417,14 @@ impl Producer {
 		self.alive.token.is_used()
 	}
 
-	/// Ready once a [`Consumer`] handle exists or the broadcast ended.
-	pub(crate) fn poll_held(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.alive.token.poll_used(waiter).map(|_| ())
+	/// `Ready(Ok)` once a [`Consumer`] handle exists, `Ready(Err)` once the broadcast ended.
+	pub(crate) fn poll_held(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
+		self.alive.token.poll_used(waiter)
 	}
 
-	/// Ready once no [`Consumer`] handle is left or the broadcast ended.
-	pub(crate) fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.alive.token.poll_unused(waiter).map(|_| ())
+	/// `Ready(Ok)` once no [`Consumer`] handle is left, `Ready(Err)` once the broadcast ended.
+	pub(crate) fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
+		self.alive.token.poll_unused(waiter)
 	}
 
 	/// [`Self::close`], unless a [`Consumer`] holds the broadcast or a track it asked for
@@ -971,16 +984,7 @@ impl Demand {
 		if self.alive.poll_closed(waiter).is_ready() {
 			return Poll::Ready(Err(Error::Dropped));
 		}
-		let ready = self.state.poll(waiter, |state| {
-			// The consumer counts live on the per-track channels, whose flips
-			// don't write this state: park on those channels too so the edge
-			// wakes us, then recompute here.
-			state.register_demand(waiter, want);
-			match state.is_used() == want {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		});
+		let ready = self.state.poll(waiter, |state| state.poll_demand(waiter, want));
 		match ready {
 			Poll::Ready(_) => Poll::Ready(Ok(())),
 			Poll::Pending => Poll::Pending,
@@ -1105,6 +1109,26 @@ mod test {
 		producer.close();
 		assert!(matches!(demand.used().await, Err(Error::Dropped)));
 		assert!(matches!(demand.unused().await, Err(Error::Dropped)));
+	}
+
+	/// One read track keeps the broadcast in demand however many others are unread, and
+	/// its last reader leaving wakes a parked `unused`.
+	#[moq_net_sim::test]
+	async fn demand_unused_waits_for_every_track() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let demand = producer.demand();
+		let _video = producer.create_track("video", None).unwrap();
+		let _audio = producer.create_track("audio", None).unwrap();
+
+		let video = consumer.track("video").unwrap();
+		assert!(
+			demand.poll_unused(&kio::Waiter::noop()).is_pending(),
+			"a read track is demand"
+		);
+
+		let (unused, ()) = futures::join!(expect(demand.unused()), async { drop(video) });
+		unused.unwrap();
 	}
 
 	/// A consumer demand handle distinguishes lost demand from a dropped producer.

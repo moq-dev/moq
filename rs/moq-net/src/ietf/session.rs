@@ -755,10 +755,18 @@ struct UniSetup<S: crate::transport::poll::Session> {
 }
 
 /// Accept incoming uni streams, including SETUP and GOAWAY on draft-17+.
+///
+/// Each stream reads its own type in its own child. QUIC opens every lower-numbered
+/// stream once a higher one arrives, so the next stream accepted can be one whose bytes
+/// the peer has not sent yet, held back by connection flow control that the later
+/// streams' unread data is using up. Waiting here for its type would deadlock the
+/// connection.
 async fn run_unis<S>(mut session: S, subscriber: Subscriber<S>, setup: UniSetup<S>) -> Result<(), Error>
 where
 	S: crate::transport::poll::Boxable,
 {
+	use std::task::Poll;
+
 	let UniSetup {
 		peer: peer_setup,
 		read: setup_read,
@@ -769,24 +777,42 @@ where
 	} = setup;
 	let outer_version = crate::Version::Ietf(version);
 	let mut tasks = TaskSet::owned();
-	// A gated server accept already read the peer's one SETUP off its own uni stream,
-	// so anything arriving here is a second one.
-	let mut seen_setup = setup_read;
+	let uni = Uni {
+		session: session.clone(),
+		subscriber: subscriber.clone(),
+		peer_setup,
+		// A gated server accept already read the peer's one SETUP off its own uni stream,
+		// so anything arriving here is a second one.
+		seen_setup: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(setup_read)),
+		goaway,
+		version,
+	};
+	// The first stream to break the session, recorded by the child that read it.
+	let fatal = kio::Shared::<Option<Error>>::default();
 	let mut early = early.into_iter();
 
 	loop {
-		let mut reader = match early.next() {
+		let reader = match early.next() {
 			Some(reader) => reader,
 			None => {
 				let recv = tasks
 					.drive(|waiter| {
+						let broken = fatal.poll(waiter, |fatal| match fatal.is_some() {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						});
+						if let Poll::Ready(mut fatal) = broken
+							&& let Some(err) = fatal.take()
+						{
+							return Poll::Ready(Err(err));
+						}
 						let mut cx = waiter.context();
-						session.poll_accept_uni(&mut cx)
+						session.poll_accept_uni(&mut cx).map(Ok)
 					})
 					.await;
 				let recv = match recv {
-					Ok(recv) => recv,
-					Err(err) => {
+					Ok(Ok(recv)) => recv,
+					Ok(Err(err)) => {
 						let err = Error::from_transport(err);
 						// Settle tracks and open groups before the owned receive tasks drop
 						// their cancellation guards, which would otherwise record Cancel.
@@ -797,33 +823,75 @@ where
 						}
 						return Err(err);
 					}
+					Err(fatal) => return Err(fatal),
 				};
 				Reader::new(recv, outer_version)
 			}
 		};
+
+		let uni = uni.clone();
+		let fatal = fatal.clone();
+		tasks.push(async move {
+			if let Err(err) = uni.serve(reader).await {
+				fatal.lock().get_or_insert(err);
+			}
+		});
+	}
+}
+
+/// What serving one incoming uni stream needs from its session.
+struct Uni<S: crate::transport::poll::Session> {
+	session: S,
+	subscriber: Subscriber<S>,
+	peer_setup: Option<peer::PeerSetup>,
+	/// Exactly one SETUP per endpoint.
+	seen_setup: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	goaway: crate::goaway::Protocol,
+	version: Version,
+}
+
+impl<S: crate::transport::poll::Session> Clone for Uni<S> {
+	fn clone(&self) -> Self {
+		Self {
+			session: self.session.clone(),
+			subscriber: self.subscriber.clone(),
+			peer_setup: self.peer_setup.clone(),
+			seen_setup: self.seen_setup.clone(),
+			goaway: self.goaway.clone(),
+			version: self.version,
+		}
+	}
+}
+
+impl<S: crate::transport::poll::Boxable> Uni<S> {
+	/// Read the stream's type and serve it, failing only when the stream breaks the session.
+	async fn serve(self, mut reader: Reader<S::RecvStream, crate::Version>) -> Result<(), Error> {
+		let Self {
+			mut session,
+			mut subscriber,
+			peer_setup,
+			seen_setup,
+			goaway,
+			version,
+		} = self;
+
 		// A stream that dies before its type varint is that stream's failure, not the
 		// session's. RESET_STREAM is how a peer drops a group, and QUIC does not order
 		// the reset behind the data, so one can beat the first byte even of a stream
-		// the peer wrote to. Failing the loop here would tear down the whole session
-		// over a single stream the peer had already given up on. Only death is
-		// tolerated: bytes that arrive and do not parse stay session-fatal.
+		// the peer wrote to. Failing here would tear down the whole session over a
+		// single stream the peer had already given up on. Only death is tolerated:
+		// bytes that arrive and do not parse stay session-fatal.
 		//
 		// A transport error counts as death too. A reset whose code the transport cannot
 		// place in the stream registry surfaces as one: over raw QUIC a moq-transport
 		// peer resets with its own codes (moxygen's CANCELLED is 0x1), which the
 		// WebTransport code mapping rejects. If the connection itself died, the next
 		// accept reports it.
-		let kind: u64 = match tasks
-			.drive(|waiter| {
-				let mut cx = waiter.context();
-				reader.poll_varint_peek(&mut cx)
-			})
-			.await
-		{
+		let kind: u64 = match std::future::poll_fn(|cx| reader.poll_varint_peek(cx)).await {
 			Ok(kind) => kind,
 			Err(err) if died_before_header(&err) => {
 				tracing::debug!(%err, "dropping uni stream that died before its type");
-				continue;
+				return Ok(());
 			}
 			Err(err) => return Err(err),
 		};
@@ -834,78 +902,66 @@ where
 		};
 
 		match ty {
-			// SETUP then becomes the GOAWAY channel. We accept it in the background
-			// without blocking; the one thing that does need it (the MoQ Cluster
-			// negotiation) waits on `peer_setup` instead, so a slow SETUP delays
-			// announcements rather than the whole session.
+			// SETUP then becomes the GOAWAY channel. It is read in the background like any
+			// other stream; the one thing that does need it (the MoQ Cluster negotiation)
+			// waits on `peer_setup` instead, so a slow SETUP delays announcements rather
+			// than the whole session.
 			UniType::Setup => {
 				// Exactly one SETUP per endpoint. A second would let a peer restate its
 				// declared identity mid-session, silently re-attributing every route
 				// already built from the first.
-				if std::mem::replace(&mut seen_setup, true) {
+				if seen_setup.swap(true, std::sync::atomic::Ordering::Relaxed) {
 					return Err(Error::ProtocolViolation);
 				}
 
-				let peer_setup = peer_setup.clone();
-				let mut session = session.clone();
-				let goaway = goaway.clone();
-				tasks.push(async move {
-					// The negotiation gates the announce and dispatch loops, so a SETUP we
-					// cannot read must end the session rather than leave them parked on a
-					// slot nothing will ever fill.
-					let msg = match reader.decode::<setup::Setup>().await {
-						Ok(msg) => msg,
+				// The negotiation gates the announce and dispatch loops, so a SETUP we
+				// cannot read must end the session rather than leave them parked on a
+				// slot nothing will ever fill.
+				let msg = match reader.decode::<setup::Setup>().await {
+					Ok(msg) => msg,
+					Err(err) => {
+						tracing::warn!(%err, "setup decode error");
+						session.close(SessionError::ProtocolViolation.to_code(), "invalid setup");
+						return Ok(());
+					}
+				};
+
+				if let Some(peer_setup) = peer_setup {
+					let peer = match decode_peer_setup(msg.parameters, version) {
+						Ok(peer) => peer,
 						Err(err) => {
-							tracing::warn!(%err, "setup decode error");
-							session.close(SessionError::ProtocolViolation.to_code(), "invalid setup");
-							return;
+							tracing::warn!(%err, "setup parameter decode error");
+							session.close(SessionError::ProtocolViolation.to_code(), "invalid setup parameters");
+							return Ok(());
 						}
 					};
+					peer_setup.set(peer);
+				}
 
-					if let Some(peer_setup) = peer_setup {
-						let peer = match decode_peer_setup(msg.parameters, version) {
-							Ok(peer) => peer,
-							Err(err) => {
-								tracing::warn!(%err, "setup parameter decode error");
-								session.close(SessionError::ProtocolViolation.to_code(), "invalid setup parameters");
-								return;
-							}
-						};
-						peer_setup.set(peer);
-					}
-
-					// Monitor for GOAWAY after setup completes.
-					if let Err(err) = run_goaway(reader.with_version(version), version, goaway).await {
-						tracing::warn!(%err, "goaway error");
-					}
-				});
+				// Monitor for GOAWAY after setup completes.
+				if let Err(err) = run_goaway(reader.with_version(version), version, goaway).await {
+					tracing::warn!(%err, "goaway error");
+				}
 			}
 			UniType::Subgroup => {
-				let mut sub = subscriber.clone();
-				tasks.push(async move {
-					let mut reader = reader.with_version(version);
-					let res = sub.recv_group(&mut reader).await;
-					stop_on_error(&mut reader, res);
-				});
+				let mut reader = reader.with_version(version);
+				let res = subscriber.recv_group(&mut reader).await;
+				stop_on_error(&mut reader, res);
 			}
 			// A fill fetch stream carries the head of the group a draft-20 subscription
 			// joined part way through. One answering no fill of ours is refused inside.
 			UniType::Fetch => {
-				let mut sub = subscriber.clone();
-				tasks.push(async move {
-					let mut reader = reader.with_version(version);
-					let res = sub.recv_fill(&mut reader).await;
-					stop_on_error(&mut reader, res);
-				});
+				let mut reader = reader.with_version(version);
+				let res = subscriber.recv_fill(&mut reader).await;
+				stop_on_error(&mut reader, res);
 			}
 			// The receiver MUST discard padding. We read it to the end rather than cancel,
 			// so a peer probing for bandwidth gets the throughput it is measuring.
 			UniType::Padding => {
-				tasks.push(async move {
-					while let Ok(Some(_)) = std::future::poll_fn(|cx| reader.poll_read_chunk(cx, usize::MAX)).await {}
-				});
+				while let Ok(Some(_)) = std::future::poll_fn(|cx| reader.poll_read_chunk(cx, usize::MAX)).await {}
 			}
 		}
+		Ok(())
 	}
 }
 
@@ -1696,6 +1752,27 @@ mod tests {
 		);
 		assert!(result.is_none(), "one dropped group ended the session: {result:?}");
 		assert_eq!(log.closes(), vec![], "one dropped group may not close the session");
+	}
+
+	/// A stream whose type has not arrived must not hold up the streams accepted after it.
+	///
+	/// QUIC opens every lower-numbered stream when a higher one arrives, so the next stream
+	/// accepted can be one whose bytes the peer has not sent yet, held back by connection
+	/// flow control that the later streams' unread data is using up. Waiting on its type
+	/// before reading them deadlocks the connection.
+	#[moq_net_sim::test]
+	async fn a_silent_stream_does_not_hold_up_the_next() {
+		let header = subgroup_header(Version::Draft19, 7, 0).await;
+		let session =
+			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), header]);
+		let (log, result) = drive_unis(Version::Draft19, session, None, Some(7)).await;
+
+		assert_eq!(
+			log.stops(),
+			vec![crate::ietf::error::CANCELLED],
+			"the stream behind the silent one was never read",
+		);
+		assert!(result.is_none(), "the silent stream ended the session: {result:?}");
 	}
 
 	/// A non-zero subgroup is refused on its own stream, never by closing the session.

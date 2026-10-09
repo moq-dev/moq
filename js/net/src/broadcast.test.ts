@@ -4,6 +4,7 @@ import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./
 import { GroupTooLarge, NotFound } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { MAX_TRACK_SEQUENCES } from "./internal.ts";
+import { textFrame } from "./mock.ts";
 import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { Producer as TrackProducer } from "./track.ts";
@@ -41,7 +42,7 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	// Serving that single request fans out to both subscribers.
 	if (!request) throw new Error("expected request");
 	const producer = request.accept({ timescale: Timescale.MILLI });
-	producer.writeString("hello");
+	producer.writeFrame(textFrame("hello"));
 	expect(await a.readString()).toBe("hello");
 	expect(await b.readString()).toBe("hello");
 
@@ -101,7 +102,7 @@ test("createTrack answers a queued request", async () => {
 
 	// The track is created before any handler takes the queued request.
 	const producer = broadcast.createTrack("media", { timescale: Timescale.MILLI, priority: 3 });
-	producer.writeString("hello");
+	producer.writeFrame(textFrame("hello"));
 	expect(await subscriber.readString()).toBe("hello");
 	expect((await info).priority).toBe(3);
 
@@ -113,7 +114,7 @@ test("createTrack answers a queued request", async () => {
 
 	// Later subscriptions read the created track, and the name stays taken.
 	const again = broadcast.track("media").subscribe().ordered();
-	producer.writeString("again");
+	producer.writeFrame(textFrame("again"));
 	expect(await again.readString()).toBe("again");
 	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
 
@@ -225,7 +226,7 @@ test("publishing-side subscriptions coalesce onto one request", async () => {
 
 	if (!request) throw new Error("expected request");
 	const producer = request.accept({ timescale: Timescale.MILLI });
-	producer.writeString("hello");
+	producer.writeFrame(textFrame("hello"));
 	expect(await a.readString()).toBe("hello");
 	expect(await b.readString()).toBe("hello");
 	await info;
@@ -318,7 +319,7 @@ test("an abandoned info lookup stops counting as demand, and its request goes on
 
 	// The handler still gets an open track, and the answer lets it go.
 	const producer = request.accept({ timescale: Timescale.MILLI });
-	producer.writeString("late");
+	producer.writeFrame(textFrame("late"));
 	await producer.closed;
 	broadcast.close();
 });
@@ -477,13 +478,13 @@ test("consumer track subscriptions fan out and close independently", async () =>
 	expect(await pendingRequest(consumer)).toBeUndefined();
 
 	const producer = request.accept({ timescale: Timescale.MILLI });
-	producer.writeString("one");
+	producer.writeFrame(textFrame("one"));
 	expect(await a.readString()).toBe("one");
 	expect(await b.readString()).toBe("one");
 
 	// ...and closing one subscriber leaves the other (and the shared upstream) delivering.
 	a.close();
-	producer.writeString("two");
+	producer.writeFrame(textFrame("two"));
 	expect(await b.readString()).toBe("two");
 });
 
@@ -523,8 +524,8 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 		.subscribe({ maxDelay: Milli(5000) })
 		.ordered();
 
-	producer.writeString("hello");
-	producer.writeString("world");
+	producer.writeFrame(textFrame("hello"));
+	producer.writeFrame(textFrame("world"));
 
 	// Neither subscriber steals from the other: both see every frame in order.
 	expect(await a.readString()).toBe("hello");
@@ -538,12 +539,12 @@ test("a late subscriber replays the cached window", async () => {
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	// Written before anyone subscribes; retained in the cache for replay.
-	producer.writeString("early");
+	producer.writeFrame(textFrame("early"));
 
 	const late = broadcast.track("video").subscribe().ordered();
 	expect(await late.readString()).toBe("early");
 
-	producer.writeString("later");
+	producer.writeFrame(textFrame("later"));
 	expect(await late.readString()).toBe("later");
 });
 
@@ -582,12 +583,12 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		// A subscriber that never reads. Its sink must not grow without bound.
 		const stalled = broadcast.track("video").subscribe();
 
-		producer.writeString("old");
+		producer.writeFrame(textFrame("old"));
 
 		// Advance past the cache window and write again to trigger a prune. The old
 		// (closed, aged-out) group is dropped from the stalled sink, not retained.
 		setSystemTime(new Date(12_000));
-		producer.writeString("fresh");
+		producer.writeFrame(textFrame("fresh"));
 
 		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
 		// was evicted, not still buffered ahead of it.
@@ -623,7 +624,7 @@ test("insertTrack rejects a duplicate live name", () => {
 test("a finished track is still served from its cache", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("track1", { timescale: Timescale.MILLI });
-	track.writeString("last");
+	track.writeFrame(textFrame("last"));
 	track.close();
 
 	// Like Rust, finishing keeps the track: a late subscriber reads the cache, then the clean end.
