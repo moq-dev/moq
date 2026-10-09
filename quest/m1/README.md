@@ -31,7 +31,8 @@ capture-chain, and first-FETCH pipelining work to m2; and deleted quests that
 were done or not worth their cost.
 
 Promoted from m2 on 2026-10-09 by maintainer priority: mobile capture and
-completion, the capacity probe, and the viewer up-switch. Added the same day:
+completion, the capacity probe, the viewer up-switch, and native enabled,
+which simulcast rung disable requires. Added the same day:
 simulcast rung disable, OBS multitrack, MoQ in obs-studio, and portrait
 ladders.
 
@@ -109,6 +110,7 @@ ladders.
 - [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the maintainer registers the host that runs the NVIDIA tests
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
 - [Rendition preference](/quest/m1/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
+- [Native enabled](/quest/m1/native-enabled.md) - native players and the ffi/C paths never select a disabled rendition, and move off one disabled mid-playback
 - [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - JS, Rust/FFI, and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
 - [Discover media headroom](/quest/m1/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [Viewer up-switch](/quest/m1/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up

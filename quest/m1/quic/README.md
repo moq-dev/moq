@@ -9,8 +9,9 @@ quinn and not noq). One core serves the tokio backend, the thread-per-core
 BBR correctness, reliable stream resets, hierarchical stream scheduling with
 per-broadcast fairness, wider limits for relay peers, and endpoint sharding.
 Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
-stream state machine, and the experiments (the egress profile, media probing,
-ECN measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); L4S,
+stream state machine, and the experiments (the egress profile, ECN
+measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); media
+probing is its own [m1 quest](/quest/m1/quic-probe.md); L4S,
 careful resume, and a receive-timestamps spike toward GCC live in
 [m3](/quest/m3/README.md). None of them gate this line.
 

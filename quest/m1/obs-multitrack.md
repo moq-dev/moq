@@ -5,9 +5,10 @@
 The obs-moq output publishes OBS's native multitrack video encoders as
 simulcast renditions of one broadcast, one rendition per track, each with
 its own size and bitrate in the catalog. A user configures them the way OBS
-multitrack video is configured, including over obs-websocket, and the top
-renditions disable as the bandwidth grant falls (see
-[simulcast rung disable](/quest/m1/simulcast-rung-disable.md)).
+multitrack video is configured, including over obs-websocket. Disabling the
+top renditions as the bandwidth grant falls is
+[simulcast rung disable](/quest/m1/simulcast-rung-disable.md)'s work, not
+this quest's.
 
 ## Plan
 

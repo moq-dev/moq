@@ -8,8 +8,9 @@ each as `enabled: false` in the catalog, and re-enables them with hysteresis
 once the grant recovers. The lower renditions keep their share instead of
 every rung degrading together. Covers the JS publisher (`js/publish`), the
 Rust and FFI publishers (the `rs/moq-video` producer under the `rs/moq-mux`
-rate policy), and the OBS plugin. Viewers already skip disabled renditions,
-so this is publisher-side only.
+rate policy), and the OBS plugin. `@moq/watch` already skips disabled
+renditions, and [native enabled](/quest/m1/native-enabled.md) brings native
+players along first, so a disabled rung never strands a viewer.
 
 ## Plan
 
@@ -53,10 +54,13 @@ browser and one through moq-ffi.
 Public API: the shared rule in `moq_mux::rate` and whatever knobs the
 publishers expose for it. Wire: none; `enabled` already exists.
 
+## Required
+
+- [Native enabled](/quest/m1/native-enabled.md) - native players move off a rendition disabled mid-playback
+
 ## Related
 
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
 - [Rendition preference](/quest/m1/rendition-preference.md) - viewer selection that drops disabled renditions before ranking the rest
 - [OBS multitrack](/quest/m1/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables
-- [Native enabled](/quest/m2/native-enabled.md) - native players skipping disabled renditions as `@moq/watch` does
 - [Viewer up-switch](/quest/m1/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes

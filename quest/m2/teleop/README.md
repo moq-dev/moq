@@ -61,7 +61,8 @@ means for a protocol multiplexing many message rates onto one link is in
 
 ### What a WAN deployment expects
 
-Nobody runs DDS over a WAN. What remote robotics needs over one:
+DDS discovery assumes a LAN, so a WAN deployment configures its peers by
+hand. What remote robotics needs over a WAN:
 
 - Priority-mapped QUIC streams with mixed stream and datagram reliability,
   without hand-configured router endpoints between sites.
