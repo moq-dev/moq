@@ -195,7 +195,6 @@ ladders.
 - [Catalog colour](/quest/m1/color-catalog.md) - the catalog describes a rendition's colour and HDR properties, which the WebGPU HDR renderer reads
 - [WebGPU HDR](/quest/m1/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [Request ID order](/quest/m1/request-id-order.md) - drafts 14 to 16 refuse a reused or lower Request ID in both languages
-- [Watch follows a covering prefix](/quest/m1/watch-follow-prefix.md) - `@moq/watch` moves to a covering prefix when the exact route ends, as `moq play` does
 - [Import catalog drop](/quest/m1/import-catalog-drop.md) - moq-cli import never drops a catalog producer without finishing it
 - [JS restart keeps the request](/quest/m1/js-restart-keeps-request.md) - a resolved `@moq/net` request survives a Restart, as in Rust
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS

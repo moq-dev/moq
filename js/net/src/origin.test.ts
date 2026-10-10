@@ -331,6 +331,138 @@ test("announced streams the table under a scope with origin-relative paths", asy
 	a.close();
 });
 
+test("follow reports the route serving the path", async () => {
+	const origin = new Producer();
+	const follow = origin.consume().follow(Path.from("pool/job"));
+	const epoch = Epoch.mint();
+	const next = async () => {
+		const event = await follow.next();
+		return event && { kind: event.kind, prefix: event.prefix };
+	};
+
+	// A prefix above the path covers it.
+	const pool = origin.dynamic(Path.from("pool"), { epoch });
+	expect(await next()).toEqual({ kind: "start", prefix: Path.from("pool") });
+
+	// A route beneath the path serves another broadcast, so the next event is the exact path's.
+	const beneath = publish(origin, Path.from("pool/job/thumbnail"));
+
+	// The path itself, from the same instance, takes over without a restart.
+	const exact = origin.createBroadcast(Path.from("pool/job"));
+	exact.announce({ epoch });
+	expect(await next()).toEqual({ kind: "update", prefix: Path.from("pool/job") });
+
+	// The covering prefix no longer serves the path, so its re-price is not seen: the next
+	// event is another instance at the path.
+	pool.update({ ...pool.route, cost: 5n });
+	exact.announce({ epoch: Epoch.mint() });
+	expect(await next()).toEqual({ kind: "restart", prefix: Path.from("pool/job") });
+
+	// It goes, so the prefix serves the path again: another instance.
+	exact.close();
+	expect(await next()).toEqual({ kind: "restart", prefix: Path.from("pool") });
+
+	pool.update({ ...pool.route, cost: 9n });
+	expect(await next()).toEqual({ kind: "update", prefix: Path.from("pool") });
+
+	pool.close();
+	expect(await next()).toEqual({ kind: "end", prefix: Path.from("pool") });
+
+	// The stream ends with the origin.
+	origin.close();
+	expect(await follow.next()).toBeUndefined();
+	beneath.close();
+});
+
+test("follow restarts onto a more specific route without an epoch", async () => {
+	const origin = new Producer();
+	const follow = origin.consume().follow(Path.from("pool/job"));
+
+	const pool = origin.dynamic(Path.from("pool"));
+	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool") });
+
+	const exact = publish(origin, Path.from("pool/job"));
+	expect(await follow.next()).toMatchObject({ kind: "restart", prefix: Path.from("pool/job") });
+
+	follow.close();
+	exact.close();
+	pool.close();
+	origin.close();
+});
+
+test("follow ignores a route scoped beneath the path", async () => {
+	const origin = new Producer();
+	// A cheaper dynamic at the same prefix that claims only `room/*/chat`, so it never serves the path.
+	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const dynamic = chat.dynamic(Path.from("room/alice"));
+	const follow = origin.consume().follow(Path.from("room/alice"));
+
+	const first = origin.createBroadcast(Path.from("room/alice"));
+	first.announce({ cost: 5n });
+	expect(await follow.next()).toMatchObject({ kind: "start", route: { cost: 5n } });
+
+	// A republish is another instance of the route that serves the path.
+	const second = origin.createBroadcast(Path.from("room/alice"));
+	second.announce({ cost: 5n });
+	first.close();
+	expect(await follow.next()).toMatchObject({ kind: "restart", route: { cost: 5n } });
+
+	follow.close();
+	second.close();
+	dynamic.close();
+	origin.close();
+});
+
+test("follow starts on the serving route when joining late", async () => {
+	const origin = new Producer();
+	const pool = origin.dynamic(Path.from("pool"));
+	const exact = publish(origin, Path.from("pool/job"));
+
+	const follow = origin.consume().follow(Path.from("pool/job"));
+	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool/job") });
+
+	// Nothing else is queued: the next event is the exact route ending, a restart onto the prefix.
+	exact.close();
+	expect(await follow.next()).toMatchObject({ kind: "restart", prefix: Path.from("pool") });
+
+	follow.close();
+	pool.close();
+	origin.close();
+});
+
+test("follow keeps a gap between routes of one epoch", async () => {
+	const origin = new Producer();
+	const epoch = Epoch.mint();
+	const exact = origin.createBroadcast(Path.from("pool/job"));
+	exact.announce({ epoch });
+	const follow = origin.consume().follow(Path.from("pool/job"));
+	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool/job") });
+
+	// Both changes land before the table is read again, but the path went unserved in between,
+	// which ended any request on it: a start of its own, not an update.
+	exact.close();
+	const pool = origin.dynamic(Path.from("pool"), { epoch });
+	expect(await follow.next()).toMatchObject({ kind: "end", prefix: Path.from("pool/job") });
+	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool") });
+
+	follow.close();
+	pool.close();
+	origin.close();
+});
+
+test("follow refuses a path no pattern can spell", () => {
+	const origin = new Producer();
+	expect(() => origin.consume().follow(Path.from("camera*main"))).toThrow();
+	origin.close();
+});
+
+test("follow refuses a path outside the scope", () => {
+	const origin = new Producer();
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("pool/job/cam"))]));
+	expect(() => scoped.consume().follow(Path.from("pool/job"))).toThrow();
+	origin.close();
+});
+
 test("hidden paths need an opt-in or a scope naming the dot segment", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

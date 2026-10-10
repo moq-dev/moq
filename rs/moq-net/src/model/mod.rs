@@ -10,6 +10,8 @@ pub mod track;
 // modules so neither leaks the other's plumbing.
 #[path = "origin.rs"]
 mod origin_impl;
+// Reduces the routes covering one path to the one serving it.
+mod follow;
 // The failover state machine origin fronts run; pure, so its transitions are
 // tested without a runtime.
 mod front;
@@ -48,6 +50,7 @@ pub mod origin {
 
 /// Subscribing to route (un)announcements from an origin.
 pub mod announce {
+	pub use super::follow::Follow;
 	pub use super::origin_impl::{Announce, AnnounceConsumer as Consumer, AnnounceEvent as Event};
 }
 
