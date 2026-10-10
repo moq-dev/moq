@@ -61,6 +61,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// final. A one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
 	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
+	/// Hold TS rate metadata until one PCR measurement window, independently of decoder readiness.
+	mux_rate_reservation: Option<crate::catalog::Reserved<E>>,
 
 	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
 	/// its offset onto the catalog clock.
@@ -156,12 +158,14 @@ impl<E: catalog::Catalog> Import<E> {
 		let mut snapshot = catalog.snapshot();
 		let supports_mpegts = snapshot.ext.mpegts_mut().is_some();
 		let si = super::si::Capture::new(broadcast.clone(), catalog.clone());
+		let mux_rate_reservation = supports_mpegts.then(|| reserved.clone());
 		Self {
 			broadcast,
 			catalog,
 			container,
 			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
+			mux_rate_reservation,
 			pat: PatReader::default(),
 			pmt_sections: HashMap::new(),
 			crc_errors: BTreeMap::new(),
@@ -282,8 +286,13 @@ impl<E: catalog::Catalog> Import<E> {
 					if let Some(now) = self.liveness.now() {
 						self.health.tick(now);
 					}
-					if self.supports_mpegts && self.mux_rate.pcr(pcr) {
-						self.record_mux_rate()?;
+					if self.supports_mpegts {
+						if self.mux_rate.pcr(pcr) {
+							self.record_mux_rate()?;
+						}
+						if self.mux_rate.ready() {
+							self.mux_rate_reservation = None;
+						}
 					}
 				}
 			}
@@ -990,7 +999,8 @@ impl<E: catalog::Catalog> Import<E> {
 		for pid in pids {
 			self.flush(pid)?;
 		}
-		// No frame follows to anchor the clock, so publish the declared track set now.
+		// EOF releases an unmeasured short source as well as its decoder reservations.
+		self.mux_rate_reservation = None;
 		self.initial_reservation = None;
 		self.release_sections(self.timebase.offset().unwrap_or_default())?;
 		for (pid, stream) in &mut self.streams {
@@ -5854,10 +5864,9 @@ pub(super) mod test {
 		assert_eq!(&frame.payload[..], &payload[..], "verbatim PES payload round-trips");
 	}
 
-	/// A program of only verbatim PIDs reserves no rendition, so the held reservation alone keeps
-	/// its PMT from publishing the catalog before the first PES anchors the clock.
+	/// A verbatim-only program retains the PES clock while waiting for rate measurement or EOF.
 	#[tokio::test]
-	async fn verbatim_only_program_publishes_at_the_first_pes() {
+	async fn verbatim_only_program_retains_its_pes_clock_until_catalog_release() {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 
@@ -5885,12 +5894,11 @@ pub(super) mod test {
 			.unwrap();
 		let anchored = catalog.snapshot().clock.expect("a clock");
 		assert_ne!(anchored, provisional, "the first PES anchors the clock");
-		let published = clocks.drain();
-		assert!(!published.is_empty(), "the first PES publishes the catalog");
-		assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
-
+		assert!(clocks.drain().is_empty(), "rate measurement still holds the catalog");
 		import.finish().unwrap();
-		assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
+		let published = clocks.drain();
+		assert!(!published.is_empty(), "EOF releases a program without PCR samples");
+		assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
 	}
 
 	/// A TS packet on `pid` carrying only an adaptation field (no payload) that sets
@@ -7248,6 +7256,77 @@ pub(super) mod test {
 		];
 		p.resize(188, 0xff);
 		p
+	}
+
+	#[test]
+	fn first_ts_catalog_waits_for_the_mux_rate_window() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		for cbr in [true, false] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(
+				&mut broadcast,
+				crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+			)
+			.unwrap();
+			let mut updates = catalog.consume().unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			import
+				.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+				.unwrap();
+			import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
+			let waiter = kio::Waiter::noop();
+			assert!(
+				updates.poll_next(&waiter).is_pending(),
+				"catalog preceded rate measurement"
+			);
+
+			for i in 0..=50 {
+				let mut bytes = pcr_packet(PCR_PID, i * 27_000_000 / 25);
+				let stuffing = if cbr || i < 25 { 99 } else { 19 };
+				for _ in 0..stuffing {
+					bytes.extend_from_slice(&super::super::export::NULL_PACKET);
+				}
+				import.decode(&bytes).unwrap();
+				if i < 50 {
+					assert!(
+						updates.poll_next(&waiter).is_pending(),
+						"catalog before a full PCR window"
+					);
+				}
+			}
+			let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+				panic!("catalog did not release at the end of the first window");
+			};
+			assert_eq!(first.ext.mpegts.mux_rate, cbr.then_some(3_760_000));
+		}
+	}
+
+	#[test]
+	fn finishing_a_short_ts_releases_its_catalog_without_a_rate() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
+		import.decode(&pcr_packet(PCR_PID, 0)).unwrap();
+		let waiter = kio::Waiter::noop();
+		assert!(updates.poll_next(&waiter).is_pending());
+		import.finish().unwrap();
+		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+			panic!("short recording finished without a catalog");
+		};
+		assert_eq!(first.ext.mpegts.mux_rate, None);
 	}
 
 	/// The catalog follows the clock: a stable multiplex rate is recorded, a source that

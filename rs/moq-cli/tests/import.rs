@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const BBB: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb.ts");
+const BBB: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 
 /// Await `step` while `moq` still holds stdin open, failing as soon as the process exits.
 ///
@@ -53,6 +53,7 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 		.spawn()
 		.expect("spawn moq");
 	let mut stdin = child.stdin.take().expect("stdin");
+	// A live TS catalog waits for its initial two-second PCR rate measurement.
 	stdin.write_all(BBB).await.expect("write stdin");
 
 	let origin = moq_tokio::origin::spawn();

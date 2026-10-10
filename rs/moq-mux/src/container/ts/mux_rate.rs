@@ -73,12 +73,19 @@ pub(super) struct Meter {
 	window: Vec<Interval>,
 	/// The rate recorded in the catalog, if any.
 	published: Option<u64>,
+	/// Whether the startup measurement window has completed, even for VBR.
+	ready: bool,
 }
 
 impl Meter {
 	/// The rate recorded in the catalog.
 	pub fn published(&self) -> Option<u64> {
 		self.published
+	}
+
+	/// Whether the first PCR measurement window has completed.
+	pub fn ready(&self) -> bool {
+		self.ready
 	}
 
 	/// One transport packet went by.
@@ -101,7 +108,7 @@ impl Meter {
 			return self.discontinuity();
 		}
 		self.sample.add(Interval { packets, ticks });
-		if self.sample.ticks < SAMPLE {
+		if self.sample.ticks < SAMPLE && self.sample.ticks + self.window.iter().map(|s| s.ticks).sum::<u64>() < WINDOW {
 			return false;
 		}
 		self.window.push(std::mem::take(&mut self.sample));
@@ -124,6 +131,7 @@ impl Meter {
 
 	/// Judge the full window and discard it.
 	fn judge(&mut self) -> bool {
+		self.ready = true;
 		let window = std::mem::take(&mut self.window);
 		let mut whole = Interval::default();
 		window.iter().for_each(|s| whole.add(*s));
