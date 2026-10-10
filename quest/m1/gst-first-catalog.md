@@ -8,9 +8,11 @@ restarted `moqsink` then resumes each rendition on its held pad, instead of
 ending a late-listed one with EOS and adding a new, unlinked pad for it. A
 rendition the new run really drops still ends with EOS.
 
-Non-goals: other publishers, whose first catalog is already complete
-(`@moq/publish` waits for its tracks to settle, and the CLI importers reserve
-their track set up front).
+Non-goals: other publishers. The CLI importers reserve their track set up
+front, and `<moq-publish>`'s default `source` mode waits for its enabled
+tracks to settle before announcing. `@moq/publish` with `announce="always"`,
+or its `Broadcast` class used directly, announces before its renditions
+resolve and has the same gap, which is planned separately.
 
 ## Plan
 
@@ -20,8 +22,9 @@ Decided 2026-10-10, planning the follow-ups of
 - The fix lives in `moqsink`, and `moqsrc`'s rule stays: a rendition the new
   run's first catalog does not list ends with EOS. Holding unlisted
   renditions in `moqsrc` instead would let one that never returns stall a
-  downstream muxer, and every other publisher already sends a complete first
-  catalog.
+  downstream muxer.
+- A browser publisher that announces before its tracks settle stays out of
+  scope (decided in #5189's review), so this quest stays a `moqsink` change.
 - Each pad reserves its catalog slot (`moq_mux::catalog::Producer::reserve`)
   when it is requested in `request_new_pad` (`rs/moq-gst/src/sink/imp.rs`),
   instead of when its caps arrive (`catalog.reserve()` in
@@ -50,11 +53,6 @@ Open, for the maintainer:
 Tests: a `moqsink` whose audio pad gets caps after its video pad's first
 buffer publishes one first catalog listing both; and a `moqsrc` following
 that `moqsink` across a restart keeps both pads without EOS.
-
-The comment above the catalog subscribe in `follow_catalog`
-(`rs/moq-gst/src/source/imp.rs`) says the browser announces an empty catalog
-before its encoder configures. Check it against `@moq/publish` and correct it
-if stale.
 
 ## Required
 
