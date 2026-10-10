@@ -33,6 +33,5 @@ Public API: none. Wire: none.
 ## Required
 
 - [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - a late joiner shows video promptly and catches up to live, and the check asserts that under load
-- [Import catalog finish](/quest/m1/test-flakes-2/import-catalog-finish.md) - `moq-cli`'s subprocess EOF catalog-finish test holds up under load with event-based fixture coordination
 - [Impaired handshake](/quest/m1/test-flakes-2/impaired-handshake.md) - the impaired cluster drills' clients never time out while connecting
 - [Media audio tone](/quest/m1/media-audio-tone.md) - the `just test media` audio-tone check passes under load, fixed at its cause
