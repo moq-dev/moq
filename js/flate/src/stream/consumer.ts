@@ -1,4 +1,5 @@
 import type * as Moq from "@moq/net";
+import type { Timed } from "@moq/net";
 import { race } from "@moq/signals";
 import { Decoder as Flate } from "../codec.ts";
 
@@ -22,7 +23,8 @@ export class Rolled extends Error {
 }
 
 /**
- * Consumes an ordered log of opaque payloads from a track, yielding every one in order.
+ * Consumes an ordered log of opaque payloads from a track, yielding every one in order with its
+ * frame's timestamp.
  *
  * The log is a single group. That is what makes the mode lossless: rolling to a second group means
  * the payloads that would have completed the first are gone, so a publisher that cannot write ends
@@ -55,8 +57,8 @@ export class Consumer {
 		this.#decompress = isDeflate(config.compression);
 	}
 
-	/** Get the next payload, or `undefined` once the track ends. */
-	next(): Promise<Uint8Array | undefined> {
+	/** Get the next payload with its frame's timestamp, or `undefined` once the track ends. */
+	next(): Promise<Timed<Uint8Array> | undefined> {
 		// One reader at a time. Two concurrent calls await the same `recvGroup`, so the second would
 		// take the first's group for a rolled log and fail a perfectly good one.
 		if (this.#reading) throw new Error("multiple calls to next not supported");
@@ -66,7 +68,7 @@ export class Consumer {
 		});
 	}
 
-	async #read(): Promise<Uint8Array | undefined> {
+	async #read(): Promise<Timed<Uint8Array> | undefined> {
 		for (;;) {
 			if (!this.#group) {
 				const { group } = await this.#recvGroup();
@@ -84,7 +86,9 @@ export class Consumer {
 			}
 
 			const frame = await this.#readFrame(this.#group);
-			if (frame) return this.#flate ? this.#flate.frame(frame.payload) : frame.payload;
+			if (frame) {
+				return { value: this.#flate ? this.#flate.frame(frame.payload) : frame.payload, at: frame.timestamp };
+			}
 
 			// The log's one group is exhausted. Keep reading the track so a clean end still
 			// reports the log as complete, and so a second group is caught as Rolled.
@@ -132,11 +136,11 @@ export class Consumer {
 	}
 
 	/** Iterate over every payload in order, until the track ends. */
-	async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+	async *[Symbol.asyncIterator](): AsyncIterator<Timed<Uint8Array>> {
 		for (;;) {
-			const value = await this.next();
-			if (value === undefined) return;
-			yield value;
+			const payload = await this.next();
+			if (payload === undefined) return;
+			yield payload;
 		}
 	}
 }

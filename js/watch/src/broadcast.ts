@@ -386,7 +386,7 @@ export class Broadcast {
 				schema: Catalog.RootSchema,
 				compression: format === "hangz" ? "deflate" : "none",
 			});
-			fetchNext = () => consumer.next();
+			fetchNext = async () => (await consumer.latest())?.value;
 		} else {
 			const ordered = track.ordered();
 			fetchNext = async () => {

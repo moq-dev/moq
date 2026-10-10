@@ -58,7 +58,7 @@ async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.Video
 	const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
 	for (;;) {
-		const root = await catalog.next();
+		const root = (await catalog.latest())?.value;
 		if (!root) throw new Error("catalog ended without a video track");
 		const first = Object.entries(root.video?.renditions ?? {})[0];
 		if (first) return first;

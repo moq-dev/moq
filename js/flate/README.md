@@ -9,7 +9,7 @@
 
 Opaque byte tracks over MoQ, optionally compressed with group-scoped DEFLATE, in two modes:
 
-- `Snapshot`: **lossy**. One value updated over time; a consumer only gets the most recent one.
+- `Snapshot`: **lossy**. One value updated over time; a consumer reads every value it receives (`next()`) or skips to the most recent (`latest()`).
 - `Stream`: **lossless**. An ordered append-log of self-contained payloads, nothing superseded.
 
 The bytes are opaque: the tracks frame them onto a [`@moq/net`](../net) track and optionally compress them, and never look inside. For JSON documents reach for [`@moq/json`](../json) instead, which adds RFC 7396 merge-patch deltas on top of the same two modes and codec. Interoperable with the Rust [`moq-flate`](https://crates.io/crates/moq-flate) crate.
@@ -22,15 +22,14 @@ const thumbnail = new Snapshot.Producer({ track, compression: "deflate" });
 thumbnail.update({ value: jpeg, at: Time.Timestamp.now() });
 
 const log = new Stream.Consumer({ track: subscriber, compression: "deflate" });
-for (;;) {
-	const payload = await log.next();
-	if (payload === undefined) break;
+for await (const { value, at } of log) {
+	console.log(value.byteLength, at);
 }
 ```
 
 Compression is opt-in per track (`compression: "none" | "deflate"`, default `"none"`); a consumer must set the same value as the producer.
 
-Producers take `{ value, at }`, where `at` is the capture time written as the frame timestamp. Nothing fills in now: a timed track needs `at` on every write, and an untimed track takes none.
+Producers take `{ value, at }`, where `at` is the capture time written as the frame timestamp, and consumers return the same shape. Nothing fills in now: a timed track needs `at` on every write, and an untimed track takes none and reads back without one.
 
 ## Codec
 

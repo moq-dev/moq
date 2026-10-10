@@ -13,7 +13,7 @@ const REPLAY_LATENCY = Time.Milli(30_000);
 // Reconstruct every value a compressed consumer yields, in order.
 async function drainCompressed(track: Track.Subscriber): Promise<Value[]> {
 	const out: Value[] = [];
-	for await (const value of new Consumer<Value>({ track, compression: "deflate" })) out.push(value);
+	for await (const { value } of new Consumer<Value>({ track, compression: "deflate" })) out.push(value);
 	return out;
 }
 
@@ -44,9 +44,8 @@ test("compressed snapshot per group round-trips", async () => {
 	producer.update({ value: { a: 2 } });
 	producer.finish();
 
-	// Deltas off: one compressed snapshot per group. A consumer joining after the fact
-	// collapses the backlog to the newest value (mirrors the Rust consumer).
-	expect(await drainCompressed(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ a: 2 }]);
+	// Deltas off: one compressed snapshot per group, each its own cold window.
+	expect(await drainCompressed(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ a: 1 }, { a: 2 }]);
 });
 
 test("compressed live consumer sees each update in order", async () => {
@@ -57,7 +56,7 @@ test("compressed live consumer sees each update in order", async () => {
 
 	for (let n = 1; n <= 5; n++) {
 		producer.update({ value: { a: n } });
-		expect(await consumer.next()).toEqual({ a: n });
+		expect((await consumer.next())?.value).toEqual({ a: n });
 	}
 });
 
