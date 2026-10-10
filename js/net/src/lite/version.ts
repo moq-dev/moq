@@ -10,7 +10,7 @@ export const Version = {
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
 	/// Work-in-progress lite-07, only negotiated when explicitly offered.
-	/// Adds the ANNOUNCE_REQUEST hidden opt-in.
+	/// Adds the ANNOUNCE_REQUEST hidden opt-in and the publisher epoch.
 	DRAFT_07: 0xff0dad07,
 } as const;
 
@@ -79,10 +79,10 @@ export function hasAnnounceOk(version: Version): boolean {
 	}
 }
 
-/** Whether the version can replace an advertisement in place rather than retracting and
- * re-announcing it. Added in lite-05 as a duplicate ANNOUNCE; lite-06 gave it a message of
+/** Whether the version can update an advertisement's metadata in place rather than retracting
+ * and re-announcing it. Added in lite-05 as a duplicate ANNOUNCE; lite-06 gave it a message of
  * its own (ANNOUNCE_UPDATE) and made the duplicate a violation. */
-export function restartSupported(version: Version): boolean {
+export function updateSupported(version: Version): boolean {
 	// Explicitly list older versions so future versions default to supported.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -96,8 +96,8 @@ export function restartSupported(version: Version): boolean {
 }
 
 /** Whether announcements carry implicit announce ids: each `active` assigns the next
- * per-stream ordinal, and `ended`/`restart` reference that id instead of repeating the
- * path. Added in lite-06. */
+ * per-stream ordinal, and `ended`/`update`/`restart` reference that id instead of repeating
+ * the path. Added in lite-06. */
 export function hasAnnounceId(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-06+ announce behavior.
 	switch (version) {
@@ -132,9 +132,8 @@ export function hasExcludeHop(version: Version): boolean {
 	}
 }
 
-/** Whether announcements carry the route cost varints alongside the hop chain: the
- * warm and cold cost of pulling the broadcast via this route, accumulated per link.
- * Added in lite-06. Older versions carry neither, so a received route has no cost
+/** Whether announcements carry a static route price alongside the hop chain.
+ * Added in lite-06. Older versions omit the price, so a received route has no cost
  * at all and routing falls back to the hop-count tie-break. */
 export function hasRouteCost(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-06+ behavior.
@@ -249,6 +248,61 @@ export function hasStreamCount(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether a served SUBSCRIBE completes only once the subscriber FINs or resets its half of the
+ * Subscribe Stream. Added in lite-07, where a subscriber FINs once its tail accounting settles,
+ * since a transport ACK does not say the application read the tail.
+ */
+export function waitsForSubscriberFin(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether the announce stream has ANNOUNCE_RESTART: another publisher instance replacing an
+ * advertisement in place. Added in lite-07. Older versions send an ANNOUNCE_END then an
+ * ANNOUNCE_START. */
+export function hasAnnounceRestart(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether ANNOUNCE_START, TRACK, SUBSCRIBE, and FETCH carry the publisher epoch. Added in lite-07.
+ * Older versions carry nothing, so a received route has no epoch and is never resumed elsewhere. */
+export function hasEpoch(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a live announcement. Added in lite-07. */
 export function hasAnnounceCompression(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
@@ -298,4 +352,23 @@ const VERSION_NAMES: Record<number, string> = {
 
 export function versionName(v: Version): string {
 	return VERSION_NAMES[v] ?? `unknown(0x${v.toString(16)})`;
+}
+
+/**
+ * Whether SUBSCRIBE_START carries the publisher's largest (group, frame), which a subscriber
+ * takes as where the live feed is. Added in lite-07; an earlier answer says nothing about it.
+ */
+export function hasLargest(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
 }

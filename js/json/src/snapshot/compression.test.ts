@@ -40,13 +40,13 @@ async function groupCount(track: Track.Ordered): Promise<number> {
 test("compressed snapshot per group round-trips", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 0, compression: "deflate" });
-	producer.update({ a: 1 });
-	producer.update({ a: 2 });
+	producer.update({ value: { a: 1 } });
+	producer.update({ value: { a: 2 } });
 	producer.finish();
 
 	// Deltas off: one compressed snapshot per group. A consumer joining after the fact
 	// collapses the backlog to the newest value (mirrors the Rust consumer).
-	expect(await drainCompressed(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([{ a: 2 }]);
+	expect(await drainCompressed(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ a: 2 }]);
 });
 
 test("compressed live consumer sees each update in order", async () => {
@@ -56,7 +56,7 @@ test("compressed live consumer sees each update in order", async () => {
 	const consumer = new Consumer<Value>({ track: track.subscribe(), compression: "deflate" });
 
 	for (let n = 1; n <= 5; n++) {
-		producer.update({ a: n });
+		producer.update({ value: { a: n } });
 		expect(await consumer.next()).toEqual({ a: n });
 	}
 });
@@ -64,9 +64,9 @@ test("compressed live consumer sees each update in order", async () => {
 test("compressed deltas share one group and reconstruct", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 100, compression: "deflate" });
-	producer.update({ a: 1, b: 1 });
-	producer.update({ a: 1, b: 2 });
-	producer.update({ a: 5, b: 2 });
+	producer.update({ value: { a: 1, b: 1 } });
+	producer.update({ value: { a: 1, b: 2 } });
+	producer.update({ value: { a: 5, b: 2 } });
 	producer.finish();
 
 	expect((await drainCompressed(track.subscribe())).at(-1)).toEqual({ a: 5, b: 2 });
@@ -75,9 +75,9 @@ test("compressed deltas share one group and reconstruct", async () => {
 test("compressed late joiner reconstructs from snapshot + deltas", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 100, compression: "deflate" });
-	producer.update({ a: 1, b: 1 });
-	producer.update({ a: 1, b: 2 });
-	producer.update({ a: 5, b: 2 });
+	producer.update({ value: { a: 1, b: 1 } });
+	producer.update({ value: { a: 1, b: 2 } });
+	producer.update({ value: { a: 5, b: 2 } });
 	producer.finish();
 
 	// A consumer created only now still rebuilds the final value from the snapshot + deltas.
@@ -89,7 +89,7 @@ test("a group's snapshot decodes from a fresh decoder", async () => {
 	// joiner (or the Rust consumer) start mid-stream at any group boundary.
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 0, compression: "deflate" });
-	producer.update({ hello: "world" });
+	producer.update({ value: { hello: "world" } });
 	producer.finish();
 
 	const decoder = new Decoder();
@@ -103,8 +103,8 @@ test("compressed deltas reuse the window", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 100, compression: "deflate" });
 	const phrase = "Media over QUIC delivers real-time latency at massive scale";
-	producer.update({ note: phrase });
-	producer.update({ note: phrase, echo: phrase });
+	producer.update({ value: { note: phrase } });
+	producer.update({ value: { note: phrase, echo: phrase } });
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
@@ -121,9 +121,9 @@ test("compression shrinks a repetitive frame", async () => {
 	const value = { renditions: Array(3).fill("video".repeat(50)) };
 
 	const plain = new Track.Producer("plain");
-	new Producer<Value>({ track: plain, deltaRatio: 0 }).update(value);
+	new Producer<Value>({ track: plain, deltaRatio: 0 }).update({ value: value });
 	const compressed = new Track.Producer("compressed");
-	new Producer<Value>({ track: compressed, deltaRatio: 0, compression: "deflate" }).update(value);
+	new Producer<Value>({ track: compressed, deltaRatio: 0, compression: "deflate" }).update({ value: value });
 
 	const plainLen = (await firstFrame(plain.subscribe().ordered())).length;
 	const compressedLen = (await firstFrame(compressed.subscribe().ordered())).length;
@@ -138,12 +138,12 @@ test("compressed deltas roll on the compressed budget", async () => {
 	// producers (deterministic output) keep the group-count and reconstruction reads independent.
 	const fill = (track: Track.Producer) => {
 		const producer = new Producer<Value>({ track, deltaRatio: 2, compression: "deflate" });
-		for (let n = 0; n <= 40; n++) producer.update({ n });
+		for (let n = 0; n <= 40; n++) producer.update({ value: { n } });
 		producer.finish();
 	};
 
 	const layout = new Track.Producer("layout");
-	const layoutSub = layout.subscribe({ maxAge: REPLAY_LATENCY }).ordered();
+	const layoutSub = layout.subscribe({ maxDelay: REPLAY_LATENCY }).ordered();
 	fill(layout);
 	expect(await groupCount(layoutSub)).toBeGreaterThan(1);
 

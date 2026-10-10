@@ -40,7 +40,7 @@ typedef OriginDynamic = MoqOriginDynamic;
 /// A requested broadcast not yet accepted: fulfill it with a producer or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
-/// A stream of route announcements and retractions under a prefix.
+/// A stream of announce events under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
 
 /// A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery.
@@ -49,8 +49,21 @@ typedef AnnounceConfig = MoqAnnounceConfig;
 /// A pending wait for a route to cover a specific path.
 typedef AnnouncedBroadcast = MoqAnnouncedBroadcast;
 
-/// A single route announcement or retraction: its path, route metadata, and active flag.
-typedef AnnounceUpdate = MoqAnnounceUpdate;
+/// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
+typedef Announce = MoqAnnounce;
+
+/// What an [AnnounceConsumer] yields: [AnnounceEventStart],
+/// [AnnounceEventUpdate], or [AnnounceEventEnd].
+typedef AnnounceEvent = MoqAnnounceEvent;
+
+/// A route now covers the prefix; the stream had none there.
+typedef AnnounceEventStart = StartMoqAnnounceEvent;
+
+/// The route covering the prefix changed hops or cost.
+typedef AnnounceEventUpdate = UpdateMoqAnnounceEvent;
+
+/// No route covers the prefix any more; carries its last route.
+typedef AnnounceEventEnd = EndMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
@@ -85,89 +98,11 @@ typedef GroupProducer = MoqGroupProducer;
 /// The read side of a single group: yields timestamped raw frames.
 typedef GroupConsumer = MoqGroupConsumer;
 
-/// The write side of a media track; discontinuity() marks a break between pre-framed payloads.
-typedef MediaProducer = MoqMediaProducer;
-
-/// The write side of a media track fed a raw byte stream, with frame boundaries inferred.
-typedef MediaStreamProducer = MoqMediaStreamProducer;
-
-/// The write side of a container, which publishes each track it describes.
-typedef ContainerProducer = MoqContainerProducer;
-
-/// The write side of a container fed a raw byte stream.
-typedef ContainerStreamProducer = MoqContainerStreamProducer;
-
-/// The read side of a media track: yields frames with codec metadata in decode order.
-typedef MediaConsumer = MoqMediaConsumer;
-
-/// A finite fetched media group: yields container-decoded frames until the group ends.
-typedef MediaGroupConsumer = MoqMediaGroupConsumer;
-
-/// The read side of a broadcast's catalog: yields updates as the set of tracks changes.
-typedef CatalogConsumer = MoqCatalogConsumer;
-
-/// Publishes lossy latest-value JSON snapshots.
-typedef JsonSnapshotProducer = MoqJsonSnapshotProducer;
-
-/// Consumes reconstructed latest-value JSON snapshots.
-typedef JsonSnapshotConsumer = MoqJsonSnapshotConsumer;
-
-/// Configures a lossy latest-value JSON track.
-typedef JsonSnapshotConfig = MoqJsonSnapshotConfig;
-
-/// Publishes a lossless stream of JSON records.
-typedef JsonStreamProducer = MoqJsonStreamProducer;
-
-/// Consumes a lossless stream of JSON records.
-typedef JsonStreamConsumer = MoqJsonStreamConsumer;
-
-/// Configures a lossless JSON stream track.
-typedef JsonStreamConfig = MoqJsonStreamConfig;
-
-/// A broadcast's catalog: its tracks and their properties, plus any application sections.
-typedef Catalog = MoqCatalog;
-
 /// A datagram-delivered frame, tagged with a per-track sequence number.
 typedef Datagram = MoqDatagram;
 
 /// A payload plus the timestamp it should be presented at.
 typedef Frame = MoqFrame;
-
-/// A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts.
-typedef MediaFrame = MoqMediaFrame;
-
-/// The catalog description of a video track, including whether the publisher recommends temporarily avoiding it.
-typedef Video = MoqVideo;
-
-/// Caller-provided catalog fields for a video track.
-typedef VideoHint = MoqVideoHint;
-
-/// A video codec, optional init bytes, a label, and catalog hints.
-typedef VideoInit = MoqVideoInit;
-
-/// Catalog properties shared by every video rendition; absent fields clear those properties.
-typedef VideoProperties = MoqVideoProperties;
-
-/// A single video codec an importer can parse.
-typedef VideoFormat = MoqVideoFormat;
-
-/// The catalog description of an audio track: codec, sample rate, channels, and container.
-typedef Audio = MoqAudio;
-
-/// An audio codec, its required init bytes, and an optional label.
-typedef AudioInit = MoqAudioInit;
-
-/// A single audio codec an importer can parse.
-typedef AudioFormat = MoqAudioFormat;
-
-/// A container that publishes its own tracks.
-typedef ContainerFormat = MoqContainerFormat;
-
-/// A container format and its leading bytes.
-typedef ContainerInit = MoqContainerInit;
-
-/// A width and height pair, in pixels.
-typedef Dimensions = MoqDimensions;
 
 /// Tunes how a track subscription is delivered: priority, group ordering, and range.
 typedef Subscription = MoqSubscription;

@@ -270,9 +270,20 @@ fn transport_config(config: &Transport) -> Result<moq_noq_proto::TransportConfig
 	transport.keep_alive_interval(config.keep_alive);
 	transport.max_concurrent_bidi_streams(streams);
 	transport.max_concurrent_uni_streams(streams);
-	transport.stream_receive_window(STREAM_WINDOW.into());
-	transport.receive_window(CONNECTION_WINDOW.into());
-	transport.send_window(CONNECTION_WINDOW.into());
+	// Unset keeps the credits this stack has always advertised. A value that
+	// cannot go on the wire is an error: clamping it would ignore what was set.
+	let stream_window = match config.stream_receive_window {
+		Some(window) => varint_window("stream receive window", window)?,
+		None => STREAM_WINDOW.into(),
+	};
+	let connection_window = match config.receive_window {
+		Some(window) => varint_window("receive window", window)?,
+		None => CONNECTION_WINDOW.into(),
+	};
+	let send_window = config.send_window.unwrap_or(u64::from(CONNECTION_WINDOW));
+	transport.stream_receive_window(stream_window);
+	transport.receive_window(connection_window);
+	transport.send_window(send_window);
 	transport.datagram_receive_buffer_size(Some(DATAGRAM_WINDOW));
 	transport.datagram_send_buffer_size(DATAGRAM_WINDOW);
 	// Every datagram in a GSO train is one SEGMENT, so the packet size is not
@@ -286,6 +297,12 @@ fn transport_config(config: &Transport) -> Result<moq_noq_proto::TransportConfig
 		Congestion::Delay => Arc::new(moq_noq_proto::congestion::Bbr3Config::default()),
 	});
 	Ok(transport)
+}
+
+/// A receive window on the wire is a QUIC varint. One that does not fit cannot
+/// be applied, so it is an error rather than a smaller window than was asked.
+fn varint_window(name: &str, value: u64) -> Result<moq_noq_proto::VarInt, Error> {
+	moq_noq_proto::VarInt::from_u64(value).map_err(|_| Error::Quic(format!("{name} out of range: {value}")))
 }
 
 /// ALPN protocols on the wire, which is a length-prefixed list of byte
@@ -372,5 +389,79 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 
 	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
 		self.0.signature_verification_algorithms.supported_schemes()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{CONNECTION_WINDOW, STREAM_WINDOW, Transport, transport_config};
+
+	/// noq keeps the windows private, but its `Debug` prints them. The leading
+	/// space keeps `receive_window` from matching `stream_receive_window`, and
+	/// the trailing comma keeps a shorter value from matching a longer one.
+	fn has_window(config: &moq_noq_proto::TransportConfig, name: &str, value: u64) -> bool {
+		format!("{config:?}").contains(&format!(" {name}: {value},"))
+	}
+
+	#[test]
+	fn windows_default_to_the_fixed_credits() {
+		let transport = transport_config(&Transport::default()).expect("defaults");
+		assert!(has_window(
+			&transport,
+			"stream_receive_window",
+			u64::from(STREAM_WINDOW)
+		));
+		assert!(has_window(&transport, "receive_window", u64::from(CONNECTION_WINDOW)));
+		assert!(has_window(&transport, "send_window", u64::from(CONNECTION_WINDOW)));
+	}
+
+	#[test]
+	fn configured_windows_replace_the_defaults() {
+		let config = Transport {
+			receive_window: Some(64 << 20),
+			stream_receive_window: Some(8 << 20),
+			send_window: Some(32 << 20),
+			..Default::default()
+		};
+
+		let transport = transport_config(&config).expect("windows");
+		assert!(has_window(&transport, "receive_window", 64 << 20));
+		assert!(has_window(&transport, "stream_receive_window", 8 << 20));
+		assert!(has_window(&transport, "send_window", 32 << 20));
+		assert!(!has_window(&transport, "receive_window", u64::from(CONNECTION_WINDOW)));
+	}
+
+	#[test]
+	fn the_largest_representable_windows_are_applied() {
+		let max_varint = (1u64 << 62) - 1;
+		// The send window is local bookkeeping, so it is not a varint.
+		let config = Transport {
+			receive_window: Some(max_varint),
+			stream_receive_window: Some(max_varint),
+			send_window: Some(u64::MAX),
+			..Default::default()
+		};
+
+		let transport = transport_config(&config).expect("max windows");
+		assert!(has_window(&transport, "receive_window", max_varint));
+		assert!(has_window(&transport, "stream_receive_window", max_varint));
+		assert!(has_window(&transport, "send_window", u64::MAX));
+	}
+
+	#[test]
+	fn a_receive_window_past_a_varint_is_an_error() {
+		let over = Transport {
+			receive_window: Some(1u64 << 62),
+			..Default::default()
+		};
+		let err = transport_config(&over).expect_err("past a varint");
+		assert!(err.to_string().contains("receive window"), "{err}");
+
+		let over = Transport {
+			stream_receive_window: Some(u64::MAX),
+			..Default::default()
+		};
+		let err = transport_config(&over).expect_err("past a varint");
+		assert!(err.to_string().contains("stream receive window"), "{err}");
 	}
 }

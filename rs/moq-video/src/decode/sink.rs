@@ -10,7 +10,7 @@
 //! plain task does not keep it: the future migrates between executor workers,
 //! so the apartment is opened on one and closed on another.
 //!
-//! macOS keeps decoding inline: VideoToolbox has no COM apartment to balance, so
+//! macOS and iOS keep decoding inline: VideoToolbox has no COM apartment to balance, so
 //! a thread would only add a hop, and its zero-copy `CVPixelBuffer` surface is
 //! `!Send` and could not cross to one anyway.
 
@@ -21,9 +21,9 @@ use moq_net::Timestamp;
 use super::decoder::Config;
 use crate::{Error, Frame};
 
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 use inline::Inner;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 use threaded::Inner;
 
 /// A [`Decoder`](super::Decoder) confined to one thread, driven from anywhere.
@@ -47,10 +47,10 @@ use threaded::Inner;
 /// the sink refuses every call after a
 /// cancelled one. Drop it and open another.
 ///
-/// macOS never refuses, because there is no thread to run ahead: the decoder runs
+/// Apple platforms never refuse, because there is no thread to run ahead: the decoder runs
 /// inline, so a dropped future either had not started the call or had already
 /// finished it. Write to the contract above regardless, or the same code loses
-/// frames off macOS.
+/// frames elsewhere.
 pub struct Sink(Inner);
 
 impl Sink {
@@ -84,7 +84,7 @@ impl Sink {
 	}
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 mod threaded {
 	use bytes::Bytes;
 	use hang::catalog::VideoConfig;
@@ -112,13 +112,13 @@ mod threaded {
 
 	/// Build a decoder and serve requests until the channel closes. Runs entirely
 	/// on the decode thread; see [`crate::worker`].
-	fn run(catalog: VideoConfig, config: Config, ready: Ready, mut requests: mpsc::UnboundedReceiver<Request>) {
+	fn run(catalog: VideoConfig, config: Config, ready: Ready<String>, mut requests: mpsc::UnboundedReceiver<Request>) {
 		let mut decoder = match Decoder::new(&catalog, &config) {
 			Ok(decoder) => decoder,
 			Err(err) => return ready.err(err),
 		};
 		// If the awaiting `open` was cancelled, give up before decoding.
-		if !ready.ok(decoder.name()) {
+		if !ready.ok(decoder.name().to_owned()) {
 			return;
 		}
 
@@ -143,7 +143,7 @@ mod threaded {
 	}
 
 	/// A [`Decoder`] running on its own thread. See the module docs.
-	pub struct Inner(Worker<Request>);
+	pub struct Inner(Worker<Request, String>);
 
 	impl Inner {
 		pub async fn open(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
@@ -157,7 +157,7 @@ mod threaded {
 		}
 
 		pub fn name(&self) -> &str {
-			self.0.name()
+			self.0.info()
 		}
 
 		pub async fn decode(
@@ -182,7 +182,7 @@ mod threaded {
 	}
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 mod inline {
 	use bytes::Bytes;
 	use hang::catalog::VideoConfig;
@@ -225,9 +225,9 @@ mod inline {
 	}
 }
 
-/// macOS is exempt by design: the inline sink decodes on the calling thread, so
+/// Apple platforms are exempt by design: the inline sink decodes on the calling thread, so
 /// there is no confinement to assert (see the module docs).
-#[cfg(all(test, not(target_os = "macos")))]
+#[cfg(all(test, not(apple)))]
 mod tests {
 	use std::collections::HashSet;
 	use std::sync::{Arc, Mutex};
@@ -262,7 +262,7 @@ mod tests {
 	/// Regression: the Windows decoder opens a COM apartment on the thread that
 	/// builds it and closes it on the thread that drops it. Every owner holds the
 	/// codec across `.await` in a spawned task (`decode::Consumer`'s read loop,
-	/// which libmoq drives; moq-transcode's feed and fetch pipeline), so the
+	/// which moq-c drives; moq-transcode's feed and fetch pipeline), so the
 	/// future migrates between executor workers and the apartment is opened on
 	/// one and closed on another.
 	#[test]

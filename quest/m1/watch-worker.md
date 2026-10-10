@@ -23,7 +23,7 @@ requirement.
 
 Public API: removing `renderer.out.frame`, moving `Sync`, and changing what
 `Player` and the composable classes accept are breaks to the published
-`@moq/watch`, so the PR targets `dev`. The `@moq/signals` bridge is additive.
+`@moq/watch`. The `@moq/signals` bridge is additive.
 Wire: none.
 
 Gate on the plan's jank harness and N-player sweep, both nightly.
@@ -35,5 +35,4 @@ Gate on the plan's jank harness and N-player sweep, both nightly.
 
 ## Related
 
-- [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - touches the same video decoder
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - changes the worklet this feeds

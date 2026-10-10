@@ -1,7 +1,5 @@
+import { Time } from "@moq/net";
 import type { AudioFrame } from "./capture";
-
-// Ramp over this long so a mute or a volume change doesn't click.
-const FADE = 0.2; // seconds
 
 /**
  * Scales PCM toward a target level, ramping across samples rather than jumping to it.
@@ -14,15 +12,26 @@ export class Gain {
 	#current: number;
 	#target: number;
 
+	// The ramp toward #target, in ms until the next frame converts it to samples at that frame's rate.
+	#fade: Time.Milli = Time.Milli.zero;
+	#remaining: number | undefined = 0;
+
 	/** Start at `initial`, avoiding a ramp from unity before the first frame. */
 	constructor(initial = 1) {
 		this.#current = initial;
 		this.#target = initial;
 	}
 
-	/** Set the level to ramp toward, where 1 is unity and 0 is silence. */
-	set(value: number): void {
+	/**
+	 * Ramp toward `value`, where 1 is unity and 0 is silence, reaching it `fade` after the next frame
+	 * starts. Every change takes the whole `fade` whatever its size, so a mute is silent on time.
+	 * A `fade` of 0 steps at once. Repeating the current target leaves a ramp in progress alone.
+	 */
+	set(value: number, fade: Time.Milli): void {
+		if (value === this.#target) return;
 		this.#target = value;
+		this.#fade = fade;
+		this.#remaining = undefined;
 	}
 
 	/**
@@ -36,14 +45,16 @@ export class Gain {
 		// Unity already, and staying there: every sample would be multiplied by 1.
 		if (this.#current === 1 && this.#target === 1) return frame;
 
-		// How far the level may move per sample to cover the full range in FADE seconds.
-		const step = 1 / (FADE * sampleRate);
+		this.#remaining ??= Math.round(Time.Milli.toSecond(this.#fade) * sampleRate);
+
 		const samples = frame.channels[0]?.length ?? 0;
 		const channels = frame.channels.map((channel) => new Float32Array(channel));
 
 		for (let index = 0; index < samples; index++) {
-			if (this.#current < this.#target) this.#current = Math.min(this.#target, this.#current + step);
-			else if (this.#current > this.#target) this.#current = Math.max(this.#target, this.#current - step);
+			// Spread what is left evenly over the samples left, landing on the target exactly.
+			if (this.#remaining <= 1) this.#current = this.#target;
+			else this.#current += (this.#target - this.#current) / this.#remaining;
+			if (this.#remaining > 0) this.#remaining--;
 
 			if (this.#current === 1) continue;
 			for (const channel of channels) channel[index] *= this.#current;

@@ -44,8 +44,7 @@ const varints = await write(async (w) => {
 });
 
 // Past 2^62-1 the range is per version: lite-07 carries the full 64 bits, which JS writes and
-// reads back and Rust (62-bit until its VarInt widens) must refuse loudly; lite-06's QUIC form
-// cannot express it, so JS refuses to write it, as Rust does.
+// Rust reads back; lite-06's QUIC form cannot express it, so JS refuses to write it, as Rust does.
 const huge = [1n << 62n, (1n << 64n) - 1n];
 let beyond: number[] = [];
 if (version === Version.DRAFT_07) {
@@ -72,6 +71,7 @@ const frames: { timestamp: bigint; payload: Uint8Array }[] = [];
 for (;;) {
 	const frame = await g.decodeMaybe(decode);
 	if (!frame) break;
+	if (!frame.timestamp) throw new Error("a lite-05+ frame decoded without its timestamp");
 	frames.push({ timestamp: BigInt(frame.timestamp.value), payload: frame.payload });
 }
 const zigzag = (d: bigint) => (d << 1n) ^ (d >> 63n);

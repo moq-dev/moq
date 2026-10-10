@@ -73,11 +73,6 @@ pub trait MediaSink: Send {
 	/// loop has already converted the timestamp to microseconds.
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()>;
 
-	/// Re-evaluate stall from source silence on every ingest track.
-	fn tick(&mut self) -> Result<()> {
-		Ok(())
-	}
-
 	/// Called once when the session ends with a genuine failure, so the sink can
 	/// abort its tracks with the real cause instead of a bare `Error::Dropped`.
 	fn abort(&mut self, err: moq_net::Error);
@@ -232,12 +227,7 @@ impl Session {
 			}
 
 			let timeout = match self.rtc.poll_output().map_err(Error::rtc)? {
-				Output::Timeout(t) => {
-					if let MediaRole::Ingest(sink) = &mut self.role {
-						sink.tick()?;
-					}
-					t
-				}
+				Output::Timeout(t) => t,
 				Output::Transmit(t) => {
 					let dst = crate::net::to_family(t.destination, socket_v6);
 					if let Err(err) = self.socket.send_to(&t.contents, dst).await {
@@ -592,13 +582,6 @@ impl Bridges {
 		Ok(())
 	}
 
-	pub fn tick(&mut self) -> Result<()> {
-		for bridge in self.inner.values_mut() {
-			bridge.tick()?;
-		}
-		Ok(())
-	}
-
 	/// Abort every bridge's track with `err` so subscribers see the real cause
 	/// rather than a bare `Error::Dropped`.
 	///
@@ -629,7 +612,7 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConf
 		.set_send_buffer_video(EGRESS_SEND_BUFFER_VIDEO);
 	for c in codecs {
 		config = match c {
-			Codec::Opus => config.enable_opus(true),
+			Codec::Opus => config.enable_opus(true, false),
 			Codec::H264 => config.enable_h264(true),
 			Codec::H265 => config.enable_h265(true),
 			Codec::Vp8 => config.enable_vp8(true),

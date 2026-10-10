@@ -26,12 +26,12 @@
 //! ## Zero-copy
 //!
 //! A hardware-decoded frame is imported by aliasing the decoder's surface as a
-//! texture rather than copying it: `CVMetalTextureCache` on macOS for the
+//! texture rather than copying it: `CVMetalTextureCache` on macOS and iOS for the
 //! `PixelBuffer` variant of [`Surface`](crate::Surface), and Vulkan external
 //! memory on Linux for DMA-BUFs, packed or planar. A planar one is imported a
 //! memory plane at a time, since Vulkan will not take an NV12 or YU12 buffer as
 //! a single image, and the shader was already sampling planes.
-// `PixelBuffer` is deliberately not a doc link: the variant is macOS-only, so a
+// `PixelBuffer` is deliberately not a doc link: the variant is Apple-only, so a
 // link to it fails the `-D warnings` rustdoc build on every other platform.
 //!
 //! Linux callers must request
@@ -51,7 +51,7 @@ mod source;
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 mod dmabuf;
 
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 mod metal;
 
 pub use renderer::{Config, Renderer};

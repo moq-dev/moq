@@ -15,13 +15,35 @@ Two binaries and two plugins ship prebuilt:
 | OBS plugin | | [OBS Studio](/bin/obs) output and source |
 
 Package names match the executables everywhere except crates.io, where the
-crate is `moq-cli`. Existing Homebrew
-installs migrate through formula renames; apt upgrades use transitional
-packages, and dnf replaces the old packages. The `moqdev/moq-cli` Docker image
-and the `#moq-cli` flake package stop at 0.12.2 and now exit with an error
-naming `moqdev/moq` and `#moq`.
+crate is `moq-cli`. The CLI was once packaged as `moq-cli`; that Docker image
+and flake output stop at 0.12.2, so switch to `moqdev/moq` and `#moq`.
+`moq auth` mints keys and tokens, so installing `moq` covers that too.
 
-Use `moq auth` for keys and tokens; installing `moq` includes it.
+## macOS and Linux
+
+The quickest way to install `moq`:
+
+```bash
+curl -fsSL https://moq.sh | sh
+```
+
+It installs the newest `moq` release into `~/.local/bin`, without sudo or Rust,
+on macOS (Apple Silicon) and Linux (x86\_64, aarch64, glibc 2.34+). It checks
+the download against the release's `SHA256SUMS` and never edits your shell
+profile; it prints the `PATH` line to add if needed. Run it again to upgrade.
+Pass options after `sh -s --`:
+
+```bash
+# A specific version, e.g. to pin or downgrade
+curl -fsSL https://moq.sh | sh -s -- --version 0.14.0
+
+# Another directory, required when HOME is unset
+curl -fsSL https://moq.sh | sh -s -- --dir ~/bin
+```
+
+It refuses to overwrite a `moq` that a package manager symlinked, so upgrade
+that one with its package manager. To uninstall, delete the binary:
+`rm ~/.local/bin/moq`. `moq-relay` and the plugins use the methods below.
 
 ## Any platform
 
@@ -36,7 +58,8 @@ brew install moq-dev/tap/moq-relay moq-dev/tap/moq
 nix run github:moq-dev/moq/release#moq-relay -- relay.toml
 nix run github:moq-dev/moq/release#moq -- --help
 
-# Docker (linux/amd64 and linux/arm64)
+# Docker (linux/amd64 and linux/arm64). The image is scratch (the package
+# closure only) and has no shell.
 docker run -p 4443:4443/udp -p 4443:4443/tcp -v "$PWD/relay.toml:/app/relay.toml:ro" moqdev/moq-relay /app/relay.toml
 docker run -i moqdev/moq --help
 ```

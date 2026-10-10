@@ -7,12 +7,12 @@
 /// Unlike Message Parameters which have a count prefix, Track Properties
 /// have no count and are read until the end of the message payload.
 ///
-/// TIMESCALE, DEFAULT_PUBLISHER_PRIORITY, and DEFAULT_PUBLISHER_GROUP_ORDER are understood;
+/// MAX_CACHE_DURATION, TIMESCALE, DEFAULT_PUBLISHER_PRIORITY, and DEFAULT_PUBLISHER_GROUP_ORDER are understood;
 /// the rest are parsed and discarded.
-use bytes::Buf;
+use std::time::Duration;
 
 use crate::Timescale;
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::coding::{DecodeError, Decoder, EncodeError, Encoder};
 
 use super::{GroupOrder, Version};
 
@@ -37,6 +37,9 @@ const DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
 /// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Properties {
+	/// The publisher's cache window; omission leaves retention unconstrained.
+	pub max_cache_duration: Option<Duration>,
+
 	/// The track's Timescale, which declares the units of every object Timestamp on it.
 	///
 	/// `None` declares no timeline, so the subscriber times objects by arrival.
@@ -53,37 +56,48 @@ pub struct Properties {
 }
 
 impl Properties {
+	/// Whether [`Self::encode`] writes a TIMESCALE on this version.
+	///
+	/// Drafts 14-16 do not. 14 and 15 have no properties block, and 16's Track Extensions
+	/// predate the TIMESCALE registration; an older peer rejects trailing bytes it does not
+	/// parse. A Timestamp on those drafts would have no units. Draft-16 is still read, so a
+	/// peer that sends the block is understood.
+	pub(crate) fn sends_timescale(version: Version) -> bool {
+		!matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+	}
+
 	/// Write the block, which is the final field of the message: no count and no length,
 	/// so the caller must not append anything after it.
 	///
 	/// Properties are serialized in ascending order by type, delta-encoded.
-	pub fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		// Draft-16 carries the same block under the name Track Extensions, but we only write it
-		// from draft-17 on: a draft-16 peer running an older build of this crate rejects any
-		// trailing bytes it doesn't parse, and draft-16 never registered TIMESCALE (0x08). We
-		// still read the block on draft-16, so a peer that sends one is understood.
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Ok(()),
-			_ => {}
+	pub fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		if !Self::sends_timescale(version) {
+			return Ok(());
 		}
 
 		let mut prev_type = 0;
 
+		if let Some(age) = self.max_cache_duration {
+			w.varint(4u64)?;
+			w.varint(u64::try_from(age.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+			prev_type = 4;
+		}
+
 		if let Some(timescale) = self.timescale {
-			TIMESCALE.encode(w, version)?;
-			u64::from(timescale).encode(w, version)?;
+			w.varint(TIMESCALE - prev_type)?;
+			w.varint(u64::from(timescale))?;
 			prev_type = TIMESCALE;
 		}
 
 		if let Some(priority) = self.priority {
-			(DEFAULT_PUBLISHER_PRIORITY - prev_type).encode(w, version)?;
-			u64::from(priority).encode(w, version)?;
+			w.varint(DEFAULT_PUBLISHER_PRIORITY - prev_type)?;
+			w.varint(u64::from(priority))?;
 			prev_type = DEFAULT_PUBLISHER_PRIORITY;
 		}
 
 		if let Some(group_order) = self.group_order {
-			(DEFAULT_PUBLISHER_GROUP_ORDER - prev_type).encode(w, version)?;
-			u64::from(u8::from(group_order)).encode(w, version)?;
+			w.varint(DEFAULT_PUBLISHER_GROUP_ORDER - prev_type)?;
+			w.varint(u64::from(u8::from(group_order)))?;
 		}
 
 		Ok(())
@@ -99,7 +113,7 @@ impl Properties {
 	/// fatal, which is what lets a relay forward properties it does not implement.
 	///
 	/// Drafts before 16 have no such block, so this reads nothing and leaves the buffer alone.
-	pub fn decode<R: Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	pub fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let mut properties = Self::default();
 
 		// Draft-16 calls the block Track Extensions, draft-17+ Track Properties. Same encoding,
@@ -112,12 +126,12 @@ impl Properties {
 		let mut prev_type: u64 = 0;
 		let mut i: u64 = 0;
 
-		while r.has_remaining() {
+		while !r.is_empty() {
 			if i >= MAX_PROPERTIES {
 				return Err(DecodeError::TooMany);
 			}
 
-			let delta = u64::decode(r, version)?;
+			let delta = r.varint()?;
 			let abs = if i == 0 {
 				delta
 			} else {
@@ -128,8 +142,9 @@ impl Properties {
 
 			if abs % 2 == 0 {
 				// Even type: single varint value
-				let value = u64::decode(r, version)?;
+				let value = r.varint()?;
 				match abs {
+					4 => properties.max_cache_duration = Some(Duration::from_millis(value)),
 					TIMESCALE => {
 						// A zero timescale is invalid; treat it as no declaration rather than
 						// failing the whole message over one property we could have ignored.
@@ -151,14 +166,11 @@ impl Properties {
 				}
 			} else {
 				// Odd type: length-prefixed bytes
-				let len = u64::decode(r, version)? as usize;
+				let len = usize::try_from(r.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
 				if len > MAX_KVP_VALUE_LEN {
 					return Err(DecodeError::BoundsExceeded);
 				}
-				if r.remaining() < len {
-					return Err(DecodeError::Short);
-				}
-				r.advance(len);
+				r.slice(len)?;
 			}
 		}
 
@@ -169,14 +181,12 @@ impl Properties {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::coding::Encode;
-	use bytes::BytesMut;
 
 	#[test]
 	fn test_skip_empty_properties() {
 		let mut buf = bytes::Bytes::new();
 		assert_eq!(
-			Properties::decode(&mut buf, Version::Draft17).unwrap(),
+			crate::coding::decode_buf(&mut buf, Version::Draft17, Properties::decode).unwrap(),
 			Properties::default()
 		);
 	}
@@ -184,59 +194,65 @@ mod tests {
 	#[test]
 	fn test_skip_varint_property() {
 		// Even type (0x02 = DELIVERY_TIMEOUT), varint value
-		let mut buf = BytesMut::new();
-		0x02u64.encode(&mut buf, Version::Draft17).unwrap(); // delta type
-		5000u64.encode(&mut buf, Version::Draft17).unwrap(); // value
-		let mut bytes = buf.freeze();
-		Properties::decode(&mut bytes, Version::Draft17).unwrap();
-		assert!(!bytes.has_remaining());
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(0x02u64).unwrap(); // delta type
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(5000u64).unwrap(); // value
+		let mut bytes = bytes::Bytes::from(buf);
+		crate::coding::decode_buf(&mut bytes, Version::Draft17, Properties::decode).unwrap();
+		assert!(bytes.is_empty());
 	}
 
 	#[test]
 	fn test_skip_bytes_property() {
 		// Odd type (0x0B = IMMUTABLE_PROPERTIES), length-prefixed
-		let mut buf = BytesMut::new();
-		0x0Bu64.encode(&mut buf, Version::Draft17).unwrap(); // delta type
-		3u64.encode(&mut buf, Version::Draft17).unwrap(); // length
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(0x0Bu64).unwrap(); // delta type
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(3u64).unwrap(); // length
 		buf.extend_from_slice(&[0x01, 0x02, 0x03]); // value bytes
-		let mut bytes = buf.freeze();
-		Properties::decode(&mut bytes, Version::Draft17).unwrap();
-		assert!(!bytes.has_remaining());
+		let mut bytes = bytes::Bytes::from(buf);
+		crate::coding::decode_buf(&mut bytes, Version::Draft17, Properties::decode).unwrap();
+		assert!(bytes.is_empty());
 	}
 
 	#[test]
 	fn test_skip_multiple_properties() {
-		let mut buf = BytesMut::new();
+		let mut buf = Vec::new();
 		// First: type 0x02 (even), varint value
-		0x02u64.encode(&mut buf, Version::Draft17).unwrap();
-		1000u64.encode(&mut buf, Version::Draft17).unwrap();
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(0x02u64).unwrap();
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(1000u64).unwrap();
 		// Second: delta = 0x02 → abs type 0x04 (even), varint value
-		0x02u64.encode(&mut buf, Version::Draft17).unwrap();
-		2000u64.encode(&mut buf, Version::Draft17).unwrap();
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(0x02u64).unwrap();
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(2000u64).unwrap();
 		// Third: delta = 0x07 → abs type 0x0B (odd), length-prefixed
-		0x07u64.encode(&mut buf, Version::Draft17).unwrap();
-		2u64.encode(&mut buf, Version::Draft17).unwrap();
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(0x07u64).unwrap();
+		Encoder::new(&mut buf, Version::Draft17.into()).varint(2u64).unwrap();
 		buf.extend_from_slice(&[0xAA, 0xBB]);
 
-		let mut bytes = buf.freeze();
-		Properties::decode(&mut bytes, Version::Draft17).unwrap();
-		assert!(!bytes.has_remaining());
+		let mut bytes = bytes::Bytes::from(buf);
+		crate::coding::decode_buf(&mut bytes, Version::Draft17, Properties::decode).unwrap();
+		assert!(bytes.is_empty());
 	}
 
 	#[test]
 	fn test_round_trip() {
 		let properties = Properties {
+			max_cache_duration: None,
 			timescale: Some(Timescale::MICRO),
 			priority: Some(37),
 			group_order: Some(GroupOrder::Descending),
 		};
 
-		let mut buf = BytesMut::new();
-		properties.encode(&mut buf, Version::Draft18).unwrap();
+		let mut buf = Vec::new();
+		properties
+			.encode(&mut Encoder::new(&mut buf, Version::Draft18.into()), Version::Draft18)
+			.unwrap();
 
-		let mut bytes = buf.freeze();
-		assert_eq!(Properties::decode(&mut bytes, Version::Draft18).unwrap(), properties);
-		assert!(!bytes.has_remaining());
+		let mut bytes = bytes::Bytes::from(buf);
+		assert_eq!(
+			crate::coding::decode_buf(&mut bytes, Version::Draft18, Properties::decode).unwrap(),
+			properties
+		);
+		assert!(bytes.is_empty());
 	}
 
 	#[test]
@@ -250,11 +266,11 @@ mod tests {
 			Version::Draft21,
 			Version::Draft22,
 		] {
-			let mut buf = BytesMut::new();
-			0x0eu64.encode(&mut buf, version).unwrap();
-			256u64.encode(&mut buf, version).unwrap();
+			let mut buf = Vec::new();
+			Encoder::new(&mut buf, version.into()).varint(0x0eu64).unwrap();
+			Encoder::new(&mut buf, version.into()).varint(256u64).unwrap();
 			assert!(matches!(
-				Properties::decode(&mut buf.freeze(), version),
+				crate::coding::decode_buf(&mut bytes::Bytes::from(buf), version, Properties::decode),
 				Err(DecodeError::InvalidValue)
 			));
 		}
@@ -264,26 +280,46 @@ mod tests {
 	/// the "publisher decides" it means in the draft-14 fields.
 	#[test]
 	fn test_rejects_zero_group_order() {
-		let mut buf = BytesMut::new();
-		0x22u64.encode(&mut buf, Version::Draft18).unwrap();
-		0u64.encode(&mut buf, Version::Draft18).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Draft18.into()).varint(0x22u64).unwrap();
+		Encoder::new(&mut buf, Version::Draft18.into()).varint(0).unwrap();
 
-		let mut bytes = buf.freeze();
-		assert!(Properties::decode(&mut bytes, Version::Draft18).is_err());
+		let mut bytes = bytes::Bytes::from(buf);
+		assert!(crate::coding::decode_buf(&mut bytes, Version::Draft18, Properties::decode).is_err());
 	}
 
 	/// Draft-16 carries the same block under the name Track Extensions. We don't write one
 	/// there, but a peer that does must be understood rather than faulted.
 	#[test]
 	fn test_decodes_draft16_track_extensions() {
-		let mut buf = BytesMut::new();
-		0x22u64.encode(&mut buf, Version::Draft16).unwrap();
-		2u64.encode(&mut buf, Version::Draft16).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Draft16.into()).varint(0x22u64).unwrap();
+		Encoder::new(&mut buf, Version::Draft16.into()).varint(2u64).unwrap();
 
-		let mut bytes = buf.freeze();
-		let properties = Properties::decode(&mut bytes, Version::Draft16).unwrap();
+		let mut bytes = bytes::Bytes::from(buf);
+		let properties = crate::coding::decode_buf(&mut bytes, Version::Draft16, Properties::decode).unwrap();
 		assert_eq!(properties.group_order, Some(GroupOrder::Descending));
-		assert!(!bytes.has_remaining());
+		assert!(bytes.is_empty());
+	}
+
+	/// Drafts 14-16 cannot carry TIMESCALE, so the block (and any Timestamp that would
+	/// depend on it) stays off the wire. Draft-17 is the first version that writes it.
+	#[test]
+	fn drafts_14_through_16_write_no_timescale() {
+		let properties = Properties {
+			max_cache_duration: None,
+			timescale: Some(Timescale::MILLI),
+			priority: None,
+			group_order: None,
+		};
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+			let mut buf = Vec::new();
+			properties
+				.encode(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
+			assert_eq!(!buf.is_empty(), Properties::sends_timescale(version), "{version}");
+		}
 	}
 
 	/// The group order property is delta-encoded against the timescale that precedes it,
@@ -291,16 +327,22 @@ mod tests {
 	#[test]
 	fn test_round_trip_group_order_only() {
 		let properties = Properties {
+			max_cache_duration: None,
 			timescale: None,
 			priority: None,
 			group_order: Some(GroupOrder::Descending),
 		};
 
-		let mut buf = BytesMut::new();
-		properties.encode(&mut buf, Version::Draft18).unwrap();
+		let mut buf = Vec::new();
+		properties
+			.encode(&mut Encoder::new(&mut buf, Version::Draft18.into()), Version::Draft18)
+			.unwrap();
 
-		let mut bytes = buf.freeze();
-		assert_eq!(Properties::decode(&mut bytes, Version::Draft18).unwrap(), properties);
-		assert!(!bytes.has_remaining());
+		let mut bytes = bytes::Bytes::from(buf);
+		assert_eq!(
+			crate::coding::decode_buf(&mut bytes, Version::Draft18, Properties::decode).unwrap(),
+			properties
+		);
+		assert!(bytes.is_empty());
 	}
 }

@@ -4,7 +4,6 @@
  * @module
  */
 import { type Dispose, race } from "@moq/signals";
-import { isActive } from "../announced.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
@@ -65,7 +64,15 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 					if (!event) break;
 					if (!originWire.accepts(event.prefix)) continue;
 
-					if (isActive(event.kind)) {
+					if (event.kind === "restart") {
+						// Another publisher instance: a fresh route, so nothing resolved through the
+						// old one is joined again. Inserted before the old one leaves, so local
+						// readers see one restart rather than an end and a start.
+						const handle = originWire.receive(event.prefix, event.route);
+						inserted.get(event.prefix)?.close();
+						inserted.set(event.prefix, handle);
+						void drive(handle, conn);
+					} else if (event.kind !== "end") {
 						const existing = inserted.get(event.prefix);
 						if (existing) {
 							existing.update(event.route);
@@ -110,8 +117,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
  *
  * Every session answers, discovery or not: subscribing to an unannounced path is always
  * legal, and a missing broadcast surfaces as a reset on the first track. The first session
- * to answer wins; when this session dies its answers are withdrawn so a later session
- * answers again, which is what makes a request span reconnects.
+ * to answer wins; when this session dies its answers are withdrawn, and the requests they
+ * resolved end with it, since a later session is another publisher instance.
  *
  * A path the table already routes is left alone. A request resolves to the table's route over
  * any blind answer, so answering one would only park a handle nothing reads.
@@ -147,7 +154,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		if (!map || dead) break;
 
 		for (const [path, slot] of map) {
-			if (slot.blind === 0) continue;
+			if (!table.blind(slot)) continue;
 			if (answered.get(path)?.slot === slot || slot.answer !== undefined) continue;
 			if (table.routes(path)) continue;
 			const withdraw = table.answer(path, session.consume(path));
@@ -158,7 +165,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		// A replaced slot counts as withdrawn: the answer we hold belongs to the slot that
 		// went away, not to whatever now occupies the path.
 		for (const [path, entry] of [...answered]) {
-			if (map.get(path) === entry.slot && entry.slot.blind > 0) continue;
+			if (map.get(path) === entry.slot && table.blind(entry.slot)) continue;
 			answered.delete(path);
 			entry.withdraw();
 		}

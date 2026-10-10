@@ -26,27 +26,29 @@ SPM resolves `MoqFFI` (and its prebuilt `MoqFFI.xcframework`, attached to the ma
 ```swift
 import Moq
 
-let client = Client()
+let client = try Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 // session.publish and session.consume are always populated: by whatever
-// origin you wired via setPublish / setConsume before connect, or by a fresh
+// origin you passed as Client(publish:consume:), or by a fresh
 // auto-created one. The duplex no-config path (the typical client) shares one
 // origin between both sides.
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
-for try await announcement in announced {
+for try await event in announced {
+    // `.update` reprices a route and `.end` retracts it.
+    guard case .start(let announcement) = event else { continue }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
     print("captures \(announcement.captures ?? [])")
 
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
-    let catalog = try await broadcast.subscribeCatalog()
+    let catalog = try await Media.CatalogConsumer.subscribe(broadcast: broadcast)
     for try await update in catalog {
         print("catalog: \(update)")
     }
 }
 
-session.shutdown()
+try await session.shutdown()
 ```
 
 To publish through the auto-created origin:
@@ -57,13 +59,13 @@ let broadcast = try session.publish.createBroadcast(path: "my-stream")
 try broadcast.announce() // unannounced broadcasts are invisible
 ```
 
-Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` is an alias for `cancel(code: 0)` (code 0 means "no error").
+Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `try await session.shutdown()` drains finished tracks within one second and throws on delivery failure. `cancel(code: 0)` remains immediate.
 
 A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Audio codecs are objects with constructors (`AudioCodec.opus()`).
 
 ## API shape
 
-The wrapper fully wraps every stateful handle (`Client`, `Session`, `BroadcastProducer`, `TrackConsumer`, …) and re-exports the plain data records/enums under de-prefixed names via typealias (`Frame`, `Catalog`, `Audio`, `Container`, …). Because the records are typealiased, new fields on the `moq-ffi` side flow through automatically; only new FFI *methods* need a matching wrapper method.
+The wrapper fully wraps every stateful handle (`Client`, `Session`, `BroadcastProducer`, `TrackConsumer`, …) and re-exports the plain data records/enums under de-prefixed names via typealias (`Frame`, `Media.Catalog`, `Media.Audio`, `Media.Container`, …). Because the records are typealiased, new fields on the `moq-ffi` side flow through automatically; only new FFI *methods* need a matching wrapper method.
 
 Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` works directly. `TrackConsumer` iterates groups in sequence order; use its `groupsAsArrived` property for arrival order.
 
@@ -75,11 +77,14 @@ and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped
 Datagrams require a datagram-capable transport and lite-05 or newer moq-lite, or moq-transport;
 pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
-JSON tracks carry your own `Codable` types with the framing handled for you. You opt into one of two
-distinct modes: `publishJsonSnapshot`/`subscribeJsonSnapshot` (lossy latest-value, a subscriber only
-sees the newest value) or `publishJsonStream`/`subscribeJsonStream` (lossless append-log, every record
-preserved in order). Values encode/decode at the boundary with `JSONEncoder`/`JSONDecoder`; the consumer
-is an `AsyncSequence` of the decoded type. Pass matching `compression` on both sides.
+JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and carry your own
+`Codable` types with the framing handled for you. Each type wraps a track: a producer takes over a
+`TrackProducer` and advertises it in the broadcast's catalog, and a consumer takes over a
+`TrackConsumer`. You opt into one of two distinct modes: `Json.SnapshotProducer`/`Json.SnapshotConsumer`
+(lossy latest-value, a subscriber only sees the newest value) or `Json.StreamProducer`/`Json.StreamConsumer`
+(lossless append-log, every record preserved in order). Values encode/decode at the boundary with
+`JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Pass matching
+`compression` on both sides.
 
 ## Local development
 
@@ -108,7 +113,7 @@ Edit the templates when changing a released manifest; never copy the monolithic 
 Two workflows, mirroring the two packages:
 
 - **`release-swift-ffi.yml`** fires on each `moq-ffi-v*` tag (pushed by release-plz). It builds the per-target libs + bindings, assembles the `MoqFFI` package via `package-ffi.sh`, attaches `MoqFFI.xcframework.zip` to the `moq-ffi-v*` GitHub Release, verifies the staged package resolves (`verify-ffi.sh`), and mirrors it to [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi) on a bare-semver tag (`publish-ffi.sh`).
-- **`release-swift-lib.yml`** fires on push to `main`/`dev` when `swift/VERSION` (or the wrapper sources) change. It reads `swift/VERSION`, checks whether that tag already exists on the mirror (the release gate, the same model release-plz uses for crates), assembles the wrapper via `package.sh` (substituting the `moq-ffi` pin from `rs/moq-ffi/Cargo.toml`), verifies it resolves against the published `MoqFFI` (`verify.sh`), and publishes to [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) only when the version is new (`publish.sh`).
+- **`release-swift-lib.yml`** fires on push to `release` when `swift/VERSION` (or the wrapper sources) change. It reads `swift/VERSION`, checks whether that tag already exists on the mirror (the release gate, the same model release-plz uses for crates), assembles the wrapper via `package.sh` (substituting the `moq-ffi` pin from `rs/moq-ffi/Cargo.toml`), verifies it resolves against the published `MoqFFI` (`verify.sh`), and publishes to [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) only when the version is new (`publish.sh`).
 
 Both `verify` jobs build a throwaway SPM consumer against the staged package before any mirror push, so a manifest SPM cannot resolve never reaches consumers. The `moq-bot` GitHub App mints a fresh installation token per run, scoped to the relevant mirror.
 

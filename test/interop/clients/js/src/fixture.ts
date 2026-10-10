@@ -50,6 +50,7 @@ export class Fixture {
 	readonly #audio: AudioContext;
 	readonly #frameId = new Signal(-1);
 	readonly #audioState = new Signal<AudioContextState>("suspended");
+	readonly #videoEnabled = new Signal(true);
 	#timer: number | undefined;
 
 	constructor(host: HTMLElement, url: string, name: string, fault: Fault) {
@@ -98,7 +99,7 @@ export class Fixture {
 		const video = new Publish.Video.Encoder("video", {
 			broadcast,
 			capture,
-			enabled: true,
+			enabled: this.#videoEnabled,
 			config: { frameRate: Pattern.FPS, keyframeInterval: KEYFRAME_INTERVAL, maxBitrate: MAX_BITRATE },
 		});
 		this.#signals.cleanup(() => video.close());
@@ -160,6 +161,7 @@ export class Fixture {
 				videoActive: effect.get(video.out.active),
 				audioActive: effect.get(audio.out.active),
 				encodedFrames: effect.get(video.out.stats).frames,
+				videoEnabled: effect.get(video.out.catalog)?.enabled !== false,
 			};
 			host.dataset.interopFixture = JSON.stringify(state);
 		});
@@ -183,8 +185,8 @@ export class Fixture {
 		this.#signals.interval(schedule, (SCHEDULE_AHEAD * 1000) / 4);
 	}
 
-	// Paint and emit one frame per pattern tick. The counter comes from the audio clock rather than
-	// the timer, so a late or coalesced tick skips a frame instead of drifting the two apart.
+	// Paint and request capture per pattern tick. Capture and encoding can finish later. The counter
+	// comes from the audio clock, so a coalesced tick skips a frame instead of drifting the two apart.
 	#runPicture(ctx: CanvasRenderingContext2D, track: CanvasSource, start: number, fault: Fault): void {
 		let painted = -1;
 
@@ -202,12 +204,17 @@ export class Fixture {
 		};
 
 		// Twice the frame rate: a tick that lands between frames is a no-op, and one that lands late
-		// still emits the frame the clock is on.
+		// still requests capture of the frame the clock is on.
 		this.#timer = self.setInterval(tick, 1000 / Pattern.FPS / 2);
 		this.#signals.cleanup(() => {
 			if (this.#timer !== undefined) self.clearInterval(this.#timer);
 			this.#timer = undefined;
 		});
+	}
+
+	/** Enable or disable the video rendition, which stays in the catalog either way. */
+	setVideo(enabled: boolean): void {
+		this.#videoEnabled.set(enabled);
 	}
 
 	/** Stop publishing and release the capture, audio graph, and session. */

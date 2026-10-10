@@ -10,8 +10,9 @@ tests live in each language's own justfile.
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser audio playout stays within budget over an impaired path |
 | [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
+| video | `just test video` | the `@moq/video` renderer paints through WebGPU and falls back to Canvas2D after losing the GPU |
 
-All five stand up a `moq-relay` and clients, so two of them running at once, or
+The first five stand up a `moq-relay` and clients, so two of them running at once, or
 the same one running from two worktrees, would otherwise collide. `lib/harness.sh`
 is what keeps them apart.
 

@@ -9,7 +9,8 @@
 //! - A fetch of a specific group (`requested_group`) fetches that same group
 //!   from the source and transcodes just that group with a fresh encoder. A
 //!   fetch that starts mid-group is refused: a fresh encode's frames are only
-//!   valid after the head that same encode produced.
+//!   valid after the head that same encode produced. A fetch every caller
+//!   leaves before it is accepted is dropped, so a later one starts clean.
 //!
 //! Output groups mirror the source group sequence numbers 1:1, so a fetch for
 //! output group N maps to source group N and a player switching renditions
@@ -64,11 +65,13 @@ impl Retire {
 #[derive(Clone)]
 pub(crate) struct Rung {
 	pub info: Resolved,
-	/// The source media track, for group fetches (not yet subscribed).
-	pub source: moq_net::track::Consumer,
+	/// The source media track's name, looked up per group fetch rather than held:
+	/// a held track handle is interest in the source all the way to its publisher,
+	/// and an idle rung has none.
+	pub source: String,
 	/// The shared live decode of the source, for the live path.
 	pub feed: Feed,
-	/// The source broadcast, to notice it closing while idle.
+	/// The source broadcast, to fetch from and to notice it closing while idle.
 	pub broadcast: moq_net::broadcast::Consumer,
 	/// The source rendition's catalog entry (codec + container).
 	pub config: VideoConfig,
@@ -185,9 +188,9 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				// The output track closed; nothing more to serve.
 				return Ok(Ended::Closed);
 			},
-			err = rung.broadcast.closed() => {
+			() = rung.broadcast.closed() => {
 				// The source went away while idle; end the rung with it.
-				producer.clone().abort(err)?;
+				producer.clone().abort(moq_net::Error::Dropped)?;
 				return Ok(Ended::Closed);
 			}
 			() = retire.fired() => {
@@ -478,10 +481,14 @@ fn spawn_fetch(
 
 /// Transcode one specifically requested group, fetching it from the source.
 ///
-/// Every early exit rejects the request with a real error: dropping a
-/// `GroupRequest` auto-rejects with [`moq_net::Error::Dropped`], which reads as
-/// "the handler vanished" and hides the actual decode/encode/source failure from
-/// the waiting consumer.
+/// A failure while someone still wants the group rejects the request: a source
+/// fetch error passes through, and a pipeline or container error rejects with
+/// [`moq_net::Error::Cancel`]. Dropping it would auto-reject with [`moq_net::Error::Dropped`], which
+/// reads as "the handler vanished" and hides the actual failure. Once nobody
+/// wants the group, the request is dropped instead: the last caller already
+/// withdrew the attempt, and accepting afterwards would cache the group under a
+/// fresh request for the same sequence, whose own accept is then
+/// [`moq_net::Error::Duplicate`].
 async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error> {
 	// A fresh encode of this group need not match the bytes the reader's head
 	// came from (the live encoder, or an earlier fetch), so its tail cannot
@@ -497,24 +504,57 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 		return Ok(());
 	}
 
-	let options = moq_net::group::Fetch::default().with_priority(request.priority());
-	let mut source = match rung.source.fetch_group(request.sequence(), options).await {
-		Ok(source) => source,
+	// Watched until accept. After that the callers resolve from the cache, and
+	// this handle going unused is them picking the group up, not abandoning it.
+	let demand = request.demand();
+
+	let track = match rung.broadcast.track(&rung.source) {
+		Ok(track) => track,
 		Err(err) => {
 			request.reject(err.clone());
 			return Err(err.into());
 		}
 	};
+	let options = moq_net::group::Fetch::default().with_priority(request.priority());
+	let mut source = tokio::select! {
+		biased;
+		_ = demand.unused() => return abandon(request),
+		source = track.fetch_group(request.sequence(), options) => match source {
+			Ok(source) => source,
+			Err(err) => {
+				request.reject(err.clone());
+				return Err(err.into());
+			}
+		},
+	};
 
 	// A fresh pipeline per fetched group: groups are independently decodable,
-	// so the encoder starts clean at the group's keyframe.
-	let (pipeline, container) = match rung.pipeline().await.and_then(|p| rung.container().map(|c| (p, c))) {
-		Ok(built) => built,
+	// so the encoder starts clean at the group's keyframe. The open is not
+	// raced against demand: a threaded codec keeps opening its session after
+	// the future drops, so cancelling it would free this fetch's slot while
+	// that session still exists. The check before accept covers a caller who
+	// leaves meanwhile.
+	let pipeline = match rung.pipeline().await {
+		Ok(pipeline) => pipeline,
 		Err(err) => {
 			request.reject(moq_net::Error::Cancel);
 			return Err(err);
 		}
 	};
+
+	let container = match rung.container() {
+		Ok(container) => container,
+		Err(err) => {
+			request.reject(moq_net::Error::Cancel);
+			return Err(err);
+		}
+	};
+
+	// Accepting is what publishes the group. One last look, so a caller who
+	// left while the pipeline was opening does not race a fresh request.
+	if !demand.is_used() {
+		return abandon(request);
+	}
 
 	let output = match request.accept(None) {
 		Ok(output) => output,
@@ -525,6 +565,17 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 	// bills the rendition once rather than twice.
 	let active = rung.active.attach(&rung.info);
 	transcode_group(pipeline, &container, &mut source, output, &active).await?;
+	Ok(())
+}
+
+/// Drop a fetch nobody is waiting on.
+///
+/// Dropping rejects with [`moq_net::Error::Dropped`]. No caller is left to see
+/// it, and keeping the request would let this encode publish the group a fresh
+/// request is about to serve.
+fn abandon(request: moq_net::group::Request) -> Result<(), Error> {
+	tracing::debug!(sequence = request.sequence(), "dropping a fetch nobody wants");
+	drop(request);
 	Ok(())
 }
 
@@ -767,10 +818,12 @@ mod tests {
 		let good = moq_video::encode::Encoded::new(
 			Bytes::from_static(b"hello"),
 			moq_net::Timestamp::from_micros(0).unwrap(),
+			true,
 		);
 		let bad = moq_video::encode::Encoded::new(
 			Bytes::from_static(b"world"),
 			moq_net::Timestamp::from_secs(1 << 60).unwrap(),
+			false,
 		);
 
 		assert!(write(&mut group, &guard, vec![good, bad]).is_err());

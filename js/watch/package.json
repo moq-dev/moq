@@ -34,6 +34,7 @@
 		"@moq/net": "workspace:^",
 		"@moq/msf": "workspace:^",
 		"@moq/signals": "workspace:^",
+		"@moq/video": "workspace:^",
 		"media-captions": "0.0.18"
 	},
 	"devDependencies": {
@@ -43,6 +44,6 @@
 		"esbuild": "^0.28.2",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2",
-		"vite": "^8.3.0"
+		"vite": "^8.3.1"
 	}
 }

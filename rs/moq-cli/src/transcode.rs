@@ -166,7 +166,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.create_broadcast(&output_path)
 		.context("failed to create the derivative broadcast")?;
 	output
-		.announce(Default::default())
+		.announce(moq_net::origin::Route::default().with_epoch(moq.epoch.clone().unwrap_or_else(moq_net::Epoch::mint)))
 		.context("failed to announce the derivative broadcast")?;
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 

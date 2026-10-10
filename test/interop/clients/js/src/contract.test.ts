@@ -17,3 +17,4 @@ test("a leaked player is visible when it reuses a pooled websocket fallback", ()
 test("unchanged counts are not a leak start", () => {
 	expect(leakedPlayerStarted(playing, playing)).toBe(false);
 });
+

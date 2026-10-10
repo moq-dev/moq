@@ -1,22 +1,22 @@
-use bytes::{Buf, BufMut};
-
-use crate::coding::{Decode, DecodeError, Encode, EncodeError, Sizer};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
 use super::Version;
 
-// Match the JavaScript reader's ceiling. Lite control messages are buffered before
-// decoding, so the limit must be checked as soon as their length prefix arrives.
-pub(super) const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+// Lite control messages are buffered whole before decoding, so the limit is checked as
+// soon as the length prefix arrives. The same ceiling as SETUP: paths, track names, and
+// hop chains fit with room to spare, and the JavaScript reader matches it.
+pub(super) const MAX_MESSAGE_SIZE: usize = u16::MAX as usize;
 
-pub(super) fn decode_size<B: Buf>(buf: &mut B, version: Version) -> Result<usize, DecodeError> {
-	let size = usize::decode(buf, version)?;
-	if size > MAX_MESSAGE_SIZE {
-		return Err(DecodeError::MessageTooLarge {
-			size,
-			max: MAX_MESSAGE_SIZE,
-		});
+/// Read a lite message's varint size prefix, refusing one past `max`.
+pub(super) fn decode_size(r: &mut Decoder<'_>, max: usize) -> Result<usize, DecodeError> {
+	let size = r.varint()?;
+	match usize::try_from(size) {
+		Ok(size) if size <= max => Ok(size),
+		_ => Err(DecodeError::MessageTooLarge {
+			size: usize::try_from(size).unwrap_or(usize::MAX),
+			max,
+		}),
 	}
-	Ok(size)
 }
 
 /// A trait for lite messages that are automatically size-prefixed during encoding/decoding.
@@ -27,73 +27,44 @@ pub trait Message: Sized + std::fmt::Debug {
 	const MAX_SIZE: usize = MAX_MESSAGE_SIZE;
 
 	/// Encode this message body (without size prefix).
-	fn encode_msg<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError>;
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError>;
 
 	/// Decode a message body (without size prefix).
-	fn decode_msg<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError>;
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError>;
 }
 
 impl<T: Message> Encode<Version> for T {
-	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		tracing::trace!(?self, "encoding");
-		let mut sizer = Sizer::default();
-		self.encode_msg(&mut sizer, version)?;
+		let prefix = w.prefix_varint();
+		self.encode_msg(w, version)?;
 		// Never emit a body our own receiver would refuse.
-		if sizer.size > Self::MAX_SIZE {
+		if w.since(&prefix) > Self::MAX_SIZE {
+			w.discard(prefix);
 			return Err(EncodeError::TooLarge);
 		}
-		sizer.size.encode(w, version)?;
-		self.encode_msg(w, version)
+		w.fill(prefix)
 	}
 }
 
 impl<T: Message> Decode<Version> for T {
-	fn decode<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		let size = decode_size(buf, version)?;
-		if size > Self::MAX_SIZE {
-			return Err(DecodeError::MessageTooLarge {
-				size,
-				max: Self::MAX_SIZE,
-			});
-		}
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let size = decode_size(r, Self::MAX_SIZE)?;
+		let mut body = r.sub(size)?;
 
-		if tracing::enabled!(tracing::Level::TRACE) {
-			if buf.remaining() < size {
-				return Err(DecodeError::Short);
-			}
-			let raw = buf.copy_to_bytes(size);
-			let mut slice = &raw[..];
-			match Self::decode_msg(&mut slice, version).map_err(DecodeError::complete) {
-				Ok(result) => {
-					if slice.remaining() > 0 {
-						return Err(DecodeError::Long);
-					}
-					tracing::trace!(?result, "decoded");
-					Ok(result)
-				}
-				Err(e) => {
-					tracing::warn!(%e, ?raw, "decode failed");
-					Err(e)
-				}
-			}
-		} else {
-			if buf.remaining() < size {
-				return Err(DecodeError::Short);
-			}
-			let mut limited = buf.take(size);
-			match Self::decode_msg(&mut limited, version).map_err(DecodeError::complete) {
-				Ok(result) => {
-					if limited.remaining() > 0 {
-						return Err(DecodeError::Long);
-					}
-					Ok(result)
-				}
-				Err(e) => {
-					tracing::warn!(%e, "decode failed");
-					Err(e)
-				}
-			}
+		// The body is complete, so running short inside it is malformed, not a wait for more.
+		let result = Self::decode_msg(&mut body, version)
+			.map_err(DecodeError::complete)
+			.and_then(|msg| match body.is_empty() {
+				true => Ok(msg),
+				false => Err(DecodeError::Long),
+			});
+
+		match &result {
+			Ok(msg) => tracing::trace!(?msg, "decoded"),
+			Err(err) => tracing::warn!(%err, "decode failed"),
 		}
+		result
 	}
 }
 
@@ -105,23 +76,29 @@ mod tests {
 	struct Empty;
 
 	impl Message for Empty {
-		fn encode_msg<W: BufMut>(&self, _: &mut W, _: Version) -> Result<(), EncodeError> {
+		fn encode_msg(&self, _: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 			Ok(())
 		}
 
-		fn decode_msg<B: Buf>(_: &mut B, _: Version) -> Result<Self, DecodeError> {
+		fn decode_msg(_: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
 			Ok(Self)
 		}
 	}
 
+	/// A lite size prefix announcing `size` bytes, with no body behind it.
+	fn prefix(size: usize) -> Vec<u8> {
+		let mut wire = Vec::new();
+		Encoder::new(&mut wire, Version::Lite06.into())
+			.varint(size as u64)
+			.unwrap();
+		wire
+	}
+
 	#[test]
 	fn rejects_oversized_message_before_reading_the_body() {
-		let mut wire = Vec::new();
-		((MAX_MESSAGE_SIZE + 1) as u64)
-			.encode(&mut wire, Version::Lite06)
-			.unwrap();
+		let wire = prefix(MAX_MESSAGE_SIZE + 1);
 
-		let err = Empty::decode(&mut wire.as_slice(), Version::Lite06).unwrap_err();
+		let err = Empty::decode_slice(&wire, Version::Lite06).unwrap_err();
 		assert!(matches!(
 			err,
 			DecodeError::MessageTooLarge {
@@ -133,10 +110,41 @@ mod tests {
 
 	#[test]
 	fn accepts_message_at_the_limit() {
-		let mut wire = Vec::new();
-		(MAX_MESSAGE_SIZE as u64).encode(&mut wire, Version::Lite06).unwrap();
+		let wire = prefix(MAX_MESSAGE_SIZE);
 
-		let err = Empty::decode(&mut wire.as_slice(), Version::Lite06).unwrap_err();
+		let err = Empty::decode_slice(&wire, Version::Lite06).unwrap_err();
 		assert!(matches!(err, DecodeError::Short));
+	}
+
+	/// A peer can no longer make a control stream buffer megabytes: every message past
+	/// the SETUP ceiling is refused at its length prefix, announcements included.
+	#[test]
+	fn control_messages_are_refused_at_the_prefix() {
+		let oversized = |prefix: &[u8]| {
+			let mut wire = prefix.to_vec();
+			Encoder::new(&mut wire, Version::Lite06.into()).varint(65_536).unwrap();
+			wire
+		};
+
+		let wire = oversized(&[]);
+		let err = super::super::Subscribe::decode_slice(&wire, Version::Lite06).unwrap_err();
+		assert!(matches!(err, DecodeError::MessageTooLarge { .. }), "{err:?}");
+
+		// ANNOUNCE_START: the type, then the length.
+		let wire = oversized(&[0]);
+		let err = super::super::AnnounceBroadcast::decode_slice(&wire, Version::Lite06).unwrap_err();
+		assert!(matches!(err, DecodeError::MessageTooLarge { .. }), "{err:?}");
+	}
+
+	/// ANNOUNCE_INIT carries the whole initial set in one message, so it keeps the room
+	/// a large origin needs.
+	#[test]
+	fn announce_init_waits_for_a_large_body() {
+		let mut wire = Vec::new();
+		Encoder::new(&mut wire, Version::Lite02.into())
+			.varint(1024 * 1024)
+			.unwrap();
+		let err = super::super::AnnounceInit::decode_slice(&wire, Version::Lite02).unwrap_err();
+		assert!(matches!(err, DecodeError::Short), "{err:?}");
 	}
 }

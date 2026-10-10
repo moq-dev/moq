@@ -18,23 +18,17 @@ impl From<Version> for u64 {
 	}
 }
 
-impl<V: Copy> Decode<V> for Version
-where
-	u64: Decode<V>,
-{
+impl<V> Decode<V> for Version {
 	/// Decode the version number.
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let v = u64::decode(r, version)?;
-		Ok(Self(v))
+	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+		Ok(Self(r.varint()?))
 	}
 }
 
-impl<V: Copy> Encode<V> for Version
-where
-	u64: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		self.0.encode(w, version)
+impl<V> Encode<V> for Version {
+	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
+		w.varint(self.0)?;
+		Ok(())
 	}
 }
 
@@ -48,13 +42,10 @@ impl fmt::Debug for Version {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Versions(Vec<Version>);
 
-impl<V: Copy> Decode<V> for Versions
-where
-	u64: Decode<V>,
-{
+impl<V: Copy> Decode<V> for Versions {
 	/// Decode the version list.
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let count = u64::decode(r, version)?;
+	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError> {
+		let count = r.varint()?;
 		let mut vs = Vec::new();
 
 		for _ in 0..count {
@@ -66,13 +57,10 @@ where
 	}
 }
 
-impl<V: Copy> Encode<V> for Versions
-where
-	u64: Encode<V>,
-{
+impl<V: Copy> Encode<V> for Versions {
 	/// Encode the version list.
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		(self.0.len() as u64).encode(w, version)?;
+	fn encode(&self, w: &mut Encoder<'_>, version: V) -> Result<(), EncodeError> {
+		w.varint(self.0.len() as u64)?;
 
 		for v in &self.0 {
 			v.encode(w, version)?;

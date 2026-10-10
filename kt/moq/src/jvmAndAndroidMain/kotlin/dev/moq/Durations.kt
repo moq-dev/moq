@@ -13,49 +13,49 @@ import kotlin.time.Duration.Companion.microseconds
 val ConnectionStats.rtt: Duration?
     get() = rttUs?.toLong()?.microseconds
 
-/** Delay before the first reconnect attempt. */
-val Backoff.initial: Duration
-    get() = initialUs.toLong().microseconds
+/** Delay before the first reconnect attempt, or null for the default. */
+val Backoff.initial: Duration?
+    get() = initialUs?.toLong()?.microseconds
 
-/** Maximum delay between reconnect attempts. */
-val Backoff.max: Duration
-    get() = maxUs.toLong().microseconds
+/** Maximum delay between reconnect attempts, or null for the default. */
+val Backoff.max: Duration?
+    get() = maxUs?.toLong()?.microseconds
 
-/** Time spent retrying before giving up. [Duration.ZERO] retries forever. */
-val Backoff.timeout: Duration
-    get() = timeoutUs.toLong().microseconds
+/** Time spent retrying before giving up, or null for the default. [Duration.ZERO] retries forever. */
+val Backoff.timeout: Duration?
+    get() = timeoutUs?.toLong()?.microseconds
+
+/** Head start QUIC gets before the WebSocket fallback joins, or null for the default. */
+val WebSocketConfig.delay: Duration?
+    get() = delayUs?.toLong()?.microseconds
 
 /** Upper bound on buffering before a stalled group is skipped. */
-val Subscription.maxAge: Duration
-    get() = maxAgeUs.toLong().microseconds
+val Subscription.maxDelay: Duration
+    get() = maxDelayUs.toLong().microseconds
 
 /** Maximum age of a non-latest group before the publisher evicts it, or null for the default. */
 val TrackInfo.maxAge: Duration?
     get() = maxAgeUs?.toLong()?.microseconds
 
 /** Upper bound on buffering before a stalled group is skipped, or null for the default. */
-val AudioDecoderOutput.maxAge: Duration?
-    get() = maxAgeUs?.toLong()?.microseconds
+val AudioDecoderOutput.maxDelay: Duration?
+    get() = maxDelayUs?.toLong()?.microseconds
 
 /** Upper bound on buffering before a stalled group is skipped, or null for the default. */
-val VideoDecoderOutput.maxAge: Duration?
-    get() = maxAgeUs?.toLong()?.microseconds
+val VideoDecoderOutput.maxDelay: Duration?
+    get() = maxDelayUs?.toLong()?.microseconds
 
 /** Encoded frame duration. */
 val AudioEncoderOutput.frameDuration: Duration
     get() = frameDurationUs.toLong().microseconds
 
-/** Presentation timestamp. */
-val Frame.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
+/** Presentation timestamp, or null for an untimed frame. */
+val Frame.timestamp: Duration?
+    get() = timestampUs?.toLong()?.microseconds
 
-/** Presentation timestamp. */
-val MediaFrame.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
-
-/** Presentation timestamp. */
-val Datagram.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
+/** Presentation timestamp, or null for an untimed datagram. */
+val Datagram.timestamp: Duration?
+    get() = timestampUs?.toLong()?.microseconds
 
 /** Presentation timestamp of the first sample. */
 val AudioFrame.timestamp: Duration
@@ -67,4 +67,4 @@ val VideoFrame.timestamp: Duration
 
 /** Presentation timestamp. */
 val VideoDecodedFrame.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
+    get() = timestampUs().toLong().microseconds

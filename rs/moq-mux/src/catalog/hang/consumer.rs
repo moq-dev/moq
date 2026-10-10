@@ -204,7 +204,7 @@ mod test {
 
 		let origin = crate::source::produce_origin();
 		let dynamic = origin.dynamic("", Default::default()).unwrap();
-		let requesting = origin.consume().request_broadcast("a/pub");
+		let requesting = origin.consume().request_broadcast("a/pub", None);
 		let served = broadcast.consume();
 		// The handler hands its route back: dropping it would retract the route and end
 		// the broadcast it just served.

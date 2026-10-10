@@ -3,4 +3,4 @@
  *
  * @module
  */
-export { Allocator, type Demand, type Handle, Reservation } from "./bandwidth.ts";
+export { Allocator, type Handle, Reservation } from "./bandwidth.ts";

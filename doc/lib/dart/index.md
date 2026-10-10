@@ -13,125 +13,68 @@ futures and streams. A Native Assets hook supplies the Rust core for Android
 (API 24+), iOS (16+), Linux, macOS, and Windows. Flutter web is not supported,
 since it can't load a native library.
 
-Media frames use `keyframe` to mark a group start or a video keyframe. For audio,
-it is true only on the first frame of each group, even when every sample can be
-decoded independently.
+Import `package:moq/media.dart` with a prefix for catalogs, encoded-media imports, and
+container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
+and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
+and sections; it holds the broadcast weakly and fails after the broadcast closes.
+`CatalogConsumer.subscribe`, `ContainerConsumer.subscribe`, and `ContainerGroupConsumer.fetch`
+construct the read side from a broadcast.
 
 ```bash
 dart pub add moq        # or: flutter pub add moq
 ```
 
 ```dart
+import 'package:moq/media.dart' as media;
 import 'package:moq/moq.dart';
 
 final moq = await Moq.connect('https://relay.example.com');
 
 // Subscribe. The stream is live, so listen to it rather than awaiting its end.
-moq.announcements(
-  options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
-).listen((announcement) {
-  print(announcement.prefix());
-  print(announcement.captures());
+moq
+    .announced(
+      options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
+    )
+    .updates()
+    .listen((event) {
+  if (event is AnnounceEventStart) {
+    print(event.announce.prefix);
+    print(event.announce.captures);
+  }
 });
 final broadcast = await moq.requestBroadcast('live/camera');
+final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
+print(await catalog.next());
 ```
 
 ```dart
 // Publish. bytes comes from your encoder or application source.
 final mine = moq.createBroadcast('live/camera');
 final track = mine.publishTrack(name: 'video', info: null);
-track.appendGroup().writeFrame(frame: Frame(payload: bytes));
+final group = track.appendGroup();
+group.writeFrame(frame: Frame(payload: bytes, timestampUs: 0));
+group.finish();
 mine.announce(route: MoqRoute());
+track.finish();
+mine.close();
 
-moq.close();
+await moq.close();
 ```
 
-```dart
-// Serve. Server.listen binds the socket and streams the sessions that arrive.
-final server = await Server.listen(
-  options: const ListenOptions(
-    bind: '127.0.0.1:4443',
-    tlsGenerate: ['localhost'],
-  ),
-);
-final live = server.createBroadcast('live/camera');
-live.announce(route: MoqRoute()); // unannounced broadcasts are invisible
-await for (final request in server.requests()) {
-  final session = await request.accept();
-  print(session.epoch());
-}
-```
+## Things to know
 
-The three advertising operations: `moq.createBroadcast(path)` (or
-`origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
-`broadcast.announce(route:)` / `broadcast.unannounce()` own that exact-path
-advertisement, and `broadcast.close()` ends the broadcast for good (a second
-call is a no-op; `finish()` is its deprecated alias); `origin.dynamic_(prefix:, route:)` claims `prefix` and
-every path beneath it (`''` for everything; Dart spells the origin method
-`dynamic_` because `dynamic` is reserved). Hold the returned handle while the
-claim should stay advertised, and reject the requests you will not serve. A
-route is a capability, not an inventory. `announcements(options:)` takes a
-literal prefix plus an optional relative pattern; `announcement.prefix()`
-stays origin-relative and `captures()` reports the wildcard matches. Paths with
-a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden: true`.
+The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
+one to one; the API reference has the names.
 
-Sessions reconnect with backoff when the transport drops and re-announce local
-broadcasts. `Moq.connect` and `Server.listen` take a `ConnectOptions` /
-`ListenOptions` struct, like Rust: `reconnect: false` makes the dial one-shot
-and `backoff:` re-paces the retries. `moq.epoch` counts the connections, 1 on the first, pairing with
-`session.status()` to log each reconnect; `maxStreams` raises the peer's
-inbound stream cap for a subscriber to many tracks.
+- **No codecs.** Unlike the other bindings, the published Dart binaries carry no encoder or decoder. Already-encoded frames flow through `media.TrackProducer` and `media.ContainerConsumer`; encoding is up to `package:camera`, platform channels, or another codec package.
+- **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`) as aliases, so the generated names still work. `Container`, `Route`, and the exceptions keep it, since Flutter owns those names. `dynamic` is reserved, so the origin method is `dynamic_`.
+- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
+- **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs: ...)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Closing.** `await moq.close()` or `session.shutdown()` gives finished tracks up to one second to deliver and fails if they did not. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Cancelling a stream subscription releases its native cursor.
+- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero.
 
-The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
-a 200 ms head start. `websocketEnabled: false` turns it off for a QUIC-only
-relay, and a `websocketDelay` `Duration` changes the head start.
+## Reference
 
-Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
-`Backoff`); the generated names stay valid, since these are aliases rather than
-wrappers. `Container`, `Route`, and the exceptions keep theirs, because
-`Container` and `Route` are Flutter's. Microsecond fields read back as a
-`Duration`: `stats.rtt`, `backoff.initial`, `frame.timestamp`.
-
-Cancelling a stream releases the native cursor. The package re-exports
-`moq_ffi`, so the full generated API is available without a second import.
-Generated configuration setters throw if a connect, listen, or accept is in
-flight, or after `cancel()`. Incoming requests report a `MoqTransport` enum.
-`ProtocolMoqException` carries a `MoqProtocolException` as `details` (scope, verbatim
-code, kind) when the peer sent a session or stream code. An exception's
-`toString()` is the Rust error message.
-
-`moq.bandwidth()` divides the connection's send estimate; `reserve` a share
-for an app-owned encoder so several publishers on one session split the
-uplink instead of each targeting the whole thing.
-
-Unlike the other bindings, the published Dart binaries carry **no codecs**:
-catalog and container types are there, so already-encoded frames flow through
-`MoqMediaProducer`/`MoqMediaConsumer`, but encoding is up to
-`package:camera`, platform channels, or another codec package.
-
-`MediaProducer.flush(timestampUs: ...)` records the handoff of a locally encoded frame on the broadcast media clock. Call it after `writeFrame` only for live encoder output; file, pipe, and network imports stay clock-free. `MediaProducer` aliases the generated FFI object, so its method is available directly.
-
-Call `media.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a video track, resume with a keyframe: a delta frame before it fails.
-
-## Connection stats
-
-`session.stats()` returns a `ConnectionStats` snapshot. Each field is `null`
-when the transport backend does not report it (native QUIC reports all of them;
-browser WebTransport reports few or none) or before it is available, which is
-not the same as zero. `rttUs` is microseconds; the `rtt` extension reads it as a
-`Duration`.
-
-| Field | Unit | Meaning |
-| --- | --- | --- |
-| `rttUs` | microseconds | Smoothed round-trip time. |
-| `estimatedSendRateBps` | bits per second | Send bandwidth from the congestion controller. |
-| `estimatedRecvRateBps` | bits per second | Receive bandwidth from MoQ PROBE. |
-| `bytesSent` | bytes | Total sent, including retransmissions and overhead. |
-| `bytesReceived` | bytes | Total received, including duplicates and overhead. |
-| `bytesLost` | bytes | Total lost, detected via retransmission or acknowledgement. |
-| `packetsSent` | datagrams | Total datagrams sent. |
-| `packetsReceived` | datagrams | Total datagrams received. |
-| `packetsLost` | datagrams | Total datagrams detected as lost. |
-
+- API reference: [pub.dev/documentation/moq](https://pub.dev/documentation/moq/latest/)
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)

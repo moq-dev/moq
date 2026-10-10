@@ -2,7 +2,7 @@
 //! DXVA.
 //!
 //! The inverse of the encode Media Foundation backend, and the Windows
-//! counterpart to the macOS VideoToolbox decode backend. Unlike encoders, the
+//! counterpart to the VideoToolbox decode backend. Unlike encoders, the
 //! GPU vendors (NVIDIA especially) don't ship standalone async hardware decoder
 //! MFTs; the portable hardware path is the Microsoft decoder MFT driven
 //! synchronously with a Direct3D11 device manager bound to it, which routes the
@@ -106,9 +106,10 @@ impl MediaFoundation {
 		let (input_subtype, label) = match codec {
 			Codec::H264 => (MFVideoFormat_H264, "H.264"),
 			Codec::H265 => (MFVideoFormat_HEVC, "H.265"),
-			Codec::Av1 => {
+			Codec::Av1 | Codec::Vp8 | Codec::Vp9 => {
 				return Err(Error::Codec(anyhow::anyhow!(
-					"Media Foundation AV1 decode is not wired"
+					"Media Foundation {} decode is not wired",
+					codec.label()
 				)));
 			}
 		};

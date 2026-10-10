@@ -2,6 +2,7 @@ package dev.moq.ffi
 
 import kotlinx.coroutines.test.runTest
 import uniffi.moq.MoqClient
+import uniffi.moq.MoqClientConfig
 import uniffi.moq.MoqException
 import uniffi.moq.MoqOriginConfig
 import uniffi.moq.MoqOriginProducer
@@ -17,7 +18,7 @@ import kotlin.test.assertFailsWith
 class BindingsSmokeTest {
     @Test
     fun `client constructs and connect fails fast on a bad url`() = runTest {
-        MoqClient().use { client ->
+        MoqClient(MoqClientConfig()).use { client ->
             client.cancel()
             assertFailsWith<MoqException> {
                 client.connect("https://localhost:0/test")

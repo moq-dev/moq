@@ -1,4 +1,5 @@
 declare module "*?worklet" {
-	const url: string;
+	/** Resolves the script's URL: the hosted file under `base`, or a blob: URL without one. */
+	const url: (base?: URL) => Promise<string>;
 	export default url;
 }

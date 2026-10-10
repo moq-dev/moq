@@ -136,7 +136,8 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 		moq_net::StreamError::GoingAway => MoqProtocolKind::GoingAway,
 		moq_net::StreamError::TooFarBehind => MoqProtocolKind::TooFarBehind,
 		moq_net::StreamError::MalformedTrack => MoqProtocolKind::MalformedTrack,
-		moq_net::StreamError::NotFound => MoqProtocolKind::NotFound,
+		// A datagram reached by a FETCH is, to a binding, a miss like any other.
+		moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable => MoqProtocolKind::NotFound,
 		moq_net::StreamError::Unroutable => MoqProtocolKind::Unroutable,
 		moq_net::StreamError::Old => MoqProtocolKind::Old,
 		moq_net::StreamError::Evicted => MoqProtocolKind::Evicted,
@@ -249,14 +250,14 @@ pub enum MoqError {
 	#[error("unsupported")]
 	Unsupported,
 
-	/// This track already committed to the other delivery order.
+	/// This track already committed to another way of reading it.
 	///
-	/// A track is read in arrival order or in sequence order, never both, and the first
-	/// group read picks which. Reaching for the other one afterwards is this error rather
-	/// than [`Self::Unsupported`]: both orders work fine here, the track just isn't
-	/// reading in the one you asked for. Read the track through a second consumer if you
-	/// genuinely need both.
-	#[error("already committed to the other delivery order")]
+	/// A track is read in arrival order, in sequence order, or by a typed reader such as a
+	/// JSON consumer, never two of them, and the first group read picks the order. Reaching
+	/// for another one afterwards is this error rather than [`Self::Unsupported`]: each works
+	/// fine here, the track just isn't reading the way you asked for. Read the track through
+	/// a second consumer if you genuinely need both.
+	#[error("already committed to another way of reading")]
 	AlreadyCommitted,
 
 	/// A route carried an invalid hop id or too many hops.
@@ -274,13 +275,17 @@ pub enum MoqError {
 
 	#[error("log: {0}")]
 	Log(String),
+
+	/// A configuration record held a value the constructor cannot use.
+	#[error("config: {0}")]
+	Config(String),
 }
 
 impl From<moq_net::Error> for MoqError {
 	fn from(err: moq_net::Error) -> Self {
 		match err {
 			moq_net::Error::Transport(message) => Self::Transport(message),
-			moq_net::Error::NotFound => Self::NotFound,
+			moq_net::Error::NotFound | moq_net::Error::NotFetchable => Self::NotFound,
 			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
 			moq_net::Error::Unauthorized => Self::Unauthorized,

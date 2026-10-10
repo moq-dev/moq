@@ -1,8 +1,8 @@
 //! Screen and camera capture via PipeWire (Linux, Wayland and X11).
 //!
 //! The ScreenCast portal owns screen selection: [`open`] pops the compositor's
-//! picker dialog, the user chooses a monitor, and the portal hands us a PipeWire
-//! fd + node id. Cameras are PipeWire nodes too, reached as described in
+//! picker dialog, the user chooses a monitor or window, and the portal hands us
+//! a PipeWire fd + node id. Cameras are PipeWire nodes too, reached as described in
 //! [`camera`]. For either, a dedicated thread then runs the PipeWire main loop,
 //! forwarding DMA-BUF frames without copying when the producer offers them and
 //! converting shared-memory frames to CPU [`I420`] otherwise. It pushes both into
@@ -12,7 +12,7 @@
 //! Two screen quirks worth knowing:
 //! - `publish_capture` releases the capture while unwatched and reopens it on
 //!   demand. A fresh portal session would re-prompt the picker every time, so the
-//!   portal's restore token is kept in a process-wide slot and replayed on the
+//!   portal's restore token is kept with the selection and consumed by the
 //!   next [`open`], which restores the same grant without a dialog (on
 //!   compositors that support persistence). The token is forgotten when the
 //!   compositor ends the stream (the user hit "stop sharing"), so a revoked
@@ -26,7 +26,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -39,9 +39,10 @@ use spa::param::video::{VideoFormat, VideoInfoRaw};
 
 use super::channel::FrameChannel;
 use super::mode::Request;
+use super::portal;
 use super::pump::Geometry;
 use super::{Config, Stream};
-use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
+use crate::frame::{DmaBuf, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
 use crate::{Color, Error, Size};
 
 const DEFAULT_FRAMERATE: u32 = 30;
@@ -57,10 +58,9 @@ const FORMAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// ScreenCaptureKit backend).
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The portal restore token from the last grant, replayed on the next [`open`]
-/// so a demand-driven reopen skips the picker dialog. Process-wide because the
-/// capture session (and its `Stream`) is torn down between opens.
-static RESTORE_TOKEN: Mutex<Option<String>> = Mutex::new(None);
+// Display sources share the implicit screen selection across demand reopens.
+// Explicit Portal sources instead own a separate grant for each selection.
+static DISPLAY: LazyLock<portal::Selection> = LazyLock::new(|| portal::Selection::new(portal::Kind::Screen));
 
 fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
@@ -68,17 +68,15 @@ fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 
 pub(super) mod camera;
 
-/// Open a portal screen capture and stream its frames from a PipeWire loop thread.
-pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream, Error> {
-	if let Some(device) = device {
-		tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
-	}
-
-	let (node_id, fd, session) = portal_negotiate(config.cursor).await?;
+/// Open a system-picked screen or window and stream frames from a PipeWire thread.
+pub(super) async fn open(config: &Config, selection: Option<&portal::Selection>) -> Result<Stream, Error> {
+	let selection = selection.unwrap_or(&DISPLAY);
+	let (node_id, fd, session) = portal_negotiate(config.cursor, selection).await?;
 	start(
 		config,
 		Capture {
 			kind: Kind::Screen,
+			selection: Some(selection.clone()),
 			remote: Some(fd),
 			target: Target::Node(node_id),
 			label: format!("pipewire:{node_id}"),
@@ -91,6 +89,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 /// What a capture loop streams, and where it finds it.
 struct Capture {
 	kind: Kind,
+	selection: Option<portal::Selection>,
 	/// A portal's PipeWire remote, or `None` for the session's own socket.
 	remote: Option<OwnedFd>,
 	target: Target,
@@ -225,11 +224,23 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 	))
 }
 
-/// Ask the ScreenCast portal for a monitor: create a session, (re)select the
+/// Ask the ScreenCast portal for a screen or window: create a session, (re)select the
 /// source, and start it, returning the PipeWire node to stream, the fd of the
 /// portal's PipeWire remote, and a guard that closes the session on drop.
-async fn portal_negotiate(cursor: bool) -> Result<(u32, OwnedFd, SessionGuard), Error> {
+async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result<(u32, OwnedFd, SessionGuard), Error> {
 	let proxy = Screencast::new().await.map_err(|e| err("screencast portal", e))?;
+	let available = proxy
+		.available_source_types()
+		.await
+		.map_err(|e| err("portal source types", e))?;
+	selection
+		.kind()
+		.validate(available.bits())
+		.map_err(|e| Error::Unsupported(e.into()))?;
+	let requested = match selection.kind() {
+		portal::Kind::Screen => SourceType::Monitor,
+		portal::Kind::Window => SourceType::Window,
+	};
 	let session = proxy
 		.create_session(Default::default())
 		.await
@@ -237,7 +248,7 @@ async fn portal_negotiate(cursor: bool) -> Result<(u32, OwnedFd, SessionGuard), 
 	let session = Arc::new(session);
 	let guard = SessionGuard::new(session.clone());
 
-	let restore = RESTORE_TOKEN.lock().unwrap().clone();
+	let restore = selection.take_restore();
 	proxy
 		.select_sources(
 			&session,
@@ -247,13 +258,15 @@ async fn portal_negotiate(cursor: bool) -> Result<(u32, OwnedFd, SessionGuard), 
 				} else {
 					CursorMode::Hidden
 				})
-				.set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
+				.set_sources(ashpd::enumflags2::BitFlags::from(requested))
 				.set_multiple(false)
 				.set_persist_mode(PersistMode::Application)
 				.set_restore_token(restore.as_deref()),
 		)
 		.await
-		.map_err(|e| err("portal select sources", e))?;
+		.map_err(|e| err("portal select sources", e))?
+		.response()
+		.map_err(|e| Error::PermissionDenied(format!("capture source request: {e}")))?;
 
 	// This is where the compositor's picker dialog appears (unless the restore
 	// token silently re-grants), so it blocks on the user.
@@ -263,7 +276,20 @@ async fn portal_negotiate(cursor: bool) -> Result<(u32, OwnedFd, SessionGuard), 
 		.map_err(|e| err("portal start", e))?
 		.response()
 		.map_err(|e| Error::PermissionDenied(format!("screen capture request: {e}")))?;
-	*RESTORE_TOKEN.lock().unwrap() = response.restore_token().map(str::to_string);
+	selection
+		.accept(
+			proxy.version(),
+			portal::Grant {
+				streams: response.streams().len(),
+				source: response
+					.streams()
+					.first()
+					.and_then(|stream| stream.source_type())
+					.map(|kind| kind as u32),
+				token: response.restore_token(),
+			},
+		)
+		.map_err(|e| Error::SourceUnavailable(e.into()))?;
 
 	let stream = response
 		.streams()
@@ -768,6 +794,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 	let CaptureLoop {
 		capture: Capture {
 			kind,
+			selection,
 			remote,
 			target,
 			label,
@@ -844,8 +871,8 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// asks again instead of silently resuming a grant the user just
 					// revoked. Our own teardown quits the loop before anything
 					// disconnects, so it never reaches this path.
-					if kind == Kind::Screen {
-						*RESTORE_TOKEN.lock().unwrap() = None;
+					if let Some(selection) = &selection {
+						selection.replace_restore(None);
 					}
 					state.borrow_mut().terminal = Some(Error::SourceUnavailable(match &new {
 						pw::stream::StreamState::Error(error) => format!("PipeWire stream failed: {error}"),
@@ -1117,7 +1144,16 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						modifier,
 						color,
 					});
-					match DmaBuf::new(format, modifier, layout.width, layout.height, planes, color, inner) {
+					match DmaBuf::adopt(
+						DmaBufLayout {
+							format,
+							modifier,
+							size: Size::new(layout.width, layout.height),
+							planes,
+							color,
+						},
+						inner,
+					) {
 						Ok(frame) => {
 							chan.push(Surface::DmaBuf(frame.clone()));
 							// Only the pacing timer reads `last`. A camera must not
@@ -2087,13 +2123,14 @@ mod tests {
 			modifier: 0,
 			color: Some(Color::Bt709Full),
 		});
-		let frame = DmaBuf::new(
-			DrmFormat::NV12,
-			0,
-			2,
-			2,
-			vec![DmaBufPlane::new(0, 2), DmaBufPlane::new(4, 2)],
-			Some(Color::Bt709Full),
+		let frame = DmaBuf::adopt(
+			DmaBufLayout {
+				format: DrmFormat::NV12,
+				modifier: 0,
+				size: Size::new(2, 2),
+				planes: vec![DmaBufPlane::new(0, 2), DmaBufPlane::new(4, 2)],
+				color: Some(Color::Bt709Full),
+			},
 			inner,
 		)
 		.expect("DMA-BUF");

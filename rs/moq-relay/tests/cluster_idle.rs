@@ -107,8 +107,10 @@ async fn silent_peer_detected() {
 
 	tokio::time::timeout(DETECT, async {
 		loop {
-			let update = announced.next().await.expect("origin closed");
-			if update.kind.is_active() && update.prefix.as_str() == "peer" {
+			let event = announced.next().await.expect("origin closed");
+			if let moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) = event
+				&& update.prefix.as_str() == "peer"
+			{
 				break;
 			}
 		}
@@ -123,8 +125,10 @@ async fn silent_peer_detected() {
 
 	tokio::time::timeout(DETECT, async {
 		loop {
-			let update = announced.next().await.expect("origin closed");
-			if !update.kind.is_active() && update.prefix.as_str() == "peer" {
+			let event = announced.next().await.expect("origin closed");
+			if let moq_net::announce::Event::End(update) = event
+				&& update.prefix.as_str() == "peer"
+			{
 				break;
 			}
 		}

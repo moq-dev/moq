@@ -1,18 +1,15 @@
 package dev.moq
 
-import kotlinx.coroutines.flow.Flow
-import kotlin.time.Duration
-
 /**
  * A connected MoQ session with publish/subscribe conveniences.
  *
  * Build one with [Moq.connect]. The underlying [session] always exposes a
- * publisher and a subscriber (wired from the origins you pass to [connect], or
- * auto-created), so you can [createBroadcast] and iterate [announcements]
+ * publisher and a subscriber (wired from the origins in its [ClientConfig], or
+ * auto-created), so you can [createBroadcast] and collect [announced] updates
  * without touching the raw [Client] handle.
  *
- * [Moq] is [AutoCloseable]; `use { ... }` (or [close]) gracefully shuts down
- * the session and cancels the client.
+ * Call [shutdown] to drain finished tracks before disconnecting. [AutoCloseable]
+ * disposal through `use { ... }` or [close] cancels immediately.
  */
 class Moq internal constructor(
     /** The established session. Use it for [Session.closed]/[Session.shutdown]. */
@@ -22,20 +19,16 @@ class Moq internal constructor(
     /**
      * Create an unannounced broadcast at [path], invisible to everyone until announced.
      *
-     * Advertise it with `announce` after populating tracks. `end()` ends it immediately;
-     * `close()` (or `use`) ends it once no `dynamic()` handle remains.
+     * Advertise it with `announce` after populating tracks. `end()` ends it for good; `close()`
+     * (or `use`) releases the handle, which ends it once no `dynamic()` handle remains.
      */
     fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
 
     /**
-     * Discover routes matching [config] as a [Flow]. Each update stays relative
-     * to the origin. The subscription is acquired on
-     * collection and cancelled when collection ends. Use [announced] for the raw handle.
+     * Discover routes matching [config]; prefixes stay relative to the origin.
+     * Collect `announced(config).updates()` for a [Flow] of [AnnounceEvent] that
+     * cancels the handle when collection ends.
      */
-    fun announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceUpdate> =
-        session.consume().announcements(config)
-
-    /** Raw announcement handle for [config]; update prefixes stay relative to the origin. */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
 
@@ -74,9 +67,18 @@ class Moq internal constructor(
      */
     fun bandwidth(): Bandwidth = session.bandwidth()
 
-    /** Gracefully shut down the session and cancel the client, releasing the native handles. */
+    /** Drain finished tracks within one second, throwing if delivery times out. */
+    suspend fun shutdown() {
+        try {
+            session.shutdown()
+        } finally {
+            client.cancel()
+        }
+    }
+
+    /** Cancel immediately and release the client. */
     override fun close() {
-        session.shutdown()
+        session.cancel(0u)
         client.cancel()
     }
 
@@ -84,72 +86,19 @@ class Moq internal constructor(
         /**
          * Connect to a relay at [url] and return the live [Moq] connection.
          *
-         * @param tlsVerify set false to skip certificate verification (local dev only).
-         * @param tlsRoots PEM root certificate paths to trust instead of platform roots.
-         * @param tlsSystemRoots whether to also trust platform roots when custom roots are set.
-         * @param tlsFingerprints peer certificate SHA-256 fingerprints to pin.
-         * @param tlsCert path to a PEM certificate chain to present for mTLS.
-         * @param tlsKey path to a PEM private key to present for mTLS.
-         * @param bind local socket address to bind, e.g. "0.0.0.0:0".
-         * @param maxStreams cap on the concurrent QUIC streams the peer may open toward
-         *   this connection; MoQ opens one stream per group, and for a subscriber those
-         *   arrive from the relay, so subscribing to many tracks may want this raised.
-         * @param reconnect set false for a one-shot dial. By default the session redials
-         *   with backoff whenever the transport drops; watch [Session.status] for the
-         *   transitions.
-         * @param backoff retry pacing for the automatic reconnect.
-         * @param websocketEnabled set false to stop the WebSocket fallback racing QUIC,
-         *   e.g. against a relay that only serves QUIC. On by default.
-         * @param websocketDelay head start QUIC gets before the WebSocket fallback joins
-         *   the race; 200ms by default, and zero races both at once.
-         * @param publish origin to announce broadcasts through; auto-created when null.
-         * @param subscribe origin to discover broadcasts through; auto-created when null.
+         * [config] carries the TLS trust, bind address, protocol versions, QUIC and
+         * WebSocket tuning, reconnect pacing, and origins; every field has a default.
+         * A value the native side cannot use throws `MoqException.Config`.
          *
-         * With neither [publish] nor [subscribe] given, both sides share one origin, so a
-         * broadcast announced on this connection is discoverable via its own [announcements]
-         * (loopback). Wiring either side opts out and isolates the two directions.
+         * With neither [ClientConfig.publish] nor [ClientConfig.consume] set, both sides
+         * share one origin, so a broadcast announced on this connection is discoverable
+         * via its own [announced] (loopback). Wiring either side opts out and isolates the
+         * two directions.
          */
-        suspend fun connect(
-            url: String,
-            tlsVerify: Boolean = true,
-            tlsRoots: List<String>? = null,
-            tlsSystemRoots: Boolean? = null,
-            tlsFingerprints: List<String>? = null,
-            tlsCert: String? = null,
-            tlsKey: String? = null,
-            bind: String? = null,
-            reconnect: Boolean? = null,
-            backoff: Backoff? = null,
-            publish: OriginProducer? = null,
-            subscribe: OriginProducer? = null,
-            maxStreams: ULong? = null,
-            websocketEnabled: Boolean? = null,
-            websocketDelay: Duration? = null,
-        ): Moq {
-            require(websocketDelay == null || !websocketDelay.isNegative()) {
-                "websocketDelay must not be negative: $websocketDelay"
-            }
-            val client = Client()
+        suspend fun connect(url: String, config: ClientConfig = ClientConfig()): Moq {
+            val client = Client(config)
             try {
-				if (!tlsVerify) client.setTlsVerify(false)
-                if (tlsRoots != null) client.setTlsRoots(tlsRoots)
-                if (tlsSystemRoots != null) client.setTlsSystemRoots(tlsSystemRoots)
-                if (tlsFingerprints != null) client.setTlsFingerprints(tlsFingerprints)
-                if (tlsCert != null) client.setTlsCert(tlsCert)
-                if (tlsKey != null) client.setTlsKey(tlsKey)
-                if (bind != null) client.setBind(bind)
-                if (maxStreams != null) client.setQuicMaxStreams(maxStreams)
-                if (websocketEnabled != null) client.setWebsocketEnabled(websocketEnabled)
-                if (websocketDelay != null) {
-                    client.setWebsocketDelay(websocketDelay.inWholeMicroseconds.toULong())
-                }
-                if (reconnect != null) client.setReconnect(reconnect)
-                if (backoff != null) client.setBackoff(backoff)
-                if (publish != null) client.setPublish(publish)
-                if (subscribe != null) client.setConsume(subscribe)
-
-                val session = client.connect(url)
-                return Moq(session, client)
+                return Moq(client.connect(url), client)
             } catch (e: Throwable) {
                 // connect() failed: don't leak the client handle.
                 client.cancel()

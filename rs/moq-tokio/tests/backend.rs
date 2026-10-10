@@ -176,13 +176,13 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+	assert!(active, "expected announce, got retraction");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -675,7 +675,7 @@ async fn iroh_connect_test(version: Option<&str>) {
 		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
 		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC: no request
 		// URL, leaving the SETUP as the only place for the request target.
-		assert_eq!(request.transport(), moq_tokio::server::Transport::Iroh);
+		assert_eq!(request.transport(), moq_tokio::Transport::Iroh);
 		assert_eq!(request.url(), None);
 		assert_eq!(request.path(), "/room");
 		assert_eq!(request.query(), Some("jwt=abc"));
@@ -697,13 +697,13 @@ async fn iroh_connect_test(version: Option<&str>) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+	assert!(active, "expected announce, got retraction");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -866,11 +866,11 @@ async fn noq_client_close_drains_finished_track() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -985,11 +985,11 @@ async fn noq_client_close_drains_migrated_predecessor() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -1120,11 +1120,11 @@ async fn noq_client_close_keeps_predecessor_handover() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -1349,4 +1349,14 @@ async fn window_test(scheme: &str) {
 #[tokio::test]
 async fn noq_windows() {
 	window_test("moqt").await;
+}
+
+/// The next route and whether it is active.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	match announced.next().await? {
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		moq_net::announce::Event::End(route) => Some((route, false)),
+	}
 }

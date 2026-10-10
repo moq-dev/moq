@@ -23,8 +23,7 @@ Found in the 2026-09-30 fork planning; none needs a QUIC API change:
 
 The clock-read fix stays in
 [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md).
-Measure with the echo benches and `just bench`. This branches from `dev`,
-where the fork lands; paths above are pre-fork names.
+Measure with the echo benches and `just bench`. Paths above are pre-fork names.
 
 ## Required
 

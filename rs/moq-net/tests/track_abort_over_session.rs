@@ -10,11 +10,11 @@ use support::harness::{MockConnectOptions, connect_mock};
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
-/// A group reader alone must drive failover, without polling the next group.
+/// A group reader alone must see the abort, without polling the next group.
 async fn after_abort(version: &str, hops: u32) {
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
@@ -32,7 +32,7 @@ async fn after_abort(version: &str, hops: u32) {
 	let _pair2 = connect_mock(options).await;
 	let consumer = if hops == 2 { far.consume() } else { relay.consume() };
 	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut open = track.append_group().unwrap();
 	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
@@ -41,7 +41,7 @@ async fn after_abort(version: &str, hops: u32) {
 	track.abort(moq_net::Error::Cancel).unwrap();
 	drop(open);
 	assert!(
-		tokio::time::timeout(Duration::from_secs(2), group.read_frame())
+		moq_net_sim::timeout(Duration::from_secs(2), group.read_frame())
 			.await
 			.expect("group-only read hung")
 			.is_err()
@@ -50,7 +50,7 @@ async fn after_abort(version: &str, hops: u32) {
 
 macro_rules! abort_test {
 	($name:ident, $version:literal, $hops:literal) => {
-		#[tokio::test(start_paused = true)]
+		#[moq_net_sim::test]
 		async fn $name() {
 			after_abort($version, $hops).await;
 		}
@@ -65,12 +65,17 @@ abort_test!(abort_05_two, "moq-lite-05", 2);
 abort_test!(abort_06_one, "moq-lite-06", 1);
 abort_test!(abort_06_two, "moq-lite-06", 2);
 
+/// The publisher replaces an aborted track. The epoch lets the front resume onto the
+/// replacement, and a group reader alone must drive that, without polling the next
+/// group.
 async fn recreate(finish: bool) {
 	let origin = produce_origin(1);
 	let broadcast = origin.create_broadcast("bench").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast
+		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
-	let remote = origin.consume().request_broadcast("bench").await.unwrap();
+	let remote = origin.consume().request_broadcast("bench", None).await.unwrap();
 	let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut open = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
 	open.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
@@ -83,7 +88,7 @@ async fn recreate(finish: bool) {
 	next.write_frame(Timestamp::from_millis(1).unwrap(), b"next".as_ref())
 		.unwrap();
 	drop(open);
-	let result = tokio::time::timeout(Duration::from_secs(2), async {
+	let result = moq_net_sim::timeout(Duration::from_secs(2), async {
 		if finish {
 			group.finished().await.map(|_| ())
 		} else {
@@ -97,12 +102,12 @@ async fn recreate(finish: bool) {
 	assert_eq!(next.sequence, 3);
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn recreated_track_skips_old_group() {
 	recreate(false).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn recreated_track_finishes_old_group() {
 	recreate(true).await;
 }

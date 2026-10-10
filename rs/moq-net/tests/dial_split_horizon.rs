@@ -10,9 +10,9 @@ mod support;
 
 use std::time::Duration;
 
-use moq_net::{Client, Hop, Server, Session, Version, announce, origin, stats};
+use moq_net::{Client, Hop, Server, Session, Version, origin, stats};
 use support::{
-	harness::{now, run},
+	harness::{now, spawn},
 	mock::create_mock_session_pair,
 };
 
@@ -25,7 +25,7 @@ fn version() -> Version {
 
 fn produce(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(run(driver));
+	spawn(driver);
 	producer
 }
 
@@ -63,7 +63,7 @@ async fn dial(dialer: &origin::Producer, edge: &origin::Producer) -> Link {
 			.connect(now(), client_transport)
 			.await
 			.expect("client handshake failed");
-		tokio::spawn(run(driver));
+		spawn(driver);
 		session
 	};
 	let server = async {
@@ -71,10 +71,10 @@ async fn dial(dialer: &origin::Producer, edge: &origin::Producer) -> Link {
 			.accept(now(), server_transport)
 			.await
 			.expect("server handshake failed");
-		tokio::spawn(run(driver));
+		spawn(driver);
 		session
 	};
-	let (client, server) = tokio::join!(client, server);
+	let (client, server) = futures::join!(client, server);
 	Link {
 		_client: client,
 		_server: server,
@@ -95,11 +95,17 @@ fn traffic(registry: &stats::Registry, role: stats::Role) -> stats::Traffic {
 /// The hop the dialer attributed `path` to, once that announce has arrived.
 async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
 	let mut announced = dialer.consume().announced();
-	let event = tokio::time::timeout(SETTLE, async {
+	let event = moq_net_sim::timeout(SETTLE, async {
 		loop {
-			let update = announced.next().await.expect("announce cursor closed");
-			if update.kind.is_active() && update.prefix.as_str() == path {
-				return update;
+			let event = announced.next().await.expect("announce cursor closed");
+			let announce = match event {
+				moq_net::announce::Event::Start(announce)
+				| moq_net::announce::Event::Update(announce)
+				| moq_net::announce::Event::Restart(announce) => announce,
+				moq_net::announce::Event::End(_) => continue,
+			};
+			if announce.prefix.as_str() == path {
+				return announce;
 			}
 		}
 	})
@@ -116,7 +122,7 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
 /// announced a namespace is not told about it, and the other edge is. A
 /// subscribe from that other edge is fetched from the announcer and is not
 /// sent back to the subscriber.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	let dialer = produce(1);
 	let publisher = produce(2);
@@ -138,15 +144,13 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	// The other edge learns the namespace, attributed to a different hop, so the
 	// two dials are not one endpoint.
 	let mut subscriber_announced = subscriber.consume().announced();
-	let subscriber_saw = tokio::time::timeout(SETTLE, subscriber_announced.next())
+	let subscriber_saw = moq_net_sim::timeout(SETTLE, subscriber_announced.next())
 		.await
 		.expect("the other edge never learned the namespace")
 		.expect("announce cursor closed");
-	assert_eq!(
-		subscriber_saw.kind,
-		announce::Kind::Announced,
-		"the other edge's first event was not the namespace: {subscriber_saw:?}"
-	);
+	let moq_net::announce::Event::Start(subscriber_saw) = subscriber_saw else {
+		panic!("the other edge's first event was not the namespace: {subscriber_saw:?}");
+	};
 	assert_eq!(subscriber_saw.prefix.as_str(), "room");
 	let subscriber_hop = match subscriber_saw.route.source() {
 		origin::Source::Peer(hop) => hop,
@@ -155,7 +159,7 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	assert_ne!(subscriber_hop, publisher_hop, "each dial gets its own hop");
 	assert_ne!(subscriber_hop, Hop::UNKNOWN);
 
-	tokio::time::sleep(SETTLE).await;
+	moq_net_sim::sleep(SETTLE).await;
 
 	let echoed = traffic(&to_publisher.registry, stats::Role::Subscriber);
 	assert_eq!(
@@ -173,7 +177,7 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	// session it arrived on.
 	let viewed = subscriber
 		.consume()
-		.request_broadcast("room")
+		.request_broadcast("room", None)
 		.await
 		.expect("subscriber resolves the namespace");
 	let subscription = moq_net::track::Subscription::default();
@@ -183,12 +187,12 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 		.subscribe(subscription)
 		.await
 		.expect("subscriber subscribes");
-	tokio::time::timeout(SETTLE, track.demand().used())
+	moq_net_sim::timeout(SETTLE, track.demand().used())
 		.await
 		.expect("the subscribe never reached the announcer")
 		.unwrap();
 
-	tokio::time::sleep(SETTLE).await;
+	moq_net_sim::sleep(SETTLE).await;
 
 	let from_announcer = traffic(&to_publisher.registry, stats::Role::Publisher);
 	assert_eq!(

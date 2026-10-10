@@ -12,7 +12,7 @@ globalThis.customElements = {
 } as unknown as CustomElementRegistry;
 
 // The audio worklet is inlined by a bundler plugin, which the test runner has no equivalent for.
-mock.module("./audio/render-worklet.ts?worklet", () => ({ default: "blob:worklet" }));
+mock.module("./audio/render-worklet.ts?worklet", () => ({ default: async () => "blob:worklet" }));
 
 // A framework binds the raw node (Svelte's `bind:this`, React's ref) and reads properties from it.
 // Until the browser upgrades that node, every field the class sets is absent, so `el.broadcast` is

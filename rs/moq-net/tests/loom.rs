@@ -26,7 +26,7 @@
 
 use bytes::Bytes;
 use loom::{future::block_on, thread};
-use moq_net::{Error, Timestamp, broadcast, cache};
+use moq_net::{Error, Hop, Timestamp, broadcast, cache, origin};
 
 /// Preemptions per execution unless `LOOM_MAX_PREEMPTIONS` overrides it. Loom's own
 /// guidance is that 2 or 3 catches most bugs, and each extra level multiplies the
@@ -184,6 +184,140 @@ fn subscriber_wakes_parked_demand() {
 	});
 }
 
+/// A publisher parked on `broadcast::Demand::used` while one reader hands over to the
+/// next: the last reader leaves and a new one arrives straight from the track producer,
+/// which never touches the broadcast's own state. Whatever the publisher's poll saw, it
+/// must be woken for the newcomer.
+#[test]
+fn broadcast_demand_sees_a_reader_return() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let video = broadcast.create_track("video", None).expect("create track");
+		let demand = broadcast.demand();
+		let first = consumer.track("video").expect("track");
+
+		let reader = thread::spawn(move || {
+			drop(first);
+			let next = video.consume();
+			// Returned, so neither the reader nor the track goes before the join.
+			(video, next)
+		});
+
+		block_on(demand.used()).expect("the returning reader was missed");
+		drop(reader.join().unwrap());
+	});
+}
+
+/// A publisher parked on `broadcast::Demand::unused` while a reader comes and goes
+/// straight through the track producer: its leaving must wake the publisher.
+#[test]
+fn broadcast_demand_sees_a_reader_leave() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let video = broadcast.create_track("video", None).expect("create track");
+		let demand = broadcast.demand();
+
+		let reader = thread::spawn(move || {
+			drop(video.consume());
+			video
+		});
+
+		block_on(demand.unused()).expect("the reader leaving was missed");
+		drop(reader.join().unwrap());
+	});
+}
+
+/// A reader taking and dropping a track around the front's demand poll. The front must
+/// see it go: one that missed the edge keeps its source subscribed for nobody, which
+/// shows up here as a deadlock waiting for the source to go unread.
+///
+/// A lookup today also writes the broadcast state the front watches for new tracks,
+/// which wakes it regardless, so this only bites once a lookup stops writing. The
+/// front's demand poll must not lean on that wake.
+#[test]
+fn a_front_sees_a_reader_come_and_go() {
+	model(|| {
+		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		let consumer = producer.consume();
+		let source = producer.publish("room", origin::Route::default()).unwrap();
+		let video = source.create_track("video", None).expect("create track");
+		let demand = video.demand();
+		let noop = kio::Waiter::noop();
+		let now = moq_net::time::Instant::now();
+
+		let pending = consumer.request_broadcast("room", None);
+		driver.poll(now, &noop).unwrap();
+		let room = block_on(pending).expect("resolves");
+
+		// A first reader gets the source asked, then leaves.
+		let first = room.track("video").expect("track");
+		driver.poll(now, &noop).unwrap();
+		assert!(demand.is_used(), "the front never asked the source");
+		drop(first);
+
+		let racing = room.clone();
+		let reader = thread::spawn(move || drop(racing.track("video").expect("track")));
+		driver.poll(now, &noop).unwrap();
+		reader.join().unwrap();
+
+		block_on(std::future::poll_fn(|cx| {
+			driver.poll(now, &kio::Waiter::new(cx.waker().clone())).unwrap();
+			match demand.is_used() {
+				true => std::task::Poll::Pending,
+				false => std::task::Poll::Ready(()),
+			}
+		}));
+	});
+}
+
+/// The other direction: with the track parked, one reader leaves and another arrives
+/// around the front's demand poll. A front that missed the arrival leaves the newcomer
+/// stalled on a parked track, which shows up here as a deadlock waiting for the source
+/// to be asked again. Like `a_front_sees_a_reader_come_and_go`, it must hold without
+/// the lookup's incidental wake.
+#[test]
+fn a_front_sees_a_reader_return() {
+	model(|| {
+		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		let consumer = producer.consume();
+		let source = producer.publish("room", origin::Route::default()).unwrap();
+		let video = source.create_track("video", None).expect("create track");
+		let demand = video.demand();
+		let noop = kio::Waiter::noop();
+		let now = moq_net::time::Instant::now();
+
+		let pending = consumer.request_broadcast("room", None);
+		driver.poll(now, &noop).unwrap();
+		let room = block_on(pending).expect("resolves");
+
+		// A first reader comes and goes, which parks the track.
+		let first = room.track("video").expect("track");
+		driver.poll(now, &noop).unwrap();
+		drop(first);
+		driver.poll(now, &noop).unwrap();
+		assert!(!demand.is_used(), "the front kept the source for nobody");
+
+		let leaving = room.track("video").expect("track");
+		let racing = room.clone();
+		let reader = thread::spawn(move || {
+			drop(leaving);
+			racing.track("video").expect("track")
+		});
+		driver.poll(now, &noop).unwrap();
+		let returned = reader.join().unwrap();
+
+		block_on(std::future::poll_fn(|cx| {
+			driver.poll(now, &kio::Waiter::new(cx.waker().clone())).unwrap();
+			match demand.is_used() {
+				true => std::task::Poll::Ready(()),
+				false => std::task::Poll::Pending,
+			}
+		}));
+		drop(returned);
+	});
+}
+
 /// Two tracks publish into one bounded pool from separate threads, and the pool must
 /// be back to zero once every handle is gone: a charge that outlives its group is how
 /// a cache leaks, and loom's Arc-leak check catches the reference-cycle flavor of the
@@ -221,7 +355,7 @@ fn concurrent_tracks_drain_a_shared_pool() {
 		for handle in handles {
 			handle.join().unwrap();
 		}
-		broadcast.finish();
+		broadcast.close();
 		drop(broadcast);
 
 		assert_eq!(pool.used(), 0, "the pool kept a charge after every group was dropped");
@@ -290,5 +424,70 @@ fn publisher_drop_resolves_a_parked_subscriber() {
 		let _ = block_on(subscriber.recv_group());
 
 		publisher.join().unwrap();
+	});
+}
+
+/// The last `fetch_group` caller leaving, racing a new fetch of the same group while
+/// the handler drops the request the moment it sees it unused.
+///
+/// The leaver withdraws the attempt under the fetch lock a join takes, so the new
+/// fetch either joined the live attempt (keeping its request wanted) or queued a fresh
+/// one. A fetch joining the withdrawn attempt and failing as its handler drops it is
+/// the bug, and shows up as `Err` here.
+#[test]
+fn a_fetch_never_joins_a_withdrawn_attempt() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("video", None).expect("create track");
+		let dynamic = track.dynamic();
+		let consumer = track.consume();
+
+		let first = consumer.fetch_group(5, None);
+		let request = block_on(dynamic.requested_group()).expect("requested");
+
+		let leaver = thread::spawn(move || {
+			drop(first);
+			request.demand().is_used().then_some(request)
+		});
+		let mut retry = consumer.fetch_group(5, None);
+		let request = match leaver.join().unwrap() {
+			Some(request) => request,
+			None => {
+				let polled = kio::Task::poll(&mut *retry, &kio::Waiter::noop());
+				if let std::task::Poll::Ready(Err(err)) = polled {
+					panic!("the retry joined a withdrawn attempt: {err}");
+				}
+				block_on(dynamic.requested_group()).expect("the retry queued a fresh request")
+			}
+		};
+		request.accept(None).expect("accept").finish().expect("finish");
+		block_on(retry).expect("the retry resolves");
+	});
+}
+
+/// A request racing the front it joins as that front retires: the last holder lets go
+/// while the origin's driver runs. The request either holds the front in time, which
+/// keeps it, or finds it closed and mints a fresh one. Being handed the broadcast of a
+/// front that is ending is the bug, and shows up here as a closed broadcast.
+#[test]
+fn a_request_never_joins_a_retiring_front() {
+	model(|| {
+		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		let consumer = producer.consume();
+		let _broadcast = producer.publish("room", origin::Route::default()).unwrap();
+		let waiter = kio::Waiter::noop();
+		let now = moq_net::time::Instant::now();
+
+		let pending = consumer.request_broadcast("room", None);
+		driver.poll(now, &waiter).unwrap();
+		let first = block_on(pending).expect("resolves");
+
+		let requester = thread::spawn(move || consumer.request_broadcast("room", None));
+		drop(first);
+		driver.poll(now, &waiter).unwrap();
+		let pending = requester.join().unwrap();
+		driver.poll(now, &waiter).unwrap();
+		let resolved = block_on(pending).expect("resolves");
+		assert!(!resolved.is_closed(), "handed a front that is ending");
 	});
 }

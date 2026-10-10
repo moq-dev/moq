@@ -35,8 +35,6 @@ const trackShape = {
 	samplerate: z.optional(z.number()),
 	channelConfig: z.optional(z.string()),
 	bitrate: z.optional(z.number()),
-	// Non-standard: whether the publisher recommends temporarily avoiding this track.
-	stalled: z.optional(z.boolean()),
 	/** Resolved base64 initialization data (draft-01's initRef indirection is resolved away). */
 	initData: z.optional(z.string()),
 	renderGroup: z.optional(z.number()),

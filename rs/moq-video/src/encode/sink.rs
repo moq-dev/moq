@@ -1,7 +1,7 @@
 //! An [`Encoder`](super::Encoder) that owns the thread it runs on, so any
 //! thread (or task) can drive it.
 //!
-//! Off macOS the encoder runs on a dedicated OS thread (mirroring the capture
+//! Off macOS and iOS the encoder runs on a dedicated OS thread (mirroring the capture
 //! pump): the Windows hardware encoder is a Media
 //! Foundation MFT whose COM handles must be created, driven, and dropped all on
 //! one thread (COM apartments are per-thread), and whose encode call blocks on
@@ -14,19 +14,19 @@
 //! `Send` there (Windows D3D11 textures and CPU I420 both are) and packets come
 //! back over a channel.
 //!
-//! macOS keeps encoding inline: VideoToolbox has no COM apartment to balance and
+//! macOS and iOS keep encoding inline: VideoToolbox has no COM apartment to balance and
 //! doesn't block on an event loop, so a thread would only add a hop, and its
 //! zero-copy `CVPixelBuffer` surface is `!Send` and couldn't cross to one anyway.
 
 use std::sync::Arc;
 
 use super::Encoded;
-use super::encoder::Config;
+use super::encoder::{Applied, Config};
 use crate::{Error, Frame};
 
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 use inline::Inner;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 use threaded::Inner;
 
 /// An [`Encoder`](super::Encoder) confined to one thread, driven from anywhere.
@@ -56,10 +56,10 @@ use threaded::Inner;
 /// Racing an encode against a shutdown signal is fine, since the sink is on its
 /// way out anyway. What does not work is cancelling one and carrying on.
 ///
-/// macOS never refuses, because there is no thread to run ahead: the encoder
+/// Apple platforms never refuse, because there is no thread to run ahead: the encoder
 /// runs inline, so a dropped future either had not started the call or had
 /// already finished it. Write to the contract above regardless, or the same code
-/// loses frames off macOS.
+/// loses frames elsewhere.
 pub struct Sink(Inner);
 
 impl Sink {
@@ -75,6 +75,12 @@ impl Sink {
 		self.0.name()
 	}
 
+	/// The latency and compression controls the backend applied, like
+	/// [`Encoder::applied`](super::Encoder::applied).
+	pub fn applied(&self) -> &Applied {
+		self.0.applied()
+	}
+
 	/// Cut a new group at the next frame, like
 	/// [`Encoder::cut`](super::Encoder::cut).
 	///
@@ -88,10 +94,22 @@ impl Sink {
 		self.0.cut().await
 	}
 
+	/// What [`cut`](Self::cut) would answer, without queueing anything.
+	#[cfg(feature = "capture")]
+	pub(crate) async fn check_cut(&mut self) -> Result<(), Error> {
+		self.0.check_cut().await
+	}
+
 	/// Encode one frame, waiting for its access units.
 	///
 	/// Otherwise [`Encoder::encode`](super::Encoder::encode): zero or more access
 	/// units, each stamped with the frame it came from.
+	///
+	/// One call at a time, so the sink never queues raw frames of its own: the
+	/// only pictures in flight are the one being encoded and whatever the codec
+	/// pipelines (none on NVENC or openh264). A source that outruns the codec
+	/// should drop the raw frames it has not submitted yet, never encoded
+	/// packets, which later frames depend on.
 	///
 	/// Takes ownership, since the frame may be moved to the encode thread, but
 	/// takes it as anything that can become an [`Arc`] so a caller fanning one
@@ -133,14 +151,14 @@ impl Sink {
 	}
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 mod threaded {
 	use std::sync::Arc;
 
 	use tokio::sync::{mpsc, oneshot};
 
 	use super::super::Encoded;
-	use super::super::encoder::{Config, Encoder};
+	use super::super::encoder::{Applied, Config, Encoder};
 	use crate::worker::{Ready, Worker};
 	use crate::{Error, Frame};
 
@@ -158,6 +176,9 @@ mod threaded {
 		/// refusal has to reach the caller, since the alternative is a group
 		/// boundary that silently never happens.
 		Cut { resp: oneshot::Sender<Result<(), Error>> },
+		/// Report whether a cut would be refused, queueing nothing.
+		#[cfg(feature = "capture")]
+		CheckCut { resp: oneshot::Sender<Result<(), Error>> },
 		/// Retune to a new bitrate, reporting whether the backend took it so the
 		/// caller can stop adapting against an encoder that can't. The round trip
 		/// is affordable because the rate control policy only sends one of these
@@ -180,15 +201,25 @@ mod threaded {
 		},
 	}
 
+	/// What the encode thread reports once its encoder is open.
+	pub struct Opened {
+		name: String,
+		applied: Applied,
+	}
+
 	/// Build an encoder for `config` and serve requests until the channel closes.
 	/// Runs entirely on the encode thread; see [`crate::worker`].
-	fn run(config: Config, ready: Ready, mut requests: mpsc::UnboundedReceiver<Request>) {
+	fn run(config: Config, ready: Ready<Opened>, mut requests: mpsc::UnboundedReceiver<Request>) {
 		let mut encoder = match Encoder::new(&config) {
 			Ok(encoder) => encoder,
 			Err(err) => return ready.err(err),
 		};
 		// If the awaiting `open` was cancelled, give up before encoding.
-		if !ready.ok(encoder.name()) {
+		let opened = Opened {
+			name: encoder.name().to_owned(),
+			applied: encoder.applied().clone(),
+		};
+		if !ready.ok(opened) {
 			return;
 		}
 
@@ -204,6 +235,10 @@ mod threaded {
 				}
 				Request::Cut { resp } => {
 					let _ = resp.send(encoder.cut());
+				}
+				#[cfg(feature = "capture")]
+				Request::CheckCut { resp } => {
+					let _ = resp.send(encoder.check_cut());
 				}
 				Request::SetBitrate { bitrate, resp } => {
 					let _ = resp.send(encoder.set_bitrate(bitrate));
@@ -226,7 +261,7 @@ mod threaded {
 	}
 
 	/// An [`Encoder`] running on its own thread. See the module docs.
-	pub struct Inner(Worker<Request>);
+	pub struct Inner(Worker<Request, Opened>);
 
 	impl Inner {
 		pub async fn open(config: &Config) -> Result<Self, Error> {
@@ -236,11 +271,20 @@ mod threaded {
 		}
 
 		pub fn name(&self) -> &str {
-			self.0.name()
+			&self.0.info().name
+		}
+
+		pub fn applied(&self) -> &Applied {
+			&self.0.info().applied
 		}
 
 		pub async fn cut(&mut self) -> Result<(), Error> {
 			self.0.request(|resp| Request::Cut { resp }).await
+		}
+
+		#[cfg(feature = "capture")]
+		pub async fn check_cut(&mut self) -> Result<(), Error> {
+			self.0.request(|resp| Request::CheckCut { resp }).await
 		}
 
 		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<Vec<Encoded>, Error> {
@@ -263,12 +307,12 @@ mod threaded {
 	}
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 mod inline {
 	use std::sync::Arc;
 
 	use super::super::Encoded;
-	use super::super::encoder::{Config, Encoder};
+	use super::super::encoder::{Applied, Config, Encoder};
 	use crate::{Error, Frame};
 
 	/// An [`Encoder`] driven inline on the calling thread (see the module docs).
@@ -288,10 +332,19 @@ mod inline {
 			self.0.name()
 		}
 
+		pub fn applied(&self) -> &Applied {
+			self.0.applied()
+		}
+
 		/// Async only to match the threaded `Inner`; there's no thread to hand this
 		/// to, so it runs inline. The same holds for the calls below.
 		pub async fn cut(&mut self) -> Result<(), Error> {
 			self.0.cut()
+		}
+
+		#[cfg(feature = "capture")]
+		pub async fn check_cut(&mut self) -> Result<(), Error> {
+			self.0.check_cut()
 		}
 
 		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<Vec<Encoded>, Error> {
@@ -314,11 +367,11 @@ mod inline {
 
 #[cfg(test)]
 mod tests {
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(not(apple))]
 	use std::collections::HashSet;
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(not(apple))]
 	use std::sync::{Arc, Mutex};
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(not(apple))]
 	use std::thread::ThreadId;
 
 	use super::super::backend::probe;
@@ -393,15 +446,38 @@ mod tests {
 		);
 	}
 
+	/// What the backend applied has to survive the trip off the encode thread,
+	/// since that thread is the only place the encoder can be asked.
+	#[cfg(feature = "openh264")]
+	#[test]
+	fn the_applied_preset_crosses_the_thread() {
+		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		config.kind = Kind::Software;
+		config.preset = super::super::Preset::Quality;
+		let sink = pollster::block_on(Sink::open(&config)).unwrap();
+		// openh264 has no Quality controls of its own, and says so.
+		assert_eq!(sink.applied().preset, Some(super::super::Preset::Balanced));
+		assert!(!sink.applied().controls.is_empty());
+	}
+
+	/// A backend that reports nothing claims no preset, rather than echoing the
+	/// one that was asked for.
+	#[test]
+	fn an_unreported_backend_claims_no_preset() {
+		let _probe = probe::exclusive();
+		let sink = pollster::block_on(Sink::open(&probe_config())).unwrap();
+		assert_eq!(sink.applied().preset, None);
+	}
+
 	/// Regression: a queued request runs on the encode thread whether or not the
 	/// caller is still waiting, so a cancelled `encode` leaves the codec a step
 	/// ahead of the stream with output nobody received. Carrying on would publish
 	/// a track quietly missing those frames, which is worse than an error: only
 	/// the publisher could ever tell, and only by decoding its own output.
 	///
-	/// macOS is exempt by design: the inline sink encodes on the calling thread,
+	/// Apple platforms are exempt by design: the inline sink encodes on the calling thread,
 	/// so there is nothing to run ahead (see the module docs).
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(not(apple))]
 	#[test]
 	fn a_cancelled_call_poisons_the_sink() {
 		let _probe = probe::exclusive();
@@ -445,9 +521,9 @@ mod tests {
 	///
 	/// Asserted on every platform rather than only Windows: the confinement is
 	/// what the bindings now rely on, so it should fail here rather than on a
-	/// machine none of CI has. macOS is exempt by design: the inline sink has
+	/// machine none of CI has. Apple platforms are exempt by design: the inline sink has
 	/// no thread of its own to confine anything to.
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(not(apple))]
 	#[test]
 	fn the_codec_stays_on_one_thread_however_it_is_driven() {
 		let _probe = probe::exclusive();

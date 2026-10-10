@@ -14,11 +14,11 @@ mod consumer;
 mod container;
 mod hex;
 mod json;
+mod m2ts;
 mod millis;
 mod mode;
 mod priority;
 mod root;
-pub mod stalled;
 mod text;
 mod video;
 
@@ -30,11 +30,22 @@ pub use compression::*;
 pub use consumer::*;
 pub use container::*;
 pub use json::*;
+pub use m2ts::*;
 pub use mode::*;
 pub use priority::*;
 pub use root::*;
 pub use text::*;
 pub use video::*;
+
+/// Serde default for a rendition's `enabled` field.
+pub(crate) fn enabled_default() -> bool {
+	true
+}
+
+/// Skip serializing `enabled` unless it is false, so only a disabled rendition writes it.
+pub(crate) fn enabled_skip(enabled: &bool) -> bool {
+	*enabled
+}
 
 pub(crate) fn deserialize_timescale_or_default<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where

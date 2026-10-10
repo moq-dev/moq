@@ -296,7 +296,7 @@ async fn subscribe_named(consume: moq_net::origin::Consumer, path: String, stats
 		.routed(path.as_str())
 		.await
 		.ok_or_else(|| anyhow::anyhow!("target broadcast was never announced: {path}"))?;
-	let broadcast = consume.request_broadcast(path.as_str()).await?;
+	let broadcast = consume.request_broadcast(path.as_str(), None).await?;
 	drain(broadcast, &stats).await
 }
 
@@ -335,10 +335,15 @@ async fn subscribe(
 			biased;
 			_ = &mut deadline => break,
 			update = announced.next() => {
-				let Some(update) = update else { break };
-				if !update.kind.is_active() {
-					continue;
-				}
+				let update = match update {
+					Some(
+						moq_net::announce::Event::Start(update)
+						| moq_net::announce::Event::Update(update)
+						| moq_net::announce::Event::Restart(update),
+					) => update,
+					Some(moq_net::announce::Event::End(_)) => continue,
+					None => break,
+				};
 				let path = update.prefix.to_string();
 				if own.contains(&path) || !seen.insert(path.clone()) {
 					continue;
@@ -351,7 +356,7 @@ async fn subscribe(
 
 	let mut selected = pool.len() as u64;
 	for path in pool {
-		let Ok(broadcast) = consume.request_broadcast(path.as_str()).await else {
+		let Ok(broadcast) = consume.request_broadcast(path.as_str(), None).await else {
 			continue;
 		};
 		spawn_drain(&mut tasks, path, broadcast, stats.clone());
@@ -360,17 +365,20 @@ async fn subscribe(
 	// Top up from late announcements, first-come: the pool was too small, so
 	// there is nothing to spread over.
 	while selected < want {
-		let Some(update) = announced.next().await else {
-			break;
+		let update = match announced.next().await {
+			Some(
+				moq_net::announce::Event::Start(update)
+				| moq_net::announce::Event::Update(update)
+				| moq_net::announce::Event::Restart(update),
+			) => update,
+			Some(moq_net::announce::Event::End(_)) => continue,
+			None => break,
 		};
-		if !update.kind.is_active() {
-			continue;
-		}
 		let path = update.prefix.to_string();
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}
-		let Ok(broadcast) = consume.request_broadcast(path.as_str()).await else {
+		let Ok(broadcast) = consume.request_broadcast(path.as_str(), None).await else {
 			continue;
 		};
 		selected += 1;
@@ -591,7 +599,7 @@ mod tests {
 	}
 
 	fn replay() -> track::Subscription {
-		track::Subscription::default().with_max_age(Duration::from_secs(30))
+		track::Subscription::default().with_max_delay(Duration::from_secs(30))
 	}
 
 	/// A produced group must start with the JSON keyframe describing the rolled

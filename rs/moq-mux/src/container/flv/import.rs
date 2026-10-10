@@ -21,7 +21,6 @@
 //! enhanced audio, and any other codec, are logged and dropped.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -69,6 +68,10 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// other importers, until they finish too).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
+	/// The stream's timestamp base: the first media frame anchors it, and every frame shifts by its
+	/// offset onto the catalog clock.
+	timebase: crate::catalog::Timebase<E>,
+
 	/// Accumulated unparsed input. Whole tags are drained out; a trailing partial
 	/// tag is retained for the next [`decode`](Self::decode) call.
 	buffer: BytesMut,
@@ -80,10 +83,6 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	video: BTreeMap<u8, VideoStream>,
 	/// Demuxed audio tracks keyed by RTMP track id.
 	audio: BTreeMap<u8, AudioStream>,
-
-	/// The source's mapping onto the broadcast clock, set by [`live`](Self::live). `None`
-	/// publishes the tag timestamps verbatim.
-	anchor: Option<crate::clock::Anchor>,
 }
 
 /// The demuxed video track plus its current catalog config, so a repeated
@@ -91,16 +90,12 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 struct VideoStream {
 	track: crate::container::Producer<crate::catalog::hang::Container, VideoConfig>,
 	config: VideoConfig,
-	stalled: hang::catalog::stalled::Detector,
-	last_source: Option<Instant>,
-	lane: crate::clock::Lane,
 }
 
 /// The demuxed audio track plus its current catalog config.
 struct AudioStream {
 	track: crate::container::Producer<crate::catalog::hang::Container, AudioConfig>,
 	config: AudioConfig,
-	lane: crate::clock::Lane,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -111,25 +106,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			catalog: reserved.producer(),
 			container,
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			header_seen: false,
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
-			anchor: None,
 		}
-	}
-
-	/// Publish on the broadcast clock rather than the source's own tag timestamps.
-	///
-	/// For a live feed with its own zero: the first frame is live on arrival, every track shares
-	/// that one mapping, and an encoder that restarts its timestamps continues forward after the
-	/// real idle gap. Without this, tag timestamps are published verbatim, which suits a source
-	/// already on the clock the catalog advertises
-	/// ([`Config::with_clock`](crate::catalog::Config::with_clock)).
-	pub fn live(mut self) -> Self {
-		self.anchor = Some(crate::clock::Anchor::new(self.catalog.clock()));
-		self
 	}
 
 	/// Select the container this importer wraps decoded media renditions in.
@@ -200,7 +183,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 		}
 
-		self.tick_stalled()?;
 		Ok(())
 	}
 
@@ -486,50 +468,35 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			tracing::debug!("video frame before sequence header, dropping");
 			return Ok(());
 		}
+		// The first frame anchors the stream before the reservation below publishes.
+		let timestamp = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
-		let written = {
-			let stream = self.video.get_mut(&track_id).expect("checked above");
-			let timestamp = Timestamp::from_millis(pts_ms as u64)?;
-			let timestamp = match self.anchor.as_mut() {
-				Some(anchor) => anchor.translate(&mut stream.lane, timestamp)?,
-				None => timestamp,
-			};
-			match stream.track.write(Frame {
-				timestamp,
-				duration: None,
-				payload: Bytes::copy_from_slice(data),
-				keyframe,
-			}) {
-				Ok(()) => {
-					stream.last_source = Some(Instant::now());
-					true
-				}
-				Err(crate::Error::MissingKeyframe(_)) => false,
-				Err(e) => return Err(e.into()),
-			}
-		};
-		if written {
-			self.publish_stalled(track_id, true)?;
+		let stream = self.video.get_mut(&track_id).expect("checked above");
+		match stream.track.write(Frame {
+			timestamp,
+			duration: None,
+			payload: Bytes::copy_from_slice(data),
+			keyframe,
+		}) {
+			Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
+			Err(e) => Err(e.into()),
 		}
-		Ok(())
 	}
 
 	/// Write one audio frame as its own group, so the relay can forward it immediately.
 	fn write_audio(&mut self, track_id: u8, data: &[u8], timestamp: u64) -> anyhow::Result<()> {
-		let Some(stream) = self.audio.get_mut(&track_id) else {
+		if !self.audio.contains_key(&track_id) {
 			tracing::debug!("audio frame before config, dropping");
 			return Ok(());
-		};
+		}
+		// The first frame anchors the stream before the reservation below publishes.
+		let timestamp = self.timebase.shift(Timestamp::from_millis(timestamp)?)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
-		let timestamp = Timestamp::from_millis(timestamp)?;
-		let timestamp = match self.anchor.as_mut() {
-			Some(anchor) => anchor.translate(&mut stream.lane, timestamp)?,
-			None => timestamp,
-		};
+		let stream = self.audio.get_mut(&track_id).expect("checked above");
 		stream.track.write(Frame {
 			timestamp,
 			duration: None,
@@ -563,9 +530,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// site (the producer reports MissingKeyframe), so a mid-GOP join works.
 				track: media,
 				config,
-				stalled: hang::catalog::stalled::Detector::new(),
-				last_source: None,
-				lane: Default::default(),
 			},
 		);
 		Ok(())
@@ -587,54 +551,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			Some(reserved) => reserved.audio(net_track, wire, config.clone())?,
 			None => self.catalog.audio(net_track, wire, config.clone())?,
 		};
-		self.audio.insert(
-			track_id,
-			AudioStream {
-				track: media,
-				config,
-				lane: Default::default(),
-			},
-		);
-		Ok(())
-	}
-
-	fn tick_stalled(&mut self) -> anyhow::Result<()> {
-		let ids: Vec<u8> = self.video.keys().copied().collect();
-		for id in ids {
-			self.publish_stalled(id, false)?;
-		}
-		Ok(())
-	}
-
-	fn publish_stalled(&mut self, track_id: u8, frame: bool) -> anyhow::Result<()> {
-		let Some(stream) = self.video.get_mut(&track_id) else {
-			return Ok(());
-		};
-		let demand = stream.track.track().is_used();
-		if demand {
-			stream.last_source.get_or_insert_with(Instant::now);
-		} else {
-			stream.last_source = None;
-		}
-		let quiet = stream
-			.last_source
-			.map(|at| Instant::now().saturating_duration_since(at))
-			.unwrap_or(Duration::ZERO);
-		let interval = hang::catalog::stalled::interval_from_fps(stream.config.framerate);
-		if !stream.stalled.observe(hang::catalog::stalled::Sample {
-			frame,
-			media_lag: Duration::ZERO,
-			quiet,
-			interval,
-			demand,
-			idle: false,
-		}) {
-			return Ok(());
-		}
-		let flag = stream.stalled.flag();
-		let mut config = stream.track.modify()?;
-		config.stalled = flag;
-		config.commit()?;
+		self.audio.insert(track_id, AudioStream { track: media, config });
 		Ok(())
 	}
 
@@ -664,17 +581,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		for stream in self.video.values_mut() {
 			stream.track.seek(sequence)?;
-			stream.lane.restart();
 		}
 		for stream in self.audio.values_mut() {
 			stream.track.seek(sequence)?;
-			stream.lane.restart();
 		}
 		Ok(())
 	}
 
 	/// Finish every track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		// No frame follows to anchor the clock, so publish the declared track set now.
+		self.initial_reservation = None;
 		for stream in self.video.values_mut() {
 			stream.track.finish()?;
 		}

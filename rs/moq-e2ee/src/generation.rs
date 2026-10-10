@@ -3,12 +3,12 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::credential::{Credential, append_bytes};
-use crate::epoch::Epoch;
 use crate::error::{Error, Result};
 use crate::key::TrackKey;
 use crate::limits::{KEY_LABEL, KEY_LEN, NAME_LABEL};
 use crate::name::{Name, encode};
 use crate::track;
+use moq_net::Epoch;
 
 /// Grouped-frame versus datagram key domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

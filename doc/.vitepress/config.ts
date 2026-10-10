@@ -22,9 +22,9 @@ export default defineConfig({
 				content: "Real-time latency at massive scale",
 			},
 		],
-		["meta", { property: "og:image", content: "https://doc.moq.dev/icon.png" }],
-		["meta", { property: "og:image:width", content: "163" }],
-		["meta", { property: "og:image:height", content: "150" }],
+		["meta", { property: "og:image", content: "https://doc.moq.dev/og.png" }],
+		["meta", { property: "og:image:width", content: "2400" }],
+		["meta", { property: "og:image:height", content: "1350" }],
 		["meta", { property: "og:url", content: "https://doc.moq.dev" }],
 		["meta", { property: "og:site_name", content: "Media over QUIC" }],
 		["meta", { name: "twitter:card", content: "summary_large_image" }],
@@ -36,7 +36,7 @@ export default defineConfig({
 				content: "Real-time latency at massive scale",
 			},
 		],
-		["meta", { name: "twitter:image", content: "https://doc.moq.dev/icon.png" }],
+		["meta", { name: "twitter:image", content: "https://doc.moq.dev/og.png" }],
 		["meta", { name: "theme-color", content: "#0f172a" }],
 	],
 
@@ -60,6 +60,7 @@ export default defineConfig({
 					{ text: "Python", link: "/lib/py/" },
 					{ text: "Go", link: "/lib/go/" },
 					{ text: "Dart", link: "/lib/dart/" },
+					{ text: "C++", link: "/lib/cpp/" },
 					{ text: "C", link: "/lib/c/" },
 				],
 			},
@@ -132,7 +133,11 @@ export default defineConfig({
 								{ text: "Deployment", link: "/setup/prod" },
 							],
 						},
-						{ text: "moq-cli", link: "/bin/cli" },
+						{
+							text: "moq-cli",
+							link: "/bin/cli",
+							items: [{ text: "Inspect a relay", link: "/bin/inspect" }],
+						},
 						{
 							text: "Gateways",
 							items: [
@@ -171,7 +176,7 @@ export default defineConfig({
 								{ text: "moq-auth", link: "/lib/rs/moq-auth" },
 								{ text: "moq-room", link: "/lib/rs/moq-room" },
 								{ text: "moq-json", link: "/lib/rs/moq-json" },
-								{ text: "moq-binary", link: "/lib/rs/moq-binary" },
+								{ text: "moq-flate", link: "/lib/rs/moq-flate" },
 							],
 						},
 						{
@@ -182,11 +187,12 @@ export default defineConfig({
 								{ text: "@moq/hang", link: "/lib/js/hang" },
 								{ text: "@moq/watch", link: "/lib/js/watch" },
 								{ text: "@moq/publish", link: "/lib/js/publish" },
+								{ text: "@moq/video", link: "/lib/js/video" },
 								{ text: "@moq/room", link: "/lib/js/room" },
 								{ text: "@moq/auth", link: "/lib/js/auth" },
 								{ text: "@moq/signals", link: "/lib/js/signals" },
 								{ text: "@moq/json", link: "/lib/js/json" },
-								{ text: "@moq/binary", link: "/lib/js/binary" },
+								{ text: "@moq/flate", link: "/lib/js/flate" },
 							],
 						},
 						{ text: "Swift", link: "/lib/swift/" },
@@ -194,6 +200,7 @@ export default defineConfig({
 						{ text: "Python", link: "/lib/py/" },
 						{ text: "Go", link: "/lib/go/" },
 						{ text: "Dart", link: "/lib/dart/" },
+						{ text: "C++", link: "/lib/cpp/" },
 						{ text: "C", link: "/lib/c/" },
 					],
 				},
@@ -258,6 +265,9 @@ export default defineConfig({
 			}),
 		],
 	},
+
+	// Agent instructions, not a page.
+	srcExclude: ["AGENTS.md"],
 
 	ignoreDeadLinks: [
 		// Localhost URLs are intentional for development examples and aren't

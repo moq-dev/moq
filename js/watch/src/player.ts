@@ -22,7 +22,7 @@ export type PlayerInput = {
 	catalogFormat: Getter<CatalogFormat | undefined>;
 	/** Catalog supplied when the format is `manual`. */
 	catalog: Getter<Catalog.Root | undefined>;
-	/** Connection probe used for rendition selection and delay. */
+	/** Connection probe used for rendition selection. */
 	probe: Getter<Moq.Connection.Probe | undefined>;
 	/** Canvas to paint video into. */
 	canvas: Getter<HTMLCanvasElement | undefined>;
@@ -36,6 +36,8 @@ export type PlayerInput = {
 	muted: Getter<boolean>;
 	/** Canvas visibility policy for video downloads. */
 	visible: Getter<Video.Visible>;
+	/** Which graphics API paints the canvas. */
+	backend: Getter<Video.Backend>;
 	/** Playback distance from the live edge. */
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
@@ -90,6 +92,7 @@ export class Player {
 			volume: getter(props.volume ?? 0.5),
 			muted: getter(props.muted ?? false),
 			visible: getter(props.visible ?? "20%"),
+			backend: getter<Video.Backend>(props.backend ?? "auto"),
 			delay: getter(props.delay ?? "auto"),
 			buffer: getter(props.buffer ?? Time.Milli.zero),
 			target: getter<Video.Target | undefined>(props.target),
@@ -117,7 +120,7 @@ export class Player {
 		this.text = new Text.Source({ broadcast: this.broadcast, target: this.in.captions });
 		this.#signals.cleanup(() => this.text.close());
 
-		this.sync = new Sync({ delay: this.in.delay, buffer: this.in.buffer, probe: this.in.probe });
+		this.sync = new Sync({ delay: this.in.delay, buffer: this.in.buffer });
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.video = new Video.Decoder({ source: videoSource, sync: this.sync, enabled: this.#videoEnabled });
@@ -137,6 +140,7 @@ export class Player {
 			decoder: this.video,
 			canvas: this.in.canvas,
 			visible: this.in.visible,
+			backend: this.in.backend,
 		});
 		this.#signals.cleanup(() => {
 			this.emitter.close();

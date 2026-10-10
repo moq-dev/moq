@@ -12,9 +12,8 @@ Decided in planning:
 
 - Only the relay changes. moq-cli keeps iroh by default because the P2P
   questline dials native peers over it, which mDNS's LAN discovery doesn't
-  replace. `moq relay` (the planned verb) keeps iroh through moq-cli's
-  features.
-- Target `dev`. Removing a default feature from a published crate, and
+  replace.
+- Removing a default feature from a published crate, and
   flags from a shipped binary, is a published break.
 
 Guidance:
@@ -26,5 +25,4 @@ Guidance:
 
 ## Related
 
-- [`moq relay`](/quest/m2/moq-relay-subcommand.md) - forwards the relay's features from moq-cli's
-- [P2P](/quest/m2/p2p/README.md) - why moq-cli keeps iroh
+- [P2P](/quest/m3/p2p/README.md) - why moq-cli keeps iroh

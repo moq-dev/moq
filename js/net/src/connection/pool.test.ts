@@ -217,7 +217,7 @@ test("a publish through one handle resolves locally for another", async () => {
 	const origin = publisher.origin.peek();
 	if (!origin) throw new Error("expected an origin");
 	const broadcast = publish(origin, Path.from("mine"));
-	broadcast.createTrack("chat");
+	broadcast.createTrack("chat", { timescale: Time.Timescale.MILLI });
 
 	// Loopback: the shared origin serves the page's own publish with no round trip, so the
 	// request resolves synchronously instead of waiting on the relay to announce it back.

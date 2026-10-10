@@ -81,4 +81,4 @@ is not an end-to-end network measurement.
 
 ## Related
 
-- [Discover media headroom](/quest/m2/quic-probe.md) - preserving an estimate and discovering spare capacity are separate problems
+- [Discover media headroom](/quest/m1/quic-probe.md) - preserving an estimate and discovering spare capacity are separate problems

@@ -4,11 +4,12 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { closeError, error, fromClose, ProtocolViolation, StreamCode, StreamError, sessionCause } from "../error.ts";
+import { closeError, error, fromClose, ProtocolViolation, SessionCode, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
+import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
@@ -49,6 +50,7 @@ export interface ConnectionProps {
  * @public
  */
 export class Connection implements Established {
+	#closing?: Promise<void>;
 	// The URL of the connection.
 	readonly url: URL;
 
@@ -87,6 +89,7 @@ export class Connection implements Established {
 	// encoding depends on a negotiated capability (e.g. PROBE) wait on this. undefined
 	// until the peer's SETUP arrives; stays undefined forever on older drafts.
 	#peerSetup = new Signal<Setup | undefined>(undefined);
+	#setupSeen = false;
 
 	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
 	// direction without handing out the whole SETUP (whose probe level gates our own streams).
@@ -134,16 +137,36 @@ export class Connection implements Established {
 
 		this.hop = randomHop();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish);
-		this.#subscriber = new Subscriber(this.#quic, this.#version, this.hop, this.#probe, this.#peerSetup);
+		this.#subscriber = new Subscriber(
+			this.#quic,
+			this.#version,
+			this.hop,
+			this.#probe,
+			this.#peerSetup,
+			this.#goaway,
+		);
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
 		void this.#run();
 	}
 
 	/**
-	 * Closes the connection.
+	 * Withdraw announcements and finish the requests this session serves, waiting up to one
+	 * second for delivery before closing.
+	 *
+	 * A served subscription first delivers its remaining group streams, and on lite-07 also
+	 * waits for the subscriber's FIN, which says it read the tail. A live track never ends on
+	 * its own, so it holds the close until the deadline.
 	 */
-	close() {
+	close(): Promise<void> {
+		this.#closing ??= withTimeout(this.#publisher.drain(), 1000, "session close timed out").finally(() =>
+			this.abort(),
+		);
+		return this.#closing;
+	}
+
+	/** End the session immediately without waiting for delivery. */
+	abort(): void {
 		this.#publisher.close();
 		this.#subscriber.close();
 
@@ -181,7 +204,7 @@ export class Connection implements Established {
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
 			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));
-			this.close();
+			this.abort();
 		}
 	}
 
@@ -236,7 +259,7 @@ export class Connection implements Established {
 					// A protocol violation on one stream is the peer breaking the session.
 					// Resetting that stream leaves it free to repeat the violation; a duplicate
 					// GOAWAY is the one this dispatcher raises.
-					if (err instanceof ProtocolViolation) this.close();
+					if (err instanceof ProtocolViolation) this.abort();
 				})
 				.finally(() => {
 					stream.writer.close();
@@ -253,14 +276,27 @@ export class Connection implements Established {
 			const msg = await AnnounceRequest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
 		} else if (typ === StreamId.Subscribe) {
-			const msg = await Subscribe.decode(stream.reader, this.#version);
-			await this.#publisher.runSubscribe(msg, stream);
+			// Owed from dispatch, so a close that lands mid-decode still waits for the request.
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await Subscribe.decode(stream.reader, this.#version);
+					await this.#publisher.runSubscribe(msg, stream);
+				})(),
+			);
 		} else if (typ === StreamId.Fetch) {
-			const msg = await Fetch.decode(stream.reader, this.#version);
-			await this.#publisher.runFetch(msg, stream);
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await Fetch.decode(stream.reader, this.#version);
+					await this.#publisher.runFetch(msg, stream);
+				})(),
+			);
 		} else if (typ === StreamId.Track) {
-			const msg = await TrackMessage.decode(stream.reader, this.#version);
-			await this.#publisher.runTrackInfo(msg, stream);
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await TrackMessage.decode(stream.reader, this.#version);
+					await this.#publisher.runTrackInfo(msg, stream);
+				})(),
+			);
 		} else if (typ === StreamId.Probe) {
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Goaway) {
@@ -282,10 +318,13 @@ export class Connection implements Established {
 
 			this.#runUni(stream)
 				.then(() => {
-					stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+					stream.stop(StreamCode.Cancel);
 				})
 				.catch((err: unknown) => {
 					stream.stop(err);
+					if (err instanceof ProtocolViolation) {
+						this.#quic.close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
+					}
 				});
 		}
 	}
@@ -296,9 +335,16 @@ export class Connection implements Established {
 			const msg = await Group.decode(stream, this.#version);
 			await this.#subscriber.runGroup(msg, stream);
 		} else if (typ === DataType.Setup) {
+			// Claim the stream before decoding, so two incomplete SETUPs are duplicates too.
+			if (this.#setupSeen) throw new ProtocolViolation("duplicate SETUP");
+			this.#setupSeen = true;
 			// The peer sends exactly one SETUP, then FINs. Record it so capability-gated
-			// streams (e.g. PROBE) can react, then drain to the FIN.
-			const setup = await Setup.decode(stream, this.#version);
+			// streams (e.g. PROBE) can react.
+			// The slot is claimed, so no other SETUP can arrive and the streams waiting on it
+			// would hang. The session cannot continue.
+			const setup = await Setup.decode(stream, this.#version).catch((err: unknown) => {
+				throw new ProtocolViolation("invalid SETUP", { cause: err });
+			});
 			this.#peerSetup.set(setup);
 			this.#peerRole.set(setup.role);
 		} else {

@@ -30,20 +30,27 @@
 //! The catalog entry is written when the producer is created and removed when it drops, so a track
 //! is never advertised without a publisher behind it.
 //!
-//! A payload that carries the [`Instant`] it was captured is written at that
-//! time on the broadcast [`Clock`](crate::Clock), and the entry advertises how late payloads reach
-//! the transport as its `jitter` and `delay`, the way a media rendition does:
+//! A payload timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
+//! and the entry advertises how late payloads reach the transport as its `jitter` and `delay`, the
+//! way a media rendition does. A capture [`Instant`](std::time::Instant) converts with
+//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock:
 //!
 //! ```no_run
 //! # fn example(
+//! #     catalog: &moq_mux::catalog::Producer,
 //! #     thumbnail: &mut moq_mux::binary::Snapshot,
 //! #     jpeg: bytes::Bytes,
 //! #     captured: std::time::Instant,
 //! # ) -> moq_mux::Result<()> {
-//! thumbnail.update(moq_net::Timed::from(jpeg).at(captured))?;
+//! let at = catalog.clock().capture(captured)?;
+//! thumbnail.update(moq_net::Timed::from(jpeg).at(at))?;
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! A timestamp carried over from elsewhere, such as a source's own timestamp or the `at` of a
+//! consumed [`Timed`] the payload was derived from, is published unchanged too. It lines up with
+//! media only on a broadcast sharing the source's clock mapping.
 //!
 //! Read one back off the catalog, naming it once:
 //!
@@ -63,7 +70,6 @@
 //! ```
 
 use std::marker::PhantomData;
-use std::time::Instant;
 
 use bytes::Bytes;
 use moq_net::Timed;
@@ -136,10 +142,8 @@ fn prepare(config: &mut impl AsMut<BinaryConfig>, mode: Mode) -> crate::Result<b
 /// Every [`update`](Self::update) supersedes the last, so a consumer reads only the newest payload.
 /// For a log where every payload survives, use [`Stream`].
 pub struct Snapshot<E: CatalogExt = ()> {
-	inner: moq_binary::snapshot::Producer,
+	inner: moq_flate::snapshot::Producer,
 	listing: Listing,
-	/// Maps a payload's capture instant onto the broadcast timeline.
-	clock: crate::Clock,
 	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
 	_catalog: PhantomData<fn() -> E>,
 }
@@ -150,17 +154,15 @@ impl<E: CatalogExt> Snapshot<E> {
 		rendition: crate::catalog::Rendition<E, C>,
 		mut config: C,
 	) -> crate::Result<Self> {
-		let mut binary = moq_binary::snapshot::Config::default();
+		let mut binary = moq_flate::snapshot::Config::default();
 		if prepare(&mut config, Mode::Snapshot)? {
-			binary.compression = moq_binary::Compression::Deflate;
+			binary.compression = moq_flate::Compression::Deflate;
 		}
-		let inner = moq_binary::snapshot::Producer::new(track, binary);
-		let clock = rendition.clock();
+		let inner = moq_flate::snapshot::Producer::new(track, binary);
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
 			listing,
-			clock,
 			_catalog: PhantomData,
 		})
 	}
@@ -177,10 +179,10 @@ impl<E: CatalogExt> Snapshot<E> {
 
 	/// Publish a new payload, superseding the previous one.
 	///
-	/// A payload timed with its capture instant is written at that time and measures the entry's
-	/// `jitter` and `delay`; one ahead of now is refused before anything is written.
-	pub fn update(&mut self, payload: impl Into<Timed<Bytes, Instant>>) -> crate::Result<()> {
-		let (payload, captured) = self.clock.stamp(payload.into())?;
+	/// A payload timed on the broadcast clock is written at that timestamp and measures the entry's
+	/// `jitter` and `delay`; one ahead of now measures as zero delay.
+	pub fn update(&mut self, payload: impl Into<Timed<Bytes>>) -> crate::Result<()> {
+		let (payload, captured) = self.listing.stamp(payload.into());
 		let size = self.inner.update(payload)?;
 		self.listing.record(size, captured)
 	}
@@ -200,15 +202,13 @@ impl<E: CatalogExt> Snapshot<E> {
 /// Every [`append`](Self::append) is preserved and delivered in order. For a latest-value payload,
 /// use [`Snapshot`].
 pub struct Stream<E: CatalogExt = ()> {
-	inner: moq_binary::stream::Producer,
+	inner: moq_flate::stream::Producer,
 	name: String,
 
 	/// Cleared when a terminal failure ends the track, which retires the catalog entry with it. An
 	/// entry advertising a track that can no longer accept records only misleads a consumer that
 	/// discovers it afterwards.
 	listing: Option<Listing>,
-	/// Maps a payload's capture instant onto the broadcast timeline.
-	clock: crate::Clock,
 	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
 	_catalog: PhantomData<fn() -> E>,
 }
@@ -219,18 +219,16 @@ impl<E: CatalogExt> Stream<E> {
 		rendition: crate::catalog::Rendition<E, C>,
 		mut config: C,
 	) -> crate::Result<Self> {
-		let mut binary = moq_binary::stream::Config::default();
+		let mut binary = moq_flate::stream::Config::default();
 		if prepare(&mut config, Mode::Stream)? {
-			binary.compression = moq_binary::Compression::Deflate;
+			binary.compression = moq_flate::Compression::Deflate;
 		}
-		let inner = moq_binary::stream::Producer::new(track, binary);
-		let clock = rendition.clock();
+		let inner = moq_flate::stream::Producer::new(track, binary);
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
 			name: listing.name().to_string(),
 			listing: Some(listing),
-			clock,
 			_catalog: PhantomData,
 		})
 	}
@@ -251,13 +249,20 @@ impl<E: CatalogExt> Stream<E> {
 	/// Append one payload to the log.
 	///
 	/// A payload that cannot be written ends the track (see
-	/// [`moq_binary::stream::Producer::append`]) and retires the catalog entry with it. A catalog
-	/// error publishing the measured bitrate is returned after the payload was written, so the track
-	/// stays open and a retry would duplicate it.
-	pub fn append(&mut self, payload: impl Into<Timed<Bytes, Instant>>) -> crate::Result<()> {
-		let (payload, captured) = self.clock.stamp(payload.into())?;
+	/// [`moq_flate::stream::Producer::append`]) and retires the catalog entry with it. A payload
+	/// refused with [`moq_net::Error::GroupTooLarge`] leaves both intact, since nothing was written.
+	/// A catalog error publishing the measured bitrate is returned after the payload was written, so
+	/// the track stays open and a retry would duplicate it.
+	pub fn append(&mut self, payload: impl Into<Timed<Bytes>>) -> crate::Result<()> {
+		let (payload, captured) = match &mut self.listing {
+			Some(listing) => listing.stamp(payload.into()),
+			// A failed write already ended the log, which refuses this payload whatever its time.
+			None => (Timed::from(payload.into().value), None),
+		};
 		let size = match self.inner.append(payload) {
 			Ok(size) => size,
+			// Refused before anything was written, so the log and its entry carry on.
+			Err(err @ moq_flate::Error::Net(moq_net::Error::GroupTooLarge)) => return Err(err.into()),
 			Err(err) => {
 				// The inner producer has already closed the track. Dropping the listing retires the
 				// catalog entry too: waiting for the handle to drop would keep advertising a track
@@ -295,10 +300,10 @@ pub struct Consumer {
 	mode: Mode,
 }
 
-/// Which moq-binary consumer is doing the reading. Private: the caller sees one `Consumer`.
+/// Which moq-flate consumer is doing the reading. Private: the caller sees one `Consumer`.
 enum Inner {
-	Snapshot(moq_binary::snapshot::Consumer),
-	Stream(moq_binary::stream::Consumer),
+	Snapshot(moq_flate::snapshot::Consumer),
+	Stream(moq_flate::stream::Consumer),
 }
 
 impl Consumer {
@@ -315,18 +320,18 @@ impl Consumer {
 
 		let inner = match &config.mode {
 			Mode::Snapshot => {
-				let mut binary = moq_binary::snapshot::Config::default();
+				let mut binary = moq_flate::snapshot::Config::default();
 				if compression {
-					binary.compression = moq_binary::Compression::Deflate;
+					binary.compression = moq_flate::Compression::Deflate;
 				}
-				Inner::Snapshot(moq_binary::snapshot::Consumer::new(track, binary))
+				Inner::Snapshot(moq_flate::snapshot::Consumer::new(track, binary))
 			}
 			Mode::Stream => {
-				let mut binary = moq_binary::stream::Config::default();
+				let mut binary = moq_flate::stream::Config::default();
 				if compression {
-					binary.compression = moq_binary::Compression::Deflate;
+					binary.compression = moq_flate::Compression::Deflate;
 				}
-				Inner::Stream(moq_binary::stream::Consumer::new(track, binary))
+				Inner::Stream(moq_flate::stream::Consumer::new(track, binary))
 			}
 			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
 		};
@@ -407,6 +412,18 @@ mod test {
 			.clone()
 	}
 
+	/// Drain the timestamp of every frame a subscriber currently has, without blocking.
+	fn stamps(subscriber: &mut moq_net::track::Subscriber) -> Vec<u128> {
+		let waiter = kio::Waiter::noop();
+		let mut stamps = Vec::new();
+		while let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) {
+			while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
+				stamps.push(frame.timestamp.unwrap().as_millis());
+			}
+		}
+		stamps
+	}
+
 	/// Drain every payload a consumer currently has, without blocking.
 	///
 	/// One loop whichever mode the publisher chose, which is the point of the single `Consumer`.
@@ -469,19 +486,73 @@ mod test {
 			.unwrap();
 
 		let captured = std::time::Instant::now();
-		telemetry.append(Timed::from(&b"now"[..]).at(captured)).unwrap();
-		let late = captured - std::time::Duration::from_secs(1);
+		let at = catalog.clock().capture(captured).unwrap();
+		telemetry.append(Timed::from(&b"now"[..]).at(at)).unwrap();
+		let late = catalog
+			.clock()
+			.capture(captured - std::time::Duration::from_secs(1))
+			.unwrap();
 		telemetry.append(Timed::from(&b"late"[..]).at(late)).unwrap();
-
-		// A capture ahead of now is refused before anything is written.
-		let ahead = std::time::Instant::now() + std::time::Duration::from_secs(1);
-		assert!(matches!(
-			telemetry.append(Timed::from(&b"ahead"[..]).at(ahead)),
-			Err(crate::Error::InvalidCapture)
-		));
 
 		let jitter = entry(&catalog, "telemetry").jitter.expect("a late capture is jitter");
 		assert!(jitter >= std::time::Duration::from_secs(1), "{jitter:?}");
+	}
+
+	/// A source's own timestamp, on a catalog clock anchored to that source, is the frame's
+	/// timestamp as given. One ahead of now (a source clock running fast) is published too.
+	#[test]
+	fn a_source_timestamp_is_published_unchanged() {
+		let (mut broadcast, catalog) = catalog();
+		let first = moq_net::Timestamp::from_secs(3600).unwrap();
+		catalog.timebase().anchor(first).unwrap();
+
+		let mut klv = catalog
+			.binary_stream(track(&mut broadcast, "klv"), Config::default())
+			.unwrap();
+		let mut subscriber = klv.consume();
+		let sample = moq_net::Timestamp::from_millis(3_600_040).unwrap();
+		klv.append(Timed::from(&b"sample"[..]).at(sample)).unwrap();
+		let ahead = moq_net::Timestamp::from_millis(3_700_000).unwrap();
+		klv.append(Timed::from(&b"ahead"[..]).at(ahead)).unwrap();
+
+		assert_eq!(stamps(&mut subscriber), [3_600_040, 3_700_000]);
+	}
+
+	/// A timestamp ahead of now counts as on time: its track advertises no delay, and another track
+	/// is measured against it as against any on-time track. Measured as given, it would undercut
+	/// every real flush and inflate the other track's delay by the hour it runs fast.
+	#[test]
+	fn an_ahead_timestamp_counts_as_on_time() {
+		let (mut broadcast, catalog) = catalog();
+		let mut slow = catalog
+			.binary_stream(track(&mut broadcast, "slow"), Config::default())
+			.unwrap();
+		let mut ahead = catalog
+			.binary_stream(track(&mut broadcast, "ahead"), Config::default())
+			.unwrap();
+
+		let anchor = std::time::Instant::now();
+		for i in 0..20u64 {
+			let now = moq_net::Timestamp::from_micros(i * 100_000).unwrap();
+			let at = |late: u64| anchor + std::time::Duration::from_millis(i * 100 + late);
+			let slow = slow.listing.as_mut().unwrap();
+			slow.record_at(now, 100, Some((now, at(200)))).unwrap();
+			// An hour fast, flushed the moment it was written.
+			let fast = moq_net::Timestamp::from_micros(i * 100_000 + 3_600_000_000).unwrap();
+			ahead
+				.listing
+				.as_mut()
+				.unwrap()
+				.record_at(now, 100, Some((fast, at(0))))
+				.unwrap();
+		}
+
+		assert_eq!(
+			entry(&catalog, "slow").delay,
+			Some(std::time::Duration::from_millis(200))
+		);
+		let ahead = entry(&catalog, "ahead");
+		assert_eq!((ahead.delay, ahead.jitter), (None, None));
 	}
 
 	/// An untimed payload is stamped on the broadcast clock too, so mixing it with captured payloads
@@ -497,22 +568,49 @@ mod test {
 		let before = catalog.clock().now();
 		telemetry.append(&b"untimed"[..]).unwrap();
 		telemetry
-			.append(Timed::from(&b"timed"[..]).at(std::time::Instant::now()))
+			.append(Timed::from(&b"timed"[..]).at(catalog.clock().now()))
 			.unwrap();
 		let after = catalog.clock().now();
 
-		let waiter = kio::Waiter::noop();
-		let mut stamps = Vec::new();
-		while let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) {
-			while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-				stamps.push(frame.timestamp.as_millis());
-			}
-		}
+		let stamps = stamps(&mut subscriber);
 		assert_eq!(stamps.len(), 2);
 		assert!(
 			// The track stores milliseconds.
 			before.as_millis() <= stamps[0] && stamps[0] <= stamps[1] && stamps[1] <= after.as_millis(),
 			"{before:?} {stamps:?} {after:?}"
+		);
+	}
+
+	/// A data track registered before an importer's first frame publishes the catalog, fixing its
+	/// clock. An importer starting an hour in shifts onto that clock instead of moving it, so its
+	/// first frame lands at now and the track's writes never step back.
+	#[test]
+	fn an_importer_joins_the_data_tracks_clock() {
+		let (mut broadcast, catalog) = catalog();
+		let mut stream = catalog
+			.binary_stream(track(&mut broadcast, "telemetry"), Config::default())
+			.unwrap();
+		let mut subscriber = stream.consume();
+		stream.append(&b"before"[..]).unwrap();
+		let published = catalog.snapshot().clock;
+
+		let before = catalog.clock().now();
+		let first = catalog
+			.timebase()
+			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
+			.unwrap();
+		stream.append(&b"after"[..]).unwrap();
+		let after = catalog.clock().now();
+
+		assert_eq!(catalog.snapshot().clock, published, "the clock never moves");
+		assert!(before <= first && first <= after, "{before:?} {first:?} {after:?}");
+		let stamps = stamps(&mut subscriber);
+		assert_eq!(stamps.len(), 2);
+		assert!(stamps[0] <= stamps[1] && stamps[1] <= after.as_millis(), "{stamps:?}");
+		let jitter = entry(&catalog, "telemetry").jitter;
+		assert!(
+			jitter.is_none_or(|jitter| jitter < std::time::Duration::from_secs(1)),
+			"{jitter:?}"
 		);
 	}
 
@@ -538,6 +636,34 @@ mod test {
 		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(consumer.mode(), &Mode::Stream);
 		assert_eq!(drain(consumer), expected);
+	}
+
+	/// A payload past the group budget is refused before anything is written, so the log stays
+	/// advertised and the next payload still lands.
+	#[test]
+	fn an_oversized_payload_keeps_the_track_and_the_entry() {
+		let (mut broadcast, catalog) = catalog();
+		let mut samples = catalog
+			.binary_stream(track(&mut broadcast, "samples"), Config::default())
+			.unwrap();
+		let track = samples.consume();
+
+		let oversized = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
+		assert!(matches!(
+			samples.append(oversized),
+			Err(crate::Error::Flate(moq_flate::Error::Net(
+				moq_net::Error::GroupTooLarge
+			)))
+		));
+		assert!(catalog.snapshot().binary.tracks.contains_key("samples"));
+
+		samples.append(&b"after"[..]).unwrap();
+		let entry = entry(&catalog, "samples");
+		samples.finish().unwrap();
+		assert_eq!(
+			drain(Consumer::from_track(track, &entry).unwrap()),
+			vec![Bytes::from_static(b"after")]
+		);
 	}
 
 	#[test]
@@ -611,14 +737,13 @@ mod test {
 
 		#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 		struct Mavlink {
-			#[serde(flatten)]
-			binary: BinaryConfig,
+			config: BinaryConfig,
 			sysid: u8,
 		}
 
 		impl AsMut<BinaryConfig> for Mavlink {
 			fn as_mut(&mut self) -> &mut BinaryConfig {
-				&mut self.binary
+				&mut self.config
 			}
 		}
 
@@ -638,19 +763,19 @@ mod test {
 			}
 			fn estimate(&self) -> Estimate {
 				Estimate::default()
-					.with_bitrate(self.binary.bitrate)
-					.with_jitter(self.binary.jitter)
+					.with_bitrate(self.config.bitrate)
+					.with_jitter(self.config.jitter)
 			}
 			fn set_estimate(&mut self, estimate: Estimate) {
-				self.binary.bitrate = estimate.bitrate;
-				self.binary.jitter = estimate.jitter;
+				self.config.bitrate = estimate.bitrate;
+				self.config.jitter = estimate.jitter;
 			}
 		}
 
 		fn mavlink(sysid: u8) -> Mavlink {
-			let mut binary = BinaryConfig::new(Mode::Snapshot);
-			binary.compression = Some(Compression::Deflate);
-			Mavlink { binary, sysid }
+			let mut config = BinaryConfig::new(Mode::Snapshot);
+			config.compression = Some(Compression::Deflate);
+			Mavlink { config, sysid }
 		}
 
 		fn catalog() -> (moq_net::broadcast::Producer, crate::catalog::Producer<Ext>) {
@@ -676,11 +801,11 @@ mod test {
 			let published = consumer.next().await.unwrap().expect("catalog published");
 			let entry = published.ext.mavlink.get("telemetry").expect("missing entry");
 			assert_eq!(entry.sysid, 7, "the application's fields survive");
-			assert_eq!(entry.binary.mode, Mode::Stream, "the producer fixes the mode");
-			assert_eq!(entry.binary.compression, Some(Compression::Deflate));
+			assert_eq!(entry.config.mode, Mode::Stream, "the producer fixes the mode");
+			assert_eq!(entry.config.compression, Some(Compression::Deflate));
 			assert!(published.binary.tracks.is_empty(), "not listed in the binary section");
 
-			let mut reader = crate::catalog::Entry::new("telemetry", &entry.binary)
+			let mut reader = crate::catalog::Entry::new("telemetry", &entry.config)
 				.subscribe(&source)
 				.await
 				.unwrap();
@@ -723,7 +848,7 @@ mod test {
 		fn an_unknown_compression_is_refused() {
 			let (mut broadcast, catalog) = catalog();
 			let mut entry = mavlink(1);
-			entry.binary.compression = Some(Compression::Unknown("zstd".to_string()));
+			entry.config.compression = Some(Compression::Unknown("zstd".to_string()));
 
 			assert!(matches!(
 				catalog.binary_stream(track(&mut broadcast, "telemetry"), entry),
@@ -738,7 +863,7 @@ mod test {
 		fn a_broadcast_reference_is_refused() {
 			let (mut broadcast, catalog) = catalog();
 			let mut entry = mavlink(1);
-			entry.binary.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
+			entry.config.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
 
 			assert!(matches!(
 				catalog.binary_stream(track(&mut broadcast, "telemetry"), entry),
@@ -762,8 +887,8 @@ mod test {
 			}
 
 			let entry = &catalog.snapshot().ext.mavlink["telemetry"];
-			assert_eq!(entry.binary.bitrate, Some(1_000_000));
-			assert_eq!(entry.binary.jitter, None, "write spacing is not a flush delay");
+			assert_eq!(entry.config.bitrate, Some(1_000_000));
+			assert_eq!(entry.config.jitter, None, "write spacing is not a flush delay");
 		}
 
 		/// A supplied bitrate is authoritative, while a capture time still measures jitter and delay.
@@ -771,7 +896,7 @@ mod test {
 		fn a_supplied_bitrate_is_kept() {
 			let (mut broadcast, catalog) = catalog();
 			let mut entry = mavlink(1);
-			entry.binary.bitrate = Some(64_000);
+			entry.config.bitrate = Some(64_000);
 			let mut telemetry = catalog
 				.binary_stream(track(&mut broadcast, "telemetry"), entry)
 				.unwrap();
@@ -786,9 +911,9 @@ mod test {
 			}
 
 			let entry = &catalog.snapshot().ext.mavlink["telemetry"];
-			assert_eq!(entry.binary.bitrate, Some(64_000));
-			assert_eq!(entry.binary.jitter, Some(std::time::Duration::from_millis(10)));
-			assert_eq!(catalog.snapshot().ext.mavlink["telemetry"].binary.bitrate, Some(64_000));
+			assert_eq!(entry.config.bitrate, Some(64_000));
+			assert_eq!(entry.config.jitter, Some(std::time::Duration::from_millis(10)));
+			assert_eq!(catalog.snapshot().ext.mavlink["telemetry"].config.bitrate, Some(64_000));
 		}
 	}
 }

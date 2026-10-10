@@ -38,6 +38,13 @@ PAGES = {
 	"doc/lib/go/index.md": pascal,
 }
 
+# Python and Go own their stats record so microseconds read as a duration type,
+# which renames those fields.
+RENAMED = {
+	"doc/lib/py/index.md": {"rtt_us": "rtt"},
+	"doc/lib/go/index.md": {"rtt_us": "RTT"},
+}
+
 
 def fields() -> list[str]:
 	"""The field names declared by `MoqConnectionStats`, in source order."""
@@ -57,7 +64,7 @@ def main() -> int:
 	for page, spell in PAGES.items():
 		text = (ROOT / page).read_text()
 		for field in names:
-			name = spell(field)
+			name = RENAMED.get(page, {}).get(field) or spell(field)
 			if not re.search(rf"\b{re.escape(name)}\b", text):
 				missing.append(f"{page}: {name}")
 	if "_valid" not in (ROOT / C_PAGE).read_text():

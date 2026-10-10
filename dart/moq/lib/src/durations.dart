@@ -13,20 +13,23 @@ extension ConnectionStatsDuration on MoqConnectionStats {
 
 /// Duration views over the reconnect pacing.
 extension BackoffDuration on MoqBackoff {
-  /// Delay before the first reconnect attempt.
-  Duration get initial => Duration(microseconds: initialUs);
+  /// Delay before the first reconnect attempt, or null for the default.
+  Duration? get initial =>
+      initialUs == null ? null : Duration(microseconds: initialUs!);
 
-  /// Maximum delay between reconnect attempts.
-  Duration get max => Duration(microseconds: maxUs);
+  /// Maximum delay between reconnect attempts, or null for the default.
+  Duration? get max => maxUs == null ? null : Duration(microseconds: maxUs!);
 
-  /// Time spent retrying before giving up. [Duration.zero] retries forever.
-  Duration get timeout => Duration(microseconds: timeoutUs);
+  /// Time spent retrying before giving up, or null for the default.
+  /// [Duration.zero] retries forever.
+  Duration? get timeout =>
+      timeoutUs == null ? null : Duration(microseconds: timeoutUs!);
 }
 
 /// Duration views over the subscription knobs.
 extension SubscriptionDuration on MoqSubscription {
   /// Upper bound on buffering before a stalled group is skipped.
-  Duration get maxAge => Duration(microseconds: maxAgeUs);
+  Duration get maxDelay => Duration(microseconds: maxDelayUs);
 }
 
 /// Duration views over the publisher-side track settings.
@@ -38,18 +41,14 @@ extension TrackInfoDuration on MoqTrackInfo {
 
 /// Duration view over a raw frame's presentation time.
 extension FrameDuration on MoqFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over a media frame's presentation time.
-extension MediaFrameDuration on MoqMediaFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
+  /// Presentation timestamp, or null for an untimed frame.
+  Duration? get timestamp =>
+      timestampUs == null ? null : Duration(microseconds: timestampUs!);
 }
 
 /// Duration view over a datagram's presentation time.
 extension DatagramDuration on MoqDatagram {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
+  /// Presentation timestamp, or null for an untimed datagram.
+  Duration? get timestamp =>
+      timestampUs == null ? null : Duration(microseconds: timestampUs!);
 }

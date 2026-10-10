@@ -3,7 +3,8 @@
 An OBS Studio plugin for publishing to and subscribing from MoQ relays.
 
 It loads into a stock OBS Studio install (no OBS source build required) and links
-`libmoq`, built from the in-tree [`rs/libmoq`](../../rs/libmoq) crate.
+the moq C++ package, built from the in-tree [`cpp/moq`](../moq) over
+[`rs/moq-ffi`](../../rs/moq-ffi).
 
 Build instructions for each platform live in [`doc/bin/obs.md`](../../doc/bin/obs.md).
 In short, from the repo root:

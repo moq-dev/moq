@@ -95,7 +95,7 @@ export class Room {
 			const local = this.identity.peek();
 			if (local && parsed.identity === local) continue;
 
-			if (Moq.Announce.isActive(update.kind)) {
+			if (update.kind !== "end") {
 				this.#add(parsed.identity, parsed.kind, Moq.Path.from(covered));
 			} else {
 				this.#remove(parsed.identity, parsed.kind);

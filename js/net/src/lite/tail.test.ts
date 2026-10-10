@@ -21,7 +21,7 @@ import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_05, Version } from "./version.ts";
 
-// The subscription's max age, which is also how long it waits for a group that never arrives.
+// The subscription's max delay, which is also how long it waits for a group that never arrives.
 const GRACE = Milli(100);
 
 /** One lite-05+ frame: a zero timestamp delta, then the length-prefixed payload. */
@@ -52,10 +52,10 @@ function groupStream(subscriber: Subscriber, sequence: number) {
  * it answers TRACK_INFO, then writes whatever responses the test asks for on the subscribe
  * stream and FINs it when told.
  */
-async function subscribed(version: Version, maxAge = GRACE, groups?: Groups) {
+async function subscribed(version: Version, maxDelay = GRACE, groups?: Groups) {
 	const pair = createMockTransportPair(ALPN_05);
 	const subscriber = new Subscriber(pair.client, version, randomHop());
-	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ maxAge, groups });
+	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ maxDelay, groups });
 
 	const info = await Stream.accept(pair.server, version);
 	if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
@@ -74,6 +74,7 @@ async function subscribed(version: Version, maxAge = GRACE, groups?: Groups) {
 		reader,
 		respond: (resp: SubscribeResponse) => encodeSubscribeResponse(sub.writer, resp, version),
 		fin: () => sub.writer.close(),
+		subscriberFin: () => sub.reader.done(),
 		reset: (error: Error) => sub.writer.reset(error),
 	};
 }
@@ -164,28 +165,61 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await reader.closed).toBeNull();
 	});
 
-	test("a group that never arrives is given up on after the subscription's max age", async () => {
-		const { subscriber, reader, respond, fin } = await subscribed(version);
-		await respond({ start: new SubscribeStart(0) });
-		const group = groupStream(subscriber, 1);
-		group.write("1.0");
-		group.finish();
-		await respond({ end: new SubscribeEnd(2, 2) });
-		await fin();
+	test("readers end before a missing group's grace settles the subscription", async () => {
+		const realTimeout = globalThis.setTimeout;
+		const realNow = performance.now.bind(performance);
+		let now = 0;
+		performance.now = () => now;
+		let expire!: () => void;
+		let armed!: () => void;
+		const graceArmed = new Promise<void>((resolve) => (armed = resolve));
+		globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+			if (delay !== GRACE) return realTimeout(callback, delay);
+			expire = callback;
+			armed();
+			// The test advances this clock explicitly, without a wall-clock timer.
+			return 0;
+		}) as typeof setTimeout;
 
-		// Group 0 was reset before its header arrived, so nothing ever accounts for it.
-		expect((await reader.recvGroup())?.sequence).toBe(1);
-		const started = performance.now();
-		expect(await reader.recvGroup()).toBeUndefined();
-		expect(performance.now() - started).toBeGreaterThanOrEqual(GRACE - 5);
-		expect(await reader.closed).toBeNull();
-		expect(reader.final()).toBe(2);
+		let subscriber: Subscriber | undefined;
+		try {
+			const sub = await subscribed(version);
+			subscriber = sub.subscriber;
+			const { reader, respond, fin } = sub;
+			const ordered = reader.fork({ maxDelay: GRACE }).ordered();
+			await respond({ start: new SubscribeStart(0) });
+			const group = groupStream(subscriber, 1);
+			group.write("1.0");
+			group.finish();
+			await group.handled;
+			await respond({ end: new SubscribeEnd(2, 2) });
+			await fin();
+			await graceArmed;
+
+			// Group 0 has no header, so accounting still waits. Both reader cursors
+			// skip that hole and see the end as soon as the newest group reaches it.
+			expect((await reader.recvGroup())?.sequence).toBe(1);
+			expect(await reader.recvGroup()).toBeUndefined();
+			expect(await ordered.readString()).toBe("1.0");
+			expect(await ordered.readString()).toBeUndefined();
+			expect(reader.closed.peek()).toBeUndefined();
+			expect(reader.final()).toBe(2);
+
+			now = GRACE;
+			expire();
+			expect(await reader.closed).toBeNull();
+			ordered.close();
+		} finally {
+			globalThis.setTimeout = realTimeout;
+			performance.now = realNow;
+			subscriber?.close();
+		}
 	});
 
 	test.skipIf(version === Version.DRAFT_07)(
 		"a subscription ends without waiting once every group is accounted for",
 		async () => {
-			// A max age far past the test's patience: only the accounting may end it.
+			// A max delay far past the test's patience: only the accounting may end it.
 			const { subscriber, reader, respond, fin } = await subscribed(version, Milli(60_000));
 			await respond({ start: new SubscribeStart(0) });
 			await respond({ drop: new SubscribeDrop({ start: 0, end: 0, error: 0 }) });
@@ -243,8 +277,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test.skipIf(version === Version.DRAFT_07)("a lowered floor owes the groups it newly asked for", async () => {
-		const maxAge = Milli(60_000);
-		const { subscriber, respond, fin } = await subscribed(version, maxAge, { start: { included: 3 } });
+		const maxDelay = Milli(60_000);
+		const { subscriber, respond, fin } = await subscribed(version, maxDelay, { start: { included: 3 } });
 		await respond({ start: new SubscribeStart(3) });
 		const group = groupStream(subscriber, 3);
 		group.write("3.0");
@@ -255,7 +289,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const lower = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ maxAge, groups: { start: { included: 1 } } });
+			.subscribe({ maxDelay, groups: { start: { included: 1 } } });
 		await respond({ end: new SubscribeEnd(4, 1) });
 		await fin();
 		// Long enough for a subscription that owed nothing more to have ended.
@@ -345,4 +379,28 @@ test("a subscribe stream reset preserves the publisher's failure", async () => {
 	expect(closed).toBeInstanceOf(StreamError);
 	expect((closed as StreamError).code).toBe(StreamCode.NotFound);
 	await expect(reader.recvGroup()).rejects.toThrow(StreamError);
+});
+
+test("lite-07 FIN waits for the skipped and reset final range to settle", async () => {
+	const { subscriber, reader, respond, fin, subscriberFin } = await subscribed(Version.DRAFT_07, Milli(60_000));
+	await respond({ start: new SubscribeStart(0) });
+	const first = groupStream(subscriber, 0);
+	first.finish();
+	await first.handled;
+	const last = groupStream(subscriber, 2);
+	last.write("tail");
+	await respond({ end: new SubscribeEnd(3, 2) });
+	await fin();
+	let finished = false;
+	const ack = subscriberFin().then(() => {
+		finished = true;
+	});
+	// Wait for SUBSCRIBE_END to be decoded without advancing any timers.
+	while (reader.final() !== 3) await Promise.resolve();
+	expect(finished).toBe(false);
+	last.reset();
+	await last.handled;
+	await ack;
+	expect(finished).toBe(true);
+	expect(await reader.closed).toBeNull();
 });

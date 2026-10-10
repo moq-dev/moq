@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // Transport is the network transport carrying an incoming session.
@@ -22,6 +23,8 @@ const (
 	TransportTCP = ffi.MoqTransportTcp
 	// TransportUnix is a session that arrived over a Unix domain socket.
 	TransportUnix = ffi.MoqTransportUnix
+	// TransportWebTransport is a session that arrived over WebTransport (HTTP/3).
+	TransportWebTransport = ffi.MoqTransportWebTransport
 )
 
 // Request is an incoming session that can be accepted (Accept) or rejected (Reject).
@@ -50,28 +53,20 @@ func (r *Request) Transport() Transport {
 	return r.inner.Transport()
 }
 
-// SetPublish overrides the publish origin for this session. Pass nil to fall
-// back to the server's configured publish origin. Captured at Accept.
-func (r *Request) SetPublish(o *OriginProducer) error {
-	if o == nil {
-		return r.inner.SetPublish(nil)
+// Accept completes the handshake, inheriting server origins wherever an argument is nil.
+// Hold the session to keep the connection alive. Pass fresh origins for isolation,
+// or the same fresh origin on both sides to share it.
+func (r *Request) Accept(ctx context.Context, publish, consume *OriginProducer) (*Session, error) {
+	var ffiPublish, ffiConsume **ffi.MoqOriginProducer
+	if publish != nil {
+		ffiPublish = &publish.inner
 	}
-	return r.inner.SetPublish(&o.inner)
-}
-
-// SetConsume overrides the consume origin for this session. Pass nil to fall
-// back to the server's configured consume origin. Captured at Accept.
-func (r *Request) SetConsume(o *OriginProducer) error {
-	if o == nil {
-		return r.inner.SetConsume(nil)
+	if consume != nil {
+		ffiConsume = &consume.inner
 	}
-	return r.inner.SetConsume(&o.inner)
-}
-
-// Accept completes the handshake and returns the established session. Hold the
-// session to keep the connection alive.
-func (r *Request) Accept(ctx context.Context) (*Session, error) {
-	inner, err := runHandle(ctx, r.inner.Cancel, r.inner.Accept)
+	inner, err := bridge.CallHandle(ctx, r.inner.Cancel, func(ctx context.Context) (*ffi.MoqSession, error) {
+		return r.inner.Accept(ctx, ffiPublish, ffiConsume)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +75,7 @@ func (r *Request) Accept(ctx context.Context) (*Session, error) {
 
 // Reject refuses the session with an application error code; 401 and 403 map to unauthorized.
 func (r *Request) Reject(ctx context.Context, code uint16) error {
-	return runErr(ctx, r.inner.Cancel, func(ctx context.Context) error {
+	return bridge.CallErr(ctx, r.inner.Cancel, func(ctx context.Context) error {
 		return r.inner.Reject(ctx, code)
 	})
 }
@@ -94,11 +89,13 @@ func (r *Request) Cancel() {
 type ServerOption func(*serverConfig)
 
 type serverConfig struct {
-	tlsCert     []string
-	tlsKey      []string
-	tlsGenerate []string
-	publish     *OriginProducer
-	subscribe   *OriginProducer
+	tlsCert        []string
+	tlsKey         []string
+	tlsGenerate    []string
+	versions       []string
+	quicMaxStreams *uint64
+	publish        *OriginProducer
+	consume        *OriginProducer
 }
 
 // WithTLSCert sets paths to TLS certificate chains.
@@ -116,24 +113,35 @@ func WithTLSGenerate(hostnames ...string) ServerOption {
 	return func(c *serverConfig) { c.tlsGenerate = hostnames }
 }
 
+// WithServerVersions restricts the protocol versions accepted, spelled like
+// "moq-lite-03". By default every supported version is accepted.
+func WithServerVersions(versions ...string) ServerOption {
+	accepted := append([]string(nil), versions...)
+	return func(c *serverConfig) { c.versions = accepted }
+}
+
+// WithServerQUICMaxStreams caps the concurrent QUIC streams each peer may open
+// toward this server (default 1024).
+func WithServerQUICMaxStreams(maxStreams uint64) ServerOption {
+	return func(c *serverConfig) { c.quicMaxStreams = &maxStreams }
+}
+
 // WithServerPublishOrigin sets the origin whose broadcasts are served to
 // incoming sessions. Omit both origin options to get a shared internal origin.
 func WithServerPublishOrigin(o *OriginProducer) ServerOption {
 	return func(c *serverConfig) { c.publish = o }
 }
 
-// WithServerSubscribeOrigin sets the origin that receives broadcasts published
+// WithServerConsumeOrigin sets the origin that receives broadcasts published
 // by incoming sessions.
-func WithServerSubscribeOrigin(o *OriginProducer) ServerOption {
-	return func(c *serverConfig) { c.subscribe = o }
+func WithServerConsumeOrigin(o *OriginProducer) ServerOption {
+	return func(c *serverConfig) { c.consume = o }
 }
 
 // Server accepts incoming sessions with automatic origin wiring.
 type Server struct {
 	inner         *ffi.MoqServer
-	origin        *OriginProducer
 	publishOrigin *OriginProducer
-	consumeOrigin *OriginProducer
 	localAddr     string
 	closeOnce     sync.Once
 }
@@ -144,41 +152,36 @@ func Listen(ctx context.Context, bind string, opts ...ServerOption) (*Server, er
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-
-	s := &Server{}
-	if cfg.publish == nil && cfg.subscribe == nil {
-		s.origin = NewOriginProducer()
-		s.publishOrigin = s.origin
-		s.consumeOrigin = s.origin
-	} else {
-		s.publishOrigin = cfg.publish
-		s.consumeOrigin = cfg.subscribe
+	if cfg.publish == nil && cfg.consume == nil {
+		shared := NewOriginProducer()
+		cfg.publish = shared
+		cfg.consume = shared
 	}
 
-	inner := ffi.NewMoqServer()
-	err := inner.SetBind(bind)
-	if err == nil && len(cfg.tlsCert) > 0 {
-		err = inner.SetTlsCert(cfg.tlsCert)
+	config := ffi.MoqServerConfig{
+		Bind:     &bind,
+		Versions: cfg.versions,
+		Tls: ffi.MoqServerTls{
+			Cert:     cfg.tlsCert,
+			Key:      cfg.tlsKey,
+			Generate: cfg.tlsGenerate,
+		},
+		Quic: ffi.MoqQuicConfig{MaxStreams: cfg.quicMaxStreams},
 	}
-	if err == nil && len(cfg.tlsKey) > 0 {
-		err = inner.SetTlsKey(cfg.tlsKey)
+	if cfg.publish != nil {
+		config.Publish = &cfg.publish.inner
 	}
-	if err == nil && len(cfg.tlsGenerate) > 0 {
-		err = inner.SetTlsGenerate(cfg.tlsGenerate)
+	if cfg.consume != nil {
+		config.Consume = &cfg.consume.inner
 	}
-	if err == nil && s.publishOrigin != nil {
-		err = inner.SetPublish(&s.publishOrigin.inner)
-	}
-	if err == nil && s.consumeOrigin != nil {
-		err = inner.SetConsume(&s.consumeOrigin.inner)
-	}
+
+	inner, err := ffi.NewMoqServer(config)
 	if err != nil {
-		inner.Cancel()
 		return nil, err
 	}
-	s.inner = inner
+	s := &Server{inner: inner, publishOrigin: cfg.publish}
 
-	addr, err := runCancellable(ctx, inner.Cancel, inner.Listen)
+	addr, err := bridge.Call(ctx, inner.Cancel, inner.Listen)
 	if err != nil {
 		inner.Cancel()
 		return nil, err
@@ -221,9 +224,9 @@ func (s *Server) Accept(ctx context.Context) (*Request, error) {
 	return &Request{inner: *res}, nil
 }
 
-// Requests ranges over incoming requests until the server stops or the loop
+// All ranges over incoming requests until the server stops or the loop
 // breaks. Each request must be answered with Accept or Reject.
-func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
+func (s *Server) All(ctx context.Context) iter.Seq2[*Request, error] {
 	return func(yield func(*Request, error) bool) {
 		for {
 			req, err := s.Accept(ctx)
@@ -248,7 +251,7 @@ func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
 //
 // To inspect or reject requests, range over Requests instead:
 //
-//	for req, err := range server.Requests(ctx) {
+//	for req, err := range server.All(ctx) {
 //	    if err != nil {
 //	        return err
 //	    }
@@ -256,7 +259,7 @@ func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
 //	        _ = req.Reject(ctx, 403)
 //	        continue
 //	    }
-//	    session, err := req.Accept(ctx)
+//	    session, err := req.Accept(ctx, nil, nil)
 //	    // hold the session to keep the connection alive
 //	}
 func (s *Server) Serve(ctx context.Context) error {
@@ -280,7 +283,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		wg.Add(1)
 		go func(req *Request) {
 			defer wg.Done()
-			session, err := req.Accept(ctx)
+			session, err := req.Accept(ctx, nil, nil)
 			if err != nil {
 				return
 			}

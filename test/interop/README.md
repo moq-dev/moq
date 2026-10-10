@@ -16,8 +16,14 @@ Most subscribers check for a non-empty frame. The browser additionally verifies
 WebCodecs output painted to a canvas and drives the player's pause/resume controls.
 Every publisher but the Rust CLI also carries an Opus track, which the browser
 subscriber checks end-to-end: the browser encodes fake microphone audio, and the
-Python and Go clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
+Python, Go, and C++ clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
 duration, so the matrix covers the FFI audio path with a non-default codec config.
+
+Whenever the browser subscriber is in the run, the matrix ends with a close-code
+case: Chromium dials the relay with a token its public rules refuse, and
+`WebTransport.closed` must carry the relay's code and reason. Chromium treats a
+server's HTTP/3 control stream ending as fatal, so a server that ends it under
+the close capsule loses both; no Rust peer is that strict.
 
 `just test media` is a separate, browser-only run that asks a harder
 question: is the media a viewer gets actually advancing and in sync, and does the
@@ -30,15 +36,16 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 | Rust | `rs/moq-relay` + `rs/moq-cli` | `cargo build` | publish (video) + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `uv build` wheels (maturin + hatchling), installed into a venv in the run directory | publish (video + audio) + subscribe |
 | Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `sh/go/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
+| C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
-| C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
+| C | `rs/moq-c` | `cargo build -p moq-c` + `cc` | subscribe |
 | GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |
 
 The browser, native JS, C, and GStreamer clients subscribe only by choice
 (publishing media needs an encoder the native JS runtimes lack, the C client is
 intentionally minimal, and `moqsink` publishing needs request-pad muxing this
-client doesn't drive). Rust, Python, Go, and the browser publish.
+client doesn't drive). Rust, Python, Go, C++, and the browser publish.
 
 The Go client builds against the modules `sh/go/stage.sh` assembles from
 this checkout: `moq-ffi` compiled for the host, bindings regenerated with
@@ -46,6 +53,12 @@ this checkout: `moq-ffi` compiled for the host, bindings regenerated with
 That is the same staging `just go check` uses, so this cell covers the Go
 wrapper end to end rather than only compiling it. A shell without
 `uniffi-bindgen-go` (the nix devShell ships it) marks the cell unavailable.
+
+The C++ client builds against the package the way an external project would:
+`interop.sh` configures, builds, and installs `cpp/moq` into the run directory,
+then builds `clients/cpp` with `find_package(moq-cpp)` pointed at that prefix. A
+shell without `cmake` or `uniffi-bindgen-cpp` (the nix devShell ships both)
+marks the cell unavailable.
 
 The GStreamer client builds the `moqsrc` plugin from `rs/moq-gst` and points
 `GST_PLUGIN_PATH` at it, then reads a broadcast with
@@ -62,7 +75,7 @@ workspace packages, because the JS clients here are bun workspace members.
 ## Running locally
 
 You need the workspace toolchain on `PATH` (cargo, ffmpeg, bun, uv, go,
-uniffi-bindgen-go, a C compiler). `nix develop` provides all of it except
+uniffi-bindgen-go, cmake, uniffi-bindgen-cpp, a C/C++ compiler). `nix develop` provides all of it except
 Playwright's Chromium, which
 `interop.sh` fetches on first run (`bunx playwright install chromium`).
 
@@ -70,7 +83,7 @@ Playwright's Chromium, which
 # Default: rust publishes, rust subscribes (a fast sanity check).
 just test interop
 
-# Full matrix: rust/python/go/browser publish; everyone subscribes.
+# Full matrix: rust/python/go/cpp/browser publish; everyone subscribes.
 just test interop --all
 
 # Pick your own axes:
@@ -86,11 +99,58 @@ just test interop-negative
 just test media
 ```
 
-Subscriber names: `rust`, `python`, `go`, `js` (browser), `js-native-node`,
-`js-native-bun`, `c`, `gst`. Publisher names: `rust`, `python`, `go`, `js`.
+Subscriber names: `rust`, `python`, `go`, `cpp`, `js` (browser), `js-native-node`,
+`js-native-bun`, `c`, `gst`. Publisher names: `rust`, `python`, `go`, `cpp`, `js`.
 
 A client whose source build fails fails only its own matrix cells (see
 `mark_broken` in `interop.sh`); it never aborts the rest of the run.
+
+## Released wire compatibility
+
+`just test wire-compat` compares this checkout with the newest stable,
+non-yanked crates.io and npm releases. The existing Interop workflow runs it
+nightly and on demand on `main`. Registry installation is omitted from PR runs;
+resolver and removed-version regressions run through `just test harness`.
+
+The run records exact releases, npm's resolved lockfile, both CLI help outputs,
+and each matrix cell in the harness artifacts. It uses checksummed GitHub
+binaries when available on Linux x86\_64, with an exact-version `cargo install`
+fallback. Run inside `nix develop` with GitHub CLI registry access.
+
+Four sources sign JWTs: current and published Rust CLI, and current and
+published `@moq/auth`. Both Rust CLIs and both JavaScript packages verify every
+token and assert its normalized root and permission scope. Current and released
+`hang` and `@moq/hang` encode and decode one another's catalogs and legacy frame
+headers, checking the exact timestamp and payload. These are format checks,
+independent of a media decoder.
+
+The session lanes take the moq-lite drafts from each CLI's `--connect-version`
+choices. IETF drafts are left out on purpose: our clients and relays always
+prefer moq-lite with each other, and `just test interop` covers IETF. The relay
+offers only the cell's version, and JavaScript checks the negotiated version.
+Current Rust media publishers feed released Rust and JS readers, then released
+publishers feed current readers, through both relay sources. Rust exports must
+decode to a video frame through ffmpeg. The existing JS subscriber
+reconstructs the catalog and decodes the container.
+
+Each `moq-net` library states whether a draft has FETCH (lite-05 onward
+today). A draft without it in both is logged and its FETCH lanes skipped; one
+the release supports and the checkout dropped fails. Both Rust versions FETCH the group the
+publisher's own JS subscriber observed and compare every frame's exact
+payload. JS publishers write one group after that subscriber's demand, and the
+opposite-source Rust CLI FETCHes it by the same observed ID.
+
+Every session cell runs, and the run counts the cells that ran and were
+skipped, then lists each failing cell before it fails.
+Checkout-only versions are logged and omitted. Removing a released version
+fails before sessions start. A maintainer-approved break belongs in
+`compat/planned-breaks.json` with its reason and the exact affected release
+versions. Keyed by a protocol name it drops that version; with `cells` it
+skips only the named lanes, optionally narrowed to versions, a relay source,
+or a publisher source. Every skipped cell is logged with the break's name.
+Entries become errors once an affected release changes or no longer offers a
+listed version, forcing removal or a fresh review. Future WIP drafts receive
+no automatic exception.
 
 ## Media QA
 
@@ -126,7 +186,11 @@ Each run covers, against a real local relay:
   The fake device is not physical hardware, and the headless permission decision
   is not a person clicking a browser prompt.
 - **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
-  **publisher stop and same-path republish**, and **late join**.
+  **publisher stop and same-path republish**, and **late join**. The late
+  joiner may first show the GOP from before the demand gap, but it must present
+  a frame within 5s of loading and then come within 1.5s of the fixture's
+  painted frame within 2s, both bounds about twice the worst seen in looped runs
+  under CPU load.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -170,8 +234,10 @@ varint.ts               the JS side of the varint check, driven by moq-net's tes
 clients/
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
+  cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq-cpp))
   js/                     headless-Chromium publish/subscribe via @moq/watch + @moq/publish
     driver.ts             the interop matrix's browser publisher/subscriber
+    close.ts              the refused session's close code and reason
     media.ts              the media output + lifecycle checks
     harness.ts            shared Playwright plumbing
     src/contract.ts       what the page and its drivers agree on, free of browser imports
@@ -179,8 +245,9 @@ clients/
     src/pattern.ts        how that fixture encodes itself into the picture and the audio
     src/probe.ts          subscriber-side measurement, taken at the sinks
     src/instrument.ts     live counts of the platform resources the page holds
+    src/close.ts          the refused session, read off `WebTransport.closed`
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
-  c/subscribe.c           subscribe via rs/libmoq
+  c/subscribe.c           subscribe via rs/moq-c
 ```
 
 ## CI
@@ -211,5 +278,10 @@ match byte for byte and decode back to the same value.
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
 (leading-ones) varints, a SETUP carrying a 62-bit Hop ID, a datagram, and a
 GROUP stream with frames, and re-encodes them byte for byte. Past 2^62-1 the
-range is per version: JS writes lite-07's 64-bit values, which Rust must refuse
-with a decode error until its `VarInt` widens, and JS refuses them on lite-06.
+range is per version: JS writes lite-07's 64-bit values, which Rust reads back,
+and JS refuses them on lite-06.
+
+`ietf_datagram_interop` does the same for moq-transport's `OBJECT_DATAGRAM` on
+drafts 14 through 22: `ietf-datagram.ts` decodes Rust's datagrams and their
+Timestamps and re-encodes them byte for byte, and Rust decodes the datagram the
+JS publisher sends.
