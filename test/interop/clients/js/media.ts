@@ -45,14 +45,9 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import {
-	type CaptureState,
-	FAULTS,
-	leakedPlayerStarted,
-	SAMPLE_MS,
-	SAMPLE_RATE,
-} from "./src/contract";
+import { type CaptureState, FAULTS, leakedPlayerStarted, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
 import * as Pattern from "./src/pattern";
+import { resumeSkew } from "./src/resume";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
 const CASES = ["capture-denial", "pause", "disable", "rejoin", "detach", "republish", "late-join"] as const;
@@ -205,6 +200,7 @@ async function waitForLive(
 	player: Page,
 	playerErrors: BrowserErrors,
 	assertion: string,
+	resumed = false,
 ): Promise<{ first: number; lag: number; after: number }> {
 	const since = Date.now();
 	let first: number | undefined;
@@ -218,6 +214,15 @@ async function waitForLive(
 			() => [],
 		);
 		if (fixture && state?.frameId !== undefined) {
+			if (resumed) {
+				const skew = resumeSkew(state, frame);
+				if (skew !== undefined)
+					check(
+						Math.abs(skew) <= MAX_SKEW_STEPS * Pattern.STEP_MS,
+						"resume audio/video sync",
+						() => `${assertion}: offset ${skew}ms; ${traceLine(state, since)}`,
+					);
+			}
 			lag = fixture.frameId - state.frameId;
 			first ??= lag;
 			moved = frame !== undefined && state.frameId !== frame;
@@ -263,7 +268,7 @@ function traceLine(sample: PlayerState, start: number): string {
 		`    +${((sample.at - start) / 1000).toFixed(2)}s frame=${sample.frameId ?? "-"} ` +
 		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
 		`rms=${sample.rms?.toFixed(3) ?? "-"} ats=${sample.audioTimestamp?.toFixed(0) ?? "-"} vts=${sample.videoTimestamp?.toFixed(0) ?? "-"} ` +
-			`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
+		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
 	);
 }
 
@@ -750,13 +755,7 @@ try {
 		console.error("  detach released every session, audio graph, and worker");
 
 		await command(player, "reattach");
-		await waitForState(player, playerErrors, {
-			deadline: Date.now() + timeoutMs,
-			assertion: "reattach resumes playback",
-			description: `the presented frame to move past the ${busy.frameId} showing before the detach`,
-			predicate: (state) => (state.frameId ?? 0) > (busy.frameId ?? 0),
-		});
-		await waitForLive(publisher, publisherErrors, player, playerErrors, "reattach reaches live");
+		await waitForLive(publisher, publisherErrors, player, playerErrors, "reattach reaches live", true);
 		await measurePlayback(player, playerErrors, "after reattach");
 	}
 
