@@ -2658,18 +2658,21 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 						let Some(instance) = instances.get(&source).cloned() else {
 							continue;
 						};
-						let prefix = {
+						let (prefix, winner) = {
 							let table = shared.read();
-							table
+							let prefix = table
 								.routes
 								.covering(&path.as_path())
 								.find(|entry| entry.id == route)
-								.map(|entry| entry.prefix.clone())
+								.map(|entry| entry.prefix.clone());
+							let winner = prefix.as_ref().and_then(|prefix| table.presented(prefix, horizon));
+							(prefix, winner)
 						};
 						resolved = Some(Resolution {
 							instance: instance.clone(),
 							route,
 							prefix,
+							winner,
 							renewed: false,
 						});
 						if let Ok(mut pending) = request.write()
@@ -3678,6 +3681,16 @@ impl OriginState {
 		}
 		best
 	}
+
+	/// The instance announce cursors behind `horizon` present at `prefix`: its best
+	/// route there, ranked as [`Self::sync_route`] ranks them.
+	fn presented(&self, prefix: &Path, horizon: Horizon) -> Option<Instance> {
+		self.routes
+			.at(prefix)
+			.filter(|entry| entry.live() && horizon.admits(entry))
+			.min_by_key(|entry| route_order(prefix, entry))
+			.map(RouteEntry::instance)
+	}
 }
 
 /// One-shot result of a dynamic broadcast request.
@@ -3707,6 +3720,8 @@ struct Resolution {
 	route: u64,
 	/// That route's prefix, when it was still in the table as the front resolved.
 	prefix: Option<PathOwned>,
+	/// The instance the prefix's announcements presented as the front resolved.
+	winner: Option<Instance>,
 	/// Whether the front already renewed the prefix; see [`Self::moved`].
 	renewed: bool,
 }
@@ -3715,7 +3730,9 @@ impl Resolution {
 	/// The prefix to [renew](OriginState::renew), once per front: on a route without
 	/// an epoch, a request for the path, beneath the prefix, now resolves through
 	/// another route there. The prefix's own winner may be unchanged, so nothing else
-	/// tells its announce cursors that what they resolved under it moved.
+	/// tells its announce cursors that what they resolved under it moved. Once another
+	/// instance wins the prefix, they restarted it already, and a renewal would restart
+	/// it again.
 	fn moved(&mut self, table: &OriginState, path: &Path, horizon: Horizon) -> Option<PathOwned> {
 		if self.renewed || !matches!(self.instance, Instance::Route(_)) {
 			return None;
@@ -3727,6 +3744,9 @@ impl Resolution {
 		}
 		let best = table.best_route(path, horizon, &HashSet::new(), |_| true)?;
 		if best.id == self.route || best.prefix != *prefix || best.epoch.is_some() {
+			return None;
+		}
+		if table.presented(prefix, horizon) != self.winner {
 			return None;
 		}
 		self.renewed = true;
