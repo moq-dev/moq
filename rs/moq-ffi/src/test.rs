@@ -3939,6 +3939,10 @@ async fn server_cancel_during_listen_releases_the_port() {
 	let waker = std::task::Waker::noop();
 	let mut listen = Box::pin(server.listen());
 	let _ = listen.as_mut().poll(&mut std::task::Context::from_waker(waker));
+	assert!(
+		std::net::UdpSocket::bind(addr).is_err(),
+		"the polled listen should have bound the port"
+	);
 
 	server.cancel();
 	std::net::UdpSocket::bind(addr).expect("cancel should release the socket before it returns");
