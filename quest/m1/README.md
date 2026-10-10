@@ -81,6 +81,7 @@ bench all require its crate.
 - [moq.sh deploys from CI](/quest/m1/moq-sh-deploy.md) - the first `release` run of the moq.sh workflow deploys with the Workers Editor token
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
+- [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [IETF object gaps](/quest/m1/ietf-object-gaps.md) - a gapped object ID is refused loudly like a subgroup in Rust and JS, and an overflowing one closes the session in Rust
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [Relay session limits](/quest/m1/relay-session-limits.md) - moq-relay sets per-session request limits, tighter for clients than peers, and the bindings name a refused request
@@ -198,6 +199,7 @@ bench all require its crate.
 - [Draft 14-16 updates](/quest/m1/ietf-legacy-updates.md) - Rust and JS apply and answer moq-transport 14-16 request updates without ending or leaking the request
 - [JS session caps](/quest/m1/js-session-parity.md) - @moq/net enforces moq-net's per-session announce and subscription caps
 - [Tail arrivals](/quest/m1/tail-arrivals.md) - a track judges its pending tail from recorded arrivals, not a cache scan, and errors a reader whose tail ends short
+- [Resume reorder](/quest/m1/resume-reorder.md) - a group whose stream header arrives after its successor's still resumes on failover; only a dropped or long-gone group fails
 - [JS pending tail](/quest/m1/js-pending-tail.md) - a JS reader holds for a track's pending tail like Rust
 - [Group demand after accept](/quest/m1/group-demand-accept.md) - an accepted group request's demand ends cleanly instead of failing with NotFound
 - [Pool churn cursors](/quest/m1/pool-churn-cursors.md) - the origin pool churn benchmark sweeps announce cursors per prefix
