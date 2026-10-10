@@ -138,7 +138,6 @@ partial final interval; the last emitted line covers exactly its recorded bounds
 Ticker delays can extend or shorten a reported interval, so use its actual bounds
 rather than assuming the configured cadence.
 
-
 `--output stats.jsonl` mirrors every report interval to a file as one JSON
 line, each stamped with `timestamp_ms`. The frame, byte, and group counters are
 cumulative and monotonic, so a consumer diffs successive lines to compute
