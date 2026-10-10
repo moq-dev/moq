@@ -141,6 +141,32 @@ struct moq_source;
 
 namespace {
 
+struct prepared_decoder {
+	AVCodecContext *codec_ctx = nullptr;
+	AVCodecID codec_id = AV_CODEC_ID_NONE;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	std::string codec;
+
+	~prepared_decoder()
+	{
+		if (codec_ctx)
+			avcodec_free_context(&codec_ctx);
+	}
+};
+
+struct prepared_audio_decoder {
+	AVCodecContext *codec_ctx = nullptr;
+	uint32_t sample_rate = 0;
+	uint32_t channels = 0;
+
+	~prepared_audio_decoder()
+	{
+		if (codec_ctx)
+			avcodec_free_context(&codec_ctx);
+	}
+};
+
 // One subscribed track: what it is, the consumer once subscribed, and the pending
 // call that resolves, subscribes, or reads its next frame. Dropping it cancels that call.
 struct Track {
@@ -157,6 +183,9 @@ struct Track {
 	// "Video" or "Audio", for the log.
 	const char *kind;
 	std::string name;
+	std::optional<std::string> broadcast;
+	std::unique_ptr<prepared_decoder> video_decoder;
+	std::unique_ptr<prepared_audio_decoder> audio_decoder;
 	moq::Container container;
 	// Decodes one frame and hands it to OBS, under ctx->mutex.
 	Decode decode;
@@ -187,32 +216,8 @@ struct Connection {
 
 	std::shared_ptr<Track> video;
 	std::shared_ptr<Track> audio;
-};
-
-struct prepared_decoder {
-	AVCodecContext *codec_ctx = nullptr;
-	AVCodecID codec_id = AV_CODEC_ID_NONE;
-	uint32_t width = 0;
-	uint32_t height = 0;
-	std::string codec;
-
-	~prepared_decoder()
-	{
-		if (codec_ctx)
-			avcodec_free_context(&codec_ctx);
-	}
-};
-
-struct prepared_audio_decoder {
-	AVCodecContext *codec_ctx = nullptr;
-	uint32_t sample_rate = 0;
-	uint32_t channels = 0;
-
-	~prepared_audio_decoder()
-	{
-		if (codec_ctx)
-			avcodec_free_context(&codec_ctx);
-	}
+	std::shared_ptr<Track> pending_video;
+	std::shared_ptr<Track> pending_audio;
 };
 
 } // namespace
@@ -590,7 +595,10 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 static std::shared_ptr<Track> moq_source_track(const Connection &conn, const std::weak_ptr<Track> &weak)
 {
 	auto track = weak.lock();
-	return track && (track == conn.video || track == conn.audio) ? track : nullptr;
+	return track && (track == conn.video || track == conn.audio || track == conn.pending_video ||
+			 track == conn.pending_audio)
+		       ? track
+		       : nullptr;
 }
 
 // Wraps a track's continuation so it runs only while `track` is still current.
@@ -659,6 +667,18 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 		LOG_DEBUG("%s track closed cleanly", track->kind);
 		return;
 	}
+	if (track == conn->pending_video) {
+		// Keep the old decoder and subscription until a replacement keyframe arrives.
+		if (!(**result).keyframe) {
+			moq_source_read_track(ctx, conn, track);
+			return;
+		}
+		moq_source_install_decoder_locked(ctx, std::move(track->video_decoder));
+		conn->video = std::move(conn->pending_video);
+	} else if (track == conn->pending_audio) {
+		moq_source_install_audio_decoder_locked(ctx, std::move(track->audio_decoder));
+		conn->audio = std::move(conn->pending_audio);
+	}
 	track->decode(ctx, **result);
 	// The frame may have stopped the track (an audio decode failure).
 	if (moq_source_track(*conn, track) == track)
@@ -688,22 +708,24 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 		return;
 	}
 
-	// Build the decoder before replacing the current one, so a rendition we can't
-	// decode leaves nothing half installed.
+	conn->pending_video.reset();
+	if (conn->video && conn->video->name == rendition->first &&
+	    conn->video->broadcast == rendition->second.broadcast)
+		return;
+
+	// An unusable replacement leaves the current track and decoder playing.
 	auto decoder = moq_source_prepare_decoder(rendition->second);
 	if (!decoder) {
 		LOG_ERROR("Failed to initialize decoder");
-		moq_source_clear_video_locked(ctx);
-		moq_source_blank_video(ctx);
 		return;
 	}
 
-	// A catalog update can arrive while a track is already subscribed; replacing it
-	// cancels the previous one.
-	moq_source_install_decoder_locked(ctx, std::move(decoder));
-	conn->video = std::make_shared<Track>("Video", rendition->first, rendition->second.container,
-					      moq_source_decode_frame);
-	moq_source_subscribe_track(ctx, conn, conn->video, rendition->second.broadcast);
+	auto track = std::make_shared<Track>("Video", rendition->first, rendition->second.container,
+					     moq_source_decode_frame);
+	track->broadcast = rendition->second.broadcast;
+	track->video_decoder = std::move(decoder);
+	conn->pending_video = track;
+	moq_source_subscribe_track(ctx, conn, track, track->broadcast);
 }
 
 // Subscribe to the first audio rendition and install the matching decoder. A
@@ -717,25 +739,32 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		moq_source_clear_audio_locked(ctx);
 		return;
 	}
+	conn->pending_audio.reset();
+	if (conn->audio && conn->audio->name == rendition->first &&
+	    conn->audio->broadcast == rendition->second.broadcast)
+		return;
 	auto decoder = moq_source_prepare_audio_decoder(rendition->second);
 	if (!decoder) {
-		LOG_ERROR("Failed to initialize audio decoder; stopping audio");
-		moq_source_clear_audio_locked(ctx);
+		LOG_ERROR("Failed to initialize replacement audio decoder");
 		return;
 	}
 
 	LOG_INFO("Subscribing to audio track (%u Hz, %u ch)", decoder->sample_rate, decoder->channels);
-	moq_source_install_audio_decoder_locked(ctx, std::move(decoder));
-	conn->audio = std::make_shared<Track>("Audio", rendition->first, rendition->second.container,
-					      moq_source_decode_audio_frame);
-	moq_source_subscribe_track(ctx, conn, conn->audio, rendition->second.broadcast);
+	auto track = std::make_shared<Track>("Audio", rendition->first, rendition->second.container,
+					     moq_source_decode_audio_frame);
+	track->broadcast = rendition->second.broadcast;
+	track->audio_decoder = std::move(decoder);
+	conn->pending_audio = track;
+	moq_source_subscribe_track(ctx, conn, track, track->broadcast);
 }
 
 // NOTE: Caller must hold ctx->mutex.
 static void moq_source_clear_video_locked(struct moq_source *ctx)
 {
-	if (ctx->connection)
+	if (ctx->connection) {
+		ctx->connection->pending_video.reset();
 		ctx->connection->video.reset();
+	}
 	moq_source_destroy_decoder_locked(ctx);
 	ctx->got_keyframe = false;
 	ctx->frames_waiting_for_keyframe = 0;
@@ -1138,8 +1167,10 @@ static void moq_source_destroy_audio_decoder_locked(struct moq_source *ctx)
 // NOTE: caller holds ctx->mutex.
 static void moq_source_clear_audio_locked(struct moq_source *ctx)
 {
-	if (ctx->connection)
+	if (ctx->connection) {
+		ctx->connection->pending_audio.reset();
 		ctx->connection->audio.reset();
+	}
 	moq_source_destroy_audio_decoder_locked(ctx);
 }
 

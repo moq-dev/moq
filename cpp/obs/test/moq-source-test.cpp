@@ -188,7 +188,7 @@ namespace {
 std::atomic<long> g_av_allocs{0};
 
 // Decode knobs. Only the failure scenarios move them.
-bool g_find_decoder_ok = true;
+std::atomic<bool> g_find_decoder_ok{true};
 int g_send_result = 0;
 int g_receive_result = 0;
 int g_audio_send_result = 0;
@@ -205,6 +205,7 @@ bool g_audio_frame_pending = false;
 bool g_audio_packet_owned = false;
 bool g_audio_packet_padding_zero = false;
 std::atomic<int> g_last_decoder_extradata{-1};
+std::atomic<int> g_decoder_opens{0};
 
 std::atomic<int> g_sws_scales{0};
 
@@ -243,6 +244,7 @@ void avcodec_free_context(AVCodecContext **avctx)
 
 int avcodec_open2(AVCodecContext *, const AVCodec *, AVDictionary **)
 {
+	g_decoder_opens++;
 	return 0;
 }
 
@@ -443,6 +445,7 @@ void reset(std::string url, std::string broadcast = "obs/test")
 	g_audio_packet_owned = false;
 	g_audio_packet_padding_zero = false;
 	g_last_decoder_extradata = -1;
+	g_decoder_opens = 0;
 	g_live_allocs = 0;
 	g_av_allocs = 0;
 }
@@ -568,6 +571,71 @@ int main()
 		destroySource(source);
 	}
 	report("plays video and audio");
+
+	// A metadata-only snapshot leaves the same rendition and decoder running.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		const int opens = g_decoder_opens;
+		const int frames = g_output_frames;
+		auto catalog = TestOk(moq::MediaCatalogProducer::init(publisher.broadcast), "catalog");
+		moq::VideoProperties properties{};
+		properties.rotation = 90;
+		TestOk(catalog->set_video_properties(properties), "catalog properties");
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 10; }));
+		CHECK(g_decoder_opens == opens);
+		destroySource(source);
+	}
+	report("unchanged rendition keeps decoder");
+
+	// A new rendition that has not delivered a frame cannot stop the old track.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		moq::VideoInit init{};
+		init.format = moq::VideoFormat::kAvc3;
+		init.data = TestH264Init();
+		auto replacement =
+			TestOk(moq::MediaTrackProducer::video(publisher.broadcast,
+							      moq::MediaTarget::kNamed{std::string("aaa")}, init),
+			       "replacement");
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 10; }));
+		CHECK(publisher.WriteUntil([&] {
+			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), 2'000'000}),
+			       "replacement frame");
+			return g_last_timestamp == 2'000'000'000;
+		}));
+		destroySource(source);
+	}
+	report("replacement waits for first frame");
+
+	// A replacement that cannot prepare a decoder leaves current playback alive.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		g_find_decoder_ok = false;
+		moq::VideoInit init{};
+		init.format = moq::VideoFormat::kAvc3;
+		init.data = TestH264Init();
+		auto replacement =
+			TestOk(moq::MediaTrackProducer::video(publisher.broadcast,
+							      moq::MediaTarget::kNamed{std::string("aaa")}, init),
+			       "failed replacement");
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 10; }));
+		destroySource(source);
+	}
+	report("failed replacement preserves playback");
 
 	// A broadcast with no video rendition plays its audio and blanks the video.
 	{

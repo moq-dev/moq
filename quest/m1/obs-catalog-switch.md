@@ -9,6 +9,14 @@ instead of freezing the source until the next catalog update.
 
 ## Plan
 
+Draft implementation preserves current playback across catalog metadata changes,
+pending subscriptions, and decoder preparation failures. Remaining: stage actual
+decoded output before committing the replacement, including malformed first-frame
+and audio decode failures, plus explicit failed sibling-resolution coverage.
+A replacement keyframe flag alone does not prove decodability. Keep this quest
+until those remaining transitions pass.
+
+
 `moq_source_subscribe_video` and `moq_source_subscribe_audio` in
 `cpp/obs/src/moq-source.cpp` install the new decoder and replace
 `conn->video` / `conn->audio` as soon as the catalog arrives, which cancels
