@@ -20,9 +20,9 @@ still a session error. Start after #5191 merges.
 - Retry without limit (`backoff.timeout = 0`), as `moqsink` does: the default
   10s budget would turn a longer outage into a bus error.
 - Refusals stay fatal, as #5191 decided for the catalog. They surface in two
-  places: an `Unauthorized` dial ends the reconnect loop (`is_auth`), and a
-  `NotFound` path or catalog arrives on a request after a successful redial.
-  Both error on the bus instead of redialing forever.
+  places: an `Unauthorized` or `Forbidden` dial ends the reconnect loop
+  (`is_auth`), and a `NotFound` path or catalog arrives on a request after a
+  successful redial. Both error on the bus instead of redialing forever.
 - Test end to end through a loopback relay: kill the relay mid-playback, keep
   it down past the default 10s budget, restart it, and require frames on the
   same pad by name with no bus error. Publish with `moqsink`, which reconnects
