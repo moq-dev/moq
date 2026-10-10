@@ -1,0 +1,9 @@
+{
+	"extends": "../js/tsconfig.json",
+	"compilerOptions": {
+		"types": ["audioworklet", "bun", "vite/client"],
+		"noEmit": true
+	},
+	"include": ["**/*", "../js/common/worklet.d.ts"],
+	"exclude": ["**/node_modules", "**/dist", "**/target"]
+}

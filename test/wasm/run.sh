@@ -107,11 +107,9 @@ bun install --frozen-lockfile
 # it already, in which case this is a no-op anyway.
 bunx playwright install chromium
 
-# Type-check against the .d.ts wasm-bindgen just generated. This is the only
-# thing that reads it, and it is worth reading: wasm-bindgen resolves a type in
-# a signature by its Rust identifier alone, so a binding can compile, run, and
-# still publish typings that name the wrong class. Not part of `just check`,
-# which never builds js/wasm/dist.
+# Type-check against wasm-bindgen's generated .d.ts, as the shared harness check does.
+# wasm-bindgen resolves a type in a signature by its Rust identifier alone, so a
+# binding can compile, run, and still publish typings that name the wrong class.
 echo "type-checking against js/wasm/dist/moq.d.ts..."
 bunx tsc --noEmit
 
