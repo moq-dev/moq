@@ -14,7 +14,10 @@ site move to the `Manual` clock or wait on an event.
 
 Breaking: `@moq/net` loses its time units, with no re-export shim. Tests that cross a real browser or socket follow the real-I/O
 rule in [the line's README](/quest/m1/time/README.md). Split the PR by package
-if review needs it, but land every package before this closes.
+if review needs it, but land every package before this closes. Migrate every
+in-tree consumer outside `js/` too (`demo/web`, `test/interop/clients/js`,
+`test/drain`) and the `doc/lib/js` examples, so nothing references the
+removed exports.
 
 Ban direct `performance.now`, `Date.now`, `setTimeout`, and `setInterval` in
 each package as it finishes (the ratchet).

@@ -24,7 +24,9 @@ arm timers only through `moq-time`:
 
 Breaking; it lands on `main` after the crate (see [the line's README](/quest/m1/time/README.md)).
 The ambient functions sit behind moq-net's `async` feature; the core takes
-explicit instants ([the async feature](/quest/m1/rs2ts/sans-io/async-feature.md)).
+explicit instants. Decided 2026-10-10 from review: this waits for
+[the async feature](/quest/m1/rs2ts/sans-io/async-feature.md), so the
+migration lands gated rather than exposing ambient time to the sans-IO core.
 Tell rs2ts how `moq_time::Instant` maps to `@moq/time` if the
 [translator](/quest/m1/rs2ts/translator.md) has landed.
 
@@ -50,3 +52,4 @@ PR enumerates each break and migrates its in-tree callers. Wire: none.
 ## Required
 
 - [The moq-time crate](/quest/m1/time/crate.md) - the clock and sim this adopts
+- [The async feature](/quest/m1/rs2ts/sans-io/async-feature.md) - the feature the ambient functions sit behind
