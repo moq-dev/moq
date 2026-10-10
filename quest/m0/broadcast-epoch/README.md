@@ -107,6 +107,7 @@ maintainer's pre-release merge of `release` into `main` keeps `main`'s
 
 - [JS consume identity](/quest/m0/broadcast-epoch/js-consume-identity.md) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast
 - [JS restart keeps the request](/quest/m0/broadcast-epoch/js-restart-keeps-request.md) - a resolved request remains on its old instance, matching Rust's sticky subscriptions
+- [Source pin](/quest/m0/broadcast-epoch/source-pin.md) - an export's later requests stay on the broadcast it resolved, so an epochless replacement never splices into the old program
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
