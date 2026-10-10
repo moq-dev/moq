@@ -1364,6 +1364,162 @@ mod test {
 		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
 	}
 
+	/// A reader holding group 2, which its quiet route never finishes, after the front
+	/// switched to `copy`, a replacement that starts past it.
+	struct Held {
+		group: group::Consumer,
+		copy: track::Producer,
+		/// The replacement's groups, by sequence.
+		groups: std::collections::BTreeMap<u64, group::Producer>,
+		wake: Arc<Wake>,
+		waiter: kio::Waiter,
+		_route: (
+			Producer,
+			track::Producer,
+			track::Producer,
+			group::Producer,
+			track::Subscriber,
+		),
+	}
+
+	impl Held {
+		/// `groups` are the replacement's `(sequence, first timestamp)`, written before the
+		/// switch is noticed, so its subscription has passed the held group.
+		fn new(groups: &[(u64, Option<u64>)]) -> Self {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_millis(100));
+			for (sequence, ms) in [(0, 0), (1, 1000)] {
+				let mut group = a.create_group(group::Info { sequence }).unwrap();
+				group.write_frame(ts(ms), b"x".as_ref()).unwrap();
+				group.finish().unwrap();
+			}
+			assert_eq!(recv(&mut sub).sequence, 0);
+			assert_eq!(recv(&mut sub).sequence, 1);
+			let mut open = a.create_group(group::Info { sequence: 2 }).unwrap();
+			open.write_frame(ts(2000), b"held".as_ref()).unwrap();
+			let mut group = recv(&mut sub);
+			assert_eq!(read(&mut group), Some(b"held".to_vec()));
+
+			let b = copy();
+			routes.serve(b.consume());
+			let groups = groups
+				.iter()
+				.map(|&(sequence, ms)| {
+					let mut group = b.create_group(group::Info { sequence }).unwrap();
+					if let Some(ms) = ms {
+						group.write_frame(ts(ms), b"b".as_ref()).unwrap();
+					}
+					(sequence, group)
+				})
+				.collect();
+
+			let wake = Arc::new(Wake::default());
+			let waiter = kio::Waiter::new(wake.clone().into());
+			let mut held = Self {
+				group,
+				copy: b,
+				groups,
+				wake,
+				waiter,
+				_route: (routes, logical, a, open, sub),
+			};
+			assert!(!held.is_old(), "not stale yet");
+			held
+		}
+
+		/// Poll the held group, forgetting earlier wakes so only a later one shows.
+		fn is_old(&mut self) -> bool {
+			self.wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+			match self.group.poll_read_frame(&self.waiter) {
+				Poll::Ready(Err(Error::Old)) => true,
+				Poll::Pending => false,
+				other => panic!("unexpected read: {other:?}"),
+			}
+		}
+
+		/// Re-poll after the first change to the replacement. The refused recovery fetch
+		/// parked on the replacement's track state once, so that change wakes the group
+		/// whatever it is; from here on only the expiry index can.
+		fn settle(&mut self) {
+			assert!(self.woken());
+			assert!(!self.is_old());
+		}
+
+		fn woken(&self) -> bool {
+			self.wake.0.load(std::sync::atomic::Ordering::Relaxed)
+		}
+
+		fn group(&self, sequence: u64) -> group::Producer {
+			self.copy.create_group(group::Info { sequence }).unwrap()
+		}
+	}
+
+	#[test]
+	fn a_group_no_route_continues_wakes_when_its_successor_is_stamped() {
+		let mut held = Held::new(&[(3, None), (4, Some(4000))]);
+		// Group 2 ends where group 3 begins, so this is when it is known to be 1s behind.
+		held.groups
+			.get_mut(&3)
+			.unwrap()
+			.write_frame(ts(3000), b"successor".as_ref())
+			.unwrap();
+		assert!(held.woken(), "the successor's first timestamp wakes the held group");
+		assert!(held.is_old());
+	}
+
+	#[test]
+	fn a_group_no_route_continues_wakes_when_its_successor_aborts() {
+		let mut held = Held::new(&[(3, None), (4, Some(4000)), (5, Some(5000))]);
+		// Group 4 succeeds it instead, a full second behind the edge.
+		held.groups.remove(&3).unwrap().abort(Error::Dropped).unwrap();
+		assert!(held.woken(), "the successor's abort wakes the held group");
+		assert!(held.is_old());
+	}
+
+	#[test]
+	fn a_group_no_route_continues_wakes_when_the_edge_passes_it() {
+		let mut held = Held::new(&[(3, Some(3000))]);
+		let mut newer = held.group(4);
+		held.settle();
+		newer.write_frame(ts(3050), b"b".as_ref()).unwrap();
+		assert!(!held.woken(), "the edge is still within the budget");
+		newer.write_frame(ts(3100), b"b".as_ref()).unwrap();
+		assert!(held.woken(), "the edge crossing the budget wakes the held group");
+		assert!(held.is_old());
+	}
+
+	/// The held group sits below everything the replacement holds, so a landing at the
+	/// top must not forget it before an older group lands as its new successor.
+	#[test]
+	fn a_group_no_route_continues_wakes_when_an_older_successor_lands() {
+		let mut held = Held::new(&[(4, Some(4000))]);
+		held.group(5).write_frame(ts(4050), b"b".as_ref()).unwrap();
+		held.settle();
+		let _newer = held.group(6);
+		assert!(!held.woken(), "a landing above the successor changes nothing");
+
+		let mut successor = held.group(3);
+		assert!(held.woken(), "a group landing below the successor wakes the held group");
+		assert!(!held.is_old(), "its successor has no timestamp yet");
+		successor.write_frame(ts(3000), b"b".as_ref()).unwrap();
+		assert!(held.woken());
+		assert!(held.is_old());
+	}
+
+	/// The replacement passed the held group, so it looked lost, but its subscription
+	/// can still deliver it out of order: that landing is the continuation.
+	#[test]
+	fn a_group_no_route_continues_wakes_when_it_lands_late() {
+		let mut held = Held::new(&[(3, Some(3000))]);
+		let _newer = held.group(4);
+		held.settle();
+		let _late = held.group(2);
+		assert!(held.woken(), "the held group's own landing wakes it");
+	}
+
 	#[test]
 	fn a_half_read_frame_waits_for_the_replacement_header() {
 		for arrives in [true, false] {

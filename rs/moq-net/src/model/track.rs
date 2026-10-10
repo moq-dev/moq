@@ -808,6 +808,56 @@ impl TrackState {
 			.is_some_and(|reach| matches!(live.timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget))
 	}
 
+	/// [`Self::drifted`] under `cap`, parking `waiter` on exactly what else can move the
+	/// verdict: the successor's first frame or abort, the edge's abort, and the edge
+	/// crossing the deadline. Parking on every track change instead wakes each of N parked reads per append.
+	///
+	/// The caller parks on a group landing above `sequence` first, in the way that fits
+	/// whether this track holds it.
+	fn poll_drifted(&self, sequence: u64, cap: Option<u64>, budget: Duration, waiter: &kio::Waiter) -> bool {
+		let reach = loop {
+			// An abort can change reach even after the successor is stamped.
+			// Register before judging, so a racing abort is observed or wakes us.
+			// An abort only closes the group, never touching the track, so one that
+			// landed before registering must re-select or the replacement goes unwatched.
+			let successor = loop {
+				let successor = self.first_servable(sequence.saturating_add(1), cap);
+				match successor {
+					Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
+					successor => break successor,
+				}
+			};
+			// Unbounded until a group lands above, or the successor presents its first frame.
+			let Some(successor) = successor else {
+				return false;
+			};
+			if let Some(reach) = successor.timestamp() {
+				break reach;
+			}
+			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
+				return false;
+			}
+		};
+		// Registered before the edge is resolved, so a write crossing the deadline is
+		// either seen here or wakes us.
+		self.cache.wakes().watch_deadline(reach, budget, waiter);
+		loop {
+			let edge = self.drift_edge(cap);
+			// The edge's abort presents nothing and never touches the track, yet hands the
+			// edge to a lower group that may already sit past the deadline. Watch it, and
+			// re-resolve if it already landed. Terminates: an aborted group is never the
+			// edge again, so each pass resolves a lower one.
+			if let Some(live) = edge.presentation
+				&& let Some(slot) = self.lookup.get(&live.sequence)
+				&& slot.group.poll_closed(waiter).is_ready()
+				&& slot.group.is_aborted()
+			{
+				continue;
+			}
+			return self.drifted(sequence, &edge, budget);
+		}
+	}
+
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
 	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]), not an
 	/// end-of-stream. The handler side (a rejection, or no [`Dynamic`] at all) lives
@@ -1348,10 +1398,17 @@ impl TrackState {
 		// `sealed` also ends a locally closed receive track without a declared end.
 		// An abort still wins unless that end had already settled: a group below it was still open.
 		let reached = self.sealed
-			|| self
-				.final_sequence
-				.is_some_and(|fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin);
+			|| self.final_sequence.is_some_and(|fin| {
+				self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin && !self.withholds(fin)
+			});
 		reached && (self.abort.is_none() || self.settled)
+	}
+
+	/// Whether a group below `fin` is still withheld from readers until its first frame
+	/// lands (see [`Producer::receive_group`]): the end is not reached before it shows, or
+	/// readers would end without it.
+	fn withholds(&self, fin: u64) -> bool {
+		self.lookup.range(..fin).any(|(_, slot)| slot.pending)
 	}
 
 	/// Whether the declared end is reached and every cached group below it finished,
@@ -2903,17 +2960,14 @@ impl Consumer {
 
 	/// Poll for group `sequence` falling a full `budget` behind this track's live edge,
 	/// as a reader would judge it, whether the track holds it or not; see
-	/// `TrackState::is_stale`. Pending for good once the track closes.
+	/// `TrackState::drifted`. Parks in this track's expiry index, so only a change that can
+	/// make the group stale, or land it here, wakes it. Pending for good once the track closes.
 	pub(crate) fn poll_stale(&self, sequence: u64, budget: Duration, waiter: &kio::Waiter) -> Poll<()> {
-		let res = self.state.poll(waiter, |state| {
-			match state.drifted(sequence, &state.drift_edge(None), budget) {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		});
-		match res {
-			Poll::Ready(Ok(())) => Poll::Ready(()),
-			_ => Poll::Pending,
+		let state = self.state.read();
+		state.cache.wakes().watch_held(sequence, waiter);
+		match state.poll_drifted(sequence, None, budget, waiter) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
 		}
 	}
 
@@ -3552,51 +3606,8 @@ impl group::Expiry for GroupExpiry {
 
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
-		let wakes = state.cache.wakes();
-		// Park on exactly what can move the verdict: a group landing above this one, the
-		// successor's first frame or abort, and the edge crossing the deadline. Parking on
-		// every track change instead wakes each of N parked reads per append.
-		wakes.watch_landing(self.sequence, waiter);
-		let reach = loop {
-			// An abort can change reach even after the successor is stamped.
-			// Register before judging, so a racing abort is observed or wakes us.
-			// An abort only closes the group, never touching the track, so one that
-			// landed before registering must re-select or the replacement goes unwatched.
-			let successor = loop {
-				let successor = state.first_servable(self.sequence.saturating_add(1), cap);
-				match successor {
-					Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
-					successor => break successor,
-				}
-			};
-			// Unbounded until a group lands above, or the successor presents its first frame.
-			let Some(successor) = successor else {
-				return false;
-			};
-			if let Some(reach) = successor.timestamp() {
-				break reach;
-			}
-			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
-				return false;
-			}
-		};
-		// Registered before the edge is resolved, so a write crossing the deadline is
-		// either seen here or wakes us.
-		wakes.watch_deadline(reach, budget, waiter);
-		loop {
-			let edge = state.drift_edge(cap);
-			// The edge's abort presents nothing and never touches the track, yet hands the
-			// edge to a lower group that may already sit past the deadline. Watch it, and
-			// re-resolve if it already landed.
-			if let Some(live) = edge.presentation
-				&& let Some(slot) = state.lookup.get(&live.sequence)
-				&& slot.group.poll_closed(waiter).is_ready()
-				&& slot.group.is_aborted()
-			{
-				continue;
-			}
-			return state.is_stale(self.sequence, &edge, budget);
-		}
+		state.cache.wakes().watch_landing(self.sequence, waiter);
+		state.poll_drifted(self.sequence, cap, budget, waiter) && state.lookup.contains_key(&self.sequence)
 	}
 }
 
@@ -6368,6 +6379,49 @@ mod test {
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}
 
+	/// An aborted edge hands the edge to a group between it and the successor, and neither
+	/// the abort nor that group's first frame touches the track, so the read must still wake.
+	#[test]
+	fn a_parked_read_watches_its_edge_abort() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		append_at(&mut producer, 1000); // the successor bounds the head's reach
+		let mut between = producer.append_group().unwrap();
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		edge.finish().unwrap();
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0);
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		edge.abort(Error::Cancel).unwrap();
+		between
+			.write_frame(Timestamp::from_millis(10_000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the edge's abort, then a new edge below it, lost the wakeup"
+		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
 	/// An aborted successor hands the reach to the next group, which sits below the edge
 	/// and so is watched only because the read re-selects its successor.
 	#[test]
@@ -6422,7 +6476,7 @@ mod test {
 	/// past the deadline. No frame write crosses it afterwards, and the abort never touches
 	/// the track, so only the read watching the edge's abort sees the head go stale.
 	#[test]
-	fn a_parked_read_watches_its_edge_abort() {
+	fn a_parked_read_watches_its_rewound_edge_abort() {
 		let mut producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
 		let mut head = producer.append_group().unwrap();
@@ -6497,6 +6551,72 @@ mod test {
 		assert!(woken.load(Ordering::SeqCst), "the reveal wakes the expired read");
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// A route can declare the end, then land every group's header before its first frame.
+	/// Those groups are withheld until their frames land, so the end is not reached before
+	/// they show: a reader ending at the boundary would never see them.
+	#[test]
+	fn a_withheld_group_holds_the_end() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
+		producer.finish_at(2).unwrap();
+		let mut received: Vec<_> = (0..2)
+			.map(|sequence| producer.receive_group(group::Info { sequence }).unwrap())
+			.collect();
+		assert!(
+			subscriber.recv_group().now_or_never().is_none(),
+			"the end waits for the withheld groups"
+		);
+
+		for group in &mut received {
+			group
+				.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+				.unwrap();
+			producer.reveal_group(group);
+		}
+		assert_eq!(subscriber.assert_group().sequence, 0);
+		assert_eq!(subscriber.assert_group().sequence, 1);
+		assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A withheld group whose stream ends with no frame, cleanly or reset, shows when it
+	/// ends, which wakes a reader parked on the end.
+	#[moq_net_sim::test]
+	async fn a_withheld_group_that_ends_empty_releases_the_end() {
+		for abort in [false, true] {
+			let mut producer = track_producer("test", None);
+			let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
+			producer.finish_at(1).unwrap();
+			let group = producer.receive_group(group::Info { sequence: 0 }).unwrap();
+			let handle = group.clone();
+
+			let first = {
+				let mut next = std::pin::pin!(subscriber.recv_group());
+				assert!(
+					futures::poll!(next.as_mut()).is_pending(),
+					"the end waits for the group"
+				);
+				match abort {
+					true => group.abort(Error::Cancel).unwrap(),
+					false => group.finish().unwrap(),
+				}
+				producer.reveal_group(&handle);
+				moq_net_sim::timeout(Duration::from_secs(1), next)
+					.await
+					.expect("the reveal wakes the reader")
+					.unwrap()
+			};
+
+			match abort {
+				// A reset group shows nothing, so the reader ends.
+				true => assert!(first.is_none()),
+				false => {
+					assert_eq!(first.expect("the empty group").sequence, 0);
+					assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
+				}
+			}
+		}
 	}
 
 	/// The ordinary live case, at the default real-time budget: 2s GOPs produced one at

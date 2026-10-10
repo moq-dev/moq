@@ -55,7 +55,10 @@ pin a channel count again once this is fixed, and
 not. A unit test that counts worklet callbacks under an explicit downmix would
 be cheaper than a full media run, if one can be made to fail reliably.
 
+The `just test media` audio-tone misses under load were not this: the fixture
+takes the `"max"` path, and every miss was the player's own buffering silence
+with audio still arriving.
+
 ## Related
 
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the other place browser-side capture and encode costs get measured
-- [Media audio-tone check](/quest/m1/media-audio-tone.md) - a test that misses tone samples, possibly from the same cause
