@@ -3445,8 +3445,9 @@ impl group::Expiry for GroupExpiry {
 				// Register on the candidate, its successor, and every servable group
 				// past the edge. If one raced this scan, resolve the edge again before
 				// Pending. Groups between the successor and the edge can move neither
-				// while the edge stands (its abort is watched above), and walking them would cost each of N parked serves the whole
-				// backlog, O(N^2) per track change.
+				// while the edge stands (its abort is watched above), and walking them
+				// would cost each of N parked serves the whole backlog, O(N^2) per
+				// track change.
 				let mut timestamp_raced = false;
 				if let Some(slot) = state.lookup.get(&self.sequence) {
 					let group = &slot.group;
