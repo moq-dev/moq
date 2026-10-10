@@ -1451,11 +1451,10 @@ enum SubscribeServe<S: crate::transport::poll::Session> {
 		latest: Option<u64>,
 		update: Option<lite::SubscribeUpdate>,
 	},
-	/// Streaming groups and datagrams. Boxed: by far the largest state, and the enum
-	/// is moved on every transition.
+	/// Streaming groups and datagrams, then draining the in-flight group streams before
+	/// the FIN. Boxed: by far the largest state, and the enum is moved on every
+	/// transition.
 	Run(Box<TrackRun<S>>),
-	/// The track finished: draining the in-flight group streams before the FIN.
-	Drain { children: kio::Tasks<GroupServe<S>> },
 }
 
 impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
@@ -1500,8 +1499,6 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		match self {
 			Self::Confirm { update: pending, .. } => *pending = Some(update),
 			Self::Run(run) => run.update(update),
-			// The track is over: nothing left to steer.
-			Self::Drain { .. } => {}
 		}
 	}
 
@@ -1513,19 +1510,14 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		loop {
 			match self {
-				Self::Confirm { subscribing, .. } => {
+				Self::Confirm {
+					subscribing,
+					msg,
+					latest,
+					update,
+				} => {
 					let mut track = ready!(subscribing.poll_ok(waiter))?;
-					let Self::Confirm {
-						msg, latest, update, ..
-					} = std::mem::replace(
-						self,
-						Self::Drain {
-							children: Default::default(),
-						},
-					)
-					else {
-						unreachable!()
-					};
+					let (latest, update) = (*latest, update.take());
 
 					// Per-frame timestamps require a wire format that carries them. Lite05+
 					// prefixes every frame with a zigzag-delta timestamp at the track's
@@ -1580,17 +1572,17 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					*self = Self::Run(Box::new(run));
 				}
 				Self::Run(run) => {
-					// The live edge reached the boundary; SUBSCRIBE_END was already sent (or
-					// the version predates the track stream). Drain the in-flight group
-					// machines, then FIN.
-					if ready!(run.poll_step(writer, waiter))?.is_continue() {
-						return Poll::Ready(Ok(ControlFlow::Continue(())));
+					// Once the live edge reaches the boundary (SUBSCRIBE_END was already sent,
+					// or the version predates the track stream), drain the in-flight group
+					// machines, then FIN. The subscription stays until they finish, or a relay
+					// would let its upstream go and strand their tails.
+					if !run.ended {
+						if ready!(run.poll_step(writer, waiter))?.is_continue() {
+							return Poll::Ready(Ok(ControlFlow::Continue(())));
+						}
+						run.ended = true;
 					}
-					let children = std::mem::take(&mut run.children);
-					*self = Self::Drain { children };
-				}
-				Self::Drain { children } => {
-					ready!(children.poll(waiter));
+					ready!(run.children.poll(waiter));
 					return Poll::Ready(Ok(ControlFlow::Break(())));
 				}
 			}
@@ -2700,6 +2692,8 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	// fallback: otherwise off.
 	datagrams: bool,
 	children: kio::Tasks<GroupServe<S>>,
+	// The live edge reached the track's boundary: only the in-flight groups are left.
+	ended: bool,
 }
 
 impl<S: crate::transport::poll::Session> TrackRun<S> {
@@ -2731,6 +2725,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			count_streams,
 			datagrams,
 			children: kio::Tasks::new(),
+			ended: false,
 		}
 	}
 

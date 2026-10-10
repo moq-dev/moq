@@ -1048,13 +1048,8 @@ pub(crate) mod tests {
 			};
 			let recording =
 				read(start(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE)).await);
-			// About twice real time, so the recording keeps up and only staleness can cut it. A
-			// burst ends the track while the relay still pulls the older groups, and the relay
-			// drops its upstream subscription with those groups unfinished.
-			for chunk in second.chunks(8 * 1024) {
-				decoder.decode_chunk(chunk).unwrap();
-				tokio::time::sleep(Duration::from_millis(15)).await;
-			}
+			// All at once: the track ends while the relay is still pulling the older groups.
+			decoder.decode_chunk(&second).unwrap();
 			decoder.finish().unwrap();
 
 			let recording: Vec<_> = recording
