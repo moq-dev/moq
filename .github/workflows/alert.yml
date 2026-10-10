@@ -28,7 +28,6 @@ on:
     # request.
     workflows:
       - apt-repo
-      - Back-merge
       - Cache
       - Cachix
       - Docker
