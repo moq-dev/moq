@@ -313,7 +313,7 @@ describe("restart", () => {
 		const old = source.out.active.peek();
 		expect(old).toBeDefined();
 
-		// A newer publisher announces the exact path: a start, not a restart, for this name.
+		// A newer publisher announces the exact path, which now serves the name: a restart.
 		const exact = owner.createBroadcast(name);
 		exact.announce({ epoch: Moq.Epoch.mint() });
 		await settle();
@@ -333,9 +333,64 @@ describe("restart", () => {
 		owner.close();
 		await settle();
 	});
+
+	it("falls back to a covering prefix when the exact route ends", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("pool/job.hang");
+		const pool = owner.dynamic(Path.from("pool"));
+		const requests = pool.requested();
+		const upstream = new Moq.Broadcast.Producer();
+		void (async () => {
+			for await (const request of requests) request.accept(upstream);
+		})();
+		const exact = publish(owner, name);
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		await settle();
+		const old = source.out.active.peek();
+		expect(old).toBeDefined();
+
+		// The exact route goes while the prefix still covers the name: a restart onto the prefix.
+		exact.close();
+		await settle();
+		const fallback = source.out.active.peek();
+		expect(fallback).toBeDefined();
+		expect(fallback).not.toBe(old);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		// Nothing covers the name any more: offline, not an error.
+		pool.close();
+		await settle();
+		expect(source.out.active.peek()).toBeUndefined();
+		expect(source.out.error.peek()).toBeUndefined();
+
+		upstream.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
 });
 
 describe("refusal", () => {
+	it("refuses a name outside the origin's scope", async () => {
+		const owner = new Origin.Producer();
+		const scoped = owner.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));
+		const source = new Broadcast({
+			origin: scoped,
+			name: Path.from("lobby/live.hang"),
+			enabled: true,
+			announced: true,
+			catalogFormat: "manual",
+		});
+		await settle();
+
+		expect(source.out.error.peek()?.message).toBe("path is outside the origin scope");
+		expect(source.out.status.peek()).toBe("error");
+
+		source.close();
+		owner.close();
+		await settle();
+	});
+
 	for (const announced of [true, false]) {
 		it(`reports a refusal until a fresh request (announced: ${announced})`, async () => {
 			const owner = new Origin.Producer();

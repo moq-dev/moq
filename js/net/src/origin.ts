@@ -1633,8 +1633,11 @@ export class Consumer {
 	 */
 	follow(path: Path.Valid): announce.Consumer {
 		this.#scope.path(path);
+		const producer = new announce.Producer();
+		const patterns = this.#scope.patterns(Path.Pattern.subtree(path));
 		// Hiding narrows discovery, not lookup, so a hidden path follows like any other.
-		return announce.follow(path, this.announced(Path.Pattern.subtree(path), { hidden: true }));
+		void this.#runAnnounced(producer, patterns, true, announce.follower(path));
+		return producer.consume();
 	}
 
 	/** One snapshot shared by map readers and announcement-stream diffing. */
@@ -1671,7 +1674,17 @@ export class Consumer {
 		return next;
 	}
 
-	async #runAnnounced(producer: announce.Producer, patterns: Path.Patterns, hidden: boolean): Promise<void> {
+	async #runAnnounced(
+		producer: announce.Producer,
+		patterns: Path.Patterns,
+		hidden: boolean,
+		reduce: (event: announce.Event) => announce.Event | undefined = (event) => event,
+	): Promise<void> {
+		const append = (event: announce.Event) => {
+			const reduced = reduce(event);
+			if (reduced) producer.append(reduced);
+		};
+
 		// Keyed by the presented path (from the origin, not the scope), valued by identity
 		// plus route. Diffing the instance rather than mere presence means a republish emits a
 		// restart; a re-price of the same instance emits an update.
@@ -1688,7 +1701,7 @@ export class Consumer {
 
 				for (const [path, snap] of active) {
 					if (!next.has(path))
-						producer.append({
+						append({
 							prefix: path,
 							captures: snap.captures,
 							kind: "end",
@@ -1698,11 +1711,11 @@ export class Consumer {
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
 					if (!prev) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "start", route: snap.route });
+						append({ prefix: path, captures: snap.captures, kind: "start", route: snap.route });
 					} else if (!sameInstance(prev, snap)) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "restart", route: snap.route });
+						append({ prefix: path, captures: snap.captures, kind: "restart", route: snap.route });
 					} else if (!routesEqual(prev.route, snap.route)) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "update", route: snap.route });
+						append({ prefix: path, captures: snap.captures, kind: "update", route: snap.route });
 					}
 				}
 				active = next;

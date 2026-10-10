@@ -165,54 +165,42 @@ export class Consumer {
 }
 
 /**
- * Reduce `source`, the announcements of the routes covering `path`, to those of the one route
+ * A reducer from the announcements of the routes covering `path` to those of the one route
  * serving it: the most specific. Another route taking over is a `restart`, or an `update` when
  * both carry the same epoch, since those serve the same bytes. Routes beneath `path` serve
- * other broadcasts and are skipped. Closing the result closes `source`.
+ * other broadcasts and are skipped, as is any change no request sees (`undefined`).
  *
+ * Synchronous, so a followed stream delivers in step with an announced one.
  * Mirrors `announce::Follow` in rs/moq-net.
  *
  * @internal
  */
-export function follow(path: Path.Valid, source: Consumer): Consumer {
-	const producer = new Producer();
-	void producer.closed.then(() => source.close());
-	void (async () => {
-		// Every route standing over the path, by prefix.
-		const covering = new Map<Path.Valid, Announce>();
-		const serving = () => {
-			let best: Announce | undefined;
-			for (const announce of covering.values()) {
-				if (!best || announce.prefix.length > best.prefix.length) best = announce;
-			}
-			return best;
-		};
-
-		try {
-			for await (const { kind, ...announce } of source) {
-				if (!Path.hasPrefix(announce.prefix, path)) continue;
-				const before = serving();
-				if (kind === "end") covering.delete(announce.prefix);
-				else covering.set(announce.prefix, announce);
-				const after = serving();
-
-				if (!before) {
-					if (after) producer.append({ kind: "start", ...after });
-				} else if (!after) {
-					producer.append({ kind: "end", ...before });
-				} else if (before.prefix !== after.prefix) {
-					const same = before.route.epoch !== undefined && before.route.epoch === after.route.epoch;
-					producer.append({ kind: same ? "update" : "restart", ...after });
-				} else if (after.prefix === announce.prefix) {
-					// A route less specific than the serving one changing is skipped: no request sees it.
-					producer.append({ kind: kind === "restart" ? "restart" : "update", ...after });
-				}
-			}
-			producer.close();
-		} catch (err) {
-			// Also reached when the reader closed between events; closing again is a no-op.
-			producer.close(err instanceof Error ? err : new Error(String(err)));
+export function follower(path: Path.Valid): (event: Event) => Event | undefined {
+	// Every route standing over the path, by prefix.
+	const covering = new Map<Path.Valid, Announce>();
+	const serving = () => {
+		let best: Announce | undefined;
+		for (const announce of covering.values()) {
+			if (!best || announce.prefix.length > best.prefix.length) best = announce;
 		}
-	})();
-	return producer.consume();
+		return best;
+	};
+
+	return ({ kind, ...announce }) => {
+		if (!Path.hasPrefix(announce.prefix, path)) return undefined;
+		const before = serving();
+		if (kind === "end") covering.delete(announce.prefix);
+		else covering.set(announce.prefix, announce);
+		const after = serving();
+
+		if (!before) return after && { kind: "start", ...after };
+		if (!after) return { kind: "end", ...before };
+		if (before.prefix !== after.prefix) {
+			const same = before.route.epoch !== undefined && before.route.epoch === after.route.epoch;
+			return { kind: same ? "update" : "restart", ...after };
+		}
+		// A route less specific than the serving one changing is skipped: no request sees it.
+		if (after.prefix !== announce.prefix) return undefined;
+		return { kind: kind === "restart" ? "restart" : "update", ...after };
+	};
 }
