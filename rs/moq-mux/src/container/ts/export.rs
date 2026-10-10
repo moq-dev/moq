@@ -100,9 +100,19 @@ pub struct Export<E: catalog::Catalog = ()> {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<E>>,
 	catalog_format: CatalogFormat,
-	/// Tracks [`Self::resume`] left on the ended broadcast, resubscribed as the
-	/// returned catalog lists them.
+	/// A snapshot arrived on `catalog` since it was subscribed.
+	cataloged: bool,
+	/// The publisher epoch of the broadcast being exported, `None` for an epochless route.
+	instance: Option<moq_net::Epoch>,
+	/// Tracks [`Self::follow`] left on the ended broadcast, resubscribed as the returned
+	/// catalog lists them.
 	stale: HashSet<String>,
+	/// The PAT and PMT `version_number`, advanced by each switch to another instance so a
+	/// demux that caches tables by version reads the new ones.
+	version: VersionNumber,
+	/// After a switch to another instance, the PIDs whose first packet is queued flagging the
+	/// break. `None` for an export that never switched.
+	flagged: Option<HashSet<u16>>,
 	/// How long after its decode time each frame goes out.
 	delay: Duration,
 	/// Holds every track's frames until `delay` past their decode time, keyed by PID.
@@ -182,9 +192,10 @@ struct Tally {
 /// A frame read from its source.
 struct Pending {
 	frame: Frame,
-	/// How many times the source had restarted its timeline when the frame was read.
+	/// How many marker groups had declared a break in the track's timeline when the frame
+	/// was read.
 	restart: u64,
-	/// How many times its playhead had jumped, restarts included ([`jitter::Arrival::skip`]).
+	/// How many times its playhead had jumped, markers included ([`jitter::Arrival::skip`]).
 	skip: u64,
 	/// The earliest the frame could have arrived: when its source was last found empty.
 	arrived: web_async::time::Instant,
@@ -211,8 +222,11 @@ struct Track {
 	/// no later than it is read; the jitter buffer judges it on the earlier bound, so a caller
 	/// that polls late (a sink sleeping to pace its writes) does not make it late.
 	empty: web_async::time::Instant,
-	/// The source's restart counter the decode clock runs under.
+	/// The marker count the decode clock runs under.
 	restart: u64,
+	/// The marker and skip counts of the sources the track read before this one, so the
+	/// counts keep rising across a resubscription.
+	base: (u64, u64),
 	finished: bool,
 	pid: u16,
 	kind: Kind,
@@ -235,6 +249,7 @@ impl Track {
 			pending: None,
 			empty: web_async::time::Instant::now(),
 			restart: 0,
+			base: (0, 0),
 			finished: false,
 			pid: 0,
 			kind,
@@ -252,7 +267,7 @@ impl Track {
 	/// strand a B-frame behind its reference or send it first.
 	fn queue(&mut self, name: &str, pending: Pending, jitter: &mut jitter::Buffer<u16, Queued>) -> anyhow::Result<()> {
 		if pending.restart != self.restart {
-			// The source may have restarted its timeline, so the decode clock restarts too.
+			// A marker declared a break in the timeline, so the decode clock restarts too.
 			self.release(name, jitter, true)?;
 			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
@@ -741,12 +756,29 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	async fn build(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		let catalog = source.catalog::<E>(catalog_format).await?;
-		Ok(Self {
-			source,
+		let broadcast = source.broadcast().await?;
+		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
+		Ok(Self::build_with(source, &broadcast, catalog_format, catalog))
+	}
+
+	/// Export `broadcast`, the one at `source`'s path, from its subscribed `catalog`, pinning
+	/// every later request for that path to its instance.
+	fn build_with(
+		source: crate::Source,
+		broadcast: &moq_net::broadcast::Consumer,
+		catalog_format: CatalogFormat,
+		catalog: crate::catalog::Consumer<E>,
+	) -> Self {
+		let instance = broadcast.info().epoch.clone();
+		Self {
+			source: source.pinned(instance.clone()),
 			catalog: Some(catalog),
 			catalog_format,
+			cataloged: false,
+			instance,
 			stale: HashSet::new(),
+			version: VersionNumber::default(),
+			flagged: None,
 			delay: Duration::ZERO,
 			jitter: jitter::Buffer::new(Duration::ZERO),
 			held: None,
@@ -771,7 +803,7 @@ impl<E: catalog::Catalog> Export<E> {
 			video_start: None,
 			mux_rate: None,
 			mux_rate_override: None,
-		})
+		}
 	}
 
 	/// Pad the output with null packets to `mux_rate` bits per second, whatever the
@@ -848,7 +880,10 @@ impl<E: catalog::Catalog> Export<E> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(snapshot)?,
+				Poll::Ready(Some(snapshot)) => {
+					self.cataloged = true;
+					self.update_catalog(snapshot)?
+				}
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
@@ -929,9 +964,8 @@ impl<E: catalog::Catalog> Export<E> {
 
 		// Once every source has ended, the tail goes out late if it must: the end of the
 		// stream is not a missed deadline.
-		if !self.tracks.is_empty() && self.tracks.values().all(|track| track.finished) {
-			self.schedule.end();
-		}
+		self.schedule
+			.set_ended(!self.tracks.is_empty() && self.tracks.values().all(|track| track.finished));
 
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
@@ -1089,8 +1123,8 @@ impl<E: catalog::Catalog> Export<E> {
 						}
 						let pending = Pending {
 							frame,
-							restart: track.source.restarts(),
-							skip: track.source.skips(),
+							restart: track.base.0 + track.source.markers(),
+							skip: track.base.1 + track.source.skips(),
 							arrived: track.empty,
 							read: web_async::time::Instant::now(),
 						};
@@ -1342,7 +1376,9 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Point each stale track this snapshot lists at the returned broadcast.
 	///
 	/// The PIDs and PMT stay as announced. A track the returned catalog does not list stays
-	/// finished, silent on its PID.
+	/// finished, silent on its PID. The new subscription's playhead jumped from wherever the
+	/// old one stopped, so its first frame counts as a skip: late frames drop, and a leap
+	/// ahead opens a new generation.
 	fn resubscribe(&mut self, catalog: &Catalog<E>, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
 		let budget = self.budget();
 		for (name, track) in self.tracks.iter_mut() {
@@ -1362,6 +1398,8 @@ impl<E: catalog::Catalog> Export<E> {
 				continue;
 			};
 			self.stale.remove(name);
+			track.base.0 += track.source.markers();
+			track.base.1 += track.source.skips() + 1;
 			track.source = source;
 			track.finished = false;
 			track.empty = web_async::time::Instant::now();
@@ -1425,39 +1463,90 @@ impl<E: catalog::Catalog> Export<E> {
 		self.emitted_epoch
 	}
 
-	/// Carry on with the broadcast that replaced the one this export was reading.
+	pub(super) fn source(&self) -> &crate::Source {
+		&self.source
+	}
+
+	/// The publisher epoch of the broadcast being exported, `None` for an epochless route.
+	pub(super) fn instance(&self) -> Option<&moq_net::Epoch> {
+		self.instance.as_ref()
+	}
+
+	/// Carry on into `broadcast`, the one now at this export's path.
 	///
-	/// Call it once [`Source::returned`](crate::Source::returned) has resolved, after
-	/// [`next`](Self::next) returned `None` or an error. Whatever the ended broadcast left
-	/// unwritten is dropped and the program clock restarts, so the next output flags the
-	/// break and re-emits the PAT/PMT. The returned catalog resubscribes each track as it
-	/// lists it, under the program already announced; one that adds a track fails as a
-	/// layout change.
-	pub async fn resume(&mut self) -> Result<(), crate::Error> {
-		self.catalog = Some(self.source.catalog::<E>(self.catalog_format).await?);
+	/// The same publisher instance (an equal epoch) continues the stream: the program and
+	/// its PSI stay as announced, and its catalog resubscribes each track as it lists it, so a
+	/// gap is a skip like any other. One that adds a track fails as a layout change.
+	///
+	/// Another instance (another epoch, or an epochless route) is a full program switch: a
+	/// fresh export of `broadcast` with a new PMT from its catalog, and nothing carried from
+	/// this one but the PAT and PMT `version_number`s, both advanced. Every PID's first packet
+	/// flags the break with `discontinuity_indicator`, and each stream starts on a keyframe.
+	/// The caller decides whether to follow a replacement at all; [`Follower`](super::Follower)
+	/// decides from the path's announcements.
+	pub async fn follow(mut self, broadcast: moq_net::broadcast::Consumer) -> Result<Self, crate::Error> {
+		let catalog = crate::catalog::Consumer::new(&broadcast, self.catalog_format).await?;
+		self.followed(&broadcast, catalog)?;
+		Ok(self)
+	}
+
+	pub(super) fn catalog_format(&self) -> CatalogFormat {
+		self.catalog_format
+	}
+
+	/// Whether the catalog this export last subscribed has delivered a snapshot.
+	pub(super) fn cataloged(&self) -> bool {
+		self.cataloged
+	}
+
+	/// [`Self::follow`], once `broadcast`'s catalog is subscribed.
+	pub(super) fn followed(
+		&mut self,
+		broadcast: &moq_net::broadcast::Consumer,
+		catalog: crate::catalog::Consumer<E>,
+	) -> Result<(), crate::Error> {
+		let same = self.instance.is_some() && broadcast.info().epoch == self.instance;
+		if !same || self.psi.is_none() {
+			let mut next = Self::build_with(self.source.clone(), broadcast, self.catalog_format, catalog);
+			next.replay = self.replay;
+			next = next.with_delay(self.delay);
+			if let Some(rate) = self.mux_rate_override {
+				next = next.with_mux_rate(rate);
+			}
+			// A switch away from a program that went out, or one still pending because this
+			// program never built its tables, carries to the next: its tables must read as new,
+			// every PID flags the break, and a pacing caller re-anchors on the new clock. Only a
+			// program that went out advances them again.
+			let emitted = self.psi.is_some();
+			if (!same && emitted) || self.flagged.is_some() {
+				next.version = self.version;
+				next.flagged = Some(HashSet::new());
+				next.pcr_discontinuity = true;
+				next.epoch = self.epoch;
+				next.emitted_epoch = self.emitted_epoch;
+				if !same && emitted {
+					next.version.increment();
+					next.epoch += 1;
+				}
+			}
+			*self = next;
+			return Ok(());
+		}
+
+		self.catalog = Some(catalog);
+		self.cataloged = false;
 		self.si_flushed = false;
 		// A name no entry carries, so the returned catalog repoints every SI entry.
 		for si in self.si.values_mut() {
 			si.track.clear();
 		}
-		if self.psi.is_none() {
-			// Nothing announced yet: the returned catalog builds the program afresh.
-			self.tracks.clear();
-		}
 		// Whatever the ended broadcast left is done, including a track whose error ended
-		// the export: polled again, it would end this one too.
+		// the export: polled again, it would end this one too. Its held frames still go out.
 		for (name, track) in self.tracks.iter_mut() {
+			track.release(name, &mut self.jitter, true)?;
 			track.finished = true;
-			track.pending = None;
-			track.restart = 0;
-			track.clock = DecodeClock::default();
 			self.stale.insert(name.clone());
 		}
-		// The replacement's clock starts afresh at its own first frame.
-		self.jitter.clear();
-		self.held = None;
-		self.generation = 0;
-		self.rewind();
 		Ok(())
 	}
 
@@ -1468,6 +1557,10 @@ impl<E: catalog::Catalog> Export<E> {
 	fn rewind(&mut self) {
 		self.epoch += 1;
 		self.schedule.clear();
+		// A break flag queued on a PID that has not gone out yet was just dropped with it.
+		if let Some(flagged) = &mut self.flagged {
+			flagged.clear();
+		}
 		self.queue.clear();
 		self.last_psi = None;
 		for si in self.si.values_mut() {
@@ -1503,6 +1596,17 @@ impl<E: catalog::Catalog> Export<E> {
 			.filter(|t| matches!(t.kind, Kind::Video(_)))
 			.filter_map(|t| t.pending.as_ref().map(|p| p.frame.timestamp))
 			.min()
+	}
+
+	/// Whether `pid`'s next packet is its first since a switch to another instance, so it has
+	/// to flag the break. The PCR PID's first packet is always a clock packet, flagged on its
+	/// own ([`Self::lay`]).
+	fn breaks(&mut self, pid: u16) -> bool {
+		let pcr = self.psi.as_ref().map(|psi| psi.pcr_pid);
+		match &mut self.flagged {
+			Some(flagged) => Some(pid) != pcr && !self.counters.contains_key(&pid) && flagged.insert(pid),
+			None => false,
+		}
 	}
 
 	/// PID the PMT rides on: the source's original (preserved in the service record),
@@ -1634,7 +1738,7 @@ impl<E: catalog::Catalog> Export<E> {
 
 		let pat = Pat {
 			transport_stream_id,
-			version_number: VersionNumber::default(),
+			version_number: self.version,
 			table: vec![ProgramAssociation {
 				program_num: program_number,
 				program_map_pid: Pid::new(pmt_pid)?,
@@ -1643,7 +1747,7 @@ impl<E: catalog::Catalog> Export<E> {
 		let pmt = Pmt {
 			program_num: program_number,
 			pcr_pid: Some(Pid::new(pcr_pid)?),
-			version_number: VersionNumber::default(),
+			version_number: self.version,
 			program_info,
 			es_info,
 		};
@@ -1731,8 +1835,10 @@ impl<E: catalog::Catalog> Export<E> {
 			let pmt_pid = psi.pmt_pid;
 			let pat = TsPayload::Pat(psi.pat.clone());
 			let pmt = TsPayload::Pmt(psi.pmt.clone());
-			self.write_packet(&mut out, Pid::PAT, None, pat)?;
-			self.write_packet(&mut out, pmt_pid, None, pmt)?;
+			let flag = self.breaks(Pid::PAT).then(|| flags(true));
+			self.write_packet(&mut out, Pid::PAT, flag, pat)?;
+			let flag = self.breaks(pmt_pid).then(|| flags(true));
+			self.write_packet(&mut out, pmt_pid, flag, pmt)?;
 			self.last_psi = Some(frame.timestamp);
 		}
 
@@ -1998,20 +2104,11 @@ impl<E: catalog::Catalog> Export<E> {
 		let mut offset = 0;
 		let mut first = true;
 		loop {
-			let adaptation = if first && unit.keyframe {
-				Some(AdaptationField {
-					discontinuity_indicator: false,
-					random_access_indicator: true,
-					es_priority_indicator: false,
-					pcr: None,
-					opcr: None,
-					splice_countdown: None,
-					transport_private_data: Vec::new(),
-					extension: None,
-				})
-			} else {
-				None
-			};
+			let flag = first && self.breaks(unit.pid);
+			let adaptation = ((first && unit.keyframe) || flag).then(|| AdaptationField {
+				random_access_indicator: first && unit.keyframe,
+				..flags(flag)
+			});
 
 			let header_len = if first { 6 + optional_len } else { 0 };
 			let af_len = adaptation.as_ref().map(adaptation_size).unwrap_or(0);
@@ -2057,9 +2154,12 @@ impl<E: catalog::Catalog> Export<E> {
 		let mut offset = 0;
 		let mut first = true;
 		loop {
+			let flag = (first && self.breaks(pid)).then(|| flags(true));
 			let payload = if first {
-				// pointer_field (1 byte, written by `Section`) eats one payload byte.
-				let take = (TsBytes::MAX_SIZE - 1).min(section.len());
+				// pointer_field (1 byte, written by `Section`) eats one payload byte, and a flag
+				// for the break its adaptation field.
+				let room = TsBytes::MAX_SIZE - 1 - flag.as_ref().map_or(0, adaptation_size);
+				let take = room.min(section.len());
 				let chunk = &section[..take];
 				offset = take;
 				TsPayload::Section(Section {
@@ -2073,7 +2173,7 @@ impl<E: catalog::Catalog> Export<E> {
 				TsPayload::Raw(TsBytes::new(chunk).map_err(anyhow::Error::msg)?)
 			};
 
-			self.write_packet(out, pid, None, payload)?;
+			self.write_packet(out, pid, flag, payload)?;
 			first = false;
 			if offset >= section.len() {
 				break;
@@ -2216,6 +2316,20 @@ fn slot_stamp(index: u128) -> anyhow::Result<Timestamp> {
 fn stamp(nanos: u128) -> anyhow::Result<Timestamp> {
 	let micros = (nanos / 1_000).try_into().context("media timeline out of range")?;
 	Ok(Timestamp::from_micros(micros)?)
+}
+
+/// An adaptation field carrying nothing but `discontinuity_indicator`.
+fn flags(discontinuity: bool) -> AdaptationField {
+	AdaptationField {
+		discontinuity_indicator: discontinuity,
+		random_access_indicator: false,
+		es_priority_indicator: false,
+		pcr: None,
+		opcr: None,
+		splice_countdown: None,
+		transport_private_data: Vec::new(),
+		extension: None,
+	}
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's

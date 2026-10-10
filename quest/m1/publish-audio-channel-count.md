@@ -61,4 +61,4 @@ with audio still arriving.
 
 ## Related
 
-- [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the other place browser-side capture and encode costs get measured
+- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - the other place browser-side capture and encode costs get measured

@@ -11,10 +11,18 @@ brings it back in place of `Stream Count`.
 
 ## Plan
 
-Today SUBSCRIBE_DROP is on the wire for lite-03 through lite-06 and the Rust
-subscriber accounts for it, but no publisher sends it. lite-07 (still
-`moq-lite-07-wip`, unpublished) removed it for a `Stream Count` on
-SUBSCRIBE_END (#4224).
+Today SUBSCRIBE_DROP is on the wire for lite-03 through lite-06, and the Rust
+and `@moq/net` subscribers account for it. Once a track ends, the Rust
+publisher on lite-05 and lite-06 names every sequence from its
+SUBSCRIBE_START to the end that the subscription never got (skipped,
+stale, or missing its head), just before its FIN. Still missing: JS
+publishers, drops sent as soon as a group is given up rather than at the end,
+and groups reset before their header. The end-of-track drops also miss a gap
+the publisher aged out of its grace while the subscriber still waits on it:
+the publisher ages a gap from when it queued the group above it, which can be
+well before stream credit lets that group's header out. lite-07 (still `moq-lite-07-wip`,
+unpublished) removed SUBSCRIBE_DROP for a `Stream Count` on SUBSCRIBE_END
+(#4224).
 
 Decided:
 
@@ -24,11 +32,14 @@ Decided:
 - A reliable reset ([Reliable stream reset](/quest/m1/quic/reliable-reset.md))
   that keeps the stream header acts as a one-group drop, an optimization over
   sending the DROP.
-- Publishers send SUBSCRIBE_DROP on lite-03 through lite-06 too: for every group
+- Publishers send SUBSCRIBE_DROP on lite-05 and lite-06 too: for every group
   in range they won't deliver (expired, deprioritized, or reset without its
   header delivered) and for every explicit gap. Publishers that skip sequences
   (`cut` and group discontinuities in the media layers) must mark the gap so
   the net layer can drop it.
+- Not on lite-03 or lite-04 (maintainer, 2026-10-09): they declare no
+  SUBSCRIBE_END, so no subscriber has an owed range to settle against, and a
+  drop would only add traffic to legacy peers.
 - Datagram groups stay best effort. A publisher counts a datagram as
   delivered, so a lost one leaves an uncovered hole that waits out the tail
   grace, as today.
@@ -65,18 +76,14 @@ lite-07 changelog), `doc/concept/moq-lite.md`, and the Rust and JS lite
 publishers, subscribers, and tail accounting. Run `just drafts check` and
 `just test interop --all`.
 
-Regression tests: a publisher that expires a group, skips a sequence, and
-resets a stream before its header; on each version the subscriber settles
-without waiting out the grace.
+Regression tests: a publisher that expires a group or resets a stream before
+its header; on each version the subscriber settles without waiting out the
+grace. A skipped sequence at the end is covered on lite-05 through lite-07
+(`track_tail::skipped_groups_end_without_the_grace`).
 
-Add the lite-07 drop case to the tail interop harness from
-[track tail interop](/quest/m1/track-tail-interop.md): Rust and JS
+Add the lite-07 drop case to the tail interop harness
+(`just test interop --tail`, `test/interop/clients/*/tail.*`): Rust and JS
 subscribers both settle on SUBSCRIBE_DROP through the relay, so a group the
 publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
-
-
-## Related
-
-- [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS tail harness the lite-07 drop case extends

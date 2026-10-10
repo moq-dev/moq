@@ -262,9 +262,10 @@ impl Schedule {
 		}
 	}
 
-	/// Every source has ended: what is queued still goes out, late if it must.
-	pub fn end(&mut self) {
-		self.ended = true;
+	/// Whether every source has ended, so what is queued still goes out, late if it must.
+	/// A source that resumes (a same-instance return) holds its deadlines again.
+	pub fn set_ended(&mut self, ended: bool) {
+		self.ended = ended;
 	}
 
 	/// Pad to `rate` bits per second from the next slot on, or stop padding.
@@ -604,7 +605,7 @@ mod tests {
 		schedule.set_rate(Some(RATE));
 		schedule.set_buffer(1, VIDEO);
 		schedule.push(1, ms(1_000), unit(1, 200), true);
-		schedule.end();
+		schedule.set_ended(true);
 		let sent: usize = drain(&mut schedule)
 			.into_iter()
 			.map(|(_, per_pid, _)| per_pid.get(&1).copied().unwrap_or(0))
@@ -625,7 +626,7 @@ mod tests {
 		};
 		schedule.set_buffer(1, small);
 		schedule.push(1, ms(1_000), unit(1, 11), true);
-		schedule.end();
+		schedule.set_ended(true);
 		let mut sent = 0;
 		for _ in 0..100 {
 			let Some(slot) = schedule.next(None).unwrap() else {

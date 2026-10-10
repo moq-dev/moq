@@ -9,6 +9,10 @@ a track with no keyframes at all and fails the group invariant.
 
 ## Plan
 
+Decided in the 2026-10-10 audit: H.264 lands first and owns the shared warmup
+measurement and catalog mutation. H.265 reuses it rather than implementing
+that machinery in parallel.
+
 - `rs/moq-mux/src/codec/h265/split.rs`: parse `PrefixSeiNut` payloads for
   payload type 6 (`recovery_point`: `recovery_poc_cnt`, `exact_match_flag`,
   `broken_link_flag`). `scuffle-h265` does not parse SEI, so walk the
@@ -33,8 +37,4 @@ a track with no keyframes at all and fails the group invariant.
 
 ## Required
 
-- [Catalog warmup](/quest/m1/catalog-warmup.md) - the field import writes
-
-## Related
-
-- [H.264 import](/quest/m2/intra-refresh/h264-import.md) - the conversion and catalog mutation this shares
+- [H.264 import](/quest/m2/intra-refresh/h264-import.md) - the shared measurement and catalog mutation, built on catalog warmup

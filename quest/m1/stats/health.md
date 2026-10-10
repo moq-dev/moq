@@ -32,10 +32,11 @@ broadcast, which #4510 replaced with these tracks (the relay's own
 Guidance, to be settled while building:
 
 - Inputs are the snapshot types from [the schema](/quest/m1/stats/schema.md):
-  `transport` (rtt, rate, loss, sample age) and the per-rendition counters.
-  Rendition rates come from cumulative counters, so a sample is the delta of
-  two snapshots over their interval; `transport` gauges (rtt, rate, loss)
-  are read as reported, never re-derived, so both languages agree. A reset is detected by a counter decreasing or by the
+  `transport` (rtt, rate, cumulative bytes and packets lost, sample age) and
+  the per-rendition counters. Decided in the 2026-10-10 audit: rendition
+  rates and transport loss use deltas of cumulative counters over the two
+  snapshots' interval. RTT and estimated rate remain gauges read as reported.
+  A reset is detected by a counter decreasing or by the
   reporting broadcast's path or epoch changing
   ([Broadcast epochs](/quest/m0/broadcast-epoch/README.md)); the sample then
   starts over rather than going negative.

@@ -18,10 +18,18 @@ to get one restarts the first viewer: the front resolved through the claim,
 and the epoch route wins the path and is announced as a `Restart`
 (Restart). A front on a drained
 worker no longer needs this: under Restart a request joins a front only while
-its route still wins, on every version (re-scoped 2026-10-07). lite-07 only; older versions
-and moq-transport keep today's behavior.
+its route still wins, on every version (re-scoped 2026-10-07). This quest owns
+the shared model and lite-07 wire. The negotiated IETF response is owned by
+[IETF claim epochs](/quest/m1/ietf-claim-epochs.md); older and unnegotiated
+versions keep today's wire.
 
 ## Plan
+
+Decided 2026-10-10: extend claim-served identity to lite-07 and IETF as
+separate m1 follow-up work. Land the shared model and lite-07 behavior here,
+then apply it to IETF in its own quest, so the lite-07 cut does not acquire an
+IETF dependency. The API shapes below remain implementation proposals, not
+newly settled maintainer decisions.
 
 Decisions (2026-10-07, proposed for the maintainer):
 
@@ -63,8 +71,9 @@ Decisions (2026-10-07, proposed for the maintainer):
 - A worker drains feed by feed by closing the outputs it wants off: their
   readers re-request and land on the cheapest worker as a new instance, one
   short cut per feed instead of withdrawing the claim and cutting everything.
-- Every link from the worker to the relays that serve viewers must speak
-  lite-07, since the epoch is learned and named hop by hop. A viewer's own
+- Every link from the worker to the relays that serve viewers must carry
+  the served identity: lite-07 here, or the negotiated IETF extension after
+  its claim follow-up lands. The epoch is learned and named hop by hop. A viewer's own
   version should not matter, because the join rule and the refusal live at
   relays and workers; confirm it, including that `@moq/net`'s track cache
   never hands a returning viewer the old instance's group.
@@ -90,5 +99,6 @@ it. Wire: lite-07 TRACK_INFO gains `Epoch`.
 
 ## Related
 
+- [IETF claim epochs](/quest/m1/ietf-claim-epochs.md) - the same served identity on negotiated IETF responses, without gating the lite-07 cut
 - [Upstream position regression](/quest/m1/largest-regression.md) - catches the same restart from the answer's largest position on lite-07 and moq-transport; lite-05 and 06 stay uncovered
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - waits on this wire change
