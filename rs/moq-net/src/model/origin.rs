@@ -2329,9 +2329,12 @@ impl TrackIo {
 			// Ended before any route served it: nothing to read.
 			Some(request) => request.reject(result.err().unwrap_or(Error::NotFound)),
 			None => {
-				// A failed track refuses newcomers too, so they ask afresh.
-				if let (Err(err), Some(accepted)) = (&result, self.accepted.take()) {
-					let _ = accepted.abort(err.clone());
+				if let Some(accepted) = self.accepted.take() {
+					let _ = match &result {
+						Ok(()) => accepted.finish(),
+						// A failed track refuses newcomers too, so they ask afresh.
+						Err(err) => accepted.abort(err.clone()),
+					};
 				}
 				self.routes.end(result);
 			}
@@ -5055,6 +5058,7 @@ impl ProduceTest for Hop {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::model::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
 
 	fn origin(id: u64) -> Hop {
@@ -5080,6 +5084,48 @@ mod tests {
 			.iter()
 			.map(|prefix| Pattern::subtree(prefix).unwrap())
 			.collect()
+	}
+
+	/// Ending a logical track must finish its metadata producer as well as its routes,
+	/// without losing the source's final group or warning about an unfinished writer.
+	#[test]
+	fn a_finished_logical_track_does_not_warn() {
+		let warns = count_drop_warnings("track::Producer dropped without finish", || {
+			let broadcast = Arc::new(broadcast::Info::default());
+			let source = track::Producer::new(broadcast.clone(), "catalog.json", None);
+			let mut group = source.create_group(7u64.into()).unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
+			group.finish().unwrap();
+			source.finish().unwrap();
+
+			let routes = crate::model::resume::Producer::new();
+			routes.serve(source.consume());
+			let request = track::Request::new(broadcast, "catalog.json");
+			let consumer = request.consume();
+			let weak = request.weak();
+			let accepted = request.routes(routes.consume()).accept(None);
+			let mut io = TrackIo {
+				request: None,
+				accepted: Some(accepted),
+				weak,
+				routes,
+				query: None,
+				staged: None,
+				copy: None,
+				held: None,
+				closed: false,
+				used: true,
+			};
+			let mut subscriber = consumer.subscribe(None).now_or_never().unwrap().unwrap();
+			io.end(Ok(()));
+
+			let mut group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(group.sequence, 7);
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(frame.payload.as_ref(), b"snapshot");
+			assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
+		});
+		assert_eq!(warns, 0, "a clean logical end must not drop an unfinished producer");
 	}
 
 	#[test]
