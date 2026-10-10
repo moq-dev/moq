@@ -3806,6 +3806,9 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	dynamic: track::Dynamic,
 	sub: Sub<S>,
 	fetches: kio::Tasks<FetchServeRun<S>>,
+	/// Fetches a pre-lite-05 upstream has no FETCH for, held while the live
+	/// subscription may still deliver the group; see [`Self::poll_feed_fetches`].
+	feed_fetches: Vec<(group::Request, track::Consumer)>,
 	// A dedicated close-watch handle for the session-died arm.
 	closed: S,
 	// SUBSCRIBE_UPDATE only exists on Lite03+, so older peers can't carry a
@@ -3854,11 +3857,26 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			dynamic,
 			sub: Sub::None,
 			fetches: kio::Tasks::new(),
+			feed_fetches: Vec::new(),
 			closed: serve.subscriber.session.clone(),
 			supports_update: !matches!(serve.subscriber.version, Version::Lite01 | Version::Lite02),
 			supports_fetch: serve.subscriber.version.has_track_stream(),
 			timescale,
 			mode: ServeMode::Select,
+		}
+	}
+
+	/// Settle the fetches held for the live feed. A pre-lite-05 peer has no FETCH, but a
+	/// group its subscription delivers lands in the cache, where the waiting fetches read
+	/// it once the request is dropped. A group the feed went past (or started past, or
+	/// ended before) is a miss, the same answer as an evicted one.
+	fn poll_feed_fetches(feed_fetches: &mut Vec<(group::Request, track::Consumer)>, waiter: &kio::Waiter) {
+		for (req, feed) in std::mem::take(feed_fetches) {
+			match feed.poll_group(req.sequence(), waiter) {
+				Poll::Ready(Some(_)) => drop(req),
+				Poll::Ready(None) => req.reject(Error::NotFound),
+				Poll::Pending => feed_fetches.push((req, feed)),
+			}
 		}
 	}
 
@@ -3881,6 +3899,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 				}
 				ServeMode::Tail { settle, owed, streams } => {
 					let _ = self.fetches.poll(waiter);
+					// The final sequence is known, so every held fetch resolves.
+					Self::poll_feed_fetches(&mut self.feed_fetches, waiter);
 					if settle
 						.poll(waiter, |tail| match streams {
 							Some(streams) => tail.streams() >= *streams,
@@ -3929,8 +3949,11 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							if self.supports_fetch {
 								self.fetches
 									.push(FetchServeRun::new(serve.clone(), req, self.timescale));
+							} else if matches!(self.sub, Sub::Active(_)) {
+								self.feed_fetches.push((req, self.serving.consume()));
 							} else {
-								req.reject(Error::Version);
+								// No FETCH on the wire and no feed to wait on: a cache miss.
+								req.reject(Error::NotFound);
 							}
 							continue;
 						}
@@ -3948,7 +3971,14 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								self.timescale,
 							) {
 								Ok(Begin::Establish(est)) => self.mode = ServeMode::Establish(est),
-								Ok(Begin::None) => {}
+								Ok(Begin::None) => {
+									// The last subscriber left, so no feed will deliver a held fetch.
+									if matches!(self.sub, Sub::None) {
+										for (req, _) in self.feed_fetches.drain(..) {
+											req.reject(Error::NotFound);
+										}
+									}
+								}
 								// Updating the upstream failed: hand the track back for
 								// another route to resume.
 								Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
@@ -3961,6 +3991,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 
 					// (2) In-flight fetches; completions just retire.
 					let _ = self.fetches.poll(waiter);
+					Self::poll_feed_fetches(&mut self.feed_fetches, waiter);
 
 					// (3) Nobody reads this copy anymore: the origin dropped its source
 					// copy when demand ended, so drop it instead of holding the track

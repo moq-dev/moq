@@ -63,6 +63,12 @@ impl Kind {
 	}
 }
 
+/// How far behind the live edge a cursor's feed still asks for a group. A group resolves
+/// into a row only once its successor starts, so a cursor keeping up fetches it at the live
+/// edge; the budget only has to cover a burst (a publisher catching up) and a cursor that
+/// fell behind. The default zero would deliver only the newest group of a burst.
+const FEED_MAX_DELAY: Duration = Duration::from_secs(30);
+
 /// A built init segment, with the content hash that versions its URL (`init.{hash}.mp4`).
 ///
 /// Hashing the bytes rather than a list of catalog fields covers every input that shapes the
@@ -638,6 +644,25 @@ impl Rendition {
 				Muxer::audio(&config)?
 			}
 		})
+	}
+
+	/// The binding this rendition's media is fetched through now.
+	pub(crate) fn binding(&self) -> Arc<moq_mux::Binding> {
+		self.media.sync(&self.live)
+	}
+
+	/// Subscribe to the media track on `binding` once it resolves: `None` when it never will.
+	pub(crate) fn poll_subscribe(
+		&self,
+		binding: &moq_mux::Binding,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<moq_net::track::Subscribing>> {
+		let Ok(broadcast) = std::task::ready!(binding.poll_broadcast(waiter)) else {
+			return Poll::Ready(None);
+		};
+		let track = broadcast.track(&self.name).ok();
+		let subscription = moq_net::track::Subscription::default().with_max_age(FEED_MAX_DELAY);
+		Poll::Ready(track.map(|track| track.subscribe(subscription).into_inner()))
 	}
 
 	/// The media track handle on `binding`, with that bound broadcast so a fetch can tell a
