@@ -143,7 +143,7 @@ impl MoqServer {
 	/// Bind the listening socket. Returns the bound local address as a string,
 	/// which is useful when binding to an ephemeral port (`:0`).
 	pub async fn listen(&self) -> Result<String, MoqError> {
-		self.task.run(|mut state| async move { state.listen().await }).await
+		self.task.spawn(|mut state| async move { state.listen().await }).await
 	}
 
 	/// Accept the next incoming session. Returns `None` when the server has closed.
@@ -151,7 +151,7 @@ impl MoqServer {
 	/// `listen()` must be called first. Dropping the returned future aborts this
 	/// call alone and leaves the server listening.
 	pub async fn accept(&self) -> Result<Option<Arc<MoqRequest>>, MoqError> {
-		self.task.run(|mut state| async move { state.accept().await }).await
+		self.task.spawn(|mut state| async move { state.accept().await }).await
 	}
 
 	/// SHA-256 fingerprints of the configured TLS certificates, hex-encoded.
