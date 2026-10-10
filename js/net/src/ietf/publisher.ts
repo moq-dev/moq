@@ -591,7 +591,9 @@ export class Publisher {
 					hasExtensions: stamped,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
-					hasEnd: true,
+					// A stream capped by the range stops before the group may end, so its FIN
+					// cannot claim END_OF_GROUP.
+					hasEnd: slice.until === undefined,
 					hasPriority: true,
 					// Only honest when the stream really starts at the group's first object;
 					// a trimmed head starts partway through.
