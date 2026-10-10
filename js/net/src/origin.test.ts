@@ -3,6 +3,7 @@ import { getter, Once, race, Signal } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
+import { Producer as GroupProducer } from "./group.ts";
 import { HopSchema, Route } from "./hop.ts";
 import { spreadHash } from "./internal.ts";
 import type { Consumer, Table } from "./origin.ts";
@@ -2149,19 +2150,81 @@ test("the newest epoch wins the path over a cheaper one and arrives as a new bro
 	origin.close();
 });
 
-test("demand naming an epoch is refused when the route changes instance while it waits", async () => {
+const NEWER = Epoch.parse("01900000-0000-7000-8000-000000000002");
+
+test("demand held across an epoch change asks again, unless it named the old epoch", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
+	const path = Path.from("live/cam");
 	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH });
 	const it = handle.requested();
-	const pending = wireOf(consumer).demand(Path.from("live/cam"), EPOCH);
+	const pinned = wireOf(consumer).demand(path, EPOCH);
+	const unpinned = wireOf(consumer).demand(path);
 	const { value: req } = await it.next();
 
-	// Another instance now serves the route; its answer is not the one the peer named.
-	handle.update({ ...handle.route, epoch: Epoch.mint() });
+	// Another instance now serves the route: the old handler's answer is for the old one.
+	handle.update({ ...handle.route, epoch: NEWER });
 	req?.accept(new BroadcastProducer().consume());
-	await expect(pending).rejects.toThrow("unroutable");
+	await expect(pinned).rejects.toThrow("unroutable");
 
+	const next = new BroadcastProducer();
+	const track = next.createTrack("video");
+	(await it.next()).value?.accept(next);
+	const subscription = (await unpinned)?.track("video").subscribe();
+	track.writeGroup(new GroupProducer(7));
+	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+
+	subscription?.close();
+	await it.return?.();
+	next.close();
+	handle.close();
+	origin.close();
+});
+
+test("a demand refused across an epoch change does not lose the carried demand's answer", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("live/cam");
+	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const it = handle.requested();
+	const unpinned = wireOf(consumer).demand(path);
+	const pinned = wireOf(consumer).demand(path, EPOCH);
+	await it.next();
+
+	handle.update({ ...handle.route, epoch: NEWER });
+	await expect(pinned).rejects.toThrow("unroutable");
+	// The replacement's refusal reaches the demand that carried over.
+	(await it.next()).value?.reject(new Error("gone"));
+	await expect(unpinned).rejects.toThrow("gone");
+
+	await it.return?.();
+	handle.close();
+	origin.close();
+});
+
+test("demand held across an epoch round trip still asks again", async () => {
+	const origin = new Producer();
+	const path = Path.from("live/cam");
+	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const it = handle.requested();
+	const demanded = wireOf(origin.consume()).demand(path);
+	const { value: req } = await it.next();
+
+	// Released by the first change; the epoch coming back does not undo that.
+	handle.update({ ...handle.route, epoch: NEWER });
+	handle.update({ ...handle.route, epoch: EPOCH });
+	req?.accept(new BroadcastProducer().consume());
+
+	const next = new BroadcastProducer();
+	const track = next.createTrack("video");
+	(await it.next()).value?.accept(next);
+	const subscription = (await demanded)?.track("video").subscribe();
+	track.writeGroup(new GroupProducer(7));
+	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+
+	subscription?.close();
+	await it.return?.();
+	next.close();
 	handle.close();
 	origin.close();
 });
@@ -2232,29 +2295,177 @@ test("a newer epoch ends pinned and unpinned requests on the replaced publisher 
 	origin.close();
 });
 
-test("request never accepts an old handler after its epoch changes asynchronously", async () => {
+test("a request held across an epoch change asks again and never takes the old handler's answer", async () => {
 	const origin = new Producer();
 	const prefix = Path.from("room");
 	const path = Path.from("room/cam");
 	const dynamic = origin.dynamic(prefix, { epoch: EPOCH });
-	const pending = origin.consume().request(path, { epoch: EPOCH });
+	const unpinned = origin.consume().request(path);
+	const pinned = origin.consume().request(path, { epoch: EPOCH });
 	const requests = dynamic.requested();
 	const old = (await requests.next()).value;
-	const epoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
-	dynamic.update({ ...dynamic.route, epoch });
-	const current = origin.consume().request(path, { epoch });
+	dynamic.update({ ...dynamic.route, epoch: NEWER });
+	const current = origin.consume().request(path, { epoch: NEWER });
 	old?.accept(new BroadcastProducer().consume());
-	expect(pending.active.peek()).toBeUndefined();
-	expect(pending.unroutable.peek()).toBe(true);
+	await settle();
+	expect(pinned.active.peek()).toBeUndefined();
+	expect(pinned.unroutable.peek()).toBe(true);
+	expect(unpinned.active.peek()).toBeUndefined();
 	expect(current.active.peek()).toBeUndefined();
 	const next = (await requests.next()).value;
 	next?.accept(new BroadcastProducer().consume());
-	expect(current.active.peek()?.epoch).toBe(epoch);
-	expect(pending.active.peek()).toBeUndefined();
+	await settle();
+	expect(unpinned.active.peek()?.epoch).toBe(NEWER);
+	expect(current.active.peek()?.epoch).toBe(NEWER);
+	expect(pinned.active.peek()).toBeUndefined();
 	await requests.return?.();
-	pending.close();
+	unpinned.close();
+	pinned.close();
 	current.close();
 	dynamic.close();
+	origin.close();
+});
+
+test.each([
+	["A to B", EPOCH, NEWER],
+	["A to none", EPOCH, undefined],
+	["none to B", undefined, NEWER],
+])("an epoch update %s restarts the claim, while a re-price keeps every handle", async (_, from, to) => {
+	const origin = new Producer();
+	const prefix = Path.from("live");
+	const path = Path.from("live/cam");
+	const dynamic = origin.dynamic(prefix, { epoch: from });
+	const requests = dynamic.requested();
+	const announced = origin.consume().announced();
+	expect(await announced.next()).toMatchObject({ prefix, kind: "start" });
+
+	const held = origin.consume().request(path);
+	const old = new BroadcastProducer();
+	const oldTrack = old.createTrack("video");
+	(await requests.next()).value?.accept(old);
+	await settle();
+	const resolved = held.active.peek();
+	expect(resolved?.epoch).toBe(from);
+
+	const sticky = resolved?.track("video").subscribe();
+	oldTrack.appendGroup().close();
+	expect((await sticky?.recvGroup())?.sequence).toBe(0);
+
+	// A re-price at the same epoch keeps every handle, and the handler is not asked again.
+	dynamic.update({ ...dynamic.route, cost: 5n });
+	expect(await announced.next()).toMatchObject({ prefix, kind: "update" });
+	expect(held.active.peek()).toBe(resolved);
+	const same = origin.consume().request(path);
+	await settle();
+	expect(same.active.peek()?.epoch).toBe(from);
+
+	// Another epoch, or none, is another instance: the requests on the old one end.
+	dynamic.update({ ...dynamic.route, epoch: to });
+	expect(await announced.next()).toMatchObject({ prefix, kind: "restart" });
+	await settle();
+	expect(held.active.peek()).toBeUndefined();
+	expect(held.unroutable.peek()).toBe(true);
+	expect(same.active.peek()).toBeUndefined();
+
+	// The subscription already open stays on the old answer.
+	oldTrack.appendGroup().close();
+	expect((await sticky?.recvGroup())?.sequence).toBe(1);
+
+	// A re-request, local or from a session, asks the handler again and never reads the
+	// old answer.
+	const fresh = origin.consume().request(path);
+	const demanded = wireOf(origin.consume()).demand(path);
+	const next = new BroadcastProducer();
+	const nextTrack = next.createTrack("video");
+	(await requests.next()).value?.accept(next);
+	await settle();
+	expect(fresh.active.peek()?.epoch).toBe(to);
+	const subscription = fresh.active.peek()?.track("video").subscribe();
+	const forwarded = (await demanded)?.track("video").subscribe();
+	nextTrack.writeGroup(new GroupProducer(7));
+	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+	expect((await forwarded?.recvGroup())?.sequence).toBe(7);
+
+	await requests.return?.();
+	sticky?.close();
+	subscription?.close();
+	forwarded?.close();
+	for (const handle of [held, same, fresh]) handle.close();
+	old.close();
+	next.close();
+	dynamic.close();
+	announced.close();
+	origin.close();
+});
+
+test("a session's re-request after an epoch update asks the handler again", async () => {
+	const origin = new Producer();
+	const path = Path.from("live/cam");
+	const dynamic = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const requests = dynamic.requested();
+	const wire = wireOf(origin.consume());
+
+	const before = wire.demand(path);
+	const old = new BroadcastProducer();
+	(await requests.next()).value?.accept(old);
+	expect(await before).toBeDefined();
+
+	dynamic.update({ ...dynamic.route, epoch: NEWER });
+	const after = wire.demand(path);
+	const next = new BroadcastProducer();
+	const track = next.createTrack("video");
+	(await requests.next()).value?.accept(next);
+	const subscription = (await after)?.track("video").subscribe();
+	track.writeGroup(new GroupProducer(7));
+	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+
+	subscription?.close();
+	await requests.return?.();
+	old.close();
+	next.close();
+	dynamic.close();
+	origin.close();
+});
+
+test("an update does not override route selection: another claim at the epoch keeps it", async () => {
+	const origin = new Producer();
+	const prefix = Path.from("live");
+	const path = Path.from("live/cam");
+	const first = origin.dynamic(prefix, { epoch: EPOCH, cost: 1n });
+	const second = origin.dynamic(prefix, { epoch: EPOCH, cost: 5n });
+	const firstRequests = first.requested();
+	const secondRequests = second.requested();
+
+	const held = origin.consume().request(path);
+	const answer = new BroadcastProducer();
+	(await firstRequests.next()).value?.accept(answer);
+	await settle();
+	expect(held.active.peek()?.epoch).toBe(EPOCH);
+
+	// The first claim drops the epoch, so the second, still at it, outranks it: the
+	// request on the epoch moves to the second's answer rather than ending.
+	first.update({ ...first.route, epoch: undefined });
+	const fresh = origin.consume().request(path);
+	const replacement = new BroadcastProducer();
+	const track = replacement.createTrack("video");
+	(await secondRequests.next()).value?.accept(replacement);
+	await settle();
+	expect(held.active.peek()?.epoch).toBe(EPOCH);
+	expect(held.unroutable.peek()).toBe(false);
+	expect(fresh.active.peek()?.epoch).toBe(EPOCH);
+	const subscription = fresh.active.peek()?.track("video").subscribe();
+	track.writeGroup(new GroupProducer(7));
+	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+
+	subscription?.close();
+	await firstRequests.return?.();
+	await secondRequests.return?.();
+	held.close();
+	fresh.close();
+	answer.close();
+	replacement.close();
+	first.close();
+	second.close();
 	origin.close();
 });
 

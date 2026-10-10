@@ -34,6 +34,7 @@ in sync at the latency you ask for.
 | `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
+| `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can mount before the stream exists. |
 | `catalog-format` | `hang`, `hangz`, `msf`, or `manual`; detected from the name by default. |
 
