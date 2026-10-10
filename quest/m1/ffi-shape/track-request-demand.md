@@ -29,10 +29,6 @@ Additive in every binding. It edits the same wrappers as
 that PR to avoid conflicts, without blocking on it. Run
 `just test interop --all`. Wire: none.
 
-## Required
-
-- [Group request demand](/quest/m1/ffi-shape/group-request-demand.md) - establishes the binding shape this follows; the 2026-10-10 audit makes the existing start-after rule explicit
-
 ## Related
 
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - edits the same wrappers; land after it

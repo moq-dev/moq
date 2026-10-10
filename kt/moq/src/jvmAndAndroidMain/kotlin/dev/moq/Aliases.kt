@@ -81,6 +81,8 @@ typealias TrackDemand = uniffi.moq.MoqTrackDemand
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 /** A request to produce one uncached group for a fetch consumer. */
 typealias GroupRequest = uniffi.moq.MoqGroupRequest
+/** A watch-only handle to whether any caller still wants a requested group; holding it keeps nothing open. */
+typealias GroupDemand = uniffi.moq.MoqGroupDemand
 /** The write side of a single group: append frames to it. */
 typealias GroupProducer = uniffi.moq.MoqGroupProducer
 /** The read side of a single group: yields timestamped raw frames. */

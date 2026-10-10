@@ -572,18 +572,7 @@ impl Client {
 					let moq = moq.clone();
 					let dial = Box::pin(async move {
 						let quic = quic.await?;
-						Ok(Box::pin(async move {
-							let session = connect_session(&moq, quic).await?;
-							// Wait for the peer's SETUP before draining WebSocket. This crate's servers
-							// send SETUP after admission; other servers may still refuse afterward.
-							// A refusal, or a version with no SETUP to wait on, keeps WebSocket.
-							session.setup().await?;
-							// A session already told to leave would hand straight back out of QUIC.
-							if session.draining().peek().is_some() {
-								return Err(Error::ConnectFailed);
-							}
-							Ok(session)
-						}) as Handshake)
+						Ok(Box::pin(async move { Ok(connect_session(&moq, quic).await?) }) as Handshake)
 					});
 					Upgrade::new(dial, transport)
 				});
@@ -688,7 +677,7 @@ impl Dialed {
 	}
 }
 
-/// The MoQ handshake running on an upgrade's QUIC session.
+/// The MoQ handshake starting on an upgrade's QUIC session, up to sending our SETUP.
 pub(crate) type Handshake = BoxFuture<'static, crate::Result<moq_net::Session>>;
 
 /// A QUIC dial that lost the race to the WebSocket fallback but is still going.
@@ -710,12 +699,20 @@ enum Stage {
 	Dialing(BoxFuture<'static, crate::Result<Handshake>>),
 	/// The QUIC transport is up and the MoQ handshake is running on it.
 	Handshaking(Handshake),
+	/// Our SETUP is sent, and `setup` waits on the peer's.
+	Setup {
+		session: moq_net::Session,
+		setup: BoxFuture<'static, crate::Result<()>>,
+	},
 }
 
 /// How far an [`Upgrade`] got on one poll.
 pub(crate) enum Step {
 	/// The QUIC transport is up; the MoQ handshake has started on it.
 	Handshaking,
+	/// The MoQ session exists and waits on the peer's SETUP. It is the caller's to close
+	/// if it stops before [`Step::Done`], since the peer already holds it open.
+	Session(moq_net::Session),
 	/// The peer's SETUP arrived over QUIC, which is ready to take over on this transport.
 	Done(moq_net::Session, crate::Transport),
 }
@@ -737,8 +734,9 @@ impl Upgrade {
 	}
 
 	/// Drive the dial: `Ready(Ok(Step::Handshaking))` once when the QUIC transport
-	/// comes up, then `Ready(Ok(Step::Done))` once the peer's SETUP arrives. Not
-	/// polled again after `Done` or an error.
+	/// comes up, `Ready(Ok(Step::Session))` once our SETUP is sent, then
+	/// `Ready(Ok(Step::Done))` once the peer's SETUP arrives. Not polled again after
+	/// `Done` or an error.
 	pub(crate) fn poll(&mut self, waiter: &moq_net::kio::Waiter) -> Poll<crate::Result<Step>> {
 		if let Some((sleep, timeout)) = &mut self.deadline
 			&& waiter.poll_future(sleep.as_mut()).is_ready()
@@ -754,7 +752,27 @@ impl Upgrade {
 			}
 			Stage::Handshaking(handshake) => {
 				let session = ready!(waiter.poll_future(handshake.as_mut()))?;
-				Poll::Ready(Ok(Step::Done(session, self.transport)))
+				let peer = session.clone();
+				let setup = Box::pin(async move {
+					// Wait for the peer's SETUP before draining WebSocket. This crate's servers
+					// send SETUP after admission; other servers may still refuse afterward.
+					// A refusal, or a version with no SETUP to wait on, keeps WebSocket.
+					peer.setup().await?;
+					// A session already told to leave would hand straight back out of QUIC.
+					if peer.draining().peek().is_some() {
+						return Err(Error::ConnectFailed);
+					}
+					Ok(())
+				});
+				self.stage = Stage::Setup {
+					session: session.clone(),
+					setup,
+				};
+				Poll::Ready(Ok(Step::Session(session)))
+			}
+			Stage::Setup { session, setup } => {
+				ready!(waiter.poll_future(setup.as_mut()))?;
+				Poll::Ready(Ok(Step::Done(session.clone(), self.transport)))
 			}
 		}
 	}
