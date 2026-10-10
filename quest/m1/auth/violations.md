@@ -39,3 +39,5 @@ regression test per case, and check the lite and IETF draft text agrees. Run
 `just test interop --all`.
 
 Public API: none. Wire: none beyond draft wording.
+
+**Draft progress:** [#5279](https://github.com/moq-dev/moq/pull/5279) implements malformed AUTH decoding, unexpected and extra messages, expiry/code bounds, and session-fatal propagation in Rust and JS. The quest remains open for AUTH Request-ID ordering and reuse, which must use the common validator being implemented in [#5235](https://github.com/moq-dev/moq/pull/5235), rather than introduce a competing AUTH-only validator.
