@@ -3,8 +3,9 @@
 ## Goal
 
 The moq-json and `@moq/json` window consumers return each event with a
-timestamp, as the snapshot and stream consumers do. All three data consumers
-then return `Timed<T>` in both Rust and JS.
+timestamp. In JS all three data consumers then return `Timed<T>`; the Rust
+snapshot and stream consumers follow in
+[Data consumer timestamps](/quest/m1/data-consumer-timestamps.md).
 
 ## Plan
 
@@ -21,7 +22,8 @@ stream consumers `Timed<T>`. The window consumer (`window::Consumer::next` in
 - Update in-repo readers (`js/hang` timeline, `js/room` chat) and add a line to
   the Unreleased section of `doc/setup/upgrade.md`. No new doc page.
 - Land before the next `@moq/json` release, so its break ships together with
-  #5099's.
+  #5099's. Not blocked on the Rust snapshot and stream quest: both Rust breaks
+  use the same `moq_net::Timed` and ship in the next moq-json release together.
 
 Public API: breaking (Rust and JS). Wire: none.
 
