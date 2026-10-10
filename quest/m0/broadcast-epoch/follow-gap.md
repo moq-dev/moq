@@ -27,8 +27,8 @@ JS. Regression with simulated time: an exact route ends, its request ends,
 then a same-epoch prefix route takes over while a reader is still draining;
 the follower must report the handoff, and `moq play` must restart. Leave the
 follower unpolled until the replacement is announced, since awaiting its
-`End` first avoids the bug and passes on the broken code. Start after #5154
-merges.
+`End` first avoids the bug and passes on the broken code, as
+`follow_keeps_a_gap_between_routes_of_one_epoch` does today.
 
 Public API: no new items, but `follow` reports a gap where it reported an
 `Update`, a behavior change to call out in the PR. Wire: none.
