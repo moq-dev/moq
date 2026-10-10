@@ -126,6 +126,10 @@ if [[ "$TAIL_ONLY" -eq 1 ]]; then
         echo "error: --tail, --media, and --negative are separate runs" >&2
         exit 2
     fi
+    if [[ "$IN_TREE" -eq 0 ]]; then
+        echo "error: --tail builds its clients from this checkout; drop the binary and client overrides" >&2
+        exit 2
+    fi
     PUBLISHERS="rust,js-native-node,js-native-bun"
     SUBSCRIBERS="$PUBLISHERS"
 fi
