@@ -44,6 +44,8 @@ export type DecoderProps = Inputs<DecoderInput> & {
 };
 
 type DecoderOutput = {
+	/** Fatal decode failure, cleared when another source is selected. */
+	error: Signal<Error | undefined>;
 	context: Signal<AudioContext | undefined>;
 
 	// The root of the audio graph, which can be used for custom visualizations.
@@ -92,6 +94,7 @@ export class Decoder {
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
+		error: new Signal<Error | undefined>(undefined),
 		context: new Signal<AudioContext | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 		sampleRate: new Signal<number | undefined>(undefined),
@@ -135,6 +138,7 @@ export class Decoder {
 	#instance?: Moq.Broadcast.Consumer["closed"];
 
 	#signals = new Effect();
+	#failed?: { instance: unknown; track: string; identity: string };
 
 	// The catalog fields that require a replacement subscription or decoder.
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
@@ -334,6 +338,22 @@ export class Decoder {
 		const active = broadcast.relativeBroadcast(effect, identity.broadcast);
 		if (!active) return;
 
+		const key = JSON.stringify(identity);
+		if (this.#failed?.instance === active.closed && this.#failed.track === track && this.#failed.identity === key)
+			return;
+		this.#failed = undefined;
+		this.#out.error.set(undefined);
+		// Closing this effect releases both its container reader and track subscription.
+		const failure = new Signal<Error | undefined>(undefined);
+		let attempt: Effect | undefined;
+		effect.run((inner) => {
+			const error = inner.get(failure);
+			if (!error) return;
+			this.#failed = { instance: active.closed, track, identity: key };
+			this.#out.error.set(error);
+			attempt?.close();
+		});
+
 		// Another broadcast (a new name, or a republish) brings its own timeline, which a ring and a
 		// clock anchored on the previous one would discard as already played. A return to the same
 		// instance keeps the anchor, so the relay's redelivered last group is still dropped as old.
@@ -353,22 +373,29 @@ export class Decoder {
 		// of tail beyond them. Drop that once the replacement's first frame says where it starts.
 		this.#handover.opened();
 
-		const sub = subscribeMedia(effect, {
-			broadcast: active,
-			track,
-			priority: Catalog.PRIORITY.audio,
-			maxDelay: this.#subscribeMaxDelay,
-		});
-		if (!sub) return;
+		effect.run((run) => {
+			attempt = run;
+			const sub = subscribeMedia(run, {
+				broadcast: active,
+				track,
+				priority: Catalog.PRIORITY.audio,
+				maxDelay: this.#subscribeMaxDelay,
+			});
+			if (!sub) return;
 
-		if (config.container.kind === "cmaf") {
-			this.#runCmafDecoder(effect, sub, config);
-		} else {
-			this.#runLegacyDecoder(effect, sub, config);
-		}
+			if (config.container.kind === "cmaf") {
+				this.#runCmafDecoder(run, sub, { config, failure });
+			} else {
+				this.#runLegacyDecoder(run, sub, { config, failure });
+			}
+		});
 	}
 
-	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: DecoderConfig): void {
+	#runLegacyDecoder(
+		effect: Effect,
+		sub: Moq.Track.Subscriber,
+		{ config, failure }: { config: DecoderConfig; failure: Signal<Error | undefined> },
+	): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(preSkip);
@@ -410,7 +437,7 @@ export class Decoder {
 					}
 					this.#emit(data, decoded);
 				},
-				error: (error) => console.error("audio decoder error", error),
+				error: (error) => failure.set(error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -477,7 +504,11 @@ export class Decoder {
 		});
 	}
 
-	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: DecoderConfig): void {
+	#runCmafDecoder(
+		effect: Effect,
+		sub: Moq.Track.Subscriber,
+		{ config, failure }: { config: DecoderConfig; failure: Signal<Error | undefined> },
+	): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
 		const initSegment = base64ToBytes(config.container.init);
@@ -518,7 +549,7 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => this.#emit(data),
-				error: (error) => console.error("audio decoder error", error),
+				error: (error) => failure.set(error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();

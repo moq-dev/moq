@@ -191,6 +191,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const owed = new Set(hold);
 	const pending: Array<() => void> = [];
 	let resets = 0;
+	const errors: VideoDecoderInit["error"][] = [];
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
 	class Codec {
 		state = "unconfigured";
@@ -199,6 +200,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		readonly callbacks: VideoDecoderInit;
 		constructor(callbacks: VideoDecoderInit) {
 			this.callbacks = callbacks;
+			errors.push(callbacks.error);
 		}
 		configure() {
 			this.state = "configured";
@@ -272,6 +274,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	await microtasks();
 	return {
 		decoder,
+		fail: (error: DOMException) => errors.at(-1)?.(error),
 		enabled,
 		catalog,
 		submitted,
@@ -463,3 +466,27 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 }
+
+it("releases a failed video subscription and recovers only on a new source", async () => {
+	const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+	const playback = await guardedPlayback("legacy", []);
+	try {
+		const before = close.mock.calls.length;
+		const failure = new DOMException("invalid encoded video", "EncodingError");
+		playback.fail(failure);
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		expect(close.mock.calls.length).toBeGreaterThan(before);
+		playback.enabled.set(false);
+		await microtasks();
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		playback.republish();
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBeUndefined();
+	} finally {
+		playback.close();
+		close.mockRestore();
+	}
+});

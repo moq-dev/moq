@@ -54,6 +54,8 @@ export interface Stats {
 }
 
 type DecoderOutput = {
+	/** Fatal decode failure, cleared when another source is selected. */
+	error: Signal<Error | undefined>;
 	// The current frame to render.
 	frame: Signal<VideoFrame | undefined>;
 
@@ -80,6 +82,7 @@ export class Decoder {
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
+		error: new Signal<Error | undefined>(undefined),
 		frame: new Signal<VideoFrame | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
@@ -104,6 +107,7 @@ export class Decoder {
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
+	#failed?: { instance: unknown; track: string; identity: string };
 
 	#clearCurrentFrame(): void {
 		this.#out.frame.update((prev) => {
@@ -191,6 +195,12 @@ export class Decoder {
 			return;
 		}
 
+		const key = JSON.stringify(identity);
+		if (this.#failed?.instance === active.closed && this.#failed.track === track && this.#failed.identity === key)
+			return;
+		this.#failed = undefined;
+		this.#out.error.set(undefined);
+
 		// A republish of the media this rendition reads (the catalog's own broadcast, or the one a
 		// `broadcast` override names) is another instance, whose timeline starts over. Waiting for
 		// it to catch up to the old picture would freeze video until it passed the old timestamps,
@@ -208,6 +218,16 @@ export class Decoder {
 			config: identity.decoder,
 			stats: this.#out.stats,
 			catalog: broadcast.out.catalog,
+		});
+		const candidate = pending;
+		effect.run((inner) => {
+			const error = inner.get(candidate.error);
+			if (!error) return;
+			this.#failed = { instance: active.closed, track, identity: key };
+			this.#out.error.set(error);
+			if (this.#active.peek() === candidate) this.#active.set(undefined);
+			this.#pending.set(undefined);
+			this.#clearCurrentFrame();
 		});
 		effect.set(this.#pending, { track, catalog: broadcast.out.catalog });
 
@@ -322,6 +342,7 @@ interface DecoderTrackProps {
 }
 
 class DecoderTrack {
+	error = new Signal<Error | undefined>(undefined);
 	sync: Sync;
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
@@ -422,9 +443,8 @@ class DecoderTrack {
 					frame.close();
 				}
 			},
-			// TODO bubble up error
 			error: (error) => {
-				console.error("video decoder error", error);
+				this.error.set(error);
 				effect.close();
 			},
 		});

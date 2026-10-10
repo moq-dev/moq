@@ -90,10 +90,12 @@ const globals = [
 ] as const;
 const originals = new Map<string, PropertyDescriptor | undefined>();
 let codecs = 0;
+let codecErrors: AudioDecoderInit["error"][] = [];
 
 beforeEach(() => {
 	frameTimestamp = 0;
 	codecs = 0;
+	codecErrors = [];
 	contexts = [];
 	moduleLoaded = Promise.resolve();
 	for (const name of globals) originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -103,6 +105,7 @@ beforeEach(() => {
 		readonly init: AudioDecoderInit;
 		constructor(init: AudioDecoderInit) {
 			this.init = init;
+			codecErrors.push(init.error);
 			codecs++;
 		}
 		configure() {}
@@ -220,6 +223,7 @@ async function play(initial: Delay) {
 		delay,
 		enabled,
 		context: decoder.out.context,
+		error: decoder.out.error,
 		play,
 		// Remove the rendition from the catalog, then restore it.
 		remove: () => catalog.set({}),
@@ -503,6 +507,39 @@ describe("Decoder across a rendition's absence", () => {
 			expect(playback.inserted()).toEqual(timestamps.slice(3));
 		} finally {
 			playback.close();
+		}
+	});
+});
+
+describe("fatal decoder errors", () => {
+	it("releases audio subscriptions and retains the failure until the source changes", async () => {
+		const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const before = close.mock.calls.length;
+			const failure = new DOMException("invalid encoded audio", "EncodingError");
+			codecErrors.at(-1)?.(failure);
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			expect(close.mock.calls.length).toBeGreaterThan(before);
+			const attempts = playback.subscriptions();
+			playback.enabled.set(false);
+			await microtasks();
+			playback.enabled.set(true);
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			expect(playback.codecs()).toBe(1);
+			playback.remove();
+			await microtasks();
+			playback.replace();
+			playback.restore();
+			await microtasks();
+			expect(playback.error.peek()).toBeUndefined();
+			expect(playback.subscriptions()).toBeGreaterThan(attempts);
+		} finally {
+			playback.close();
+			close.mockRestore();
 		}
 	});
 });
