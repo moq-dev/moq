@@ -17,7 +17,7 @@ import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
 import { requestReason, toRequestCode } from "./error.ts";
-import { Frame, type Group as GroupMessage } from "./object.ts";
+import { Frame, type Group as GroupMessage, hasFirstObjectBit } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -1046,18 +1046,19 @@ export class Subscriber {
 			// or a stream with no object, has a hole at the front: drop it and pick up at
 			// the next group.
 			//
-			// This only saves reading a stream we would throw away. The bit is the publisher's
-			// claim, so what is enforced is the object ids themselves: `Frame.decode` holds every
-			// object to starting at 0 and incrementing by 1, whatever the header said and on the
-			// drafts that have no such bit to read.
-			if (!group.flags.firstObject) {
+			// Drafts before the bit cannot say this in the header, so the first ID is the only
+			// signal: a non-zero one is the same hole and is dropped the same way, but an empty
+			// stream there is still a group. A later gap, or a header that claimed the group
+			// starts at object 0, still fails it: `Frame.decode` refuses every non-zero delta.
+			const legacy = !hasFirstObjectBit(this.#session.version);
+			if (!group.flags.firstObject || legacy) {
 				let id: bigint | undefined;
 				try {
 					id = await stream.peekU62();
 				} catch (err: unknown) {
 					if (!(err instanceof UnexpectedEnd)) throw err;
 				}
-				if (id !== 0n) {
+				if (id !== 0n && !(legacy && id === undefined)) {
 					console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
 					stream.stop(new Error("a group must start at object 0"));
 					return;
