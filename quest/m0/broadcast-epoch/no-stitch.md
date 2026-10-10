@@ -32,10 +32,14 @@ export bailed on "missed a decode deadline".
 - Accepted consequence: on lite-06, and on any epochless route, any upstream
   track error now ends the track. The epoch README already accepts that
   default sessions end subscriptions on failover instead of resuming them.
-- Decided: no exporter-side guard. A unit due at or behind the TS schedule's
+- Decided: no guard at the TS schedule's `next` bail. A unit due at or behind
   `next` still bails. Once the stitch is gone, a stale unit reaching the
   schedule is a bug to fail loud on. The replaced broadcast's state is dropped
   by [Export ts](/quest/m0/broadcast-epoch/export-ts.md).
+- Decided 2026-10-09: counting a frame held for its DTS through a silence as
+  late at release (#5109) is arrival-time accounting, not a guard. A held
+  frame is ready no earlier than the frame that settles it, and a same-epoch
+  re-splice still produces that silence after this quest lands.
 - Fix the module docs that claim an epochless front is never swapped
   (`front.rs` header, `origin.rs` around `pick`): today that holds only when
   the replacement is in the front's own table.

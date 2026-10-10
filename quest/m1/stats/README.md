@@ -127,7 +127,6 @@ connection view and the dashboard flow.
 ## Related
 
 - [QoS](/quest/m1/qos/README.md) - the relay's delivery counters; the
-  combined per-broadcast verdict reading both lives in moq.pro's
-  [health badge](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/qos/badge.md)
+  combined per-broadcast verdict reading both lives downstream
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report

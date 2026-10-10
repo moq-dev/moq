@@ -123,7 +123,10 @@ async fn read_fetch(
 	let first = group.index();
 	let mut frames = Vec::new();
 	let mut complete = false;
+	// A long cached group is read a slice per poll, so the session's other tasks still run.
+	let mut budget = kio::coop::Budget::new(32);
 	while until.is_none_or(|until| first + (frames.len() as u64) < until) {
+		kio::wait(|waiter| budget.poll_yield(waiter)).await;
 		match group.read_frame().await? {
 			Some(frame) => frames.push(frame),
 			None => {
@@ -1180,7 +1183,10 @@ where
 		let mut first = true;
 
 		let mut buf: frame::Buffer = frame::Buffer::new();
+		// A long cached group is written a slice per poll, so the session's other tasks still run.
+		let mut budget = kio::coop::Budget::new(32);
 		'serve: loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			// The cap is the Largest Object snapshot: the group may keep growing, but
 			// everything past the snapshot belongs to the subscription, not the fill.
 			if until.is_some_and(|until| index >= until) {
@@ -2841,6 +2847,8 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	/// Serve the track's datagrams too, as OBJECT_DATAGRAMs. Off when the transport has no
 	/// datagrams; there is no stream fallback.
 	datagrams: bool,
+	/// A track that always has another group ready still lets the session's other tasks run.
+	budget: kio::coop::Budget,
 }
 
 impl<S: crate::transport::poll::Session> TrackServe<S> {
@@ -2879,6 +2887,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			draining: false,
 			opened: Default::default(),
 			end: None,
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -2937,6 +2946,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		let _ = self.children.poll(waiter);
 		loop {
+			// Still serves the datagrams and the groups already started below.
+			if self.budget.poll_yield(waiter).is_pending() {
+				break;
+			}
 			match self.track.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => {
 					let sequence = group.sequence;
@@ -3076,6 +3089,8 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	version: Version,
 	object_delta: u64,
 	state: GroupState<S>,
+	/// A long cached group drains a slice per poll, so its siblings still run.
+	budget: kio::coop::Budget,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -3135,6 +3150,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			version,
 			object_delta,
 			state: GroupState::Open,
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -3191,6 +3207,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					}
 					let res = 'serve: {
 						loop {
+							ready!(self.budget.poll_yield(waiter));
 							match writer.poll_flush(&mut cx) {
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
@@ -3509,6 +3526,132 @@ mod group_priority_test {
 		assert_eq!(
 			crate::coding::decode_varint(&mut buf, Version::Draft17).unwrap(),
 			b"hello".len() as u64
+		);
+	}
+
+	/// Drive `serve` beside a sibling that only counts its turns, until `done`, checking every
+	/// poll stays under `most` by `progress` and leaves the sibling its turn.
+	fn serve_beside_a_sibling(
+		mut serve: TrackServe<SinkSession>,
+		mut produce: impl FnMut() -> bool + 'static,
+		progress: impl Fn() -> usize,
+		most: usize,
+		done: usize,
+	) {
+		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			if produce() {
+				return Poll::Ready(());
+			}
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+		let turns = std::sync::Arc::new(AtomicU64::new(0));
+		let counted = turns.clone();
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			counted.fetch_add(1, Ordering::Relaxed);
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			serve.poll(waiter).map(|res| res.expect("serve"))
+		}));
+
+		let owner = kio::Waiter::noop();
+		let mut polls = 0;
+		while progress() < done {
+			let before = progress();
+			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			polls += 1;
+			let made = progress() - before;
+			assert!(made <= most, "one poll made {made} progress");
+			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
+			assert!(polls <= 2 * done as u64, "the serve stalled");
+		}
+	}
+
+	/// A track that always has another group ready yields within its budget.
+	#[test]
+	fn a_busy_track_yields_to_its_siblings() {
+		/// `TrackServe`'s passes per poll; each starts at most one group.
+		const BUDGET: usize = 32;
+		const GROUPS: u64 = 10_000;
+		const BATCH: u64 = 1_000;
+
+		let session = SinkSession::new(crate::lite::test_transport::Log::default()).with_unacked_fin();
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let subscriber =
+			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
+		let serve = TrackServe::new(
+			session,
+			subscriber,
+			RequestId(0),
+			Version::Draft14,
+			ServeRange::default(),
+			None,
+		);
+		let opened = serve.opened.clone();
+
+		let producer = track.clone();
+		let mut appended = 0;
+		let produce = move || {
+			for _ in 0..BATCH.min(GROUPS - appended) {
+				let mut group = producer.create_group(group::Info { sequence: appended }).unwrap();
+				group
+					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
+					.unwrap();
+				group.finish().unwrap();
+				appended += 1;
+			}
+			appended == GROUPS
+		};
+		serve_beside_a_sibling(
+			serve,
+			produce,
+			|| opened.load(Ordering::Relaxed) as usize,
+			BUDGET,
+			GROUPS as usize,
+		);
+	}
+
+	/// A group with more objects ready than one poll's budget drains over several polls.
+	#[test]
+	fn a_long_group_drains_within_the_budget() {
+		/// `GroupServe`'s passes per poll; each writes at most one object.
+		const BUDGET: usize = 32;
+		const FRAMES: usize = 4_000;
+		const PAYLOAD: usize = 100;
+
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone()).with_unacked_fin();
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let subscriber =
+			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		for millis in 0..FRAMES as u64 {
+			group
+				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
+				.unwrap();
+		}
+		group.finish().unwrap();
+		let serve = TrackServe::new(
+			session,
+			subscriber,
+			RequestId(0),
+			Version::Draft14,
+			ServeRange::default(),
+			None,
+		);
+
+		// An object's header takes well under a payload more, and a poll may also flush what
+		// the last one buffered.
+		serve_beside_a_sibling(
+			serve,
+			|| true,
+			|| log.writes.lock().unwrap().len(),
+			2 * (BUDGET + 1) * 2 * PAYLOAD,
+			FRAMES * PAYLOAD,
 		);
 	}
 

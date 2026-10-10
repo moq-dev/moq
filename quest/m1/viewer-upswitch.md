@@ -15,12 +15,15 @@ above it.
 
 Decided (2026-10-04): its own quest, after the transport can validate
 headroom. The viewer sends a PROBE target, the relay pads up to it, and
-selection uses the validated estimate. If [quic-probe](/quest/m2/quic-probe.md)
+selection uses the validated estimate. If [quic-probe](/quest/m1/quic-probe.md)
 ends in a measured no-go, revisit this quest rather than leaving it blocked.
+
+Promoted from m2 on 2026-10-09 by maintainer priority, with the capacity
+probe it requires.
 
 ## Required
 
-- [Discover capacity](/quest/m2/quic-probe.md) - a validated estimate above the media bitrate
+- [Discover capacity](/quest/m1/quic-probe.md) - a validated estimate above the media bitrate
 
 ## Closes
 

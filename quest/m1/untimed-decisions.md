@@ -4,9 +4,7 @@
 
 kixelated decides two questions [#4822](https://github.com/moq-dev/moq/pull/4822)
 (the untimed model) raised, and each answer becomes a quest or is dropped.
-Requested by an external consumer (OneTooMany), who leaves these calls to the
-maintainer. This quest waits on that decision; delete it once both are
-answered.
+This quest waits on that decision; delete it once both are answered.
 
 ## Plan
 
