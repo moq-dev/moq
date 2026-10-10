@@ -30,6 +30,21 @@ for a cue that may be minutes away.
 Cover a file with subtitles and no supported text format, a file with several
 subtitle languages, and a file whose subtitle track is empty.
 
+### Draft progress and remaining scope
+
+The draft imports MKV S_TEXT/UTF8 and S_TEXT/TTML as sparse text tracks,
+preserves LanguageIETF (preferred over Language) and Name, and closes each
+cue group immediately. Multilingual, empty-track, and unknown-format tests
+cover this increment. Unsupported fMP4 subtitle handlers now warn and skip
+only their track, including subsequent fragments for that track.
+
+WebVTT remains unfinished: Matroska stores cue text in Block and settings/IDs
+in BlockAdditions, while MP4 wvtt samples contain vttc boxes. Hang Vtt requires
+a self-contained WEBVTT document with absolute timing, so copying those bytes
+and merely labeling them Vtt would be wrong. Complete the source timing and
+settings conversion before advertising those formats. Full fMP4 text import
+and source labels/languages remain here too. This quest is retained.
+
 ## Related
 
 - [MSF caption roles](/quest/m1/captions-msf.md) - the catalog half of the same

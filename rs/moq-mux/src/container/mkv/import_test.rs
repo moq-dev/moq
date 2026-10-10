@@ -623,3 +623,60 @@ fn tracks_after_finish_are_refused() {
 	);
 	assert!(catalog.snapshot().audio.renditions.is_empty(), "no track was declared");
 }
+
+fn text_entry(number: u64, codec: &str, language: &str, name: &str) -> MatroskaSpec {
+	MatroskaSpec::TrackEntry(Master::Full(vec![
+		MatroskaSpec::TrackNumber(number),
+		MatroskaSpec::TrackUID(number),
+		MatroskaSpec::TrackType(17),
+		MatroskaSpec::CodecID(codec.into()),
+		MatroskaSpec::Language(language.into()),
+		MatroskaSpec::Name(name.into()),
+	]))
+}
+
+#[tokio::test]
+async fn subtitle_languages_and_empty_tracks_are_published() {
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![
+			text_entry(1, "S_TEXT/UTF8", "en", "English"),
+			text_entry(2, "S_TEXT/UTF8", "es", "Spanish"),
+			text_entry(3, "S_TEXT/TTML", "fr", "French"),
+			text_entry(4, "S_TEXT/ASS", "de", "Unsupported"),
+		])
+		.cluster(0, || vec![simple_block(1, 250, true, b"Hello")])
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&data).unwrap();
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.text.renditions.len(), 3);
+	let (name, english) = snapshot
+		.text
+		.renditions
+		.iter()
+		.find(|(_, config)| config.lang.as_deref() == Some("en"))
+		.unwrap();
+	assert_eq!(english.label.as_deref(), Some("English"));
+	assert_eq!(english.format, hang::catalog::TextFormat::Utf8);
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default())
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(&frame.payload[..], b"Hello");
+	assert_eq!(frame.timestamp.as_micros(), 250_000);
+	importer.finish().unwrap();
+}

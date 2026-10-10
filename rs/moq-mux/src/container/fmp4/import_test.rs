@@ -1683,3 +1683,29 @@ async fn imports_the_sample_defaults_fixtures() {
 		);
 	}
 }
+
+#[test]
+fn an_unknown_subtitle_track_does_not_refuse_supported_media() {
+	use mp4_atom::{DecodeMaybe, Encode};
+	let mut cursor = std::io::Cursor::new(include_bytes!("test_data/bbb.mp4"));
+	let mut input = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+		if let mp4_atom::Any::Moov(mut moov) = atom {
+			let mut subtitle = moov.trak[0].clone();
+			subtitle.tkhd.track_id = 99;
+			subtitle.mdia.hdlr.handler = b"sbtl".into();
+			moov.trak.push(subtitle);
+			moov.encode(&mut input).unwrap();
+			break;
+		} else {
+			atom.encode(&mut input).unwrap();
+		}
+	}
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	assert!(!catalog.snapshot().video.renditions.is_empty());
+	assert!(catalog.snapshot().text.renditions.is_empty());
+}

@@ -273,6 +273,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
+			if matches!(handler.as_ref(), b"sbtl" | b"subt" | b"text") {
+				tracing::warn!(track_id, handler = %handler, "unsupported fMP4 subtitle encoding, skipping");
+				self.skipped.insert(track_id);
+				continue;
+			}
+
 			let kind = Kind::from_handler(*handler)?;
 
 			// Drop tracks whose role isn't selected before minting or publishing them; their

@@ -37,7 +37,9 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// - FLAC (`A_FLAC`)
 /// - MP3 (`A_MPEG/L3`)
 ///
-/// Unsupported codecs (e.g. Vorbis, AC3, subtitles) are logged and dropped.
+/// **Text:** UTF-8 (`S_TEXT/UTF8`) and TTML (`S_TEXT/TTML`).
+///
+/// Unsupported track roles and subtitle encodings are logged and dropped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
@@ -75,6 +77,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 enum TrackKind {
 	Video,
 	Audio,
+	Text,
 }
 
 impl TrackKind {
@@ -84,6 +87,7 @@ impl TrackKind {
 		match self {
 			Self::Video => hang::catalog::PRIORITY.video,
 			Self::Audio => hang::catalog::PRIORITY.audio,
+			Self::Text => hang::catalog::PRIORITY.text,
 		}
 	}
 }
@@ -97,6 +101,7 @@ struct MkvTrack {
 enum Media {
 	Video(crate::container::Producer<crate::catalog::hang::Container, VideoConfig>),
 	Audio(crate::container::Producer<crate::catalog::hang::Container, AudioConfig>),
+	Text(crate::container::Producer<crate::catalog::hang::Container, hang::catalog::TextConfig>),
 }
 
 impl Media {
@@ -104,6 +109,7 @@ impl Media {
 		match self {
 			Self::Video(track) => track.write(frame),
 			Self::Audio(track) => track.write(frame),
+			Self::Text(track) => track.write(frame),
 		}
 	}
 
@@ -111,6 +117,7 @@ impl Media {
 		match self {
 			Self::Video(track) => track.cut(timestamp),
 			Self::Audio(track) => track.cut(timestamp),
+			Self::Text(track) => track.cut(timestamp),
 		}
 	}
 
@@ -118,6 +125,7 @@ impl Media {
 		match self {
 			Self::Video(track) => track.seek(sequence),
 			Self::Audio(track) => track.seek(sequence),
+			Self::Text(track) => track.seek(sequence),
 		}
 	}
 
@@ -125,6 +133,7 @@ impl Media {
 		match self {
 			Self::Video(track) => track.finish(),
 			Self::Audio(track) => track.finish(),
+			Self::Text(track) => track.finish(),
 		}
 	}
 
@@ -132,6 +141,7 @@ impl Media {
 		match self {
 			Self::Video(track) => track.abort(err),
 			Self::Audio(track) => track.abort(err),
+			Self::Text(track) => track.abort(err),
 		}
 	}
 }
@@ -327,12 +337,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let mut codec_private: Option<Bytes> = None;
 		let mut audio_children: Option<Vec<MatroskaSpec>> = None;
 		let mut video_children: Option<Vec<MatroskaSpec>> = None;
+		let mut language = None;
+		let mut language_ietf = None;
+		let mut name = None;
 
 		for c in children {
 			match c {
 				MatroskaSpec::TrackNumber(v) => track_number = Some(v),
 				MatroskaSpec::TrackType(v) => track_type = Some(v),
 				MatroskaSpec::CodecID(v) => codec_id = Some(v),
+				MatroskaSpec::Language(v) => language = Some(v),
+				MatroskaSpec::LanguageIETF(v) => language_ietf = Some(v),
+				MatroskaSpec::Name(v) => name = Some(v),
 				MatroskaSpec::CodecPrivate(v) => codec_private = Some(Bytes::from(v)),
 				MatroskaSpec::Audio(Master::Full(v)) => audio_children = Some(v),
 				MatroskaSpec::Video(Master::Full(v)) => video_children = Some(v),
@@ -344,10 +360,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let track_type = track_type.ok_or(Error::MissingTrackType)?;
 		let codec_id = codec_id.ok_or(Error::MissingCodecId)?;
 
-		// Matroska TrackType: 1 = video, 2 = audio.
+		// Matroska TrackType: 1 = video, 2 = audio, 17 = subtitles.
 		let (kind, suffix) = match track_type {
 			1 => (TrackKind::Video, ".mkv-v"),
 			2 => (TrackKind::Audio, ".mkv-a"),
+			17 if matches!(codec_id.as_str(), "S_TEXT/UTF8" | "S_TEXT/TTML") => (TrackKind::Text, ".mkv-t"),
+			17 => {
+				tracing::warn!(codec_id, "unsupported MKV subtitle encoding, skipping");
+				return Ok(());
+			}
 			other => {
 				tracing::warn!(track_type = other, codec_id, "unsupported MKV track type, skipping");
 				return Ok(());
@@ -366,9 +387,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			match kind {
 				TrackKind::Video => crate::container::Kind::Video,
 				TrackKind::Audio => crate::container::Kind::Audio,
+				TrackKind::Text => crate::container::Kind::Data,
 			},
 		)?;
 		let media = match kind {
+			TrackKind::Text => {
+				let format = if codec_id == "S_TEXT/UTF8" {
+					hang::catalog::TextFormat::Utf8
+				} else {
+					hang::catalog::TextFormat::Ttml
+				};
+				let mut config = hang::catalog::TextConfig::new(format);
+				config.lang = language_ietf.or(language);
+				config.label = name;
+				config.container = self.container.clone();
+				Media::Text(reserved.text(track, wire, config)?)
+			}
 			TrackKind::Video => {
 				let mut config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
 				config.container = self.container.clone();
@@ -441,7 +475,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		self.initial_reservation = None;
 
 		// Audio tracks: always treat as keyframes (matches fmp4 behavior).
-		let keyframe = matches!(track.kind, TrackKind::Audio) || keyframe;
+		let keyframe = matches!(track.kind, TrackKind::Audio | TrackKind::Text) || keyframe;
 
 		let frame = crate::container::Frame {
 			timestamp,
@@ -458,7 +492,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 				track.track.write(frame)?;
 			}
-			TrackKind::Audio => {
+			TrackKind::Audio | TrackKind::Text => {
 				track.track.write(frame)?;
 				track.track.cut(None)?;
 			}
