@@ -173,7 +173,7 @@ bench all require its crate.
 - [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the T-STD buffer model, starting with a fixed `--delay`
 - [Multi-packet PMT](/quest/m1/ts-pmt-split.md) - `export ts` splits a PMT longer than one packet instead of exiting before its first packet
 - [TS damage log](/quest/m1/ts-damage-log.md) - a burst of damaged TS units logs a first warning and a periodic summary per PID, not one warning per unit
-- [TS adaptation-only packets](/quest/m1/ts-adaptation-only.md) - an adaptation-only TS packet whose field doesn't fill the payload is refused as damage
+- [TS adaptation field length](/quest/m1/ts-adaptation-only.md) - a TS adaptation field with the wrong length for its packet (183 adaptation-only, at most 182 with a payload) is refused as damage
 - [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust container consumer reports a frame after a subscribe or discontinuity as non-continuous, like JS, for the tune-in and warmup trims
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
 - [Watch decode errors](/quest/m1/watch-decode-error.md) - a WebCodecs error ends the subscription and the element reports it

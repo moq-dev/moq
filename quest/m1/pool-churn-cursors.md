@@ -8,7 +8,7 @@ that grows with cursors shows up as a slope.
 
 ## Plan
 
-#5182 made a front's renewal check read each cursor presenting the prefix, and
+PR #5182 made a front's renewal check read each cursor presenting the prefix, and
 a renewal restarts every cursor, so both scale with cursors. Add the axis, and
 include a scoped cursor so the per-cursor scope filter is measured.
 

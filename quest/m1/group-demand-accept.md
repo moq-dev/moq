@@ -3,8 +3,8 @@
 ## Goal
 
 Once a group request is answered with `accept`, its `group::Demand` ends the
-way a dropped request's does: `used()` and `unused()` stop without an error,
-and moq-ffi's `MoqGroupDemand` reports `Closed`. A rejected request's demand
+way a dropped request's does: `used()`, `unused()`, and `closed()` return
+`Error::Dropped`, which moq-ffi's `MoqGroupDemand` reports as `Closed`. A rejected request's demand
 still fails with the reject reason.
 
 ## Plan
