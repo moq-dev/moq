@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.12](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.11...moq-mux-v0.10.12) - 2026-10-10
+
+### Fixed
+
+- *(mux)* keep the last good parameter sets when refusing a TS access unit
+- *(mux)* refuse damaged TS units without ending ingest (backport #4733)
+
+### Other
+
+- Merge pull request #5124 from moq-dev/backport/ts-damaged-units
+- *(mux)* note the per-PES parameter set rollback, and drop 'refused whole'
+
 ## [0.10.11](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.10...moq-mux-v0.10.11) - 2026-10-05
 
 ### Other

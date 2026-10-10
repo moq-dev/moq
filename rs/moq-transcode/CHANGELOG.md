@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/moq-dev/moq/compare/moq-transcode-v0.1.10...moq-transcode-v0.1.11) - 2026-10-10
+
+### Fixed
+
+- *(transcode)* refuse a fetch that starts mid-group ([#4812](https://github.com/moq-dev/moq/pull/4812))
+
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-transcode-v0.1.9...moq-transcode-v0.1.10) - 2026-10-05
 
 ### Other

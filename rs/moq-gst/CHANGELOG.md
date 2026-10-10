@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.13](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.12...moq-gst-v0.4.13) - 2026-10-10
+
+### Fixed
+
+- *(moq-mux)* configure H.265 from the SPS head when scuffle_h265 refuses the rest ([#4924](https://github.com/moq-dev/moq/pull/4924))
+
 ## [0.4.12](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.11...moq-gst-v0.4.12) - 2026-10-06
 
 ### Other
