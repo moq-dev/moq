@@ -95,7 +95,6 @@ ladders.
 - [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - `moq::Client` is the generated type itself and `moq::expected` is one type at every C++ standard
 - [First C++ package release](/quest/m1/cpp-release.md) - the OBS release path is dry-run nightly, then the first `cpp-v*` tag publishes the C++ archives and the first OBS plugin built on them
 - [Catalog switch](/quest/m1/obs-catalog-switch.md) - a catalog update keeps OBS playback running until the replacement track is decoding
-- [OBS stats race test](/quest/m1/obs-stats-race.md) - a test against the generated bindings proves a retired session's stats are refused
 - [OBS publishes under epochs](/quest/m1/obs-epoch.md) - each OBS Start Streaming is a fresh epoch, through the generated C++
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [The final libmoq release is the stub](/quest/m1/libmoq-final-release.md) - the release that lets `rs/libmoq` go
