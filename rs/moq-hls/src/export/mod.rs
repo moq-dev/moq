@@ -2391,12 +2391,11 @@ mod tests {
 		}
 	}
 
-	// A bound sibling whose route goes away ends with Dropped, and a new publisher may serve
-	// the path afterwards. The exporter must drop rows listed for the old publisher, re-bind,
-	// and list only rows that arrive after the new bind resolves: fetching an old row from the
-	// replacement would serve restarted groups under the previous publisher's segment numbers.
+	// A bound sibling that ends ends the rendition: its rows go, its playlist ends, and a
+	// publisher serving the path afterwards is never bound. A broadcast end carries no cause, so
+	// a clean end and a replacement end alike; a new instance only comes with a new catalog.
 	#[tokio::test]
-	async fn a_replaced_sibling_drops_old_rows_and_rebinds() {
+	async fn a_replaced_sibling_ends_the_rendition() {
 		tokio::time::pause();
 		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
@@ -2453,72 +2452,28 @@ mod tests {
 		until_empty(&rendition).await;
 		assert!(
 			rendition.listed_segment(0).await.unwrap().is_none(),
-			"a row listed for the old publisher answers 404 after replacement"
+			"a row listed for the old publisher answers 404"
 		);
+		assert!(rendition.snapshot().finished, "the playlist ends with its sibling");
+		assert!(early.next().await.unwrap().is_none(), "segment cursors end");
 
-		// A publisher still routed when the incumbent goes would resume its broadcast
-		// instead: a path is one broadcast, whoever serves it. The bind failed while nothing
-		// served the path, so the next poll re-issues it.
+		// A publisher serving the path afterwards, with rows recorded for it, is never bound.
 		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
 		let _ = rendition.snapshot();
-
-		let mut new_media = moq_net::broadcast::Info::new().produce();
-		accept_sibling(&new_server, &new_media).await;
-		// The rendition skips timeline rows until this bind resolves. Joining the
-		// same front waits for attach, so writes below land after that.
-		tokio::time::timeout(
-			Duration::from_secs(5),
-			origin.consume().request_broadcast("media", None),
-		)
-		.await
-		.expect("the rebound sibling resolves")
-		.expect("the replacement is routable");
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), new_server.requested_broadcast())
+				.await
+				.is_err(),
+			"the replacement is never requested"
+		);
 		let recorder = catalog.enroll_test("video0").unwrap();
-		// Model source records lost during the outage: every rendition must carry the
-		// same new timeline sequence, including a recorder that starts after this rebind.
 		fanout.skip();
+		let mut new_media = moq_net::broadcast::Info::new().produce();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
-		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-		loop {
-			if !rendition.snapshot().segments.is_empty() {
-				break;
-			}
-			assert!(
-				tokio::time::Instant::now() < deadline,
-				"rows produced after the new bind were not listed"
-			);
-			tokio::task::yield_now().await;
-		}
-		let listed = rendition
-			.snapshot()
-			.segments
-			.into_iter()
-			.find(|segment| !segment.gap)
-			.expect("a non-gap row after the new bind")
-			.segment;
-		let served = rendition
-			.listed_segment(listed)
-			.await
-			.unwrap()
-			.expect("the rebound sibling is servable");
-		assert!(
-			contains(&served, NEW),
-			"rows after the new bind come from the replacement"
-		);
-		assert!(!contains(&served, OLD));
-		let mut late = rendition.segments();
-		let early = early.next().await.unwrap().unwrap();
-		let late = late.next().await.unwrap().unwrap();
-		assert_eq!(early.segment, late.segment);
-		assert!(early.discontinuity > 0, "the replacement starts after a timeline break");
-		assert_eq!(
-			late.discontinuity, early.discontinuity,
-			"cursor creation cannot reset the baseline"
-		);
-		assert!(
-			rendition.listed_segment(0).await.unwrap().is_none(),
-			"a row listed for the old publisher is not served from the replacement"
-		);
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		let snapshot = rendition.snapshot();
+		assert!(snapshot.segments.is_empty(), "nothing of the replacement is listed");
+		assert!(snapshot.finished);
 		watcher.abort();
 		drop((new_media, _new_track, new_server, catalog, live));
 	}
@@ -2631,11 +2586,12 @@ mod tests {
 		drop((media, _track, server, catalog, live));
 	}
 
-	// The replacement is often announced after the incumbent is already gone. The rebind
-	// then resolves Unroutable; Binding never retries, so the next poll must issue a new
-	// request or the rendition stays empty forever.
+	// The replacement is often announced after the incumbent is already gone. Nothing serves
+	// the path in between, but a sibling that resolved once is never looked up again, so the
+	// rendition stays ended rather than recovering onto the replacement.
 	#[tokio::test]
-	async fn a_replaced_sibling_recovers_after_an_unroutable_gap() {
+	async fn a_replaced_sibling_stays_ended_across_an_unroutable_gap() {
+		tokio::time::pause();
 		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
 
@@ -2674,44 +2630,62 @@ mod tests {
 
 		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
 		let mut new_media = moq_net::broadcast::Info::new().produce();
-		let _ = rendition.snapshot();
-		accept_sibling(&new_server, &new_media).await;
-		tokio::time::timeout(
-			Duration::from_secs(5),
-			origin.consume().request_broadcast("media", None),
-		)
-		.await
-		.expect("the rebound sibling resolves")
-		.expect("the replacement is routable");
 		let recorder = catalog.enroll_test("video0").unwrap();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
-		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-		loop {
-			if !rendition.snapshot().segments.is_empty() {
-				break;
-			}
-			assert!(
-				tokio::time::Instant::now() < deadline,
-				"rows produced after the new bind were not listed"
-			);
-			tokio::task::yield_now().await;
-		}
-		let listed = rendition
-			.snapshot()
-			.segments
-			.into_iter()
-			.find(|segment| !segment.gap)
-			.expect("a non-gap row after the new bind")
-			.segment;
-		let served = rendition
-			.listed_segment(listed)
-			.await
-			.unwrap()
-			.expect("the rebound sibling is servable after an unroutable gap");
-		assert!(contains(&served, NEW));
-		assert!(rendition.listed_segment(0).await.unwrap().is_none());
+		let _ = rendition.snapshot();
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), new_server.requested_broadcast())
+				.await
+				.is_err(),
+			"the replacement is never requested"
+		);
+		let snapshot = rendition.snapshot();
+		assert!(snapshot.segments.is_empty(), "nothing of the replacement is listed");
+		assert!(snapshot.finished, "the playlist ended with its sibling");
 		watcher.abort();
 		drop((new_media, _new_track, new_server, catalog, live));
+	}
+
+	// A sibling not yet announced when the rendition binds it fails that first lookup. The
+	// catalog's rows are still listed, and the bind is issued again until the sibling resolves.
+	#[tokio::test]
+	async fn a_sibling_announced_after_export_start_is_bound() {
+		tokio::time::pause();
+		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
+
+		let origin = produce_origin();
+		let mut live = origin.create_broadcast("live").expect("publish allowed");
+		live.announce(Default::default()).expect("publish allowed");
+		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
+		let mut media = moq_net::broadcast::Info::new().produce();
+		let _track = write_routed_media(&mut media, OLD, recorder, 0);
+		settle().await;
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let upstream = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
+		let mut config = video_config();
+		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
+
+		let (rendition, watcher) = export(&upstream, &config);
+		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+			.await
+			.expect("the catalog's rows are listed before the sibling resolves");
+
+		let server = origin.dynamic("media", sibling_route(10)).unwrap();
+		let _ = rendition.snapshot();
+		accept_sibling(&server, &media).await;
+		let served = rendition
+			.listed_segment(0)
+			.await
+			.unwrap()
+			.expect("the late sibling is servable");
+		assert!(contains(&served, OLD));
+		watcher.abort();
+		drop((media, _track, server, catalog, live));
 	}
 
 	// A rendition the catalog drops must end its segment cursors. The cursor holds an

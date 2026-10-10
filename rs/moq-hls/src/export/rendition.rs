@@ -93,7 +93,7 @@ struct Run {
 	/// The window [`resets`](segments::Producer::resets) during which a listed segment started
 	/// where a player can, so the master keeps advertising the rendition even once a GOP past
 	/// [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts that segment. Stale once the window
-	/// is cleared (a new generation, a timeline skip or rewind, a replaced sibling publisher).
+	/// is cleared (a new generation, a timeline skip or rewind, an ended sibling).
 	startable: Option<u64>,
 }
 
@@ -103,18 +103,19 @@ enum Config {
 	Audio(AudioConfig),
 }
 
-/// The broadcast serving this rendition's media, rebound when a sibling publisher is replaced.
+/// The broadcast serving this rendition's media. A sibling that ends ends the rendition: it is
+/// never rebound onto whatever serves the path next.
 struct Media {
 	handle: Mutex<Handle>,
-	/// When set, a Dropped sibling is rebound through this source rather than keeping the
-	/// replaced publisher's rows listed.
+	/// The source and reference a sibling is bound through, to re-issue a bind that failed
+	/// before it ever resolved.
 	sibling: Option<(moq_mux::Source, moq_net::path::RelativeOwned)>,
 }
 
 struct Handle {
 	binding: Arc<moq_mux::Binding>,
-	/// Skip incoming timeline rows until the current bind resolves (set when a sibling is rebound).
-	waiting: bool,
+	/// The bound sibling ended, so the rendition lists nothing more.
+	ended: bool,
 }
 
 impl Media {
@@ -122,44 +123,39 @@ impl Media {
 		Ok(Self {
 			handle: Mutex::new(Handle {
 				binding: Arc::new(upstream.bind(rel)?),
-				waiting: false,
+				ended: false,
 			}),
 			sibling: sibling(upstream, rel),
 		})
 	}
 
-	/// Drop listed rows and rebind when a sibling publisher has been replaced; return whether
-	/// incoming timeline rows should be listed.
+	/// Whether incoming timeline rows should be listed: not once the bound sibling ended.
 	fn admits(&self, window: &segments::Producer) -> bool {
 		self.sync(window);
-		!self.handle.lock().expect("media lock poisoned").waiting
+		!self.handle.lock().expect("media lock poisoned").ended
 	}
 
-	/// Drop listed rows and rebind when a sibling publisher has been replaced; return the
-	/// binding those rows belong to. Fetch from this handle, not a later `sync`: a replacement
-	/// that lands between a range lookup and `track` would otherwise serve the old groups.
+	/// End the window when a bound sibling has ended; return the binding listed rows belong to.
 	fn sync(&self, window: &segments::Producer) -> Arc<moq_mux::Binding> {
 		let Some((source, rel)) = &self.sibling else {
 			return self.handle.lock().expect("media lock poisoned").binding.clone();
 		};
 		let mut handle = self.handle.lock().expect("media lock poisoned");
 		match handle.binding.poll_broadcast(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(broadcast)) if broadcast.is_closed() => {
-				// The bound sibling ended, and a broadcast end carries no cause, so a rival
-				// publisher looks the same as a clean VOD end. Rows listed for it must not
-				// be served from the replacement.
+			Poll::Ready(Ok(broadcast)) if broadcast.is_closed() && !handle.ended => {
+				// A broadcast end carries no cause, so a clean end and a replacement look the
+				// same. Either way its rows can no longer be fetched, and a new instance only
+				// comes with a new catalog instance, so the playlist ends here.
+				tracing::error!(broadcast = %rel, "rendition's sibling broadcast ended; ending its playlist");
+				handle.ended = true;
 				window.clear();
-				if let Ok(next) = source.bind(Some(rel)) {
-					handle.binding = Arc::new(next);
-				}
-				handle.waiting = true;
+				window.end();
 			}
-			Poll::Ready(Ok(_)) => handle.waiting = false,
+			Poll::Ready(Ok(_)) => {}
 			Poll::Ready(Err(_)) => {
-				// Binding never retries a failed request. Re-issue so a publisher that
-				// appears after this Unroutable can still recover the rendition. Do not
-				// set waiting: an initial Unroutable (announce still in flight) must
-				// still list the catalog's rows.
+				// Binding never retries a failed request. Re-issue so a sibling still being
+				// announced binds once it is. Only a bind that never resolved fails, and the
+				// source pins every one that did, so this never re-resolves a sibling.
 				if let Ok(next) = source.bind(Some(rel)) {
 					handle.binding = Arc::new(next);
 				}
@@ -251,7 +247,7 @@ pub struct Rendition {
 	/// Feeds [`spans`](Self::spans); aborted when the rendition drops.
 	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
 	/// The broadcast serving this rendition's media. A sibling is bound when the rendition is
-	/// created and rebound if that publisher is replaced (see [`Upstream::bind`]).
+	/// created (see [`Upstream::bind`]), and ends the rendition when it ends.
 	media: Media,
 	/// The current publisher run: the embedder's label every segment URL carries (see
 	/// [`Broadcaster::set_generation`](super::Broadcaster::set_generation)) and the init, built

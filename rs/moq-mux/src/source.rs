@@ -28,11 +28,10 @@ type Pins = Arc<Mutex<HashMap<moq_net::PathOwned, moq_net::broadcast::Consumer>>
 ///
 /// A source keeps the first broadcast it resolves for each path, its own and every sibling,
 /// and serves every later request for that path from it ([`broadcast`](Self::broadcast),
-/// [`catalog`](Self::catalog), [`resolve`](Self::resolve), [`subscribe_track`](Self::subscribe_track),
-/// and an export's track requests). A route replaced after that is never resolved, epoch or
+/// [`catalog`](Self::catalog), [`resolve`](Self::resolve), [`bind`](Self::bind),
+/// [`subscribe_track`](Self::subscribe_track), and an export's track requests). A route replaced after that is never resolved, epoch or
 /// not, so two publishers never splice into one export; a request on a pinned broadcast that
-/// went fails instead. Clones share the pins. [`bind`](Self::bind) is the exception: it always
-/// looks up the path.
+/// went fails instead. Clones share the pins.
 #[derive(Clone)]
 pub struct Source {
 	origin: moq_net::origin::Consumer,
@@ -109,7 +108,8 @@ impl Source {
 		}
 		Binding(Bound::Requested {
 			request: self.origin.request_broadcast(path, None).into_inner(),
-			pin: Some((self.pins.clone(), path.clone())),
+			pins: self.pins.clone(),
+			path: path.clone(),
 		})
 	}
 
@@ -137,21 +137,7 @@ impl Source {
 		})
 	}
 
-	/// Begin resolving the broadcast that serves a rendition, honoring an optional
-	/// cross-broadcast reference.
-	///
-	/// A path this source already resolved is served from that broadcast. Otherwise it is
-	/// fetched from the origin, which deduplicates repeat requests for the same reachable or
-	/// dynamically served path so the catalog and every rendition share one upstream
-	/// subscription.
-	///
-	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if `rel` walks
-	/// above the origin root, naming no broadcast.
-	pub(crate) fn request(&self, rel: Option<&moq_net::path::Relative<'_>>) -> crate::Result<Binding> {
-		Ok(self.request_path(&self.target(rel)?))
-	}
-
-	/// The skipping counterpart to [`Self::request`], returning `None` when `rel` walks above
+	/// The skipping counterpart to [`Self::bind`], returning `None` when `rel` walks above
 	/// the origin root.
 	///
 	/// The exporters use it to drop a single bad rendition rather than fail the whole export.
@@ -215,7 +201,7 @@ impl Source {
 		&self,
 		rel: Option<&moq_net::path::Relative<'_>>,
 	) -> crate::Result<moq_net::broadcast::Consumer> {
-		self.request(rel)?.broadcast().await
+		self.bind(rel)?.broadcast().await
 	}
 
 	/// Start one broadcast request now and retain its result for repeated reads.
@@ -224,17 +210,14 @@ impl Source {
 	/// A remote or dynamic handler may answer later. The binding never retries a failed request
 	/// or resolves the path again after a publisher is replaced.
 	///
-	/// This always looks up the path, including for a self-reference, and neither reads nor
-	/// sets this source's pins. Use [`Binding::new`] when the intended broadcast is already
-	/// in hand.
+	/// A path this source already resolved binds to that broadcast; otherwise the origin is
+	/// asked, deduplicating repeat requests for one path so the catalog and every rendition share
+	/// one upstream subscription, and its answer is pinned. Use [`Binding::new`] when the
+	/// intended broadcast is already in hand.
 	///
 	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
 	pub fn bind(&self, rel: Option<&moq_net::path::Relative<'_>>) -> crate::Result<Binding> {
-		let request = self.origin.request_broadcast(&self.target(rel)?, None);
-		Ok(Binding(Bound::Requested {
-			request: request.into_inner(),
-			pin: None,
-		}))
+		Ok(self.request_path(&self.target(rel)?))
 	}
 
 	/// Resolve an optional cross-broadcast reference and subscribe to track `name`,
@@ -253,7 +236,7 @@ impl Source {
 		rel: Option<&moq_net::path::Relative<'_>>,
 		name: &str,
 	) -> crate::Result<moq_net::track::Subscriber> {
-		let broadcast = self.request(rel)?.broadcast().await?;
+		let broadcast = self.bind(rel)?.broadcast().await?;
 		Ok(broadcast.track(name)?.subscribe(None).await?)
 	}
 }
@@ -273,8 +256,9 @@ enum Bound {
 	/// A request issued when the binding was made.
 	Requested {
 		request: moq_net::origin::Requesting,
-		/// Where a [`Source`] request records its answer, the first for its path winning.
-		pin: Option<(Pins, moq_net::PathOwned)>,
+		/// Where the answer is pinned, the first for its path winning.
+		pins: Pins,
+		path: moq_net::PathOwned,
 	},
 }
 
@@ -290,11 +274,8 @@ impl Binding {
 	pub fn poll_broadcast(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::broadcast::Consumer>> {
 		match &self.0 {
 			Bound::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone())),
-			Bound::Requested { request, pin } => {
+			Bound::Requested { request, pins, path } => {
 				let broadcast = ready!(request.poll_ok(waiter))?;
-				let Some((pins, path)) = pin else {
-					return Poll::Ready(Ok(broadcast));
-				};
 				// A request that raced another for the path takes the one pinned first.
 				let mut pins = pins.lock().expect("pins poisoned");
 				Poll::Ready(Ok(pins.entry(path.clone()).or_insert(broadcast).clone()))
@@ -422,6 +403,7 @@ mod tests {
 		assert!(first.is_clone(&binding.broadcast().await.unwrap()));
 	}
 
+	/// A failed lookup pins nothing: the guarantee starts at a path's first resolution.
 	#[tokio::test]
 	async fn failed_binding_does_not_retry_a_later_publisher() {
 		let origin = produce_origin();
@@ -475,18 +457,7 @@ mod tests {
 			"the replacement's track is never read"
 		);
 		let bound = source.bind(Some(&sibling)).unwrap().broadcast().await.unwrap();
-		assert!(!bound.is_clone(&first), "a binding looks the path up again");
-	}
-
-	/// A failed lookup pins nothing: the guarantee starts at a path's first resolution.
-	#[tokio::test(start_paused = true)]
-	async fn a_failed_lookup_pins_nothing() {
-		let origin = produce_origin();
-		let source = Source::new(origin.consume(), "live");
-		assert!(source.broadcast().await.is_err(), "nothing serves the path yet");
-		let _publisher = origin.publish("live", Default::default()).unwrap();
-		settle().await;
-		assert!(!source.broadcast().await.unwrap().is_closed());
+		assert!(bound.is_clone(&first), "a binding honors the pin too");
 	}
 
 	#[tokio::test]
@@ -500,14 +471,14 @@ mod tests {
 
 		// No reference and an empty reference both resolve to the catalog broadcast.
 		source
-			.request(None)
+			.bind(None)
 			.expect("no reference is always resolvable")
 			.broadcast()
 			.await
 			.expect("catalog broadcast should resolve");
 		let empty = Relative::empty();
 		source
-			.request(Some(&empty))
+			.bind(Some(&empty))
 			.expect("empty reference is always resolvable")
 			.broadcast()
 			.await
@@ -573,7 +544,7 @@ mod tests {
 				source.resolve_reference(Some(&rel)).is_none(),
 				"{reference} should escape"
 			);
-			assert!(source.request(Some(&rel)).is_err(), "{reference} should be rejected");
+			assert!(source.bind(Some(&rel)).is_err(), "{reference} should be rejected");
 
 			// Neither `elsewhere` nor the catalog broadcast answers it: the rendition names
 			// no broadcast at all.
