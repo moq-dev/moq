@@ -1,0 +1,31 @@
+{
+	"name": "@moq/video",
+	"type": "module",
+	"version": "0.1.0",
+	"description": "Render Media over QUIC video frames to a canvas through WebGPU or Canvas2D",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/video"
+	},
+	"sideEffects": false,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
+		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
+		"release": "bun ../common/release.ts"
+	},
+	"dependencies": {
+		"@moq/signals": "workspace:^"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.2",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
+		"rimraf": "^6.1.3",
+		"typescript": "7.0.2"
+	}
+}

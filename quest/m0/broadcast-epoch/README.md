@@ -84,6 +84,10 @@ epoch while the old publisher's session stays open. A lite-07 viewer and a lite-
 that follow the announce `Restart` (or END then START) both reach the new
 epoch within one RTT-scale bound rather than the idle timeout, and killing the
 newest epoch falls back to a still-live older one.
+The same test drives the real players (decided 2026-10-09, from #5154):
+`moq play` and a browser `@moq/watch`, the latter through the `just test
+media` lane, both show the new run within that bound, without a manual
+republish against a live relay.
 
 When the release cut carries stats epochs, drop
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and
@@ -93,7 +97,6 @@ then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 
 ## Required
 
-- [No stitch](/quest/m0/broadcast-epoch/no-stitch.md) - an epochless track ends on an upstream error instead of re-splicing onto whatever instance now wins upstream
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Export ts](/quest/m0/broadcast-epoch/export-ts.md) - `export ts` and SRT egress linger only for the same epoch, and switch to a replacement only with `--stitch`, as a full program switch
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
