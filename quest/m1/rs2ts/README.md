@@ -62,13 +62,14 @@ break moq-net's published API. It compares the generated lite codec with
 js/net's hand-written one on bundle size and per-frame CPU. A no-go stops the
 line there.
 
-This README's own work is the final no-downgrade report once generated lite ships:
-bundle size, per-frame CPU, and first-frame latency against the hand-written
-js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-benchmarks.md).
+Decided in the 2026-10-10 audit: the final browser comparison moves to
+[its own m2 quest](/quest/m2/rs2ts-browser-report.md), alongside the browser
+benchmark harness it needs. The translator's go/no-go, implementation,
+interop, and translated tests remain in m1. This line finishes when its
+children land; the later report does not block them.
 
 ## Required
 
-- [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the harness the no-downgrade report uses
 - [rs2ts](/quest/m1/rs2ts/translator.md) - a Charon-based translator emits readable TypeScript for moq-net's lite codec, committed and checked for drift in CI
 - [Sans-IO moq-net](/quest/m1/rs2ts/sans-io/README.md) - moq-net builds and runs without a runtime; async helpers sit behind an `async` feature
 - [Generated lite](/quest/m1/rs2ts/lite.md) - @moq/net's lite session and model layer are generated from moq-net
@@ -82,4 +83,5 @@ js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-ben
 
 ## Related
 
+- [Generated lite browser report](/quest/m2/rs2ts-browser-report.md) - the final bundle, CPU, and first-frame latency comparison after generated lite ships
 - [Generated IETF](/quest/m2/rs2ts-ietf.md) - the IETF half, deferred to m2 until the lite go/no-go
