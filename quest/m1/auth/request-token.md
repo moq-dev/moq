@@ -53,18 +53,20 @@ Decided, so review does not relitigate them:
   accepted SUBSCRIBE_UPDATE, so its sender does not wait for one; test two
   successive replacements with no answers.
 - **Drafts.** Renewal works on every supported draft, 14 through 16 included
-  (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15. A namespace renews
-  from 16, whose REQUEST_UPDATE covers PUBLISH_NAMESPACE.
+  (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15. A namespace must
+  renew from 16, whose REQUEST_UPDATE covers PUBLISH_NAMESPACE; #5148 starts
+  at 17 (see below).
 - `EXPIRED_AUTH_TOKEN` and `MALFORMED_AUTH_TOKEN` are not this quest's; they
   land with [Expired token error](/quest/m1/auth/expired-error.md), which
   does not block it (2026-10-01 Q4).
 
-#5148 fixes most of what a 2026-10-09 read of #4675 found: updates answered out
-of order behind a pending renewal, a repeated 0x03 refused, duplicated
-admission and renewal logic, three parallel `Option`s on `auth::Request`, a
-request token silently ignored on moq-lite, an outbound update sniffer, and a
-refused renewal overloading `Error::Unsupported`. Still open in #5148, each
-fixed or settled by a recorded decision before it merges:
+Of what a 2026-10-09 read of #4675 found, #5148 fixes updates answered out of
+order behind a pending renewal, a repeated 0x03 refused, duplicated admission
+and renewal logic, three parallel `Option`s on `auth::Request`, a request token
+silently ignored on moq-lite, an outbound update sniffer, unread
+`max_request_updates` and `decode_value`, and a refused renewal overloading
+`Error::Unsupported`. Still open in #5148, each fixed or settled by a recorded
+decision before it merges:
 
 - `set_request_token` takes `setup::Token` and the encoder writes only
   `USE_VALUE`, so a caller cannot send an alias form. Take encoded bytes, or
