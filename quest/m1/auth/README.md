@@ -99,7 +99,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 ## Required
 
 - [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
-- [Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md) - a lite acceptor answers AUTH_ERROR NOT_SUPPORTED after a grant too, with a lite session code for `Error::Unsupported`
 - [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
 - [Malformed grant](/quest/m1/auth/malformed-grant.md) - a malformed or
   non-canonical grant pattern, or an out-of-range `Expires`, closes the
@@ -133,3 +132,5 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 - [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's node-bound credential,
   built on this line's relay tokens
+
+- [#5269](https://github.com/moq-dev/moq/pull/5269) - explicit Lite AUTH NOT_SUPPORTED, including grant updates
