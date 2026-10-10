@@ -623,3 +623,121 @@ fn tracks_after_finish_are_refused() {
 	);
 	assert!(catalog.snapshot().audio.renditions.is_empty(), "no track was declared");
 }
+
+/// Opus packets packed like mkvmerge's laced audio blocks retain their boundaries and times.
+#[tokio::test]
+async fn laced_opus_frames() {
+	use webm_iterable::matroska_spec::{BlockLacing, Frame};
+	for lacing in [BlockLacing::Xiph, BlockLacing::Ebml, BlockLacing::FixedSize] {
+		for grouped in [false, true] {
+			let packets: Vec<&[u8]> = if matches!(lacing, BlockLacing::FixedSize) {
+				vec![b"\xf8\xff\xfe", b"\xf8\xff\xfd", b"\xf8\xff\xfc"]
+			} else {
+				vec![b"\xf8\xff\xfe", b"\xf8\xff", b"\xf8\xff\xfc\x00"]
+			};
+			let mut block = SimpleBlock::new_uncheked(&[], 1, 7, false, Some(lacing), false, true);
+			block.set_frame_data(&packets.iter().map(|data| Frame { data }).collect());
+			let MatroskaSpec::SimpleBlock(raw) = block.into() else {
+				unreachable!()
+			};
+			let tag = if grouped {
+				MatroskaSpec::BlockGroup(Master::Full(vec![MatroskaSpec::Block(raw)]))
+			} else {
+				MatroskaSpec::SimpleBlock(raw)
+			};
+			let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+			let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+				unreachable!()
+			};
+			children.push(MatroskaSpec::DefaultDuration(20_000_000));
+			let data = MkvBuilder::new()
+				.header("webm")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(vec![entry])
+				.cluster(100, || vec![tag])
+				.segment_end()
+				.build();
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut importer = super::Import::new(broadcast, catalog.reserve());
+			for piece in data.chunks(11) {
+				importer.decode(piece).unwrap();
+			}
+			importer.finish().unwrap();
+			let snapshot = catalog.snapshot();
+			let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
+			let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+			let mut reader =
+				crate::container::Consumer::new(track, crate::catalog::hang::Container::try_from(config).unwrap());
+			for (index, packet) in packets.iter().enumerate() {
+				let frame = reader.read().await.unwrap().expect("one frame per packet");
+				assert_eq!(frame.payload.as_ref(), *packet, "{lacing:?}, grouped={grouped}");
+				assert_eq!(frame.timestamp.as_micros(), 107_000 + index as u128 * 20_000);
+			}
+			assert!(reader.read().await.unwrap().is_none());
+		}
+	}
+}
+
+#[tokio::test]
+async fn lacing_requires_default_duration() {
+	use webm_iterable::matroska_spec::BlockLacing;
+	for duration in [None, Some(0)] {
+		let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+		if let Some(duration) = duration {
+			let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+				unreachable!()
+			};
+			children.push(MatroskaSpec::DefaultDuration(duration));
+		}
+		let block = SimpleBlock::new_uncheked(&[1, 0xf8, 0xf8], 1, 0, false, Some(BlockLacing::FixedSize), false, true);
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![entry])
+			.cluster(0, || vec![block.into()])
+			.segment_end()
+			.build();
+		let imported = import_chunked(&data, data.len()).await;
+		let error = imported.refused.expect("laced timing must be known").to_string();
+		assert!(error.contains("lacing") && error.contains("DefaultDuration"), "{error}");
+		assert!(imported.published.values().all(Vec::is_empty));
+	}
+}
+
+#[tokio::test]
+async fn malformed_lacing_is_refused() {
+	use webm_iterable::matroska_spec::BlockLacing;
+	for (lacing, payload) in [
+		(BlockLacing::FixedSize, &[][..]),
+		(BlockLacing::FixedSize, &[0, 0xf8][..]),
+		(BlockLacing::FixedSize, &[2, 0xf8, 0xf8][..]),
+		(BlockLacing::Xiph, &[1, 255][..]),
+		(BlockLacing::Xiph, &[1, 10, 0xf8][..]),
+		(BlockLacing::Ebml, &[2, 0x81, 0x80, 0xf8][..]), // Negative second size.
+		(BlockLacing::Ebml, &[1, 0x01][..]),             // Truncated eight-byte VINT.
+		(BlockLacing::Ebml, &[1, 0][..]),                // Invalid VINT marker.
+	] {
+		let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+		let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+			unreachable!()
+		};
+		children.push(MatroskaSpec::DefaultDuration(20_000_000));
+		let block = SimpleBlock::new_uncheked(payload, 1, 0, false, Some(lacing), false, true);
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![entry])
+			.cluster(0, || vec![block.into()])
+			.segment_end()
+			.build();
+		let imported = import_chunked(&data, data.len()).await;
+		let error = imported.refused.expect("malformed lace is refused").to_string();
+		assert!(error.contains("lacing"), "{error}");
+		assert!(imported.published.values().all(Vec::is_empty));
+	}
+}
