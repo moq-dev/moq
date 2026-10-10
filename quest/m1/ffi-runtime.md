@@ -9,6 +9,12 @@ the parallelism their own runtimes already have.
 
 ## Plan
 
+Draft implementation changes the runtime and joins its workers at shutdown.
+Remaining evidence: controlled single-CPU/many-CPU binding publisher throughput,
+and macOS/JVM/Dart binding-suite runs. Keep this quest until that evidence is
+recorded; successful cross-language interop alone does not establish scaling.
+
+
 Decided 2026-10-08 in a `/quest-plan` interview (paper trail in the PR that
 added this quest):
 

@@ -100,3 +100,9 @@ one to one; the API reference has the names.
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
+
+Native I/O and background tasks run on a Tokio worker pool. UniFFI wake callbacks
+can arrive concurrently from different worker threads; marshal UI work onto your
+host runtime. The process shutdown hook waits for workers and in-flight callbacks,
+including blocking native tasks, before returning. Invoke it from a host thread,
+never from a native callback. Async calls polled by the host still run in place.

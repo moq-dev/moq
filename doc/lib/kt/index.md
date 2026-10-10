@@ -81,3 +81,9 @@ one to one; the API reference has the names.
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [`kt/`](https://github.com/moq-dev/moq/tree/main/kt); `just kt check` builds and tests locally
 - Artifacts: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq), [dev.moq:moq-ffi](https://central.sonatype.com/artifact/dev.moq/moq-ffi)
+
+Native I/O and background tasks run on a Tokio worker pool. UniFFI wake callbacks
+can arrive concurrently from different worker threads; marshal UI work onto your
+host runtime. The process shutdown hook waits for workers and in-flight callbacks,
+including blocking native tasks, before returning. Invoke it from a host thread,
+never from a native callback. Async calls polled by the host still run in place.

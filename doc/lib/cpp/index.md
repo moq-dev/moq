@@ -166,7 +166,7 @@ future completed, which is the executor thread.
 
 ## Shutdown
 
-`moq::shutdown()` stops the `moq-ffi` runtime thread, then the executor.
+`moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call
 it once before a plugin or engine module unloads, from a thread that is not
 running a continuation, so no thread is left calling into unmapped code. A
@@ -192,3 +192,9 @@ Everything else maps one to one onto the
 header is the reference; every method carries its doc comment.
 
 - Source: [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq); `just cpp check` builds, installs, and tests it locally
+
+Native I/O and background tasks run on a Tokio worker pool. UniFFI wake callbacks
+can arrive concurrently from different worker threads; marshal UI work onto your
+host runtime. The process shutdown hook waits for workers and in-flight callbacks,
+including blocking native tasks, before returning. Invoke it from a host thread,
+never from a native callback. Async calls polled by the host still run in place.

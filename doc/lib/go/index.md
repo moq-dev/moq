@@ -105,3 +105,9 @@ one to one; the API reference has the names.
 - API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [`go/`](https://github.com/moq-dev/moq/tree/main/go); `just go check` builds and tests locally
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)
+
+Native I/O and background tasks run on a Tokio worker pool. UniFFI wake callbacks
+can arrive concurrently from different worker threads; marshal UI work onto your
+host runtime. The process shutdown hook waits for workers and in-flight callbacks,
+including blocking native tasks, before returning. Invoke it from a host thread,
+never from a native callback. Async calls polled by the host still run in place.

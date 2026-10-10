@@ -78,3 +78,9 @@ one to one; the API reference has the names.
 - API reference: [pub.dev/documentation/moq](https://pub.dev/documentation/moq/latest/)
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)
+
+Native I/O and background tasks run on a Tokio worker pool. UniFFI wake callbacks
+can arrive concurrently from different worker threads; marshal UI work onto your
+host runtime. The process shutdown hook waits for workers and in-flight callbacks,
+including blocking native tasks, before returning. Invoke it from a host thread,
+never from a native callback. Async calls polled by the host still run in place.
