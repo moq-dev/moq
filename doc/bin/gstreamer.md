@@ -104,8 +104,14 @@ rewound timestamps forward.
 Pads are named by kind and appear as the catalog announces renditions:
 `video_0`, `video_1`, `audio_0`. Link the pad you want by name; the terse
 `moqsrc ! decodebin3` form links only the first pad offered, which may be
-audio. Each pad sends EOS when its rendition ends. A rendition that leaves the
-catalog keeps its pad until its track ends, while one whose format changes is
-replaced by a new pad. Properties: `url`, `broadcast`, `tls-disable-verify`.
+audio. Each pad stays with its rendition for the whole session. When the
+publisher restarts, or another takes over the broadcast, the pipeline switches
+to the new one on the same pads, starting a new stream on each at the current
+running time. A rendition whose format changes keeps its pad too, and new caps
+that downstream refuses fail as not negotiated. A rendition that leaves the
+catalog sends EOS once its track ends, and one the catalog adds gets a new pad.
+When the broadcast ends, or its publisher goes away, its pads hold without EOS
+until the broadcast is announced again. Properties: `url`, `broadcast`,
+`tls-disable-verify`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.

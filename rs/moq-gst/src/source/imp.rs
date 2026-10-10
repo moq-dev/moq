@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -10,6 +11,7 @@ use gst::subclass::prelude::*;
 use tokio::sync::watch;
 
 use hang::moq_net;
+use moq_net::announce::Event as AnnounceEvent;
 
 static CAT: LazyLock<gst::DebugCategory> =
 	LazyLock::new(|| gst::DebugCategory::new("moq-src", gst::DebugColorFlags::empty(), Some("MoQ Source Element")));
@@ -27,8 +29,8 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 /// first audio pad `audio_0`. That predictability matters because `gst-launch` links a
 /// source's sometimes-pads by name (`moqsrc name=s s.video_0 ! ...`); a single shared counter
 /// made the first pad's number depend on catalog arrival order (audio could claim `0`),
-/// silently breaking those pipelines. Counters only ever increment, so a mid-stream reshape
-/// still gets a fresh, collision-free id.
+/// silently breaking those pipelines. Counters only ever increment, so a rendition that
+/// appears later still gets a fresh, collision-free id.
 ///
 /// An id is claimed where the pad is created, not where its pump is spawned. A rendition whose
 /// subscription never resolves therefore reserves nothing, so it can't leave `video_0` pointing
@@ -87,10 +89,10 @@ tokio::task_local! {
 	static STREAMING: glib::WeakRef<super::MoqSrc>;
 }
 
-/// The session task drives everything: it connects, follows the catalog, and
-/// runs one [`Pump`] per active rendition. The element just starts and
-/// stops it. No control-plane channel is needed because pumps push to their pads
-/// directly from their own task (a source pad's push *is* its streaming thread),
+/// The session task drives everything: it connects, follows the path's announcements, and
+/// follows the catalog of the broadcast serving it with one [`Pump`] per active rendition. The
+/// element just starts and stops it. No control-plane channel is needed because pumps push to
+/// their pads directly from their own task (a source pad's push *is* its streaming thread),
 /// so there's nothing to marshal back onto the element.
 struct SessionController {
 	shutdown: watch::Sender<bool>,
@@ -104,12 +106,13 @@ impl SessionController {
 		let (connection, origin) = connect(&settings)?;
 		let task_connection = connection.clone();
 		let task_element = element.clone();
-		Ok(Self::spawn(connection, element, move |mut shutdown| async move {
+		Ok(Self::spawn(connection, element, move |mut shutdown, pads| async move {
 			run_session(
 				&task_connection,
 				origin,
 				settings.broadcast,
 				task_element,
+				&pads,
 				&mut shutdown,
 			)
 			.await
@@ -117,17 +120,21 @@ impl SessionController {
 	}
 
 	/// Run `session` as this element's session task, reporting its error on the bus.
+	///
+	/// The session's pads outlive every broadcast it plays, so they are removed here, once it ends.
 	fn spawn<F, Fut>(connection: moq_tokio::Connection, element: glib::WeakRef<super::MoqSrc>, session: F) -> Self
 	where
-		F: FnOnce(watch::Receiver<bool>) -> Fut,
+		F: FnOnce(watch::Receiver<bool>, Pads) -> Fut,
 		Fut: Future<Output = Result<()>> + Send + 'static,
 	{
 		let (shutdown_tx, shutdown_rx) = watch::channel(false);
-		let task = session(shutdown_rx.clone());
+		let pads = Pads::default();
+		let task = session(shutdown_rx.clone(), pads.clone());
 		let task_connection = connection.clone();
 		let join = RUNTIME.spawn(STREAMING.scope(element.clone(), async move {
 			let result = task.await;
-			// A broadcast that ends on its own releases the transport now rather than at stop.
+			pads.clear(&element);
+			// A session that fails on its own releases the transport now rather than at stop.
 			task_connection.abort(moq_net::Error::Cancel);
 			// Stopping cuts the session short, which is not a failure.
 			if let Err(err) = result
@@ -145,7 +152,7 @@ impl SessionController {
 		}
 	}
 
-	/// Stop the session, returning once its pumps have removed their pads and the connection closed.
+	/// Stop the session, returning once its pads are removed and the connection closed.
 	///
 	/// A dial still running once the element reached NULL can outlive `main` (`gst-launch` exits right
 	/// after), and aws-lc aborts the process when a thread asks it for randomness after its exit
@@ -195,8 +202,8 @@ fn connect(settings: &ResolvedSettings) -> Result<(moq_tokio::Connection, moq_ne
 	let _rt = RUNTIME.enter();
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	// One-shot: the catalog subscription dies with the session anyway, so a background redial could
-	// not resurrect this run. A drop surfaces as the catalog closing and the session winding down.
+	// One-shot: every subscription dies with the session anyway, so a background redial could not
+	// resurrect this run. A drop ends the session with the connection's error.
 	let connection = config
 		.init(Default::default())?
 		.with_subscriber(origin)
@@ -366,9 +373,9 @@ impl MoqSrc {
 	}
 }
 
-/// The identity we reconcile a rendition on: a change to either field tears the pad down and
-/// recreates it. Caps cover codec/resolution; the container descriptor covers the wire framing
-/// (e.g. legacy -> cmaf).
+/// The identity we reconcile a rendition on: a change to either field restarts its pump, which
+/// starts a new stream on the same pad. Caps cover codec/resolution; the container descriptor
+/// covers the wire framing (e.g. legacy -> cmaf).
 #[derive(Clone, PartialEq)]
 struct Shape {
 	caps: gst::Caps,
@@ -377,9 +384,9 @@ struct Shape {
 
 /// A pump's progress, shared with its [`ActiveTrack`] so teardown and pad creation can't both
 /// win. A pump is torn down two different ways depending on how far it got: before it owns a pad,
-/// stopping it means it must never create one; after, it owns a pad and has to drop it. One
+/// stopping it means it must never take one; after, it owns a pad and has to hand it back. One
 /// compare-exchange settles which of the two happened, so a pad can't slip out between a
-/// teardown's check and the pump's creation.
+/// teardown's check and the pump taking it.
 struct PumpState(AtomicU8);
 
 impl PumpState {
@@ -409,10 +416,10 @@ impl PumpState {
 
 /// A rendition we're currently serving, keyed in the session by moq track name.
 struct ActiveTrack {
-	/// Identity we diff against on each catalog update; a change recreates the pad.
+	/// Identity we diff against on each catalog update; a change restarts the pump.
 	shape: Shape,
-	/// Tells the pump to drop its pad and exit (set on shutdown or when reconcile
-	/// replaces the rendition).
+	/// Tells the pump to hand its pad back and exit (set when the broadcast is stopped or
+	/// replaced, or when reconcile restarts the rendition).
 	cancel: watch::Sender<bool>,
 	/// Handle to the pump task in the session's `JoinSet`. We only read
 	/// `is_finished()` to prune this entry once the pump ends (the `JoinSet` owns
@@ -424,7 +431,7 @@ struct ActiveTrack {
 
 impl ActiveTrack {
 	/// Tear the pump down whatever stage it reached: one still subscribing never takes a pad,
-	/// one that has drops it when it sees the watch.
+	/// one that has hands it back when it sees the watch.
 	///
 	/// Terminal, so it consumes the handle: a cancelled rendition is removed from the session's
 	/// active set, and respawns as a fresh pump if the catalog names it again.
@@ -439,6 +446,7 @@ async fn run_session(
 	origin: moq_net::origin::Consumer,
 	broadcast: String,
 	element: glib::WeakRef<super::MoqSrc>,
+	pads: &Pads,
 	shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
 	// Stop closes the connection only after the session ends, so the dial races shutdown here.
@@ -447,83 +455,228 @@ async fn run_session(
 		_ = shutdown.changed() => return Ok(()),
 	}
 
-	// Wait for a route to cover the broadcast. Synchronous lookup would race the gossip
-	// of announcements that happens after the session is established.
-	tracing::info!(%broadcast, "waiting for broadcast to be announced");
-	let broadcast = tokio::select! {
-		routed = origin.routed_broadcast(&broadcast) => {
-			routed.context("broadcast unavailable")?
-		}
-		_ = shutdown.changed() => return Ok(()),
+	// The dial is one-shot, so once it closes nothing can announce the path again.
+	let closed = async {
+		connection.closed().await.context("connection closed")?;
+		bail!("connection closed")
 	};
-
-	follow_catalog(broadcast, element, shutdown).await
+	follow_path(origin, &broadcast, &element, pads, shutdown, closed).await
 }
 
-/// Follow the broadcast's catalog for the whole session, keeping one [`Pump`] per
-/// announced rendition in sync with it. Returns once the catalog closes and the last pump
-/// drains, or `shutdown` fires.
+/// Follow the path's announcements for the whole session: a start plays the broadcast serving
+/// it, a restart cuts over to the instance that replaced it, and an end leaves its pads held
+/// until the next start. An update is the same instance, which its subscriptions ride out.
+///
+/// Returns once `shutdown` fires, or with the error that ended the session: `closed`'s, a
+/// malformed catalog's, or the origin closing.
+async fn follow_path(
+	origin: moq_net::origin::Consumer,
+	path: &str,
+	element: &glib::WeakRef<super::MoqSrc>,
+	pads: &Pads,
+	shutdown: &mut watch::Receiver<bool>,
+	closed: impl Future<Output = Result<()>>,
+) -> Result<()> {
+	let mut follow = origin.follow(path)?;
+	tokio::pin!(closed);
+	tracing::info!(broadcast = %path, "waiting for broadcast to be announced");
+
+	let mut run: Option<Run> = None;
+	let result = loop {
+		tokio::select! {
+			_ = shutdown.changed() => break Ok(()),
+			result = &mut closed => break result,
+			// The broadcast ended on its own, holding its pads for the next start.
+			result = async { run.as_mut().expect("guarded").task.as_mut().await }, if run.is_some() => {
+				run = None;
+				if let Err(err) = result {
+					break Err(err);
+				}
+			}
+			event = follow.next() => {
+				let Some(event) = event else { break Err(anyhow::anyhow!("origin closed")) };
+				let announce = match event {
+					AnnounceEvent::Start(announce) | AnnounceEvent::Restart(announce) => announce,
+					// With nothing playing, it is the path served again after a gap the
+					// announcements folded away, so play it.
+					AnnounceEvent::Update(announce) if run.is_none() => announce,
+					AnnounceEvent::Update(_) => continue,
+					AnnounceEvent::End(_) => {
+						tracing::info!(broadcast = %path, "offline, waiting for it to return");
+						continue;
+					}
+				};
+				tracing::info!(
+					broadcast = %path,
+					epoch = announce.route.epoch.as_ref().map(tracing::field::display),
+					"online"
+				);
+
+				// The old instance's pumps hand their pads back before the new one takes them.
+				if let Some(old) = run.take() {
+					old.stop().await;
+				}
+				run = Some(Run::start(&origin, path, element, pads, shutdown));
+			}
+		}
+	};
+
+	if let Some(run) = run {
+		run.stop().await;
+	}
+	result
+}
+
+/// The broadcast serving the path, followed until it ends or is replaced.
+struct Run {
+	stop: watch::Sender<bool>,
+	task: Pin<Box<dyn Future<Output = Result<()>> + Send>>,
+}
+
+impl Run {
+	fn start(
+		origin: &moq_net::origin::Consumer,
+		path: &str,
+		element: &glib::WeakRef<super::MoqSrc>,
+		pads: &Pads,
+		shutdown: &watch::Receiver<bool>,
+	) -> Self {
+		let (stop, mut stopped) = watch::channel(false);
+		let (origin, path, element, pads, shutdown) = (
+			origin.clone(),
+			path.to_string(),
+			element.clone(),
+			pads.clone(),
+			shutdown.clone(),
+		);
+		let task = Box::pin(async move {
+			// Rides out the route moving between the announcement and the request.
+			let broadcast = tokio::select! {
+				routed = origin.routed_broadcast(&path) => match routed {
+					Ok(broadcast) => broadcast,
+					Err(err) => {
+						gst::warning!(CAT, "broadcast {path} unavailable: {err:?}");
+						return Ok(());
+					}
+				},
+				_ = stopped.changed() => return Ok(()),
+			};
+			follow_catalog(broadcast, &element, &pads, &mut stopped, &shutdown).await
+		});
+		Self { stop, task }
+	}
+
+	/// Stop following the broadcast, returning once its pumps have handed their pads back.
+	async fn stop(self) {
+		let _ = self.stop.send(true);
+		if let Err(err) = self.task.await {
+			gst::debug!(CAT, "replaced broadcast ended with error: {err:?}");
+		}
+	}
+}
+
+/// Whether `err` is the source going away (its session closing, its route going) rather than
+/// something wrong with what it sent.
+fn source_lost(err: &moq_mux::Error) -> bool {
+	matches!(
+		err,
+		moq_mux::Error::Moq(_) | moq_mux::Error::Json(moq_json::Error::Net(_))
+	)
+}
+
+/// Follow one broadcast's catalog, keeping one [`Pump`] per announced rendition in sync with
+/// it. Returns once the catalog closes and the last pump drains, or `stop` fires. Each pump
+/// hands its pad back to `pads` as it ends, so the next broadcast at the path resumes on it.
+///
+/// Losing the source is not an error: the catalog and the tracks end, holding their pads.
 async fn follow_catalog(
 	broadcast: moq_net::broadcast::Consumer,
-	element: glib::WeakRef<super::MoqSrc>,
-	shutdown: &mut watch::Receiver<bool>,
+	element: &glib::WeakRef<super::MoqSrc>,
+	pads: &Pads,
+	stop: &mut watch::Receiver<bool>,
+	shutdown: &watch::Receiver<bool>,
 ) -> Result<()> {
-	let catalog_track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?;
 	// A publisher that never answers would otherwise hold stop until the connection closes.
 	let catalog_track = tokio::select! {
-		track = catalog_track.subscribe(hang::catalog::Catalog::default_subscription()) => track?,
-		_ = shutdown.changed() => return Ok(()),
+		track = async {
+			broadcast
+				.track(hang::catalog::Catalog::DEFAULT_NAME)?
+				.subscribe(hang::catalog::Catalog::default_subscription())
+				.await
+		} => match track {
+			Ok(track) => track,
+			Err(err) => {
+				gst::warning!(CAT, "catalog failed to subscribe: {err:?}");
+				return Ok(());
+			}
+		},
+		_ = stop.changed() => return Ok(()),
 	};
 	let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
 
-	// Follow the catalog for the whole session and reconcile our pumps against every update,
+	// Follow the catalog for the whole broadcast and reconcile our pumps against every update,
 	// rather than building them once from the first frame. This covers reactive publishers
 	// (the browser via @moq/hang) that announce an empty catalog before their encoder
 	// configures, then add renditions a beat later, as well as renditions appearing,
 	// disappearing, or changing codec/resolution mid-stream.
 	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
 	let mut pumps: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+	// The renditions the newest catalog lists, once one has arrived.
+	let mut listed: Option<HashSet<String>> = None;
 	let mut catalog_closed = false;
 
-	loop {
+	let result = loop {
 		// Prune metadata for pumps that have ended (the JoinSet has already reaped the
 		// tasks). Once the catalog is closed and the last pump drains we're done: each
-		// emitted EOS (or a pad drop on error) downstream via its own end path.
+		// handed its pad back, or ended it on error.
 		active.retain(|_, track| !track.task.is_finished());
 		if catalog_closed && pumps.is_empty() {
-			break;
+			break Ok(());
 		}
 
 		tokio::select! {
-			// Full session shutdown: break to the drain below.
-			_ = shutdown.changed() => break,
-			// A pump finished; loop back so the `retain` above prunes its entry and the
-			// break condition sees the drained set.
-			_ = pumps.join_next(), if !pumps.is_empty() => {}
-			// The guard stops us polling a closed catalog track (which would spin the loop
-			// returning None) while we wait for the remaining pumps to drain.
-			next = catalog_consumer.next(), if !catalog_closed => {
-				match next? {
-					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element, shutdown),
-					// Catalog track closed. Don't cancel the pumps: let each reach its
-					// natural Ok(None) -> EOS end so downstream sees a clean EOS rather than a
-					// bare pad drop. We just stop reconciling and wait for them to drain.
-					//
-					// That includes a pump still resolving its subscription, which is
-					// indistinguishable here from one that has simply not been polled yet:
-					// a final snapshot naming a track the publisher does serve arrives this
-					// way, and cancelling on "not live yet" would drop it. Whether a
-					// rendition will ever be served is the publisher's to answer, and
-					// ending the broadcast is where it does: every name it never served
-					// resolves with an error, which fails that pump's subscribe and ends
-					// it here.
-					None => catalog_closed = true,
+			// Stopped or replaced: break to the drain below.
+			_ = stop.changed() => break Ok(()),
+			// A pump finished and handed its pad back, which ends there if the catalog no longer
+			// lists it. Loop back so the `retain` above prunes its entry and the break condition
+			// sees the drained set.
+			_ = pumps.join_next(), if !pumps.is_empty() => {
+				if let Some(listed) = &listed {
+					pads.retire(listed, element);
 				}
 			}
+			// The guard stops us polling a closed catalog track (which would spin the loop
+			// returning None) while we wait for the remaining pumps to drain.
+			next = catalog_consumer.next(), if !catalog_closed => match next {
+				Ok(Some(catalog)) => {
+					let names = reconcile(&catalog, &mut active, &mut pumps, &broadcast, element, pads, shutdown);
+					pads.retire(&names, element);
+					listed = Some(names);
+				}
+				// Catalog track closed. Don't cancel the pumps: let each reach its natural end,
+				// which holds its pad for the next broadcast. We just stop reconciling and wait
+				// for them to drain.
+				//
+				// That includes a pump still resolving its subscription, which is
+				// indistinguishable here from one that has simply not been polled yet:
+				// a final snapshot naming a track the publisher does serve arrives this
+				// way, and cancelling on "not live yet" would drop it. Whether a
+				// rendition will ever be served is the publisher's to answer, and
+				// ending the broadcast is where it does: every name it never served
+				// resolves with an error, which fails that pump's subscribe and ends
+				// it here.
+				Ok(None) => catalog_closed = true,
+				// The same for a source that went away: its tracks end the same way.
+				Err(err) if source_lost(&err) => {
+					gst::info!(CAT, "catalog lost its source: {err}");
+					catalog_closed = true;
+				}
+				Err(err) => break Err(err.into()),
+			}
 		}
-	}
+	};
 
-	// Shutdown: cancel every pump, then wait for them all to drop their pads. Cancel all up front
+	// Cancel every pump, then wait for them all to hand their pads back. Cancel all up front
 	// (pumps only exit on their own `cancel`), or the not-yet-cancelled ones would keep streaming
 	// while we await the rest.
 	// On the clean catalog-closed exit `active`/`pumps` are already drained, so this is a no-op.
@@ -532,12 +685,64 @@ async fn follow_catalog(
 	}
 	while pumps.join_next().await.is_some() {}
 
-	Ok(())
+	result
+}
+
+/// A rendition's pad between the pumps that serve it, so a restarted broadcast, a format
+/// change, or a source coming back resumes on the pad downstream linked by name. The pump
+/// streaming to the pad holds the lock, so the next one waits for it to hand the pad back.
+type Slot = Arc<tokio::sync::Mutex<Option<gst::Pad>>>;
+
+/// The session's pads by rendition name, outliving every broadcast it plays.
+#[derive(Clone, Default)]
+struct Pads(Arc<Mutex<HashMap<String, Slot>>>);
+
+impl Pads {
+	fn slot(&self, name: &str) -> Slot {
+		self.0.lock().unwrap().entry(name.to_string()).or_default().clone()
+	}
+
+	/// End the held pads of the renditions `listed` leaves out, with EOS. A pad still streaming
+	/// is left to its pump and ends here once handed back.
+	///
+	/// The slots stay: a pump may hold one it has yet to lock, and must hand its pad back where
+	/// this finds it.
+	fn retire(&self, listed: &HashSet<String>, element: &glib::WeakRef<super::MoqSrc>) {
+		let retired: Vec<gst::Pad> = self
+			.0
+			.lock()
+			.unwrap()
+			.iter()
+			.filter(|(name, _)| !listed.contains(*name))
+			.filter_map(|(_, slot)| slot.try_lock().ok()?.take())
+			.collect();
+		for pad in retired {
+			let _ = tokio::task::block_in_place(|| pad.push_event(gst::event::Eos::builder().build()));
+			remove_pad(element, &pad);
+		}
+	}
+
+	/// Remove every pad, once no pump is left to hold one.
+	fn clear(&self, element: &glib::WeakRef<super::MoqSrc>) {
+		let slots: Vec<Slot> = self.0.lock().unwrap().drain().map(|(_, slot)| slot).collect();
+		for slot in slots {
+			if let Some(pad) = slot.try_lock().ok().and_then(|mut held| held.take()) {
+				remove_pad(element, &pad);
+			}
+		}
+	}
+}
+
+fn remove_pad(element: &glib::WeakRef<super::MoqSrc>, pad: &gst::Pad) {
+	let _ = pad.set_active(false);
+	if let Some(obj) = element.upgrade() {
+		let _ = obj.remove_pad(pad);
+	}
 }
 
 /// Bring the live set of pumps in line with `catalog`: spawn pumps for newly announced
-/// renditions, recreate any whose caps or container changed, and leave ones that vanished to end
-/// with their track.
+/// renditions, restart any whose caps or container changed, and leave ones that vanished to end
+/// with their track. Returns the renditions the catalog lists.
 ///
 /// Infallible by design: every way a single rendition can be unusable (unsupported codec,
 /// malformed init, a name the broadcast refuses) skips just that rendition, so one bad entry in
@@ -548,8 +753,9 @@ fn reconcile(
 	pumps: &mut tokio::task::JoinSet<()>,
 	broadcast: &moq_net::broadcast::Consumer,
 	element: &glib::WeakRef<super::MoqSrc>,
+	pads: &Pads,
 	shutdown: &watch::Receiver<bool>,
-) {
+) -> HashSet<String> {
 	struct Desired {
 		kind: TrackKind,
 		shape: Shape,
@@ -588,13 +794,13 @@ fn reconcile(
 		&active.iter().map(|(name, t)| (name.clone(), t.shape.clone())).collect(),
 	);
 
-	// Drop anything that changed shape; each cancelled pump drops its own pad. Changed renditions
-	// also land in `plan.add`, so they respawn below under a fresh pad id.
+	// Stop anything that changed shape; each cancelled pump hands its pad back. Changed renditions
+	// also land in `plan.add`, so they respawn below and take the same pad.
 	//
 	// A rendition that vanished is only no longer selectable: a publisher retires one by
 	// delisting it and finishing its track, and the two arrive in either order. A pump that owns
-	// a pad stays in `active` and ends with its track (EOS, or a pad drop on error), where
-	// `follow_catalog` prunes it. One that never took a pad is stopped.
+	// a pad stays in `active` and ends with its track, where `follow_catalog` prunes it and ends
+	// the pad it hands back. One that never took a pad is stopped.
 	for name in plan.remove {
 		if !desired.contains_key(&name) && active.get(&name).is_some_and(|track| !track.state.cancel_before_live()) {
 			continue;
@@ -648,6 +854,7 @@ fn reconcile(
 					caps: d.shape.caps.clone(),
 					track,
 					container,
+					slot: pads.slot(&name),
 					state: state.clone(),
 					cancel: cancel_rx,
 					shutdown: shutdown.clone(),
@@ -667,6 +874,8 @@ fn reconcile(
 			},
 		);
 	}
+
+	desired.into_keys().collect()
 }
 
 /// Tear-down / spawn decisions for one catalog update, computed purely from the desired and
@@ -691,13 +900,12 @@ fn plan_reconcile<S: PartialEq>(desired: &HashMap<String, S>, active: &HashMap<S
 	ReconcilePlan { remove, add }
 }
 
-/// Identifies a pump's pad. Pads are named `video_<id>` / `audio_<id>` from a
+/// Identifies a rendition's pad. Pads are named `video_<id>` / `audio_<id>` from a
 /// per-kind, process-unique counter (matching the `%u` templates) rather than after
-/// the track name, so a rendition can be torn down and recreated (when its
-/// codec/resolution changes mid-stream) without two pads ever sharing a name. The
-/// first *live* pad of each kind is `video_0` / `audio_0`, so `gst-launch` can link them by
-/// name regardless of which rendition the catalog announces first, or how many it announces
-/// that never arrive.
+/// the track name, so a rendition that ends and is later announced again never shares a
+/// name with a pad still being removed. The first *live* pad of each kind is
+/// `video_0` / `audio_0`, so `gst-launch` can link them by name regardless of which rendition
+/// the catalog announces first, or how many it announces that never arrive.
 struct TrackDescriptor {
 	kind: TrackKind,
 	name: String,
@@ -734,6 +942,8 @@ struct Pump {
 	caps: gst::Caps,
 	track: moq_net::track::Consumer,
 	container: moq_mux::catalog::hang::Container,
+	/// The rendition's pad, held between the pumps that serve it.
+	slot: Slot,
 	/// Shared with this rendition's [`ActiveTrack::state`].
 	state: Arc<PumpState>,
 	cancel: watch::Receiver<bool>,
@@ -742,9 +952,13 @@ struct Pump {
 }
 
 impl Pump {
-	/// Subscribe to the track, then read its frames and push them to a pad owned for the rest of
-	/// this pump's lifetime: create the pad, stream buffers, and remove the pad on exit. Runs
-	/// until the track ends (EOS), errors, or `cancel` fires.
+	/// Subscribe to the track, then read its frames and push them to the rendition's pad: take
+	/// it from the slot (or create it), start a new stream on it, and stream buffers. Runs until
+	/// the track ends, errors, or `cancel` fires.
+	///
+	/// The pad goes back to the slot when the track ends or loses its source, or the pump is
+	/// cancelled, so the next pump resumes on it. A broken pad (a flow error, a malformed track)
+	/// is removed instead.
 	async fn run(self) {
 		let Pump {
 			element,
@@ -753,6 +967,7 @@ impl Pump {
 			caps,
 			track,
 			container,
+			slot,
 			state,
 			mut cancel,
 			shutdown,
@@ -783,12 +998,25 @@ impl Pump {
 			return;
 		}
 
+		// Wait for the pump that last served this rendition to hand its pad back.
+		let mut held = tokio::select! {
+			biased;
+			_ = cancel.changed() => return,
+			held = slot.lock_owned() => held,
+		};
 		// The pad appears only once the track is live, so a pad downstream can link to is a promise
 		// that the rendition is actually flowing, and only a rendition that gets this far claims a
-		// pad id.
-		let descriptor = TrackDescriptor::claim(kind, name);
-		let Some(pad) = create_pad(&element, &descriptor, &caps) else {
-			return;
+		// pad id. A pad held from an earlier pump starts a new stream instead, with caps that may
+		// differ: downstream that can't take them fails the first push as not negotiated.
+		let pad = match held.take() {
+			Some(pad) => {
+				tokio::task::block_in_place(|| start_stream(&pad, &name, &caps));
+				pad
+			}
+			None => match create_pad(&element, &TrackDescriptor::claim(kind, name.clone()), &caps) {
+				Some(pad) => pad,
+				None => return,
+			},
 		};
 		// Stop flushes only the pads it finds, and this one may have been added just after, while
 		// this pump's cancel is still on its way. Flushing it here keeps a push from blocking stop.
@@ -797,42 +1025,71 @@ impl Pump {
 		}
 
 		let mut reference_ts = None;
-		loop {
+		let hold = loop {
 			tokio::select! {
-				// This rendition is being torn down (shutdown, or replaced by a catalog update).
-				_ = cancel.changed() => break,
+				// This rendition is being torn down (stopped, replaced, or reshaped).
+				_ = cancel.changed() => break true,
 				frame = track.read() => match frame {
 					Ok(Some(frame)) => {
-						let buffer = build_buffer(frame, &mut reference_ts, descriptor.kind);
+						// The segment waits for the first buffer so the stream starts at the
+						// running time it reaches downstream, not at the one it had when the
+						// pad was taken, and isn't late at a synced sink.
+						let segment = reference_ts.is_none().then(|| live_segment(&element));
+						let buffer = build_buffer(frame, &mut reference_ts, kind);
 						// pad.push() blocks until downstream accepts the buffer (full queues, a
 						// clock-synced sink). block_in_place hands our sibling tasks to another
 						// worker so a stalled downstream can't pin a runtime thread and starve
 						// the session loop or other pumps.
-						if tokio::task::block_in_place(|| pad.push(buffer)).is_err() {
-							break;
+						let pushed = tokio::task::block_in_place(|| {
+							if let Some(segment) = segment {
+								pad.push_event(segment);
+							}
+							pad.push(buffer)
+						});
+						match pushed {
+							Ok(_) => {}
+							// Stop is flushing the pad, which it removes once the session ends.
+							Err(gst::FlowError::Flushing) => break true,
+							// Nothing downstream wants this rendition.
+							Err(gst::FlowError::NotLinked | gst::FlowError::Eos) => break false,
+							Err(err) => {
+								if let Some(obj) = element.upgrade() {
+									gst::element_error!(
+										obj,
+										gst::StreamError::Failed,
+										("Internal data flow error."),
+										["pad {} stopped: {err:?}", pad.name()]
+									);
+								}
+								break false;
+							}
 						}
 					}
-					Ok(None) => {
-						let _ = tokio::task::block_in_place(|| pad.push_event(gst::event::Eos::builder().build()));
-						break;
+					// The track ended, which is not the rendition ending: the catalog says
+					// whether it returns, so the pad is held without EOS until it does.
+					Ok(None) => break true,
+					Err(err) if source_lost(&err) => {
+						gst::info!(CAT, "track {name} lost its source: {err}");
+						break true;
 					}
 					Err(err) => {
-						gst::warning!(CAT, "track {} failed: {err:?}", descriptor.name);
-						break;
+						gst::warning!(CAT, "track {name} failed: {err:?}");
+						break false;
 					}
 				}
 			}
-		}
+		};
 
-		let _ = pad.set_active(false);
-		if let Some(obj) = element.upgrade() {
-			let _ = obj.remove_pad(&pad);
+		if hold {
+			*held = Some(pad);
+		} else {
+			remove_pad(&element, &pad);
 		}
 	}
 }
 
-/// Create, activate, and add a src pad for the track, seeding it with the sticky
-/// stream-start/caps/segment events. Returns `None` if the element is already gone.
+/// Create, activate, and add a src pad for the track, starting its stream. Returns `None` if the
+/// element is already gone.
 fn create_pad(
 	element: &glib::WeakRef<super::MoqSrc>,
 	descriptor: &TrackDescriptor,
@@ -846,16 +1103,35 @@ fn create_pad(
 		.build();
 
 	pad.set_active(true).ok()?;
+	start_stream(&pad, &descriptor.name, caps);
+
+	obj.add_pad(&pad).ok()?;
+	Some(pad)
+}
+
+/// Start a new stream on `pad` with the sticky stream-start and caps events. Its segment follows
+/// with the first buffer.
+fn start_stream(pad: &gst::Pad, stream_id: &str, caps: &gst::Caps) {
 	pad.push_event(
-		gst::event::StreamStart::builder(&descriptor.name)
+		gst::event::StreamStart::builder(stream_id)
 			.group_id(gst::GroupId::next())
 			.build(),
 	);
 	pad.push_event(gst::event::Caps::new(caps));
-	pad.push_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new()));
+}
 
-	obj.add_pad(&pad).ok()?;
-	Some(pad)
+/// A segment starting at the element's current running time, so a stream that starts mid-run
+/// lines up with the clock rather than replaying from zero.
+fn live_segment(element: &glib::WeakRef<super::MoqSrc>) -> gst::Event {
+	// Running time only advances while playing; before that, the stream starts at zero.
+	let base = element
+		.upgrade()
+		.filter(|obj| obj.current_state() == gst::State::Playing)
+		.and_then(|obj| obj.current_running_time())
+		.unwrap_or(gst::ClockTime::ZERO);
+	let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+	segment.set_base(base);
+	gst::event::Segment::new(&segment)
 }
 
 /// Wrap a decoded frame in a gst buffer, assigning a pts relative to the track's first frame.
@@ -1094,7 +1370,7 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{NEXT_VIDEO_PAD_ID, ResolvedSettings, SessionController, follow_catalog};
+	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, follow_catalog};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -1136,6 +1412,23 @@ mod session_tests {
 			.into_iter()
 			.filter(|pad| pad.name().starts_with(kind))
 			.collect()
+	}
+
+	/// Follow `broadcast`'s catalog until the returned sender stops it, removing its pads once it
+	/// ends, as the session does.
+	fn follow(
+		element: &super::super::MoqSrc,
+		broadcast: moq_net::broadcast::Consumer,
+	) -> (watch::Sender<bool>, tokio::task::JoinHandle<anyhow::Result<()>>) {
+		let (stop, stopped) = watch::channel(false);
+		let weak = element.downgrade();
+		let session = super::RUNTIME.spawn(async move {
+			let pads = Pads::default();
+			let result = follow_catalog(broadcast, &weak, &pads, &mut stopped.clone(), &stopped).await;
+			pads.clear(&weak);
+			result
+		});
+		(stop, session)
 	}
 
 	/// Block until a consumer asks the broadcast for a track, returning the request unanswered so
@@ -1180,10 +1473,7 @@ mod session_tests {
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 
-		let (shutdown, mut shutdown_rx) = watch::channel(false);
-		let consumer = broadcast.consume();
-		let weak = element.downgrade();
-		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+		let (shutdown, session) = follow(&element, broadcast.consume());
 
 		// Wait for the audio subscription before announcing video, and hold the request
 		// unanswered. A catalog consumer skips to the newest snapshot, so without this the
@@ -1228,10 +1518,7 @@ mod session_tests {
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
-		let (shutdown, mut shutdown_rx) = watch::channel(false);
-		let consumer = broadcast.consume();
-		let weak = element.downgrade();
-		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+		let (shutdown, session) = follow(&element, broadcast.consume());
 
 		await_pad(&element, "video_");
 
@@ -1257,10 +1544,7 @@ mod session_tests {
 			guard.video.renditions = BTreeMap::from([("stalled".to_string(), video_rendition())]);
 		}
 
-		let (shutdown, mut shutdown_rx) = watch::channel(false);
-		let consumer = broadcast.consume();
-		let weak = element.downgrade();
-		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+		let (shutdown, session) = follow(&element, broadcast.consume());
 
 		// Hold the subscription pending, then drop the rendition from the catalog so its pump
 		// is cancelled while it is still waiting.
@@ -1313,10 +1597,7 @@ mod session_tests {
 		}
 		catalog.finish().unwrap();
 
-		let (shutdown, mut shutdown_rx) = watch::channel(false);
-		let consumer = broadcast.consume();
-		let weak = element.downgrade();
-		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+		let (shutdown, session) = follow(&element, broadcast.consume());
 
 		await_pad(&element, "video_");
 
@@ -1326,8 +1607,9 @@ mod session_tests {
 
 	/// The flip side of the test above: a rendition the publisher reserved and never served is
 	/// answerable once the publisher ends the broadcast, which resolves every name it never
-	/// filled. That pump must end on its own so the session terminates on the media it was
-	/// serving, rather than holding the connection open until the element is stopped.
+	/// filled. That pump must end on its own so the broadcast ends on the media it was serving,
+	/// rather than waiting for one that replaces it. The served rendition's pad is held for that
+	/// one, without EOS.
 	#[test]
 	fn a_rendition_nobody_served_ends_with_the_broadcast() {
 		let _pad_ids = pad_ids();
@@ -1347,12 +1629,13 @@ mod session_tests {
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 
-		let (shutdown, mut shutdown_rx) = watch::channel(false);
-		let consumer = broadcast.consume();
-		let weak = element.downgrade();
-		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+		let (stop, stopped) = watch::channel(false);
+		let pads = Pads::default();
+		let (consumer, weak, held) = (broadcast.consume(), element.downgrade(), pads.clone());
+		let session = super::RUNTIME
+			.spawn(async move { follow_catalog(consumer, &weak, &held, &mut stopped.clone(), &stopped).await });
 
-		// Watch for the EOS on the served rendition, before anything can end its track.
+		// Watch for an EOS on the served rendition, before anything can end its track.
 		let pad = await_pad(&element, "video_");
 		let eos = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 		let seen = eos.clone();
@@ -1370,14 +1653,16 @@ mod session_tests {
 		video.finish().unwrap();
 		broadcast.close();
 
-		// No shutdown is sent: the session has to end on the media draining alone.
+		// No stop is sent: the broadcast has to end on the media draining alone.
 		super::RUNTIME
 			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
-			.expect("the session outlived the renditions it was serving")
+			.expect("the broadcast outlived the renditions it was serving")
 			.unwrap()
 			.unwrap();
-		assert!(eos.load(Ordering::Relaxed), "the served rendition never emitted EOS");
-		drop(shutdown);
+		assert!(pad.parent().is_some(), "the served rendition's pad was not held");
+		assert!(!eos.load(Ordering::Relaxed), "the held pad emitted EOS");
+		pads.clear(&element.downgrade());
+		drop(stop);
 	}
 
 	/// A publisher that ends one rendition finishes its track and retires it from the catalog,
@@ -1408,10 +1693,7 @@ mod session_tests {
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
-		let (shutdown, mut shutdown_rx) = watch::channel(false);
-		let consumer = broadcast.consume();
-		let weak = element.downgrade();
-		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+		let (shutdown, session) = follow(&element, broadcast.consume());
 
 		// Count what reaches the pad. The pad has no peer, so the probe swallows each buffer, which
 		// reports the push as OK.
@@ -1475,8 +1757,8 @@ mod session_tests {
 		}
 		await_pad(&element, "audio_");
 
-		// A pump the update cancelled still has to notice. It takes its pad with it when it does,
-		// so the wait is only ever served in full by one that is still reading.
+		// A pump the update cancelled still has to notice. Its pad ends once it hands it back, so
+		// the wait is only ever served in full by one that is still reading.
 		for _ in 0..10 {
 			if pads(&element, "video_").is_empty() {
 				break;
@@ -1490,7 +1772,7 @@ mod session_tests {
 		}
 		producer.finish().unwrap();
 
-		// The pump removes its pad on the way out, whichever way it goes.
+		// The pad ends once the pump hands it back, since the catalog no longer lists it.
 		for _ in 0..100 {
 			if pads(&element, "video_").is_empty() {
 				break;
@@ -1542,29 +1824,15 @@ mod session_tests {
 			}
 		});
 
-		let (shutdown, mut shutdown_rx) = watch::channel(false);
-		let consumer = broadcast.consume();
-		let weak = element.downgrade();
-		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+		let (shutdown, session) = follow(&element, broadcast.consume());
 
 		let pad = await_pad(&element, "video_");
 		let buffers = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-		let eos = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-		let (counted, seen) = (buffers.clone(), eos.clone());
-		pad.add_probe(
-			gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
-			move |_, info| match &info.data {
-				Some(gst::PadProbeData::Buffer(_)) => {
-					counted.fetch_add(1, Ordering::Relaxed);
-					gst::PadProbeReturn::Drop
-				}
-				Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::Eos => {
-					seen.store(true, Ordering::Relaxed);
-					gst::PadProbeReturn::Ok
-				}
-				_ => gst::PadProbeReturn::Ok,
-			},
-		);
+		let counted = buffers.clone();
+		pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+			counted.fetch_add(1, Ordering::Relaxed);
+			gst::PadProbeReturn::Drop
+		});
 
 		let mut producer = moq_mux::container::Producer::new(
 			video,
@@ -1610,18 +1878,11 @@ mod session_tests {
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
-		// The same track resumes with a new group, then ends.
+		// The same track resumes with a new group.
 		for i in HEAD..HEAD + TAIL {
 			write(i);
 		}
 		wait_for(HEAD + TAIL);
-		producer.finish().unwrap();
-		for _ in 0..100 {
-			if pads(&element, "video_").is_empty() {
-				break;
-			}
-			std::thread::sleep(Duration::from_millis(50));
-		}
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();
@@ -1636,7 +1897,156 @@ mod session_tests {
 			HEAD + TAIL,
 			"the first pad lost frames"
 		);
-		assert!(eos.load(Ordering::Relaxed), "the track's end never reached the pad");
+	}
+
+	/// Poll until `ready`, failing the test with `what` if it never is.
+	fn eventually(what: &str, ready: impl Fn() -> bool) {
+		for _ in 0..100 {
+			if ready() {
+				return;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		panic!("{what}");
+	}
+
+	/// Announce `live` on `origin` with one video rendition, returning what keeps it up.
+	fn announce(
+		origin: &moq_net::origin::Producer,
+	) -> (
+		moq_net::broadcast::Producer,
+		moq_mux::catalog::Producer,
+		moq_net::track::Producer,
+	) {
+		let mut broadcast = origin.create_broadcast("live").unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let video = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		}
+		broadcast
+			.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.unwrap();
+		(broadcast, catalog, video)
+	}
+
+	/// A source that goes away (its session closing, not finishing) holds its pads for the next
+	/// one to start. Its tracks failing and its announcement ending travel separately, so the
+	/// hold can't depend on which reaches the session first.
+	#[test]
+	fn a_lost_source_holds_its_pads_for_the_next_start() {
+		for end_first in [false, true] {
+			let _pad_ids = pad_ids();
+			let element = element();
+			let origin = {
+				let _runtime = super::RUNTIME.enter();
+				moq_tokio::origin::spawn()
+			};
+			let slots = Pads::default();
+			let (shutdown, mut shutdown_rx) = watch::channel(false);
+			let (consumer, weak, session_slots) = (origin.consume(), element.downgrade(), slots.clone());
+			let session = super::RUNTIME.spawn(async move {
+				let closed = std::future::pending::<anyhow::Result<()>>();
+				super::follow_path(consumer, "live", &weak, &session_slots, &mut shutdown_rx, closed).await
+			});
+
+			let (old, catalog, video) = announce(&origin);
+			let pad = await_pad(&element, "video_");
+			let mut follow = origin.consume().follow("live").unwrap();
+			let mut announced = || {
+				super::RUNTIME
+					.block_on(async { tokio::time::timeout(Duration::from_secs(10), follow.next()).await })
+					.expect("the path never changed")
+					.unwrap()
+			};
+			assert!(matches!(announced(), moq_net::announce::Event::Start(_)));
+
+			let lose = move || {
+				video.abort(moq_net::Error::Cancel).unwrap();
+				drop(catalog);
+			};
+			let held = || slots.slot("video").try_lock().is_ok_and(|held| held.is_some());
+			if end_first {
+				old.unannounce();
+				assert!(matches!(announced(), moq_net::announce::Event::End(_)));
+				lose();
+				eventually("the lost source's pad was never held", held);
+			} else {
+				lose();
+				eventually("the lost source's pad was never held", held);
+				old.unannounce();
+				assert!(matches!(announced(), moq_net::announce::Event::End(_)));
+			}
+			assert_eq!(pads(&element, "video_"), vec![pad.clone()], "end_first={end_first}");
+
+			// The next source to start takes the held pad.
+			let _new = announce(&origin);
+			eventually("the next source never took the held pad", || {
+				slots.slot("video").try_lock().is_err()
+			});
+			assert_eq!(pads(&element, "video_"), vec![pad], "end_first={end_first}");
+
+			let _ = shutdown.send(true);
+			super::RUNTIME.block_on(session).unwrap().unwrap();
+			slots.clear(&element.downgrade());
+		}
+	}
+
+	/// A rendition whose caps change mid-run starts a new stream with them on the pad downstream
+	/// already linked, rather than replacing it.
+	#[test]
+	fn a_reshaped_rendition_keeps_its_pad() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let (broadcast, mut catalog, _producer) = video_broadcast();
+
+		let added = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let count = added.clone();
+		element.connect_pad_added(move |_, _| {
+			count.fetch_add(1, Ordering::Relaxed);
+		});
+
+		let (shutdown, session) = follow(&element, broadcast.consume());
+		let pad = await_pad(&element, "video_");
+		let caps = std::sync::Arc::new(Mutex::new(Vec::new()));
+		let seen = caps.clone();
+		pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+			if let Some(gst::PadProbeData::Event(event)) = &info.data
+				&& let gst::EventView::Caps(event) = event.view()
+			{
+				seen.lock().unwrap().push(event.caps_owned());
+			}
+			gst::PadProbeReturn::Ok
+		});
+
+		// The same rendition, now carrying its parameter sets out of band.
+		{
+			let mut rendition = video_rendition();
+			rendition.description = Some(bytes::Bytes::from_static(&[1, 0x42, 0x00, 0x1f, 0xff, 0xe0, 0x00]));
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), rendition)]);
+		}
+		let reshaped = || {
+			caps.lock().unwrap().iter().any(|caps| {
+				caps.structure(0)
+					.is_some_and(|s| s.get::<&str>("stream-format") == Ok("avc"))
+			})
+		};
+		for _ in 0..100 {
+			if reshaped() {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		assert!(reshaped(), "the new caps never reached the pad");
+		assert_eq!(pads(&element, "video_"), vec![pad]);
+		assert_eq!(added.load(Ordering::Relaxed), 1, "the reshape added a pad");
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
 	}
 
 	/// Pipelines link `moqsrc`'s pads by name, so the first video rendition that actually
@@ -1662,10 +2072,7 @@ mod session_tests {
 		}
 
 		let first = NEXT_VIDEO_PAD_ID.load(Ordering::Relaxed);
-		let (shutdown, mut shutdown_rx) = watch::channel(false);
-		let consumer = broadcast.consume();
-		let weak = element.downgrade();
-		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+		let (shutdown, session) = follow(&element, broadcast.consume());
 
 		await_pad(&element, "audio_");
 
@@ -1711,7 +2118,9 @@ mod session_tests {
 		let session = SessionController::spawn(
 			connection.clone(),
 			element.downgrade(),
-			move |mut shutdown| async move { follow_catalog(broadcast, weak, &mut shutdown).await },
+			move |shutdown, pads| async move {
+				follow_catalog(broadcast, &weak, &pads, &mut shutdown.clone(), &shutdown).await
+			},
 		);
 		(session, connection)
 	}
@@ -1833,7 +2242,8 @@ mod session_tests {
 	}
 
 	/// A pump whose subscription resolves while stop flushes the pads adds its own just after, with
-	/// its cancel still on the way. A push on that pad must not block stop either.
+	/// its cancel still on the way. A push on that pad must not block stop either, and the pad
+	/// goes back to its slot for the session to remove.
 	#[test]
 	fn a_pad_added_after_stop_flushed_does_not_block() {
 		let _pad_ids = pad_ids();
@@ -1848,6 +2258,7 @@ mod session_tests {
 
 		let (_cancel, cancel) = watch::channel(false);
 		let (_shutdown, shutdown) = watch::channel(true);
+		let slot = super::Slot::default();
 		let pump = super::Pump {
 			element: element.downgrade(),
 			kind: super::TrackKind::Video,
@@ -1855,6 +2266,7 @@ mod session_tests {
 			caps: gst::Caps::new_empty_simple("video/x-h264"),
 			track: broadcast.consume().track("video").unwrap(),
 			container: moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+			slot: slot.clone(),
 			state: std::sync::Arc::new(super::PumpState::new()),
 			cancel,
 			shutdown,
@@ -1863,7 +2275,13 @@ mod session_tests {
 			.block_on(async { tokio::time::timeout(Duration::from_secs(10), super::RUNTIME.spawn(pump.run())).await })
 			.expect("a push on a pad added after the flush blocked")
 			.unwrap();
-		assert!(pads(&element, "video_").is_empty(), "the pad outlived its pump");
+		let held = slot
+			.try_lock()
+			.unwrap()
+			.take()
+			.expect("the pump never handed its pad back");
+		assert_eq!(pads(&element, "video_"), vec![held.clone()]);
+		super::remove_pad(&element.downgrade(), &held);
 	}
 
 	/// A bus sync or pad handler can stop the element from inside a pump's push. Waiting for the
