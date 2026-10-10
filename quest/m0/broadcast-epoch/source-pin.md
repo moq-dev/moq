@@ -41,4 +41,8 @@ replacement won in the meantime, it serves that request even without
   it followed. A same-epoch return reads the returned handle. Today's
   epoch-pin test (`source.rs`) moves to the handle.
 
-Public API: none (`pinned` is crate-private). Wire: none.
+Public API: no signature change, but a behavior change. A `Source` reused
+across a route replacement now returns its pinned handle for a path it
+already resolved (`broadcast`, `catalog`, and track requests), or fails on
+the replaced instance, instead of resolving the current route. Document it
+on `Source`. Wire: none.
