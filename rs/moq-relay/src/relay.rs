@@ -789,8 +789,11 @@ async fn serve_listening(
 			.with_sessions(sessions.clone());
 
 		tokio::spawn(async move {
-			if let Err(err) = conn.run().await {
-				tracing::warn!(id, %err, "connection closed");
+			match conn.run().await {
+				// A lease or shutdown ending the session closes it too: logged, so every
+				// accepted connection pairs with its end.
+				Ok(()) => tracing::info!(id, "connection closed"),
+				Err(err) => tracing::warn!(id, %err, "connection closed"),
 			}
 		});
 	}

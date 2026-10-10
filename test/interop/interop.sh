@@ -577,18 +577,22 @@ relay_log_since() {
 }
 
 # Print each relay connection that appears from log line FROM on, with how it closed: the
-# relay's close error, or "open" while it hasn't closed yet. The patterns follow the relay's
-# `conn{id=...}` span and its `connection closed` warning (`rs/moq-relay/src/relay.rs`).
+# relay's close error, "ended" for a close without one, or "open" while it hasn't closed yet.
+# The patterns follow the relay's `conn{id=...}` span and its `connection closed` log
+# (`rs/moq-relay/src/relay.rs`). Only connections opened in the window count, so a straggler
+# from an earlier round closing here isn't blamed on this one.
 relay_connections() {
     relay_log_since "$1" | awk '
         match($0, /conn\{id=[0-9]+ /) {
             id = substr($0, RSTART + 8, RLENGTH - 9)
             if (!(id in state)) { state[id] = "open"; order[++n] = id }
         }
-        match($0, /connection closed id=[0-9]+ err=/) {
-            id = substr($0, RSTART + 21, RLENGTH - 26)
-            if (!(id in state)) order[++n] = id
-            state[id] = substr($0, RSTART + RLENGTH)
+        match($0, /connection closed id=[0-9]+/) {
+            id = substr($0, RSTART + 21, RLENGTH - 21)
+            if (id in state) {
+                rest = substr($0, RSTART + RLENGTH)
+                state[id] = sub(/^ err=/, "", rest) ? rest : "ended"
+            }
         }
         END { for (i = 1; i <= n; i++) print order[i], state[order[i]] }
     '
