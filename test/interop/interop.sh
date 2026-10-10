@@ -552,7 +552,9 @@ start_publisher() {
 stop_publisher() {
     local pid="$1" lang="$2" deadline=$((SECONDS + 10))
     case "$lang" in
-        js | js-native) kill -TERM -- -"$pid" 2>/dev/null || true ;;
+        # The leader alone: a SIGTERM to the group would reach Chromium too, which then exits
+        # without closing its sessions.
+        js | js-native) kill -TERM "$pid" 2>/dev/null || true ;;
         *) pkill -TERM -g "$pid" -x ffmpeg 2>/dev/null || true ;;
     esac
     while ! harness_exited "$pid" && ((SECONDS < deadline)); do
