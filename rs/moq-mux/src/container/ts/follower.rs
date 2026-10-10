@@ -250,7 +250,24 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				} => {
 					// Announcements wait until the export is on the instance they describe.
 					if let Poll::Ready(resolved) = waiter.poll_future(resolving.as_mut()) {
-						let (broadcast, catalog) = resolved?;
+						let (broadcast, catalog) = match resolved {
+							Ok(resolved) => resolved,
+							// A return that went before it resolved is no return yet. Until the
+							// next announcement says otherwise, nothing serves the path.
+							Err(err) => {
+								let Some((end, deadline)) = settling else {
+									return Poll::Ready(Err(err));
+								};
+								tracing::warn!(path = %self.path, %err, "broadcast returned and went again, still waiting");
+								self.serving = Serving::Gone;
+								self.state = State::Settling {
+									end,
+									grace: None,
+									deadline,
+								};
+								continue;
+							}
+						};
 						self.export.followed(&broadcast, catalog)?;
 						self.epoch = self.export.instance().cloned();
 						self.serving = Serving::Ours;

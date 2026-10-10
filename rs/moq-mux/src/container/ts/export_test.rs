@@ -7551,6 +7551,44 @@ async fn a_follower_return_whose_catalog_never_snapshots_expires_with_the_linger
 	assert_eq!(start.elapsed(), linger);
 }
 
+/// A return that goes again before its catalog resolves is no return yet: the follower keeps
+/// lingering, and with nothing else back it yields the original clean end at the deadline.
+#[tokio::test(start_paused = true)]
+async fn a_follower_keeps_lingering_when_a_return_goes_before_it_resolves() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let first = publish_bare(&origin, Some(&epoch));
+	let linger = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_linger(linger);
+	let start = tokio::time::Instant::now();
+	finish(first);
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"lingering"
+	);
+
+	// Back, but its catalog request is never answered before it goes again.
+	let second = origin
+		.publish("live", moq_net::origin::Route::default().with_epoch(epoch))
+		.unwrap();
+	let unanswered = second.dynamic();
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"resolving the return"
+	);
+	drop((second, unanswered));
+
+	let end = tokio::time::timeout(linger * 3, follower.next())
+		.await
+		.expect("the linger bounds the wait");
+	assert!(matches!(end, Ok(None)), "the original clean end: {end:?}");
+	assert_eq!(start.elapsed(), linger);
+}
+
 /// Without stitching, another instance taking the path fails the follower once the export
 /// ends, however long the linger.
 #[tokio::test(start_paused = true)]
