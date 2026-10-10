@@ -678,10 +678,11 @@ impl Run {
 					broadcast = origin.request_broadcast(&path, None) => match broadcast {
 						Ok(broadcast) => broadcast,
 						// The route went between the announcement and the request.
-						Err(err) => {
+						Err(err) if source_lost(&err) => {
 							tracing::warn!(%path, %err, "broadcast unavailable, holding pads");
 							return Ok(());
 						}
+						Err(err) => return Err(anyhow::Error::from(err).context("broadcast refused")),
 					},
 				};
 				let _ = demand.set(broadcast.demand());
@@ -711,13 +712,18 @@ impl Run {
 	}
 }
 
-/// Whether a catalog failure is the source going away (its session closing, or its route going)
-/// rather than a malformed catalog. Losing the source holds the pads for the next start.
-fn source_lost(err: &moq_mux::Error) -> bool {
-	matches!(
-		err,
-		moq_mux::Error::Moq(_) | moq_mux::Error::Json(moq_json::Error::Net(_))
-	)
+/// Whether a failure is the source going away (its session closing, or its route going), which
+/// holds the pads for the next start. A refusal is not: no restart answers a path that names
+/// nothing or a token that doesn't grant it, so it fails the session, as a malformed catalog does.
+fn source_lost(err: &moq_net::Error) -> bool {
+	!matches!(err, moq_net::Error::NotFound | moq_net::Error::Unauthorized)}
+
+/// [`source_lost`] for a catalog read, where anything but a transport failure is malformed.
+fn catalog_lost(err: &moq_mux::Error) -> bool {
+	match err {
+		moq_mux::Error::Moq(err) | moq_mux::Error::Json(moq_json::Error::Net(err)) => source_lost(err),
+		_ => false,
+	}
 }
 
 /// Follow one broadcast's catalog, keeping one [`Pump`] per announced rendition in sync with it.
@@ -735,10 +741,11 @@ async fn follow_catalog(
 	let catalog_track = tokio::select! {
 		track = catalog_track.subscribe(hang::catalog::Catalog::default_subscription()) => match track {
 			Ok(track) => track,
-			Err(err) => {
+			Err(err) if source_lost(&err) => {
 				tracing::warn!(%err, "catalog unavailable, holding pads");
 				return Ok(());
 			}
+			Err(err) => return Err(anyhow::Error::from(err).context("catalog refused")),
 		},
 		_ = cancel.changed() => return Ok(()),
 	};
@@ -800,7 +807,7 @@ async fn follow_catalog(
 					// resolves with an error, which fails that pump's subscribe and ends
 					// it here.
 					Ok(None) => catalog_closed = true,
-					Err(err) if source_lost(&err) => {
+					Err(err) if catalog_lost(&err) => {
 						tracing::warn!(%err, "catalog lost, holding pads");
 						catalog_closed = true;
 					}
@@ -2568,6 +2575,27 @@ mod session_tests {
 		);
 		stop(session);
 		recorder.assert_one_pad_held();
+	}
+
+	/// A broadcast with no catalog refuses it, which no restart fixes, so the session fails
+	/// loudly instead of holding its pads.
+	#[test]
+	fn a_refused_catalog_fails_the_session() {
+		let element = element();
+		let origin = origin();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+
+		let (_shutdown, session) = follow(&element, &origin);
+		let err = super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
+			.expect("the refusal held the session")
+			.unwrap()
+			.expect_err("the refusal did not fail the session");
+		assert!(
+			matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::NotFound)),
+			"{err:?}"
+		);
 	}
 
 	/// A relay on loopback: an origin served over plain TCP to every session, which may also
