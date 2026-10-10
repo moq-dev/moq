@@ -4477,6 +4477,7 @@ dependencies = [
  "gstreamer",
  "hang",
  "moq-audio",
+ "moq-json",
  "moq-mux",
  "moq-net",
  "moq-tokio",
