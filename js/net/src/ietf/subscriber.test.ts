@@ -1,4 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
+import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
@@ -6,6 +7,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Tail } from "../tail.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
@@ -1489,6 +1491,51 @@ test("a group that claims its first object must start at zero", async () => {
 
 	track.close();
 });
+
+for (const [name, firstObject, bytes] of [
+	["the first object ID", false, []],
+	["the first object", true, []],
+	["the first payload after peeking object zero", false, [0]],
+] as const) {
+	test(`unsubscribing stops a subgroup stalled before ${name}`, async () => {
+		const { subscriber, track } = await subscribeTrack();
+		const opened = Promise.withResolvers<Tail>();
+		const open = Tail.prototype.open;
+		const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, sequence) {
+			opened.resolve(this);
+			return open.call(this, sequence);
+		});
+		const cancelled = jest.fn();
+		let controller: ReadableStreamDefaultController<Uint8Array>;
+		const readable = new ReadableStream<Uint8Array>({
+			start(value) {
+				controller = value;
+			},
+			cancel: cancelled,
+		});
+		const reader = new Reader(readable, new Uint8Array(bytes), VERSION);
+		const header = new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 3,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: groupFlags(firstObject),
+		});
+		const handled = subscriber.handleGroup(header, reader);
+		onTestFinished(async () => {
+			track.close();
+			if (cancelled.mock.calls.length === 0) controller.close();
+			await handled;
+			opening.mockRestore();
+		});
+		const tail = await opened.promise;
+		track.close();
+		await handled;
+		expect(cancelled).toHaveBeenCalledTimes(1);
+		// A completed handler must also release the live Tail entry, not just stop its reader.
+		await tail.settle(() => true, new Once<null>());
+	});
+}
 
 test("every object in a chunk reaches the reader before it wakes", async () => {
 	const { subscriber, track } = await subscribeTrack();
