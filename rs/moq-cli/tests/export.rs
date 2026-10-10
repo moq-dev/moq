@@ -67,8 +67,8 @@ fn export(relay: &Relay, linger: &str) -> (Child, Output) {
 	(child, output)
 }
 
-/// Start `moq <global> export ts <flags>`, collecting its stdout and stderr.
-fn export_with(relay: &Relay, global: &[&str], flags: &[&str]) -> (Child, Output, Output) {
+/// Start `moq <global> export ts <flags>`, collecting its stdout, and its stderr until it exits.
+fn export_with(relay: &Relay, global: &[&str], flags: &[&str]) -> (Child, Output, JoinHandle<String>) {
 	let mut child = moq(relay, global)
 		.args(["export", "ts"])
 		.args(flags)
@@ -77,7 +77,13 @@ fn export_with(relay: &Relay, global: &[&str], flags: &[&str]) -> (Child, Output
 		.spawn()
 		.expect("spawn export");
 	let output = collect(child.stdout.take().expect("stdout"));
-	let errors = collect(child.stderr.take().expect("stderr"));
+	// Read to the end, since the exit error is the last thing written before the pipe closes.
+	let mut stderr = child.stderr.take().expect("stderr");
+	let errors = tokio::spawn(async move {
+		let mut errors = Vec::new();
+		let _ = stderr.read_to_end(&mut errors).await;
+		String::from_utf8_lossy(&errors).into_owned()
+	});
 	(child, output, errors)
 }
 
@@ -280,7 +286,7 @@ async fn a_restarted_publisher_exits_one_without_stitch() {
 		"exited after {:?}, as though waiting out the linger",
 		started.elapsed()
 	);
-	let errors = String::from_utf8_lossy(&errors.lock().unwrap()).into_owned();
+	let errors = errors.await.unwrap();
 	assert!(errors.contains("--stitch"), "the error names --stitch: {errors}");
 	assert_eq!(
 		output.lock().unwrap().len(),
@@ -389,7 +395,7 @@ async fn an_old_publisher_that_stays_up_keeps_the_export() {
 		Some(1),
 		"the replacement exits 1 once the old one ends, got {status}"
 	);
-	let errors = String::from_utf8_lossy(&errors.lock().unwrap()).into_owned();
+	let errors = errors.await.unwrap();
 	assert!(errors.contains("--stitch"), "the error names --stitch: {errors}");
 	let output = output.lock().unwrap().clone();
 	assert!(
