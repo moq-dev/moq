@@ -10,6 +10,10 @@ resolve under the new epoch.
 
 ## Plan
 
+Decided 2026-10-10 in the epoch audit: correctness fixes gate m0, while
+seamless JS handover remains in m1. Move this existing Rust/JS parity fix
+under the broadcast-epoch release gate without expanding its scope.
+
 Found in #5141 (2026-10-10): on an epoch change JS ends a resolved request
 handle (it reports unroutable), while Rust keeps the resolved broadcast. Open
 track subscriptions survive in both. Decided 2026-10-10: align JS to Rust,

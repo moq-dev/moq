@@ -6,10 +6,16 @@
 and the hand-written TypeScript they replace is deleted. Hand-written
 TypeScript remains only for the transport pumps, timers, and the Promise
 helpers over the poll API. The translated moq-net tests and
-`just test interop --all` pass, and bundle size, per-frame CPU, and
-first-frame latency are no worse than the hand-written js/net.
+`just test interop --all` pass. The translator's bundle-size and per-frame
+CPU go/no-go still gates this implementation; the final browser comparison
+is a separate follow-up.
 
 ## Plan
+
+Decided in the 2026-10-10 audit: the
+[final browser report](/quest/m2/rs2ts-browser-report.md) belongs in m2 with
+its harness. Keep implementation measurements and the translator's go/no-go
+here; do not wait for that broader report to land generated lite.
 
 - The `@moq/net` API may change where the generated shape is no worse to
   use: disposable handles (`using`), `U64` for sequences and ids. Update

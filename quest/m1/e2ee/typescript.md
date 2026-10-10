@@ -8,6 +8,9 @@ the Rust crate name for name, without putting keys or crypto policy in `@moq/net
 
 ## Plan
 
+Decided in the 2026-10-10 audit: wait for the Rust generation API to settle,
+then implement against it independently of Rust media publisher integration.
+
 From the Rust fix (#4994): a grouped authentication or identity failure wakes every parked frame, group, and datagram read and releases the track and group demand; dropping the track consumer releases demand even while a group handle is held; a bad datagram stays an event until its key is exhausted. Use the same error and event types.
 
 - Add the package above `@moq/net`. `Credential` accepts a 32-byte secret or a nonextractable HKDF `CryptoKey` with `deriveBits` usage, rejects extractable keys, and never serializes the secret. `credential.path(semantic)` returns the opaque broadcast name. Mirror the Rust split (decided 2026-10-08): only a credential call that takes no epoch mints a producing generation (`epoch()`, `name()`, `produce()`), and a discovered `@moq/net` `Epoch` binds a consume-only one (`name()`, `consume()`), with the names the Rust core settles.
@@ -16,3 +19,7 @@ From the Rust fix (#4994): a grouped authentication or identity failure wakes ev
 - Identity state is two counters per key (invocations, plaintext bytes) and one monotonic sequence per track. Check payload size before taking a frame ordinal so a rejected write never burns an identity. Datagram receivers keep a 1024-bit sliding bitmask marked only after a successful open; failed opens count against the key; a grouped authentication failure closes the ordered track.
 - Pass every vector in `drafts/moq-e2ee-00.json` against [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), then cover pump ordering, saturation, and cancellation, protected payload ceilings, monotonic allocation, per-key exhaustion, bounded datagram suppression, bad-group termination, bad-datagram events, and a new epoch authenticating while the old keys do not. Exercise grouped tracks on both transports and datagrams on moq-lite via `insertDatagram`.
 - Add the package to `doc/lib/js/index.md` and the workspace; leave it unpublished until the browser components consume it.
+
+## Required
+
+- [Rust E2EE generations](/quest/m1/e2ee/rust-generations.md) - settles the producing/consuming API and names TypeScript mirrors
