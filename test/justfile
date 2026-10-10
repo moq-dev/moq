@@ -22,6 +22,7 @@ default:
 # which this recipe installs, as the interop and wasm harnesses do.
 harness:
     ./lib/harness.test.sh
+    ./interop/relay-log.test.sh
     cd .. && bun test test/interop/compat/resolve.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium

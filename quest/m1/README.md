@@ -203,4 +203,3 @@ ladders.
 - [moqsrc reconnect](/quest/m1/moqsrc-reconnect.md) - `moqsrc` redials after losing its relay and resumes on the same pads
 - [moq fetch closes cleanly](/quest/m1/moq-fetch-close.md) - `moq fetch` closes its session before exiting instead of leaving the relay to time it out
 - [Terminal dial errors](/quest/m1/moq-tokio-terminal-errors.md) - moq-tokio's reconnect loop stops on errors that can never succeed
-- [Interop close log](/quest/m1/interop-close-log.md) - the interop idle-out check reads the relay close log at a pinned level
