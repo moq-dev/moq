@@ -2,13 +2,17 @@
 
 ## Goal
 
-A connection to a host the process recently talked to starts at the previous
-connection's delivered rate instead of the initial window. A relay reconnect
-after a peer restart, a client's WebSocket-to-QUIC upgrade, and a redial after
-a GOAWAY reach their steady rate in one RTT, not a slow start. A stale or wrong
-estimate falls back to slow start without hurting the path.
+A QUIC connection to a host the process recently talked to starts at the
+previous QUIC connection's delivered rate instead of the initial window.
+A relay reconnect after a peer restart and a redial after a GOAWAY reach their
+steady rate in one RTT, not a slow start. A stale or wrong estimate falls back
+to slow start without hurting the path.
 
 ## Plan
+
+Decided in the 2026-10-10 audit: scope this to remembered QUIC connections.
+Transferring TCP estimates into a WebSocket-to-QUIC upgrade is out of scope;
+that upgrade starts without a seed.
 
 Follow the shape of draft-ietf-ccwg-careful-resume: the sender keeps a
 per-destination record of the last validated bandwidth estimate and minimum
@@ -38,6 +42,5 @@ only when the jump never makes the first second worse than slow start.
 
 ## Related
 
-- [Transport upgrade](/quest/m1/transport-upgrade/README.md) - one of the
-  reconnects this speeds up
+- [Transport upgrade](/quest/m1/transport-upgrade/README.md) - its first QUIC connection has no seed from TCP; later QUIC reconnects may reuse a remembered estimate
 - [noq#815](https://github.com/n0-computer/noq/issues/815) - the careful-resume proposal to n0

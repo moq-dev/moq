@@ -8,7 +8,9 @@ microbenchmarks do not exercise.
 
 ## Plan
 
-Decided 2026-10-08: m2, since nothing in m1 waits on browser measurements.
+Decided 2026-10-08 and reconciled in the 2026-10-10 audit: keep this in m2.
+The rs2ts final browser report moves beside it, so m1's translator go/no-go
+and implementation do not wait for this harness.
 
 The JS microbenchmarks already exist: the seven Bun sweeps in `js/net/bench`
 (`broadcasts`, `forward`, `frames`, `lite-varint`, `reader`, `track`,
@@ -41,4 +43,5 @@ pieces and add a focused recipe with artifacts under the benchmark conventions.
 
 ## Related
 
+- [Generated lite browser report](/quest/m2/rs2ts-browser-report.md) - compares generated and hand-written js/net through this harness
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - reporting conventions
