@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::future::Future;
 
 use moq_mux::catalog::hang::Extra;
 use moq_mux::import;
@@ -16,32 +15,6 @@ use crate::{Error, Id, NonZeroSlab, State, moq_demand};
 struct TaskEntry {
 	close: Option<oneshot::Sender<()>>,
 	callback: OnStatus,
-}
-
-/// A watch-only demand handle: a track's subscribers or a group request's waiting fetches.
-pub(crate) trait Demand: Send + Sync + 'static {
-	fn used(&self) -> impl Future<Output = moq_net::Result<()>> + Send;
-	fn unused(&self) -> impl Future<Output = moq_net::Result<()>> + Send;
-}
-
-impl Demand for moq_net::track::Demand {
-	fn used(&self) -> impl Future<Output = moq_net::Result<()>> + Send {
-		moq_net::track::Demand::used(self)
-	}
-
-	fn unused(&self) -> impl Future<Output = moq_net::Result<()>> + Send {
-		moq_net::track::Demand::unused(self)
-	}
-}
-
-impl Demand for moq_net::group::Demand {
-	fn used(&self) -> impl Future<Output = moq_net::Result<()>> + Send {
-		moq_net::group::Demand::used(self)
-	}
-
-	fn unused(&self) -> impl Future<Output = moq_net::Result<()>> + Send {
-		moq_net::group::Demand::unused(self)
-	}
 }
 
 /// A subscriber's request for a track the broadcast has not declared, kept with the
@@ -448,13 +421,13 @@ impl Publish {
 		Ok(self.media.get(media).ok_or(Error::MediaNotFound)?.demand())
 	}
 
-	/// Watch a track's or group request's demand, reporting the current state and every change.
+	/// Watch a track's subscriber demand, reporting the current state and every change.
 	///
 	/// `on_demand` fires with a [`moq_demand`] value immediately and again on each change, then
-	/// once with a terminal code: `0` when the track or request ends or the watcher is closed,
-	/// negative when it aborts. Seeding with the current state is what makes a late registration
-	/// safe: a track that went unused before the watcher existed still reports it.
-	pub fn demand(&mut self, demand: impl Demand, on_demand: OnStatus) -> Result<Id, Error> {
+	/// once with a terminal code: `0` when the track ends or the watcher is closed, negative when
+	/// the track aborts. Seeding with the current state is what makes a late registration safe: a
+	/// track that went unused before the watcher existed still reports it.
+	pub fn demand(&mut self, demand: moq_net::track::Demand, on_demand: OnStatus) -> Result<Id, Error> {
 		let channel = oneshot::channel();
 		let id = self.demand.insert(Some(TaskEntry {
 			close: Some(channel.0),
@@ -477,7 +450,7 @@ impl Publish {
 
 	pub(crate) async fn run_demand(
 		callback: OnStatus,
-		demand: impl Demand,
+		demand: moq_net::track::Demand,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Neither handle exposes the current state, only the level-triggered waits, and exactly
@@ -689,11 +662,6 @@ impl Publish {
 	pub fn group_request_info(&self, request: Id) -> Result<(u64, u8, u64), Error> {
 		let request = self.group_request.get(request).ok_or(Error::NotFound)?;
 		Ok((request.sequence(), request.priority(), request.frame_start()))
-	}
-
-	/// A watch-only handle to the fetches still waiting on a group request.
-	pub fn group_request_demand(&self, request: Id) -> Result<moq_net::group::Demand, Error> {
-		Ok(self.group_request.get(request).ok_or(Error::NotFound)?.demand())
 	}
 
 	/// Accept a group request, returning a group handle like [`Self::track_group`].
