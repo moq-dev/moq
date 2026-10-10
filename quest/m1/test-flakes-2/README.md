@@ -35,4 +35,5 @@ Public API: none. Wire: none.
 - [Relay restart rebind](/quest/m1/test-flakes-2/relay-restart-rebind.md) - the crash drill restarts on its original UDP address under concurrent load
 - [Impaired handshake](/quest/m1/test-flakes-2/impaired-handshake.md) - the impaired cluster drills' clients never time out while connecting
 - [Cluster burst overrun](/quest/m1/test-flakes-2/cluster-burst-overrun.md) - the impaired cluster burst drill always overruns its bottleneck, so it always exercises it
+- [TS passthrough jump](/quest/m1/test-flakes-2/ts-passthrough-jump.md) - moq-cli's flagged-jump TS passthrough test passes under load without wall-clock pacing
 - [Media audio tone](/quest/m1/media-audio-tone.md) - the `just test media` audio-tone check passes under load, fixed at its cause
