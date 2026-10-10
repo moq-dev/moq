@@ -25,7 +25,8 @@ const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 // object 0 is still the head, and any other first ID is dropped.
 const FIRST_OBJECT_BIT = 0x40;
 
-function hasFirstObjectBit(version: IetfVersion): boolean {
+/** Whether the subgroup header carries FIRST_OBJECT: draft-18 and later, not drafts 14-17. */
+export function hasFirstObjectBit(version: IetfVersion): boolean {
 	switch (version) {
 		case Version.DRAFT_14:
 		case Version.DRAFT_15:
