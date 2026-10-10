@@ -17,7 +17,10 @@ publisher on lite-05 and lite-06 names every sequence from its
 SUBSCRIBE_START to the end that the subscription never got (skipped,
 stale, or missing its head), just before its FIN. Still missing: JS
 publishers, drops sent as soon as a group is given up rather than at the end,
-and groups reset before their header. lite-07 (still `moq-lite-07-wip`,
+and groups reset before their header. The end-of-track drops also miss a gap
+the publisher aged out of its grace while the subscriber still waits on it:
+the publisher ages a gap from when it queued the group above it, which can be
+well before stream credit lets that group's header out. lite-07 (still `moq-lite-07-wip`,
 unpublished) removed SUBSCRIBE_DROP for a `Stream Count` on SUBSCRIBE_END
 (#4224).
 
