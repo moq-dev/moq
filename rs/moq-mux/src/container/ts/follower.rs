@@ -252,18 +252,19 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					if let Poll::Ready(resolved) = waiter.poll_future(resolving.as_mut()) {
 						let (broadcast, catalog) = match resolved {
 							Ok(resolved) => resolved,
-							// A return that went before it resolved is no return yet. Until the
-							// next announcement says otherwise, nothing serves the path.
+							// An instance that went before it resolved is no return or switch yet.
+							// Until the next announcement says otherwise, nothing serves the path:
+							// a stitch stays on the export it has, and a return keeps lingering.
 							Err(err) => {
-								let Some((end, deadline)) = settling else {
-									return Poll::Ready(Err(err));
-								};
-								tracing::warn!(path = %self.path, %err, "broadcast returned and went again, still waiting");
+								tracing::warn!(path = %self.path, %err, "broadcast went before it resolved, still waiting");
 								self.serving = Serving::Gone;
-								self.state = State::Settling {
-									end,
-									grace: None,
-									deadline,
+								self.state = match settling {
+									Some((end, deadline)) => State::Settling {
+										end,
+										grace: None,
+										deadline,
+									},
+									None => State::Running { settling: None },
 								};
 								continue;
 							}

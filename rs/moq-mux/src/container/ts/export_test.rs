@@ -7589,6 +7589,42 @@ async fn a_follower_keeps_lingering_when_a_return_goes_before_it_resolves() {
 	assert_eq!(start.elapsed(), linger);
 }
 
+/// A stitch whose replacement goes before it resolves is no switch yet: the export stays on
+/// its own instance and follows the next replacement instead.
+#[tokio::test(start_paused = true)]
+async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_resolves() {
+	let origin = crate::source::produce_origin();
+	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut follower = follower(&origin).await.with_stitch(true);
+
+	// Replaced, but the replacement's catalog request is never answered before it goes.
+	let second = origin.publish("live", route()).unwrap();
+	let unanswered = second.dynamic();
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"resolving the replacement"
+	);
+	drop((second, unanswered));
+	let third = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"following the next replacement"
+	);
+
+	// Once the first instance is gone too, the third one's end ends the export.
+	finish(first);
+	finish(third);
+	let end = tokio::time::timeout(Duration::from_secs(10), follower.next())
+		.await
+		.expect("the third instance's end ends the export");
+	assert!(matches!(end, Ok(None)), "{end:?}");
+}
+
 /// Without stitching, another instance taking the path fails the follower once the export
 /// ends, however long the linger.
 #[tokio::test(start_paused = true)]
