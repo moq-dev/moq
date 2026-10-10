@@ -401,8 +401,14 @@ impl Web {
 		let ws = config.resolved_ws();
 
 		let http = if let Some(listener) = http_listener {
-			let mut server = crate::listener::server(listener, health.clone(), WebAcceptor::plain(ws))?;
-			header_timeout(&mut server, state.timeout);
+			let server = crate::listener::server(
+				listener,
+				crate::listener::Config {
+					health: health.clone(),
+					timeout: state.timeout,
+				},
+				WebAcceptor::plain(ws),
+			)?;
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -416,8 +422,14 @@ impl Web {
 				config.https.key,
 				config.https.root,
 			));
-			let mut server = crate::listener::server(listener, health.clone(), WebAcceptor::tls(rustls_config, ws))?;
-			header_timeout(&mut server, state.timeout);
+			let server = crate::listener::server(
+				listener,
+				crate::listener::Config {
+					health: health.clone(),
+					timeout: state.timeout,
+				},
+				WebAcceptor::tls(rustls_config, ws),
+			)?;
 			Some(server.serve(app))
 		} else {
 			None
@@ -478,20 +490,6 @@ async fn get_cors(request: axum::extract::Request, next: axum::middleware::Next)
 		);
 	}
 	response
-}
-
-/// Close an HTTP/1 connection that hasn't sent its full request headers within
-/// `timeout`, or never when `None`.
-///
-/// axum-server builds hyper without a timer, and hyper enforces no header deadline
-/// without one, so a client that trickles its headers would otherwise hold its
-/// connection forever.
-fn header_timeout<A>(server: &mut axum_server::Server<crate::listener::Peer, A>, timeout: Option<std::time::Duration>) {
-	server
-		.http_builder()
-		.http1()
-		.timer(hyper_util::rt::TokioTimer::new())
-		.header_read_timeout(timeout);
 }
 
 /// Build a [`rustls::ServerConfig`] for the HTTPS listener.

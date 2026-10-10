@@ -57,6 +57,7 @@ axum-server = { workspace = true }
 bytes = { workspace = true }
 bytesize = "2.4.2"
 futures = { workspace = true }
+http-body = "1.0.1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 humantime = { workspace = true }
 hyper-util = { workspace = true }
@@ -90,6 +91,7 @@ moq-uring = { workspace = true, optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-shaper = { path = "../moq-shaper" }
 qmux = { workspace = true, features = ["tcp"] }
@@ -107,3 +109,7 @@ socket2 = { workspace = true, features = ["all"] }
 # path rather than the trigger behind it.
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+[[bench]]
+name = "http_idle"
+harness = false
