@@ -73,6 +73,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// The current segment's boundary was declared by the source (rather than inferred from a
 	// keyframe), so each track cuts its timeline where it opens its group for the segment.
 	declared: bool,
+	dropped_metadata: u64,
 }
 
 /// The catalog entry for one imported track, whichever section it lives in.
@@ -160,7 +161,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			pending_cut: false,
 			segment: 0,
 			declared: false,
+			dropped_metadata: 0,
 		}
+	}
+
+	/// Return the number of metadata units discarded by this importer.
+	pub fn dropped_metadata(&self) -> u64 {
+		self.dropped_metadata
 	}
 
 	/// Declare that the next fragment starts a new segment, for callers that know the source's
@@ -233,6 +240,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for (atom, start, size) in parsed {
 			match atom {
 				Any::Ftyp(_) => {}
+				Any::Emsg(_) => {
+					self.dropped_metadata += 1;
+					if self.dropped_metadata == 1 {
+						tracing::warn!(count = self.dropped_metadata, "discarding fMP4 emsg metadata");
+					}
+				}
 				// A styp opens a CMAF segment: the on-disk segmentation is the boundary,
 				// landing on the next fragment.
 				Any::Styp(_) => self.pending_cut = true,

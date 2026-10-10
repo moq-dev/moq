@@ -366,7 +366,7 @@ impl<S: Stream> Client<S> {
 					}
 					// Codec config arrives in the sequence-header tags, so metadata
 					// isn't forwarded.
-					ClientSessionEvent::StreamMetadataReceived { .. } => {}
+					ClientSessionEvent::StreamMetadataReceived { .. } => publisher.metadata.record(),
 					other => tracing::trace!(?other, "ignoring RTMP event during pull"),
 				},
 				ClientSessionResult::UnhandleableMessageReceived(_) => {}
@@ -490,6 +490,7 @@ async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> 
 /// path.
 struct Publisher {
 	importer: FlvImport,
+	metadata: crate::metadata::Dropped,
 	// A clone of the importer's producer, so an end can close the broadcast
 	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
@@ -511,6 +512,7 @@ impl Publisher {
 		importer.decode(&flv::file_header())?;
 		Ok(Self {
 			importer,
+			metadata: crate::metadata::Dropped::default(),
 			epoch,
 			broadcast: handle,
 		})
@@ -547,6 +549,47 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn pull_metadata_drops_warn_once() {
+		let (stream, _peer) = tokio::io::duplex(1024);
+		let (session, _) = ClientSession::new(crate::rml::sessions::ClientSessionConfig::new()).unwrap();
+		let mut client = Client {
+			stream,
+			session,
+			work: VecDeque::new(),
+			app: "live".into(),
+			export_max_delay: crate::DEFAULT_MAX_DELAY,
+			import_max_age: None,
+			import_bandwidth: Default::default(),
+		};
+		let origin = moq_tokio::origin::spawn();
+		let mut publisher = Publisher::new(&origin, "metadata", Default::default()).unwrap();
+		let events = (0..2).map(|_| {
+			ClientSessionResult::RaisedEvent(ClientSessionEvent::StreamMetadataReceived {
+				metadata: crate::rml::sessions::StreamMetadata::new(),
+			})
+		});
+		client.pull_results(events, &mut publisher).await.unwrap();
+		assert_eq!(publisher.metadata.count, 2);
+		publisher.finish().unwrap();
+		drop(publisher);
+		logs_assert(|lines| {
+			let warnings = lines
+				.iter()
+				.filter(|line| line.contains("discarding RTMP stream metadata"))
+				.count();
+			let summary = lines
+				.iter()
+				.any(|line| line.contains("RTMP metadata discard summary") && line.contains("count=2"));
+			if warnings == 1 && summary {
+				Ok(())
+			} else {
+				Err(format!("warnings={warnings}, summary={summary}"))
+			}
+		});
+	}
+
 	use crate::server::{Request, Server};
 
 	/// Loopback: dial the crate's own server and pull a broadcast the server plays
