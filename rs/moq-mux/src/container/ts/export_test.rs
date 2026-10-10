@@ -7597,11 +7597,10 @@ async fn drain_follower(follower: &mut super::Follower) -> (Vec<Frame>, Option<c
 	}
 }
 
-/// The exact route going and a covering prefix of the same epoch taking over after the gap
-/// reaches the follower as an update rather than an end and a start
-/// (`quest/m0/broadcast-epoch/follow-gap.md`), while the export sees its request end. The
-/// follower takes that for its own instance returning: the export carries on through the
-/// prefix under the program already announced, with no break flagged.
+/// The exact route going and a covering prefix of the same epoch taking over after a gap that
+/// ended the export's request, with the follower unpolled across it, is its own instance
+/// returning: the export carries on through the prefix under the program already announced,
+/// with no break flagged.
 #[tokio::test(start_paused = true)]
 async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	let origin = crate::source::produce_origin();
@@ -7666,4 +7665,30 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 		pmts(&frames).iter().all(|(version, _)| *version == 0),
 		"the PMT keeps its version"
 	);
+}
+
+/// A broader prefix starting, restarting, and ending while the exact route still serves the
+/// path changes nothing: the request resolves through the exact route, so none of it is a
+/// replacement, and the export ends cleanly with its own broadcast.
+#[tokio::test(start_paused = true)]
+async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
+	let origin = crate::source::produce_origin();
+	let route = |epoch| moq_net::origin::Route::default().with_epoch(epoch);
+	let mut exact = origin.publish("pool/job", route(moq_net::Epoch::mint())).unwrap();
+	let catalog = crate::catalog::Producer::<()>::new(&mut exact, Default::default()).unwrap();
+	let source = crate::Source::new(origin.consume(), "pool/job");
+	let mut follower = super::Follower::new(Export::new(source).await.unwrap()).unwrap();
+	let quiet = Duration::from_secs(1);
+
+	let pool = origin.dynamic("pool", route(moq_net::Epoch::mint())).unwrap();
+	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a start");
+	drop(pool);
+	let pool = origin.dynamic("pool", route(moq_net::Epoch::mint())).unwrap();
+	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a restart");
+	drop(pool);
+	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "an end");
+
+	finish((exact, catalog));
+	let end = follower.next().await;
+	assert!(matches!(end, Ok(None)), "no replacement: {end:?}");
 }

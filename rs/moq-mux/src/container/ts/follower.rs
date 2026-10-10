@@ -74,8 +74,7 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	/// The epoch of the instance being exported.
 	epoch: Option<moq_net::Epoch>,
 	serving: Serving,
-	/// The route the export resolved may have gone since: every route went, or another route
-	/// of the same instance took over. An export that ends then follows its instance back.
+	/// Every route went since the export resolved its broadcast.
 	ended: bool,
 	/// An announcement arrived since the follower was built.
 	started: bool,
@@ -286,16 +285,9 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				self.ended = true;
 				Serving::Gone
 			}
-			// The same instance over another route, which subscriptions ride out. But `follow`
-			// folds a gap that ended the export's request into an update when a covering route of
-			// the same epoch takes over (`quest/m0/broadcast-epoch/follow-gap.md`), so an export
-			// that ends after one follows its instance onto that route.
-			moq_net::announce::Event::Update(announce) => {
-				if announce.route.epoch.is_some() && announce.route.epoch == self.epoch {
-					self.ended = true;
-				}
-				return;
-			}
+			// The same instance over another route, which subscriptions ride out. A gap that
+			// ended the export's request comes as an end and a start instead.
+			moq_net::announce::Event::Update(_) => return,
 		};
 	}
 
