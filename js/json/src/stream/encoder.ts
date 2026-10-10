@@ -124,7 +124,7 @@ export class Encoder<T> {
 		// actual size for the same reason. The budget is also below `@moq/flate`'s per-frame decode
 		// cap, so any record that fits is one every consumer can inflate.
 		const budget = this.#budget;
-		const bound = this.#compress ? deflateBound(bytes.byteLength) : bytes.byteLength;
+		const bound = this.#compress ? Flate.bound(bytes.byteLength) : bytes.byteLength;
 		if (budget.frames >= Group.MAX_GROUP_FRAMES || budget.bytes + bound > Group.MAX_GROUP_CACHE_BYTES) {
 			throw new NetError.GroupTooLarge();
 		}
@@ -151,12 +151,4 @@ export class Encoder<T> {
 			},
 		};
 	}
-}
-
-// The largest a sync-flushed DEFLATE frame of `len` raw bytes can grow to: zlib's `deflateBound` for
-// its default window and memory level, which both pako and moq-flate use. Incompressible input falls
-// back to stored blocks, 5 bytes per 16 KiB; the constant covers the block headers and the flush,
-// whose fixed 4-byte marker is stripped anyway. Division rather than shifts, which wrap past 2^31.
-export function deflateBound(len: number): number {
-	return len + Math.floor(len / 4096) + Math.floor(len / 16384) + Math.floor(len / 33554432) + 13;
 }

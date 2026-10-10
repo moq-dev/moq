@@ -23,7 +23,6 @@ maintainer at release time:
 
 ## Required
 
-- [One external GPU image for every encoder](/quest/m2/gpu-surface.md) - the neutral surface and auto-selection
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the AMD encoder
 - [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - the Intel proof
 - [GPU capacity and health](/quest/m2/gpu-health.md) - keyed by the same device identity; moq.pro's admission still needs vendor code without it

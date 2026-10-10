@@ -18,9 +18,7 @@ dashboard flow. Downstream (moq.pro) owns those.
 
 ## Plan
 
-Decided 2026-10-05, from moq.pro's
-[stream preflight](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/qos-preflight.md):
-the media checks are generic, so they live upstream in this line; moq.pro
+Decided 2026-10-05: the media checks are generic, so they live upstream in this line; moq.pro
 keeps the project-scoped target and dashboard. Rejected: deferring them.
 
 Guidance, to be settled while building:
@@ -58,4 +56,3 @@ Public API: a preflight check and its report type, and a CLI sink. Wire: none.
 
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - the relay's view of the same timestamp lateness and monotonicity
 - [Intra-refresh](/quest/m2/intra-refresh/README.md) - a stream without IDR keyframes, which the sync point checks must not fail
-- [moq.pro: stream preflight](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/qos-preflight.md) - the project-scoped target and dashboard flow built on these checks

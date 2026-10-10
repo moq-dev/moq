@@ -13,7 +13,7 @@
 //! already serves.
 //!
 //! A route swap on one front is swept over its tracks and the copies each track
-//! still holds from earlier routes.
+//! still holds from earlier routes, and a front retiring over the fronts around it.
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
@@ -231,55 +231,57 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 /// honor each cursor's scope rather than reuse one global winner.
 fn bench_reprice_duplicate(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/reprice_duplicate");
-	for (duplicates, subscribers) in CONTENDED {
-		let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s"));
-		group.bench_function(id, |b| {
-			let (producer, _driver) = origin::Producer::new(origin::Config::default());
-			let _routes: Vec<_> = (1..=duplicates)
-				.map(|peer| {
-					producer
-						.scope(
-							"",
-							&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
-						)
-						.unwrap()
-						.dynamic(PATH, peer_route(peer as u64, INCUMBENT_COST))
-						.unwrap()
-				})
-				.collect();
-			let challenger = duplicates as u64 + 1;
-			let route = producer
-				.dynamic(PATH, peer_route(challenger, INCUMBENT_COST + 1))
-				.unwrap();
-			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
-				.map(|peer| {
-					producer
-						.consume()
-						.scope(
-							"",
-							&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", peer % 2)).unwrap()),
-						)
-						.unwrap()
-						.with_hidden(true)
-						.announced()
-				})
-				.collect();
-			for cursor in &mut cursors {
-				while cursor.next().now_or_never().flatten().is_some() {}
-			}
-			b.iter(|| {
-				for cost in [INCUMBENT_COST - 1, INCUMBENT_COST + 1] {
-					route.update(peer_route(challenger, cost)).unwrap();
-					for cursor in &mut cursors {
-						let event = cursor.next().now_or_never().flatten().expect("winner changed");
-						let moq_net::announce::Event::Update(update) = event else {
-							panic!("expected an update: got {event:?}");
-						};
-						assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(INCUMBENT_COST)));
-					}
+	for incumbent_cost in [INCUMBENT_COST, origin::Cost::MAX.value() - 1] {
+		for (duplicates, subscribers) in CONTENDED {
+			let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s_cost{incumbent_cost}"));
+			group.bench_function(id, |b| {
+				let (producer, _driver) = origin::Producer::new(origin::Config::default());
+				let _routes: Vec<_> = (1..=duplicates)
+					.map(|peer| {
+						producer
+							.scope(
+								"",
+								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
+							)
+							.unwrap()
+							.dynamic(PATH, peer_route(peer as u64, incumbent_cost))
+							.unwrap()
+					})
+					.collect();
+				let challenger = duplicates as u64 + 1;
+				let route = producer
+					.dynamic(PATH, peer_route(challenger, incumbent_cost + 1))
+					.unwrap();
+				let mut cursors: Vec<announce::Consumer> = (0..subscribers)
+					.map(|peer| {
+						producer
+							.consume()
+							.scope(
+								"",
+								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", peer % 2)).unwrap()),
+							)
+							.unwrap()
+							.with_hidden(true)
+							.announced()
+					})
+					.collect();
+				for cursor in &mut cursors {
+					while cursor.next().now_or_never().flatten().is_some() {}
 				}
+				b.iter(|| {
+					for cost in [incumbent_cost - 1, incumbent_cost + 1] {
+						route.update(peer_route(challenger, cost)).unwrap();
+						for cursor in &mut cursors {
+							let event = cursor.next().now_or_never().flatten().expect("winner changed");
+							let moq_net::announce::Event::Update(update) = event else {
+								panic!("expected an update: got {event:?}");
+							};
+							assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(incumbent_cost)));
+						}
+					}
+				});
 			});
-		});
+		}
 	}
 	group.finish();
 }
@@ -422,6 +424,36 @@ fn bench_request(c: &mut Criterion) {
 					.now_or_never()
 					.expect("fails synchronously");
 				assert!(matches!(result, Err(moq_net::Error::Unroutable)));
+			});
+		});
+	}
+	group.finish();
+}
+
+/// A front minted, resolved, and retired once its holder leaves, among `fronts`
+/// others held open. A retiring front leaves the table it shares with them, so a
+/// cost that grows with the table rather than with the one path shows up as a slope.
+fn bench_retire(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/retire");
+	for fronts in [100, 1_000, 10_000] {
+		group.bench_function(BenchmarkId::from_parameter(format!("{fronts}f")), |b| {
+			let mut fleet = fanout(fronts + 1, 0);
+			let waiter = kio::Waiter::noop();
+			let held: Vec<_> = (0..fronts)
+				.map(|i| fleet.consumer.request_broadcast(format!("room/{i}"), None))
+				.collect();
+			fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+			let _held: Vec<_> = held
+				.into_iter()
+				.map(|pending| pending.now_or_never().expect("resolved once driven").expect("local"))
+				.collect();
+			let path = format!("room/{fronts}");
+			b.iter(|| {
+				let pending = fleet.consumer.request_broadcast(&path, None);
+				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				drop(pending.now_or_never().expect("resolved once driven").expect("local"));
+				// Nothing holds it and a local source keeps no track, so it retires here.
+				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 			});
 		});
 	}
@@ -847,6 +879,7 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
+	bench_retire,
 	bench_pool_churn,
 	bench_handoff,
 	bench_relay,

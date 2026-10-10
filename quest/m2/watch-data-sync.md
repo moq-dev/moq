@@ -20,11 +20,14 @@ releases it.
 - An untimed track's payloads add no timestamp wait; they apply in order as
   they arrive. Since 2026-10-05 a track is all timed or all untimed (the untimed
   model, [#4822](https://github.com/moq-dev/moq/pull/4822)), so no stream mixes the two.
-- OneTooMany is the application this waited for (2026-10-01): their web
-  frontend holds KLV and MAVLink telemetry back to the video playhead with
-  its own sync code, which this replaces. In m2 rather than m1 because
-  they aren't blocked.
+- This replaces the sync code a web frontend writes today to hold KLV or
+  MAVLink telemetry back to the video playhead. In m2 rather than m1, since
+  that workaround exists.
+- Decided 2026-10-08: the A/V clock and the watch worker land first, since
+  they change what `Sync` waits on and where it runs.
 
 ## Required
 
 - [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md) - the reader releases each value by the timestamp its consumer returns
+- [A/V clock](/quest/m1/av-clock.md) - the playhead the reader releases against
+- [Watch worker](/quest/m1/watch-worker.md) - moves `Sync` into a worker, where the reader registers

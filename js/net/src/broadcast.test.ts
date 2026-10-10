@@ -3,6 +3,7 @@ import { Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { textFrame } from "./mock.ts";
 import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { Producer as TrackProducer } from "./track.ts";
@@ -40,7 +41,7 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	// Serving that single request fans out to both subscribers.
 	if (!request) throw new Error("expected request");
 	const producer = request.accept({ timescale: Timescale.MILLI });
-	producer.writeString("hello");
+	producer.writeFrame(textFrame("hello"));
 	expect(await a.readString()).toBe("hello");
 	expect(await b.readString()).toBe("hello");
 
@@ -92,102 +93,176 @@ test("dynamic track sequences continue across producer replacements", async () =
 	nextGeneration.close();
 });
 
-test("concurrent dynamic producers share a sequence namespace", async () => {
+test("publishing-side subscriptions coalesce onto one request", async () => {
 	const broadcast = new BroadcastProducer();
 	const pulled = wireOf(broadcast).requested();
-	const firstSubscriber = broadcast.track("media").subscribe();
-	const secondSubscriber = broadcast.track("media").subscribe();
-	const firstRequest = await pulled;
-	const secondRequest = await wireOf(broadcast).requested();
-	if (!firstRequest || !secondRequest) throw new Error("expected requests");
-	const firstProducer = firstRequest.accept({ timescale: Timescale.MILLI });
-	const secondProducer = secondRequest.accept({ timescale: Timescale.MILLI });
+	const info = broadcast.track("media").info();
+	const a = broadcast.track("media").subscribe().ordered();
+	const b = broadcast.track("media").subscribe().ordered();
 
-	expect(firstProducer.appendGroup().sequence).toBe(0);
-	expect(secondProducer.appendGroup().sequence).toBe(1);
-	expect(firstProducer.appendGroup().sequence).toBe(2);
+	// One request serves the info lookup and every subscriber.
+	const request = await pulled;
+	expect(request?.name).toBe("media");
+	expect(await pendingRequest(broadcast)).toBeUndefined();
 
-	firstSubscriber.close();
-	secondSubscriber.close();
-	firstProducer.close();
-	secondProducer.close();
+	if (!request) throw new Error("expected request");
+	const producer = request.accept({ timescale: Timescale.MILLI });
+	producer.writeFrame(textFrame("hello"));
+	expect(await a.readString()).toBe("hello");
+	expect(await b.readString()).toBe("hello");
+	await info;
+	// The lookup leaves the shared producer to its subscribers, and stops counting as demand.
+	expect(producer.closed.peek()).toBeUndefined();
+	a.close();
+	b.close();
+	await broadcast.demand().unused();
+	expect(producer.closed.peek()).toBeUndefined();
+
+	producer.close();
 	broadcast.close();
 });
 
-test("a sibling producer's groups do not settle an aborted end", async () => {
+test("an info lookup joining a subscription's request stays demand after the subscriber leaves", async () => {
 	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
 	const pulled = wireOf(broadcast).requested();
-	const firstSubscriber = broadcast.track("media").subscribe();
-	const secondSubscriber = broadcast.track("media").subscribe();
-	const firstRequest = await pulled;
-	const secondRequest = await wireOf(broadcast).requested();
-	if (!firstRequest || !secondRequest) throw new Error("expected requests");
-	const firstProducer = firstRequest.accept({ timescale: Timescale.MILLI });
-	const secondProducer = secondRequest.accept({ timescale: Timescale.MILLI });
+	const subscriber = broadcast.track("media").subscribe();
+	const info = broadcast.track("media").info();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
 
-	const reader = firstProducer.subscribe();
-	firstProducer.finishAt(3);
-	for (let i = 0; i < 3; i++) secondProducer.appendGroup().close();
-	const boom = new Error("boom");
-	firstProducer.close(boom);
+	// Flush every pending notification, so only the lookup is left holding demand.
+	subscriber.close();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(request.demand().used.peek()).toBe(false);
+	expect(demand.used.peek()).toBe(true);
 
-	// The first producer never received the groups its end promised, so it was cut off.
-	expect(firstProducer.closed.peek()).toBe(boom);
-	await expect(reader.recvGroup()).rejects.toBe(boom);
-
-	firstSubscriber.close();
-	secondSubscriber.close();
-	secondProducer.close();
+	request.accept({ timescale: Timescale.MILLI });
+	await info;
+	await demand.unused();
 	broadcast.close();
 });
 
-test("a clean close ends at the track's own last group, not a sibling's", async () => {
+test("an info lookup releases a request nobody subscribed to", async () => {
 	const broadcast = new BroadcastProducer();
 	const pulled = wireOf(broadcast).requested();
-	const firstSubscriber = broadcast.track("media").subscribe();
-	const secondSubscriber = broadcast.track("media").subscribe();
-	const firstRequest = await pulled;
-	const secondRequest = await wireOf(broadcast).requested();
-	if (!firstRequest || !secondRequest) throw new Error("expected requests");
-	const firstProducer = firstRequest.accept({ timescale: Timescale.MILLI });
-	const secondProducer = secondRequest.accept({ timescale: Timescale.MILLI });
+	const info = broadcast.track("media").info();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	const producer = request.accept();
+	await info;
+	expect(producer.closed.peek()).toBeDefined();
 
-	const reader = firstProducer.subscribe();
-	firstProducer.appendGroup().close();
-	for (let i = 0; i < 3; i++) secondProducer.appendGroup().close();
-	firstProducer.close();
-
-	// The sibling took 1..3, which the first producer will never send.
-	expect(reader.final()).toBe(1);
-
-	firstSubscriber.close();
-	secondSubscriber.close();
-	secondProducer.close();
+	// The next subscription asks again.
+	const subscriber = broadcast.track("media").subscribe();
+	expect((await pendingRequest(broadcast))?.name).toBe("media");
+	subscriber.close();
 	broadcast.close();
 });
 
-test("finishAt accepts an end below a sibling's groups", async () => {
+test("held info lookups keep a request until the last one lets go", async () => {
 	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
 	const pulled = wireOf(broadcast).requested();
-	const firstSubscriber = broadcast.track("media").subscribe();
-	const secondSubscriber = broadcast.track("media").subscribe();
-	const firstRequest = await pulled;
-	const secondRequest = await wireOf(broadcast).requested();
-	if (!firstRequest || !secondRequest) throw new Error("expected requests");
-	const firstProducer = firstRequest.accept({ timescale: Timescale.MILLI });
-	const secondProducer = secondRequest.accept({ timescale: Timescale.MILLI });
+	const first = new AbortController();
+	const opened = wireOf(broadcast).resolveTrackInfo("media", first.signal);
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	const producer = request.accept();
+	const second = new AbortController();
+	await wireOf(broadcast).resolveTrackInfo("media", second.signal);
+	await opened;
 
-	const reader = firstProducer.subscribe();
-	firstProducer.appendGroup().close();
-	for (let i = 0; i < 3; i++) secondProducer.appendGroup().close();
-	expect(() => firstProducer.finishAt(0)).toThrow("track end 0 is below the next sequence 1");
-	firstProducer.finishAt(2);
-	expect(reader.final()).toBe(2);
+	// The lookup that opened the request lets go first, under the one still holding it.
+	first.abort();
+	expect(producer.closed.peek()).toBeUndefined();
+	expect(demand.used.peek()).toBe(true);
 
-	firstSubscriber.close();
-	secondSubscriber.close();
-	firstProducer.close();
-	secondProducer.close();
+	second.abort();
+	expect(producer.closed.peek()).toBeDefined();
+	expect(demand.used.peek()).toBe(false);
+	broadcast.close();
+});
+
+test("an abandoned info lookup stops counting as demand, and its request goes once answered", async () => {
+	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
+	const pulled = wireOf(broadcast).requested();
+	const hold = new AbortController();
+	const info = wireOf(broadcast).resolveTrackInfo("media", hold.signal);
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	expect(demand.used.peek()).toBe(true);
+
+	hold.abort();
+	await expect(info).rejects.toThrow();
+	expect(demand.used.peek()).toBe(false);
+
+	// The handler still gets an open track, and the answer lets it go.
+	const producer = request.accept({ timescale: Timescale.MILLI });
+	producer.writeFrame(textFrame("late"));
+	await producer.closed;
+	broadcast.close();
+});
+
+test("a held info lookup on an inserted track counts as demand until it lets go", async () => {
+	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
+	const track = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const hold = new AbortController();
+	await wireOf(broadcast).resolveTrackInfo("media", hold.signal);
+	expect(demand.used.peek()).toBe(true);
+
+	hold.abort();
+	expect(demand.used.peek()).toBe(false);
+	expect(track.closed.peek()).toBeUndefined();
+	broadcast.close();
+});
+
+test("a held info lookup ending after removeTrack leaves demand alone", async () => {
+	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
+	const track = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const subscriber = track.subscribe();
+	const hold = new AbortController();
+	await wireOf(broadcast).resolveTrackInfo("media", hold.signal);
+	expect(demand.used.peek()).toBe(true);
+
+	broadcast.removeTrack("media");
+	expect(demand.used.peek()).toBe(false);
+	hold.abort();
+	expect(demand.used.peek()).toBe(false);
+	subscriber.close();
+	await Promise.resolve();
+	expect(demand.used.peek()).toBe(false);
+
+	// Re-inserting the track counts it again.
+	broadcast.insertTrack(track);
+	expect(demand.used.peek()).toBe(false);
+	const resubscriber = track.subscribe();
+	await Promise.resolve();
+	expect(demand.used.peek()).toBe(true);
+
+	resubscriber.close();
+	track.close();
+	broadcast.close();
+});
+
+test("removeTrack leaves a track that only a request serves", async () => {
+	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
+	const pulled = wireOf(broadcast).requested();
+	const subscriber = broadcast.track("media").subscribe();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	const producer = request.accept();
+
+	broadcast.removeTrack("media");
+	expect(demand.used.peek()).toBe(true);
+	expect(producer.closed.peek()).toBeUndefined();
+
+	subscriber.close();
+	producer.close();
 	broadcast.close();
 });
 
@@ -284,13 +359,13 @@ test("consumer track subscriptions fan out and close independently", async () =>
 	expect(await pendingRequest(consumer)).toBeUndefined();
 
 	const producer = request.accept({ timescale: Timescale.MILLI });
-	producer.writeString("one");
+	producer.writeFrame(textFrame("one"));
 	expect(await a.readString()).toBe("one");
 	expect(await b.readString()).toBe("one");
 
 	// ...and closing one subscriber leaves the other (and the shared upstream) delivering.
 	a.close();
-	producer.writeString("two");
+	producer.writeFrame(textFrame("two"));
 	expect(await b.readString()).toBe("two");
 });
 
@@ -330,8 +405,8 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 		.subscribe({ maxDelay: Milli(5000) })
 		.ordered();
 
-	producer.writeString("hello");
-	producer.writeString("world");
+	producer.writeFrame(textFrame("hello"));
+	producer.writeFrame(textFrame("world"));
 
 	// Neither subscriber steals from the other: both see every frame in order.
 	expect(await a.readString()).toBe("hello");
@@ -345,12 +420,12 @@ test("a late subscriber replays the cached window", async () => {
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	// Written before anyone subscribes; retained in the cache for replay.
-	producer.writeString("early");
+	producer.writeFrame(textFrame("early"));
 
 	const late = broadcast.track("video").subscribe().ordered();
 	expect(await late.readString()).toBe("early");
 
-	producer.writeString("later");
+	producer.writeFrame(textFrame("later"));
 	expect(await late.readString()).toBe("later");
 });
 
@@ -389,12 +464,12 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		// A subscriber that never reads. Its sink must not grow without bound.
 		const stalled = broadcast.track("video").subscribe();
 
-		producer.writeString("old");
+		producer.writeFrame(textFrame("old"));
 
 		// Advance past the cache window and write again to trigger a prune. The old
 		// (closed, aged-out) group is dropped from the stalled sink, not retained.
 		setSystemTime(new Date(12_000));
-		producer.writeString("fresh");
+		producer.writeFrame(textFrame("fresh"));
 
 		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
 		// was evicted, not still buffered ahead of it.
@@ -430,7 +505,7 @@ test("insertTrack rejects a duplicate live name", () => {
 test("a finished track is still served from its cache", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("track1", { timescale: Timescale.MILLI });
-	track.writeString("last");
+	track.writeFrame(textFrame("last"));
 	track.close();
 
 	// Like Rust, finishing keeps the track: a late subscriber reads the cache, then the clean end.

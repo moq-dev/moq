@@ -23,20 +23,9 @@ match CI. `just check` and `just fix` refuse to run outside it; set
 | `just boy` | Run the [MoQ Boy](/bin/demo) demo. |
 
 Recipes default to the local relay at `http://localhost:4443`. Pass
-`https://cdn.moq.dev/anon` to use the public relay instead. The default BBB/TOS
-publishers and `just pub serve` use MPEG-TS, with one audio frame per PES to
-avoid batching latency. Use `just pub cmaf` only when testing fMP4/CMAF.
-
-BBB publishes the original 720p video and a pre-encoded 360p rendition at
-about 600 kbps. The player can switch between them as bandwidth or viewport
-size changes, without encoding while publishing. Consumers that only support
-one rendition get the 720p track.
-
-To reproduce the hosted SD asset, run `just pub encode-bbb-sd`, then
-`just pub upload bbb-sd.mp4` with access to the video bucket. The encode keeps
-the source frame timestamps and keyframes, and holds the final SD frame long
-enough to match the source audio's loop period. `just pub check-bbb` verifies
-both assets across three loops. Remove the local SD file before re-encoding.
+`https://cdn.moq.dev/anon` to use the public relay instead. `just pub bbb`
+publishes the original 720p video plus a pre-encoded 360p rendition, so the
+player can switch between them without encoding while publishing.
 
 ## Debugging
 
@@ -52,12 +41,12 @@ fetch groups with `curl`, which is the quickest way to see what a relay holds.
 ## Windows
 
 Nix isn't available on Windows, so `setup.bat` installs the toolchain with
-winget: Git, Rust, Bun, Node, just, CMake, and the Visual Studio Build Tools.
+winget: Git, Rust, Bun, Node, just, CMake, FFmpeg, and the Visual Studio Build Tools.
 Run it from an Administrator terminal on a fresh machine, and re-run it after
 reopening the terminal if it reports tools missing from `PATH`.
 
 Run `just` recipes from **Git Bash**, not PowerShell or `cmd`: they need
-`bash` and `cygpath`. Only one `just dev` can run at a time on Windows, because
+`bash`. Only one `just dev` can run at a time on Windows, because
 the free-port probe needs `lsof`. If a rebuild fails with "Access is denied",
 a previous relay is still running:
 
@@ -75,8 +64,7 @@ just check
 
 These diff the branch against its upstream (or `origin/main`) and run only the
 modules the diff reaches. The map from paths to modules lives in
-`sh/dispatch.sh`. Recipes stay thin: any logic (conditionals, loops, traps)
-lives in a script under `sh/`.
+`sh/dispatch.sh`.
 
 See [CONTRIBUTING.md](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md)
 for branch targeting, commit messages, and reviews, and [Agent setup](/setup/agent)

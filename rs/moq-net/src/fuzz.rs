@@ -204,7 +204,7 @@ impl AnnounceWriter {
 					cost: Default::default(),
 				}
 			}
-			Announced::Update(id, hops) => lite::AnnounceBroadcast::Restart {
+			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
 				hops: self.encoder.update(*id, hops.clone()),
 				cost: Default::default(),
@@ -260,7 +260,7 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 			lite::AnnounceBroadcast::Active { suffix, hops, .. } => decoder
 				.start(suffix, hops)
 				.map(|(suffix, hops)| Announced::Start(suffix, hops)),
-			lite::AnnounceBroadcast::Restart { id, hops, .. } => {
+			lite::AnnounceBroadcast::Update { id, hops, .. } => {
 				decoder.update(id, hops).map(|(_, hops)| Announced::Update(id, hops))
 			}
 			lite::AnnounceBroadcast::EndedId { id } => decoder.end(id).map(|_| Announced::End(id)),
@@ -891,6 +891,7 @@ pub fn seeds() -> Vec<Seed> {
 				fetch_type,
 				range_filters: false,
 				fill_timeout: false,
+				properties_wanted: true,
 			};
 			fetch.encode_bytes(*version).ok()
 		}) else {

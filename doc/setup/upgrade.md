@@ -19,6 +19,26 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **A replaced broadcast restarts announce consumers, and subscriptions stay.**
+  Rust's `AnnounceEvent` gains `Restart`, `@moq/net`'s announce events gain the
+  `"restart"` kind, moq-ffi's `MoqAnnounceEvent` gains `Restart`, and libmoq's
+  `moq_announce_kind` gains `MOQ_ANNOUNCE_KIND_RESTART`: another publisher
+  instance now serves the prefix (a newer epoch, or another route without one,
+  including a reconnect), so request the path again. A newer epoch no longer
+  ends subscriptions with `Unroutable`; they stay on the old instance until
+  dropped or its route goes. A restart was an end then a start, and still is on
+  moq-lite 06 and older and moq-transport. moq-lite 07 adds `ANNOUNCE_RESTART`
+  (0x3), and lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it
+  always meant.
+- **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
+  catalog codec string and dimensions are enough, `moq export fmp4` writes an
+  `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,
+  and VPS in the samples. High AVC profiles (110, 122, 244, and the rest whose
+  chroma or bit depth the string does not carry), HEVC beyond Main and Main
+  Still Picture, and a catalog missing dimensions still wait for the SPS. A
+  returning Annex-B rendition is matched on that catalog record, so an encoder
+  that restarts with a new SPS can return. A keyframe whose parameter sets never
+  appeared in the track ends the export instead of waiting 30 seconds.
 - **moq-binary is moq-flate, and @moq/binary is @moq/flate.** The opaque
   `snapshot` and `stream` tracks moved beside the codec; the wire and the
   catalog's `binary` section are unchanged. In Rust, `moq_binary::X` is
@@ -27,10 +47,47 @@ These land with the next breaking release, not the 2026-09-23 train.
   now carries `moq_net::Error`, so it is no longer `PartialEq`. moq-mux's
   `Error::Binary` is `Error::Flate`. In TypeScript, import `Snapshot` and
   `Stream` from `@moq/flate`.
-- **moq-ffi flate tracks.** `publish_binary_snapshot` / `publish_binary_stream`
-  are `publish_flate_snapshot` / `publish_flate_stream`, taking
-  `MoqFlateConfig` and returning `MoqFlateSnapshotProducer` /
-  `MoqFlateStreamProducer`. The C `moq_publish_binary_*` calls are unchanged.
+- **moq-ffi data tracks wrap a track.** The broadcast's
+  `publish_binary_*`, `publish_json_*`, and `subscribe_json_*` are gone.
+  Create the track with `publish_track` or `subscribe_track`, then construct
+  `MoqFlateSnapshotProducer` / `MoqFlateStreamProducer` (taking
+  `MoqFlateConfig`) or `MoqJsonSnapshotProducer` / `MoqJsonStreamProducer`
+  from the broadcast and the track, or `MoqJsonSnapshotConsumer` /
+  `MoqJsonStreamConsumer` from the track. The wrappers keep JSON under its own
+  namespace: `moq.json` in Python, `moq.dev/moq/json` in Go, `dev.moq.json` in
+  Kotlin, `package:moq/json.dart` in Dart, and `Json` in Swift. The C
+  `moq_publish_binary_*` calls are unchanged.
+- **moq-ffi clients and servers take a config record.** `MoqClient::new()` and
+  `MoqServer::new()` plus their setters are `MoqClient::new(MoqClientConfig)` and
+  `MoqServer::new(MoqServerConfig)`, with nested `tls`, `quic`, `websocket`, and
+  `backoff` records and a new `versions` list. A value the native side cannot use
+  fails construction with `MoqError::Config`, including a bad bind address that
+  used to fail later as `Bind`. The `subscribe` origin is `consume` everywhere:
+  Python's `Client(..., subscribe=)` is `consume=`, Go's `WithSubscribeOrigin` is
+  `WithConsumeOrigin`. A server request's `set_publish` / `set_consume` are
+  arguments to `accept(publish, consume)`, where null inherits the server's
+  origin (Go: `Accept(ctx, nil, nil)`). Go's `Requests(ctx)` iterators are
+  `All(ctx)`, and its `Status*` constants are `ConnectionStatus*`; Kotlin and
+  Dart read announcements as `announced(config).updates()`.
+- **moq-ffi media lives in a `media` namespace.** The broadcast's
+  `publish_audio`, `publish_video`, `publish_container`, their `_on_track` and
+  `_stream` variants, `set_video_properties`, `set_catalog_section`,
+  `subscribe_catalog`, `subscribe_media`, and `fetch_media_group` are gone.
+  Construct `MoqMediaTrackProducer::audio` / `video` (from the broadcast, a
+  `MoqMediaTarget::Named` or `Requested` target, and the init record),
+  `MoqMediaContainerProducer`, `MoqMediaCatalogProducer`,
+  `MoqMediaCatalogConsumer::subscribe`, `MoqMediaContainerConsumer::subscribe`,
+  or `MoqMediaContainerGroupConsumer::fetch` instead. Producers drop `name`,
+  `used`, and `unused`; read them through `demand()`. The wrappers expose these
+  as `moq.media` in Python, `moq.dev/moq/media` in Go, `dev.moq.media` in
+  Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift.
+- **Python and Go durations are native.** `Frame`, `Datagram`, `Subscription`,
+  `TrackInfo`, and `ConnectionStats` carry `timedelta` in Python and
+  `time.Duration` in Go instead of microsecond integers: `max_delay_us` is
+  `max_delay`, `timestamp_us` is `timestamp`, and `rtt_us` is `rtt`. A frame
+  timestamp read from an untimed track is `None` / `nil`. A Python string
+  passed where a list of strings belongs (`tls_roots="ca.pem"`) raises
+  `TypeError` instead of splitting into characters.
 - **Demand is read through `demand()`.** In Rust, `track::Producer`'s
   `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`,
   and so are `group::Producer`'s `used` and `unused`.
@@ -71,10 +128,22 @@ These land with the next breaking release, not the 2026-09-23 train.
   the rendition's own delay added on top. `Sync.out.jitter` now always
   equals `Sync.out.delay`, and `"auto"` with no decoder registered resolves to
   0 rather than 100 ms.
+- **`moq export ts --delay` replaces `--max-age`** (#4645). Each frame is
+  written that long after its decode time, on a clock that follows the
+  source's; `--max-age` and `--latency-max` are refused with the new flag
+  named. In Rust, moq-mux's `ts::Export::with_max_age` is `with_delay`, and
+  `ts::stats::Export` gains the dropped-frame count (late frames, and the
+  video frames then dropped waiting for a keyframe), measured drift and
+  out-of-tolerance count beside its `streams` rows. It is no longer `Eq`.
 - **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
-  source's own timestamps and let the catalog clock map them to wall time;
-  pin that mapping with `Config::with_clock` when the source's zero is known.
+  source's own timestamps and let the catalog clock map them to wall time.
+  An importer whose first frame arrives once the clock is in use (taken with
+  `catalog.clock()`, published in a catalog, or pinned with
+  `Config::with_clock`) shifts its timestamps onto it, so its first frame lands
+  at now; a `with_clock` catalog no longer keeps an importer's timestamps
+  verbatim. Importers sharing a timestamp base reserve through one
+  `catalog.timebase()`.
 - **moq-net owns its transport traits.** `moq_net::web_transport_trait` is
   gone, and `transport::poll::{Session, SendStream, RecvStream}` no longer
   extend `web_transport_trait::poll`. They carry their own `poll_*` methods,
@@ -98,9 +167,8 @@ These land with the next breaking release, not the 2026-09-23 train.
 - **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
   `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
   instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
-  `Instant` with `.at(catalog.clock().capture(instant)?)`, reading
-  `catalog.clock()` at write time, since an importer's first frame re-anchors
-  it. A timestamp ahead of now is published rather than refused.
+  `Instant` with `.at(catalog.clock().capture(instant)?)`. A timestamp ahead
+  of now is published rather than refused.
 - **moq-mux importers publish the catalog at their first frame.** The fMP4,
   MKV, and MPEG-TS importers used to publish it at their init segment (`moov`,
   `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the
@@ -141,7 +209,7 @@ These land with the next breaking release, not the 2026-09-23 train.
   `moq_video_decoder_output`, `moq_consume_video`, and `moq_consume_audio`.
   `moq export fmp4`, `mkv`, `flv`, `h264`, `h265`, and `rtmp` take
   `--max-delay`, and refuse `--max-age`. `track::Info::max_age`,
-  `MoqTrackInfo.max_age_us`, `moq import --max-age`, and `moq export ts --max-age` are unchanged, as is the wire.
+  `MoqTrackInfo.max_age_us`, and `moq import --max-age` are unchanged, as is the wire.
 - **moq-relay auth takes the client-CA answer.** `auth::Config::validate` and
   `init` take `client_ca: bool`, whether any listener verifies client
   certificates, and `validate_client_ca` is gone. `moq --listen` with an
@@ -168,8 +236,7 @@ These land with the next breaking release, not the 2026-09-23 train.
 - **moq-mux TS stats live in `ts::stats`.** `ts::Stats` is
   `ts::stats::Snapshot` and `ts::StreamStats` is `ts::stats::Stream`, whose
   `track` is an owned `String`. `ts::Export::stats` returns
-  `ts::stats::Export`, which carries only `streams`; feed it to
-  `stats::Log` with `.into()`. `ts::MultipleProgramsError` is
+  `ts::stats::Export`; feed it to `stats::Log` with `.into()`. `ts::MultipleProgramsError` is
   `#[non_exhaustive]`: recover it by downcast and read `programs`.
 - **@moq/publish drops `OpusConfig.usedtx`.** Chromium's DTX output shifts the
   audio timeline, so Opus DTX is always off (the WebCodecs default). Remove the
@@ -215,6 +282,17 @@ These land with the next breaking release, not the 2026-09-23 train.
     On a moq-transport track with `TIMESCALE`, an object without a Timestamp
     is malformed. A new subscriber with no start on an untimed track starts at
     the latest group.
+- **CMAF decodes at the frame timestamp.** A fragment's earliest sample
+  presents at its moq-net frame timestamp; `tfdt` only orders the samples. In
+  TypeScript, `Container.Format.decode` and `Cmaf.decodeDataSegment` take that
+  timestamp: pass `frame.timestamp` alongside `frame.payload`, or `undefined`
+  for an untimed frame, whose samples present at `tfdt`.
+  `Cmaf.decodeTimestamp` is gone; the frame timestamp is the fragment's time.
+  moq-mux's CMAF `Wire::write` refuses a track whose timescale isn't the init's
+  `mdhd` timescale with `fmp4::Error::TimescaleMismatch`. `import::Track` and
+  `TrackStream` accept a CMAF rendition's track at that timescale; a track you
+  create yourself declares it with `track::Info::with_timescale`. Both decoders refuse a `trun` whose
+  `data_offset` doesn't start at the next sample in the `mdat`.
 
 ## Wire
 

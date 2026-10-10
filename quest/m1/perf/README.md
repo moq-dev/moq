@@ -47,27 +47,30 @@ row per io_uring worker.
 
 Decided in the 2026-09-30 audit: io_uring is off by default and ships in no
 package, and none of the uring micro-opts is measured on noq. The unmeasured
-ones moved out (3129, 3200, 3202, the open contract, and cache shard to m2;
-3201 and 3204 to m3), and NAPI busy polling (3203), registered wait
-arguments (3205), and the priority `set_track` wakes were dropped. Egress
-requeue folded into Run to quiescence; egress keep-alive and owned decode
-copies folded into Group cost. The benchmark noise estimate and the noq
-re-profile come first, since every quest here accepts "within noise". Lock
-profile and One enter per turn rank next: they produce the numbers that decide
-the rest.
+ones moved out (3200 to m2; 3129 with the open contract, 3201, 3202, and 3204
+to m3), and NAPI busy polling (3203), registered wait arguments (3205), and
+the priority `set_track` wakes were dropped. Egress requeue folded into Run to
+quiescence; egress keep-alive folded into Group cost. The benchmark noise
+estimate comes first, since every quest here accepts "within noise". The
+profiling recipe and One enter per turn rank next: they produce the numbers
+that decide the rest.
+
+Decided 2026-10-08: the CPU and allocation profile merged into the profiling
+recipe ([Relay profiling](/quest/m1/perf/lock-profile.md)), so the relay has
+one recipe with capture modes; #3199 moved to m2 beside 3200, since it is an
+equally unmeasured ring micro-opt; cache shard was deleted, since #5031's
+profile shows no pool contention.
 
 ## Required
 
 - [Performance comparisons](/quest/m1/performance-comparisons.md) - the noise estimate every "within noise" verdict here depends on
-- [Performance profiles](/quest/m1/performance-profiles.md) - the reproducible noq profile the quests below re-measure on
-- [Lock profile](/quest/m1/perf/lock-profile.md) - a bpftrace recipe reports each worker's time blocked on locks, by stack, with no code in kio
+- [Relay profiling](/quest/m1/perf/lock-profile.md) - one recipe captures lock wait by stack (first), CPU stacks, and heap profiles, with no code in kio
 - [kio channel contention](/quest/m1/perf/kio-channel-contention.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers)
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
 - [Group cost](/quest/m1/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Announce replay](/quest/m1/perf/announce-replay.md) - the initial announce set replays in linear time, so joins don't slow with the route count
 - [Demand aggregate](/quest/m1/perf/demand-aggregate.md) - a track subscribe, leave, or preference update no longer walks every reader of the track
-- [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk
+- [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
 - [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
-- [#3199](/quest/m1/perf/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup
 - [Remove moq-uring copies](/quest/m1/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, after the fork

@@ -8,9 +8,10 @@ lost packet reaches the next hop at its own output offset while the hole is
 still being recovered, so a loss on one hop no longer delays everything behind
 it on the next.
 
-The line first measures whether this is worth it, then builds it only if the
-measurement says so. A measured no-go deletes the build quests; the loss-delay
-metric and the bench stay either way.
+The line measures whether this is worth it. Only the loss-delay metric and
+the bench are quests today; on a go, the build quests (offset writes in
+`moq-quic`, frame ranges, the transport trait, relay cut-through) are
+re-planned from git history against the bench's numbers.
 
 Non-goals: end consumers (players, `moq-cli`) keep ordered reads, since a
 decoder needs whole frames. No MoQ wire change; QUIC already allows a sender to
@@ -20,13 +21,17 @@ send stream offsets in any order.
 
 Decided 2026-10-02: the line moved from m2 to m3. It is a speculative
 optimization with no consumer asking for it, so it parks until one does and
-is deleted if it goes stale. The QUIC primitives land in `moq-quic` after
-[the hard fork](/quest/m1/quic/fork/README.md) rather than in moq-dev/noq.
+is deleted if it goes stale. The QUIC primitives land in `moq-quic`, the
+[hard fork](/quest/m1/quic/fork/README.md)'s stack.
+
+Decided 2026-10-08: the four build quests were deleted. They churned with
+every frame-model and transport change while waiting on a verdict nobody had
+measured, so they are re-planned from git history if the bench says go. The
+design decisions below stay as the starting point for that re-plan.
 
 Decided 2026-09-30:
 
-- Measure first, and plan the build now so the verdict only decides go or
-  no-go, not the design. The build quests require the [bench](/quest/m3/cut-through/bench.md).
+- Measure first; the [bench](/quest/m3/cut-through/bench.md) gates any build.
 - The gain is roughly the time the relay would spend bursting the held bytes
   downstream after the hole fills: small when the egress hop has headroom,
   larger for a big I-frame on a tight hop. The bench sweeps exactly that.
@@ -35,7 +40,7 @@ Decided 2026-09-30:
   earlier header values (lite's timestamp delta, IETF's object id delta). A hole
   inside a payload blocks nothing, since the frame sizes locate both the input
   and the output bytes. Passing a hole into later frames needs several
-  in-flight frames per group; the relay quest prototypes both scopes and keeps
+  in-flight frames per group; the build prototypes both scopes and keeps
   the one the bench justifies.
 - The opportunity is measured on the real two-hop path, not against a direct
   connection: the gain exists only with a relay in the middle.
@@ -59,7 +64,7 @@ Public API: additive `transport::poll` methods in moq-net; the loss-delay counte
 `moq-stats` ingress rows. Wire: none for MoQ; the counter is a `moq-stats`
 field.
 
-End to end: once [the relay quest](/quest/m3/cut-through/relay.md) lands, re-run the
+End to end: once a relay build lands, re-run the
 bench on the same sweep and record before and after in this README before
 closing the line. No new doc page: nothing user-facing changes beyond the
 stats field, which its quest documents inline.
@@ -68,13 +73,9 @@ stats field, which its quest documents inline.
 
 - [Loss delay](/quest/m3/cut-through/loss-delay.md) - relays report, per broadcast, the ingress bytes a loss held back by at least one RTT
 - [Bench](/quest/m3/cut-through/bench.md) - a lossy relay hop swept over loss, frame size, and egress headroom, measuring the post-hole drain time, with a go or no-go verdict
-- [Offset writes in moq-quic](/quest/m3/cut-through/quic.md) - send streams accept writes past a gap and send them right away
-- [Frame ranges](/quest/m3/cut-through/frames.md) - frames fill out of order, several at once per group, and a reader sees each range as it lands
-- [Transport trait](/quest/m3/cut-through/transport.md) - moq-net's `transport::poll` carries unordered reads and offset writes, implemented for `moq-quic`
-- [Relay cut-through](/quest/m3/cut-through/relay.md) - lite and IETF group streams read out of order and write each range at its output offset
 
 ## Related
 
-- [Unordered qmux](/quest/m3/p2p/unordered.md) - the same head-of-line problem on the data channel transport
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - orders streams; offset writes order ranges within one
 - [QoS](/quest/m1/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
+- [Frame slots are cached for free](/quest/m1/frame-slot-charge.md) - changes how the cache charges the in-flight frames a cut-through build would hold

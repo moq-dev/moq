@@ -1,7 +1,9 @@
-import { race, Signal } from "@moq/signals";
+import { type GetPromise, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
+import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import {
 	closeError,
 	controlTimeout,
@@ -16,17 +18,18 @@ import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import { type Cursor, type Reader, type Stream, UnexpectedEnd } from "../stream.ts";
+import { type Cursor, Reader, type Stream, UnexpectedEnd } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, type Timescale } from "../time.ts";
+import { Milli, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
+import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
-import { Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
+import { decodeObjectTime, Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -54,6 +57,11 @@ import { Version } from "./version.ts";
 // concurrent QUIC streams (Chrome ~100); past the cap openBi() silently
 // blocks. The timeout turns that into a clear error.
 const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
+
+// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
+// candidate outranks it, while the route stays selectable as the last path. Matches Rust
+// Cost::DRAIN: cost is the whole mechanism, not a separate state.
+const DRAIN_COST: Cost = 2n ** 62n - 1n;
 
 // A live subscription, as the track alias its data streams name resolves to.
 type Subscription = {
@@ -150,6 +158,13 @@ export class Subscriber {
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
 
+	// What the peer's SETUP declared about being solicited (MoQ Solicit), `undefined`
+	// when it declared nothing.
+	#solicit?: boolean;
+
+	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
+	#goaway?: GetPromise<Drain>;
+
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
 		this.#localClose = true;
@@ -165,6 +180,8 @@ export class Subscriber {
 		quic,
 		cluster,
 		hidden = false,
+		solicit,
+		goaway,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -174,11 +191,41 @@ export class Subscriber {
 		cluster?: Cluster.Hops;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** What the peer's SETUP declared about being solicited (MoQ Solicit). */
+		solicit?: boolean;
+		/** Settles when the peer sends GOAWAY. */
+		goaway?: GetPromise<Drain>;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
 		this.#cluster = cluster;
 		this.#hidden = hidden;
+		this.#solicit = solicit;
+		this.#goaway = goaway;
+		// A draining peer usually stops publishing namespaces, so reprice from the signal
+		// itself. Waiting for another message would leave the route primary until close.
+		if (goaway) void goaway.then(() => this.#drainAnnounced());
+	}
+
+	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
+	// session's route outranks this one, deliberately past draft-19 section 10.4's SHOULD
+	// NOT: refusing them would fail requests that land before the replacement is up.
+	#goingAway(): boolean {
+		return this.#goaway?.peek() !== undefined;
+	}
+
+	// What a route costs once the peer has asked us to leave.
+	#priced(route: Route): Route {
+		if (!this.#goingAway()) return route;
+		if (route.cost === DRAIN_COST) return route;
+		return { ...route, cost: DRAIN_COST };
+	}
+
+	// Reprice every live advertisement. Idempotent, since the signal stays set.
+	#drainAnnounced(): void {
+		for (const [path, info] of this.#announced) {
+			this.#updateAnnounce(path, info.route);
+		}
 	}
 
 	/**
@@ -196,7 +243,7 @@ export class Subscriber {
 	/** The route an advertisement carries; one without a path is anonymous and free. */
 	#route(advert: Cluster.Advert | undefined): Route {
 		if (advert === undefined) return { hops: [UNKNOWN_HOP], cost: Cost.zero };
-		return { hops: advert.hops, cost: { warm: advert.cost, cold: advert.cost } };
+		return { hops: advert.hops, cost: advert.cost };
 	}
 
 	/**
@@ -205,7 +252,9 @@ export class Subscriber {
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
-	 * that only answers are both discovered.
+	 * that only answers are both discovered. A draft-14 or draft-15 peer that declared no
+	 * MoQ Solicit is not asked for the empty prefix, so an unscoped subscriber only hears
+	 * what that peer tells.
 	 *
 	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
@@ -241,9 +290,12 @@ export class Subscriber {
 	 * first. A second one is the same namespace said twice, not news.
 	 */
 	#attachAnnounce(path: Path.Valid, route: Route) {
+		route = this.#priced(route);
 		const existing = this.#announced.get(path);
 		if (existing) {
 			existing.count += 1;
+			// A second advertisement after GOAWAY still must not win selection.
+			if (this.#goingAway()) this.#updateAnnounce(path, existing.route);
 			return;
 		}
 		this.#announced.set(path, { count: 1, route });
@@ -263,6 +315,7 @@ export class Subscriber {
 	 * the first hop now says, so the shared consume stays.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
+		route = this.#priced(route);
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;
@@ -310,6 +363,20 @@ export class Subscriber {
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
 		const version = this.#session.version;
+
+		// A zero-field track namespace was a protocol violation until draft-16 allowed
+		// it. A peer that never declared MoQ Solicit is not ours: it may enforce that, and
+		// it tells us unasked anyway, so send nothing and stay registered for its
+		// unsolicited PUBLISH_NAMESPACE. Returning would drop this consumer before one
+		// could land. A peer that declared Solicit only tells when asked, so it still is.
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
+		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
+			// No request stream ends this wait, so the session's end has to.
+			const ends: PromiseLike<unknown>[] = [announced.closed];
+			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
+			await Promise.race(ends);
+			return;
+		}
 
 		// Suffixes live on this stream, so a repeat is recognized as an update to the
 		// advertisement rather than a second one, which would leak the count.
@@ -1165,6 +1232,94 @@ export class Subscriber {
 			stream.stop(e);
 		} finally {
 			read();
+		}
+	}
+
+	/**
+	 * Receive QUIC datagrams, each an OBJECT_DATAGRAM for one of our subscriptions.
+	 *
+	 * Returns at once on a transport without datagrams, and once the datagram stream ends or
+	 * fails. A malformed datagram throws a {@link ProtocolViolation}, which ends the session.
+	 *
+	 * @internal
+	 */
+	async runDatagrams(): Promise<void> {
+		if (!this.#quic || DatagramStream.maxDatagramSize(this.#quic) === 0) return;
+		const reader = DatagramStream.datagramReader(this.#quic);
+		if (!reader) return;
+
+		try {
+			for (;;) {
+				// The stream errors once the session closes, which ends this loop like any other.
+				const next = await reader.read().catch(() => undefined);
+				if (!next || next.done) return;
+				await this.#recvDatagram(next.value);
+			}
+		} finally {
+			reader.releaseLock();
+		}
+	}
+
+	/**
+	 * Deliver one OBJECT_DATAGRAM as a datagram on its subscription's track: a single-frame
+	 * group at the Group ID.
+	 *
+	 * One the model cannot carry is dropped like any lost datagram: an Object past ID 0 (the
+	 * group would need a second object), a status other than Normal, an alias that is not
+	 * bound yet (the draft lets us drop rather than buffer), or no Timestamp on a track that
+	 * declared a timescale.
+	 */
+	async #recvDatagram(data: Uint8Array): Promise<void> {
+		const version = this.#session.version;
+		const datagram = await ObjectDatagram.decode(data, version);
+		const { trackAlias: alias, groupId: sequence } = datagram;
+
+		if ((datagram.objectId ?? 0) !== 0) {
+			console.debug(`dropping a datagram past object 0: alias=${alias} group=${sequence}`);
+			return;
+		}
+		let payload: Uint8Array;
+		if ("status" in datagram.body) {
+			if (datagram.body.status !== 0) {
+				console.debug(
+					`dropping a datagram status: alias=${alias} group=${sequence} status=${datagram.body.status}`,
+				);
+				return;
+			}
+			payload = new Uint8Array();
+		} else {
+			payload = datagram.body.payload;
+		}
+
+		const subscription = this.#aliases.peek(alias);
+		if (!subscription) {
+			console.debug(`dropping a datagram for an unbound alias: alias=${alias} group=${sequence}`);
+			return;
+		}
+
+		// Like a subgroup object: a track that declared no timescale is untimed.
+		const timescale = this.#timescales.get(alias);
+		let timestamp: Timestamp | undefined;
+		if (timescale !== undefined && datagram.properties !== undefined) {
+			try {
+				timestamp = await new Reader(undefined, datagram.properties, version).decode((c) =>
+					decodeObjectTime(c, timescale),
+				);
+			} catch (err: unknown) {
+				throw new ProtocolViolation(`malformed OBJECT_DATAGRAM properties: ${reason(error(err))}`, {
+					cause: err,
+				});
+			}
+		}
+		if (timescale !== undefined && timestamp === undefined) {
+			console.debug(`dropping an unstamped datagram: alias=${alias} group=${sequence}`);
+			return;
+		}
+
+		try {
+			subscription.track.insertDatagram(sequence, timestamp, payload);
+		} catch (err: unknown) {
+			console.debug(`dropping datagram: alias=${alias} group=${sequence} error=${reason(error(err))}`);
 		}
 	}
 }

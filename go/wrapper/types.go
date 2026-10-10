@@ -6,8 +6,6 @@ import ffi "moq.dev/moq-ffi/moq"
 // These are plain data, so type aliases are exact: a moq.AudioFrame is an
 // ffi.MoqAudioFrame, constructible and comparable across the boundary.
 type (
-	// Audio describes one audio rendition in a broadcast catalog: codec, sample rate, channel count, whether it is enabled, and container.
-	Audio = ffi.MoqAudio
 	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec or AacAudioCodec;
 	// adding a codec later adds a constructor, not a breaking enum change.
 	AudioCodec = ffi.MoqAudioCodec
@@ -21,20 +19,8 @@ type (
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
 	// AudioFrame is one audio frame: PCM payload plus a presentation timestamp in microseconds.
 	AudioFrame = ffi.MoqAudioFrame
-	// Catalog is a broadcast's manifest: its video and audio renditions plus display metadata.
-	Catalog = ffi.MoqCatalog
-	// ConnectionStats holds transport metrics for a session (RTT, bandwidth, byte and packet counters); each field is nil when unreported.
-	ConnectionStats = ffi.MoqConnectionStats
 	// ConnectionStatus is a connection lifecycle transition reported by Session.Status.
 	ConnectionStatus = ffi.MoqConnectionStatus
-	// Datagram is a best-effort track datagram as received: sequence number, timestamp, and payload.
-	Datagram = ffi.MoqDatagram
-	// Dimensions is a width and height in pixels.
-	Dimensions = ffi.MoqDimensions
-	// Frame is a raw track frame: a payload and its presentation timestamp in microseconds.
-	Frame = ffi.MoqFrame
-	// MediaFrame is a Frame plus a flag for group starts or video keyframes; audio flags only group starts.
-	MediaFrame = ffi.MoqMediaFrame
 	// ErrorScope is whether a protocol code is from the session or stream registry.
 	ErrorScope = ffi.MoqErrorScope
 	// FetchGroupOptions configures a single FetchGroup call, currently just the delivery priority.
@@ -43,7 +29,7 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// Route is the hop chain a broadcast takes to reach an origin, and its costs: warm Cost plus undiscounted Cold (nil Cold means Cost).
+	// Route is the hop chain a broadcast takes to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
@@ -59,29 +45,12 @@ type (
 	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
 	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
 	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
-	// Subscription holds subscriber-side delivery preferences: priority, ordering, max delay, and group range.
-	Subscription = ffi.MoqSubscription
-	// TrackInfo holds publisher-side track properties: priority, ordering, max age, and timescale.
-	// A zero Priority is the least urgent, not the default; set 127 for the midpoint a nil TrackInfo uses.
-	TrackInfo = ffi.MoqTrackInfo
-	// Video describes one catalog rendition, including whether it is enabled (a disabled one has no frames coming).
-	Video = ffi.MoqVideo
-	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
-	VideoHint = ffi.MoqVideoHint
 	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
 	VideoSurface = ffi.MoqVideoSurface
 	// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
 	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
-	// AudioFormat is a single audio codec an importer can parse.
-	AudioFormat = ffi.MoqAudioFormat
-	// VideoFormat is a single video codec an importer can parse.
-	VideoFormat = ffi.MoqVideoFormat
-	// ContainerFormat is a container that publishes its own tracks.
-	ContainerFormat = ffi.MoqContainerFormat
-	// VideoProperties holds catalog properties shared by every video rendition; nil fields clear those properties.
-	VideoProperties = ffi.MoqVideoProperties
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
 	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to a VideoProducer, or read from a VideoDecodedFrame.
@@ -103,97 +72,6 @@ type (
 	VideoEncoderKindSoftware = ffi.MoqVideoEncoderKindSoftware
 	// VideoEncoderKindNamed is the specific-backend variant of VideoEncoderKind; build one with NamedEncoder.
 	VideoEncoderKindNamed = ffi.MoqVideoEncoderKindNamed
-
-	// Container selects how subscribed media frames are demuxed. Build one with
-	// LegacyContainer, CmafContainer, or LocContainer.
-	Container = ffi.MoqContainer
-	// ContainerLegacy is the legacy hang container variant of Container; build one with LegacyContainer.
-	ContainerLegacy = ffi.MoqContainerLegacy
-	// ContainerCmaf is the CMAF (fMP4) container variant of Container, carrying its init segment; build one with CmafContainer.
-	ContainerCmaf = ffi.MoqContainerCmaf
-	// ContainerLoc is the low-overhead container variant of Container; build one with LocContainer.
-	ContainerLoc = ffi.MoqContainerLoc
-)
-
-// LegacyContainer selects the legacy hang container for a media subscription.
-func LegacyContainer() Container {
-	return ContainerLegacy{}
-}
-
-// CmafContainer selects the CMAF (fMP4) container for a media subscription,
-// initialized from the given init segment.
-func CmafContainer(init []byte) Container {
-	return ContainerCmaf{Init: init}
-}
-
-// LocContainer selects the low-overhead container for a media subscription.
-func LocContainer() Container {
-	return ContainerLoc{}
-}
-
-// AudioFormat values: a single audio codec an importer can parse.
-const (
-	// AudioFormatAac is Advanced Audio Coding, configured by an AudioSpecificConfig.
-	AudioFormatAac = ffi.MoqAudioFormatAac
-	// AudioFormatOpus is Opus, configured by an OpusHead.
-	AudioFormatOpus = ffi.MoqAudioFormatOpus
-	// AudioFormatFlac is FLAC, configured by its STREAMINFO block.
-	AudioFormatFlac = ffi.MoqAudioFormatFlac
-	// AudioFormatMp3 is MPEG-1/2 Audio Layer III.
-	AudioFormatMp3 = ffi.MoqAudioFormatMp3
-)
-
-// VideoFormat values: a single video codec an importer can parse. The two H.26x pairs
-// differ by framing, not codec: Avc1/Hvc1 are length-prefixed with an out-of-band config
-// record, Avc3/Hev1 are Annex-B with the parameter sets inline.
-const (
-	// VideoFormatAvc1 is H.264 with length-prefixed NALUs and an out-of-band avcC.
-	VideoFormatAvc1 = ffi.MoqVideoFormatAvc1
-	// VideoFormatAvc3 is H.264 in Annex-B with inline SPS/PPS.
-	VideoFormatAvc3 = ffi.MoqVideoFormatAvc3
-	// VideoFormatHvc1 is H.265 with length-prefixed NALUs and an out-of-band hvcC.
-	VideoFormatHvc1 = ffi.MoqVideoFormatHvc1
-	// VideoFormatHev1 is H.265 in Annex-B with inline parameter sets.
-	VideoFormatHev1 = ffi.MoqVideoFormatHev1
-	// VideoFormatAv01 is AV1.
-	VideoFormatAv01 = ffi.MoqVideoFormatAv01
-	// VideoFormatVp8 is VP8.
-	VideoFormatVp8 = ffi.MoqVideoFormatVp8
-	// VideoFormatVp9 is VP9.
-	VideoFormatVp9 = ffi.MoqVideoFormatVp9
-)
-
-// ContainerFormat values: a container that publishes its own tracks.
-const (
-	// ContainerFormatFmp4 is fragmented MP4 / CMAF.
-	ContainerFormatFmp4 = ffi.MoqContainerFormatFmp4
-	// ContainerFormatMkv is Matroska / WebM.
-	ContainerFormatMkv = ffi.MoqContainerFormatMkv
-	// ContainerFormatTs is an MPEG-2 transport stream.
-	ContainerFormatTs = ffi.MoqContainerFormatTs
-	// ContainerFormatFlv is Flash Video, as used by RTMP.
-	ContainerFormatFlv = ffi.MoqContainerFormatFlv
-)
-
-// AudioSampleFormat values: the raw PCM sample layout fed to or returned from the
-// in-process Opus codec.
-const (
-	// AudioSampleFormatU8 is unsigned 8-bit interleaved PCM.
-	AudioSampleFormatU8 = ffi.MoqAudioSampleFormatU8
-	// AudioSampleFormatS16 is signed 16-bit interleaved PCM.
-	AudioSampleFormatS16 = ffi.MoqAudioSampleFormatS16
-	// AudioSampleFormatS32 is signed 32-bit interleaved PCM.
-	AudioSampleFormatS32 = ffi.MoqAudioSampleFormatS32
-	// AudioSampleFormatF32 is 32-bit float interleaved PCM.
-	AudioSampleFormatF32 = ffi.MoqAudioSampleFormatF32
-	// AudioSampleFormatU8Planar is unsigned 8-bit planar PCM, one buffer per channel.
-	AudioSampleFormatU8Planar = ffi.MoqAudioSampleFormatU8Planar
-	// AudioSampleFormatS16Planar is signed 16-bit planar PCM, one buffer per channel.
-	AudioSampleFormatS16Planar = ffi.MoqAudioSampleFormatS16Planar
-	// AudioSampleFormatS32Planar is signed 32-bit planar PCM, one buffer per channel.
-	AudioSampleFormatS32Planar = ffi.MoqAudioSampleFormatS32Planar
-	// AudioSampleFormatF32Planar is 32-bit float planar PCM, one buffer per channel.
-	AudioSampleFormatF32Planar = ffi.MoqAudioSampleFormatF32Planar
 )
 
 // OpusAudioCodec selects Opus (RFC 6716) for EncodeAudio.
@@ -250,12 +128,12 @@ func NamedEncoder(name string) VideoEncoderKind {
 
 // ConnectionStatus values: the lifecycle of a client session's connection.
 const (
-	// StatusConnected means a session connected (the first connect, or a reconnect after a drop).
-	StatusConnected = ffi.MoqConnectionStatusConnected
-	// StatusDisconnected means the session dropped; a reconnect attempt follows.
-	StatusDisconnected = ffi.MoqConnectionStatusDisconnected
-	// StatusMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
-	StatusMigrating = ffi.MoqConnectionStatusMigrating
+	// ConnectionStatusConnected means a session connected (the first connect, or a reconnect after a drop).
+	ConnectionStatusConnected = ffi.MoqConnectionStatusConnected
+	// ConnectionStatusDisconnected means the session dropped; a reconnect attempt follows.
+	ConnectionStatusDisconnected = ffi.MoqConnectionStatusDisconnected
+	// ConnectionStatusMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
+	ConnectionStatusMigrating = ffi.MoqConnectionStatusMigrating
 )
 
 // LogLevel configures the native tracing log level (e.g. "info", "debug").
@@ -313,4 +191,25 @@ const (
 	ProtocolKindApp = ffi.MoqProtocolKindApp
 	// ProtocolKindUnknown identifies unknown.
 	ProtocolKindUnknown = ffi.MoqProtocolKindUnknown
+)
+
+// AudioSampleFormat values: the raw PCM sample layout fed to or returned from the
+// in-process Opus codec.
+const (
+	// AudioSampleFormatU8 is unsigned 8-bit interleaved PCM.
+	AudioSampleFormatU8 = ffi.MoqAudioSampleFormatU8
+	// AudioSampleFormatS16 is signed 16-bit interleaved PCM.
+	AudioSampleFormatS16 = ffi.MoqAudioSampleFormatS16
+	// AudioSampleFormatS32 is signed 32-bit interleaved PCM.
+	AudioSampleFormatS32 = ffi.MoqAudioSampleFormatS32
+	// AudioSampleFormatF32 is 32-bit float interleaved PCM.
+	AudioSampleFormatF32 = ffi.MoqAudioSampleFormatF32
+	// AudioSampleFormatU8Planar is unsigned 8-bit planar PCM, one buffer per channel.
+	AudioSampleFormatU8Planar = ffi.MoqAudioSampleFormatU8Planar
+	// AudioSampleFormatS16Planar is signed 16-bit planar PCM, one buffer per channel.
+	AudioSampleFormatS16Planar = ffi.MoqAudioSampleFormatS16Planar
+	// AudioSampleFormatS32Planar is signed 32-bit planar PCM, one buffer per channel.
+	AudioSampleFormatS32Planar = ffi.MoqAudioSampleFormatS32Planar
+	// AudioSampleFormatF32Planar is 32-bit float planar PCM, one buffer per channel.
+	AudioSampleFormatF32Planar = ffi.MoqAudioSampleFormatF32Planar
 )

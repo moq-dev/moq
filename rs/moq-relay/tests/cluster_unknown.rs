@@ -8,7 +8,7 @@ use moq_relay::{Config, Relay};
 use url::Url;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const PATH: &str = "opalin/cell-clumsy-octopus/cameras/left.hang";
+const PATH: &str = "robot/cell-clumsy-octopus/cameras/left.hang";
 
 async fn spawn_relay(
 	id: u64,
@@ -368,7 +368,9 @@ async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

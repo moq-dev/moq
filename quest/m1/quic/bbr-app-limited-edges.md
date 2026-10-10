@@ -32,9 +32,9 @@ drains, a sender blocked only by `send_window`, and a stream blocked by
 receiver credit. Builds on the seven fixes released in moq-noq 1.3.1. No public API or wire
 change is intended.
 
-## Required
-
-- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`, where this lands; the core and its BBR3 are already in `rs/moq-quic`
+Decided 2026-10-08: this does not wait for the
+[switch](/quest/m1/quic/fork/switch.md), since the core and its BBR3 are
+already in `rs/moq-quic`.
 
 ## Related
 

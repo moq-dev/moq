@@ -874,11 +874,25 @@ async fn bursts_cross_a_flapping_peer(lane: Lane) {
 
 lanes!(bursts_cross_a_flapping_peer);
 
-/// Whether the cross-relay drill's peer link stays up or flaps.
+/// Drill: [`bursts_cross_a_cluster`], with the relays peering over moq-transport.
+///
+/// The gap FETCHes cross the peer link as IETF FETCHes, so a group the origin
+/// still holds has to be served through that path too, not refused.
+async fn bursts_cross_a_transport_peer(lane: Lane) {
+	cross_cluster(lane, PeerLink::Transport).await
+}
+
+lanes!(bursts_cross_a_transport_peer);
+
+/// How the cross-relay drill's peer link behaves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PeerLink {
+	/// Up throughout, on the version the relays negotiate by default.
 	Steady,
+	/// Cut mid-recovery, then restored.
 	Flapping,
+	/// Up throughout, on moq-transport.
+	Transport,
 }
 
 /// The burst a flapping peer link is cut just before: after one that started
@@ -919,7 +933,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
 	let peer = match (link, lane) {
-		(PeerLink::Steady, _) => Path::shaped(lane, &origin, bursty(), seed).await,
+		(PeerLink::Steady | PeerLink::Transport, _) => Path::shaped(lane, &origin, bursty(), seed).await,
 		// Cutting the link takes a shaper on it, so loopback gets one that forwards untouched.
 		(PeerLink::Flapping, Lane::Loopback) => Path::through(&origin, Default::default(), seed).await,
 		(PeerLink::Flapping, Lane::Impaired) => Path::through(&origin, bursty(), seed).await,
@@ -934,6 +948,9 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
 	// like the never-redialed regression, and a stall still fails the drill.
 	config.connect.backoff.timeout = Duration::ZERO;
+	if link == PeerLink::Transport {
+		config.connect.version = vec!["moq-transport-19".parse().expect("parse version")];
+	}
 	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url.to_string())];
 	let edge = RelayHost::start(config).await;
 
@@ -1022,7 +1039,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// waiting until the edge's peer session idles out, so they get that much more;
 	// one that outlasts even that hung on the dead route and still fails the drill.
 	let wait = match link {
-		PeerLink::Steady => SETTLE,
+		PeerLink::Steady | PeerLink::Transport => SETTLE,
 		PeerLink::Flapping => SETTLE + relay_idle,
 	};
 	let fetch =
@@ -1173,14 +1190,14 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 		assert!(overflowed > 0, "no burst overran a bottleneck, so none was exercised");
 	}
 	match (link, flap) {
-		(PeerLink::Steady, Flap::Up) => {}
+		(PeerLink::Steady | PeerLink::Transport, Flap::Up) => {}
 		(PeerLink::Flapping, Flap::Restored { cut }) => println!(
 			"fault activated: the peer link was down {cut:?} before the edge withdrew the route, which came back; the flap failed {} reads and FETCHes, each claimed again: {flapped:?}",
 			flapped.len()
 		),
 		(PeerLink::Flapping, Flap::Up) => panic!("the peer link was never cut"),
 		(PeerLink::Flapping, _) => panic!("the route never came back after the peer link flapped"),
-		(PeerLink::Steady, _) => unreachable!("a steady link is never cut"),
+		(PeerLink::Steady | PeerLink::Transport, _) => unreachable!("a steady link is never cut"),
 	}
 
 	let lost: Vec<_> = outcomes
@@ -1262,7 +1279,9 @@ lanes!(no_publisher_never_delivers);
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

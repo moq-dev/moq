@@ -126,8 +126,7 @@ connection view and the dashboard flow.
 
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters; whether a
-  combined per-broadcast verdict reads both is open in
-  [client health](/quest/m1/stats/health.md)
+- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters; the
+  combined per-broadcast verdict reading both lives downstream
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report

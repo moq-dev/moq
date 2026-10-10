@@ -30,6 +30,13 @@ pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
 	}
 }
 
+/// Wait for a subscription to reach `track`. Demand alone does not say one has: on
+/// moq-lite 05 and later a TRACK stream is demand before its SUBSCRIBE arrives.
+pub async fn subscribed(track: &moq_net::track::Producer) {
+	let mut track = track.clone();
+	while track.subscription_changed().await.expect("track open").is_none() {}
+}
+
 /// Options for [`connect_mock`].
 pub struct MockConnectOptions {
 	/// The MoQ version to negotiate (determines the ALPN protocol string).
@@ -44,6 +51,10 @@ pub struct MockConnectOptions {
 	pub server_subscribe: Option<origin::Producer>,
 	/// One-way delay for stream data in each direction.
 	pub latency: std::time::Duration,
+	/// What the client may make the server's session hold, when not the default.
+	pub server_limits: Option<moq_net::session::Limits>,
+	/// The price the client puts on the link, when not the default.
+	pub cost: Option<u64>,
 }
 
 impl MockConnectOptions {
@@ -56,6 +67,8 @@ impl MockConnectOptions {
 			server_publish: None,
 			server_subscribe: None,
 			latency: std::time::Duration::ZERO,
+			server_limits: None,
+			cost: None,
 		}
 	}
 }
@@ -87,6 +100,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	let transports = (client_transport.clone(), server_transport.clone());
 
 	let mut client = Client::new().with_versions(opts.version.into());
+	if let Some(cost) = opts.cost {
+		client = client.with_cost(cost);
+	}
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}
@@ -100,6 +116,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 	if let Some(subscribe) = opts.server_subscribe {
 		server = server.with_subscriber(subscribe);
+	}
+	if let Some(limits) = opts.server_limits {
+		server = server.with_limits(limits);
 	}
 
 	// Run both handshakes concurrently and spawn each side's driver

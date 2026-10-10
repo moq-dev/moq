@@ -95,7 +95,6 @@ published version in place, so AUTH and its stream code land in
 ## Required
 
 - [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
-- [AUTH on the wip version](/quest/m1/auth/wip-version.md) - lite AUTH and UNAUTHORIZED move from lite-06 to `moq-lite-07-wip`, so no published version changes in place
 - [Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md) - a lite acceptor answers AUTH_ERROR NOT_SUPPORTED after a grant too, with a lite session code for `Error::Unsupported`
 - [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
 - [Malformed grant](/quest/m1/auth/malformed-grant.md) - a malformed or
@@ -104,11 +103,20 @@ published version in place, so AUTH and its stream code land in
 - [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
-- [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
-  TOKEN` on a moq-transport request authorizes that request when the session
-  grant does not, and REQUEST_UPDATE refreshes it
+- [Request-token decode](/quest/m1/auth/request-token-decode.md) - an
+  `AUTHORIZATION TOKEN` on a moq-transport request decodes by the draft's
+  rules, closing the session on the forms the draft forbids
+- [Setup extensions](/quest/m1/auth/extensions.md) - a side declares which
+  Setup extensions it offers with one `Extensions` struct
+- [Request tokens](/quest/m1/auth/request-token.md) - a token on a
+  moq-transport request authorizes that request and renews it in band
+- [Request leases](/quest/m1/auth/request-lease.md) - moq-relay honors a
+  request token with a lease of its own
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
+- [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - an
+  auth decider sees `webtransport` for a WebTransport session and `quic` only
+  for native QUIC
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave

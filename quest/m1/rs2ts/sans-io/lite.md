@@ -29,3 +29,7 @@ Guidance:
   explicit instants as it is rewritten, so they translate with the code.
 
 Public API: breaks moq-net's session API. Wire: none.
+
+## Required
+
+- [rs2ts](/quest/m1/rs2ts/translator.md) - its go/no-go decides whether moq-net breaks its API for generated TypeScript

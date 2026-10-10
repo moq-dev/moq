@@ -32,9 +32,10 @@ echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
 - The demo sets both attributes, so the media test can read a browser
   viewer's feedback through `moq export echo`.
 - `doc/lib/js` documents the attributes.
-- An encrypted (E2EE) broadcast refuses the stats track and the `echo` attribute: they would publish rendition
-  IDs and per-track counters in plaintext beside it. Recommended in the
-  2026-10-08 audit over encrypting them through the E2EE `Generation`.
+- Decided 2026-10-08: no E2EE refusal here. The elements have no encrypted
+  broadcast yet, so [Encrypted browser components](/quest/m1/e2ee/browser.md) refuses the
+  stats track and the `echo` attribute when it adds one: they would publish
+  rendition IDs and per-track counters in plaintext beside it.
 
 ## Required
 
@@ -42,4 +43,4 @@ echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
 
 ## Related
 
-- [E2EE](/quest/m1/e2ee/README.md) - protected broadcasts expose no semantic metadata
+- [Encrypted browser components](/quest/m1/e2ee/browser.md) - refuses stats and feedback on an encrypted broadcast

@@ -9,12 +9,11 @@ wrappers, moq-ffi, and every binding wrapper.
 
 ## Plan
 
-Requested by an external consumer (OneTooMany, Discord), who translates
-MAVLink into application telemetry and must keep its timestamps to stay in
-sync with video.
+An application that translates MAVLink into its own telemetry must keep
+each value's timestamp to stay in sync with video.
 
-Every `moq_net::Frame` has a timestamp, but the consumers decode only
-`frame.payload` and drop it: `moq_mux::{json,binary}::Consumer::next` and the
+Every `moq_net::Frame` carries an optional timestamp (`None` when untimed,
+since #4822), but the consumers decode only `frame.payload` and drop it: `moq_mux::{json,binary}::Consumer::next` and the
 moq-json and moq-flate snapshot and stream consumers they wrap. Each snapshot
 state carries the timestamp of the frame that produced it.
 

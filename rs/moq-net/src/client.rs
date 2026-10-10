@@ -18,6 +18,7 @@ pub struct Client {
 	setup_authority: Option<String>,
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
+	limits: crate::session::Limits,
 }
 
 impl Client {
@@ -56,6 +57,12 @@ impl Client {
 	/// [`with_subscriber`](Self::with_subscriber) with the same origin.
 	pub fn with_origin(self, origin: origin::Producer) -> Self {
 		self.with_publisher(&origin).with_subscriber(origin)
+	}
+
+	/// Cap what the server can make this session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
+	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
+		self.limits = limits;
+		self
 	}
 
 	/// Restrict which protocol versions to offer, in preference order.
@@ -193,6 +200,7 @@ impl Client {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			limits: self.limits,
 			session: session.clone(),
 			setup_stream: None,
 			publish,
@@ -270,6 +278,7 @@ impl Client {
 				// We advertise the request path in our SETUP for URL-less transports.
 				let (protocol, goaway, setup) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
+					limits: self.limits,
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -352,7 +361,11 @@ impl Client {
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
 
 		let mut parameters = ietf::Parameters::default();
-		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
+		// The server's requests, admitted up to our limits and granted back as they close.
+		parameters.set_varint(
+			ietf::ParameterVarInt::MaxRequestId,
+			ietf::initial_max_request_id(self.limits.requests(), false),
+		);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 		// Advertise the request path in-band (draft 14-16), same as the lite-05 SETUP.
 		if let Some(path) = &self.setup_path {
@@ -386,6 +399,7 @@ impl Client {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
 					runtime: runtime.clone(),
+					limits: self.limits,
 					session: session.clone(),
 					setup_stream: Some(stream),
 					publish: publish.clone(),
@@ -423,6 +437,7 @@ impl Client {
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway, setup) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
+					limits: self.limits,
 					session: session.clone(),
 					setup: Some(stream),
 					request_id_max,

@@ -59,6 +59,10 @@
 //!   Driven by [`Handle::session`] (the [`Session`] context); a
 //!   [`Session::set_tier`] ends the session on the old tier and starts it on
 //!   the new one.
+//! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
+//!   announcements, or subscriptions, any one session under the auth root held
+//!   at once, to compare against its [`crate::session::Limits`]. A peak never
+//!   goes down; a rollup takes the largest rather than the sum.
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
 //! backwards across reads means the underlying entry was garbage collected
@@ -111,8 +115,8 @@ use std::{
 	collections::HashMap,
 	fmt,
 	sync::{
-		Arc, Mutex,
-		atomic::{AtomicU64, Ordering},
+		Arc, Mutex, Weak,
+		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
 };
 
@@ -264,9 +268,18 @@ impl Content {
 struct SessionCounters {
 	sessions_started: AtomicU64,
 	sessions_ended: AtomicU64,
+	announces_peak: AtomicU64,
+	subscriptions_peak: AtomicU64,
 }
 
 impl SessionCounters {
+	fn peak(&self, cap: Cap) -> &AtomicU64 {
+		match cap {
+			Cap::Announces => &self.announces_peak,
+			Cap::Subscriptions => &self.subscriptions_peak,
+		}
+	}
+
 	/// Read the gauge into a [`Presence`]. Ended is loaded with `Acquire`
 	/// before started with `Relaxed`, the same pairing as [`Counters::snapshot`],
 	/// so the readout never shows `ended > started`.
@@ -276,6 +289,8 @@ impl SessionCounters {
 		Presence {
 			sessions_started,
 			sessions_ended,
+			announces_peak: self.announces_peak.load(Ordering::Relaxed),
+			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
 		}
 	}
 }
@@ -507,7 +522,8 @@ impl Traffic {
 
 /// Connected-session presence for one slice (an auth root on a tier, or any
 /// sum of such slices): cumulative connects and disconnects. `sessions_started
-/// - sessions_ended` is the current live session count.
+/// - sessions_ended` is the current live session count. The peaks show how close
+/// one session came to its [`crate::session::Limits`].
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
 /// sessions track. Serialize writes both the canonical names and the legacy
@@ -520,6 +536,11 @@ pub struct Presence {
 	pub sessions_started: u64,
 	/// Cumulative sessions disconnected.
 	pub sessions_ended: u64,
+	/// The most broadcasts (moq-transport: namespaces) any one session has held announced
+	/// to us at once.
+	pub announces_peak: u64,
+	/// The most subscriptions any one session has held on our broadcasts at once.
+	pub subscriptions_peak: u64,
 }
 
 #[derive(Serialize)]
@@ -528,6 +549,8 @@ struct PresenceSer {
 	sessions: u64,
 	sessions_ended: u64,
 	sessions_closed: u64,
+	announces_peak: u64,
+	subscriptions_peak: u64,
 }
 
 impl From<Presence> for PresenceSer {
@@ -537,6 +560,8 @@ impl From<Presence> for PresenceSer {
 			sessions: p.sessions_started,
 			sessions_ended: p.sessions_ended,
 			sessions_closed: p.sessions_ended,
+			announces_peak: p.announces_peak,
+			subscriptions_peak: p.subscriptions_peak,
 		}
 	}
 }
@@ -548,6 +573,8 @@ struct PresenceDe {
 	sessions: Edge,
 	sessions_ended: Edge,
 	sessions_closed: Edge,
+	announces_peak: u64,
+	subscriptions_peak: u64,
 }
 
 impl From<PresenceDe> for Presence {
@@ -555,6 +582,8 @@ impl From<PresenceDe> for Presence {
 		Self {
 			sessions_started: counter_edge(d.sessions_started, d.sessions),
 			sessions_ended: counter_edge(d.sessions_ended, d.sessions_closed),
+			announces_peak: d.announces_peak,
+			subscriptions_peak: d.subscriptions_peak,
 		}
 	}
 }
@@ -572,10 +601,12 @@ impl<'de> Deserialize<'de> for Presence {
 }
 
 impl Presence {
-	/// Fold another readout into this one.
+	/// Fold another readout into this one. The peaks are per session, so they take the larger.
 	pub fn add(&mut self, other: Presence) {
 		self.sessions_started += other.sessions_started;
 		self.sessions_ended += other.sessions_ended;
+		self.announces_peak = self.announces_peak.max(other.announces_peak);
+		self.subscriptions_peak = self.subscriptions_peak.max(other.subscriptions_peak);
 	}
 
 	/// Sessions currently connected.
@@ -1137,6 +1168,13 @@ pub struct Session {
 	inner: Option<Arc<SessionInner>>,
 }
 
+/// Which of a session's [`crate::session::Limits`] a [`Session::hold`] counts against.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Cap {
+	Announces,
+	Subscriptions,
+}
+
 /// The shared state behind a [`Session`]. Its `Drop` (on the last clone) records
 /// the session as closed.
 struct SessionInner {
@@ -1151,6 +1189,9 @@ struct SessionInner {
 	/// subscription this context opens for a broadcast bumps `broadcasts_started`, the last
 	/// to close bumps `broadcasts_ended` on the same counters, even across a tier change.
 	viewers: Mutex<HashMap<PathOwned, Viewer>>,
+	/// What this session holds against each cap right now, so a tier change can seed the
+	/// new tier's peaks with slots it still holds.
+	held: Mutex<Vec<(Cap, Weak<AtomicUsize>)>>,
 }
 
 /// The tier a [`Session`] records under right now.
@@ -1181,6 +1222,7 @@ impl Session {
 				current: Mutex::new(Current { tier, presence }),
 				generation: AtomicU64::new(0),
 				viewers: Mutex::new(HashMap::new()),
+				held: Mutex::new(Vec::new()),
 			})),
 		}
 	}
@@ -1196,12 +1238,41 @@ impl Session {
 		if let Some(presence) = &presence {
 			presence.sessions_started.fetch_add(1, Ordering::Relaxed);
 		}
+		if let Some(presence) = &presence {
+			// Slots still held count on the new tier, but not the old tier's history.
+			let mut held = inner.held.lock().expect("stats session poisoned");
+			held.retain(|(cap, live)| {
+				let Some(live) = live.upgrade() else { return false };
+				presence
+					.peak(*cap)
+					.fetch_max(live.load(Ordering::Acquire) as u64, Ordering::Relaxed);
+				true
+			});
+		}
 		if let Some(old) = std::mem::replace(&mut current.presence, presence) {
 			// Release pairs with the readout's Acquire load of `sessions_ended`.
 			old.sessions_ended.fetch_add(1, Ordering::Release);
 		}
 		current.tier = tier;
 		inner.generation.fetch_add(1, Ordering::Release);
+	}
+
+	/// Count `live` as what this session holds against `cap`, so a tier change carries it.
+	pub(crate) fn track_held(&self, cap: Cap, live: &Arc<AtomicUsize>) {
+		let Some(inner) = &self.inner else { return };
+		let mut held = inner.held.lock().expect("stats session poisoned");
+		// A context reused across reconnects registers again each time: drop the gone ones.
+		held.retain(|(_, live)| live.strong_count() > 0);
+		held.push((cap, Arc::downgrade(live)));
+	}
+
+	/// Record that this session holds `held` of what `cap` limits, raising that peak on its
+	/// tier and root.
+	pub(crate) fn hold(&self, cap: Cap, held: u64) {
+		let Some(inner) = &self.inner else { return };
+		let current = inner.current.lock().expect("stats session poisoned");
+		let Some(presence) = &current.presence else { return };
+		presence.peak(cap).fetch_max(held, Ordering::Relaxed);
 	}
 
 	/// Egress (publisher / reads) scope for a broadcast path. The path is the
@@ -1582,6 +1653,66 @@ mod tests {
 		assert_eq!(default_counters.subscriber.bytes.load(Relaxed), 0);
 		assert_eq!(regional_counters.publisher.bytes.load(Relaxed), 0);
 		assert_eq!(regional_counters.subscriber.bytes.load(Relaxed), 7);
+	}
+
+	/// Each root's sessions row carries the most any one of its sessions held against each
+	/// cap, which a slot released does not lower and a rollup does not sum.
+	#[test]
+	fn sessions_report_their_peaks_against_the_caps() {
+		use crate::session::Slots;
+
+		let stats = test_stats();
+		let tier = stats.tier(Tier::default());
+		let (s1, s2) = (tier.session("acme"), tier.session("acme"));
+		let announces = Slots::new(10).with_stats(&s1, Cap::Announces);
+		let subscriptions = Slots::new(10).with_stats(&s2, Cap::Subscriptions);
+		let other = Slots::new(10).with_stats(&s2, Cap::Announces);
+
+		let held: Vec<_> = (0..3).map(|_| announces.acquire().unwrap()).collect();
+		drop(held);
+		let _one = announces.acquire().unwrap();
+		let _subs: Vec<_> = (0..5).map(|_| subscriptions.acquire().unwrap()).collect();
+		let _two: Vec<_> = (0..2).map(|_| other.acquire().unwrap()).collect();
+
+		let (_, presence) = stats
+			.snapshot()
+			.sessions()
+			.into_iter()
+			.find(|(t, _)| *t == Tier::default())
+			.expect("sessions row");
+		assert_eq!(presence.announces_peak, 3, "the peak of one session, not the sum");
+		assert_eq!(presence.subscriptions_peak, 5);
+
+		let json = serde_json::to_string(&presence).unwrap();
+		assert_eq!(serde_json::from_str::<Presence>(&json).unwrap(), presence);
+	}
+
+	/// A session moving tiers brings the slots it still holds to the new tier's peak, but
+	/// not the old tier's history.
+	#[test]
+	fn a_tier_change_carries_the_slots_still_held() {
+		use crate::session::Slots;
+
+		let stats = test_stats();
+		let session = stats.tier(Tier::default()).session("acme");
+		let subscriptions = Slots::new(10).with_stats(&session, Cap::Subscriptions);
+		let mut held: Vec<_> = (0..5).map(|_| subscriptions.acquire().unwrap()).collect();
+		held.truncate(3);
+
+		let gold = Tier::new("gold");
+		session.set_tier(gold.clone());
+
+		let peak = |tier: &Tier| {
+			let (_, presence) = stats
+				.snapshot()
+				.sessions()
+				.into_iter()
+				.find(|(t, _)| t == tier)
+				.expect("sessions row");
+			presence.subscriptions_peak
+		};
+		assert_eq!(peak(&Tier::default()), 5);
+		assert_eq!(peak(&gold), 3, "the new tier sees what is still held");
 	}
 
 	#[test]
@@ -2233,6 +2364,7 @@ mod tests {
 		Presence {
 			sessions_started: 3,
 			sessions_ended: 1,
+			..Default::default()
 		}
 	}
 

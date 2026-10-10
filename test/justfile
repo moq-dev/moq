@@ -22,6 +22,7 @@ default:
 # which this recipe installs, as the interop and wasm harnesses do.
 harness:
     ./lib/harness.test.sh
+    cd .. && bun test test/interop/compat/resolve.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
     cd interop/clients/js && bun test ./harness.browser.ts ./src/contract.test.ts
@@ -29,16 +30,22 @@ harness:
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
-# browser publish; everyone subscribes (incl. native node/bun JS, the moq-c C
-# client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
+# browser + C++ publish; everyone subscribes (incl. native node/bun JS, the
+# moq-c C client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Finite track tails run too; `--tail` selects just Rust/Node/Bun tail checks.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
-# and on lite-06/07 messages (the filter also matches `lite_varint_interop`).
+# and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
+# moq-transport OBJECT_DATAGRAMs both ways on every draft.
 [positional-arguments]
 interop *args:
-    just rs test -p moq-net --lib varint_interop --run-ignored all
+    just rs test -p moq-net --lib varint_interop ietf_datagram_interop --run-ignored all
     ./interop/interop.sh "$@"
+
+# Nightly main vs newest installable registry releases: tokens, moq-lite session
+# versions, decoded catalogs/containers, and group FETCH. See interop/README.md.
+wire-compat:
+    ./interop/compat.sh
 
 # Negative control: no publisher, every subscriber must time out (proves the
 
@@ -104,7 +111,8 @@ drill-sensitivity *args:
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
 # the pipe instead, which a capture cannot carry; nightly runs this arm),
-# `--open-gop` (an open-GOP clip whose leading pictures must survive). See
+# `--open-gop` (an open-GOP clip whose leading pictures must survive), `--hrd`
+# (1080p video filling a broadcast-sized CPB), `--delay 1s` (the exporter's). See
 # ts/README.md.
 
 # Check the subscriber's MPEG-TS output for IRD compliance.

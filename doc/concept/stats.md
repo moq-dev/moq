@@ -51,14 +51,13 @@ unannounce and re-announce it across the mesh; while it lingers empty, its
 tracks hold `{}`. Once the linger elapses with the group still empty, the
 broadcast is unannounced and its counters dropped; a group that returns later
 announces a new epoch counted from zero. Within one epoch, group numbers keep
-increasing across recreated tracks; they may have gaps. A recreated compressed
-track starts a new group with a full snapshot, never a delta whose compression
-state belonged to its previous writer.
+increasing across recreated tracks and may have gaps.
 
 ## Tracks
 
 Traffic is split by **tier**, an arbitrary label (a billing class, a region)
-the relay takes from the auth grant or `--cluster-tier`. Each tier has three
+the relay takes from the auth grant, or from `--cluster-tier` for links it
+dials and LAN peers it admits. Each tier has three
 tracks, each in two encodings:
 
 | Track | Frame keyed by | Entry |
@@ -129,13 +128,19 @@ should prefer the canonical name and fall back to the legacy one.
 ### Presence
 
 ```json
-{ "acme": { "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10 } }
+{ "acme": { "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects under an
 auth root on the tier, whether or not any data flows. `sessions` and
 `sessions_closed` are their legacy spellings. A session moved to a new tier
 ends on the old one and starts on the new.
+
+`announces_peak` and `subscriptions_peak` are the most broadcasts announced to
+the relay, and subscriptions held on it, by any one session under the root.
+Compare them with the relay's per-session limits: a session that goes past one
+is closed with `TOO_MANY_REQUESTS`. A peak never goes down while the root has a
+session, and summing nodes takes the largest.
 
 ### Counters
 
@@ -172,8 +177,7 @@ fraction of the plain track's bytes.
 - **Groups.** A group's first frame is the full object. Each later frame is an
   [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396) merge patch against the
   value so far: it carries only the changed counters, and `null` removes a
-  dropped entry. The producer starts a new group once the patches outgrow
-  eight times the snapshot's compressed size, or after 256 frames.
+  dropped entry.
 - **DEFLATE.** Each group's frames form one raw DEFLATE stream, sync flushed
   per frame with the trailing `00 00 ff ff` stripped, as
   [moq-flate](/draft/moq-flate) specifies. The window starts cold at every

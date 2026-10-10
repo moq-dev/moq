@@ -6,8 +6,8 @@ C programs use moq through a C API generated from moq-ffi, shipped as the
 `moq-c` package with CMake target `moq::c`, so the hand-written libmoq ABI is
 deleted and C tracks every moq-ffi change the way Go, Swift, Kotlin, Python,
 Dart, and C++ already do. The C API shape follows moq-ffi and breaks C users
-once. The C++ package and the OBS plugin are out of scope; they already sit on
-moq-ffi through [C++ through moq-ffi](/quest/m1/cpp/README.md).
+once. The C++ package (`cpp/moq`) and the OBS plugin are out of scope; they
+already sit on moq-ffi through the generated C++.
 
 ## Plan
 
@@ -46,10 +46,9 @@ and fetch quests were abandoned for this line, and hidden is done.
 
 ## Required
 
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the generator fork, package recipe, and OBS move this line builds on
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
-- [Retire libmoq](/quest/m1/c/retire.md) - the hand-written crate is deleted after its final release points at the generated package
+- [Retire the hand-written moq-c](/quest/m1/c/retire.md) - the hand-written crate is deleted after its final release points at the generated package
 
 ## Related
 

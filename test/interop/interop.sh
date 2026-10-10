@@ -5,8 +5,9 @@
 # public registry to catch packaging breakage), this builds every client from
 # the workspace source. It proves the code in the tree interoperates across
 # implementations before anything is published: a relay built from rs/moq-relay,
-# clients built from rs/moq-cli, py/, js/, and rs/moq-c, all talking to each
-# other. There's no apt/brew/npm/PyPI here, just cargo/bun/uv/cc.
+# clients built from rs/moq-cli, py/, go/, cpp/moq, js/, and rs/moq-c, all
+# talking to each other. There's no apt/brew/npm/PyPI here, just
+# cargo/bun/uv/go/cmake/cc.
 #
 # It stands up a moq-relay, then for each publisher language publishes an H.264
 # broadcast and confirms every subscriber sees data flowing before the timeout.
@@ -25,7 +26,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_NATIVE_CLIENT INTEROP_DECODE INTEROP_JS_PUBLISH_CLIENT INTEROP_COMPAT_TRANSPORT INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -89,8 +90,8 @@ while [[ $# -gt 0 ]]; do
         # The full matrix. --timeout 30 gives headless Chromium cold-start
         # headroom; flags after it still override.
         --all)
-            PUBLISHERS="rust,python,go,js"
-            SUBSCRIBERS="rust,python,go,js,js-native-node,js-native-bun,c,gst"
+            PUBLISHERS="rust,python,go,cpp,js"
+            SUBSCRIBERS="rust,python,go,cpp,js,js-native-node,js-native-bun,c,gst"
             TIMEOUT=30
             shift
             ;;
@@ -144,7 +145,7 @@ needs() {
 
 # True if any browser/native JS client is in play (they share one bun install).
 needs_js() {
-    needs js || needs js-native-node || needs js-native-bun
+    needs js || needs js-native || needs js-native-node || needs js-native-bun
 }
 
 harness_begin interop "$RERUN"
@@ -153,6 +154,7 @@ TARGET_BASE=""    # cargo target dir (resolved in require_tools)
 PY=""             # python interpreter with the workspace moq build (set in prepare)
 C_INTEROP=""      # compiled C client binary (set in prepare)
 GO_INTEROP=""     # compiled Go client binary (set in prepare)
+CPP_INTEROP=""    # compiled C++ client binary (set in prepare)
 GST_PLUGIN_DIR="" # dir holding the built moq-gst plugin (set in prepare)
 BROKEN_LANGS=""   # clients whose source build failed
 
@@ -199,6 +201,13 @@ require_tools() {
 # Build moq-relay + moq-cli from the workspace. The relay is the spine of the
 # test, so a failure here aborts rather than marking a single client broken.
 build_relay_cli() {
+    if [[ -n "$RELAY" && -n "$MOQ" ]]; then
+        [[ -x "$RELAY" && -x "$MOQ" ]] || {
+            echo "override binaries are not executable" >&2
+            exit 1
+        }
+        return
+    fi
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
     echo "building moq-relay + moq-cli ($PROFILE)..."
@@ -249,12 +258,24 @@ prepare_python() {
 # @moq/* packages resolve to this checkout's source) and build the browser page.
 prepare_js() {
     have bun || {
-        for v in js js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun not found"; done
+        for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun not found"; done
         return
     }
+    # Staged released-compat clients bring their own packages; check every one given.
+    if [[ -n "${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
+        [[ -z "${INTEROP_NATIVE_CLIENT:-}" || -f "$INTEROP_NATIVE_CLIENT/subscribe.ts" ]] || {
+            echo "missing staged native client" >&2
+            exit 1
+        }
+        [[ -z "${INTEROP_JS_PUBLISH_CLIENT:-}" || -f "$INTEROP_JS_PUBLISH_CLIENT/client.ts" ]] || {
+            echo "missing staged publisher" >&2
+            exit 1
+        }
+        return
+    fi
     echo "installing js clients (workspace @moq/* via bun)..."
     if ! (cd "$WORKSPACE" && bun install --frozen-lockfile) >"$HARNESS_RUN/js-install.log" 2>&1; then
-        for v in js js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
+        for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
         sed 's/^/        /' "$HARNESS_RUN/js-install.log" >&2 || true
         return
     fi
@@ -320,6 +341,35 @@ prepare_go() {
         mark_broken go "go build failed"
         sed 's/^/        /' "$HARNESS_RUN/go-build.log" >&2 || true
     fi
+}
+
+# Build and install cpp/moq (cargo builds moq-ffi, uniffi-bindgen-cpp renders the
+# bindings), then build the C++ client against the installed package with
+# find_package(moq-cpp), the way an external project consumes it. Debug, like the
+# rest of the run.
+prepare_cpp() {
+    local t
+    for t in cmake uniffi-bindgen-cpp; do
+        have "$t" || {
+            mark_broken cpp "$t not found (see cpp/moq/README.md)"
+            return
+        }
+    done
+    echo "building c++ client (workspace cpp/moq via uniffi-bindgen-cpp + cmake)..."
+    local build="$HARNESS_RUN/cpp-build" prefix="$HARNESS_RUN/cpp-prefix" config=Debug
+    [[ "$PROFILE" == "release" ]] && config=Release
+    if ! {
+        cmake -S "$WORKSPACE/cpp/moq" -B "$build/package" -DCMAKE_BUILD_TYPE="$config" -DCMAKE_INSTALL_LIBDIR=lib &&
+            cmake --build "$build/package" &&
+            cmake --install "$build/package" --prefix "$prefix" &&
+            cmake -S "$CLIENTS/cpp" -B "$build/client" -DCMAKE_BUILD_TYPE="$config" -DCMAKE_PREFIX_PATH="$prefix" &&
+            cmake --build "$build/client"
+    } >"$HARNESS_RUN/cpp-build.log" 2>&1; then
+        mark_broken cpp "cmake build failed"
+        sed 's/^/        /' "$HARNESS_RUN/cpp-build.log" >&2 || true
+        return
+    fi
+    CPP_INTEROP="$build/client/cpp-interop"
 }
 
 # Build moq-c (the C staticlib + cbindgen header) and compile the C subscriber
@@ -412,6 +462,7 @@ echo "moq-cli: $MOQ"
 
 needs python && prepare_python
 needs go && prepare_go
+needs cpp && prepare_cpp
 needs_js && prepare_js
 needs c && prepare_c
 needs gst && prepare_gst
@@ -433,6 +484,14 @@ echo "starting relay on 127.0.0.1:${PORT}..."
 # interop.toml is the source of truth; rewrite its port into a scratch copy so the
 # committed file never has to be edited for a run.
 sed "s/4443/${PORT}/g" "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
+if [[ -n "${INTEROP_VERSION:-}" ]]; then
+    # Version values come from the executable's advertised CLI choices.
+    sed -i "/\[listen\]/a version = [\"${INTEROP_VERSION}\"]" "$HARNESS_RUN/relay.toml"
+    [[ "$(grep -c '^version = ' "$HARNESS_RUN/relay.toml")" == 1 ]] || {
+        echo "relay.toml needs exactly one pinned [listen] version" >&2
+        exit 1
+    }
+fi
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
@@ -463,7 +522,7 @@ run_publisher() {
     local lang="$1" broadcast="$2"
     case "$lang" in
         rust)
-            ffmpeg_h264 | "$MOQ" --connect "$URL" --broadcast "$broadcast" import avc3
+            ffmpeg_h264 | "$MOQ" --connect "$URL" ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" import avc3
             ;;
         python)
             ffmpeg_h264 | "$PY" "$CLIENTS/python/interop.py" \
@@ -471,6 +530,12 @@ run_publisher() {
             ;;
         go)
             ffmpeg_h264 | "$GO_INTEROP" publish --url "$URL" --broadcast "$broadcast"
+            ;;
+        cpp)
+            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$URL" --broadcast "$broadcast"
+            ;;
+        js-native)
+            bun "$INTEROP_JS_PUBLISH_CLIENT/client.ts" publish "$URL" "$broadcast"
             ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
@@ -501,9 +566,19 @@ start_publisher() {
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_native() {
     local out
-    out=$( (cd "$CLIENTS/js-native" && "$@") 2>&1) || true
+    out=$( (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && "$@") 2>&1) || true
     printf '%s\n' "$out" >&2
     printf '%s\n' "$out" | grep -q '^received '
+}
+
+# Write a track name and the group a live JS subscriber saw on it to
+# $HARNESS_RUN/<broadcast>.track. Extra args go to subscribe.ts (e.g. --track).
+# shellcheck disable=SC2329  # reached from run_subscriber, which 'harness_spawn' invokes
+observe_group() {
+    local broadcast="$1"
+    shift
+    (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && node --import tsx subscribe.ts subscribe --url "$URL" --broadcast "$broadcast" \
+        --timeout "$TIMEOUT" --track-file "$HARNESS_RUN/$broadcast.track" "$@")
 }
 
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
@@ -513,8 +588,57 @@ run_subscriber() {
         rust)
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
             # SIGTERM that fires when no data arrives within the timeout.
+            if [[ "${INTEROP_FETCH_TRACK:-0}" == 1 ]]; then
+                # Discover the track from the decoded catalog, never today's naming
+                # convention, and a group live demand is filling.
+                observe_group "$broadcast" || return
+                local track group binary index=0
+                { read -r track && read -r group; } <"$HARNESS_RUN/$broadcast.track" || return
+                # Both readers FETCH that group by its observed ID, which waits for it to finish.
+                for binary in "$MOQ" "${INTEROP_SUB_MOQ:-$MOQ}"; do
+                    timeout -k 3 "$TIMEOUT" "$binary" --connect "$URL" ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} \
+                        --broadcast "$broadcast" fetch "$track" --group "$group" --json >"$HARNESS_RUN/$broadcast.$index.json" || return
+                    index=$((index + 1))
+                done
+                python3 - "$HARNESS_RUN/$broadcast.0.json" "$HARNESS_RUN/$broadcast.1.json" <<'PYCODE'
+import base64, json, sys
+outputs=[]
+sequence=None
+for path in sys.argv[1:]:
+    frames=[json.loads(line) for line in open(path)]
+    assert frames, "FETCH returned no frames"
+    payloads=[]
+    for index, frame in enumerate(frames):
+        payload=base64.b64decode(frame["payload"], validate=True)
+        if sequence is None: sequence=frame["group"]
+        assert frame["group"] == sequence and frame["frame"] == index and frame["size"] == len(payload), frame
+        payloads.append(payload)
+    outputs.append(payloads)
+assert outputs[0] == outputs[1], "current/released FETCH changed the immutable group's payloads"
+PYCODE
+                return
+            fi
+            if [[ "${INTEROP_FETCH_DATA:-0}" == 1 ]]; then
+                # The JS fixture writes one group on `data` once a subscriber wants it. A
+                # live subscriber observes it; the reader then FETCHes it by that ID.
+                observe_group "$broadcast" --track data || return
+                local track group
+                { read -r track && read -r group; } <"$HARNESS_RUN/$broadcast.track" || return
+                timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} \
+                    --broadcast "$broadcast" fetch "$track" --group "$group" >"$HARNESS_RUN/$broadcast.fetch" || return
+                [[ "$(cat "$HARNESS_RUN/$broadcast.fetch")" == "compat-fetch" ]]
+                return
+            fi
+            if [[ "${INTEROP_DECODE:-0}" == 1 ]]; then
+                # ffmpeg actually decodes the exported media; mux headers alone cannot pass.
+                (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
+                    ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
+                    ffmpeg -hide_banner -loglevel error -i - -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw"
+                [[ -s "$HARNESS_RUN/$broadcast.raw" ]]
+                return
+            fi
             local n
-            n=$(timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$URL" --broadcast "$broadcast" \
+            n=$(timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" --broadcast "$broadcast" \
                 export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
             [[ "${n:-0}" -ge 1 ]]
             ;;
@@ -524,6 +648,9 @@ run_subscriber() {
             ;;
         go)
             "$GO_INTEROP" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
+            ;;
+        cpp)
+            "$CPP_INTEROP" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         c)
             "$C_INTEROP" subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"

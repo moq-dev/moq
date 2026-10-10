@@ -310,16 +310,28 @@ impl Fetcher {
 struct Sink {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: CatalogProducer,
+	/// The playlist's one timestamp base. Every rendition, and every importer replacing one on a
+	/// new `EXT-X-MAP`, shifts by its offset: separate offsets would shift each by its own first
+	/// fragment's arrival.
+	timebase: moq_mux::catalog::Timebase,
 }
 
 impl Sink {
+	fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer) -> Self {
+		let timebase = catalog.timebase();
+		Self {
+			broadcast,
+			catalog,
+			timebase,
+		}
+	}
+
 	/// Mint an fMP4 importer that publishes only the roles in `select`.
-	///
 	fn importer(&self, select: &select::Broadcast) -> Fmp4 {
-		// `reserve()` (not `clone()`) so this init's tracks publish together.
+		// A reservation (not a bare clone) so this init's tracks publish together.
 		// The pass holds a separate reservation across every rendition; this one
 		// only covers the tracks this init segment declares.
-		Fmp4::new(self.broadcast.clone(), self.catalog.reserve()).with_select(select.clone())
+		Fmp4::new(self.broadcast.clone(), self.timebase.reserve()).with_select(select.clone())
 	}
 }
 
@@ -599,7 +611,7 @@ impl Import {
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.playlist;
 		Ok(Self {
-			sink: Sink { broadcast, catalog },
+			sink: Sink::new(broadcast, catalog),
 			fetcher: Fetcher::new(cfg.client)?,
 			base_url,
 			video: Vec::new(),
@@ -1118,7 +1130,7 @@ mod tests {
 	fn sink() -> Sink {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		Sink { broadcast, catalog }
+		Sink::new(broadcast, catalog)
 	}
 
 	fn track_state() -> TrackState {
@@ -1519,6 +1531,83 @@ mod tests {
 			import.video[0].map.as_ref().unwrap().range.unwrap().start,
 			second_init as u64
 		);
+	}
+
+	/// Every frame timestamp `name` carries so far, in microseconds.
+	async fn stamps(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u128> {
+		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600));
+		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
+		let wait = std::time::Duration::from_millis(100);
+		let mut out = Vec::new();
+		while let Ok(Ok(Some(mut group))) = tokio::time::timeout(wait, track.recv_group()).await {
+			while let Ok(Ok(Some(frame))) = tokio::time::timeout(wait, group.read_frame()).await {
+				out.push(frame.timestamp.unwrap().as_micros());
+			}
+		}
+		out
+	}
+
+	/// Every frame timestamp a catalog's renditions carry so far, in microseconds.
+	async fn published(consumer: &moq_net::broadcast::Consumer, catalog: &CatalogProducer) -> Vec<Vec<u128>> {
+		let snapshot = catalog.snapshot();
+		let mut out = Vec::new();
+		for name in snapshot.video.renditions.keys().chain(snapshot.audio.renditions.keys()) {
+			out.push(stamps(consumer, name).await);
+		}
+		out
+	}
+
+	/// The same fragment imported alone, which keeps its timestamps verbatim.
+	async fn alone(init: &[u8], fragment: &[u8]) -> Vec<Vec<u128>> {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut import = Fmp4::new(broadcast, catalog.reserve()).with_select(select_muxed());
+		import.decode(init).unwrap();
+		import.decode(fragment).unwrap();
+		published(&consumer, &catalog).await
+	}
+
+	/// The import's timebase never withholds the catalog, and an importer replacing a rendition on a
+	/// new `EXT-X-MAP` after that catalog is out shifts by the same offset as the first one: none,
+	/// since the first placed the clock. A fresh offset would shift it by its own arrival.
+	#[tokio::test]
+	async fn a_replacement_importer_keeps_the_offset() {
+		let (init, fragments) = fmp4_parts(2);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut catalogs = catalog.consume().unwrap();
+		let sink = Sink::new(broadcast, catalog.clone());
+
+		let mut first = sink.importer(&select_muxed());
+		first.decode(&init).unwrap();
+		first.decode(&fragments[0]).unwrap();
+		assert!(
+			matches!(catalogs.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(Some(_)))),
+			"the initial catalog is out while the timebase lives"
+		);
+		let before = published(&consumer, &catalog).await;
+
+		// Let the clock run on, so a fresh offset could not land back on the source's timestamps.
+		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		let mut second = sink.importer(&select_muxed());
+		second.decode(&init).unwrap();
+		drop(first);
+		second.decode(&fragments[1]).unwrap();
+		let after = published(&consumer, &catalog).await;
+
+		assert_eq!(
+			before,
+			alone(&init, &fragments[0]).await,
+			"the first importer stays verbatim"
+		);
+		assert_eq!(
+			after,
+			alone(&init, &fragments[1]).await,
+			"the replacement keeps that offset"
+		);
+		assert!(after.iter().any(|stamps| !stamps.is_empty()), "{after:?}");
 	}
 
 	/// Resolve `ensure_tracks` against a master playlist written to a temp file.

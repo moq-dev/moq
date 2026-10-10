@@ -510,8 +510,8 @@ export class Producer {
 	#state = new TrackState();
 	#sequence: TrackSequence = { next: 0 };
 	// One past the highest group or datagram this producer received, like the Rust
-	// `max_sequence`. The shared counter above can run ahead of it: sibling producers of
-	// the same track advance it too.
+	// `max_sequence`. The shared counter above can run ahead of it: earlier producers of
+	// the same broadcast track advanced it too.
 	#received = 0;
 
 	// Recently written source groups, retained for replay to late subscribers and
@@ -930,7 +930,7 @@ export class Producer {
 	 * never reuses a number). The payload must fit the negotiated transport datagram size minus
 	 * a small header; an oversize payload is dropped at each hop (there is no group fallback), so
 	 * keep datagram payloads small (e.g. a single audio frame). Datagrams are never delivered
-	 * over IETF moq-transport or stream-only transports (the WebSocket fallback). A payload over
+	 * over stream-only transports (the WebSocket fallback). A payload over
 	 * 65535 bytes (the QUIC datagram frame ceiling) throws. An origin publisher uses this; a
 	 * relay preserving upstream numbering uses {@link insertDatagram}.
 	 *
@@ -1039,35 +1039,15 @@ export class Producer {
 
 	/** Append a frame as its own single-frame group. */
 	writeFrame(frame: Frame) {
-		this.#writeSingle((group) => group.writeFrame(frame));
-	}
-
-	// Write one frame as its own group, aborting the group if the write throws so no
-	// subscriber waits on a group that will never get its frame.
-	#writeSingle(write: (group: GroupProducer) => void): void {
 		const group = this.appendGroup();
 		try {
-			write(group);
+			group.writeFrame(frame);
 		} catch (err) {
+			// Abort the group so no subscriber waits on a group that will never get its frame.
 			group.close(err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
 		group.close();
-	}
-
-	/** Appends a string to the track as its own single-frame group. */
-	writeString(str: string) {
-		this.#writeSingle((group) => group.writeString(str));
-	}
-
-	/** Appends a JSON value to the track as its own single-frame group. */
-	writeJson(json: unknown) {
-		this.#writeSingle((group) => group.writeJson(json));
-	}
-
-	/** Appends a boolean to the track as its own single-frame group. */
-	writeBool(bool: boolean) {
-		this.#writeSingle((group) => group.writeBool(bool));
 	}
 }
 

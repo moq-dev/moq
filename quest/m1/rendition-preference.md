@@ -14,9 +14,8 @@ decodes. A multitrack RTMP client still receives every rendition.
 
 ## Plan
 
-Requested by an external consumer (OneTooMany), who publishes an H.265 source
-with its own H.264 transcode beside it, so a viewer that can decode H.265
-should never pull the transcode.
+A publisher with an H.265 source and its own H.264 transcode beside it wants
+a viewer that can decode H.265 to never pull the transcode.
 
 Decided in planning interviews on 2026-10-01:
 
@@ -70,7 +69,3 @@ Decided in planning interviews on 2026-10-01:
 - Out of scope: moq-ffi, libmoq, and the bindings until a native player needs
   the field. moq-transcode producing same-size codec fallbacks; the consumer
   publishes its own.
-
-## Related
-
-- [Audio rendition pick](/quest/m1/audio-ranked.md) - audio ranking, where `preference` could join later

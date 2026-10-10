@@ -1,11 +1,11 @@
 ---
 title: Libraries
-description: MoQ libraries for Rust, TypeScript, C, Python, Kotlin, Swift, Go, and Dart
+description: MoQ libraries for Rust, TypeScript, C++, C, Python, Kotlin, Swift, Go, and Dart
 ---
 
 # Libraries
 
-Two primary implementations and six bindings, all speaking the same wire
+Two primary implementations and seven bindings, all speaking the same wire
 protocol. A publisher in Python is consumable by a subscriber in Swift.
 
 | Language | Package | Best for |
@@ -17,13 +17,14 @@ protocol. A publisher in Python is consumable by a subscriber in Swift.
 | <img class="language-icon" src="/icons/languages/python.svg" alt="" /> [Python](/lib/py/) | `moq-rs` on PyPI | Scripts, ML pipelines, voice agents. |
 | <img class="language-icon" src="/icons/languages/go.svg" alt="" /> [Go](/lib/go/) | `moq.dev/moq` | Go services and tooling. |
 | <img class="language-icon" src="/icons/languages/dart.svg" alt="" /> [Dart](/lib/dart/) | `moq` on pub.dev | Flutter apps. |
-| <img class="language-icon" src="/icons/languages/c.svg" alt="" /> [C](/lib/c/) | `moq-c` | C/C++ and any language with a C FFI. |
+| [C++](/lib/cpp/) | `moq-cpp` via CMake or pkg-config | C++ apps, engines, and plugins. |
+| <img class="language-icon" src="/icons/languages/c.svg" alt="" /> [C](/lib/c/) | `moq-c` | The plain-C ABI, for C and any language with a C FFI; C++ should use the package above. |
 
 ## How they relate
 
 Rust is the reference implementation; every server-side tool is built on it.
-TypeScript is a from-scratch browser implementation. The other six wrap the
-Rust core: Python, Kotlin, Swift, Go, and Dart are generated from one
+TypeScript is a from-scratch browser implementation. The other seven wrap the
+Rust core: Python, Kotlin, Swift, Go, Dart, and C++ are generated from one
 [UniFFI](https://mozilla.github.io/uniffi-rs/) crate (`moq-ffi`) and then
 wrapped in an idiomatic layer, while C gets a hand-written stable ABI
 (`moq-c`). A feature added to the core lands in all of them together.
@@ -33,18 +34,16 @@ wrapped in an idiomatic layer, while C gets a hand-written stable ABI
 The wrapped bindings share one feature set, so the language pages only show
 how it looks in that language:
 
-- **Connect** to a relay with TLS options (system roots, custom CA, fingerprint pinning, mTLS) and a JWT in the URL, or **serve** sessions yourself and accept or reject each request by path.
-- **Reconnect** automatically with backoff when the transport drops, with `status`/`epoch` reporting each (re)connect and backoff tunable down to retrying forever. The peer's inbound QUIC stream limit is configurable for subscribe-heavy clients.
-- **Discover** broadcasts by prefix, wait for a specific one, or request one by path, including a path a prefix claim serves on demand. Advertise an exact path with `create_broadcast` then `announce` / `unannounce` (a broadcast is invisible to local consumers and peers alike until announced), or claim a path prefix with `dynamic(prefix, route)`.
-- **Publish and subscribe to media** with the hang catalog filled in from the bitstream, plus raw pixels or PCM in and out with the codec running inside the binding (VideoToolbox, Media Foundation, NVENC, openh264, Opus). A publisher follows the connection's send estimate through `session.bandwidth()`: reserve a share for an app-owned encoder, or pass the handle when encoding so the built-in video encoder follows the grant.
-- **Connection health.** `stats()` snapshots RTT, send/receive estimates, and byte/packet counters. `bandwidth()` divides that send estimate among tracks sharing the connection.
-- **Raw tracks** of arbitrary bytes with timestamps, sparse or replayed groups, per-subscriber priority and max delay, and best-effort datagrams.
-- **JSON tracks** in snapshot mode (latest value, merge-patch deltas, optional compression) or stream mode (append log).
-- **Fetch** a single group by sequence from the cache, decoded through the container or raw.
-- **Serve on demand**: accept track and broadcast requests as they arrive instead of publishing up front.
+- **Connect** to a relay with TLS options and a JWT in the URL, or **serve** sessions yourself and accept or reject each request by path.
+- **Reconnect** automatically with backoff when the transport drops.
+- **Discover** broadcasts by prefix, wait for a specific one, or request one by path. Advertise an exact path (a created broadcast is invisible until announced), or claim a prefix and serve requests beneath it on demand.
+- **Publish and subscribe to media** with the hang catalog filled in from the bitstream, or hand over raw pixels and PCM and let the binding encode and decode (VideoToolbox, Media Foundation, NVENC, openh264, Opus). The built-in video encoder can follow the connection's send estimate.
+- **Raw tracks** of arbitrary bytes, with per-subscriber priority and max delay, and best-effort datagrams.
+- **JSON tracks** as a latest value with merge-patch deltas, or as an append log.
+- **Fetch** a single cached group by sequence.
 - **Catalog extensions**: write your own section next to `video` and `audio`, and read others' back.
-- **Routes**: see which relays a broadcast came through, and advertise a cost as a standby publisher: warm `cost` for what pulling costs today, undiscounted `cold` for what it costs with nothing cached (omit `cold` to price both alike).
-- **Errors** distinguish auth rejection (don't retry) from shutdown (expected) from transport failure. A protocol error carries the peer's session or stream code, a known kind when recognized, and keeps an application or unknown code without loss.
+- **Routes**: see which relays a broadcast came through, and advertise a cost as a standby publisher.
+- **Connection stats** and **errors** that tell an auth rejection (don't retry) from a shutdown or a transport failure.
 
 Dart is the exception on codecs: its published binaries carry no encoder or
 decoder, so it moves already-encoded frames.

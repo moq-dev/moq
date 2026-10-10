@@ -35,8 +35,8 @@ backpressure the peer cannot ignore, rather than metering and closing.
   cannot bank a full default window and spend it after a low cap arrives.
   After auth the relay raises it through the `set_limits` seam: the normal
   window for an uncapped session, paced credit for a capped one. A lowered
-  cap (revalidation, a union shrinking) uses noq-proto's shrink-as-debt
-  `set_receive_window` behavior, described in
+  cap (revalidation, a union shrinking) uses `moq-quic`'s shrink-as-debt
+  `Connection::set_receive_window` (`rs/moq-quic/src/connection/mod.rs`), described in
   [peer limits](/quest/m1/quic/peer-limits.md), so the overshoot is
   bounded by the credit outstanding at the change and the test asserts that
   bound.
@@ -47,7 +47,8 @@ backpressure the peer cannot ignore, rather than metering and closing.
   rides the CONNECT URL or arrives in band), so it is set on a live
   connection and reset on revalidation or a union change. Reuse the runtime
   limits seam [peer limits](/quest/m1/quic/peer-limits.md) adds
-  (`set_limits(Limits)` on the `web-transport-moq` session), extended with
+  (`set_limits(Limits)` on moq-net's transport trait, implemented by the
+  moq-tokio and moq-uring adapters after the fork switch), extended with
   the two rates.
 - Lands in `moq-quic`, so it waits for the [fork](/quest/m1/quic/fork/README.md).
   The relay drops its refusal for QUIC sessions in the same PR.

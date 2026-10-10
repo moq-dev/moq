@@ -27,6 +27,7 @@ on:
       - "package.json"
       # The Go client builds against the modules this script stages.
       - "sh/go/**"
+      - "cpp/moq/**"
       - ".github/workflows/interop.yml"
 
 concurrency:
@@ -106,6 +107,16 @@ jobs:
           # and a passing one is deleted as usual.
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # Registry installs and the release matrix run only on main, nightly or
+      # on demand: a break only needs catching before the next release.
+      - name: Released wire compatibility
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: nix develop --command just test wire-compat
+        shell: bash -leo pipefail {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       - name: Interop negative control
         run: nix develop --command just test interop-negative
         shell: bash -leo pipefail {0}
@@ -124,6 +135,24 @@ jobs:
       # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
       - name: TS compliance
         run: nix develop --command just test ts
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
+      # so the export has to spread it over the slots before its DTS and still keep
+      # the constant-rate schedule.
+      - name: TS keyframe bursts
+        run: nix develop --command just test ts --bitrate 2000000
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # 1080p video filling a broadcast-sized 9 Mbit CPB, at the default delay: the
+      # source sends pictures most of a second ahead of their decode time, and the
+      # export has to as well without overflowing the receiver's buffers.
+      - name: TS broadcast-sized CPB
+        run: nix develop --command just test ts --hrd
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs

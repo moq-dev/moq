@@ -114,7 +114,7 @@ export interface ReadGroupFrame {
 	complete(): void;
 }
 
-/** The next group or datagram sequence shared by dynamic producers of one broadcast track. */
+/** The next group or datagram sequence, shared by every dynamic producer that serves one broadcast track in turn. */
 export interface TrackSequence {
 	next: number;
 }

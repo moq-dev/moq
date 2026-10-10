@@ -11,27 +11,24 @@ a ratio of two totals.
 ## Plan
 
 Branch from main. The loop in `Worker::block_on`
-(rs/moq-uring/src/worker.rs:164-187) runs one task pass, then `pump`
-(`submit()` at worker.rs:250, then reap and dispatch), then `maybe_park`,
-whose enter (`submit_and_wait(1)` or a timed `enter(to_submit, 1,
-GETEVENTS|EXT_ARG|ABS_TIMER)`, worker.rs:400-417) carries whatever the SQ
-holds. When nothing is `NOTIFIED`, the turn pays both. tokio-uring, monoio,
+(`rs/moq-uring/src/worker.rs`) runs one task pass, then `pump` (`submit`,
+then reap and dispatch), then `maybe_park`, whose enter
+(`submit_and_wait(1)` or a timed `enter(to_submit, 1,
+GETEVENTS|EXT_ARG|ABS_TIMER)`) carries whatever the SQ holds. When nothing is `NOTIFIED`, the turn pays both. tokio-uring, monoio,
 glommio, and compio all fold the tick's submit into the park enter.
 
 - `pump` submits only when the turn will not park: when the unpark word is
   `NOTIFIED`, or when the SQ is full enough that the park enter could not
   carry it. Otherwise the staged SQEs ride `maybe_park`'s enter. Reaping
   before the park stays as it is; it needs no enter.
-- `DEFER_TASKRUN` (set at worker.rs:104-109) runs deferred completion work
-  only on an enter carrying `GETEVENTS`. The `io-uring` crate's `submit()`
-  adds that flag only when waiting or on CQ overflow
-  (io-uring-0.7.14/src/submit.rs:195) and never consults
-  `IORING_SQ_TASKRUN`, which liburing does. Reproduce first: a worker that
-  self-wakes every turn (a deep egress backlog does) and a completion that
-  arrives mid-burst; measure how many turns pass before it dispatches. Then
-  set `GETEVENTS` on any submit while `SubmissionQueue::taskrun()` reports
-  work, and add the regression test. The inline submit in `Shared::push`
-  (rs/moq-uring/src/shared.rs:111) and `submit_teardown` get the same flag.
+- `DEFER_TASKRUN` (set in `Worker::new`) runs deferred completion work
+  only on an enter carrying `GETEVENTS`. The locked `io-uring` 0.7.15's
+  `Submitter::submit_and_wait` already adds that flag while
+  `IORING_SQ_TASKRUN` is set, as liburing does; 0.7.14, which the workspace
+  still allows, does not. Raise the workspace floor to 0.7.15 and pin it with
+  a regression test: a worker that self-wakes every turn (a deep egress
+  backlog does) dispatches a completion that arrives mid-burst within one
+  turn. A submit this quest folds into the park enter must keep the flag.
 - Metrics (rs/moq-uring/src/metrics.rs): `turns`, `sq_full_enters`, and a
   fixed-bucket histogram of SQEs per enter and CQEs per enter, one row per
   worker. `enters` stays for the ratio the docs already describe.
@@ -44,7 +41,7 @@ to edit the driver moves to a follow-up after the fork.
 
 Acceptance: enters per turn on the chat and fanout shapes via `just bench
 BASE` on Linux and the new counters; the deferred-completion regression
-fails without the flag. Latency must not regress.
+fails on io-uring 0.7.14. Latency must not regress.
 
 ## Related
 

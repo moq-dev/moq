@@ -12,8 +12,8 @@ off so their peers' short headers stay recognizable.
 
 ## Plan
 
-The filter (`moq-sock`'s `shard` module today, `moq-quic-udp` once
-[quic/shard](/quest/m1/quic/shard.md) moves it) reads byte 1 or byte 6 by the
+The filter (`moq_sock::shard`, which stays in `moq-sock` under
+[quic/shard](/quest/m1/quic/shard.md)) reads byte 1 or byte 6 by the
 long-header bit and reduces it modulo the group size. A non-QUIC datagram
 goes through the same arithmetic: RTP and RTCP are steered by timestamp and
 SSRC bytes and scatter across shards, SRT data is steered by a sequence
@@ -76,4 +76,4 @@ talking to each backend receives transport parameters without
 
 ## Related
 
-- [Shard the QUIC endpoint](/quest/m1/quic/shard.md) - moves the filter this edits into `moq-quic-udp`
+- [Shard the QUIC endpoint](/quest/m1/quic/shard.md) - makes `moq_sock::shard` the one filter both runtimes use, and moves the CID generator into `moq-quic`

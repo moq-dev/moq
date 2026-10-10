@@ -31,19 +31,22 @@ The counters and channels land here. Client health and preflight are
 moq.pro (downstream) dashboard work, including the health badge and the
 connection-health drill-down, consumes both.
 
-Open, for the maintainer (the same question is recorded in
-[client health](/quest/m1/stats/health.md)): whether anything computes a
-per-broadcast verdict combining client reports, the relay's starvation, and
-publisher timeliness, and where it would live. This line only reports the
+The per-broadcast verdict combining client reports, the relay's starvation,
+and publisher timeliness lives downstream. This line only reports the
 counters.
 
 Decided (2026-10-06 audit): [stats totals and prefix
 tracks](/quest/m0/broadcast-epoch/stats-split.md) lands first, since it is m0
-and gates the release; #4133 rebases its histograms onto stats-split's totals
-and prefix tracks rather than the per-path `publisher.json` and
-`subscriber.json` map rows it writes today, which stats-split retires.
-Rejected: #4133 first, which would make stats-split carry the lag histogram
-and dropped counters across.
+and gates the release; the lag histogram lands on stats-split's totals and
+prefix tracks rather than the per-path `publisher.json` and
+`subscriber.json` map rows, which stats-split retires.
+Rejected: the histogram first, which would make stats-split carry the lag
+histogram and dropped counters across.
+
+Decided (2026-10-08): the egress histogram is its own quest,
+[viewer lag histogram](/quest/m1/qos/lag-histogram.md), since every other
+child reads it. The line's PR, #4133, closed without landing (2026-10-09);
+its code is kept on `wip/4133-lag-histogram`.
 
 Decided (2026-09-28): the line's moq-stats changes break the published
 crate. Client stats left the line (2026-09-29)
@@ -52,9 +55,9 @@ on `main`.
 
 ## Required
 
-- [Lag across a splice](/quest/m1/qos/lag-splice.md) - a route switch
-  neither loses pending lag weight nor keeps weighing a segment replaced
-  before its first frame; the line does not land until it is fixed
+- [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the egress `lag`
+  histogram and `dropped` counters land on stats-split's totals and prefix
+  tracks
 - [Lag dashboard](/quest/m1/qos/lag-dashboard.md) - the demo stats
   dashboard shows viewer lag percentiles and dropped media
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - per

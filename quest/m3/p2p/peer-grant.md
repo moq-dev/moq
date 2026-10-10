@@ -61,4 +61,5 @@ Additive.
 
 ## Required
 
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route-layer node id a grant binds
 - [In-band auth](/quest/m1/auth/README.md) - relay tokens reach `main` with this line, so the relay owns AUTH and knows the session's paths

@@ -2,107 +2,35 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
-from typing import Any
 
+from moq_ffi import MoqAudio as Audio
 from moq_ffi import (
     MoqAudioConsumer,
     MoqBroadcastConsumer,
-    MoqCatalogConsumer,
+    MoqFrame,
     MoqGroupConsumer,
-    MoqJsonSnapshotConfig,
-    MoqJsonSnapshotConsumer,
-    MoqJsonStreamConfig,
-    MoqJsonStreamConsumer,
-    MoqMediaConsumer,
-    MoqMediaGroupConsumer,
     MoqTrackConsumer,
     MoqVideoConsumer,
 )
+from moq_ffi import MoqVideo as Video
 
+from ._records import _subscription
 from .types import (
-    Audio,
     AudioDecoderOutput,
     AudioFrame,
-    Catalog,
-    Container,
     Datagram,
     FetchGroupOptions,
     Frame,
-    MediaFrame,
     Subscription,
     TrackInfo,
-    Video,
     VideoDecodedFrame,
     VideoDecoderOutput,
 )
 
 
-class MediaConsumer:
-    """Async-iterable stream of decoded :class:`MediaFrame` in decode order.
-
-    Built via :meth:`BroadcastConsumer.subscribe_media`. Iterate with ``async for``;
-    usable as an async context manager that cancels on exit.
-    """
-
-    def __init__(self, inner: MoqMediaConsumer) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> MediaFrame:
-        frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return frame
-
-    def cancel(self) -> None:
-        """Cancel the subscription and stop delivering frames."""
-        self._inner.cancel()
-
-
-class MediaGroupConsumer:
-    """Async iterator of decoded :class:`MediaFrame` within a single fetched group.
-
-    Built via :meth:`BroadcastConsumer.fetch_media_group`. Finite: iteration ends
-    after the group's last frame. Usable as an async context manager that cancels
-    on exit.
-    """
-
-    def __init__(self, inner: MoqMediaGroupConsumer) -> None:
-        self._inner = inner
-
-    @property
-    def sequence(self) -> int:
-        """The sequence number of this group within the track."""
-        return self._inner.sequence()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> MediaFrame:
-        frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return frame
-
-    def cancel(self) -> None:
-        """Cancel reading this group and stop delivering frames."""
-        self._inner.cancel()
+def _frame(frame: MoqFrame | None) -> Frame | None:
+    return None if frame is None else Frame._from_ffi(frame)
 
 
 class GroupConsumer:
@@ -129,11 +57,11 @@ class GroupConsumer:
         frame = await self._inner.read_frame()
         if frame is None:
             raise StopAsyncIteration
-        return frame
+        return Frame._from_ffi(frame)
 
     async def read_frame(self) -> Frame | None:
         """Read the next timestamped frame. Returns `None` when the group ends."""
-        return await self._inner.read_frame()
+        return _frame(await self._inner.read_frame())
 
     def cancel(self) -> None:
         """Cancel reading this group and stop delivering frames."""
@@ -213,7 +141,7 @@ class TrackConsumer:
         `None` only when the track ends. Cancelling one call keeps the current
         group so a later :meth:`read_frame` or :meth:`next_group` still sees it.
         """
-        return await self._inner.read_frame()
+        return _frame(await self._inner.read_frame())
 
     async def recv_datagram(self) -> Datagram | None:
         """Receive the next best-effort datagram in arrival order.
@@ -221,15 +149,16 @@ class TrackConsumer:
         Returns ``None`` when the track ends. Datagrams are unavailable over stream-only
         transports and older wire versions.
         """
-        return await self._inner.recv_datagram()
+        datagram = await self._inner.recv_datagram()
+        return None if datagram is None else Datagram._from_ffi(datagram)
 
     def info(self) -> TrackInfo:
         """Return the publisher-side track properties."""
-        return self._inner.info()
+        return TrackInfo._from_ffi(self._inner.info())
 
     def update(self, subscription: Subscription) -> None:
         """Change this subscriber's delivery preferences."""
-        self._inner.update(subscription)
+        self._inner.update(subscription._ffi())
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering groups."""
@@ -300,97 +229,6 @@ class VideoConsumer:
         self._inner.cancel()
 
 
-class JsonSnapshotConsumer:
-    """Async iterator over a JSON snapshot track, yielding the latest value (lossy).
-
-    Built via :meth:`BroadcastConsumer.subscribe_json_snapshot`. Each item is a parsed Python object.
-    A consumer that has fallen behind collapses the backlog and yields only the latest value.
-    Usable as an async context manager that cancels on exit.
-    """
-
-    def __init__(self, inner: MoqJsonSnapshotConsumer) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Any:
-        value = await self._inner.next()
-        if value is None:
-            raise StopAsyncIteration
-        return json.loads(value)
-
-    def cancel(self) -> None:
-        """Cancel all current and future next() calls."""
-        self._inner.cancel()
-
-
-class JsonStreamConsumer:
-    """Async iterator over a JSON stream track, yielding every record in order (lossless).
-
-    Built via :meth:`BroadcastConsumer.subscribe_json_stream`. Each item is a parsed Python object.
-    Usable as an async context manager that cancels on exit.
-    """
-
-    def __init__(self, inner: MoqJsonStreamConsumer) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Any:
-        value = await self._inner.next()
-        if value is None:
-            raise StopAsyncIteration
-        return json.loads(value)
-
-    def cancel(self) -> None:
-        """Cancel all current and future next() calls."""
-        self._inner.cancel()
-
-
-class CatalogConsumer:
-    """Async-iterable stream of :class:`Catalog` snapshots as the broadcast updates.
-
-    Built via :meth:`BroadcastConsumer.subscribe_catalog`. Each item is the latest
-    catalog describing the broadcast's tracks; usable as an async context manager.
-    """
-
-    def __init__(self, inner: MoqCatalogConsumer) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Catalog:
-        catalog = await self._inner.next()
-        if catalog is None:
-            raise StopAsyncIteration
-        return catalog
-
-    def cancel(self) -> None:
-        """Cancel the catalog subscription and stop delivering updates."""
-        self._inner.cancel()
-
-
 class BroadcastConsumer:
     """The consume side of one broadcast: subscribe to its tracks, catalog, and media.
 
@@ -401,33 +239,12 @@ class BroadcastConsumer:
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
 
-    async def subscribe_catalog(self) -> CatalogConsumer:
-        """Subscribe to the broadcast's catalog, async-iterating snapshots as it changes."""
-        return CatalogConsumer(await self._inner.subscribe_catalog())
-
     async def subscribe_track(self, name: str, subscription: Subscription | None = None) -> TrackConsumer:
         """Subscribe to a track and receive arbitrary byte payloads.
 
         ``subscription`` tunes delivery priority, group range, and staleness; omit for defaults.
         """
-        return TrackConsumer(await self._inner.subscribe_track(name, subscription))
-
-    async def subscribe_json_snapshot(self, name: str, *, compression: bool = False) -> JsonSnapshotConsumer:
-        """Subscribe to a JSON snapshot track (lossy latest-value).
-
-        Yields parsed Python objects. Pass the same ``compression`` the producer used.
-        """
-        # delta_ratio is producer-only, so leave it at its default here.
-        config = MoqJsonSnapshotConfig(compression=compression)
-        return JsonSnapshotConsumer(await self._inner.subscribe_json_snapshot(name, config))
-
-    async def subscribe_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamConsumer:
-        """Subscribe to a JSON stream track (lossless append-log).
-
-        Yields parsed Python objects in order. Pass the same ``compression`` the producer used.
-        """
-        config = MoqJsonStreamConfig(compression=compression)
-        return JsonStreamConsumer(await self._inner.subscribe_json_stream(name, config))
+        return TrackConsumer(await self._inner.subscribe_track(name, _subscription(subscription)))
 
     async def fetch_group(
         self,
@@ -442,43 +259,6 @@ class BroadcastConsumer:
         """
         return GroupConsumer(await self._inner.fetch_group(name, sequence, options))
 
-    async def fetch_media_group(
-        self,
-        name: str,
-        sequence: int,
-        track: Video | Audio | Container,
-        options: FetchGroupOptions | None = None,
-    ) -> MediaGroupConsumer:
-        """Fetch one group by sequence and decode it into media frames.
-
-        Unlike :meth:`subscribe_media` this holds no live subscription and applies
-        no latency-based group skipping, so every frame in the group is delivered.
-        ``track`` is either the catalog entry for this track (e.g.
-        ``catalog.video[name]``) or a :class:`Container` directly.
-        """
-        container = track if isinstance(track, Container) else track.container
-        return MediaGroupConsumer(await self._inner.fetch_media_group(name, sequence, container, options))
-
-    async def subscribe_media(
-        self,
-        name: str,
-        track: Video | Audio | Container,
-        subscription: Subscription | None = None,
-    ) -> MediaConsumer:
-        """Subscribe to a media track, delivering frames in decode order.
-
-        ``track`` is either the catalog entry for this track (e.g.
-        ``catalog.video[name]``), whose ``container`` describes how to parse the
-        bitstream, or a :class:`Container` directly. Pass a bare container for the
-        dynamic flow, where you subscribe before the catalog exists.
-        ``subscription`` tunes delivery priority, group
-        range, and the max delay; omit for defaults. Raise
-        :attr:`Subscription.max_delay_us` to buffer instead of skipping a
-        stalled group.
-        """
-        container = track if isinstance(track, Container) else track.container
-        return MediaConsumer(await self._inner.subscribe_media(name, container, subscription))
-
     async def resolve(self, reference: str | None) -> "BroadcastConsumer":
         """Resolve a catalog rendition's ``broadcast`` reference to the broadcast
         serving its track.
@@ -486,8 +266,8 @@ class BroadcastConsumer:
         ``reference`` is ``catalog.video[name].broadcast`` /
         ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
         anything else names a sibling relative to it (e.g. ``./source``). Call it on
-        a rendition that carries one before :meth:`subscribe_media`,
-        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`fetch_media_group`,
+        a rendition that carries one before :meth:`~moq.media.ContainerConsumer.subscribe`,
+        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`~moq.media.ContainerGroupConsumer.fetch`,
         which take a track name rather than a rendition; :meth:`decode_audio` and
         :meth:`decode_video` resolve it themselves.
 
@@ -506,7 +286,7 @@ class BroadcastConsumer:
         declared by ``output``.
 
         ``catalog_audio`` comes from the catalog (e.g.
-        ``await broadcast.catalog()`` followed by
+        ``await moq.media.catalog(broadcast)`` followed by
         ``catalog.audio[name]``). Only Opus and AAC-LC tracks are supported;
         AAC is decode only, since nothing here encodes it.
         Use ``output.max_delay_us`` to
@@ -527,7 +307,7 @@ class BroadcastConsumer:
         """Subscribe to a video track and decode it inside the bindings.
 
         ``catalog_video`` comes from the catalog (e.g.
-        ``await broadcast.catalog()`` followed by ``catalog.video[name]``).
+        ``await moq.media.catalog(broadcast)`` followed by ``catalog.video[name]``).
         An unrecognized codec raises here; a recognized one no native backend
         handles raises when the decoder opens, both before the first frame.
 
@@ -538,8 +318,3 @@ class BroadcastConsumer:
         effort, so read each frame's own dimensions.
         """
         return VideoConsumer(await self._inner.decode_video(name, catalog_video, output or VideoDecoderOutput()))
-
-    async def catalog(self) -> Catalog:
-        """Convenience: subscribe and return the first catalog."""
-        consumer = await self.subscribe_catalog()
-        return await anext(consumer)

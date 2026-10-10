@@ -60,6 +60,7 @@ export default defineConfig({
 					{ text: "Python", link: "/lib/py/" },
 					{ text: "Go", link: "/lib/go/" },
 					{ text: "Dart", link: "/lib/dart/" },
+					{ text: "C++", link: "/lib/cpp/" },
 					{ text: "C", link: "/lib/c/" },
 				],
 			},
@@ -198,6 +199,7 @@ export default defineConfig({
 						{ text: "Python", link: "/lib/py/" },
 						{ text: "Go", link: "/lib/go/" },
 						{ text: "Dart", link: "/lib/dart/" },
+						{ text: "C++", link: "/lib/cpp/" },
 						{ text: "C", link: "/lib/c/" },
 					],
 				},
@@ -262,6 +264,9 @@ export default defineConfig({
 			}),
 		],
 	},
+
+	// Agent instructions, not a page.
+	srcExclude: ["AGENTS.md"],
 
 	ignoreDeadLinks: [
 		// Localhost URLs are intentional for development examples and aren't

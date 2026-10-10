@@ -12,7 +12,7 @@ import { Reader, Stream } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
-import { NativeSession, type Session } from "./adapter.ts";
+import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
@@ -20,7 +20,7 @@ import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk } from "./subscribe.ts";
+import { Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -1438,18 +1438,18 @@ test("an unanswered update drops the request and re-offers the namespace fresh",
 });
 
 /**
- * MoQ Cluster carries the warm cost only, and nothing at all without it, so a route change
+ * MoQ Cluster carries one static cost, and nothing at all without it, so a route change
  * the peer cannot see must not withdraw and advertise the namespace again.
  */
 test.each([
-	["a cold-only re-price with Cluster", HopSchema.parse(9n)],
+	["an unchanged price with Cluster", HopSchema.parse(9n)],
 	["any re-price without Cluster", undefined],
 ])("%s sends nothing", async (_, peer) => {
 	const self: Hop = HopSchema.parse(7n);
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
 	const broadcast = origin.createBroadcast(Path.from("mine"));
-	broadcast.announce({ cost: { warm: 4n, cold: 4n } });
+	broadcast.announce({ cost: 4n });
 	void pub.runPublishNamespaces();
 
 	const stream = await nextStream(pair.client);
@@ -1459,7 +1459,7 @@ test.each([
 	expect(msg.trackNamespace).toBe(Path.from("mine"));
 	await acceptPublishNamespace(stream);
 
-	broadcast.announce({ cost: { warm: peer === undefined ? 8n : 4n, cold: 9n } });
+	broadcast.announce({ cost: peer === undefined ? 8n : 4n });
 	expect(await nextStream(pair.client)).toBeUndefined();
 
 	origin.close();
@@ -1511,6 +1511,47 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 	}
 });
 
+// The adapter delivers a draft-14 to -16 update to its subscription's stream. Left unread, it
+// keeps that stream from reporting closed, so a later UNSUBSCRIBE would never end the subscription.
+test("drafts 14 to 16 end a subscription on UNSUBSCRIBE after an update", async () => {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const control = await Stream.open(pair.server, { version });
+		const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+		void adapter.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+
+		const path = Path.from("test");
+		const { pub, origin } = publisher(pair.server, { session: adapter });
+		const broadcast = publish(origin, path);
+		broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+		await peer.writer.u53(Subscribe.id);
+		await new Subscribe({ requestId: 0n, trackNamespace: path, trackName: "video", subscriberPriority: 0 }).encode(
+			peer.writer,
+			version,
+		);
+		const server = await adapter.acceptBi();
+		if (!server) throw new Error("no subscribe stream");
+		expect(await server.reader.u53()).toBe(Subscribe.id);
+		const running = pub.runSubscribe(await Subscribe.decode(server.reader, version), server);
+
+		expect(await peer.reader.u53()).toBe(SubscribeOk.id);
+		await SubscribeOk.decode(peer.reader, version);
+
+		await peer.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 0n, ownRequestId: 2n }).encode(peer.writer, version);
+		await peer.writer.u53(Unsubscribe.id);
+		await new Unsubscribe({ requestId: 0n }).encode(peer.writer, version);
+
+		await running;
+		broadcast.close();
+		origin.close();
+		adapter.close();
+	}
+});
+
 /** Draft-20 is the only version whose Location Filters and fills the publisher acts on. */
 const V20 = Version.DRAFT_20;
 
@@ -1523,6 +1564,8 @@ interface ServedGroup {
 	sequence: number;
 	/** Whether the header claimed the stream starts at the group's first object. */
 	firstObject: boolean;
+	/** Whether the header claimed the stream's FIN ends the group (END_OF_GROUP). */
+	endOfGroup: boolean;
 	/** Each object's absolute id (reconstructed from its delta) and payload. */
 	objects: { id: number; payload: string }[];
 }
@@ -1654,7 +1697,12 @@ async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGrou
 		objects.push({ id, payload: new TextDecoder().decode(payload) });
 	}
 
-	return { sequence: header.groupId, firstObject: header.flags.firstObject, objects };
+	return {
+		sequence: header.groupId,
+		firstObject: header.flags.firstObject,
+		endOfGroup: header.flags.hasEnd,
+		objects,
+	};
 }
 
 /** Read a stream carrying only an END_OF_TRACK object, returning the group it names. */
@@ -1715,7 +1763,8 @@ async function readFill(stream: ReadableStream<Uint8Array>): Promise<ServedFill>
 /**
  * An absolute filter names the objects it wants, so the boundary groups are trimmed to it
  * and the groups outside it are never opened. The first object written carries its absolute
- * id, or the subscriber would read a silently renumbered group.
+ * id, or the subscriber would read a silently renumbered group, and a capped tail does not
+ * claim END_OF_GROUP, or the subscriber would think the group ended at the cap.
  */
 test("draft-20: an absolute filter trims the range it serves", async () => {
 	const fx = fixture();
@@ -1746,6 +1795,7 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 			sequence: 1,
 			// The head was trimmed, so the stream does not start at the group's first object.
 			firstObject: false,
+			endOfGroup: true,
 			objects: [
 				{ id: 1, payload: "1.1" },
 				{ id: 2, payload: "1.2" },
@@ -1757,6 +1807,8 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 		expect(await readGroup(second)).toEqual({
 			sequence: 2,
 			firstObject: true,
+			// The filter ends at object 0 of 3, so the stream stops before the group does.
+			endOfGroup: false,
 			objects: [{ id: 0, payload: "2.0" }],
 		});
 
@@ -1818,6 +1870,7 @@ test("draft-20: a fill serves the current group's head on a fetch stream", async
 		expect(await readGroup(live)).toEqual({
 			sequence: 0,
 			firstObject: false,
+			endOfGroup: true,
 			objects: [{ id: 2, payload: "0.2" }],
 		});
 	} finally {
@@ -1894,7 +1947,7 @@ test("draft-20: a backwards range within one group serves nothing and ends the s
 	try {
 		const served = await nextUni(fx.uni);
 		if (!served) throw new Error("the group stream never opened");
-		expect(await readGroup(served)).toEqual({ sequence: 0, firstObject: false, objects: [] });
+		expect(await readGroup(served)).toEqual({ sequence: 0, firstObject: false, endOfGroup: false, objects: [] });
 	} finally {
 		fx.close();
 		client.close();
@@ -2314,6 +2367,50 @@ test("draft-20: PUBLISH_DONE waits for a queued group and counts every stream", 
 	} finally {
 		fx.close();
 		client.close();
+	}
+});
+
+/**
+ * A peer that did not send SOLICIT still gets NAMESPACE on its SUBSCRIBE_NAMESPACE
+ * stream on draft-16 and later: one for a match that already exists, one announced
+ * after, then NAMESPACE_DONE when that announcement ends.
+ */
+test.each([
+	["draft-16", Version.DRAFT_16],
+	["draft-18", Version.DRAFT_18],
+] as const)("a non-SOLICIT %s SUBSCRIBE_NAMESPACE carries NAMESPACE then NAMESPACE_DONE", async (_, version) => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, version, true);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: false, session });
+	const early = publish(origin, Path.from("early-cam"));
+
+	const subscription = await Stream.open(pair.client, { version });
+	const accepted = await Stream.accept(pair.server, version);
+	if (!accepted) throw new Error("missing subscription");
+	const run = pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 1n, namespace: Path.empty() }), accepted);
+
+	try {
+		expect(await subscription.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(subscription.reader, version);
+
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+		expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(
+			Path.from("early-cam"),
+		);
+
+		publish(origin, Path.from("late-cam"));
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+		expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(Path.from("late-cam"));
+
+		early.close();
+		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntryDone.id);
+		expect((await SubscribeNamespaceEntryDone.decode(subscription.reader, version)).suffix).toBe(
+			Path.from("early-cam"),
+		);
+	} finally {
+		subscription.close();
+		origin.close();
+		await run;
 	}
 });
 

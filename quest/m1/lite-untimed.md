@@ -17,9 +17,19 @@ Timescale in TRACK_INFO and no Timestamp fields on an untimed track. The
 absent timestamp inside a timed track, which no longer exists (settled
 2026-10-06: a mismatched frame is refused).
 
+Decided (2026-10-08, with [#4826](https://github.com/moq-dev/moq/pull/4826)):
+CMAF decoders anchor a fragment to its frame timestamp and fall back to `tfdt`
+only on an untimed frame. Until this lands, an untimed CMAF track (a
+draft-14 publisher such as MOQtail) relayed to a lite-05+ subscriber anchors
+to the relay's send times, and lite-05/06 peers keep doing so. Shipped anyway:
+the invented timestamp is this quest's to remove.
+
 Decided (2026-10-02): one PR for both languages. Both model quests have
 landed (#4822). Shipping one language first would break Rust-JS interop on
 lite-07-wip in between.
+
+Decided 2026-10-08: [Rust untimed default](/quest/m1/rust-untimed-default.md)
+lands first, since both edit the same Timescale defaults.
 
 Draft work:
 
@@ -37,6 +47,6 @@ JS-to-Rust on lite-07. lite-06 still receives a timestamp. Run
 
 Public API: none. Wire: lite-07-wip only, which is unpublished.
 
-## Related
+## Required
 
 - [Rust untimed default](/quest/m1/rust-untimed-default.md) - touches the same Timescale defaults in `rs/moq-net` and lands first; this rebases onto it

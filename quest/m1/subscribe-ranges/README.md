@@ -25,7 +25,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
 - **Holes.** SUBSCRIBE_DROP (restored in lite-07 by
   [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md)) names every sequence in the
   requested ranges the publisher won't deliver: never existed, expired, or
-  refused upstream. Datagram groups are always dropped in a past range (the datagrams-are-live-only quest, #4551). The
+  refused upstream. Datagram groups are always dropped in a past range (#4982). The
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` and `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
@@ -47,8 +47,8 @@ relay bounds a sparse FETCH only if the model can request ranges:
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining
   FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
   bridge relies on it (maintainer, 09-29).
-- The relay half of fetch-span (#4558, from the finished Moxygen line) moves
-  here; #4558 lands only the no-handler skip.
+- The relay half of fetch-span moves here; #4558 landed only the no-handler
+  skip.
 
 This line owns the end-to-end test: a relay with a sparse cache answers a
 wide past range plus live in both orders, over lite-07 and moq-transport, with
@@ -56,6 +56,7 @@ every sequence delivered or dropped.
 
 ## Required
 
+- [lite-07 Live flag](/quest/m1/lite-live.md) - the `Live` field the range list sits beside
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges and order, and `Dynamic` fills misses by range
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft

@@ -19,7 +19,7 @@ pub mod vp9;
 mod bitstream_test;
 
 use bytes::Bytes;
-use hang::catalog::VideoConfig;
+use hang::catalog::{AudioConfig, VideoConfig};
 
 use crate::Result;
 
@@ -198,14 +198,14 @@ enum TrackConvert {
 }
 
 impl Track {
-	/// Audio track for an Opus rendition, from a subscribed `track`.
-	pub fn opus(track: moq_net::track::Subscriber) -> Self {
-		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+	/// Audio track for an Opus rendition, from a subscribed `track` read in `config`'s container.
+	pub fn opus(track: moq_net::track::Subscriber, config: &AudioConfig) -> Result<Self> {
+		let container: moq_mux::catalog::hang::Container = config.try_into()?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
-		Self {
+		Ok(Self {
 			consumer,
 			convert: TrackConvert::Passthrough,
-		}
+		})
 	}
 
 	/// Video track from a subscribed `track` consumer. Codec inferred from

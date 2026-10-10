@@ -9,8 +9,7 @@ publisher serves requested ranges that are no longer in its live cache.
 
 ## Plan
 
-Mirror the Rust names. The JS FETCH cancel and JS FETCH quests shape the
-current `fetchGroup` surface; fold whatever of them is still open into this.
+Mirror the Rust names.
 
 Decided in the 2026-10-05 audit: the producer half of
 [JavaScript FETCH](/quest/m1/js-fetch.md) folds in here, so `@moq/net`'s
@@ -32,4 +31,3 @@ IETF FETCH dispatch. Resized from [M] to [L] for it.
 ## Required
 
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the wire this speaks
-- [Dynamic track identity](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - settles shared producer identity before adding on-demand requests

@@ -769,6 +769,9 @@ impl ImportSource {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
 			Self::Fmp4 => PublishFormat::Fmp4,
+			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
+				pcr_pid: args.pcr_pid.map(|pid| pid.0),
+			},
 			Self::Ts(args) => PublishFormat::Ts {
 				program: args.program.and_then(TsProgram::number),
 			},
@@ -798,6 +801,37 @@ pub struct TsImport {
 	/// `event/2.hang`, ...). Without it, a stream carrying more than one program is refused.
 	#[usage(long)]
 	pub program: Option<TsProgram>,
+
+	/// Publish the multiplex whole instead of demultiplexing it: every 188-byte packet verbatim,
+	/// on one track the catalog's `m2ts` section names. Scrambled streams, private PIDs, and the
+	/// PSI and SI ride through as authored. Bytes before the first group are dropped.
+	#[usage(long, conflicts = "--program")]
+	pub passthrough: bool,
+
+	/// Pace `--passthrough` on this PID's PCR rather than the `PCR_PID` of the PAT's first
+	/// program. Decimal, or hex with `0x`.
+	#[usage(long, requires = "--passthrough")]
+	pub pcr_pid: Option<TsPid>,
+}
+
+/// An `import ts --pcr-pid` value: a PID that can carry a PCR, in decimal or `0x` hex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TsPid(pub u16);
+
+impl std::str::FromStr for TsPid {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		let parsed = match arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X")) {
+			Some(hex) => u16::from_str_radix(hex, 16),
+			None => arg.parse(),
+		};
+		match parsed {
+			Ok(pid @ 0x0001..=0x1ffe) => Ok(Self(pid)),
+			Ok(pid) => Err(format!("PID {pid:#06x} cannot carry a PCR; expected 0x0001..=0x1ffe")),
+			Err(_) => Err(format!("expected a PID, got `{arg}`")),
+		}
+	}
 }
 
 /// An `import ts --program` or `import srt --program` value.
@@ -950,7 +984,7 @@ impl ExportSink {
 			},
 			Self::Ts(args) => Stdout {
 				format: SubscribeFormat::Ts,
-				max_delay: args.max_age.into_std(),
+				max_delay: args.delay.into_std(),
 				linger: args.linger.into_std(),
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
@@ -966,6 +1000,7 @@ impl ExportSink {
 /// A stdout sink's format and the options that apply to it.
 pub struct Stdout {
 	pub format: SubscribeFormat,
+	/// The staleness budget, which `ts` also holds every frame for (`--delay`).
 	pub max_delay: Duration,
 	pub linger: Duration,
 	pub fragment_duration: Option<Duration>,
@@ -1008,17 +1043,18 @@ impl Container {
 }
 
 /// The MPEG-TS stdout container.
-// It keeps `--max-age` rather than `Container`'s `--max-delay`: TS export is moving to a
-// fixed release delay that subsumes the staleness budget under its own flag.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Transport {
-	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
+	/// How long after its decode time each frame is written (e.g. `500ms`), like an SRT
+	/// receiver's latency. A frame that arrives later than this is dropped, and a stalled
+	/// group is skipped once it falls half this behind the newest content.
 	#[usage(long, default = "500ms")]
-	pub max_age: crate::duration::Duration,
+	pub delay: crate::duration::Duration,
 
 	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
 	/// The output stops while it is gone and resumes flagged as a break.
+	/// An export that fails while the broadcast is still up exits without waiting.
 	#[usage(long, default = "0s")]
 	pub linger: crate::duration::Duration,
 
@@ -1028,16 +1064,24 @@ pub struct Transport {
 	#[usage(long)]
 	pub mux_rate: Option<u64>,
 
-	/// The released spelling of [`Self::max_age`].
+	/// The released spelling of [`Self::delay`].
+	#[usage(long = "max-age", hide = true)]
+	max_age: Option<crate::duration::Duration>,
+
+	/// The released spelling of [`Self::delay`], before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<crate::duration::Duration>,
 }
 
 impl Transport {
 	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		const HOLDS: &str = "it also holds every frame that long after its decode time";
 		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.max_age.is_some() {
+			found.changed("--max-age", None, "--delay", HOLDS);
+		}
 		if self.latency_max.is_some() {
-			found.flag("--latency-max", None, "--max-age");
+			found.changed("--latency-max", None, "--delay", HOLDS);
 		}
 		found
 	}
@@ -1099,6 +1143,32 @@ mod tests {
 				parse(format, "0s").validate().is_ok(),
 				"{format}: no linger is always fine"
 			);
+		}
+	}
+
+	/// `export ts` holds every frame for its staleness budget, so the budget is spelled
+	/// `--delay` there, and the released spellings stop a run with a migration.
+	#[test]
+	fn export_ts_takes_a_delay() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["moq", "export", "--broadcast", "b", "ts"];
+			argv.extend_from_slice(args);
+			Invocation::try_parse_from(argv)
+		};
+		let stdout = |args: &[&str]| {
+			let cli = parse(args).unwrap();
+			let Command::Export(export) = &cli.stages[0] else {
+				panic!("not an export");
+			};
+			export.sink.stdout().unwrap().max_delay
+		};
+		assert_eq!(stdout(&[]), Duration::from_millis(500));
+		assert_eq!(stdout(&["--delay", "2s"]), Duration::from_secs(2));
+		for old in ["--max-age", "--latency-max"] {
+			let Err(err) = parse(&[old, "1s"]) else {
+				panic!("{old} must not start a run");
+			};
+			assert!(err.to_string().contains(&format!("{old} -> --delay")), "{err}");
 		}
 	}
 
@@ -1201,6 +1271,42 @@ mod tests {
 		assert_eq!(program("all"), Some(Some(TsProgram::All)));
 		assert_eq!(program("0"), None, "0 is the network PID");
 		assert_eq!(program("two"), None);
+	}
+
+	#[test]
+	fn import_ts_passthrough_takes_an_optional_pcr_pid() {
+		// `None` when the command line is refused.
+		let format = |args: &[&str]| {
+			let cli = Invocation::try_parse_from([&["moq", "import", "ts"], args].concat()).ok()?;
+			let Command::Import(import) = &cli.stages[0] else {
+				panic!("an import stage");
+			};
+			import.source.stdin_format()
+		};
+		assert!(matches!(
+			format(&["--passthrough"]),
+			Some(PublishFormat::TsPassthrough { pcr_pid: None })
+		));
+		assert!(matches!(
+			format(&["--passthrough", "--pcr-pid", "0x21"]),
+			Some(PublishFormat::TsPassthrough { pcr_pid: Some(0x21) })
+		));
+		assert!(matches!(
+			format(&["--passthrough", "--pcr-pid", "33"]),
+			Some(PublishFormat::TsPassthrough { pcr_pid: Some(33) })
+		));
+		assert!(format(&["--pcr-pid", "33"]).is_none(), "--pcr-pid needs --passthrough");
+		assert!(
+			format(&["--passthrough", "--program", "1"]).is_none(),
+			"nothing to select"
+		);
+		assert!(
+			format(&["--passthrough", "--pcr-pid", "0x1fff"]).is_none(),
+			"null packets"
+		);
+		assert!(format(&["--passthrough", "--pcr-pid", "0"]).is_none(), "the PAT");
+		assert!(format(&["--passthrough", "--pcr-pid", "clock"]).is_none());
+		assert!(matches!(format(&[]), Some(PublishFormat::Ts { program: None })));
 	}
 
 	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.
@@ -1693,12 +1799,6 @@ mod tests {
 		};
 		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
 
-		let Err(err) = Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "ts", "--latency-max", "1s"])
-		else {
-			panic!("--latency-max must not start a run");
-		};
-		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
-
 		let Err(err) = Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "mkv", "--latency-max", "1s"])
 		else {
 			panic!("--latency-max must not start a run");
@@ -1707,7 +1807,7 @@ mod tests {
 	}
 
 	/// A publisher's retention is `--max-age` on `import`; a subscriber's staleness budget is
-	/// `--max-delay` on `export`, except `export ts`, which still spells it `--max-age`.
+	/// `--max-delay` on `export`, except `export ts`, which spells it `--delay`.
 	#[test]
 	fn export_staleness_is_max_delay_and_import_retention_is_max_age() {
 		let export = |args: &[&str]| {
@@ -1736,8 +1836,8 @@ mod tests {
 			assert!(err.to_string().contains("--max-age -> --max-delay"), "{format}: {err}");
 		}
 
-		assert_eq!(stdout(&["ts", "--max-age", "2s"]), Duration::from_secs(2));
-		assert!(export(&["ts", "--max-delay", "2s"]).is_err(), "ts keeps --max-age");
+		assert_eq!(stdout(&["ts", "--delay", "2s"]), Duration::from_secs(2));
+		assert!(export(&["ts", "--max-delay", "2s"]).is_err(), "ts spells it --delay");
 
 		let rtmp = |flag: &str| export(&["rtmp", "--connect", "rtmp://example.com/live/key", flag, "2s"]);
 		let cli = rtmp("--max-delay").unwrap();

@@ -509,6 +509,30 @@ async fn import_enhanced_av1() {
 	assert_eq!(frame.payload.as_ref(), payload);
 }
 
+/// GStreamer 1.28 `fdkaacenc` output at 48 kHz stereo, remuxed to FLV by ffmpeg 9.0.1, whose
+/// AudioSpecificConfig signals SBR (and PS for v2) over a 24 kHz LC core. The catalog names the
+/// output, as ffprobe does, not the core.
+#[tokio::test(start_paused = true)]
+async fn import_explicit_sbr_names_its_output() {
+	let fixtures: [(&[u8], u8); 2] = [
+		(include_bytes!("../ts/test_data/he_aac.flv"), 5),
+		(include_bytes!("../ts/test_data/he_aac_v2.flv"), 29),
+	];
+	for (data, profile) in fixtures {
+		let mut producer = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+		let mut importer = Import::new(producer, catalog.reserve());
+		importer.decode(&bytes::BytesMut::from(data)).unwrap();
+		importer.finish().unwrap();
+
+		let snap = catalog.snapshot();
+		let a = snap.audio.renditions.values().next().expect("an AAC track");
+		assert!(matches!(&a.codec, AudioCodec::AAC(aac) if aac.profile == profile));
+		assert_eq!(a.sample_rate, 48_000);
+		assert_eq!(a.channel_count, 2);
+	}
+}
+
 #[tokio::test(start_paused = true)]
 async fn import_enhanced_ac3() {
 	let mut out = flv_header(0x04);
@@ -802,7 +826,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.clock().wall();
+	let provisional = catalog.snapshot().clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut importer = Import::new(broadcast, catalog.reserve());
 
@@ -810,7 +834,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the sequence headers alone publish nothing");
 
 	importer.decode(frames).unwrap();
-	let anchored = catalog.clock().wall();
+	let anchored = catalog.snapshot().clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first frame anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first frame publishes the catalog");

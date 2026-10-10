@@ -13,7 +13,8 @@ instead of each adding its own.
 ## Plan
 
 Split out of [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md)
-in the 2026-10-08 audit, so audio warmup no longer waits on #4645.
+in the 2026-10-08 audit, so audio and consumer warmup need not wait on the
+open-GOP trim.
 
 Today `poll_read` returns a bare frame, and `discontinuity()` is a counter
 bumped on a declared marker group, an unproven delivered hole, or a latency

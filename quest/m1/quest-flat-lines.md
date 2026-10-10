@@ -59,18 +59,19 @@ Remaining:
   Landed so far: #4403 wildcard, #4034 archive (with #4255 folded in), #4080
   obs-moq-video, #4162 audio-jitter-target, #4180 transport-upgrade, #4437
   rs2ts (with #4438 folded in), #4640 tstd, and #4653 test-flakes-2. As of
-  2026-10-06 four lines remain, each waiting before it lands:
-  - #4039 auth waits on its `wip-version.md` child: AUTH still turns on for
-    lite-06, but wire work belongs on the wip version.
-  - #4079 cpp waits on its `cpp-generated-newline.md` child: `OBS (macOS)`
-    fails until the generated-newline fork tag is cut.
-  - #4519 ffi-shape waits on
-    [Bindings](/quest/m0/broadcast-epoch/bindings.md).
-  - #4133 qos waits on [Lag across a splice](/quest/m1/qos/lag-splice.md).
-- Child PRs still based on a line merge into it first, or GitHub closes them
-  with the branch: #4675 (auth/request-token) needs the updated auth line
-  merged in. #4645 (tstd/delay) now targets `main`; #4732 and #4863
-  landed.
+  2026-10-08 four lines remain, and all four conflict with `main` and need
+  it merged in again.
+  - #4039 auth: its `wip-version.md` child landed on the line (#5004). The
+    line's UNAUTHORIZED stream code collides with `main`'s NOT_FETCHABLE
+    (0x3A) and moves to 0x3B before it lands.
+  - #4079 cpp: `main` merged in again and the `uniffi-bindgen-cpp` pin
+    bumped to `v0.11.0-kixelated.4`, whose generated files end with a newline.
+  - #4519 ffi-shape: lands now (maintainer, 2026-10-09) with the C++ port
+    #4079 left it; Bindings, Codecs, and the rest PR straight to `main`.
+  - #4133 qos: closed without landing (2026-10-09). Every change it had over
+    `main` is the egress `lag` histogram, which
+    [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) ports from the
+    branch once stats-split lands.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.

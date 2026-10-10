@@ -566,6 +566,37 @@ mod tests {
 		assert_eq!(wire_hops, chain(2, &[5], 1));
 	}
 
+	/// Hop 100 is 2 bytes as a QUIC varint and 1 byte as leading-ones. Sharing that
+	/// single hop from 128 announcements back costs 4 bytes in both forms (the base
+	/// is 2 bytes either way). The literal chain is 5 bytes in QUIC and 4 in
+	/// leading-ones, so QUIC would compress and leading-ones ties. A tie stays literal.
+	#[test]
+	fn a_tie_stays_literal_where_hop_100_sizes_differ() {
+		let quic = Form::Quic;
+		let leading = Form::LeadingOnes { seven: true };
+		assert_eq!(varint_size(100, quic), 2);
+		assert_eq!(varint_size(100, leading), 1);
+
+		let base = 128;
+		let compressed = |form| varint_size(base, form) + varint_size(0, form) + varint_size(1, form);
+		let literal = |form| varint_size(0, form) * 2 + varint_size(1, form) + varint_size(100, form);
+		assert!(compressed(quic) < literal(quic));
+		assert_eq!(compressed(leading), literal(leading));
+
+		let mut encoder = AnnounceEncoder::new(VERSION);
+		let mut decoder = AnnounceDecoder::default();
+		start(&mut encoder, &mut decoder, "origin", &[100]);
+		for n in 1..128 {
+			let suffix = format!("f{n}");
+			start(&mut encoder, &mut decoder, &suffix, &[1]);
+		}
+		let (_, wire_path, wire_hops) = encoder.start(Path::new("again").to_owned(), hops(&[100]));
+		assert_eq!(wire_hops, HopsRef::literal(hops(&[100])));
+		let (got_path, got_hops) = decoder.start(wire_path, wire_hops).unwrap();
+		assert_eq!(got_path.as_str(), "again");
+		assert_eq!(got_hops, hops(&[100]));
+	}
+
 	#[test]
 	fn encoder_sends_literal_when_nothing_is_shared() {
 		let mut encoder = AnnounceEncoder::new(VERSION);
@@ -591,7 +622,7 @@ mod tests {
 
 	/// A compressed stream pinned byte for byte: `js/net/src/lite/announce.test.ts`
 	/// decodes the same hex, so a codec change on either side breaks both.
-	const GOLDEN: &str = "001700000a726f6f6d2f612f63616d0000029111a222000000000e0102036d6963000101b3330100000209000101c04444010000010101000d02010162000201c05555010000";
+	const GOLDEN: &str = "001600000a726f6f6d2f612f63616d0000029111a2220000000d0102036d6963000101b33301000208000101c044440100010101000c02010162000201c055550100";
 
 	fn golden() -> Vec<crate::fuzz::Announced> {
 		use crate::fuzz::Announced;
@@ -614,7 +645,7 @@ mod tests {
 
 	/// The literal lite-07 stream `js/net` writes for the same announcements, which
 	/// never picks a base.
-	const JS_LITERAL: &str = "001700000a726f6f6d2f612f63616d0000029111a222000000001700000a726f6f6d2f612f6d6963000002b333a222000000020b000002c04444a2220000000101010014000006726f6f6d2f62000002c05555a222000000";
+	const JS_LITERAL: &str = "001600000a726f6f6d2f612f63616d0000029111a2220000001600000a726f6f6d2f612f6d6963000002b333a2220000020a000002c04444a22200000101010013000006726f6f6d2f62000002c05555a2220000";
 
 	#[test]
 	fn js_literal_stream_decodes() {

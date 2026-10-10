@@ -230,6 +230,111 @@ describe("blind resolution", () => {
 	});
 });
 
+describe("restart", () => {
+	it.each([true, false])("follows a republish through its announcement (announced: %p)", async (announced) => {
+		const owner = new Origin.Producer();
+		const name = Path.from("live.hang");
+		const first = publish(owner, name);
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced, catalogFormat: "manual" });
+		await settle();
+		const old = source.out.active.peek();
+		expect(old).toBeDefined();
+
+		// A republish replaces the old instance, which ends the request on it; the restart
+		// announcement is what requests the new one.
+		const second = publish(owner, name);
+		await settle();
+		const restarted = source.out.active.peek();
+		expect(restarted).toBeDefined();
+		expect(restarted).not.toBe(old);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		// The publisher goes offline: offline, not an error, until it is announced again.
+		second.close();
+		first.close();
+		await settle();
+		expect(source.out.active.peek()).toBeUndefined();
+		expect(source.out.error.peek()).toBeUndefined();
+
+		const third = publish(owner, name);
+		await settle();
+		const resumed = source.out.active.peek();
+		expect(resumed).toBeDefined();
+		expect(resumed).not.toBe(restarted);
+
+		third.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+
+	it("opens no request after teardown races a start", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("live.hang");
+		const published = publish(owner, name);
+
+		// Count every request the player opens and closes.
+		let open = 0;
+		const request = owner.request.bind(owner);
+		owner.request = (path, options) => {
+			const opened = request(path, options);
+			open += 1;
+			const close = opened.close.bind(opened);
+			let closed = false;
+			opened.close = () => {
+				if (!closed) open -= 1;
+				closed = true;
+				close();
+			};
+			return opened;
+		};
+
+		// The initial start settles just before teardown, so its continuation runs after it.
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		queueMicrotask(() => queueMicrotask(() => source.close()));
+		await settle();
+		expect(open).toBe(0);
+
+		published.close();
+		owner.close();
+	});
+
+	it("moves to a more specific announcement of another instance", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("pool/job.hang");
+		const pool = owner.dynamic(Path.from("pool"), { epoch: Moq.Epoch.mint() });
+		const requests = pool.requested();
+		const upstream = new Moq.Broadcast.Producer();
+		void (async () => {
+			for await (const request of requests) request.accept(upstream);
+		})();
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		await settle();
+		const old = source.out.active.peek();
+		expect(old).toBeDefined();
+
+		// A newer publisher announces the exact path: a start, not a restart, for this name.
+		const exact = owner.createBroadcast(name);
+		exact.announce({ epoch: Moq.Epoch.mint() });
+		await settle();
+		const moved = source.out.active.peek();
+		expect(moved).toBeDefined();
+		expect(moved).not.toBe(old);
+
+		// The pool going leaves playback on the newer publisher.
+		pool.close();
+		await settle();
+		expect(source.out.active.peek()).toBe(moved);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		exact.close();
+		upstream.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+});
+
 describe("refusal", () => {
 	for (const announced of [true, false]) {
 		it(`reports a refusal until a fresh request (announced: ${announced})`, async () => {
@@ -324,6 +429,77 @@ describe("cross-broadcast renditions", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["local"]);
 		} finally {
+			source.close();
+			owner.close();
+		}
+	});
+
+	it("follows a republished rendition broadcast through its announcement", async () => {
+		const owner = new Origin.Producer();
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("public/transcode.hang"),
+			enabled: true,
+			catalogFormat: "manual",
+		});
+		const rel = Path.normalizeRelative("../private/source");
+		const resolved: (Moq.Broadcast.Consumer | undefined)[] = [];
+		const effect = new Effect();
+		effect.run((nested) => {
+			resolved.push(source.relativeBroadcast(nested, rel));
+		});
+
+		try {
+			const first = publish(owner, Path.from("private/source"));
+			await settle();
+			const old = resolved.at(-1);
+			expect(old).toBeDefined();
+
+			// The republish ends the request on the old instance; its restart requests the new one.
+			publish(owner, Path.from("private/source"));
+			await settle();
+			const restarted = resolved.at(-1);
+			expect(restarted).toBeDefined();
+			expect(restarted).not.toBe(old);
+			first.close();
+		} finally {
+			effect.close();
+			source.close();
+			owner.close();
+		}
+	});
+
+	it("follows a rendition broadcast that ends and starts again in one tick", async () => {
+		const owner = new Origin.Producer();
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("public/transcode.hang"),
+			enabled: true,
+			catalogFormat: "manual",
+		});
+		const rel = Path.normalizeRelative("../private/source");
+		const resolved: (Moq.Broadcast.Consumer | undefined)[] = [];
+		const effect = new Effect();
+		effect.run((nested) => {
+			resolved.push(source.relativeBroadcast(nested, rel));
+		});
+
+		try {
+			const first = publish(owner, Path.from("private/source"));
+			await settle();
+			const old = resolved.at(-1);
+			expect(old).toBeDefined();
+
+			// An end then a start, delivered back to back: a new instance all the same.
+			first.close();
+			const second = publish(owner, Path.from("private/source"));
+			await settle();
+			const restarted = resolved.at(-1);
+			expect(restarted).toBeDefined();
+			expect(restarted).not.toBe(old);
+			second.close();
+		} finally {
+			effect.close();
 			source.close();
 			owner.close();
 		}
@@ -425,7 +601,9 @@ describe("wildcard renditions", () => {
 			expect(active).toBeUndefined();
 
 			const produced = new Moq.Broadcast.Producer();
-			produced.createTrack("video", { timescale: Moq.Time.Timescale.MILLI }).writeString("frame");
+			produced
+				.createTrack("video", { timescale: Moq.Time.Timescale.MILLI })
+				.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Moq.Time.Timestamp.now() });
 			request?.accept(produced);
 			await settle();
 			expect(active).toBeDefined();

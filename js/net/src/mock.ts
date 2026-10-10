@@ -1,11 +1,18 @@
 /**
- * Mock WebTransport implementation for in-process testing.
+ * Test doubles for in-process testing.
  *
  * Creates paired client/server transports connected via TransformStreams.
  */
 
 import type { TransportStats } from "./connection/stats.ts";
+import type { Frame } from "./group.ts";
 import type { SendStream } from "./stream.ts";
+import { Timestamp } from "./time.ts";
+
+/** A UTF-8 text frame stamped now, for a test writing to a timed track. */
+export function textFrame(text: string): Frame {
+	return { payload: new TextEncoder().encode(text), timestamp: Timestamp.now() };
+}
 
 // High watermark to prevent writes from blocking on backpressure.
 // Real WebTransport has kernel buffers; we simulate this with a large queue.

@@ -7,8 +7,8 @@ A moq-transport group whose object IDs skip after an object was delivered
 refused the same way a non-zero subgroup is: the group aborts, a warning is
 logged, and the stream is stopped with the error, in Rust and JS. A headless
 subgroup on drafts 14-17 (a non-zero first object ID, since those drafts have
-no FIRST_OBJECT bit) is not a gap: it stays a quiet drop that keeps the
-subscription, as #5019 made it in JS. An object ID that overflows
+no FIRST_OBJECT bit) is not a gap: it is a quiet drop that keeps the
+subscription, in Rust as in JS since #5019. An object ID that overflows
 closes the session with PROTOCOL_VIOLATION in Rust, as the draft requires.
 
 ## Plan
@@ -17,8 +17,12 @@ Decided 2026-10-06, while declining object-level identity in #4926: the
 model is the product, so subgroups, gapped object IDs, and arbitrary object
 properties stay unsupported. Refusals must be loud and consistent, except
 the headless drop: a relay joining at the live edge sends one on every
-subscribe, so it is expected, not a fault. Rust's headless drop is planned
-separately in #5041.
+subscribe, so it is expected, not a fault.
+
+Decided 2026-10-08: the Rust headless drop is part of this quest, not its own,
+since both change how `next_object_id`'s refusal is handled and the
+order matters. Do the headless drop first, so a headless subgroup is never
+caught by the louder gap refusal.
 
 Facts from `main`:
 
@@ -28,6 +32,14 @@ Facts from `main`:
   A non-zero subgroup returns `Err`, which the session's `stop_on_error`
   turns into STOP_SENDING. An overflowing object ID (`BoundsExceeded`) is
   aborted with the group the same way.
+- Rust headless subgroups: drafts 14-17 have no FIRST_OBJECT bit, so the
+  header decode sets `first_object` true (`rs/moq-net/src/ietf/group.rs`) and
+  `open_group`'s "dropping a group with no head" path never runs. A non-zero
+  first object ID then reaches `next_object_id`, which warns, and
+  `recv_group` aborts the group. Apply #5019's rule: on a draft without the
+  bit, a non-zero first object ID takes the same drop path as a cleared
+  FIRST_OBJECT bit on d18, before a group exists. A gap after an object was
+  delivered is still the refusal below.
 - A data stream's error never reaches the session: `stop_on_error` in
   `rs/moq-net/src/ietf/session.rs` only aborts the stream, even for a
   protocol violation. Closing the session on overflow needs a new route from
@@ -41,7 +53,8 @@ Neither closes the session for a gap; that would punish a peer following
 the spec. JS refuses any non-zero delta before adding it, so it has no
 overflow to close on; the overflow case is Rust-only.
 
-Tests: a gapped group yields `Err(Unsupported)` from `recv_group` and
+Tests: a d14 and a d16 subgroup opening at object 2 is dropped at debug and
+the subscription delivers the next group; a gapped group yields `Err(Unsupported)` from `recv_group` and
 stops its stream, while the subscription keeps flowing (beside
 `a_non_zero_subgroup_leaves_the_track_flowing`); an overflowing object ID
 closes the session (Rust).

@@ -25,6 +25,7 @@ use super::catalog;
 use super::health::{Continuation, Continuity, Health};
 use super::psi::{self, PesStart, Pmt};
 use super::stats;
+use crate::catalog::Offset;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2, opus};
 use moq_net::Timestamp;
@@ -60,6 +61,10 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// final. A one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
 	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
+
+	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
+	/// its offset onto the catalog clock.
+	timebase: crate::catalog::Timebase<E>,
 
 	/// The PAT, reassembled off PID 0.
 	pat: PatReader,
@@ -130,6 +135,10 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// SPTS scope: one clock for the whole input. Under MPTS every program's video
 	/// advances it, so a cue could be stamped with another program's PTS.
 	last_pts: Option<Timestamp>,
+	/// The first PES's PTS on the catalog clock since the last timebase break: the section clock
+	/// until video starts `last_pts`, so a cue ahead of the first picture lands on the media
+	/// timeline, not at zero.
+	start_pts: Option<Timestamp>,
 	media_unwrap: PtsUnwrap,
 	/// The program number chosen by [`with_program`](Self::with_program). `None` imports the
 	/// multiplex's only program and refuses a PAT that lists more than one.
@@ -151,6 +160,7 @@ impl<E: catalog::Catalog> Import<E> {
 			broadcast,
 			catalog,
 			container,
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			pat: PatReader::default(),
 			pmt_sections: HashMap::new(),
@@ -176,6 +186,7 @@ impl<E: catalog::Catalog> Import<E> {
 			si,
 			identity_recorded: false,
 			last_pts: None,
+			start_pts: None,
 			media_unwrap: PtsUnwrap::default(),
 			program: None,
 		}
@@ -202,8 +213,9 @@ impl<E: catalog::Catalog> Import<E> {
 		self
 	}
 
+	/// A reservation on this program's timebase, so every stream shifts by its offset.
 	fn reserve(&self) -> crate::catalog::Reserved<E> {
-		self.catalog.reserve()
+		self.timebase.reserve()
 	}
 
 	/// The video hint for a decoded rendition: this importer's container, nothing else.
@@ -276,7 +288,8 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			if let Some(section) = self.sections.get_mut(&pid) {
-				let units = section.packet(&pkt, self.last_pts)?;
+				let clock = self.last_pts.or(self.start_pts).zip(self.timebase.offset());
+				let units = section.packet(&pkt, clock)?;
 				self.published |= units > 0;
 				self.liveness.delivered(pid, units);
 				continue;
@@ -668,6 +681,19 @@ impl<E: catalog::Catalog> Import<E> {
 		if pes.pts.is_some() && !matches!(stream, Stream::Verbatim(_) | Stream::Ignored) {
 			self.health.pts(pid.as_u16(), self.liveness.now());
 		}
+		// The first PTS anchors the program: it needs no unwrap yet. Anchoring at the PES start
+		// rather than its flush keeps the section clock below on the same offset as the media.
+		let offset = match pes.pts {
+			Some(pts) => {
+				let pts = Timestamp::from_scale(pts, 90_000)?;
+				let offset = self.timebase.anchor(pts)?;
+				if self.start_pts.is_none() {
+					self.start_pts = Some(offset.apply(pts)?);
+				}
+				offset
+			}
+			None => Offset::default(),
+		};
 		if is_video {
 			for stream in self.streams.values_mut() {
 				if let Stream::Aac(audio) = stream {
@@ -679,15 +705,17 @@ impl<E: catalog::Catalog> Import<E> {
 			// frame must be timestamped with this frame's PTS ("now"), not the
 			// previous one's.
 			if pes.pts.is_some() {
-				self.last_pts = unwrap_pts(&mut self.media_unwrap, pes.pts)?;
+				self.last_pts = unwrap_pts(&mut self.media_unwrap, pes.pts, offset)?;
 			}
+		}
+		if pes.pts.is_some() {
+			self.release_sections(offset)?;
 		}
 
 		if is_clock {
 			// A clock-only stream never flushes, but sections are stamped with its PTS, so it
-			// anchors the catalog here like a flushed PES would.
-			if let Some(pts) = pes.pts {
-				self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
+			// releases the reservation here like a flushed PES would.
+			if pes.pts.is_some() {
 				self.initial_reservation = None;
 			}
 			// Nothing is published, but each PES is a picture the source delivered.
@@ -697,6 +725,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 		let mut pending = Pending {
 			pts: pes.pts,
+			offset,
 			dts: pes.dts,
 			stream_id: pes.stream_id,
 			data: Vec::with_capacity(pes.data.len()),
@@ -708,6 +737,18 @@ impl<E: catalog::Catalog> Import<E> {
 
 		if complete {
 			self.flush(pid)?;
+		}
+		Ok(())
+	}
+
+	/// Publish the sections held for the timebase's offset, now that it is known. They are stamped
+	/// with the section clock at release: no timeline existed when they arrived.
+	fn release_sections(&mut self, offset: Offset) -> anyhow::Result<()> {
+		let pts = self.last_pts.or(self.start_pts);
+		for (pid, section) in &mut self.sections {
+			let units = section.release(pts, offset)?;
+			self.published |= units > 0;
+			self.liveness.delivered(*pid, units);
 		}
 		Ok(())
 	}
@@ -749,12 +790,11 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		// The first PES is live on arrival: its PTS needs no unwrap yet. Anchor before releasing
-		// the reservation, so the first snapshot carries the final clock: an Opus config comes
-		// from the PMT and would otherwise publish first. Every stream in the initial program
-		// reserved at its PMT, so any stream's PES releases it.
-		if let Some(pts) = pending.pts {
-			self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
+		// Its PES start anchored the timebase. Release the reservation only now, so the first
+		// snapshot carries the final clock: an Opus config comes from the PMT and would otherwise
+		// publish first. Every stream in the initial program reserved at its PMT, so any stream's
+		// PES releases it.
+		if pending.pts.is_some() {
 			self.initial_reservation = None;
 		}
 		let units = match stream.write(pending, batched) {
@@ -821,6 +861,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		self.media_unwrap.discontinuity();
 		self.last_pts = None;
+		self.start_pts = None;
 		self.published = false;
 		self.liveness.discontinuity();
 		if self.mux_rate.discontinuity() {
@@ -951,6 +992,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
+		self.release_sections(self.timebase.offset().unwrap_or_default())?;
 		for (pid, stream) in &mut self.streams {
 			let units = stream.finish()?;
 			self.liveness.delivered(pid.as_u16(), units);
@@ -1053,6 +1095,8 @@ fn list_programs(programs: &[u16]) -> String {
 struct Pending {
 	/// Raw 90 kHz PTS, before wrap-unwrapping.
 	pts: Option<u64>,
+	/// The timebase's offset, which the unwrapped PTS shifts by onto the catalog clock.
+	offset: Offset,
 	/// Raw 90 kHz DTS, before wrap-unwrapping. Present on reordered (B-frame) video; its
 	/// distance below the PTS is the reorder delay published as the catalog jitter.
 	dts: Option<u64>,
@@ -1068,6 +1112,7 @@ impl Pending {
 	fn empty() -> Self {
 		Self {
 			pts: None,
+			offset: Offset::default(),
 			dts: None,
 			stream_id: 0,
 			data: Vec::new(),
@@ -1161,6 +1206,8 @@ struct SectionStream<E: catalog::Catalog> {
 	/// Held for its `Drop`, which clears this track's catalog entry.
 	_entry: VerbatimEntry<E>,
 	reassembler: SectionReassembler,
+	/// Sections completed before the timebase's offset was known, which they must absorb.
+	held: Vec<Vec<u8>>,
 }
 
 impl<E: catalog::Catalog> SectionStream<E> {
@@ -1187,17 +1234,29 @@ impl<E: catalog::Catalog> SectionStream<E> {
 			track,
 			_entry: entry,
 			reassembler: SectionReassembler::default(),
+			held: Vec::new(),
 		})
 	}
 
 	/// Consume one 188-byte TS packet, publishing each completed section and returning how
-	/// many. `pts` is the current media clock used to timestamp a section (its arrival on the
-	/// timeline; the splice time itself is inside the section bytes), if one is running.
-	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>) -> anyhow::Result<u64> {
-		let mut sections = Vec::new();
-		self.reassembler.push(pkt, &mut sections);
-		let published = sections.len() as u64;
-		for section in sections {
+	/// many. `clock` is the current media clock used to timestamp a section (its arrival on the
+	/// timeline; the splice time itself is inside the section bytes), paired with the offset the
+	/// media shifted by, which a SCTE-35 section absorbs too. Until this importer has one,
+	/// completed sections are held for [`release`](Self::release): the timebase may have its offset
+	/// from another importer before this one sees a timestamp.
+	fn packet(&mut self, pkt: &[u8], clock: Option<(Timestamp, Offset)>) -> anyhow::Result<u64> {
+		self.reassembler.push(pkt, &mut self.held);
+		match clock {
+			Some((pts, offset)) => self.release(Some(pts), offset),
+			None => Ok(0),
+		}
+	}
+
+	/// Publish every held section shifted by `offset`, returning how many.
+	fn release(&mut self, pts: Option<Timestamp>, offset: Offset) -> anyhow::Result<u64> {
+		let published = self.held.len() as u64;
+		for mut section in std::mem::take(&mut self.held) {
+			adjust_splice(&mut section, offset);
 			self.emit(section, pts)?;
 		}
 		Ok(published)
@@ -1243,6 +1302,37 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
+}
+
+/// Shift a SCTE-35 `splice_info_section`'s splice times by `offset`, the shift its media took
+/// onto the catalog clock.
+///
+/// Its `pts_time` fields name the source's PTS base, which nothing downstream can recover once
+/// the media moved, so the section's `pts_adjustment` (added to every `pts_time`, modulo 2^33)
+/// absorbs the offset and the `CRC_32` is recomputed. The field is outside the encrypted part, so
+/// an encrypted section is adjusted alike. Any other section, one too short to be a SCTE-35
+/// section, or one failing its CRC is left alone.
+fn adjust_splice(section: &mut [u8], offset: Offset) {
+	const TABLE_ID: u8 = 0xFC;
+	const FIELD: i128 = 1 << 33;
+	// table_id through cw_index, plus the CRC_32: the shortest section carrying the field.
+	if offset == Offset::default() || section.len() < 14 || section[0] != TABLE_ID {
+		return;
+	}
+	// A corrupt section stays corrupt rather than gaining a CRC that vouches for it.
+	if psi::CRC.checksum(section) != 0 {
+		return;
+	}
+
+	// pts_adjustment: the low bit of byte 4, then bytes 5..9.
+	let field = ((section[4] as u64 & 1) << 32) | u32::from_be_bytes(section[5..9].try_into().unwrap()) as u64;
+	let adjusted = (field as i128 + offset.ticks(90_000)).rem_euclid(FIELD) as u64;
+	section[4] = (section[4] & !1) | (adjusted >> 32) as u8;
+	section[5..9].copy_from_slice(&(adjusted as u32).to_be_bytes());
+
+	let body = section.len() - 4;
+	let crc = psi::CRC.checksum(&section[..body]);
+	section[body..].copy_from_slice(&crc.to_be_bytes());
 }
 
 /// Publishes whole reassembled PES payloads verbatim as frames on a track
@@ -1302,7 +1392,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 			self.stream_id_recorded = true;
 		}
 
-		let pts = match unwrap_pts(&mut self.unwrap, pending.pts)? {
+		let pts = match unwrap_pts(&mut self.unwrap, pending.pts, pending.offset)? {
 			Some(pts) => pts,
 			// No clock of its own, so land on the edge.
 			None => self.track.live_edge().unwrap_or(Timestamp::ZERO),
@@ -1537,7 +1627,7 @@ impl PatReader {
 }
 
 /// Whether every adaptation field fits inside the length its packet declares.
-fn adaptation_valid(pkt: &[u8; TsPacket::SIZE]) -> bool {
+pub(super) fn adaptation_valid(pkt: &[u8; TsPacket::SIZE]) -> bool {
 	if pkt[3] & 0x20 == 0 {
 		return true;
 	}
@@ -1587,10 +1677,10 @@ pub(super) fn payload(pkt: &[u8; TsPacket::SIZE]) -> Payload<'_> {
 /// Private sections (SCTE-35 table_id 0xFC and others) are not PES. This handles
 /// pointer_field alignment, sections split across packets (including a 3-byte
 /// header split, where section_length is not yet known), continuity-counter
-/// gaps, and adaptation-field discontinuities. Deliberately private and minimal:
-/// just enough to recover whole sections verbatim.
+/// gaps, and adaptation-field discontinuities. Deliberately minimal: just enough to
+/// recover whole sections verbatim.
 #[derive(Default)]
-struct SectionReassembler {
+pub(super) struct SectionReassembler {
 	/// Bytes of the section currently being reassembled. Its 3-byte header (and
 	/// thus section_length) may not all be present yet, so completeness is
 	/// re-checked as bytes arrive; empty means no section in progress.
@@ -1601,7 +1691,7 @@ struct SectionReassembler {
 
 impl SectionReassembler {
 	/// Consume one 188-byte TS packet, appending every completed section to `out`.
-	fn push(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
+	pub(super) fn push(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
 		let pkt: &[u8; 188] = pkt.try_into().expect("section packet must be 188 bytes");
 		match self.continuity.observe(pkt) {
 			Continuation::Duplicate => return,
@@ -1758,7 +1848,7 @@ impl<E: catalog::Catalog> Stream<E> {
 		match self {
 			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = unwrap_pts(unwrap, pending.pts)?;
+				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
 				frames.extend(split.flush(pts).map_err(unit_error)?);
@@ -1774,7 +1864,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			}
 			Stream::H265 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = unwrap_pts(unwrap, pending.pts)?;
+				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
 				frames.extend(split.flush(pts).map_err(unit_error)?);
@@ -2190,7 +2280,7 @@ struct AacStream<E: CatalogExt = ()> {
 
 impl<E: CatalogExt> AacStream<E> {
 	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<u64> {
-		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, pending.offset)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
 		let carried = self.tail.len();
@@ -2473,7 +2563,7 @@ struct OpusStream {
 
 impl OpusStream {
 	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
-		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+		let base = unwrap_pts(&mut self.unwrap, pending.pts, pending.offset)?;
 
 		let packets = opus_packets(&pending.data).map_err(Damaged)?;
 		let mut published = 0;
@@ -2805,7 +2895,7 @@ struct LegacyStream<E: CatalogExt = ()> {
 impl<E: CatalogExt> LegacyStream<E> {
 	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
 		let mut published = 0;
-		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, pending.offset)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
 		let carried = self.tail.len();
@@ -3078,13 +3168,13 @@ fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow
 	Ok(Some(pts.checked_add(advance.convert(pts.scale())?)?))
 }
 
-/// Convert a raw 90 kHz PTS to a microsecond [`Timestamp`], unwrapping the
-/// 33-bit field. Returns `None` when the PES carried no PTS.
-fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>) -> anyhow::Result<Option<Timestamp>> {
+/// Convert a raw 90 kHz PTS to a [`Timestamp`] on the catalog clock, unwrapping the
+/// 33-bit field and shifting by the timebase's `offset`. Returns `None` when the PES carried no PTS.
+fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>, offset: Offset) -> anyhow::Result<Option<Timestamp>> {
 	let Some(raw) = pts else {
 		return Ok(None);
 	};
-	Ok(Some(Timestamp::from_scale(unwrap.unwrap(raw), 90_000)?))
+	Ok(Some(offset.apply(Timestamp::from_scale(unwrap.unwrap(raw), 90_000)?)?))
 }
 
 /// The reorder delay `PTS - DTS` for one PES, as a microsecond [`Timestamp`]. `None` unless
@@ -3769,6 +3859,185 @@ pub(super) mod test {
 		assert!(
 			(PTS_SECS as u128..PTS_SECS as u128 + 5).contains(&now),
 			"catalog clock reads {now}s, not the first video PTS"
+		);
+	}
+
+	/// A `splice_insert` section splicing at `pts_time`, with no `pts_adjustment` and a valid CRC.
+	fn splice_insert(pts_time: u64) -> Vec<u8> {
+		// table_id, length (filled below), protocol_version, pts_adjustment, cw_index, tier, and a
+		// 15-byte splice_insert command.
+		let mut section = vec![0xfc, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xf0, 15, 0x05];
+		section.extend_from_slice(&1u32.to_be_bytes()); // splice_event_id
+		section.push(0x7f); // not cancelled
+		section.push(0xcf); // out of network, program splice, no duration, not immediate
+		section.push(0xfe | ((pts_time >> 32) as u8 & 1)); // time_specified, then the PTS
+		section.extend_from_slice(&(pts_time as u32).to_be_bytes());
+		section.extend_from_slice(&[0, 1, 0, 0]); // unique_program_id, avail_num, avails_expected
+		section.extend_from_slice(&[0, 0]); // descriptor_loop_length
+		section[2] = (section.len() - 3 + 4) as u8;
+		let crc = super::psi::CRC.checksum(&section);
+		section.extend_from_slice(&crc.to_be_bytes());
+		section
+	}
+
+	/// A TS import joining a clock already in use shifts its media onto that clock, so its
+	/// SCTE-35 sections absorb the same shift in `pts_adjustment`: in the export, a splice time
+	/// lands on the exported picture it names, and the section still verifies.
+	#[tokio::test(start_paused = true)]
+	async fn a_splice_follows_its_media_onto_a_clock_in_use() {
+		splice_onto_a_clock_in_use(CueAt::AfterVideo).await;
+	}
+
+	/// A cue arriving before any PES waits for the offset the media takes, rather than
+	/// publishing unshifted.
+	#[tokio::test(start_paused = true)]
+	async fn a_startup_splice_follows_its_media_onto_a_clock_in_use() {
+		splice_onto_a_clock_in_use(CueAt::BeforeVideo).await;
+	}
+
+	/// A cue released by a non-video PES lands on that PES's shifted PTS, not at zero.
+	#[tokio::test(start_paused = true)]
+	async fn a_splice_released_before_video_lands_on_the_media_timeline() {
+		splice_onto_a_clock_in_use(CueAt::BeforePrivate).await;
+	}
+
+	/// A timebase another importer already anchored still holds a cue until this importer has a
+	/// timestamp to stamp it with.
+	#[tokio::test(start_paused = true)]
+	async fn a_splice_on_an_anchored_input_waits_for_its_media() {
+		splice_onto_a_clock_in_use(CueAt::BeforeVideoOnAnAnchoredInput).await;
+	}
+
+	/// Where the cue arrives relative to the first PES.
+	enum CueAt {
+		AfterVideo,
+		BeforeVideo,
+		/// Ahead of a private PES at the first picture's PTS, which anchors the timebase.
+		BeforePrivate,
+		/// Ahead of the first picture, on a timebase placed before the import starts.
+		BeforeVideoOnAnAnchoredInput,
+	}
+
+	async fn splice_onto_a_clock_in_use(at: CueAt) {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		const VIDEO_PID: u16 = 0x0050;
+		const CUE_PID: u16 = 0x0021;
+		const PRIVATE_PID: u16 = 0x0051;
+		const MASK: u64 = (1 << 33) - 1;
+		// Ten pictures a second from one second in; the cue splices at the sixth.
+		let picture = |k: u64| 90_000 + k * 9_000;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		// A capture took the clock, which reads ten seconds: the feed shifts nine seconds later.
+		let _capture = catalog.clock();
+		let anchored = matches!(at, CueAt::BeforeVideoOnAnAnchoredInput);
+		let timebase = catalog.timebase();
+		if anchored {
+			// The shift then depends on the wall clock, so only its consistency is checked.
+			let first = Timestamp::from_scale(picture(0), 90_000).unwrap();
+			timebase.place(first, std::time::SystemTime::now()).unwrap();
+		}
+		let mut import = super::Import::new(broadcast, timebase.reserve());
+
+		let mut bytes = synth_pmt(
+			&[
+				(StreamType::H264, VIDEO_PID),
+				(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
+				(StreamType::Mpeg2PacketizedData, PRIVATE_PID),
+			],
+			true,
+		);
+		let cue_packet = packet(true, 0, 0, &splice_insert(picture(5)));
+		match at {
+			CueAt::AfterVideo => {}
+			CueAt::BeforeVideo | CueAt::BeforeVideoOnAnAnchoredInput => bytes.extend_from_slice(&cue_packet),
+			CueAt::BeforePrivate => {
+				bytes.extend_from_slice(&cue_packet);
+				bytes.extend_from_slice(&pes_packet(PRIVATE_PID, picture(0)));
+			}
+		}
+		for k in 0..20 {
+			bytes.extend_from_slice(&audio_pes_packet(
+				VIDEO_PID,
+				k as u8,
+				picture(k),
+				&annexb_au(k % 10 == 0),
+			));
+			if k == 0 && matches!(at, CueAt::AfterVideo) {
+				bytes.extend_from_slice(&cue_packet);
+			}
+		}
+		import.decode(&bytes).unwrap();
+		import.finish().unwrap();
+
+		let exporter = crate::container::ts::Export::with_ts(
+			crate::source::announced(&consumer),
+			crate::catalog::CatalogFormat::Hang,
+		)
+		.await
+		.unwrap();
+		let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
+		let mut ts = Vec::new();
+		while let Ok(Some(frame)) = tokio::time::timeout(RECORDING_MAX_AGE * 3, exporter.next())
+			.await
+			.map(|r| r.unwrap())
+		{
+			ts.extend_from_slice(&frame.payload);
+		}
+
+		let stamp = |b: &[u8]| {
+			u64::from((b[0] >> 1) & 7) << 30
+				| u64::from(b[1]) << 22
+				| u64::from(b[2] >> 1) << 15
+				| u64::from(b[3]) << 7
+				| u64::from(b[4] >> 1)
+		};
+		let mut pictures = Vec::new();
+		let mut cue = None;
+		for packet in ts.as_chunks::<188>().0 {
+			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+			if packet[1] & 0x40 == 0 || packet[3] & 0x10 == 0 {
+				continue;
+			}
+			let start = 4 + if packet[3] & 0x20 != 0 {
+				usize::from(packet[4]) + 1
+			} else {
+				0
+			};
+			let payload = &packet[start..];
+			if pid == CUE_PID {
+				let section = &payload[1 + usize::from(payload[0])..];
+				let len = 3 + (usize::from(section[1] & 0x0f) << 8 | usize::from(section[2]));
+				cue = Some(section[..len].to_vec());
+			} else if pid != PRIVATE_PID && payload.starts_with(&[0, 0, 1]) && (0xe0..=0xef).contains(&payload[3]) {
+				pictures.push(stamp(&payload[9..14]));
+			}
+		}
+
+		let cue = cue.expect("the cue is exported");
+		assert_eq!(super::psi::CRC.checksum(&cue), 0, "the section's CRC verifies");
+		let adjustment = u64::from(cue[4] & 1) << 32 | u64::from(u32::from_be_bytes(cue[5..9].try_into().unwrap()));
+		let pts_time = u64::from(cue[20] & 1) << 32 | u64::from(u32::from_be_bytes(cue[21..25].try_into().unwrap()));
+		assert_eq!(pts_time, picture(5), "the splice time itself is untouched");
+		if !anchored {
+			assert_eq!(adjustment, 810_000, "the nine seconds the media shifted");
+		}
+		assert_eq!(pictures.len(), 20, "{pictures:?}");
+		// A wall-derived shift isn't a whole number of ticks, so the exported picture may round
+		// one tick lower than the section's shift.
+		let slack = u64::from(anchored);
+		let splice = (pts_time + adjustment) & MASK;
+		assert!(
+			(pictures[5]..=pictures[5] + slack).contains(&splice),
+			"the splice at {splice} lands on the picture it names: {pictures:?}"
 		);
 	}
 
@@ -5579,7 +5848,7 @@ pub(super) mod test {
 			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
 		)
 		.unwrap();
-		let provisional = catalog.clock().wall();
+		let provisional = catalog.snapshot().clock.expect("a clock");
 		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
@@ -5592,7 +5861,7 @@ pub(super) mod test {
 		import
 			.decode(&audio_pes_packet(DATA_PID, 0, 3_600 * 90_000, &[0xDE, 0xAD]))
 			.unwrap();
-		let anchored = catalog.clock().wall();
+		let anchored = catalog.snapshot().clock.expect("a clock");
 		assert_ne!(anchored, provisional, "the first PES anchors the clock");
 		let published = clocks.drain();
 		assert!(!published.is_empty(), "the first PES publishes the catalog");
@@ -6011,9 +6280,11 @@ pub(super) mod test {
 	fn timebase_reset_clears_section_clock() {
 		let (_, _, mut import) = two_stream_import();
 		import.last_pts = Some(Timestamp::from_micros(45_000_000).unwrap());
+		import.start_pts = Some(Timestamp::from_micros(40_000_000).unwrap());
 		import.published = true;
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
 		assert!(import.last_pts.is_none(), "section clock belongs to the old timebase");
+		assert!(import.start_pts.is_none(), "so does its fallback ahead of video");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -6687,9 +6958,10 @@ pub(super) mod test {
 		let mut exporter = super::super::Export::new(crate::source::announced(&consumer))
 			.await
 			.unwrap()
-			.with_max_age(Duration::from_secs(30));
+			.with_delay(Duration::from_secs(30))
+			.with_replay();
 		let mut ts = Vec::new();
-		while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+		while let Ok(res) = tokio::time::timeout(Duration::from_secs(100), exporter.next()).await {
 			let Some(frame) = res.expect("the exporter must take the open GOP after the break") else {
 				break;
 			};
@@ -7075,34 +7347,45 @@ pub(super) mod test {
 		}
 	}
 
-	/// Import `data`, re-export the broadcast to MPEG-TS, and count the exported packets
-	/// whose adaptation field sets `discontinuity_indicator`.
-	async fn export_discontinuities(data: &[u8]) -> usize {
+	/// Import `before`, re-export the broadcast to MPEG-TS until it has gone out, then import
+	/// `after` and count the exported packets whose adaptation field sets
+	/// `discontinuity_indicator`.
+	async fn export_discontinuities(before: &[u8], after: &[u8]) -> usize {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
-		import.decode(&bytes::BytesMut::from(data)).unwrap();
-		import.finish().unwrap();
+		import.decode(&bytes::BytesMut::from(before)).unwrap();
 
-		// `import` and `catalog` stay alive so the exporter can subscribe to the finished,
-		// retained tracks. A generous max age, since the default of zero would shed the
-		// earlier groups and the boundary with them.
+		// `import` and `catalog` stay alive so the exporter can subscribe to the retained
+		// tracks. A generous delay, since the default of zero would shed the earlier groups
+		// and the boundary with them. The paused clock runs out the delay and every gap in
+		// the media without a real wait.
+		let delay = std::time::Duration::from_secs(3600);
 		let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
 			.await
 			.unwrap()
-			.with_max_age(std::time::Duration::from_secs(3600));
-		let mut flagged = 0;
-		while let Ok(Ok(Some(frame))) =
-			tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await
-		{
-			flagged += frame
+			.with_delay(delay)
+			.with_replay();
+		let flags = |frame: crate::container::Frame| {
+			frame
 				.payload
 				.as_chunks::<188>()
 				.0
 				.iter()
 				.filter(|p| p[3] & 0x20 != 0 && p[4] > 0 && p[5] & 0x80 != 0)
-				.count();
+				.count()
+		};
+		// A discontinuity before anything went out moves no clock, so the media before the
+		// boundary goes out first, as it would live.
+		let mut flagged = 0;
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(2 * delay, exporter.next()).await {
+			flagged += flags(frame);
+		}
+		import.decode(&bytes::BytesMut::from(after)).unwrap();
+		import.finish().unwrap();
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(2 * delay, exporter.next()).await {
+			flagged += flags(frame);
 		}
 		flagged
 	}
@@ -7127,21 +7410,21 @@ pub(super) mod test {
 		};
 
 		let mut cc = 0;
-		let mut signalled = synth_pmt(&[(StreamType::Mpeg1Audio, PID)], false);
-		media(&mut signalled, &mut cc, 90_000);
-		let mut unsignalled = signalled.clone();
-		signalled.extend_from_slice(&clock_break_packet(PID));
+		let mut before = synth_pmt(&[(StreamType::Mpeg1Audio, PID)], false);
+		media(&mut before, &mut cc, 90_000);
+		let mut signalled = clock_break_packet(PID);
+		let mut unsignalled = Vec::new();
 		let mut peer_cc = cc;
 		media(&mut signalled, &mut cc, 31 * 90_000);
 		media(&mut unsignalled, &mut peer_cc, 31 * 90_000);
 
 		assert_eq!(
-			export_discontinuities(&signalled).await,
+			export_discontinuities(&before, &signalled).await,
 			1,
 			"the declared reset never reached the exported clock"
 		);
 		assert_eq!(
-			export_discontinuities(&unsignalled).await,
+			export_discontinuities(&before, &unsignalled).await,
 			0,
 			"a leap the source did not declare must not be flagged"
 		);
@@ -7168,10 +7451,14 @@ pub(super) mod test {
 
 		let mut cc = 0;
 		media(&mut stimulus, &mut cc, 90_000);
-		stimulus.extend_from_slice(&clock_break_packet(PCR_PID));
-		media(&mut stimulus, &mut cc, 31 * 90_000);
+		let mut after = clock_break_packet(PCR_PID);
+		media(&mut after, &mut cc, 31 * 90_000);
 
-		assert_eq!(export_discontinuities(&stimulus).await, 1, "one flag per program break");
+		assert_eq!(
+			export_discontinuities(&stimulus, &after).await,
+			1,
+			"one flag per program break"
+		);
 	}
 
 	fn opus_extension(body: &[u8]) -> Vec<super::catalog::Descriptor> {

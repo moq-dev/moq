@@ -1596,9 +1596,9 @@ mod tests {
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let subscriber = broadcast.consume();
-		let track = broadcast
-			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
-			.unwrap();
+		// A CMAF track counts in its init's ticks.
+		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_timescale(muxer.timescale());
+		let track = broadcast.create_track("audio", info).unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(&catalog).unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, container);
 

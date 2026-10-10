@@ -44,6 +44,7 @@ on:
       - Platform
       - Quest
       - release-brew
+      - Release Cpp
       - Release Dart
       - Release Dart FFI
       - Release Go

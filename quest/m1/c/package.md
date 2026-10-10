@@ -18,17 +18,17 @@ under the same names.
   hardcodes `<prefix>/lib`.
 - `doc/index.md` says the C library ships static and shared; say what the
   package actually ships.
-- A release workflow and nightly/CI jobs follow the C++ package's, pinned to the
-  fork tag that carries the C backend, `v0.11.0-kixelated.4+v0.32.2`
+- A release workflow and nightly/CI jobs follow the C++ package's, on the same
+  generator pin; `v0.11.0-kixelated.4+v0.32.2` already carries the C backend
   (`--lang c`).
 - Ship a hand-written `moq_shutdown` that calls `moq_ffi_shutdown`, then
   `moq_shutdown_dispatcher`.
 - moq-c and moq-cpp each embed the moq-ffi staticlib, so one program can't link
   both; say so in the docs.
-- Every Cross-Package Sync row that names libmoq for moq-ffi changes points at
-  the generated package instead; update `AGENTS.md` in this quest.
+- The Cross-Package Sync rows that name the hand-written `rs/moq-c` (as the
+  target of `rs/moq-ffi` changes, and its `moq.h` C ABI) point at the
+  generated package instead; update `AGENTS.md` in this quest.
 
 ## Required
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - moq-c 0.8.0 ships the reshaped moq-ffi, so C breaks once
-- [C++ package](/quest/m1/cpp/README.md) - the `cpp/moq` build, generator pin, and release workflow this mirrors (#4079)

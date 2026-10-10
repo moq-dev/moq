@@ -35,4 +35,5 @@ Public API: none. Wire: none.
 
 ## Related
 
+- [Route wakes](/quest/m1/route-wakes.md) - narrows which fronts a route change wakes, in the same origin driver; one owner of `origin.rs` at a time
 - [Front parking](/quest/m1/origin-front-parks.md) - also changes what a front holds, and wants a churn benchmark over requesters

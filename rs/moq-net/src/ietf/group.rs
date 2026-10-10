@@ -20,6 +20,27 @@ const PROP_TIMESTAMP: u64 = 0x10;
 /// assigns 0x0A to Secure Objects private properties, so it is not accepted here.
 const PROP_TIMESTAMP_DRAFT03: u64 = 0x06;
 
+/// Implementation limit for an object's extension (property) block, independent of the
+/// IETF draft. Checked at the length prefix, before the block is buffered.
+pub(super) const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
+
+/// The length prefix of an object's extension block, refused past [`MAX_OBJECT_EXTENSIONS`].
+#[derive(Debug)]
+pub(super) struct ObjectExtensionsLength(pub usize);
+
+impl Decode<Version> for ObjectExtensionsLength {
+	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		let size = usize::try_from(buf.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
+		if size > MAX_OBJECT_EXTENSIONS {
+			return Err(DecodeError::MessageTooLarge {
+				size,
+				max: MAX_OBJECT_EXTENSIONS,
+			});
+		}
+		Ok(Self(size))
+	}
+}
+
 /// Encode a frame's presentation timestamp as a moq-transport Object Property.
 ///
 /// Matches the LOC encoding of the same registry id so a relay or LOC-aware peer
@@ -133,9 +154,16 @@ impl Param for GroupOrder {
 
 	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let v = u8::param_decode(r, version)?;
-		Ok(GroupOrder::try_from(v)
-			.unwrap_or(GroupOrder::Descending)
-			.any_to_descending())
+		match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => Ok(GroupOrder::try_from(v)
+				.unwrap_or(GroupOrder::Descending)
+				.any_to_descending()),
+			_ => match v {
+				1 => Ok(GroupOrder::Ascending),
+				2 => Ok(GroupOrder::Descending),
+				_ => Err(DecodeError::InvalidValue),
+			},
+		}
 	}
 }
 

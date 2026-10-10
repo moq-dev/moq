@@ -556,7 +556,7 @@ mod tests {
 	fn oversized_setup_is_refused_at_the_prefix() {
 		use crate::{Version, lite, setup};
 		for version in [lite::Version::Lite01, lite::Version::Lite02] {
-			for size in [65537u64, (1 << 40) + 1] {
+			for size in [65536u64, (1 << 40) + 1] {
 				let mut prefix = vec![0x20];
 				Encoder::new(&mut prefix, version.into()).varint(size).unwrap();
 				refuses_frame::<setup::Client, _>(&prefix, Version::Lite(version), true);
@@ -566,7 +566,7 @@ mod tests {
 		}
 		for version in [lite::Version::Lite05, lite::Version::Lite06] {
 			let mut prefix = Vec::new();
-			Encoder::new(&mut prefix, version.into()).varint(65537).unwrap();
+			Encoder::new(&mut prefix, version.into()).varint(65536).unwrap();
 			refuses_frame::<lite::Setup, _>(&prefix, version, true);
 		}
 	}
@@ -576,7 +576,7 @@ mod tests {
 		use crate::{Version, lite, setup};
 		for version in [lite::Version::Lite01, lite::Version::Lite02] {
 			let mut prefix = vec![0x20];
-			Encoder::new(&mut prefix, version.into()).varint(65536).unwrap();
+			Encoder::new(&mut prefix, version.into()).varint(65535).unwrap();
 			assert!(matches!(
 				setup::Client::decode_slice(&prefix, Version::Lite(version)),
 				Err(DecodeError::Short)
@@ -589,7 +589,7 @@ mod tests {
 		}
 		for version in [lite::Version::Lite05, lite::Version::Lite06] {
 			let mut prefix = Vec::new();
-			Encoder::new(&mut prefix, version.into()).varint(65536).unwrap();
+			Encoder::new(&mut prefix, version.into()).varint(65535).unwrap();
 			assert!(matches!(
 				lite::Setup::decode_slice(&prefix, version),
 				Err(DecodeError::Short)

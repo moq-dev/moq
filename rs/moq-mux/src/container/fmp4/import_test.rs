@@ -564,7 +564,12 @@ fn sample(timestamp_us: u64, keyframe: bool, duration_us: Option<u64>) -> crate:
 fn decode_rejects_durationless_multisample() {
 	let frames = vec![sample(0, true, None), sample(33_000, false, None)];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let err = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap_err();
+	let err = super::decode(
+		frag,
+		None,
+		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
+	)
+	.unwrap_err();
 	assert!(matches!(err, super::Error::MissingSampleDuration), "got {err:?}");
 }
 
@@ -572,7 +577,12 @@ fn decode_rejects_durationless_multisample() {
 #[test]
 fn decode_single_sample_no_duration_ok() {
 	let frag = super::encode_fragment(info(1, scale(), 0), &[sample(0, true, None)]).unwrap();
-	let out = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap();
+	let out = super::decode(
+		frag,
+		None,
+		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
+	)
+	.unwrap();
 	assert_eq!(out.len(), 1);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 }
@@ -583,7 +593,12 @@ fn decode_single_sample_no_duration_ok() {
 fn decode_multisample_with_durations_roundtrips() {
 	let frames = vec![sample(0, true, Some(33_000)), sample(33_000, false, Some(33_000))];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let out = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap();
+	let out = super::decode(
+		frag,
+		None,
+		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
+	)
+	.unwrap();
 	assert_eq!(out.len(), 2);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 	assert_eq!(out[1].timestamp.as_micros(), 33_000);
@@ -1359,6 +1374,118 @@ async fn import_publishes_decode_times_on_an_arrival_clock() {
 	);
 }
 
+/// The most a shifted timestamp rounds down, in microseconds: under one unit of bbb's track scales.
+const TICK: u128 = 1_000;
+
+/// What fixes the catalog's clock before an fMP4 import's first fragment.
+#[derive(Clone, Copy, Debug)]
+enum Earlier {
+	/// A data track, whose registration publishes the catalog.
+	Data,
+	/// A capture, which takes the clock and stamps on its own copy.
+	Capture,
+}
+
+/// Something stamps on the catalog clock before an fMP4 import whose decode times start at
+/// `start_us`. The import offsets onto that clock instead of moving it: its first fragment lands
+/// at now on the earlier source's timeline, which keeps advancing with no rewind.
+async fn join_after(earlier: Earlier, start_us: u64) {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+
+	let mut data = match earlier {
+		Earlier::Data => {
+			let track = broadcast.create_track("telemetry", None).unwrap();
+			let mut stream = catalog.binary_stream(track, crate::binary::Config::default()).unwrap();
+			stream.append(&b"before"[..]).unwrap();
+			Some(stream)
+		}
+		Earlier::Capture => None,
+	};
+	let mut stamps = data.as_ref().map(|stream| stream.consume());
+	let clock = catalog.clock();
+	let fixed = catalog.snapshot().clock;
+
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	let before = clock.now().as_micros();
+	fmp4.decode(&live_session(start_us, 20)).unwrap();
+	let after = clock.now().as_micros();
+	if let Some(stream) = data.as_mut() {
+		stream.append(&b"after"[..]).unwrap();
+	}
+	fmp4.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.clock, fixed, "{earlier:?}: the import never moves the clock");
+	let published = crate::container::test_util::published(&consumer, &snapshot).await;
+	let video = &published[snapshot.video.renditions.keys().next().unwrap()];
+	// The offset rounds down to the track's own units.
+	assert!(
+		(before - TICK..=after).contains(&video[0]),
+		"{earlier:?}: the first fragment lands at now: {before} {} {after}",
+		video[0]
+	);
+	assert!(
+		video.windows(2).all(|w| (w[1] - w[0]).abs_diff(100_000) <= 1),
+		"the fragments keep their spacing: {video:?}"
+	);
+
+	if let Some(stamps) = stamps.as_mut() {
+		let waiter = kio::Waiter::noop();
+		let mut times = Vec::new();
+		while let std::task::Poll::Ready(Ok(Some(mut group))) = stamps.poll_recv_group(&waiter) {
+			while let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
+				times.push(frame.timestamp.unwrap().as_micros());
+			}
+		}
+		assert_eq!(times.len(), 2);
+		assert!(
+			times[0] <= times[1],
+			"{earlier:?}: the data track never rewinds: {times:?}"
+		);
+	}
+}
+
+/// A data track registered first fixes the clock; a feed an hour in still lands at now.
+#[tokio::test]
+async fn an_import_joins_a_data_tracks_clock() {
+	join_after(Earlier::Data, 3_600_000_000).await;
+}
+
+/// A capture that took the clock first keeps it; a feed at zero lands on its timeline rather than
+/// stepping it back ten seconds.
+#[tokio::test]
+async fn an_import_joins_a_captures_clock() {
+	join_after(Earlier::Capture, 0).await;
+}
+
+/// A `with_clock` catalog is fixed from the start, so even the first import shifts onto it.
+#[tokio::test]
+async fn an_import_shifts_onto_an_explicit_clock() {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let clock = crate::Clock::new();
+	let config = crate::catalog::Config::default().with_clock(clock);
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	let before = clock.now().as_micros();
+	fmp4.decode(&live_session(3_600_000_000, 5)).unwrap();
+	let after = clock.now().as_micros();
+	fmp4.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.clock, Some(clock.wall()));
+	let published = crate::container::test_util::published(&consumer, &snapshot).await;
+	let first = published[snapshot.video.renditions.keys().next().unwrap()][0];
+	assert!((before - TICK..=after).contains(&first), "{before} {first} {after}");
+}
+
 /// A source whose decode times restart is a new epoch: the import refuses the rewind rather than
 /// re-anchoring it forward, keeping everything published before it.
 #[tokio::test]
@@ -1414,7 +1541,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.clock().wall();
+	let provisional = catalog.snapshot().clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
@@ -1422,7 +1549,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the moov alone publishes nothing");
 
 	fmp4.decode(&live_session(3_600_000_000, 20)).unwrap();
-	let anchored = catalog.clock().wall();
+	let anchored = catalog.snapshot().clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first fragment anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first fragment publishes the catalog");
@@ -1461,7 +1588,7 @@ async fn a_moov_with_nothing_selected_publishes() {
 		.with_select(crate::select::Broadcast::default());
 
 	fmp4.decode(&init).unwrap();
-	catalog.clone().anchor(moq_net::Timestamp::ZERO).unwrap();
+	catalog.timebase().anchor(moq_net::Timestamp::ZERO).unwrap();
 	assert_eq!(clocks.drain().len(), 1, "the catalog publishes without a fragment");
 }
 
@@ -1505,4 +1632,54 @@ async fn a_deselected_fragment_does_not_publish() {
 	let video = super::encode_fragment(info(video_id, video_scale, 0), &[sample(0, true, Some(100_000))]).unwrap();
 	fmp4.decode(&video).unwrap();
 	assert_eq!(clocks.drain().len(), 1, "the selected track's first fragment publishes");
+}
+
+/// The importer resolves sample flags the way every CMAF reader does, so a fragment opening on a
+/// sync sample rolls a group even when its flags are left to `tfhd` or `trex`, or say nothing.
+/// The fragments it passes through then decode against its catalog init to the same samples.
+#[tokio::test]
+async fn imports_the_sample_defaults_fixtures() {
+	use mp4_atom::DecodeMaybe;
+
+	for fixture in super::fixtures() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+		fmp4.decode(&fixture.init).unwrap();
+
+		let snapshot = catalog.snapshot();
+		let (name, video) = snapshot.video.renditions.iter().next().unwrap();
+		let Container::Cmaf { init } = &video.container else {
+			panic!("{}: a CMAF rendition", fixture.name);
+		};
+		let wire = super::Wire::from_init(init).unwrap();
+		let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+
+		// The same fragment again, one second later, so its first sample can open a second group.
+		let mut cursor = std::io::Cursor::new(fixture.fragment.as_slice());
+		let Some(mp4_atom::Any::Moof(mut moof)) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() else {
+			panic!("{}: a moof first", fixture.name);
+		};
+		moof.traf[0].tfdt.as_mut().unwrap().base_media_decode_time += 1_000;
+		let mut later = Vec::new();
+		moof.encode(&mut later).unwrap();
+		later.extend_from_slice(&fixture.fragment[cursor.position() as usize..]);
+
+		fmp4.decode(&fixture.fragment).unwrap();
+		fmp4.decode(&later).unwrap();
+		fmp4.finish().unwrap();
+
+		let mut first = track.recv_group().await.unwrap().unwrap();
+		let frame = first.read_frame().await.unwrap().unwrap();
+		let frames = super::decode(frame.payload, frame.timestamp, wire.track().unwrap()).unwrap();
+		let samples: Vec<super::FixtureSample> = frames.iter().map(super::FixtureSample::from).collect();
+		assert_eq!(samples, fixture.samples, "{}", fixture.name);
+
+		assert!(
+			track.recv_group().await.unwrap().is_some(),
+			"{}: the second fragment opens on a sync sample, so a group",
+			fixture.name
+		);
+	}
 }

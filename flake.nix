@@ -353,6 +353,49 @@
           doCheck = false;
         };
 
+        # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
+        # nixpkgs, so build it from source; without it `just check` skips the
+        # cpp module, which MOQ_STRICT turns into a failure in CI.
+        #
+        # Like uniffi-bindgen-go, the tag pairs the generator's version with the
+        # uniffi release it reads, so it moves with the `uniffi` dependency in
+        # rs/moq-ffi/Cargo.toml. Five other places name the same tag and must be
+        # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
+        # cpp/moq/README.md, .github/workflows/cpp.yml,
+        # .github/workflows/obs.yml, and .github/workflows/release-cpp.yml.
+        #
+        # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
+        # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
+        # and the fork adds `error_style = "expected"`, which cpp/moq/uniffi.toml
+        # turns on. Its tags add a `-kixelated.N` pre-release so they never
+        # collide with upstream's. Move back upstream once one tags both.
+        uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "uniffi-bindgen-cpp";
+          version = "0.11.0-kixelated.4+v0.32.2";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "kixelated";
+            repo = "uniffi-bindgen-cpp";
+            rev = "v${version}";
+            hash = "sha256-pmk9M5Wt6DYlXZYPjJ2Nn0tbDi1ve3wCH0Lel9xomCY=";
+          };
+
+          cargoHash = "sha256-/DRrwhJiKFCzibiJU2D3QaBM3XTmieRgUNc7tHDiGXI=";
+
+          # The workspace's other member is the fixture crate, which pulls the
+          # uniffi examples in from git; build only the generator.
+          buildAndTestSubdir = "bindgen";
+
+          # The upstream tests generate fixtures and compile them with CMake,
+          # which is a lot of build for a binary we only invoke.
+          doCheck = false;
+        };
+
+        # C++ binding generator; CMake comes from rustDeps and the compiler from stdenv.
+        cppDeps = [
+          uniffi-bindgen-cpp
+        ];
+
         # Dart bindings plus the pinned external generator.
         dartDeps = [
           pkgs.dart
@@ -468,7 +511,7 @@
             moq-gst
             ;
 
-          inherit uniffi-bindgen-dart;
+          inherit uniffi-bindgen-cpp uniffi-bindgen-dart;
 
           # The quest CLI alone, so quest.yml can validate the tree without
           # realising the whole dev shell.
@@ -516,6 +559,7 @@
             ++ obsDeps
             ++ ktDeps
             ++ goDeps
+            ++ cppDeps
             ++ dartDeps
             ++ devTools
             ++ [ quest-cli ];
@@ -528,18 +572,19 @@
           # host had, which shadows the Cargo shim `mbx setup` installs. Put it
           # back in front, so a bare `cargo` in this shell reaches the same
           # wrapper it reaches outside. `setup --status` is what knows where
-          # that shim lives; it exits non-zero when there is none, which is
-          # every machine that made a different caching choice.
+          # that shim lives, naming it on its first line even when it is
+          # missing. Its exit code is no guide: it also fails over unrelated
+          # setup, such as a rust-analyzer config `mbx setup` never wrote, so
+          # only the shim existing decides.
           #
           # CI included: `.github/actions/rust-cache` runs `mbx setup` so this
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
-            if status=$(mbx setup --status 2>/dev/null); then
-              shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
-              if [ -x "$shim" ]; then
-                export PATH="$(dirname "$shim"):$PATH"
-              fi
+            status=$(mbx setup --status 2>/dev/null || true)
+            shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
+            if [ -x "$shim" ]; then
+              export PATH="$(dirname "$shim"):$PATH"
             fi
           '';
 
