@@ -1,7 +1,7 @@
 //! Raw-audio import/export via [`moq_audio`].
 //!
-//! Sibling to [`producer::MoqMediaProducer`](crate::producer::MoqMediaProducer)
-//! and [`consumer::MoqMediaConsumer`](crate::consumer::MoqMediaConsumer):
+//! Sibling to [`media::MoqMediaTrackProducer`](crate::media::MoqMediaTrackProducer)
+//! and [`media::MoqMediaContainerConsumer`](crate::media::MoqMediaContainerConsumer):
 //! those deal in already-encoded frames, these deal in PCM and run
 //! Opus encode/decode inside the FFI boundary.
 
@@ -125,7 +125,7 @@ pub struct MoqAudioDecoderOutput {
 	pub channels: Option<u32>,
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// microseconds. Same congestion-control knob as
-	/// [`MoqSubscription::max_age_us`](crate::consumer::MoqSubscription::max_age_us):
+	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us):
 	/// when a group stalls and a newer group is more than this far ahead,
 	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
 	/// aggressively). Named `_max` to leave room for a future
@@ -133,7 +133,7 @@ pub struct MoqAudioDecoderOutput {
 	/// one bounds how stale a group may be, that one how much to hold before
 	/// presenting.
 	#[uniffi(default = None)]
-	pub max_age_us: Option<u64>,
+	pub max_delay_us: Option<u64>,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -178,7 +178,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 
 /// Producer for a raw-audio track.
 ///
-/// Built via [`MoqBroadcastProducer::publish_audio`]. Each
+/// Built via [`MoqBroadcastProducer::encode_audio`]. Each
 /// [`write`](Self::write) accepts an [`MoqAudioFrame`] whose `data`
 /// is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
@@ -391,7 +391,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 impl MoqBroadcastConsumer {
 	/// Subscribe to an audio track. `catalog_audio_config` comes from
 	/// the catalog (see
-	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next));
+	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next));
 	/// the codec is inferred from it. Only Opus and AAC-LC are supported.
 	///
 	/// A rendition whose [`broadcast`](crate::media::MoqAudio::broadcast) names another broadcast
@@ -412,7 +412,7 @@ impl MoqBroadcastConsumer {
 		config.output.format = output.format.into();
 		config.output.sample_rate = output.sample_rate;
 		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
-		config.max_age = output.max_age_us.map(Duration::from_micros).unwrap_or_default();
+		config.max_delay = output.max_delay_us.map(Duration::from_micros).unwrap_or_default();
 
 		let consumer = moq_audio::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
 
@@ -436,6 +436,7 @@ mod tests {
 			sample_rate: 48_000,
 			channel_count: 2,
 			bitrate: None,
+			enabled: true,
 			container: MoqContainer::Legacy,
 		}
 	}

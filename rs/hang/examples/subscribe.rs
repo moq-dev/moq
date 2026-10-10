@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use anyhow::Context;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_tokio to configure a logger.
@@ -39,16 +37,44 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	Ok(reconnect.closed().await?)
 }
 
-// Subscribe to a broadcast and read media frames.
+// Follow the announced broadcast: play it once it starts, play it afresh when another
+// publisher instance replaces it (a restart), and stop when it ends.
 async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()> {
-	// Wait for a route to be announced, then resolve the broadcast at its path.
-	// The convention is that a publisher announces each broadcast's exact path.
-	let update = consumer.announced().next().await.context("origin closed")?;
-	anyhow::ensure!(update.kind.is_active(), "route retracted: {}", update.prefix);
-	let path = update.prefix;
+	let mut announced = consumer.announced();
+	let mut playing: Option<tokio::task::JoinHandle<()>> = None;
+	while let Some(event) = announced.next().await {
+		match event {
+			// The convention is that a publisher announces each broadcast's exact path.
+			moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
+				tracing::info!(path = %announce.prefix, "broadcast announced");
+				if let Some(old) = playing.take() {
+					old.abort();
+				}
+				let consumer = consumer.clone();
+				playing = Some(tokio::spawn(async move {
+					if let Err(err) = play(consumer, announce).await {
+						tracing::warn!(%err, "playback failed");
+					}
+				}));
+			}
+			// The same broadcast over another route: nothing to do.
+			moq_net::announce::Event::Update(_) => {}
+			moq_net::announce::Event::End(announce) => {
+				tracing::info!(path = %announce.prefix, "broadcast ended");
+				if let Some(old) = playing.take() {
+					old.abort();
+				}
+			}
+		}
+	}
+	anyhow::bail!("origin closed")
+}
 
-	tracing::info!(%path, "broadcast announced");
-	let broadcast = consumer.request_broadcast(&path).await?;
+// Resolve an announced broadcast and read media frames.
+async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::Announce) -> anyhow::Result<()> {
+	let broadcast = consumer
+		.request_broadcast(&announce.prefix, announce.route.epoch)
+		.await?;
 
 	// Read the catalog to discover available tracks.
 	let catalog_track = broadcast
@@ -82,7 +108,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_priority(1)
-				.with_max_age(latency),
+				.with_max_delay(latency),
 		)
 		.await?;
 	let mut ordered =

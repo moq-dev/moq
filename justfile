@@ -14,6 +14,8 @@ mod kt
 mod swift
 mod go
 mod dart
+# The C++ package over moq-ffi.
+mod cpp
 # OBS Studio plugin (C++). See doc/bin/obs.md.
 mod obs 'cpp/obs'
 # Cross-language tests (`just test interop`, `just test drill`, ...).
@@ -44,10 +46,13 @@ dev:
 bench $BASE="":
     bench/run.sh "$BASE"
 
-# Compare one multi-threaded Tokio runtime with the same number of independent
-# Tokio/epoll and io_uring workers; WORKERS defaults to every logical CPU.
+# Measure audio group sizes across relay publisher/subscriber and fanout shapes.
+bench-audio:
+    bench/run.sh --audio
 
-# Compare a shared Tokio runtime with independent workers: `just bench-runtime 5 16`.
+# Compare one multi-threaded Tokio runtime with independent Tokio/epoll and
+# io_uring workers; WORKERS defaults to every logical CPU.
+# Example: `just bench-runtime 5 16`.
 bench-runtime $ROUNDS="3" $WORKERS="":
     MOQ_BENCH_RUNTIME_ROUNDS="$ROUNDS" MOQ_BENCH_RUNTIME_WORKERS="$WORKERS" bench/run.sh --runtime
 

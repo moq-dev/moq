@@ -125,9 +125,14 @@ export function checkCredential(credential: Credential): void {
 
 export function checkGeneration(generation: Generation): void {
 	checkCredential(generation);
-	if (generation.epoch.length === 0) throw new ProfileError("identity", "epoch is empty");
-	if (generation.epoch.length > 0xffff) throw new ProfileError("identity", "epoch exceeds 65535 bytes");
-	if (generation.epoch.includes(0x2f)) throw new ProfileError("identity", "epoch contains /");
+	// Check bytes, not decoded length: TextDecoder strips a leading BOM.
+	const epoch = new TextDecoder().decode(generation.epoch);
+	if (
+		generation.epoch.length !== 36 ||
+		!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(epoch)
+	) {
+		throw new ProfileError("identity", "epoch is not canonical UUIDv7 text");
+	}
 }
 
 function checkU53(value: bigint, label: string): void {
@@ -194,12 +199,7 @@ export function nameInfo(generation: Generation, semanticName: Uint8Array<ArrayB
 
 /** Canonical path bytes for a credential and semantic name, excluding the epoch. */
 export function pathInfo(credential: Credential, semanticName: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-	return concat(
-		PATH_LABEL,
-		encodeBytes(credential.context),
-		encodeU64(credential.kid),
-		encodeBytes(semanticName),
-	);
+	return concat(PATH_LABEL, encodeBytes(credential.context), encodeU64(credential.kid), encodeBytes(semanticName));
 }
 
 export function keyInfo(generation: Generation, physicalName: string, domain: Domain): Uint8Array<ArrayBuffer> {
@@ -320,7 +320,7 @@ function gen(epoch = EPOCH, secret = utf8("moq-e2ee-00 test secret!!!!!!!!!")): 
 function generationJson(generation: Generation) {
 	return {
 		context: hex(generation.context),
-		epoch: new TextDecoder().decode(generation.epoch),
+		epoch: new TextDecoder("utf-8", { ignoreBOM: true }).decode(generation.epoch),
 		kid: Number(generation.kid),
 		secret: hex(generation.secret),
 	};
@@ -488,6 +488,7 @@ async function generate() {
 		["kid-exhausted", { ...base, kid: BigInt(MAX_U53) + 1n }, "identity"],
 		["epoch-empty", { ...base, epoch: new Uint8Array() }, "identity"],
 		["epoch-slash", { ...base, epoch: utf8("2026/09") }, "identity"],
+		["epoch-bom", { ...base, epoch: utf8(`\ufeff${EPOCH}`) }, "identity"],
 	] as const) {
 		negative.push({ id, operation: "generation", error, generation: generationJson(generation) });
 	}
@@ -759,7 +760,9 @@ async function main(): Promise<void> {
 	const jsonPath = pathFor("moq-e2ee-00.json");
 	if (write) {
 		mkdirSync(dirname(jsonPath), { recursive: true });
-		writeFileSync(jsonPath, `${JSON.stringify(generated, null, "\t")}\n`);
+		// Escape the BOM vector so it stays visible in the file.
+		const json = JSON.stringify(generated, null, "\t").replaceAll("\ufeff", "\\ufeff");
+		writeFileSync(jsonPath, `${json}\n`);
 	}
 	const onDisk = JSON.parse(readFileSync(jsonPath, "utf8")) as Awaited<ReturnType<typeof generate>>;
 	await verify(onDisk);

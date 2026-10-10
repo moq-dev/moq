@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"moq.dev/moq"
+	moqmedia "moq.dev/moq/media"
 )
 
 // Subscribe to a broadcast and print its catalog. These examples have no Output
@@ -25,17 +27,16 @@ func ExampleClient_Announced() {
 	}
 	defer announced.Cancel()
 
-	for ann, err := range announced.All(ctx) {
+	for event, err := range announced.All(ctx) {
 		if err != nil {
 			if moq.IsShutdown(err) {
 				break
 			}
 			log.Fatal(err)
 		}
-		if !ann.Active() {
-			continue
+		if event, ok := event.(moq.AnnounceEventStart); ok {
+			fmt.Println("broadcast:", event.Announce.Prefix)
 		}
-		fmt.Println("broadcast:", ann.Prefix())
 	}
 }
 
@@ -53,18 +54,22 @@ func ExampleClient_CreateBroadcast() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Closing ends the broadcast for good.
-	defer broadcast.Close()
 
-	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		log.Fatal(err)
 	}
 	_ = broadcast.Announce(moq.Route{})
 
-	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame")}); err != nil {
+	pts := 20 * time.Millisecond
+	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: &pts}); err != nil {
 		log.Fatal(err)
 	}
+
+	// Finish before closing: Close drains, and a live track never drains.
+	_ = media.Finish()
+	// Closing ends the broadcast for good.
+	broadcast.Close()
 }
 
 // Connect with pinned TLS material and read a stats snapshot.
@@ -82,18 +87,18 @@ func ExampleClient_Session_stats() {
 	defer client.Close()
 
 	stats := client.Session().Stats()
-	fmt.Println("rtt:", stats.RttUs)
+	fmt.Println("rtt:", stats.RTT)
 }
 
 // Publish a video track with catalog hints known before the first keyframe.
-func ExampleBroadcastProducer_PublishVideo_videoHint() {
+func Example_mediaVideoHint() {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer broadcast.Close()
 
-	media, err := broadcast.PublishVideo(moq.VideoFormatAvc3, nil, moq.WithVideoHint(moq.VideoHint{}))
+	media, err := moqmedia.NewVideoTrackProducer(broadcast, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatAvc3, Data: nil, Hint: &moqmedia.VideoHint{}})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -116,7 +121,7 @@ func ExampleListen() {
 }
 
 // Drive the accept loop directly to decide which sessions to admit.
-func ExampleServer_Requests() {
+func ExampleServer_All() {
 	ctx := context.Background()
 
 	server, err := moq.Listen(ctx, "127.0.0.1:4443", moq.WithTLSGenerate("localhost"))
@@ -125,7 +130,7 @@ func ExampleServer_Requests() {
 	}
 	defer server.Close()
 
-	for req, err := range server.Requests(ctx) {
+	for req, err := range server.All(ctx) {
 		if err != nil {
 			if moq.IsShutdown(err) {
 				break
@@ -139,7 +144,7 @@ func ExampleServer_Requests() {
 			continue
 		}
 
-		session, err := req.Accept(ctx)
+		session, err := req.Accept(ctx, nil, nil)
 		if err != nil {
 			continue
 		}

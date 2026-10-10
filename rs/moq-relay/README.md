@@ -43,6 +43,7 @@ docker pull moqdev/moq-relay
 ```
 
 Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-relay).
+The image is the package's nix closure on `scratch`, so it has no shell.
 
 ## HTTP
 
@@ -64,7 +65,7 @@ Relays can be joined together to proxy announcements and subscriptions. A viewer
 - `--cluster-connect-api <url-or-path>` fetches that list from an endpoint or file instead, reloading it without a restart.
 - `--cluster-lan` finds peers on the local network over mDNS.
 
-A relay only dials peers listed this way or found on the LAN. `--cluster-mesh` gossip discovery was removed; the relay errors at startup if it is set.
+A relay only dials peers listed this way or found on the LAN.
 
 See [doc/bin/relay/cluster.md](https://github.com/moq-dev/moq/blob/main/doc/bin/relay/cluster.md) for the full walkthrough, including topology trade-offs and authentication.
 

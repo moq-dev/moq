@@ -8,7 +8,7 @@ A worker drive turn reads the clock once and hands that instant down, so
 
 ## Plan
 
-Profiling the io_uring relay (`dev` @ `fc57e0175`, `perf record -F 499`,
+Profiling the io_uring relay (`fc57e0175`, `perf record -F 499`,
 relay process only) shows `[vdso]` as a top-5 DSO, at roughly 3x its share on
 the tokio worker path:
 
@@ -29,30 +29,40 @@ point.
 Where the reads are:
 
 - The drive loop reads once per turn to fire timers
-  (`self.shared.timers.borrow_mut().fire(Instant::now())`,
-  rs/moq-uring/src/worker.rs:183).
-- The noq driver reads the clock for
-  `close` (rs/moq-uring/src/quic/noq/connection.rs:239), `handle_timeout`
-  (:671), and `poll_transmit` (:786). The last one runs once per GSO train,
+  (`self.shared.timers.borrow_mut().fire(Instant::now())` in
+  rs/moq-uring/src/worker.rs).
+- The noq driver (rs/moq-uring/src/quic/noq/connection.rs) reads the clock
+  for `close`, `handle_timeout`, and `poll_transmit`. The last one runs once per GSO train,
   since `flush` stages one train per turn (see
   [Run to quiescence](/quest/m1/perf/uring-quiescence.md)).
 
 The same profile shows the timer heap at ~1.6%:
-`<moq_uring::timer::Timer as moq_net::runtime::Timer>::set` 0.92% plus
-`btree::search::search_tree` 0.65%. `timer::Heap` is a
-`BTreeMap<(Instant, u64), Rc<Slot>>` (rs/moq-uring/src/timer.rs:19-20), so
+`moq_uring::timer::Timer::set` 0.92% (profiled as a `moq_net::runtime::Timer`
+impl, a trait since removed) plus `btree::search::search_tree` 0.65%.
+`timer::Heap` (rs/moq-uring/src/timer.rs) keys a
+`BTreeMap<(Instant, u64), Rc<Slot>>`, so
 every QUIC timeout re-arm is an O(log n) map removal and insertion with `Rc`
 traffic. The #2875 design note called for a timer wheel. Not urgent at these
 connection counts, but it is on the same hot path and grows with it.
 
-`moq_net::runtime::Runtime::now` (rs/moq-net/src/runtime.rs:128) is the
-natural place to hand the current turn's instant down instead of having each
-layer re-read it. Sample once per drive turn and pass it through `fire`, the
-`handle_timeout`, and `poll_transmit`.
+moq-net's drivers already receive the current instant from their owner
+(`Clock::now`, "the latest instant supplied by the owning driver", in
+`rs/moq-net/src/time.rs`); moq-uring's worker passes `Instant::now()` to its
+single `driver.poll(Instant::now(), ...)` call once per poll
+(`rs/moq-uring/src/worker.rs`). Sample once per drive turn there and pass
+that instant through `fire`, the `handle_timeout`, and `poll_transmit`.
+
+Decided in the 2026-10-05 audit: this edits the QUIC connection driver the
+[hard fork](/quest/m1/quic/fork/README.md)'s switch renames and moves onto
+`moq-quic`, so it waits for the fork and is measured there.
 
 Acceptance: `[vdso]` share in the `perf` profile on both flavors, relay CPU
 via `just bench BASE` on Linux, and the existing keep-alive and idle-timeout
 tests unchanged.
+
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - the driver this edits moves onto `moq-quic`
 
 ## Closes
 

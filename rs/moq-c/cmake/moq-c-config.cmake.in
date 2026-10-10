@@ -1,0 +1,43 @@
+# find_package(moq-c): the C bindings as the moq::c target. The moq:: namespace is
+# shared with moq-cpp (moq::cpp), so the two packages install side by side.
+
+# Compute installation prefix relative to this file
+get_filename_component(_moq_prefix "${CMAKE_CURRENT_LIST_FILE}" PATH)
+get_filename_component(_moq_prefix "${_moq_prefix}" PATH)
+get_filename_component(_moq_prefix "${_moq_prefix}" PATH)
+get_filename_component(_moq_prefix "${_moq_prefix}" PATH)
+
+# Set install paths
+set(PACKAGE_PREFIX_DIR "${_moq_prefix}")
+set(_moq_includedir "${_moq_prefix}/include")
+set(_moq_libdir "${_moq_prefix}/lib")
+
+set(_moq_lib_name "@LIB_FILE@")
+
+# Create imported target
+if(NOT TARGET moq::c)
+    add_library(moq::c STATIC IMPORTED)
+
+    set_target_properties(moq::c PROPERTIES
+        IMPORTED_LOCATION "${_moq_libdir}/${_moq_lib_name}"
+        INTERFACE_INCLUDE_DIRECTORIES "${_moq_includedir}"
+    )
+
+    # System libraries Rust std/deps pull in. An external linker consuming the
+    # staticlib needs these spelled out; cargo can't inject them. Baked in at
+    # install time from rs/moq-c/native-libs/ for the platform this was built
+    # for, which is the only platform the installed static library works on.
+    set_property(TARGET moq::c APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES @MOQ_NATIVE_LIBS_QUOTED@
+    )
+endif()
+
+# Clean up internal variables
+unset(_moq_prefix)
+unset(_moq_includedir)
+unset(_moq_libdir)
+unset(_moq_lib_name)
+
+# Package metadata
+set(moq-c_FOUND TRUE)
+set(moq-c_VERSION "@VERSION@")

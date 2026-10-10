@@ -11,6 +11,7 @@ The wire layer. Generic over the transport and media-agnostic: the relay never i
 
 # Testing
 
+- Tests never use tokio or the wall clock. Prefer a plain `#[test]` that polls with explicit instants; async bodies use `#[moq_net_sim::test]`, whose simulated time jumps only when every task is idle. tokio is for the benches.
 - `just rs fuzz <target>` (one per file in `fuzz/fuzz_targets/`) needs nightly. The target bodies live in `src/fuzz.rs`; `fuzz/regressions/<target>/` replays under `just check`, so commit every crash input there.
 - `just rs loom` model-checks the concurrent handoffs. A hang is a lost wakeup, not a flake.
 - `just test interop --all` runs the cross-language interop matrix after a wire change.

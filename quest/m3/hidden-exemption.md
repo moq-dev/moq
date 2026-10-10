@@ -12,9 +12,11 @@ for peers that predate it.
 In m3 because it waits on a deployment, not on code; it comes back once
 the mesh runs lite-07.
 
-- Remove the `cluster_peer` argument from `connection::authorize` and its
-  callers in `rs/moq-relay/src/{connection,uring,websocket}.rs`, and the forced
-  `with_hidden(true)` on the outbound dial in `rs/moq-relay/src/cluster.rs`.
+- Remove the `cluster_peer` exemption, now a local inside `Cluster::scope`
+  (`rs/moq-relay/src/cluster.rs`, with its TODO), so an inbound peer discovers
+  hidden routes only when it asks, and the forced `with_hidden(true)` on the
+  outbound dial in the same file. `connection::authorize` no longer exists on
+  `main`; only `release` still has that shape.
 - Replace `rs/moq-relay/tests/hidden_cluster.rs` with a lite-07 mesh test that
   still sees a `.`-prefixed hidden broadcast.
 

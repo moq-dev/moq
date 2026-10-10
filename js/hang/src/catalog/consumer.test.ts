@@ -57,10 +57,10 @@ test("the shared containment check covers every section carrying a broadcast ref
 
 test("watch refuses an oversized catalog update", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK);
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update(catalog(MAX_RENDITIONS + 1));
+	producer.update({ value: catalog(MAX_RENDITIONS + 1), at: Moq.Time.Timestamp.now() });
 	await expect(consumer.next()).rejects.toBeInstanceOf(TooManyRenditions);
 	producer.finish();
 	broadcast.close();
@@ -78,14 +78,14 @@ function referencing(broadcast: string): Root {
 async function watchRequested(root: Root) {
 	const origin = new Moq.Origin.Producer();
 	const broadcast = origin.createBroadcast(Moq.Path.from("room/alice"));
-	const track = broadcast.createTrack(TRACK);
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
 	broadcast.announce();
 	const request = origin.request(Moq.Path.from("room/alice"));
 	const active = request.active.peek();
 	if (!active) throw new Error("request did not resolve");
 	const consumer = watch(active)[Symbol.asyncIterator]();
-	producer.update(root);
+	producer.update({ value: root, at: Moq.Time.Timestamp.now() });
 	try {
 		return await consumer.next();
 	} finally {
@@ -107,10 +107,10 @@ test("watch accepts a sibling reference under the same root and yields it unreso
 
 test("watch on a standalone broadcast refuses any parent reference", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK);
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update(referencing("../bob"));
+	producer.update({ value: referencing("../bob"), at: Moq.Time.Timestamp.now() });
 	await expect(consumer.next()).rejects.toBeInstanceOf(EscapingBroadcast);
 	producer.finish();
 	broadcast.close();
@@ -118,10 +118,10 @@ test("watch on a standalone broadcast refuses any parent reference", async () =>
 
 test("watch subscribes and yields typed catalog updates", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK);
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update(catalog(1));
+	producer.update({ value: catalog(1), at: Moq.Time.Timestamp.now() });
 	expect(await consumer.next()).toMatchObject({ value: catalog(1) });
 	await consumer.return?.();
 	producer.finish();

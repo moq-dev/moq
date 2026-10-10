@@ -1,46 +1,49 @@
-# We're using a Dockerfile despite the fact that Nix can create Docker images directly.
+# The final stage is scratch: the package's nix closure and a symlink to its
+# binary. There is no shell or nix runtime.
 #
-# 1. It's difficult to cross compile Docker images with Nix.
-#   - I tried, but OSX makes it even more difficult.
-# 2. Nix is not required for developers; `docker build .` will work.
-#
-# Unfortunately, it means that caching is more difficult.
-# Nix uses /nix/store for both caching AND the final output (lots of symlinks)
-FROM nixos/nix:latest AS builder
+# Building the image with Nix itself is a poor fit here: cross-compiling those
+# images is painful (especially from macOS), and
+# `docker build --build-arg package=moq-relay .` should work without a local
+# Nix install.
+FROM docker.io/nixos/nix:latest AS builder
 ENV NIX_CONFIG="experimental-features = nix-command flakes"
 
 WORKDIR /build
 
-RUN mkdir -p /output/store
+# Required: the flake package to publish, such as moq-relay or moq.
+ARG package
+
+RUN test -n "${package}" || { printf '%s\n' "error: the package build-arg is required" >&2; exit 1; }
 
 COPY . .
 
-# Build stage that accepts an optional package argument
-ARG package
+# Copy the closure to a rootfs, then point a fixed path at the one binary.
+# Exec-form ENTRYPOINT does not expand build args, and a shell script would
+# need /bin/sh, which scratch does not have.
+RUN --mount=type=cache,target=/root/.cache --mount=type=cache,target=/nix,from=docker.io/nixos/nix:latest,source=/nix \
+	set -eu; \
+	nix build .#"${package}" --out-link result; \
+	out=/output/root; \
+	mkdir -p "$out/nix/store" "$out/tmp"; \
+	chmod 1777 "$out/tmp"; \
+	touch "$out/tmp/.keep"; \
+	cp -a $(nix-store -qR result) "$out/nix/store/"; \
+	bins=$(ls -1 result/bin 2>/dev/null || true); \
+	count=$(printf '%s\n' "$bins" | grep -c . || true); \
+	if [ "$count" -ne 1 ]; then \
+		printf '%s\n' "error: ${package} produced ${count} binaries, expected 1" >&2; \
+		exit 1; \
+	fi; \
+	ln -s "$(readlink -f result)/bin/${bins}" "$out/entrypoint"; \
+	bundle=$(find "$out/nix/store" -type f -name ca-bundle.crt -print -quit); \
+	if [ -z "$bundle" ]; then \
+		printf '%s\n' "error: ${package} closure has no CA bundle; outbound TLS would fail" >&2; \
+		exit 1; \
+	fi; \
+	rel=${bundle#"$out/nix/store/"}; \
+	mkdir -p "$out/etc/ssl/certs"; \
+	ln -s "/nix/store/${rel}" "$out/etc/ssl/certs/ca-certificates.crt"
 
-# Build the package
-RUN --mount=type=cache,target=/root/.cache --mount=type=cache,target=/nix,from=nixos/nix:latest,source=/nix \
-	nix build .#${package} --out-link result && \
-	cp -r $(nix-store -qR result) /output/store && \
-	cp -r $(readlink -f result) /output/result && \
-	rm -rf /output/store/$(basename $(readlink -f result))
-
-# Default to `/bin/sh` for the entrypoint if no package is specified
-ARG package="sh"
-
-# Create entry.sh script that knows which binary to run. Derive it from the
-# single binary the package produced, so a package need not share its binary's
-# name; fall back to the package name when there's no binary (the `sh` default).
-RUN binary="$(ls /output/result/bin 2>/dev/null | head -n1)"; \
-	[ -n "$binary" ] || binary="${package}"; \
-	printf '#!/bin/sh\nexec /bin/%s "$@"\n' "${binary}" > /output/entry.sh && \
-	chmod +x /output/entry.sh
-
-# Final image (when no specific package is selected, defaults to sh)
-FROM nixos/nix:latest
-
-COPY --from=builder /output/entry.sh /bin/entry.sh
-COPY --from=builder /output/store /nix/store
-COPY --from=builder /output/result/bin/* /bin/
-
-ENTRYPOINT ["/bin/entry.sh"]
+FROM scratch
+COPY --from=builder /output/root/ /
+ENTRYPOINT ["/entrypoint"]

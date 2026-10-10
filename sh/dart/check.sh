@@ -60,6 +60,15 @@ for file in moq.dart uniffi_runtime.dart; do
     fi
 done
 
+# Analyze samples alongside the wrapper tests so package imports resolve to
+# this checkout. These functions only type-check; tests never execute them.
+{
+    echo "import 'prelude.dart';"
+    bash "$DART_DIR/../doc/lib/samples.sh" dart \
+        "$DART_DIR/../doc/lib/dart/"*.md "$DART_DIR/moq/README.md"
+} >"$DART_DIR/moq/test/docs/samples.dart"
+dart format "$DART_DIR/moq/test/docs/samples.dart"
+
 dart format --output=none --set-exit-if-changed \
     "$DART_DIR/moq_ffi" "$DART_DIR/moq"
 

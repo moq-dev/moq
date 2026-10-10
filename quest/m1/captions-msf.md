@@ -34,4 +34,4 @@ Per cross-package sync, mirror any schema movement in `js/msf`.
 ## Related
 
 - [Caption import](/quest/m1/captions-import.md) - the container half of the
-  same gap, and the quest that closes the issue
+  same gap

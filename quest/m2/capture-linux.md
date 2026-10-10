@@ -16,14 +16,20 @@ windows are reachable by explicit id even under Wayland.
 The portal path is what is left, and it is different in kind rather than merely
 unimplemented, because xdg-desktop-portal owns source selection:
 
-- **Windows are not offered** on Wayland: the portal is asked for
-  `SourceType::Monitor` only, so the picker never shows one. Adding
-  `SourceType::Window` is the change, but the portal still owns which window
-  the user picks, so there is no id to hand back.
+- **Portal-picked windows reach the Rust API but not the CLI.** #5089 added
+  `capture::Source::Portal(portal::Selection)` with `portal::Kind::{Screen,
+  Window}`, so a caller can ask the picker for a window, and its restore token
+  stays with that selection. The portal still owns which window the user
+  picks, so there is no id to hand back. `moq` only takes an explicit window
+  id; wire a picker-driven window selection into the CLI (for example, a bare
+  `--window` going to the portal, mirroring an unqualified `--display`) and
+  update `doc/bin/cli.md`.
 - **Display selection stays picker-driven.** An unqualified `--display` still
-  goes to the portal and ignores the selector. Either the restore-token flow
-  lets a previously-approved source be reused without the picker, or this stays
-  a documented limitation answered by the X11 path.
+  goes to the portal and ignores the selector. Since #5089 a `Selection` replays
+  its restore token across reopens within one process, but the token is never
+  exposed, so a new `moq` run always shows the picker. Either the token becomes
+  persistable (API plus CLI) so a previously-approved source is reused without
+  the picker, or this stays a documented limitation answered by the X11 path.
 - **System audio** needs a PipeWire monitor node.
   `moq_audio::capture::Source::System` exists but is macOS-only and returns
   `Unsupported` elsewhere. This is independent of the screencast portal.
@@ -35,5 +41,3 @@ unimplemented, because xdg-desktop-portal owns source selection:
 
 - [Windows capture parity](/quest/m2/capture-windows.md) - the same gaps,
   through Windows.Graphics.Capture and WASAPI
-- [X11 capture transport](/quest/m2/x11-capture-shm.md) - making the X11 half
-  that landed cheap enough for a full-screen share

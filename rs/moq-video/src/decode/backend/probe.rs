@@ -9,7 +9,7 @@
 //! `Hardware` / `Software`, so it can't be picked by accident.
 
 use std::sync::Mutex;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::ThreadId;
 
@@ -25,13 +25,13 @@ pub(crate) const NAME: &str = "probe";
 pub(crate) const BUFFERED_NAME: &str = "probe-buffered";
 
 /// A test decoder whose flush waits until the test releases it.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 pub(crate) const BLOCKING_FLUSH_NAME: &str = "probe-blocking-flush";
 
 /// A test decoder standing in for hardware: it records the [`Config`] it opened
 /// with, ignores the scale hint like a backend without a scaler, and hands back
 /// a platform-native surface where one can be built without a device (a
-/// `CVPixelBuffer` on macOS), CPU pixels elsewhere.
+/// `CVPixelBuffer` on macOS and iOS), CPU pixels elsewhere.
 pub(crate) const NATIVE_NAME: &str = "probe-native";
 
 /// What happened to the codec, and where. `open` and `drop` are the pair that
@@ -41,19 +41,19 @@ pub(crate) type Event = (&'static str, ThreadId);
 
 static LOG: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 static FLUSH_ENTERED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 static FLUSH_RELEASED: AtomicBool = AtomicBool::new(false);
 
 /// Serializes the tests that read [`LOG`], which is process-wide. nextest gives
 /// each test its own process, but `cargo test` does not.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 static EXCLUSIVE: Mutex<()> = Mutex::new(());
 
 /// Take the probe for one test, clearing whatever a previous one left behind.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 	let guard = EXCLUSIVE.lock().unwrap_or_else(|err| err.into_inner());
 	let _ = take();
@@ -61,26 +61,26 @@ pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Empty the log and hand back what was in it.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 pub(crate) fn take() -> Vec<Event> {
 	std::mem::take(&mut LOG.lock().unwrap())
 }
 
 /// Prepare the blocking flush probe for one cancellation test.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 pub(crate) fn prepare_blocking_flush() {
 	FLUSH_ENTERED.store(false, Ordering::SeqCst);
 	FLUSH_RELEASED.store(false, Ordering::SeqCst);
 }
 
 /// Whether the blocking flush has started on the codec thread.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 pub(crate) fn flush_entered() -> bool {
 	FLUSH_ENTERED.load(Ordering::SeqCst)
 }
 
 /// Let the blocking flush finish so the codec thread can be joined.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 pub(crate) fn release_flush() {
 	FLUSH_RELEASED.store(true, Ordering::SeqCst);
 }
@@ -120,7 +120,7 @@ pub(crate) struct Buffered(Option<Frame>);
 
 pub(crate) struct Native;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 pub(crate) struct BlockingFlush;
 
 impl Probe {
@@ -146,13 +146,13 @@ impl Native {
 	/// platform can build without a device.
 	fn frame(timestamp: Timestamp) -> Result<Frame, Error> {
 		let frame = frame(timestamp)?;
-		#[cfg(target_os = "macos")]
+		#[cfg(apple)]
 		let frame = {
 			let Surface::I420(i420) = frame.surface else {
 				unreachable!("the probe builds CPU pictures");
 			};
 			Frame::new(
-				Surface::PixelBuffer(crate::frame::macos::nv12_surface(&i420)),
+				Surface::PixelBuffer(crate::frame::apple::nv12_surface(&i420)),
 				frame.timestamp,
 			)
 		};
@@ -174,7 +174,7 @@ impl Backend for Native {
 	}
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 impl BlockingFlush {
 	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self))
@@ -203,7 +203,7 @@ impl Backend for Probe {
 	}
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 impl Backend for BlockingFlush {
 	fn decode(&mut self, _access_unit: Bytes, _timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 		Ok(Vec::new())

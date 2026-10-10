@@ -101,7 +101,8 @@ registration directly. There is no software H.265 encoder (it's hardware-only).
 
 `encode::Encoder::encode` takes a raw `Frame` (a timestamp plus a `Surface`
 holding the pixels) and returns `encode::Encoded`s: one whole access unit each,
-carrying the timestamp of the picture it was encoded from. That matters for a
+carrying the timestamp of the picture it was encoded from and whether it is a
+keyframe, forced by `cut()` or on the GOP cadence. The timestamp matters for a
 backend that buffers, which hands back an earlier frame's access unit while a
 later one goes in, and for the tail `finish()` drains. Bring your own pixels with
 `Surface::rgba(...)`, or feed a frame straight from capture or `decode`.
@@ -118,11 +119,18 @@ driver without the force-keyframe control), and queues nothing then: groups
 keep falling where `Config::gop` puts them. `encode::Sink` answers the same
 way, awaited.
 
-Two public entry points:
+Public entry points:
 
 - `encode::publish_capture(...)` captures a webcam, encodes it, and publishes on
   demand: the track and catalog are advertised up front, but the camera opens
   only while a subscriber is watching and is released when the last one leaves.
+- `encode::Control::new(...)` does the same but returns a `Control` handle with
+  the `Driver` that runs it, like `moq-audio`'s. `Control::cut()` asks for a
+  keyframe: requests coalesce, any keyframe serves them (the GOP cadence
+  included), and a forced one lands at least 500ms after any other. On a
+  backend that cannot force one it returns `Error::CutUnsupported` and the
+  publish carries on. Dropping the last `Control` ends the `Driver` promptly,
+  even mid-open.
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
@@ -131,43 +139,38 @@ a working software H.264 fallback but compiles vendored C++; disable defaults
 and select native features to omit it. `nvidia` is Linux-only, `dlopen`s the
 driver at runtime, and needs no build-time toolkit. `vaapi` is opt-in because
 its bindgen needs libclang on the build host, while `v4l2` is opt-in only by
-convention, since `moq-v4l` checks its bindings in. `render` is also opt-in so
-codec-only consumers do not compile wgpu.
+convention, since `moq-v4l` checks its bindings in. `vpx` is opt-in because
+libvpx comes from the build host through pkg-config (set `VPX_STATIC=1` to link
+the archive, as the Nix dev shell does). `render` is also opt-in so codec-only
+consumers do not compile wgpu.
 
-### Vulkan producers on NVIDIA
+### External Vulkan producers
 
-`frame::vulkan::Importer` accepts dedicated optimal-tiling
-`VK_FORMAT_R8G8B8A8_UNORM` (`Image::rgba8`) or `VK_FORMAT_B8G8R8A8_UNORM`
-(`Image::bgra8`) images exported as opaque memory FDs. The producer
-also exports a timeline semaphore and supplies the Vulkan physical-device UUID;
-imports with another CUDA device, format, layout, allocation shape, or sync
-mechanism are refused. Vulkan signals `Timeline::ready` after writes and the
-transition to `VK_IMAGE_LAYOUT_GENERAL`. CUDA waits on that value and signals
-`Timeline::complete` after all readers queued on the frame stream.
+External Linux Vulkan producers construct `frame::vulkan::Slot` from exported
+memory and timeline FDs, an `Image` describing the format, allocation, and
+memory handle type, and a guard retaining the producer's allocation. Device
+and driver UUIDs identify the exporter; opaque memory also carries its original
+memory type index, while DMA-BUF memory carries its DRM modifier and explicit
+plane offsets and row pitches, including producer padding.
 
-An imported `Slot<T>` owns the producer's `T`. `Slot::publish` consumes it and
-`Completion::wait` returns the same slot only after CUDA completion, so a pool
-cannot overwrite an in-flight image. Importer capacity bounds retained slots,
-and a dedicated worker drains completion after capture stops or a receiver is
-cancelled without blocking the producer thread. If the original application
-image is not exportable, copy it on Vulkan into a dedicated exportable slot;
-that is one GPU image copy, not zero-copy. There is no CPU mapping, download, or
-staging fallback for `Surface::Vulkan`.
+Set `encode::Config::input` to the image's device before opening or probing the
+encoder. `Kind::Auto` selects an importing backend on that device and refuses
+unsupported devices without a CPU fallback. Feed each published image through
+`Surface::Vulkan`; NVENC privately imports it into CUDA, shares one full-size
+NV12 conversion per capture and color space, and scales each rendition on the
+GPU. Pin `Config::color` when renditions cross the SD/HD color-inference boundary.
 
-`frame::cuda::Converter` turns a published Vulkan frame into the NV12
-`Surface::Cuda` that NVENC encodes in place. It runs on the GPU in one declared
-color space (matrix and range), averages 4:2:0 chroma per 2x2 block, applies no
-transfer function, and draws every buffer from a pool sized at construction;
-`cuda::Frame::resize` scales a converted frame for a smaller rendition from the
-same pool. One captured frame feeding HD and SD therefore holds a fixed number
-of buffers, and a producer that outruns its encoder gets an error rather than
-unbounded device memory. Open the encoder with `encode::Kind::Named("nvenc")`
-and the same `encode::Config::color`: `Kind::Auto` could fall back to a software
-encoder that reads the frame back, and the portable `Surface::resize` downloads
-when the GPU scaler fails. Everything under `frame::cuda` and `frame::vulkan`
-runs on the device or returns an error.
+`Slot::publish` consumes the producer slot and `Completion::wait` returns it
+only after the last reader finishes its GPU work. Publish only what you will
+encode: an unconsumed or failed frame fails completion and loses its slot for
+good, since nothing signalled its timeline, so drop excess captures before
+publishing. Non-exportable application images need a GPU copy into an exportable
+slot. External Vulkan images have no CPU mapping or download fallback.
 
-Run `just rs vulkan-cuda` for the opt-in native hardware exercise. It creates a
+External DMA-BUF producers use `DmaBuf::new` with an owned FD, `DmaBufLayout`,
+and a release guard; their buffers also refuse CPU download.
+
+Run `just rs gpu` for the opt-in native hardware exercise. It creates a
 Vulkan image independently of Unreal, imports it once into CUDA, checks repeated
 slot reuse and held-reader ordering, and tears down through cancellation; a
 second test converts RGBA and BGRA uploads to NV12, scales them, fills the pool,
@@ -178,12 +181,12 @@ instead of asserting a threshold.
 ## Decode
 
 `decode::Consumer` (the mirror of `moq_audio::decode::Consumer`) subscribes to an
-H.264, H.265, or AV1 track and returns raw `Frame`s. A hardware-decoded frame stays
+H.264, H.265, AV1, VP8, or VP9 track and returns raw `Frame`s. A hardware-decoded frame stays
 on the GPU: feeding it back to a compatible hardware `encode::Encoder` on the
 same device keeps it there (the transcode path), while `into_i420()` downloads
 it. An encoder that can't take that surface (openh264, or a different device)
 downloads it through I420 for you. Every frame carries a `Surface`, a
-`#[non_exhaustive]` enum naming where the pixels live (`PixelBuffer` on macOS,
+`#[non_exhaustive]` enum naming where the pixels live (`PixelBuffer` on macOS and iOS,
 `Texture` on Windows, `Vulkan` and `Cuda` on Linux, `HardwareBuffer` on Android,
 or CPU `I420`). Match
 it to take a GPU path for a representation you recognize, and fall back to
@@ -206,8 +209,9 @@ Backends are tried hardware-first, like encode:
 | H.264 | OpenH264 (feature `openh264`, default) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 | H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 | AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
+| VP8, VP9 | libvpx (feature `vpx`) | none | none | none | none |
 
-On macOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
+On macOS and iOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
 sets (SPS/PPS, plus VPS for H.265) out of each keyframe to build the format
 description. On Windows the Microsoft decoder MFT runs synchronously with a
 Direct3D11 device bound to it, so the decode happens on the GPU through DXVA
@@ -216,8 +220,10 @@ no software decoder, so it needs the GPU path (on Windows, an HEVC decoder MFT:
 the inbox HEVC Video Extensions or a vendor one). On Linux, NVDEC decodes H.264,
 H.265, and 8-bit 4:2:0 AV1 to CUDA NV12 frames; AV1 is decode-only and is useful
 for AV1 source to H.264/H.265 transcode rungs. VAAPI decodes H.264 to DMA-BUF
-surfaces the renderer imports without a download. A non-H.264/H.265/AV1
-rendition yields `Error::UnsupportedCodec`.
+surfaces the renderer imports without a download. libvpx decodes VP8 and VP9
+profile 0 to CPU I420 on every platform; other VP9 profiles (4:4:4, 10-bit) are
+refused rather than narrowed to 8-bit 4:2:0. Any other rendition yields
+`Error::UnsupportedCodec`.
 
 `decode::Config::output` says where decoded pictures live: `Output::Native`
 (the default) hands back whatever the backend decoded into, a GPU surface or
@@ -226,7 +232,7 @@ decoded straight to system memory where the backend can and downloaded where it
 cannot. `decode::Config::scale_hint` asks a decoder with a hardware scaler
 (NVDEC) to emit that size; it is a hint, so check `Frame::size` and use
 `Frame::resize` for the exact size. `decode::Consumer` takes `decode::Options`,
-which pairs that config with the subscription's `start` and `max_age`.
+which pairs that config with the subscription's `start` and `max_delay`.
 
 Common feature sets:
 

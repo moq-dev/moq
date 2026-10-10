@@ -15,17 +15,23 @@ frames decode independently and set nothing; HE-AAC is out of scope.
   publish `warmup` for Opus; `js/publish` does the same for its Opus track.
 - `rs/moq-audio/src/decode` already trims Opus `pre_skip` at stream start;
   the warmup trim is the same mechanism keyed on the container consumer's
-  non-continuous signal (added in Rust by the open-GOP quest), and the
+  non-continuous signal (added in Rust by
+  [Rust non-continuous signal](/quest/m1/rust-continuous.md)), and the
   subscription's maximum age grows by `warmup` as the video consumer quest
   does. `js/watch` audio mirrors it.
+- The trim replaces `LEGACY_WARMUP_CALLBACKS` in `js/watch/src/audio/decoder.ts`,
+  which drops the first three decoded frames of every legacy or LOC
+  subscription, CMAF excepted. That is the start loss left on a rendition's
+  return after an absence: 60 ms of 20 ms Opus.
 - Tests in both languages: a mid-stream join discards exactly the warmup span
   and a continuous listener loses nothing.
 
 ## Required
 
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - the field this reads and writes
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - adds the Rust non-continuous signal the trim keys on
+- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the signal the trim keys on
 
 ## Related
 
+- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims video at tune-in from the same signal
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - the video side of the same field

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // Session is an established MoQ connection. Hold it (or the Client/Server that
@@ -18,13 +19,13 @@ type Session struct {
 // up waiting and shuts the session down, so a caller that no longer cares about
 // the connection can tear it down by cancelling.
 func (s *Session) Closed(ctx context.Context) error {
-	return runErr(ctx, s.inner.Shutdown, s.inner.Closed)
+	return bridge.CallErr(ctx, s.abort, s.inner.Closed)
 }
 
 // Status blocks until the connection status differs from the one this session
-// last reported. A client session reports StatusConnected first (the connect it
-// was built from), then follows the reconnect loop: StatusDisconnected while
-// redialing, StatusMigrating during a GOAWAY handover. It returns an error once
+// last reported. A client session reports ConnectionStatusConnected first (the connect it
+// was built from), then follows the reconnect loop: ConnectionStatusDisconnected while
+// redialing, ConnectionStatusMigrating during a GOAWAY handover. It returns an error once
 // the connection stops for good. A server-accepted session's only transition is
 // terminal, so Status waits for the close and returns its reason. Cancelling ctx
 // gives up waiting and shuts the session down.
@@ -33,13 +34,13 @@ func (s *Session) Closed(ctx context.Context) error {
 // before the next call is coalesced away, so the outages it hides are the ones
 // that already healed. Don't count outages with it.
 func (s *Session) Status(ctx context.Context) (ConnectionStatus, error) {
-	return runCancellable(ctx, s.inner.Shutdown, s.inner.Status)
+	return bridge.Call(ctx, s.abort, s.inner.Status)
 }
 
 // Epoch is the connection epoch: 1 for the connect that built this session, one
 // more on each reconnect. A server-accepted session stays at 1.
 //
-// Pair it with Status to log each reconnect by number: a StatusConnected whose
+// Pair it with Status to log each reconnect by number: a ConnectionStatusConnected whose
 // Epoch grew is a reconnect. Like Status, it reports the current state, so a
 // drop that reconnects between reads is coalesced away.
 func (s *Session) Epoch() uint64 {
@@ -48,7 +49,7 @@ func (s *Session) Epoch() uint64 {
 
 // Stats snapshots the current connection statistics.
 func (s *Session) Stats() ConnectionStats {
-	return s.inner.Stats()
+	return connectionStatsFromFFI(s.inner.Stats())
 }
 
 // Bandwidth is the session's bandwidth allocator. Every call returns a handle
@@ -103,9 +104,15 @@ func (s *Session) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: s.inner.Consume()}
 }
 
-// Shutdown closes the session gracefully.
-func (s *Session) Shutdown() {
-	s.inner.Shutdown()
+// Shutdown drains finished tracks within one second, returning any delivery error.
+// Cancelling ctx aborts the session immediately.
+func (s *Session) Shutdown(ctx context.Context) error {
+	return bridge.CallErr(ctx, s.abort, s.inner.Shutdown)
+}
+
+// abort tears the session down without draining, for a cancelled ctx.
+func (s *Session) abort() {
+	s.inner.Cancel(0)
 }
 
 // Cancel closes the session abruptly with an application error code.

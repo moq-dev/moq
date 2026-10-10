@@ -21,12 +21,10 @@ first-frame latency are no worse than the hand-written js/net.
 - Size budget: js/net's `lite/*` is 15 KB gzip today; keep generated output
   near it. Watch for std shims and fmt/tracing pulling in weight.
 
-Public API: breaks `@moq/net`; retargets to `dev`. Wire: none.
+Public API: breaks `@moq/net`. Wire: none.
 
 ## Required
 
 - [rs2ts](/quest/m1/rs2ts/translator.md) - the translator
 - [Sans-IO lite session](/quest/m1/rs2ts/sans-io/lite.md) - the session shape it translates
-- [Sans-IO model](/quest/m1/rs2ts/sans-io/model.md) - the model shape it translates
 - [The async feature](/quest/m1/rs2ts/sans-io/async-feature.md) - rs2ts reads moq-net without it
-- [Mock-clock tests](/quest/m1/rs2ts/mock-clock.md) - the tests that prove parity

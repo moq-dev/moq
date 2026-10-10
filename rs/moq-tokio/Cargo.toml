@@ -39,13 +39,12 @@ iroh = ["_transport", "dep:web-transport-iroh", "dep:web-transport-proto", "dep:
 mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["_transport", "dep:qmux", "watch", "dep:dns-lookup"]
-# Plain-TCP qmux transport (`tcp://`), no TLS. Server-side and client-side.
+# Qmux over TCP: plaintext `tcp://`, and `tls://` once a crypto provider is on. Server-side and client-side.
 tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
 ring = ["_certs", "rustls/ring", "rcgen/ring", "web-transport-moq?/ring"]
-android-logcat = ["dep:tracing-android"]
 
 [dependencies]
 bytes = "1"
@@ -98,7 +97,7 @@ x509-parser = "0.18"
 # `tls::init_android`); jni is the bridge. Until init runs, verification falls
 # back to the bundled Mozilla roots.
 jni = "0.22"
-tracing-android = { version = "0.2", optional = true }
+tracing-android = "0.2"
 webpki-roots = "1"
 
 [target.'cfg(unix)'.dependencies]

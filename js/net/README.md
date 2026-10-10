@@ -12,7 +12,7 @@ A TypeScript [Media over QUIC](https://moq.dev/) (MoQ) client for both browsers 
 
 Check out [hang](../hang) for a higher-level media library that uses this package.
 
-> **Note:** moq-lite is a subset of moq-transport and is forwards compatible with it, so this client works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). See the [compatibility docs](https://doc.moq.dev/concept/moq-lite#compatibility) for details.
+> **Note:** moq-lite is a subset of moq-transport and is forwards compatible with it, so this client works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). See the [compatibility docs](https://doc.moq.dev/concept/moq-lite#what-moq-lite-leaves-out) for details.
 
 ## Quick Start
 

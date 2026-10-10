@@ -9,24 +9,31 @@ mod support;
 
 use std::{collections::HashMap, time::Duration};
 
-use tokio::sync::mpsc;
+use futures::{StreamExt, channel::mpsc};
 
 use moq_net::{Hop, Version, announce, broadcast, origin};
 use support::harness::{MockPair, peer, peer_with_latency};
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
+}
+
+/// The kind of an [`announce::Event`] for a prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+	Start,
+	Update,
+	Restart,
+	End,
 }
 
 /// Every update per prefix until the watcher goes quiet. Time is paused, so the
 /// timeout fires only once every task is idle.
-async fn drain(
-	watched: &mut mpsc::UnboundedReceiver<(String, announce::Kind)>,
-) -> HashMap<String, Vec<announce::Kind>> {
-	let mut updates = HashMap::<String, Vec<announce::Kind>>::new();
-	while let Ok(Some((prefix, kind))) = tokio::time::timeout(Duration::from_secs(1), watched.recv()).await {
+async fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap<String, Vec<Kind>> {
+	let mut updates = HashMap::<String, Vec<Kind>>::new();
+	while let Ok(Some((prefix, kind))) = moq_net_sim::timeout(Duration::from_secs(1), watched.next()).await {
 		updates.entry(prefix).or_default().push(kind);
 	}
 	updates
@@ -35,11 +42,17 @@ async fn drain(
 /// Watch `announced` from its own task, the way a session's announce writer does:
 /// it runs when woken, between the relays' own tasks, rather than only once the
 /// test task is polled again, which would coalesce every intermediate update.
-fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, announce::Kind)> {
-	let (tx, rx) = mpsc::unbounded_channel();
-	tokio::spawn(async move {
-		while let Some(update) = announced.next().await {
-			if tx.send((update.prefix.to_string(), update.kind)).is_err() {
+fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, Kind)> {
+	let (tx, rx) = mpsc::unbounded();
+	moq_net_sim::spawn(async move {
+		while let Some(event) = announced.next().await {
+			let (kind, announce) = match event {
+				announce::Event::Start(announce) => (Kind::Start, announce),
+				announce::Event::Update(announce) => (Kind::Update, announce),
+				announce::Event::Restart(announce) => (Kind::Restart, announce),
+				announce::Event::End(announce) => (Kind::End, announce),
+			};
+			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
 				break;
 			}
 		}
@@ -51,7 +64,7 @@ fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, 
 struct Mesh {
 	nodes: Vec<origin::Producer>,
 	_pairs: Vec<MockPair>,
-	watched: mpsc::UnboundedReceiver<(String, announce::Kind)>,
+	watched: mpsc::UnboundedReceiver<(String, Kind)>,
 }
 
 impl Mesh {
@@ -86,8 +99,8 @@ impl Mesh {
 		let updates = drain(&mut self.watched).await;
 		assert_eq!(updates.len(), count);
 		for (prefix, kinds) in updates {
-			assert_eq!(kinds[0], announce::Kind::Announced, "{prefix}: {kinds:?}");
-			assert!(kinds.last().unwrap().is_active(), "{prefix}: {kinds:?}");
+			assert_eq!(kinds[0], Kind::Start, "{prefix}: {kinds:?}");
+			assert_ne!(kinds.last(), Some(&Kind::End), "{prefix}: {kinds:?}");
 		}
 		broadcasts
 	}
@@ -105,12 +118,12 @@ fn ring_with_chords(n: usize) -> Vec<(usize, usize)> {
 /// Every relay neighbors the publisher's, so each hears the withdrawal first-hand
 /// and drops every path derived from it at once. Lite04 names the peer only in
 /// the chain, later versions in the announce handshake too.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn full_mesh_withdraw_retracts_once_lite04() {
 	full_mesh_withdraw_retracts_once("moq-lite-04").await;
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn full_mesh_withdraw_retracts_once_lite06() {
 	full_mesh_withdraw_retracts_once("moq-lite-06").await;
 }
@@ -122,7 +135,7 @@ async fn full_mesh_withdraw_retracts_once(version: &str) {
 	let updates = drain(&mut mesh.watched).await;
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
-		assert_eq!(kinds, [announce::Kind::Retracted], "{prefix}");
+		assert_eq!(kinds, [Kind::End], "{prefix}");
 	}
 	// The same relays publish again, clearing their own withdrawals.
 	let _broadcasts = mesh.publish(100, 0).await;
@@ -132,7 +145,7 @@ async fn full_mesh_withdraw_retracts_once(version: &str) {
 /// why, so it can still pass through a stale path or two. Every broadcast must still
 /// end retracted, and republishing from other relays must reach the watcher again:
 /// no withdrawal outlives the peer announcing the path again.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn partial_mesh_withdraw_then_republish() {
 	let mut mesh = Mesh::new("moq-lite-06", 12, &ring_with_chords(12)).await;
 	let broadcasts = mesh.publish(100, 0).await;
@@ -140,7 +153,7 @@ async fn partial_mesh_withdraw_then_republish() {
 	let updates = drain(&mut mesh.watched).await;
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
-		assert!(!kinds.last().unwrap().is_active(), "{prefix}: {kinds:?}");
+		assert_eq!(kinds.last(), Some(&Kind::End), "{prefix}: {kinds:?}");
 	}
 	let _broadcasts = mesh.publish(100, 5).await;
 }
@@ -185,7 +198,7 @@ const PRODUCTION_LATENCY_MS: &[u64] = &[
 /// announcement. Holding route updates (`origin::Config::update_hold`) lets the
 /// withdrawal remove those paths first; with link latency and no hold, each
 /// withdrawal here costs tens of thousands of announcements.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn partial_mesh_withdraw_retracts_once() {
 	let version: Version = "moq-lite-06".parse().unwrap();
 	let nodes: Vec<_> = (1..=34).map(produce_origin).collect();
@@ -201,7 +214,7 @@ async fn partial_mesh_withdraw_retracts_once() {
 		for (relay, watched) in watched.iter_mut().enumerate() {
 			let updates = drain(watched).await;
 			assert!(
-				updates.values().all(|kinds| kinds.last().unwrap().is_active()),
+				updates.values().all(|kinds| kinds.last() != Some(&Kind::End)),
 				"relay {relay}: {updates:?}"
 			);
 		}
@@ -211,7 +224,7 @@ async fn partial_mesh_withdraw_retracts_once() {
 		for (relay, watched) in watched.iter_mut().enumerate() {
 			let updates = drain(watched).await;
 			let kinds = &updates[&format!("room/{publisher}")];
-			if kinds != &[announce::Kind::Retracted] {
+			if kinds != &[Kind::End] {
 				hunted.push((relay, kinds.clone()));
 			}
 		}

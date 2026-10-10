@@ -42,8 +42,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use super::group;
 use super::track::{self, TrackState};
+use super::{expiry, group};
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
@@ -180,7 +180,7 @@ impl Pool {
 			}
 			ms.max(1).div_ceil(TICK_MS).saturating_mul(TICK_MS)
 		});
-		let pool = Self {
+		Self {
 			inner: Arc::new(Inner {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
@@ -191,10 +191,7 @@ impl Pool {
 				access_count: AtomicU64::new(0),
 				tracks: kio::Lock::new(slab::Slab::new()),
 			}),
-		};
-		#[cfg(test)]
-		crate::model::clock::register(&pool);
-		pool
+		}
 	}
 
 	/// Create a pool that never evicts. This is the [`Default`].
@@ -301,8 +298,18 @@ impl Pool {
 		clock.sweep
 	}
 
+	/// Move the pool's sampled clock forward by `duration`, dating accesses on either
+	/// side without collecting, as if that much time passed between two passes.
 	#[cfg(test)]
-	pub(crate) fn advance_test(&self, now: crate::time::Instant) {
+	pub(crate) fn step(&self, duration: Duration) {
+		let now = self.inner.clock.lock().unwrap().as_ref().map(|clock| clock.now);
+		let now = now.unwrap_or_else(crate::time::Instant::now);
+		self.date(now);
+		self.date(now + duration);
+	}
+
+	#[cfg(test)]
+	fn date(&self, now: crate::time::Instant) {
 		self.advance(now, false);
 		let tracks: Vec<_> = self
 			.inner
@@ -491,6 +498,10 @@ pub(crate) struct Track {
 	// This account's slot in the pool's sweep registry, absent when the pool has no
 	// expiry window (nothing is registered) or for the detached default account.
 	sweep: OnceLock<usize>,
+
+	// The track's reads parked on their drift budget. Here because this account is the
+	// link every group's frame writes already follow back to the track.
+	wakes: expiry::Wakes,
 }
 
 impl Track {
@@ -503,6 +514,7 @@ impl Track {
 			expiry_cursor: AtomicUsize::new(0),
 			state,
 			sweep: OnceLock::new(),
+			wakes: Default::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -513,6 +525,11 @@ impl Track {
 	/// The pool this track caches into.
 	pub(crate) fn pool(&self) -> &Pool {
 		&self.pool
+	}
+
+	/// The track's reads parked on their drift budget.
+	pub(crate) fn wakes(&self) -> &expiry::Wakes {
+		&self.wakes
 	}
 
 	/// Charge a new group's fixed overhead, returning its [`Charge`].
@@ -672,8 +689,6 @@ pub(crate) struct Charge {
 pub(crate) struct Access {
 	stamp: AtomicU64,
 	expires: AtomicU64,
-	// Live tracks holding the group as their latest; see [`Protection`].
-	protected: AtomicUsize,
 }
 
 impl Access {
@@ -681,13 +696,7 @@ impl Access {
 		Self {
 			stamp: AtomicU64::new(stamp),
 			expires: AtomicU64::new(u64::MAX),
-			protected: AtomicUsize::new(0),
 		}
-	}
-
-	/// Whether a live track holds the group as its latest.
-	pub(crate) fn is_protected(&self) -> bool {
-		self.protected.load(Ordering::Relaxed) > 0
 	}
 
 	/// The stamp, tie-breaking bits included.
@@ -720,25 +729,6 @@ impl Access {
 		// `fetch_max` keeps the stamp monotone, and its prior value makes the
 		// paired mean update exact even for back-to-back accesses.
 		self.stamp.fetch_max(target, Ordering::Relaxed)
-	}
-}
-
-/// A live track holding a group as its latest, for as long as this lives.
-///
-/// Tracks can share a group (a warm copy adopts the relay copy's), so the group itself
-/// counts these: an ended track sharing it must not expire another track's live edge.
-pub(crate) struct Protection(Arc<Access>);
-
-impl Protection {
-	pub(crate) fn new(access: &Arc<Access>) -> Self {
-		access.protected.fetch_add(1, Ordering::Relaxed);
-		Self(access.clone())
-	}
-}
-
-impl Drop for Protection {
-	fn drop(&mut self) {
-		self.0.protected.fetch_sub(1, Ordering::Relaxed);
 	}
 }
 
@@ -1108,7 +1098,7 @@ mod test {
 	#[test]
 	fn collecting_before_the_deadline_does_not_postpone_it() {
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(2)));
-		let now = crate::model::clock::now();
+		let now = crate::time::Instant::now();
 		let deadline = pool.gc(now);
 		assert_eq!(pool.gc(now + Duration::from_millis(500)), deadline);
 	}
@@ -1116,7 +1106,7 @@ mod test {
 	#[test]
 	fn bounded_pools_sample_recency_without_expiration() {
 		let pool = Pool::unbounded();
-		let now = crate::model::clock::now();
+		let now = crate::time::Instant::now();
 		assert_eq!(pool.gc(now), None);
 		pool.resize(1024);
 		assert_eq!(pool.gc(now), Some(now + DEFAULT_EXPIRY / 2));

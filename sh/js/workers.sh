@@ -7,7 +7,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-for project in infra/apt infra/rpm demo/pub; do
+for project in infra/apt infra/rpm infra/moq-sh demo/pub; do
     (
         cd "$project"
         bun install --frozen-lockfile

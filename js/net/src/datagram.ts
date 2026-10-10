@@ -6,7 +6,7 @@
 import type { Timestamp } from "./time.ts";
 
 /**
- * A single unreliable payload on a track: a sequence number, a presentation timestamp, and the bytes.
+ * A single unreliable payload on a track: a sequence number, a presentation timestamp on a timed track, and the bytes.
  *
  * Unlike a {@link Group} (an ordered stream of frames over a QUIC stream), a datagram is one
  * self-contained payload carried in a single QUIC datagram: best-effort, unordered, never
@@ -16,8 +16,8 @@ import type { Timestamp } from "./time.ts";
 export interface Datagram {
 	/** Per-track sequence number, shared with the group namespace. */
 	sequence: number;
-	/** Presentation timestamp in the track's timescale. */
-	timestamp: Timestamp;
+	/** Presentation timestamp, present exactly when the track has a timescale. */
+	timestamp?: Timestamp;
 	/** The datagram payload. */
 	payload: Uint8Array;
 }

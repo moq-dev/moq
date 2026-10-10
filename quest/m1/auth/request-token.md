@@ -1,75 +1,104 @@
-# [M] A token on a request authorizes that request
+# [L] A token on a request authorizes that request
 
 ## Goal
 
-A moq-transport peer that is not on moq-dev can present or refresh a
-credential the draft-17+ way, with the `AUTHORIZATION TOKEN` parameter
-(`0x03`) on SUBSCRIBE, REQUEST_UPDATE, PUBLISH, FETCH, PUBLISH_NAMESPACE,
-SUBSCRIBE_NAMESPACE, TRACK_STATUS, or any other request that carries
-parameters. A request is authorized by the session's grant first; when that
-does not cover it, by the token on the request; with neither it is refused
-`UNAUTHORIZED`. The token's grant covers only the request it rode on and
-lives exactly as long as that request, and a REQUEST_UPDATE carrying a new
-token replaces it, which is how a peer refreshes. It scopes by path, never
-by method. Every request already decodes the key and ignores it, so a token
-no longer fails the session; this quest gives it meaning.
+A moq-transport peer authorizes a SUBSCRIBE or PUBLISH_NAMESPACE with the
+`AUTHORIZATION TOKEN` parameter (`0x03`) on that request, and refreshes it in
+band with the draft's update: SUBSCRIBE_UPDATE for a subscription on drafts 14
+and 15, which cannot update a namespace, and REQUEST_UPDATE for either from
+16. A request is authorized
+by the session's grant first; when that does not cover it, by the token on the
+request; with neither it is refused `UNAUTHORIZED`. The token's grant covers
+only the request it rode on, never joins the session union, and ends with that
+request. On any other request the token is ignored.
 
 ## Plan
 
-- Decode with the SETUP option's structure and rules
-  (`rs/moq-net/src/ietf/token.rs`, `js/net/src/ietf/token.ts`): `USE_VALUE` yields the token, `REGISTER` is a value since we
-  advertise no `MAX_AUTH_TOKEN_CACHE_SIZE`, and `DELETE` or `USE_ALIAS`
-  closes with `PROTOCOL_VIOLATION`. Both decoder families change: the strict
-  `decode_params!` path, where each request reads the repeatable key into an
-  ignored `Vec<Opaque>`, and draft-14's `Parameters::skip`, which consumes it
-  unread. `js/net` keeps every instance in `Parameters` and reads none.
-- Fallback only: a request the session grant already covers is served
-  without verifying its token. Otherwise its token becomes an
-  `auth::Request` on the session's `auth::Handle`, the seam an AUTH stream's
-  token takes, marked as belonging to that one request (its path and kind).
-  The `Grant` the acceptor answers is checked against that request alone,
-  never joins the session union, and ends when the request ends. With no
-  `requests()` consumer the default acceptor rejects a non-empty token
-  `Unsupported`, so an app that does not opt in refuses every request that
-  needs one.
-- The request waits on its token's verdict before it is resolved. A refused
-  or insufficient token refuses the request with the verdict's code
-  (`UNAUTHORIZED`, `EXPIRED_AUTH_TOKEN`, `MALFORMED_AUTH_TOKEN`, or
-  `NOT_SUPPORTED`) through `to_code` for the draft; the session continues.
-- Refresh: a REQUEST_UPDATE with a token verifies it the same way and, once
-  accepted, replaces the request's grant; a refused one leaves the old grant
-  until it lapses. When a request's grant expires or is revoked, that request
-  alone ends with `EXPIRED_AUTH_TOKEN` or `UNAUTHORIZED`. A session grant
-  that shrinks cancels the requests it covered, as for any request, through
-  [Origin narrowing](/quest/m1/auth/narrowing.md).
-- Relay: each such request gets its own lease from a per-request call on
-  `moq_auth::Client`, not the `Client::attach` that [Relay
-  tokens](/quest/m1/auth/relay-refresh.md) builds. `attach` connects with the
-  connection's id, and the auth server treats that as one more grant on the
-  session that never POSTs `end`, so a request token would widen the whole
-  connection for its life. The per-request call carries the token in
-  `moq_auth::Request.token` with its kind and the request's path, is never
-  counted as a session grant, and ends when the request ends. Two requests carrying the same bytes
-  get two leases. The request is resolved against the origin with the path
-  checked against that lease's grant, not through the session's scoped
-  origin handle. Name the call while implementing.
-- `js/net` mirrors the decode and the default refusal.
-- Docs: `doc/bin/relay/auth.md` states the order (session grant, then the
-  request's token, then `UNAUTHORIZED`), that a request token covers only its
-  request, and how a peer refreshes with REQUEST_UPDATE.
-- Tests: a SUBSCRIBE outside the session grant succeeds with a covering token
-  and is refused `UNAUTHORIZED` without one; its token grants nothing to a
-  second SUBSCRIBE, and through the relay the auth server never counts it as
-  a session grant and sees its lease end with the request; a request inside the session grant never calls the
-  verifier; a REQUEST_UPDATE token keeps a subscription alive past the old
-  token's expiry; an expired request token ends only that request; with no
-  consumer a token-bearing request is refused `Unsupported`; one legacy and
-  one strict draft, Rust and JS.
+[#5148](https://github.com/moq-dev/moq/pull/5148) builds this, carrying
+Kyle Sletmoe's [#4675](https://github.com/moq-dev/moq/pull/4675) forward on a
+branch maintainers can push to. Decided 2026-10-09: an external moq-transport
+deployment needs per-request tokens with in-band renewal, so this quest keeps
+its full scope, reversing the 2026-10-08 shrink. The pieces that stand alone
+land first as the quests under Required; #5148 stacks on both.
 
-Public API: additive on `moq_net::auth::Request` (the request it belongs
-to) and on `moq_auth::Client` (the per-request lease). Wire: none new; the parameter already exists in every supported draft.
+Decided, so review does not relitigate them:
+
+- **Admission.** A request the session grant covers is served without
+  verifying its token. Otherwise the token becomes an `auth::Request` on the
+  session's `auth::Handle`, marked with the request's path and kind, and the
+  acceptor's `Grant` is checked against that request alone. With no
+  `requests()` consumer a non-empty token is refused `Unsupported`.
+- **Scope.** Honored on SUBSCRIBE, PUBLISH_NAMESPACE, and an update renewing
+  one, SUBSCRIBE_UPDATE included; ignored on every other request (2026-10-05).
+- **Refused renewal** follows drafts 16 section 9.11.1 and 18 section 10.9.1:
+  REQUEST_ERROR ends only that request, with PUBLISH_DONE `UPDATE_FAILED` for
+  a subscription or a closed stream for a namespace. The session stays up and
+  the old grant does not survive. A lapse or acceptor revoke also ends only
+  that request (2026-10-05).
+- **Client credential.** `auth::Handle::set_request_token`, beside session
+  tokens, with no `Client` methods. moq-tokio's `Connection` owns the token
+  across reconnects: `Connection::auth()` renews it on a live connection and
+  `connect::Config::with_request_token` seeds it. Setting a new token
+  re-presents it on live requests. This owns the request-token slice of
+  `Connection::auth()`, so it does not wait on
+  [Relay tokens](/quest/m1/auth/relay-refresh.md): whichever lands first adds
+  the handle (2026-10-01 Q1 and Q3, 2026-10-05).
+- **Update credit.** Draft-19+ advertises and enforces MAX_REQUEST_UPDATES,
+  closing with TOO_MANY_REQUEST_UPDATES (0x1B); earlier drafts keep a local
+  guard that ends only the request. 0x1B joins the shared session registry as
+  [Request-token decode](/quest/m1/auth/request-token-decode.md) does for 0x13
+  and 0x17: `SessionCode` in `js/net`, moq-lite's Session Error Codes table,
+  and `session_codes_round_trip`. The sender keeps one renewal in flight per
+  subscription on drafts that answer an update. Draft-14 never answers an
+  accepted SUBSCRIBE_UPDATE, so its sender does not wait for one; test two
+  successive replacements with no answers.
+- **Drafts.** Renewal works on every supported draft, 14 through 16 included
+  (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15. A namespace must
+  renew from 16, whose REQUEST_UPDATE covers PUBLISH_NAMESPACE; #5148 starts
+  at 17 (see below).
+- `EXPIRED_AUTH_TOKEN` and `MALFORMED_AUTH_TOKEN` are not this quest's; they
+  land with [Expired token error](/quest/m1/auth/expired-error.md), which
+  does not block it (2026-10-01 Q4).
+
+Of what a 2026-10-09 read of #4675 found, #5148 fixes updates answered out of
+order behind a pending renewal, a repeated 0x03 refused, duplicated admission
+and renewal logic, three parallel `Option`s on `auth::Request`, a request token
+silently ignored on moq-lite, an outbound update sniffer, unread
+`max_request_updates` and `decode_value`, and a refused renewal overloading
+`Error::Unsupported`. Still open in #5148, each fixed or settled by a recorded
+decision before it merges:
+
+- `set_request_token` takes `setup::Token` and the encoder writes only
+  `USE_VALUE`, so a caller cannot send an alias form. Take encoded bytes, or
+  decide to keep the typed, value-only API.
+- A namespace renews only from draft 17; a token-bearing draft-16
+  REQUEST_UPDATE for a PUBLISH_NAMESPACE is still ignored.
+
+Open for review: one `requests()` consumer receives both session and request
+tokens, so an acceptor written for session tokens also answers request tokens.
+
+Public API: additive. moq-net gains `auth::RequestKind`, `auth::Scope`,
+`auth::Request::scope`, `auth::Handle::set_request_token`, and
+`SessionError::TooManyRequestUpdates`, mirrored as a `js/net` `SessionCode`.
+moq-tokio gains `Auth`,
+`Connection::auth`, `connect::Config::with_request_token`, and
+`server::Request::auth`. Wire: MAX_REQUEST_UPDATES (0x08) on draft-19+ and
+TOO_MANY_REQUEST_UPDATES (0x1B), which also joins moq-lite's registry; the
+parameter already exists in every
+supported draft.
+
+Follow-ups, planned when a consumer needs them: a JS request-token setter and
+accept-side `requests()`, a moq-cli `--request-token`, and the setter through
+moq-ffi in [Bindings](/quest/m1/auth/bindings.md).
 
 ## Required
 
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the lease
-  revalidation the per-request lease reuses
+- [Request-token decode](/quest/m1/auth/request-token-decode.md) - a request
+  token decodes by the draft's rules and its forbidden forms close the session
+- [Setup extensions](/quest/m1/auth/extensions.md) - a side declares which
+  Setup extensions it offers with one `Extensions` struct
+
+## Related
+
+- [Request leases](/quest/m1/auth/request-lease.md) - moq-relay honors a
+  request token with a lease of its own

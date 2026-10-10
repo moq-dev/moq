@@ -8,6 +8,7 @@
  * @module
  */
 import * as z from "zod/mini";
+import type * as Epoch from "./epoch.ts";
 
 /**
  * One relay's identity in a broadcast's hop chain, encoded as a 62-bit varint on the wire.
@@ -66,42 +67,13 @@ export function randomHop(): Hop {
 	return HopSchema.parse(raw === 0n ? 1n : raw);
 }
 
-/**
- * Name an unknown original publisher: put `stamp`, the receiving connection's own random id,
- * in front of a chain that starts with 0, and turn an empty chain into `[stamp, 0]`. A
- * publisher that reconnects then reads downstream as a new first hop, while the 0 after the
- * stamp keeps the route ranked as anonymous. `undefined` if the chain is full or already holds
- * `stamp`. Mirrors `Hops::stamp` in rs/moq-net.
- */
-export function stampHops(hops: readonly Hop[], stamp: Hop): Hop[] | undefined {
-	if (hops.length === 0) return [stamp, UNKNOWN_HOP];
-	if (hops[0] !== UNKNOWN_HOP) return [...hops];
-	if (hops.length >= MAX_HOPS || hops.includes(stamp)) return undefined;
-	return [stamp, ...hops];
-}
+/** The static cost of pulling content through a route; lower wins. */
+export type Cost = bigint;
 
-/**
- * What pulling content via a route costs, in two magnitudes accumulated together
- * and compared in that order: lower {@link Cost.warm} wins, and {@link Cost.cold}
- * breaks the tie.
- *
- * Both price the same path against different cache states. `warm` is what one more
- * subscription would cost the mesh right now, so it collapses to zero at any relay
- * already carrying the broadcast. `cold` prices the identical path as if nothing were
- * cached, so it keeps flowing through a warm relay unchanged and still says which of
- * two warm relays sits closer to the publisher.
- */
-export interface Cost {
-	/** The cost as the mesh stands today, discounted to zero at every carrying relay. */
-	warm: bigint;
-	/** The same path with every warm discount removed. */
-	cold: bigint;
-}
-
-/** Constructors for {@link Cost}. */
+/** Common route prices. */
 export const Cost = {
-	/** A free path in both magnitudes: what a live publisher seeds. */
-	zero: { warm: 0n, cold: 0n } as Cost,
+	/** The price a live publisher seeds. */
+	zero: 0n,
 };
 
 /**
@@ -112,6 +84,13 @@ export const Cost = {
  * an announce event carries it so consumers can read it back.
  */
 export interface Route {
+	/**
+	 * The publisher instance the route serves, if known: routes with the same epoch serve
+	 * the same bytes. Among routes at one prefix the newest epoch wins, and a route without
+	 * one ranks last. Fixed for the advertisement's lifetime: changing it retracts and
+	 * announces afresh. Mirrors `Route::epoch` in rs/moq-net.
+	 */
+	epoch?: Epoch.Valid;
 	/** The chain of hops the route has traversed, oldest first. */
 	hops: Hop[];
 	/** What pulling content via this route costs; lower wins. */
@@ -123,13 +102,12 @@ export const Route = {
 	/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
 	default: { hops: [], cost: Cost.zero } as Route,
 
-	/** Normalize a partial route, treating a bare bigint cost as both magnitudes alike. */
-	normalize(route: Route | { hops?: readonly Hop[]; cost?: Cost | bigint } = {}): Route {
-		const hops = route.hops ? [...route.hops] : [];
-		const cost = route.cost;
-		if (cost === undefined) return { hops, cost: Cost.zero };
-		if (typeof cost === "bigint") return { hops, cost: { warm: cost, cold: cost } };
-		return { hops, cost: { warm: cost.warm, cold: cost.cold } };
+	/** Fill route defaults and saturate the static price at the wire ceiling. */
+	normalize(route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost } = {}): Route {
+		const cost = route.cost ?? Cost.zero;
+		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
+		const max = 2n ** 62n - 1n;
+		return { epoch: route.epoch, hops: route.hops ? [...route.hops] : [], cost: cost > max ? max : cost };
 	},
 };
 
@@ -143,13 +121,13 @@ export function isAnonymous(route: Route): boolean {
 	return route.hops.includes(UNKNOWN_HOP);
 }
 
-/** Whether two routes name the same hop chain and cost. */
+/** Whether two routes name the same epoch, hop chain, and cost. */
 export function routesEqual(a: Route | undefined, b: Route | undefined): boolean {
 	if (a === b) return true;
 	if (!a || !b) return false;
 	return (
-		a.cost.warm === b.cost.warm &&
-		a.cost.cold === b.cost.cold &&
+		a.epoch === b.epoch &&
+		a.cost === b.cost &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

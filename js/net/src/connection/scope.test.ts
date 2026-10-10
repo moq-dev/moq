@@ -33,8 +33,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 			const received: string[] = [];
 			for (let index = 0; index < 3; index++) {
 				const update = await withTimeout(announced.next(), 1000, "scoped announcement did not arrive");
-				if (!update) throw new Error("announcement stream ended before replay");
-				expect(update.kind).toBe("announced");
+				if (update?.kind !== "start") throw new Error(`expected an announcement, got ${update?.kind}`);
 				received.push(update.prefix);
 			}
 			expect(received.sort()).toEqual(["client/other/live", "client/room/.hidden", "client/room/live"]);
@@ -44,8 +43,8 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 			]);
 		} finally {
 			announced.close();
-			client.close();
-			server.close();
+			client.abort();
+			server.abort();
 			for (const broadcast of broadcasts) broadcast.close();
 			source.close();
 			destination.close();

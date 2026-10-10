@@ -20,19 +20,19 @@ parking, while `routed_broadcast` stays registered until its route completes.
 The front ends only once every parked requester has been handled, so one
 requester's disposition never ends another's wait.
 
-Worth confirming before building it: that the retry loop costs something. A
-benchmark swept over requesters and route-table churn would show whether the
-re-mint is a real slope or noise, and it is the same benchmark that would
-show the replacement is cheaper.
+Decided 2026-10-08: benchmark first. Land a benchmark swept over requesters
+and route-table churn, and build the parked front only if the re-mint shows
+as a real slope; the same benchmark then shows the replacement is cheaper. A
+measured no-win deletes this quest. The `origin/viewer_*` benches do not
+cover the retry loop.
+
+A parked front must not retire: a front nobody holds and nobody reads ends,
+but only once it serves from a source with no route request pending
+(`Front::idle` in `rs/moq-net/src/model/front.rs`).
 
 Public API: no signature change expected. `routed_broadcast` and
 `request_broadcast` keep their contracts; only where the waiting happens
 changes.
 
-Decided in the 2026-09-30 audit: this lands after shared fronts, which
-reworks the same `model/origin.rs` fronts, and may move to m2 if shared
-fronts' benchmark shows the retry loop's re-mint is noise.
-
-## Required
-
-- [Shared fronts](/quest/m0/shared-fronts.md) - reworks the same fronts, and its benchmark decides whether this stays in m1
+Fronts are keyed by effective exclusion (`Horizon::effective`), so viewers
+share them.

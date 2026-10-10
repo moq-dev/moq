@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import timedelta
 
-from moq_ffi import MoqClient
+from moq_ffi import (
+    MoqClient,
+    MoqClientConfig,
+    MoqClientTls,
+    MoqQuicConfig,
+    MoqWebSocketConfig,
+)
 
+from ._records import Backoff, _opt_us, _strs
 from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
 from .subscribe import BroadcastConsumer
-from .types import Backoff
 
 
 class Client:
@@ -20,13 +27,13 @@ class Client:
     announced here is also discoverable here:
 
         async with Client("https://relay.example.com") as client:
-            async for ann in client.announced():
+            async for event in client.announced():
                 ...
 
     In advanced mode, provide your own origin for full control:
 
         origin = OriginProducer()
-        client = Client("https://relay.example.com", publish=origin, subscribe=origin)
+        client = Client("https://relay.example.com", publish=origin, consume=origin)
 
     The WebSocket fallback races QUIC for ``http(s)`` URLs after a 200 ms head start.
     Pass ``websocket_enabled=False`` against a QUIC-only relay, or a ``websocket_delay``
@@ -42,6 +49,9 @@ class Client:
     broadcasts consumed through it ride out the gap. Pass ``reconnect=False`` for a
     one-shot dial, or a :class:`Backoff` to tune the retry pacing; watch
     :meth:`Session.status` for the connect/disconnect transitions.
+
+    ``versions`` restricts the protocol versions offered, most preferred first, spelled
+    like ``"moq-lite-03"``; empty offers every supported version.
     """
 
     def __init__(
@@ -49,40 +59,45 @@ class Client:
         url: str,
         *,
         tls_verify: bool = True,
-        tls_roots: list[str] | None = None,
+        tls_roots: Sequence[str] = (),
         tls_system_roots: bool | None = None,
-        tls_fingerprints: list[str] | None = None,
+        tls_fingerprints: Sequence[str] = (),
         tls_cert: str | None = None,
         tls_key: str | None = None,
         bind: str | None = None,
+        versions: Sequence[str] = (),
         max_streams: int | None = None,
         websocket_enabled: bool | None = None,
         websocket_delay: timedelta | None = None,
         reconnect: bool = True,
         backoff: Backoff | None = None,
         publish: OriginProducer | None = None,
-        subscribe: OriginProducer | None = None,
+        consume: OriginProducer | None = None,
     ) -> None:
         self._url = url
-        self._tls_verify = tls_verify
-        self._tls_roots = tls_roots
-        self._tls_system_roots = tls_system_roots
-        self._tls_fingerprints = tls_fingerprints
-        self._tls_cert = tls_cert
-        self._tls_key = tls_key
-        self._bind = bind
-        self._max_streams = max_streams
-        self._websocket_enabled = websocket_enabled
-        if websocket_delay is not None and websocket_delay < timedelta(0):
-            raise ValueError(f"websocket_delay must not be negative: {websocket_delay}")
-        self._websocket_delay = websocket_delay
-        self._reconnect = reconnect
-        self._backoff = backoff
-
         # With neither side given, moq-ffi wires one shared origin to both, so a broadcast
         # announced here is discoverable via announced() (loopback).
-        self._publish_origin = publish
-        self._consume_origin = subscribe
+        self._config = MoqClientConfig(
+            bind=bind,
+            versions=_strs(versions, "versions"),
+            tls=MoqClientTls(
+                insecure=not tls_verify,
+                roots=_strs(tls_roots, "tls_roots"),
+                system_roots=tls_system_roots,
+                fingerprints=_strs(tls_fingerprints, "tls_fingerprints"),
+                cert=tls_cert,
+                key=tls_key,
+            ),
+            quic=MoqQuicConfig(max_streams=max_streams),
+            websocket=MoqWebSocketConfig(
+                enabled=websocket_enabled,
+                delay_us=_opt_us(websocket_delay, "websocket_delay"),
+            ),
+            once=not reconnect,
+            backoff=(backoff or Backoff())._ffi(),
+            publish=None if publish is None else publish._inner,
+            consume=None if consume is None else consume._inner,
+        )
 
         self._publisher: OriginProducer | None = None
         self._consumer: OriginConsumer | None = None
@@ -90,39 +105,13 @@ class Client:
         self._session: Session | None = None
 
     async def __aenter__(self):
-        self._inner = MoqClient()
-
-        if not self._tls_verify:
-            self._inner.set_tls_verify(False)
-        if self._tls_roots:
-            self._inner.set_tls_roots(self._tls_roots)
-        if self._tls_system_roots is not None:
-            self._inner.set_tls_system_roots(self._tls_system_roots)
-        if self._tls_fingerprints:
-            self._inner.set_tls_fingerprints(self._tls_fingerprints)
-        if self._tls_cert is not None:
-            self._inner.set_tls_cert(self._tls_cert)
-        if self._tls_key is not None:
-            self._inner.set_tls_key(self._tls_key)
-        if self._bind is not None:
-            self._inner.set_bind(self._bind)
-        if self._max_streams is not None:
-            self._inner.set_quic_max_streams(self._max_streams)
-        if self._websocket_enabled is not None:
-            self._inner.set_websocket_enabled(self._websocket_enabled)
-        if self._websocket_delay is not None:
-            self._inner.set_websocket_delay(self._websocket_delay // timedelta(microseconds=1))
-        if not self._reconnect:
-            self._inner.set_reconnect(False)
-        if self._backoff is not None:
-            self._inner.set_backoff(self._backoff)
-
-        if self._publish_origin is not None:
-            self._inner.set_publish(self._publish_origin._inner)
-        if self._consume_origin is not None:
-            self._inner.set_consume(self._consume_origin._inner)
-
-        self._session = Session(await self._inner.connect(self._url))
+        self._inner = MoqClient(self._config)
+        try:
+            self._session = Session(await self._inner.connect(self._url))
+        except BaseException:
+            self._inner.cancel()
+            self._inner = None
+            raise
 
         # The session always exposes both sides, wired from the origins above or
         # auto-created, so publishing and discovery always have somewhere to go.
@@ -134,13 +123,21 @@ class Client:
     async def __aexit__(self, *exc) -> None:
         self._publisher = None
         self._consumer = None
-        if self._session is not None:
-            self._session.shutdown()
+        try:
+            if self._session is not None:
+                # A body error is the failure worth reporting. Draining behind it would
+                # wait out the deadline and replace it with a delivery timeout. Cancel
+                # rather than skip: dropping the last session closes the transport, so
+                # one the caller kept a reference to would otherwise stay open.
+                if exc[0] is None:
+                    await self._session.shutdown()
+                else:
+                    self._session.cancel(0)
+        finally:
             self._session = None
-        if self._inner is not None:
-            self._inner.cancel()
-            self._inner = None
-        self._session = None
+            if self._inner is not None:
+                self._inner.cancel()
+                self._inner = None
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.
@@ -187,19 +184,20 @@ def connect(
     url: str,
     *,
     tls_verify: bool = True,
-    tls_roots: list[str] | None = None,
+    tls_roots: Sequence[str] = (),
     tls_system_roots: bool | None = None,
-    tls_fingerprints: list[str] | None = None,
+    tls_fingerprints: Sequence[str] = (),
     tls_cert: str | None = None,
     tls_key: str | None = None,
     bind: str | None = None,
+    versions: Sequence[str] = (),
     max_streams: int | None = None,
     websocket_enabled: bool | None = None,
     websocket_delay: timedelta | None = None,
     reconnect: bool = True,
     backoff: Backoff | None = None,
     publish: OriginProducer | None = None,
-    subscribe: OriginProducer | None = None,
+    consume: OriginProducer | None = None,
 ) -> Client:
     """Shorthand for constructing a :class:`Client`.
 
@@ -217,11 +215,12 @@ def connect(
         tls_cert=tls_cert,
         tls_key=tls_key,
         bind=bind,
+        versions=versions,
         max_streams=max_streams,
         websocket_enabled=websocket_enabled,
         websocket_delay=websocket_delay,
         reconnect=reconnect,
         backoff=backoff,
         publish=publish,
-        subscribe=subscribe,
+        consume=consume,
     )

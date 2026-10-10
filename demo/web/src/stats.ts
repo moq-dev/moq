@@ -5,7 +5,8 @@
  * `.stats/node/<node>` carrying JSON tracks that snapshot current activity. We
  * auto-discover all of those nodes (announcements under `.stats/node`), so this
  * works for a single relay and for a cluster alike, then aggregate each node and
- * let you drill into one.
+ * let you drill into one. A restarted relay announces a new epoch at the same
+ * path, which arrives as an end then a start, so its history starts over.
  *
  * Per-node tracks we read:
  *   publisher.json   egress  (relay -> downstream viewers)
@@ -129,13 +130,13 @@ discovery.run((effect) => {
 
 	effect.spawn(async () => {
 		for (;;) {
-			const entry = await Promise.race([effect.cancel, announced.next()]);
+			const entry = await effect.race(announced.next());
 			if (!entry) break;
 			const path = entry.prefix;
 			const node = Net.Path.stripPrefix(prefix, path);
 			if (!node) continue;
 
-			if (Net.Announce.isActive(entry.kind)) {
+			if (entry.kind !== "end") {
 				if (subs.has(node)) continue;
 				const ne = new Signals.Effect();
 				subs.set(node, ne);
@@ -146,6 +147,10 @@ discovery.run((effect) => {
 				nodeStats.mutate((s) => {
 					delete s[node];
 				});
+				// A restart ends the old epoch and starts a new one at the same path,
+				// counting from zero, so neither series may splice across it.
+				history.delete(node);
+				clusterMembership = "";
 			}
 		}
 	});
@@ -171,7 +176,7 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: N
 		effect.cleanup(() => track.close());
 		effect.spawn(async () => {
 			for (;;) {
-				const data = await Promise.race([effect.cancel, track.readJson()]);
+				const data = await effect.race(track.readJson());
 				if (data === undefined) break;
 				nodeStats.mutate((s) => {
 					const cur = s[node];

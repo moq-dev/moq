@@ -50,7 +50,7 @@ async fn build_web_with(web_config: web::Config) -> web::Web {
 	let mut auth_config = auth::Config::default();
 	auth_config.public = vec![moq_auth::Pattern::all()];
 	let auth = auth_config
-		.init("test", &moq_tokio::tls::Connect::default())
+		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
@@ -170,16 +170,16 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	);
 
 	// ── data path ───────────────────────────────────────────────────
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path)
+		.request_broadcast(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -210,12 +210,12 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 async fn announced_until(announcements: &mut moq_net::announce::Consumer, until: &str) -> Vec<String> {
 	let mut seen = Vec::new();
 	while !seen.iter().any(|prefix| prefix == until) {
-		let update = tokio::time::timeout(TIMEOUT, announcements.next())
+		let event = tokio::time::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed");
-		if update.kind.is_active() {
-			seen.push(update.prefix.as_str().to_owned());
+		if let moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Update(announce) = event {
+			seen.push(announce.prefix.as_str().to_owned());
 		}
 	}
 	seen
@@ -296,7 +296,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 			continue;
 		}
 		let bc = consumer
-			.request_broadcast(".x/y")
+			.request_broadcast(".x/y", None)
 			.await
 			.expect("hidden broadcast resolves");
 		let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
@@ -464,15 +464,15 @@ async fn relay_websocket_root_path_upgrades() {
 	// ── data path ───────────────────────────────────────────────────
 	// The root auth scope is the empty path, so the broadcast announces at its
 	// own name with no prefix.
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path)
+		.request_broadcast(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -552,11 +552,11 @@ async fn two_publish_only_clients_coexist() {
 
 	let mut seen = std::collections::HashSet::new();
 	while seen.len() < 2 {
-		let update = tokio::time::timeout(TIMEOUT, announcements.next())
+		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed");
-		if update.kind.is_active() {
+		if active {
 			seen.insert(update.prefix.as_str().to_owned());
 		}
 	}
@@ -596,7 +596,7 @@ async fn spawn_accept_relay(
 	let server = config.init(Default::default()).expect("server init");
 
 	let auth = auth_config
-		.init("test", &moq_tokio::tls::Connect::default())
+		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
@@ -683,15 +683,15 @@ async fn internal_tcp_round_trip() {
 	// ── data path ───────────────────────────────────────────────────
 	// The internal listener grants the empty root, so the broadcast announces
 	// at its own name with no path prefix.
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	let path = moq_net::Path::new(update.prefix.as_str()).to_owned();
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path)
+		.request_broadcast(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -784,13 +784,13 @@ async fn internal_unix_round_trip() {
 			.expect("subscriber connect failed");
 
 	// ── data path ───────────────────────────────────────────────────
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+	assert!(active, "expected announce, got retraction");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -867,7 +867,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -1001,7 +1001,7 @@ async fn spawn_subscribe_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 /// handshake instead of being accepted and silently carrying no media. The client
 /// advertises `Role::Publisher` in its SETUP (derived from `with_publisher`), and the
 /// relay closes the session because the token has no publish scope. This is the
-/// regression guard for moq.pro#338: before the role hint, this connection was
+/// regression guard for the role hint: before it, this connection was
 /// accepted and the publisher streamed into a dropped session forever.
 #[tokio::test]
 async fn subscribe_only_public_rejects_publisher_role() {
@@ -1109,4 +1109,14 @@ async fn connect_once(
 ) -> moq_tokio::Result<(moq_tokio::Client, moq_tokio::Connection)> {
 	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
 	Ok((client, connection))
+}
+
+/// The next route and whether it is active.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	match announced.next().await? {
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		moq_net::announce::Event::End(route) => Some((route, false)),
+	}
 }

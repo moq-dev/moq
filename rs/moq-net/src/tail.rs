@@ -12,21 +12,21 @@
 
 use std::{ops::Range, task::Poll, time::Duration};
 
-use crate::runtime::{Deadline, Instant};
+use crate::time::{Deadline, Instant};
 
 /// How long a subscriber waits for a group stream it cannot account for once the
 /// publisher has ended the subscription.
 ///
-/// Bounds the wait on IETF, and on moq-lite when the subscription has no max age to bound
+/// Bounds the wait on IETF, and on moq-lite when the subscription has no max delay to bound
 /// it with. Matches `@moq/net`, so a reader cannot tell which side it is talking to.
 pub(crate) const GRACE: Duration = Duration::from_secs(1);
 
-/// The grace for a subscription with `max_age`: how long the subscriber was willing to
+/// The grace for a subscription with `max_delay`: how long the subscriber was willing to
 /// wait for a late group anyway, or [`GRACE`] without one.
-pub(crate) fn grace(max_age: Duration) -> Duration {
-	match max_age.is_zero() {
+pub(crate) fn grace(max_delay: Duration) -> Duration {
+	match max_delay.is_zero() {
 		true => GRACE,
-		false => max_age,
+		false => max_delay,
 	}
 }
 
@@ -72,7 +72,7 @@ impl Tail {
 		}
 	}
 
-	/// Change the grace, for a subscription whose max age changed.
+	/// Change the grace, for a subscription whose max delay changed.
 	pub fn set_grace(&mut self, grace: Duration) {
 		self.grace = grace;
 	}
@@ -210,7 +210,7 @@ impl Drop for Reading {
 /// Waits out a subscription's tail: until the owed streams are accounted for, or the grace.
 pub(crate) struct Settle {
 	tail: kio::Consumer<Tail>,
-	grace: Deadline<crate::time::Clock>,
+	grace: Deadline,
 }
 
 impl Settle {
@@ -328,17 +328,15 @@ mod tests {
 
 	/// The grace gives up on streams that never arrived, never on one still being read:
 	/// its group, or the END_OF_TRACK it carries, still belongs to the track.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn the_grace_waits_for_a_stream_being_read() {
-		use crate::runtime::Timers as _;
-
-		let runtime = crate::time::Clock::tokio();
+		let runtime = crate::time::Clock::sim();
 		let tail = kio::Producer::new(Tail::default());
 		let reading = Reading::open(&tail, Some(0), runtime.now());
 		let mut settle = Settle::new(&runtime, tail.consume());
 		let mut settled = std::pin::pin!(kio::wait(|waiter| settle.poll(waiter, |_| false)));
 
-		tokio::time::sleep(GRACE * 2).await;
+		moq_net_sim::sleep(GRACE * 2).await;
 		assert!(
 			futures::poll!(settled.as_mut()).is_pending(),
 			"a stream is still being read"
@@ -349,11 +347,9 @@ mod tests {
 	}
 
 	/// A stream parked on another one does not hold the end open.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn a_parked_stream_does_not_hold_the_end() {
-		use crate::runtime::Timers as _;
-
-		let runtime = crate::time::Clock::tokio();
+		let runtime = crate::time::Clock::sim();
 		let tail = kio::Producer::new(Tail::default());
 		let mut reading = Reading::open(&tail, None, runtime.now());
 		reading.park();

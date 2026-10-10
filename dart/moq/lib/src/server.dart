@@ -3,6 +3,9 @@ import 'package:moq_ffi/moq_ffi.dart';
 import 'aliases.dart';
 
 /// Everything [Server.listen] can be told.
+///
+/// A value the native side cannot use fails [Server.listen] with
+/// `MoqException.Config`.
 final class ListenOptions {
   /// Local socket address to listen on, e.g. `127.0.0.1:4443` or `[::]:443`.
   final String bind;
@@ -16,19 +19,28 @@ final class ListenOptions {
   /// Hostnames to generate a self-signed certificate for.
   final List<String>? tlsGenerate;
 
+  /// Protocol versions to accept, e.g. `moq-lite-03`. Null accepts every
+  /// supported version.
+  final List<String>? versions;
+
+  /// Cap on the concurrent QUIC streams each peer may open toward this server.
+  final int? maxStreams;
+
   /// Origin whose broadcasts are served to incoming sessions; auto-created when null.
   final OriginProducer? publish;
 
   /// Origin that receives broadcasts published by incoming sessions; auto-created when null.
-  final OriginProducer? subscribe;
+  final OriginProducer? consume;
 
   const ListenOptions({
     this.bind = '[::]:443',
     this.tlsCert,
     this.tlsKey,
     this.tlsGenerate,
+    this.versions,
+    this.maxStreams,
     this.publish,
-    this.subscribe,
+    this.consume,
   });
 }
 
@@ -52,30 +64,33 @@ final class Server {
 
   /// Bind a server at [ListenOptions.bind] and start accepting.
   ///
-  /// With neither [ListenOptions.publish] nor [ListenOptions.subscribe] given,
+  /// With neither [ListenOptions.publish] nor [ListenOptions.consume] given,
   /// both sides share one origin, so a broadcast created here is also visible
   /// to sessions publishing into this server. Wiring either side opts out and
   /// isolates the two directions.
   static Future<Server> listen({
     ListenOptions options = const ListenOptions(),
   }) async {
-    final shared = options.publish == null && options.subscribe == null
+    final shared = options.publish == null && options.consume == null
         ? OriginProducer(config: OriginConfig())
         : null;
     final publishOrigin = options.publish ?? shared;
-    final subscribeOrigin = options.subscribe ?? shared;
 
-    final server = MoqServer();
+    final server = MoqServer(
+      config: MoqServerConfig(
+        bind: options.bind,
+        versions: options.versions ?? const [],
+        tls: MoqServerTls(
+          cert: options.tlsCert ?? const [],
+          key: options.tlsKey ?? const [],
+          generate: options.tlsGenerate ?? const [],
+        ),
+        quic: MoqQuicConfig(maxStreams: options.maxStreams),
+        publish: publishOrigin,
+        consume: options.consume ?? shared,
+      ),
+    );
     try {
-      server.setBind(addr: options.bind);
-      if (options.tlsCert != null) server.setTlsCert(paths: options.tlsCert!);
-      if (options.tlsKey != null) server.setTlsKey(paths: options.tlsKey!);
-      if (options.tlsGenerate != null) {
-        server.setTlsGenerate(hostnames: options.tlsGenerate!);
-      }
-      if (publishOrigin != null) server.setPublish(origin: publishOrigin);
-      if (subscribeOrigin != null) server.setConsume(origin: subscribeOrigin);
-
       final localAddr = await server.listen();
       return Server._(server, localAddr, publishOrigin);
     } catch (_) {
@@ -88,7 +103,7 @@ final class Server {
   /// Create a broadcast at [path], served to incoming sessions.
   ///
   /// Advertise it with `announce` after populating tracks. Throws when [listen]
-  /// was given a [ListenOptions.subscribe] origin but no
+  /// was given a [ListenOptions.consume] origin but no
   /// [ListenOptions.publish] one, since there is then nothing to serve from.
   BroadcastProducer createBroadcast(String path) {
     final origin = _publishOrigin;

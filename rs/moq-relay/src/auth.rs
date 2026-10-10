@@ -241,13 +241,15 @@ impl Config {
 		self.url.is_none() && self.public_grant().is_none()
 	}
 
-	/// Refuse a configuration that admits nobody, or that names both a server and
-	/// a static grant, so the question of who decides has one answer.
+	/// Refuse a configuration that admits nobody, that names both a server and a
+	/// static grant, or that pairs public rules with a client CA, so the question
+	/// of who decides has one answer. `client_ca` is whether any listener verifies
+	/// client certificates, which public rules would grant what they grant anyone.
 	///
 	/// A public pattern without a wildcard is refused too. 0.14 read `anon` as the
 	/// prefix `anon/`, and a pattern reads it as exactly the broadcast `anon`, so
 	/// either silent reading would mislead someone upgrading.
-	pub fn validate(&self) -> anyhow::Result<()> {
+	pub fn validate(&self, client_ca: bool) -> anyhow::Result<()> {
 		let flags = [
 			("--auth-public", &self.public),
 			("--auth-public-publish", &self.public_publish),
@@ -269,27 +271,24 @@ impl Config {
 			(None, None) => anyhow::bail!(
 				"no --auth-url or --auth-public configured; nobody can authenticate (a client certificate admits nothing on its own)"
 			),
+			(None, Some(_)) if client_ca => anyhow::bail!(
+				"a client CA (--listen-tls-root, --web-https-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
+			),
 			_ => Ok(()),
 		}
 	}
 
-	/// Refuse a client CA under public rules, which grant a certificate what they
-	/// grant anyone. `client_ca` is whether any listener verifies client certificates.
-	pub fn validate_client_ca(&self, client_ca: bool) -> anyhow::Result<()> {
-		if client_ca && self.url.is_none() && self.public_grant().is_some() {
-			anyhow::bail!(
-				"a client CA (--listen-tls-root, --web-https-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
-			);
-		}
-		Ok(())
-	}
-
-	/// Build the [`Auth`] this configuration describes. `tls` is the client
-	/// identity an `https://` server is dialed with; `node` names this relay in
-	/// every request. Must be called within a Tokio runtime, which drives the
-	/// admission decider.
-	pub fn init(&self, node: impl Into<String>, tls: &moq_tokio::tls::Connect) -> anyhow::Result<Auth> {
-		self.validate()?;
+	/// Build the [`Auth`] this configuration describes, after [`validate`](Self::validate)
+	/// with the same `client_ca`. `tls` is the client identity an `https://` server
+	/// is dialed with; `node` names this relay in every request. Must be called
+	/// within a Tokio runtime, which drives the admission decider.
+	pub fn init(
+		&self,
+		node: impl Into<String>,
+		tls: &moq_tokio::tls::Connect,
+		client_ca: bool,
+	) -> anyhow::Result<Auth> {
+		self.validate(client_ca)?;
 		let decider = match (&self.url, self.public_grant()) {
 			(Some(url), _) => {
 				let tls = tls.build()?;
@@ -321,6 +320,10 @@ pub enum Error {
 	#[error("auth server unavailable: {0}")]
 	Unavailable(String),
 
+	/// A valid grant does not cover the requested direction or path.
+	#[error("{0}")]
+	Forbidden(String),
+
 	/// The relay could not build the request the server needs.
 	#[error("{0}")]
 	Request(String),
@@ -341,6 +344,7 @@ impl From<&Error> for http::StatusCode {
 			// A server-side problem, not a credential problem: the client may retry.
 			Error::Unavailable(_) => http::StatusCode::BAD_GATEWAY,
 			Error::Request(_) => http::StatusCode::BAD_REQUEST,
+			Error::Forbidden(_) => http::StatusCode::FORBIDDEN,
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
 	}
@@ -380,6 +384,8 @@ pub struct Token {
 	pub tier: Tier,
 	/// Whether the session is a cluster peer, so its routes entered elsewhere.
 	pub peer: bool,
+	/// Whether the peer is upstream, so it is never offered another upstream's routes.
+	pub upstream: bool,
 }
 
 impl Token {
@@ -402,6 +408,7 @@ impl Token {
 			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
 			peer: grant.peer,
+			upstream: grant.upstream,
 		}
 	}
 
@@ -475,8 +482,9 @@ impl Lease {
 	///
 	/// A changed root or mounts, or a narrower grant, ends it: origin handles cannot yet narrow
 	/// a live scope in place (tracked by `quest/m1/auth/narrowing.md`). A flipped
-	/// `peer` ends it too, since the routes it already announced would be
-	/// misreported as entering here or from a peer. A changed tier keeps the
+	/// `peer` or `upstream` ends it too, since the routes it already announced
+	/// would be misreported as entering here or from a peer, or offered to the
+	/// wrong links. A changed tier keeps the
 	/// session and moves its [stats](Self::with_stats) to the new tier.
 	pub async fn ended(&mut self) -> lease::Reason {
 		loop {
@@ -491,7 +499,7 @@ impl Lease {
 					Ok(grant) => {
 						let fresh = self.token.recheck(&grant);
 						if fresh.root != self.token.root {
-							return "root changed".into();
+							return lease::Reason::Narrowed;
 						}
 						if fresh.mounts != self.token.mounts {
 							return "mounts changed".into();
@@ -501,8 +509,11 @@ impl Lease {
 						if fresh.peer != self.token.peer {
 							return "peer changed".into();
 						}
+						if fresh.upstream != self.token.upstream {
+							return "upstream changed".into();
+						}
 						if !self.token.covered_by(&fresh) {
-							return "grant narrowed".into();
+							return lease::Reason::Narrowed;
 						}
 						if fresh.tier != self.token.tier {
 							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");
@@ -523,6 +534,25 @@ impl Lease {
 	/// revoked first. Dropping the consumer reports zero bytes.
 	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
 		self.consumer.close(reason, bytes)
+	}
+}
+
+/// Run gateway work while its admission lease still covers the session.
+///
+/// Work is dropped when the lease expires, narrows, or is revoked. A completed
+/// work future ends the lease with zero byte totals. A gateway that tracks
+/// transport totals can use [`Lease::ended`] and [`Lease::close`] directly.
+pub async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Output = T>) -> Result<T, lease::Reason> {
+	tokio::select! {
+		biased;
+		reason = lease.ended() => {
+			lease.close(reason.clone(), Bytes::default());
+			Err(reason)
+		},
+		result = work => {
+			lease.close("done", Bytes::default());
+			Ok(result)
+		},
 	}
 }
 
@@ -690,11 +720,12 @@ impl Admission {
 /// transport knows, nothing parsed on the server's behalf.
 pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
 	let transport = match request.transport() {
-		moq_tokio::server::Transport::Quic => moq_auth::Transport::Quic,
-		moq_tokio::server::Transport::Iroh => moq_auth::Transport::Iroh,
-		moq_tokio::server::Transport::WebSocket => moq_auth::Transport::WebSocket,
-		moq_tokio::server::Transport::Tcp => moq_auth::Transport::Tcp,
-		moq_tokio::server::Transport::Unix => moq_auth::Transport::Unix,
+		// The auth contract names QUIC either way; WebTransport is QUIC underneath.
+		moq_tokio::Transport::Quic | moq_tokio::Transport::WebTransport => moq_auth::Transport::Quic,
+		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
+		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
+		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
 		// A transport this build does not know is still a session on the wire; the
 		// server sees the same facts either way.
 		other => unreachable!("unknown transport {other}"),
@@ -717,12 +748,18 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 		.map(str::to_owned)
 		.or_else(|| request.authority().map(str::to_owned));
 	out.alpn = request.alpn().map(str::to_owned);
-	out.role = request.role().map(|role| match role {
-		moq_net::Role::Publisher => moq_auth::Role::Publisher,
-		_ => moq_auth::Role::Subscriber,
-	});
+	out.role = request.role().and_then(role);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
 	out
+}
+
+/// The auth role for a session role, `None` for one `moq-auth` cannot name yet.
+pub(crate) fn role(role: moq_net::Role) -> Option<moq_auth::Role> {
+	match role {
+		moq_net::Role::Publisher => Some(moq_auth::Role::Publisher),
+		moq_net::Role::Subscriber => Some(moq_auth::Role::Subscriber),
+		_ => None,
+	}
 }
 
 /// The certificate facts for a verified peer, or `None` when the chain does not parse.
@@ -755,19 +792,33 @@ mod tests {
 
 	#[test]
 	fn exactly_one_source() {
-		assert!(config(None, &[]).validate().is_err());
-		assert!(config(Some("http://127.0.0.1:4440/"), &["**"]).validate().is_err());
-		assert!(config(Some("http://127.0.0.1:4440/"), &[]).validate().is_ok());
-		assert!(config(None, &["anon/**"]).validate().is_ok());
+		assert!(config(None, &[]).validate(false).is_err());
+		assert!(config(Some("http://127.0.0.1:4440/"), &["**"]).validate(false).is_err());
+		assert!(config(Some("http://127.0.0.1:4440/"), &[]).validate(false).is_ok());
+		assert!(config(None, &["anon/**"]).validate(false).is_ok());
 
 		let split = Config {
 			public_subscribe: patterns(&["anon/**"]).into_iter().collect(),
 			..Default::default()
 		};
-		assert!(split.validate().is_ok());
+		assert!(split.validate(false).is_ok());
 		let grant = split.public_grant().unwrap();
 		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
+	}
+
+	/// Public rules grant a certificate what they grant anyone, so a client CA
+	/// needs an auth server, and `init` refuses it like `validate` does.
+	#[test]
+	fn a_client_ca_needs_an_auth_server() {
+		let public = config(None, &["anon/**"]);
+		let err = public.validate(true).unwrap_err().to_string();
+		assert!(err.contains("--auth-public ignores"), "{err}");
+		let Err(err) = public.init("relay-1", &moq_tokio::tls::Connect::default(), true) else {
+			panic!("init accepted a client CA under public rules");
+		};
+		assert!(err.to_string().contains("--auth-public ignores"), "{err}");
+		assert!(config(Some("http://127.0.0.1:4440/"), &[]).validate(true).is_ok());
 	}
 
 	/// The public rules are rooted at `/`, like a token with an empty root. Bare `**`
@@ -780,7 +831,7 @@ mod tests {
 			public_subscribe: patterns(&["anon/**", "*/chat"]).into_iter().collect(),
 			..Default::default()
 		}
-		.init("relay-1", &moq_tokio::tls::Connect::default())
+		.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
 
 		for (path, root, publish, subscribe) in [
@@ -810,7 +861,7 @@ mod tests {
 	#[tokio::test]
 	async fn public_rules_refuse_a_token() {
 		let auth = config(None, &["**"])
-			.init("relay-1", &moq_tokio::tls::Connect::default())
+			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
 		let mut query = auth.request(moq_auth::Transport::WebSocket, "/");
 		query.query = Some("a=1&jwt=eyJ".into());
@@ -838,7 +889,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_public_config_admits_anonymous_and_certificate_alike() {
 		let auth = config(None, &["anon/**"])
-			.init("relay-1", &moq_tokio::tls::Connect::default())
+			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
 		let anonymous = auth.request(moq_auth::Transport::Quic, "/anon/room");
 		let mut certificate = anonymous.clone();
@@ -861,27 +912,27 @@ mod tests {
 	#[test]
 	fn a_public_pattern_without_a_wildcard_refuses_to_start() {
 		for (public, hint) in [("anon", "anon/**"), ("anon/room", "anon/room/**"), ("", "**")] {
-			let err = config(None, &[public]).validate().unwrap_err().to_string();
+			let err = config(None, &[public]).validate(false).unwrap_err().to_string();
 			assert!(err.contains(&format!("`{hint}`")), "{public}: {err}");
 		}
 		let split = Config {
 			public_subscribe: patterns(&["anon/**", "live"]).into_iter().collect(),
 			..Default::default()
 		};
-		let err = split.validate().unwrap_err().to_string();
+		let err = split.validate(false).unwrap_err().to_string();
 		assert!(err.starts_with("--auth-public-subscribe `live`"), "{err}");
-		assert!(config(None, &["anon/*", "*/chat", "**"]).validate().is_ok());
+		assert!(config(None, &["anon/*", "*/chat", "**"]).validate(false).is_ok());
 
 		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
 		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
-		assert!(config(None, &[&deepest]).validate().is_ok());
+		assert!(config(None, &[&deepest]).validate(false).is_ok());
 	}
 
 	#[test]
 	fn config_init_requires_a_runtime() {
 		let result = std::panic::catch_unwind(|| {
 			let _ = config(None, &["anon/**"])
-				.init("relay-1", &moq_tokio::tls::Connect::default())
+				.init("relay-1", &moq_tokio::tls::Connect::default(), false)
 				.unwrap();
 		});
 		assert!(result.is_err());
@@ -1024,7 +1075,7 @@ mod tests {
 	/// Routes a session announced were recorded as a peer's or not; a re-check that
 	/// flips it closes the session rather than misreport them.
 	#[tokio::test]
-	async fn a_recheck_that_flips_peer_closes() {
+	async fn a_recheck_that_flips_the_link_closes() {
 		let grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
 		let (producer, consumer) = lease::Producer::new(grant.clone());
 		let mut lease = Lease::new("/", consumer);
@@ -1032,8 +1083,17 @@ mod tests {
 
 		let mut peer = grant;
 		peer.peer = true;
-		producer.update(peer);
+		producer.update(peer.clone());
 		assert_eq!(lease.ended().await.to_string(), "peer changed");
+
+		// Routes already offered to (or withheld from) the session were filtered
+		// by whether it is upstream, so flipping that closes it too.
+		let (producer, consumer) = lease::Producer::new(peer.clone());
+		let mut lease = Lease::new("/", consumer);
+		let mut upstream = peer;
+		upstream.upstream = true;
+		producer.update(upstream);
+		assert_eq!(lease.ended().await.to_string(), "upstream changed");
 	}
 
 	#[test]

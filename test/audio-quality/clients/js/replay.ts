@@ -3,7 +3,7 @@
  * `driver.ts` writes a browser row, so `analyze.ts` reduces both alike.
  *
  * The player half is `js/watch/src/audio/replay.ts`: the real container consumer and rings on a
- * simulated clock, at the delay a real `Sync` resolves for the recorded catalog and RTT. This half
+ * simulated clock, at the delay a real `Sync` resolves from the playout target it measures. This half
  * reads its quanta through the same classifier the page's output tap runs, and samples the ring
  * every 250 ms of simulated time, as the probe samples a page. Every profile is the trace's name at
  * the "auto" delay a viewer gets by default.
@@ -88,16 +88,11 @@ if (values.list) {
 const out = values.out as string;
 
 // Loaded only to play: listing runs before `run.sh` has installed the workspace the player needs.
-const { replay, target } = await import("../../../../js/watch/src/audio/replay.ts");
+const { replay } = await import("../../../../js/watch/src/audio/replay.ts");
 
 for (const { row, trace } of rows) {
 	const tag = rowKey(row);
 	const rate = row.rate;
-	const delay = await target({
-		delay: "auto",
-		config: trace.config as unknown as Catalog.AudioConfig,
-		rtt: trace.rtt ?? undefined,
-	});
 
 	const ledger = new Ledger(rate, SILENCE_RMS);
 	const samples: Sample[] = [];
@@ -114,14 +109,14 @@ for (const { row, trace } of rows) {
 	};
 
 	const arrivals = trace.arrivals.map(([at, timestamp, group]) => ({ at, timestamp, group }));
-	const sample = (quantum: { at: number; timestamp: number; stalled: boolean }) => {
+	const sample = (quantum: { at: number; timestamp: number; stalled: boolean; delay: number }) => {
 		const gaps = ledger.take();
 		samples.push({
 			at: quantum.at,
 			render: quantum.at,
 			timestamp: quantum.timestamp,
 			stalled: quantum.stalled,
-			delay,
+			delay: quantum.delay,
 			quanta: ledger.counts.quanta,
 			quiet: ledger.counts.quiet,
 			gaps: gaps.length > 0 ? gaps : undefined,
@@ -133,10 +128,11 @@ for (const { row, trace } of rows) {
 	const quanta = replay(arrivals, {
 		ring: row.ring === "isolated" ? "shared" : "post",
 		rate,
-		delay,
+		delay: "auto",
+		config: trace.config as unknown as Catalog.AudioConfig,
 		duration: trace.duration,
 	});
-	let last: { at: number; timestamp: number; stalled: boolean } | undefined;
+	let last: { at: number; timestamp: number; stalled: boolean; delay: number } | undefined;
 	for await (const quantum of quanta) {
 		// The render clock is the simulated one: the trace's `at`, which starts at zero.
 		ledger.add(frame, quantum.output.length, classify([quantum.output]));
@@ -145,7 +141,7 @@ for (const { row, trace } of rows) {
 			stalled = quantum.stalled;
 			stalls.push({ at: quantum.at, stalled });
 		}
-		last = { at: quantum.at, timestamp: quantum.timestamp, stalled: quantum.stalled };
+		last = { at: quantum.at, timestamp: quantum.timestamp, stalled: quantum.stalled, delay: quantum.delay };
 
 		if (quantum.at >= next) {
 			next += SAMPLE_INTERVAL_MS;
@@ -167,5 +163,5 @@ for (const { row, trace } of rows) {
 	};
 	await Bun.write(join(out, `${tag}.ndjson`), `${samples.map((s) => JSON.stringify(s)).join("\n")}\n`);
 	await Bun.write(join(out, `${tag}.page.json`), JSON.stringify({ environment, notes, voids: [] }, null, 1));
-	console.log(`${tag}: ${samples.length} samples at a ${delay} ms target`);
+	console.log(`${tag}: ${samples.length} samples, settling at a ${Math.round(last?.delay ?? 0)} ms target`);
 }

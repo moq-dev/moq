@@ -12,6 +12,7 @@ just test audio-quality --profiles mild --codecs opus --duration 20
 just test audio-quality --rings plain                          # the production path only
 just test audio-quality --out ~/runs/after                     # keep the run directory
 just test audio-quality --enforce                              # fail on the budgets
+just test audio-quality --profiles bursty --capture --out ~/runs/burst # keep arrival evidence
 just test audio-quality --replays                              # the replays only, in seconds
 ```
 
@@ -70,6 +71,28 @@ dials, so the driver answers that fetch with the relay's own hash (the certifica
 hash, so a different port needs nothing more). With nothing listening on TCP there, the WebSocket
 fallback cannot connect: the session is WebTransport through the shaper, or the row is void.
 
+## Diagnosing live rows
+
+Every browser sample includes the current PROBE RTT, Sync's network buffer, and the selected
+rendition's advertised jitter and delay. These distinguish a target increase caused by the
+transport from one declared by the publisher. The final page environment keeps the full audio
+configuration.
+
+`--capture` also writes `<tag>.arrivals.ndjson`: `[at, timestamp, group]` on the same viewer clock as
+`<tag>.ndjson`, before the container orders or skips groups. The observer shares the player's
+connection and track, priority, and maximum age, so it adds no upstream subscription demand.
+Groups drain concurrently, so an earlier stalled group cannot hide a later arrival. Capture
+errors void the row. Capture adds local decoding and recording work; it is off by default and
+on in nightly so a failing run preserves the inputs for diagnosis.
+
+To replay a capture, put its arrivals and final environment configuration into the version 2
+`Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's
+`at` for the duration, and supply the observed minimum RTT as a diagnostic. Replay measures the
+target from the arrivals and holds the configuration constant; compare the raw samples when it
+changed during the live run. The observer only
+records frames delivered under the player's maximum age, so a replay cannot recover groups the
+transport already discarded.
+
 ## Traces
 
 The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, each graded as a
@@ -90,9 +113,9 @@ on the delay, so the replay decides those again.
 
 `replay.ts` plays a trace through the player's own `Container.Consumer` and rings on a simulated
 clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a
-real `Sync` resolves for the recorded catalog and round trip, and reads each quantum through the
-tap's classifier. The consumer makes the player's group ordering, max age skips, and discontinuity
-resets again at that delay; a group's stream is taken to finish with its last recorded frame. Every
+real `Sync` resolves from the playout target that consumer measures, and reads each quantum through
+the tap's classifier. The consumer makes the player's group ordering, max delay skips, and
+discontinuity resets again at that delay, and the ring follows the delay as it moves; a group's stream is taken to finish with its last recorded frame. Every
 frame is the trace's median spacing long, so a frame that never arrived stays missing audio, and
 rendering runs to the end of the observation, so an outage after the last arrival is heard. It
 writes the same samples a page does, so `analyze.ts` reduces both alike, and the shaper, transport,

@@ -1,16 +1,25 @@
 package dev.moq
 
+import dev.moq.media.*
+
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
+import dev.moq.json.SnapshotConfig
+import dev.moq.json.SnapshotConsumer
+import dev.moq.json.SnapshotProducer
+import dev.moq.json.StreamConfig
+import dev.moq.json.update
+import dev.moq.json.valuesAs
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -19,6 +28,10 @@ import kotlin.time.Duration.Companion.milliseconds
 
 @Serializable
 private data class Status(val state: String)
+
+/** The next announce event. */
+private suspend fun AnnounceConsumer.nextRoute(): AnnounceEvent =
+    checkNotNull(next()) { "announce stream ended" }
 
 private fun opusHead(): ByteArray =
     "OpusHead".encodeToByteArray() + byteArrayOf(
@@ -34,9 +47,6 @@ private fun opusHead(): ByteArray =
         0,
         0,
     )
-
-/** Wall-clock bound on polling for a configuration race, so a regression fails instead of hanging. */
-private const val CONFIG_RACE_TIMEOUT_NS = 10_000_000_000L
 
 class SmokeTest {
     @Test
@@ -63,7 +73,7 @@ class SmokeTest {
     @Test
     fun `connect fails fast and surfaces a MoqException`() = runTest {
         val ex = assertFailsWith<MoqException> {
-            Moq.connect("https://localhost:0/test", tlsVerify = false, reconnect = false)
+            Moq.connect("https://localhost:0/test", ClientConfig(tls = ClientTls(insecure = true), once = true))
         }
         assertTrue(
             ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
@@ -73,22 +83,23 @@ class SmokeTest {
 
     /**
      * The WebSocket fallback knobs reach the native client: a QUIC-only dial with
-     * no head start still fails fast, and a negative delay is refused up front
-     * rather than wrapping into an enormous one.
+     * no head start still fails fast, and an invalid value is refused up front
+     * as a config error rather than at the dial.
      */
     @Test
     fun `connect accepts the websocket fallback knobs`() = runTest {
         assertFailsWith<MoqException> {
             Moq.connect(
                 "https://localhost:0/test",
-                tlsVerify = false,
-                reconnect = false,
-                websocketEnabled = false,
-                websocketDelay = 0.milliseconds,
+                ClientConfig(
+                    tls = ClientTls(insecure = true),
+                    once = true,
+                    websocket = WebSocketConfig(enabled = false, delayUs = 0uL),
+                ),
             )
         }
-        assertFailsWith<IllegalArgumentException> {
-            Moq.connect("https://localhost:0/test", websocketDelay = (-1).milliseconds)
+        assertFailsWith<MoqException.Config> {
+            Moq.connect("https://localhost:0/test", ClientConfig(versions = listOf("moq-lite-99")))
         }
     }
 
@@ -113,8 +124,8 @@ class SmokeTest {
             framerate = 60.0,
             optimizeForLatency = true,
         )
-        val snapshot: JsonSnapshotConfig = JsonSnapshotConfig(deltaRatio = 8u, compression = false)
-        val stream: JsonStreamConfig = JsonStreamConfig(compression = false)
+        val snapshot: SnapshotConfig = SnapshotConfig(deltaRatio = 8u, compression = false)
+        val stream: StreamConfig = StreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
             initialUs = 500_000uL,
@@ -122,6 +133,15 @@ class SmokeTest {
             maxUs = 10_000_000uL,
             timeoutUs = 0uL,
         )
+        val client: ClientConfig = ClientConfig(
+            tls = ClientTls(insecure = true),
+            quic = QuicConfig(maxStreams = 4096uL),
+            websocket = WebSocketConfig(enabled = false),
+            backoff = backoff,
+        )
+        val server: ServerConfig = ServerConfig(tls = ServerTls(generate = listOf("localhost")))
+        assertEquals(4096uL, client.quic.maxStreams)
+        assertEquals(listOf("localhost"), server.tls.generate)
         val status: ConnectionStatus = ConnectionStatus.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(8u, snapshot.deltaRatio)
@@ -143,10 +163,11 @@ class SmokeTest {
     }
 
     @Test
-    fun `end ends a broadcast while a dynamic handle is still held`() = runTest {
+    fun `ending a broadcast ends it while a dynamic handle remains`() = runTest {
         BroadcastProducer().use { broadcast ->
             broadcast.dynamic().use {
                 val consumer = broadcast.consume()
+                // Releasing the producer alone would leave the dynamic handle holding it open.
                 broadcast.end()
                 broadcast.end()
                 assertFailsWith<MoqException> { consumer.subscribeTrack("events", null) }
@@ -158,7 +179,7 @@ class SmokeTest {
     @Test
     fun `broadcast updates shared video properties`() {
         BroadcastProducer().use { broadcast ->
-            broadcast.setVideoProperties(VideoProperties(rotation = 315.0))
+            CatalogProducer(broadcast).setVideoProperties(VideoProperties(rotation = 315.0))
         }
     }
 
@@ -167,7 +188,7 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", null)
             val group = track.appendGroup()
-            group.writeFrame(Frame(payload = "cached".encodeToByteArray()))
+            group.writeFrame(Frame(payload = "cached".encodeToByteArray(), timestampUs = 0uL))
             group.finish()
 
             val fetched = broadcast.consume().fetchGroup(
@@ -195,26 +216,29 @@ class SmokeTest {
         }
     }
 
+    @Test
+    fun `catalog handle closes with its broadcast`() {
+        val broadcast = BroadcastProducer()
+        val catalog = CatalogProducer(broadcast)
+        catalog.setSection("app", "{\"value\":42}")
+        broadcast.close()
+        assertFailsWith<MoqException.Closed> { catalog.removeSection("app") }
+        catalog.close()
+    }
+
     /** A fetched media group streams its decoded frames and then completes. */
     @Test
     fun `media group helper streams fetched frames`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val media = broadcast.publishAudio(
-                AudioInit(format = AudioFormat.OPUS, data = opusHead()),
-            )
+            val media = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusHead()))
             val consumer = broadcast.consume()
-            val (name, audio) = consumer.catalog().audio.entries.single()
+            val (name, audio) = catalog(consumer).audio.entries.single()
 
             media.writeFrame(Frame(payload = "opus frame".encodeToByteArray(), timestampUs = 5_000_000uL))
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched: MediaGroupConsumer = consumer.fetchMediaGroup(
-                name,
-                0uL,
-                audio.container,
-                FetchGroupOptions(priority = 3u),
-            )
+            val fetched: ContainerGroupConsumer = ContainerGroupConsumer.fetch(consumer, ContainerGroupConfig(name = name, sequence = 0uL, container = audio.container, options = FetchGroupOptions(priority = 3u)))
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()
@@ -272,11 +296,11 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
-            val producer = broadcast.publishJsonSnapshot("status", config)
+            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update(Status(state = "live"))
 
-            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
             assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
         }
     }
@@ -284,12 +308,13 @@ class SmokeTest {
     @Test
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
-            val demand: TrackDemand = broadcast.publishJsonSnapshot("status", config).demand()
+            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
+            val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
             assertEquals(false, demand.isUsed())
 
-            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
             demand.used()
             consumer.cancel()
             demand.unused()
@@ -304,18 +329,18 @@ class SmokeTest {
     @Test
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
-            val producer = broadcast.publishJsonSnapshot("status", config)
+            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update("""{"state":"raw"}""")
 
-            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
             assertEquals(Status(state = "raw"), consumer.valuesAs<Status>().first())
         }
     }
 
     @Test
     fun `server listens, publishes, and streams requests`() = runTest {
-        Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost")).use { server ->
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
             assertTrue(server.localAddr.startsWith("127.0.0.1:"), "bound: ${server.localAddr}")
 
             val fingerprints = server.certFingerprints()
@@ -331,12 +356,12 @@ class SmokeTest {
 
     @Test
     fun `closing a server releases its port`() = runTest {
-        val first = Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost"))
+        val first = Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost"))))
         val addr = first.localAddr
         first.close()
 
         // No retry: close() released the listening socket before returning.
-        Server.listen(addr, tlsGenerate = listOf("localhost")).use { rebound ->
+        Server.listen(ServerConfig(bind = addr, tls = ServerTls(generate = listOf("localhost")))).use { rebound ->
             assertEquals(addr, rebound.localAddr)
         }
     }
@@ -351,18 +376,16 @@ class SmokeTest {
 
                 broadcast.announce(Route())
                 val announced = consumer.announced(AnnounceConfig())
-                val first = announced.next()!!
-                assertEquals("live", first.prefix())
-                assertTrue(first.active())
+                val first = assertIs<AnnounceEventStart>(announced.nextRoute())
+                assertEquals("live", first.announce.prefix)
 
                 broadcast.unannounce()
-                val retracted = announced.next()!!
-                assertEquals("live", retracted.prefix())
-                assertTrue(!retracted.active())
+                val retracted = assertIs<AnnounceEventEnd>(announced.nextRoute())
+                assertEquals("live", retracted.announce.prefix)
                 assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
 
                 broadcast.announce(Route())
-                assertTrue(announced.next()!!.active())
+                assertIs<AnnounceEventStart>(announced.nextRoute())
                 consumer.requestBroadcast("live")
             }
         }
@@ -374,9 +397,9 @@ class SmokeTest {
             val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.createBroadcast("room/alice/chat").use { broadcast ->
                 broadcast.announce(Route())
-                val update = announced.next()!!
-                assertEquals("room/alice/chat", update.prefix())
-                assertEquals(listOf("alice"), update.captures())
+                val update = assertIs<AnnounceEventStart>(announced.nextRoute())
+                assertEquals("room/alice/chat", update.announce.prefix)
+                assertEquals(listOf("alice"), update.announce.captures)
             }
         }
     }
@@ -440,38 +463,20 @@ class SmokeTest {
     }
 
     /**
-     * Configuration must apply or fail: a setter racing an in-flight connect
-     * throws [MoqException.Busy], and one after [Client.cancel] throws
-     * [MoqException.Cancelled]. Mirrors `test_client_setters_fail_after_cancel`
-     * in `py/moq-rs/tests/test_server.py`.
+     * Cancelling the client aborts a connect parked on a server that never
+     * accepts, and the connect reports it as [MoqException.Cancelled].
      */
     @Test
-    fun `client setters are busy during connect and cancelled after`() = runTest {
-        Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost")).use { server ->
-            val client = Client()
-            client.setTlsVerify(false)
-            client.setBind("127.0.0.1:0")
+    fun `client cancel aborts a pending connect`() = runTest {
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
             // A reconnecting client would redial instead of failing the connect.
-            client.setReconnect(false)
+            val client = Client(ClientConfig(bind = "127.0.0.1:0", tls = ClientTls(insecure = true), once = true))
 
-            // Nothing accepts the request, so connect parks holding the client lock.
             // runCatching, because a failed `async` would cancel the test scope
             // before `await` ever reported it.
             val connect = async { runCatching { client.connect("https://${server.localAddr}") } }
-
-            // The lock is taken on the ffi runtime thread, so poll until it is.
-            val deadline = System.nanoTime() + CONFIG_RACE_TIMEOUT_NS
-            var busy: Throwable? = null
-            while (busy == null && System.nanoTime() < deadline) {
-                busy = runCatching { client.setTlsVerify(false) }.exceptionOrNull()
-                yield()
-            }
-            assertTrue(busy is MoqException.Busy, "expected Busy while connecting, got: $busy")
-            assertFailsWith<MoqException.Busy> { client.setBind("127.0.0.1:0") }
-
+            yield()
             client.cancel()
-            assertFailsWith<MoqException.Cancelled> { client.setTlsVerify(true) }
-            assertFailsWith<MoqException.Cancelled> { client.setBind("127.0.0.1:0") }
 
             val connected = connect.await().exceptionOrNull()
             assertTrue(connected is MoqException.Cancelled, "expected a cancelled connect, got: $connected")
@@ -479,12 +484,12 @@ class SmokeTest {
     }
 
     @Test
-    fun `decode video picks its pixel format`() = runTest {
+    fun `decoded video frame owns its picture`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.createBroadcast("video-decode-format").use { broadcast ->
+            origin.createBroadcast("video-decode-frame").use { broadcast ->
                 val video = broadcast.encodeVideo(
                     VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
-                    // Software both ways so the test is deterministic everywhere.
+                    // Software so the encode is deterministic everywhere.
                     VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
                     null,
                 )
@@ -497,35 +502,29 @@ class SmokeTest {
                     video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
                 }
 
-                val consumer = origin.consume().requestBroadcast("video-decode-format")
-                val catalog = consumer.subscribeCatalog().next()!!
+                val consumer = origin.consume().requestBroadcast("video-decode-frame")
+                val catalog = CatalogConsumer.subscribe(consumer).next()!!
                 val rendition = catalog.video["camera"]!!
 
-                // Two subscribers over one publication, so the same encoded frames
-                // are read twice and only the requested layout differs.
-                val i420 = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
-                val packed = consumer.decodeVideo(
-                    "camera",
-                    rendition,
-                    VideoDecoderOutput(format = VideoPixelFormat.RGBA),
-                )
+                val decoder = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
 
-                // Keep the encoder fed so both decoders see frames after they joined.
+                // Keep the encoder fed so the decoder sees frames after it joined.
                 for (i in 10 until 40) {
                     video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
                 }
 
-                val planar = i420.next()!!
-                assertEquals(VideoPixelFormat.I420, planar.format)
-                assertEquals(planar.width.toInt() * planar.height.toInt() * 3 / 2, planar.data.size)
+                decoder.next()!!.use { frame ->
+                    // The frame outlives its consumer's cancellation.
+                    decoder.cancel()
 
-                val frame = packed.next()!!
-                assertEquals(VideoPixelFormat.RGBA, frame.format)
-                assertEquals(frame.width.toInt() * frame.height.toInt() * 4, frame.data.size)
-                assertTrue(frame.data.indices.filter { it % 4 == 3 }.all { frame.data[it] == 0xFF.toByte() })
+                    val planar = frame.pixels(VideoPixelFormat.I420)
+                    assertEquals(frame.width().toInt() * frame.height().toInt() * 3 / 2, planar.size)
 
-                i420.cancel()
-                packed.cancel()
+                    val packed = frame.pixels(VideoPixelFormat.RGBA)
+                    assertEquals(frame.width().toInt() * frame.height().toInt() * 4, packed.size)
+                    assertTrue(packed.indices.filter { it % 4 == 3 }.all { packed[it] == 0xFF.toByte() })
+                }
+
                 video.finish()
             }
         }

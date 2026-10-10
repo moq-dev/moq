@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { type Time, Varint } from "@moq/net";
-import { Format } from "./index.ts";
+import { Time, Track, Varint } from "@moq/net";
+import { Format, Producer } from "./index.ts";
 
 const PROP_TIMESCALE = 0x08;
 const PROP_TIMESTAMP = 0x10;
@@ -148,4 +148,107 @@ test("Format skips an unknown property whose value needs all 62 bits", () => {
 test("Format rejects a timestamp past 2^53 - 1 instead of rounding", () => {
 	const props = concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(2n ** 53n));
 	expect(() => new Format().decode(buildFrame(props, new Uint8Array()))).toThrow(/larger than 53-bits/);
+});
+
+/** Each group's (LOC timestamp, payload size, net timestamp) after the producer has closed the track. */
+async function readGroups(track: Track.Producer) {
+	const subscriber = track.subscribe({ maxDelay: Time.Milli(30_000) });
+	const format = new Format("video");
+	const groups: { timestamp: number; size: number; net: number | undefined }[][] = [];
+	for (;;) {
+		const group = await subscriber.recvGroup();
+		if (!group) break;
+		const frames: { timestamp: number; size: number; net: number | undefined }[] = [];
+		for (;;) {
+			const frame = await group.readFrame();
+			if (!frame) break;
+			const [decoded] = format.decode(frame.payload);
+			frames.push({
+				timestamp: decoded.timestamp,
+				size: decoded.payload.byteLength,
+				net: frame.timestamp?.asMicros(),
+			});
+		}
+		groups.push(frames);
+	}
+	return groups;
+}
+
+test("Producer ends a group with an empty frame at the next keyframe", async () => {
+	const track = new Track.Producer("video");
+	const producer = new Producer(track);
+	producer.encode(new Uint8Array([0xde, 0xad]), 0 as Time.Micro, true);
+	producer.encode(new Uint8Array([0xbe, 0xef]), 10_000 as Time.Micro, false);
+	producer.encode(new Uint8Array([0xca, 0xfe]), 20_000 as Time.Micro, true);
+	producer.close();
+
+	const groups = await readGroups(track);
+	expect(groups[0]).toEqual([
+		{ timestamp: 0, size: 2, net: 0 },
+		{ timestamp: 10_000, size: 2, net: 10_000 },
+		{ timestamp: 20_000, size: 0, net: 20_000 },
+	]);
+	// The tail has no successor, so the marker is one interval after the last sample.
+	expect(groups[1]).toEqual([
+		{ timestamp: 20_000, size: 2, net: 20_000 },
+		{ timestamp: 30_000, size: 0, net: 30_000 },
+	]);
+	expect(groups).toHaveLength(2);
+
+	const marker = groups[0][2];
+	expect(
+		new Format("video").end({
+			payload: new Uint8Array(marker.size),
+			timestamp: marker.timestamp as Time.Micro,
+			keyframe: false,
+		}),
+	).toBe(20_000 as Time.Micro);
+});
+
+test("Producer omits the marker when a group has no interval to close", async () => {
+	const track = new Track.Producer("video");
+	const producer = new Producer(track);
+	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
+	producer.close();
+
+	expect(await readGroups(track)).toEqual([[{ timestamp: 0, size: 1, net: 0 }]]);
+});
+
+test("Producer estimates the marker when the next keyframe overlaps an ordered tail", async () => {
+	const track = new Track.Producer("video");
+	const producer = new Producer(track);
+	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
+	producer.encode(new Uint8Array([1]), 10_000 as Time.Micro, false);
+	producer.encode(new Uint8Array([1]), 5_000 as Time.Micro, true);
+	producer.close();
+
+	expect(await readGroups(track)).toEqual([
+		[
+			{ timestamp: 0, size: 1, net: 0 },
+			{ timestamp: 10_000, size: 1, net: 10_000 },
+			{ timestamp: 20_000, size: 0, net: 20_000 },
+		],
+		[{ timestamp: 5_000, size: 1, net: 5_000 }],
+	]);
+});
+
+test("Producer omits a reordered group's marker and a keyframe that overlaps the tail", async () => {
+	const track = new Track.Producer("video");
+	const producer = new Producer(track);
+	for (const [index, timestamp] of [0, 120_000, 40_000, 80_000].entries()) {
+		producer.encode(new Uint8Array([1]), timestamp as Time.Micro, index === 0);
+	}
+	// Overlaps the previous frame, so it is not that group's end, and the cadence does not carry over.
+	producer.encode(new Uint8Array([1]), 50_000 as Time.Micro, true);
+	producer.close();
+
+	expect(await readGroups(track)).toEqual([
+		[
+			{ timestamp: 0, size: 1, net: 0 },
+			{ timestamp: 120_000, size: 1, net: 120_000 },
+			{ timestamp: 40_000, size: 1, net: 40_000 },
+			{ timestamp: 80_000, size: 1, net: 80_000 },
+		],
+		[{ timestamp: 50_000, size: 1, net: 50_000 }],
+	]);
 });

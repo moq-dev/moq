@@ -58,18 +58,24 @@ pub struct Producer<C: Container, R = ()> {
 	/// Set by [`Self::seek`] and consumed on the next group creation.
 	pending_sequence: Option<u64>,
 
-	/// Records each group open (sequence + keyframe timestamp) into this rendition's
-	/// timeline track, when the producer was built with one.
+	/// Reports each written frame and finished group into this rendition's timeline, when the
+	/// producer was built with one.
 	recorder: Option<crate::timeline::Recorder>,
 
 	/// The furthest presentation point written, i.e. `max(timestamp + duration)`. Reported to
 	/// `recorder` on each [`cut`](Self::cut), since the last group of a track has no successor
-	/// to bound it and its segment would otherwise be published a group short. Also the base
+	/// to bound it and its record would otherwise end at its last frame's start. Also the base
 	/// for a duration marker when the caller does not pass a bound.
 	end: Option<moq_net::Timestamp>,
 
-	/// Exclusive presentation end of finished groups. A frame below this is refused.
+	/// Exclusive presentation end of finished groups, where a payload with no timestamp of its
+	/// own lands. Not a floor: a group may start below it.
 	live_edge: Option<moq_net::Timestamp>,
+
+	/// The keyframe timestamp that opened the latest group. The next group may not start below it.
+	start: Option<moq_net::Timestamp>,
+	/// The start of the group before the latest one. No frame of the latest group sits below it.
+	floor: Option<moq_net::Timestamp>,
 
 	/// Duration of the frame that last raised [`end`](Self::end), if it had one. Distinguishes
 	/// an exclusive presentation point from a max timestamp that still needs an estimate.
@@ -149,6 +155,8 @@ impl<C: Container> Producer<C> {
 			recorder: None,
 			end: None,
 			live_edge: None,
+			start: None,
+			floor: None,
 			last_duration: None,
 			previous_timestamp: None,
 			cadence: None,
@@ -183,6 +191,8 @@ where
 			recorder: None,
 			end: None,
 			live_edge: None,
+			start: None,
+			floor: None,
 			last_duration: None,
 			previous_timestamp: None,
 			cadence: None,
@@ -333,18 +343,17 @@ where
 	/// it, or a keyframe arrives, packing multiple samples into one container frame (e.g. a CMAF
 	/// moof+mdat). Zero (the default) flushes each frame immediately.
 	///
-	/// This is the publisher-side counterpart to the consumer's max age, and the one
+	/// This is the publisher-side counterpart to the consumer's max delay, and the one
 	/// knob here that genuinely *adds* delay.
 	pub fn with_buffer(mut self, duration: std::time::Duration) -> Self {
 		self.buffer_duration = duration;
 		self
 	}
 
-	/// Report each group open (sequence, timestamp, keyframe) through `recorder`, enrolling
-	/// this track in the broadcast's timeline so consumers can index the media without
-	/// downloading it.
+	/// Report each written frame and finished group through `recorder`, enrolling this track in
+	/// its timeline so consumers can index the media without downloading it.
 	///
-	/// Mint the recorder from the broadcast's [`timeline::Producer`](crate::timeline::Producer).
+	/// Mint the recorder from the broadcast's [`Timelines`](crate::timeline::Timelines).
 	pub fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
 		self.recorder = Some(recorder);
 		self
@@ -377,19 +386,10 @@ where
 
 	/// The exclusive presentation end earlier groups have reached, if any.
 	///
-	/// A later [`write`](Self::write) below this is refused. Trusted sources that must
-	/// re-anchor (a PES resync, a capture restart) clamp to it rather than rewind.
+	/// A source with no timestamp of its own (a section, a PES without PTS) lands on it. It is
+	/// not a floor: a keyframe may start below it (see [`write`](Self::write)).
 	pub fn live_edge(&self) -> Option<moq_net::Timestamp> {
 		self.live_edge
-	}
-
-	/// The lowest timestamp the next [`write`](Self::write) accepts: the live edge, or for a
-	/// keyframe, the edge once the group it closes is counted too.
-	pub(crate) fn floor(&self, keyframe: bool) -> Option<moq_net::Timestamp> {
-		match (self.live_edge, self.end.filter(|_| keyframe)) {
-			(Some(edge), Some(end)) if timestamp_lt(edge, end) => Some(end),
-			(edge, end) => edge.or(end),
-		}
 	}
 
 	/// Write a frame to the track.
@@ -400,26 +400,37 @@ where
 	/// independently decodable (audio) marks only the first frame of each group a keyframe (see
 	/// [`needs_keyframe`](Self::needs_keyframe)) so the group spans more than one frame.
 	///
-	/// A timestamp below the live edge earlier groups reached returns
-	/// [`TimestampRewind`](super::TimestampRewind) without writing, the way an oversized
-	/// frame is refused. B-frames and open-GOP leading pictures still qualify when they sit
-	/// above that edge.
+	/// Group starts never go backwards: a keyframe below the start of the previous group, or any
+	/// frame below the start of the group before its own, returns
+	/// [`TimestampRewind`](super::TimestampRewind) with the refused timestamp and that start,
+	/// without writing, the way an oversized frame is refused. That is a restart, which is a new
+	/// broadcast. Frames may still dip below the previous group's content: B-frames, open-GOP
+	/// leading pictures, and a keyframe that overlaps the previous group's last frame.
 	pub fn write(&mut self, frame: Frame) -> crate::Result<()> {
-		// A keyframe cuts the previous group, using its timestamp as the boundary
-		// where the previous group's content ends. Cut first so this group's live
-		// edge includes what we just closed, then refuse a rewind against that.
-		if frame.keyframe {
-			let rewound = self
-				.previous_timestamp
-				.is_some_and(|previous| timestamp_lt(frame.timestamp, previous));
-			self.cut((!rewound).then_some(frame.timestamp))?;
-			if rewound {
-				self.cadence = None;
+		let floor = match frame.keyframe {
+			true => self.start,
+			false => self.floor,
+		};
+		if let Some(floor) = floor
+			&& timestamp_lt(frame.timestamp, floor)
+		{
+			return Err(super::TimestampRewind {
+				timestamp: frame.timestamp,
+				floor,
 			}
+			.into());
 		}
 
-		if self.live_edge.is_some_and(|edge| timestamp_lt(frame.timestamp, edge)) {
-			return Err(super::TimestampRewind.into());
+		// A keyframe cuts the previous group, using its timestamp as the boundary where the
+		// previous group's content ends, unless it overlaps that content.
+		if frame.keyframe {
+			let overlaps = self
+				.previous_timestamp
+				.is_some_and(|previous| timestamp_lt(frame.timestamp, previous));
+			self.cut((!overlaps).then_some(frame.timestamp))?;
+			if overlaps {
+				self.cadence = None;
+			}
 		}
 
 		// Start a new group if needed; the first frame of a group must be a keyframe.
@@ -434,13 +445,8 @@ where
 				None => self.inner.append_group()?,
 			};
 
-			// Report the group the moment it opens: its start is this frame's timestamp. The
-			// timeline absorbs publish failures itself (it is an optional sidecar),
-			// so reporting can't abort the media write.
-			if let Some(recorder) = self.recorder.as_mut() {
-				recorder.record(group.sequence, frame.timestamp, frame.keyframe);
-			}
-
+			self.floor = self.start;
+			self.start = Some(frame.timestamp);
 			self.group = Some(group);
 		}
 
@@ -448,7 +454,13 @@ where
 		if self.buffer_duration.is_zero() {
 			let group = self.group.as_mut().unwrap();
 			let (timestamp, duration, bytes) = (frame.timestamp, frame.duration, frame.payload.len());
+			let (position, keyframe) = (position(group), frame.keyframe);
 			self.container.write(group, &[frame])?;
+			// The timeline absorbs publish failures itself (it is an optional sidecar), so
+			// reporting can't abort the media write.
+			if let Some(recorder) = self.recorder.as_mut() {
+				recorder.frame(position, timestamp, keyframe);
+			}
 
 			// Only what the container accepted is measured. A rejected frame (too large for the
 			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
@@ -509,21 +521,25 @@ where
 		self.estimator.cut(end);
 		self.claim();
 
+		let tail_end = marker_at.filter(|_| !self.reordered);
+		self.flush_buffer(tail_end)?;
+
 		// Tell the timeline where this group's content stops: the duration marker when we
-		// write one, else the caller's bound, else the furthest point we wrote.
+		// write one, else the caller's bound, else the furthest point we wrote. After the flush,
+		// so a group still wholly buffered has reported its first frame and opened a record.
 		if let Some(recorder) = self.recorder.as_mut()
 			&& let Some(end) = marker_at.or(end).max(self.end)
 		{
 			recorder.end(end);
 		}
-
-		let tail_end = marker_at.filter(|_| !self.reordered);
-		self.flush_buffer(tail_end)?;
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
 		if let Some(group) = self.group.take() {
 			group.finish()?;
+			if let Some(recorder) = self.recorder.as_mut() {
+				recorder.finish_group(group.sequence);
+			}
 		}
 		if let Some(end) = self.end {
 			self.raise_live_edge(end);
@@ -592,8 +608,8 @@ where
 	/// source, resuming on a re-anchored clock. Without it a break is invisible: the next
 	/// group looks exactly like the one that would have followed, and a consumer bounding a
 	/// sample by the next group's first frame hands it the entire gap as its duration. That
-	/// produced a 2405 second video sample out of a publisher that had been paused 40 minutes
-	/// (moq-dev/moq.pro#814). Consecutive sequence numbers can't rule a pause out, so this
+	/// produced a 2405 second video sample out of a publisher that had been paused 40 minutes.
+	/// Consecutive sequence numbers can't rule a pause out, so this
 	/// marker is the only thing that can say one happened.
 	///
 	/// It also fixes what a subscriber joining mid-break sees. A subscription starts at the
@@ -605,7 +621,7 @@ where
 	/// That object exists on moq-transport, so the live edge moves immediately; a consumer
 	/// MUST NOT submit it to a decoder. Data tracks skip a sequence with no object, because
 	/// an empty payload is data. The next [`write`](Self::write) opens the group after the
-	/// marker and must continue forward from the live edge; it cannot rewind.
+	/// marker and may not start below the last media group's start.
 	///
 	/// To bound the closing group's final frame, [`cut(end)`](Self::cut) before calling this.
 	/// Otherwise the open group closes without a duration marker: what resumes may land sooner
@@ -632,7 +648,7 @@ where
 		};
 		let timestamp = self.live_edge.unwrap_or(moq_net::Timestamp::ZERO);
 		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.record(group.sequence, timestamp, false);
+			recorder.frame(hang::timeline::Position::group(group.sequence), timestamp, false);
 			recorder.end(timestamp);
 		}
 		self.container.write(
@@ -645,6 +661,11 @@ where
 			}],
 		)?;
 		group.finish()?;
+		if let Some(recorder) = self.recorder.as_mut() {
+			recorder.finish_group(group.sequence);
+			// The marker is contiguous, so without this the next record boundary would absorb the pause.
+			recorder.flush();
+		}
 		Ok(())
 	}
 
@@ -686,7 +707,11 @@ where
 			None => return Ok(()),
 		};
 
+		let position = position(group);
 		self.container.write(group, &self.buffer)?;
+		if let Some(recorder) = self.recorder.as_mut() {
+			recorder.frame(position, self.buffer[0].timestamp, self.buffer[0].keyframe);
+		}
 		self.buffer.clear();
 
 		Ok(())
@@ -728,6 +753,11 @@ impl<C: Container, R> std::ops::Deref for Producer<C, R> {
 	}
 }
 
+/// Where the next frame written to `group` lands.
+fn position(group: &moq_net::group::Producer) -> hang::timeline::Position {
+	hang::timeline::Position::new(group.sequence, group.frame_count() as u64)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -752,12 +782,12 @@ mod tests {
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 	/// edge: history has to be asked for.
 	fn replay() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE)
+		moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY)
 	}
 
 	/// The media track's full retention window, so readers started after publishing
 	/// can still consume every retained group.
-	const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+	const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
 		Frame {
@@ -1028,7 +1058,7 @@ mod tests {
 		let discontinuity_max_age = std::time::Duration::from_secs(41 * 60);
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(discontinuity_max_age);
 		let track = track_producer("test", info);
-		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_age(discontinuity_max_age));
+		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_delay(discontinuity_max_age));
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
 		producer.write(frame(0, true)).unwrap();
@@ -1052,7 +1082,7 @@ mod tests {
 	/// A subscription starts at the track's LATEST group, and the marker advances it even
 	/// though it carries nothing. So a subscriber arriving mid-break waits for real media
 	/// rather than being handed the pre-break group as if it were live -- which is how a
-	/// 40-minute-stale frame reached a VOD recording in moq-dev/moq.pro#814.
+	/// 40-minute-stale frame once reached a VOD recording.
 	#[tokio::test]
 	async fn discontinuity_moves_the_live_edge_off_stale_content() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
@@ -1395,6 +1425,66 @@ mod tests {
 		crate::container::fmp4::encode_fragment(info, group).unwrap();
 	}
 
+	/// A group shorter than the buffer reaches the timeline only when it closes, and its record
+	/// still runs to the group's end rather than stopping at its first frame.
+	#[tokio::test]
+	async fn a_wholly_buffered_group_records_its_end() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = crate::timeline::Timelines::new(&broadcast);
+		let recorder = timelines.track("video", crate::timeline::Config::default()).unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video))
+			.with_buffer(std::time::Duration::from_secs(10))
+			.with_recorder(recorder);
+
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(33_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(66_000).unwrap())).unwrap();
+		drop(producer);
+		timelines.finish();
+
+		let mut timeline =
+			crate::timeline::Consumer::<()>::subscribe(&broadcast.consume(), &timelines.section(), "video")
+				.await
+				.unwrap();
+		let Some(crate::timeline::Event::Push { entry, .. }) = timeline.next().await.unwrap() else {
+			panic!("expected a record");
+		};
+		assert_eq!(entry.duration, std::time::Duration::from_millis(66));
+	}
+
+	/// The record before a discontinuity ends at the marker, not where content resumes.
+	#[tokio::test]
+	async fn a_discontinuity_ends_the_record_at_the_marker() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = crate::timeline::Timelines::new(&broadcast);
+		let recorder = timelines.track("video", crate::timeline::Config::default()).unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let mut producer =
+			Producer::new(track, Container::Legacy(crate::container::Kind::Video)).with_recorder(recorder);
+
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(33_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(66_000).unwrap())).unwrap();
+		producer.discontinuity().unwrap();
+		// Resumed 40 minutes later.
+		producer.write(frame(2_400_000_000, true)).unwrap();
+		drop(producer);
+		timelines.finish();
+
+		let mut timeline =
+			crate::timeline::Consumer::<()>::subscribe(&broadcast.consume(), &timelines.section(), "video")
+				.await
+				.unwrap();
+		let mut spans = Vec::new();
+		while let Some(event) = timeline.next().await.unwrap() {
+			if let crate::timeline::Event::Push { entry, .. } = event {
+				spans.push((entry.pts.as_micros() / 1_000, entry.duration.as_millis()));
+			}
+		}
+		assert_eq!(spans, vec![(0, 66), (2_400_000, 0)]);
+	}
+
 	#[tokio::test]
 	async fn duration_marker_uses_cadence_not_batching_delay() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -1493,14 +1583,41 @@ mod tests {
 		assert!(matches!(err, crate::Error::TimestampRewind(_)));
 	}
 
+	/// #3798's join: an IDR one frame below the previous group's last frame, but above its
+	/// start, overlaps that group rather than rewinding it.
 	#[tokio::test]
-	async fn a_group_below_the_live_edge_is_refused() {
+	async fn a_keyframe_overlapping_the_previous_group_publishes() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(133_000, false)).unwrap();
+		producer.write(frame(166_000, false)).unwrap();
+		producer.write(frame(150_000, true)).unwrap();
+		producer.write(frame(183_000, false)).unwrap();
+		producer.finish().unwrap();
+		let groups = collect_payloads(consumer).await;
+		assert_eq!(groups[1][..2], [(150_000, 2), (183_000, 2)]);
+	}
+
+	/// A group may start exactly where the previous one did: only a start below it is a rewind.
+	#[tokio::test]
+	async fn a_keyframe_at_the_previous_group_start_is_accepted() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(100_000, true)).unwrap();
+	}
+
+	/// A frame below the start of the group before its own reaches back past a whole group.
+	#[tokio::test]
+	async fn a_frame_below_the_previous_group_start_is_refused() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
-		producer.write(frame(0, true)).unwrap();
-		producer.write(frame(33_000, false)).unwrap();
-		producer.cut(None).unwrap();
-		let err = producer.write(frame(16_000, true)).unwrap_err();
+		producer.write(frame(100_000, true)).unwrap();
+		producer.write(frame(133_000, false)).unwrap();
+		producer.write(frame(200_000, true)).unwrap();
+		let err = producer.write(frame(90_000, false)).unwrap_err();
 		assert!(matches!(err, crate::Error::TimestampRewind(_)));
 	}
 

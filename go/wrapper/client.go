@@ -2,132 +2,152 @@ package moq
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // ClientOption configures a client created with Dial.
 type ClientOption func(*clientConfig)
 
+// clientConfig collects the options; Dial validates it into the native config,
+// whose unset fields keep moq-ffi's defaults.
 type clientConfig struct {
-	tlsVerify          bool
-	tlsRoots           []string
-	tlsRootsSet        bool
-	tlsSystemRoots     bool
-	tlsSystemRootsSet  bool
-	tlsFingerprints    []string
-	tlsFingerprintsSet bool
-	tlsCert            *string
-	tlsKey             *string
-	bind               *string
-	quicMaxStreams     *uint64
-	websocketEnabled   *bool
-	websocketDelay     *time.Duration
-	reconnect          *bool
-	backoff            *Backoff
-	publish            *OriginProducer
-	subscribe          *OriginProducer
+	tlsInsecure      bool
+	tlsRoots         []string
+	tlsSystemRoots   *bool
+	tlsFingerprints  []string
+	tlsCert          *string
+	tlsKey           *string
+	bind             *string
+	versions         []string
+	quicMaxStreams   *uint64
+	websocketEnabled *bool
+	websocketDelay   *time.Duration
+	once             bool
+	backoff          Backoff
+	publish          *OriginProducer
+	consume          *OriginProducer
+}
+
+func (c *clientConfig) ffi() (ffi.MoqClientConfig, error) {
+	delay, err := optMicros("websocket delay", c.websocketDelay)
+	if err != nil {
+		return ffi.MoqClientConfig{}, err
+	}
+	backoff, err := c.backoff.ffi()
+	if err != nil {
+		return ffi.MoqClientConfig{}, err
+	}
+	cfg := ffi.MoqClientConfig{
+		Bind:     c.bind,
+		Versions: c.versions,
+		Tls: ffi.MoqClientTls{
+			Insecure:     c.tlsInsecure,
+			Roots:        c.tlsRoots,
+			SystemRoots:  c.tlsSystemRoots,
+			Fingerprints: c.tlsFingerprints,
+			Cert:         c.tlsCert,
+			Key:          c.tlsKey,
+		},
+		Quic:      ffi.MoqQuicConfig{MaxStreams: c.quicMaxStreams},
+		Websocket: ffi.MoqWebSocketConfig{Enabled: c.websocketEnabled, DelayUs: delay},
+		Once:      c.once,
+		Backoff:   backoff,
+	}
+	if c.publish != nil {
+		cfg.Publish = &c.publish.inner
+	}
+	if c.consume != nil {
+		cfg.Consume = &c.consume.inner
+	}
+	return cfg, nil
 }
 
 // Backoff is the retry pacing for automatic reconnects: the delay starts at
 // Initial, multiplies by Multiplier after each failed attempt, and caps at Max.
 // After Timeout of consecutive failures the connection gives up for good.
 //
-// Every field is optional: the zero value means the default beside it, so a
-// partial Backoff overrides only what it sets. Pass RetryForever as Timeout to
-// keep retrying indefinitely.
+// Every field is optional: the zero value means the native default (1s, x2, 5s,
+// and a 10s window), so a partial Backoff overrides only what it sets. Pass
+// RetryForever as Timeout to keep retrying indefinitely.
 type Backoff struct {
-	Initial    time.Duration // delay before the first retry (default 1s)
-	Multiplier uint32        // applied to the delay after each failure (default 2)
-	Max        time.Duration // ceiling on the delay (default 5s)
-	Timeout    time.Duration // give up after this long (default 10s)
+	Initial    time.Duration // delay before the first retry
+	Multiplier uint32        // applied to the delay after each failure
+	Max        time.Duration // ceiling on the delay
+	Timeout    time.Duration // give up after this long
 }
 
 // RetryForever, passed as Backoff.Timeout, keeps a reconnecting session retrying
 // indefinitely instead of giving up.
 const RetryForever time.Duration = -1
 
-const (
-	defaultBackoffInitial    = time.Second
-	defaultBackoffMultiplier = 2
-	defaultBackoffMax        = 5 * time.Second
-	defaultBackoffTimeout    = 10 * time.Second
-)
-
-// ffi resolves the unset fields, which is load-bearing rather than cosmetic:
-// the native side reads a zero timeout as "retry forever" and a zero delay as
-// no pacing at all, so passing Go's zero value straight through would turn
+// ffi leaves the zero fields unset, which is load-bearing rather than cosmetic:
+// the native side reads a zero timeout as "retry forever" and a zero delay as no
+// pacing at all, so passing Go's zero value straight through would turn
 // Backoff{} into an unthrottled dial loop.
-func (b Backoff) ffi() ffi.MoqBackoff {
-	multiplier := b.Multiplier
-	if multiplier == 0 {
-		multiplier = defaultBackoffMultiplier
+func (b Backoff) ffi() (ffi.MoqBackoff, error) {
+	var out ffi.MoqBackoff
+	var err error
+	if out.InitialUs, err = backoffMicros("backoff initial", b.Initial); err != nil {
+		return out, err
 	}
-
+	if out.MaxUs, err = backoffMicros("backoff max", b.Max); err != nil {
+		return out, err
+	}
+	if b.Multiplier != 0 {
+		out.Multiplier = &b.Multiplier
+	}
 	// Zero is the native encoding of "forever" and also Go's zero value, so the
-	// two are spelled apart here: Backoff{} keeps the documented default and
-	// forever is explicit at the call site.
-	timeoutUs := backoffUs(b.Timeout, defaultBackoffTimeout)
+	// two are spelled apart here: Backoff{} keeps the default and forever is
+	// explicit at the call site.
 	if b.Timeout == RetryForever {
-		timeoutUs = 0
+		forever := uint64(0)
+		out.TimeoutUs = &forever
+	} else if out.TimeoutUs, err = backoffMicros("backoff timeout", b.Timeout); err != nil {
+		return out, err
 	}
-
-	return ffi.MoqBackoff{
-		InitialUs:  backoffUs(b.Initial, defaultBackoffInitial),
-		Multiplier: multiplier,
-		MaxUs:      backoffUs(b.Max, defaultBackoffMax),
-		TimeoutUs:  timeoutUs,
-	}
+	return out, nil
 }
 
-// backoffUs converts d to microseconds, substituting def when it is unset or
-// negative (a negative would wrap when cast to uint64) and flooring at 1us so a
-// sub-microsecond duration doesn't truncate to an unpaced zero.
-func backoffUs(d, def time.Duration) uint64 {
-	if d <= 0 {
-		d = def
+// backoffMicros leaves a zero duration unset and floors a positive one at 1us,
+// so a sub-microsecond duration doesn't truncate to an unpaced zero.
+func backoffMicros(name string, d time.Duration) (*uint64, error) {
+	if d == 0 {
+		return nil, nil
 	}
-	us := d.Microseconds()
-	if us < 1 {
-		us = 1
+	us, err := micros(name, d)
+	if err != nil {
+		return nil, err
 	}
-	return uint64(us)
+	us = max(us, 1)
+	return &us, nil
 }
 
 // WithTLSVerify toggles TLS certificate verification. Verification is on by
 // default; pass false only against a relay with a self-signed certificate
 // during development.
 func WithTLSVerify(verify bool) ClientOption {
-	return func(c *clientConfig) { c.tlsVerify = verify }
+	return func(c *clientConfig) { c.tlsInsecure = !verify }
 }
 
 // WithTLSRoots trusts PEM root certificate files instead of the system roots.
 func WithTLSRoots(paths ...string) ClientOption {
 	roots := append([]string(nil), paths...)
-	return func(c *clientConfig) {
-		c.tlsRoots = roots
-		c.tlsRootsSet = true
-	}
+	return func(c *clientConfig) { c.tlsRoots = roots }
 }
 
 // WithTLSSystemRoots controls whether platform roots are trusted with custom roots.
 func WithTLSSystemRoots(systemRoots bool) ClientOption {
-	return func(c *clientConfig) {
-		c.tlsSystemRoots = systemRoots
-		c.tlsSystemRootsSet = true
-	}
+	return func(c *clientConfig) { c.tlsSystemRoots = &systemRoots }
 }
 
 // WithTLSFingerprints pins the peer to one of these SHA-256 certificate fingerprints.
 func WithTLSFingerprints(fingerprints ...string) ClientOption {
 	pins := append([]string(nil), fingerprints...)
-	return func(c *clientConfig) {
-		c.tlsFingerprints = pins
-		c.tlsFingerprintsSet = true
-	}
+	return func(c *clientConfig) { c.tlsFingerprints = pins }
 }
 
 // WithClientTLSCert sets the path to a PEM certificate chain for mTLS.
@@ -143,6 +163,13 @@ func WithClientTLSKey(path string) ClientOption {
 // WithBind sets the local UDP socket bind address (default "[::]:0").
 func WithBind(addr string) ClientOption {
 	return func(c *clientConfig) { c.bind = &addr }
+}
+
+// WithVersions restricts the protocol versions offered, most preferred first,
+// spelled like "moq-lite-03". By default every supported version is offered.
+func WithVersions(versions ...string) ClientOption {
+	offered := append([]string(nil), versions...)
+	return func(c *clientConfig) { c.versions = offered }
 }
 
 // WithQUICMaxStreams caps the concurrent QUIC streams the peer may open toward
@@ -173,25 +200,25 @@ func WithWebSocketDelay(delay time.Duration) ClientOption {
 // consumed through it ride out the gap. Pass false for a one-shot dial whose
 // transport close ends the session.
 func WithReconnect(enabled bool) ClientOption {
-	return func(c *clientConfig) { c.reconnect = &enabled }
+	return func(c *clientConfig) { c.once = !enabled }
 }
 
 // WithBackoff sets retry pacing for the automatic reconnect.
 func WithBackoff(backoff Backoff) ClientOption {
-	return func(c *clientConfig) { c.backoff = &backoff }
+	return func(c *clientConfig) { c.backoff = backoff }
 }
 
 // WithPublishOrigin sets the origin whose broadcasts are published to the
-// remote. Pair with WithSubscribeOrigin for full control; omit both to get a
+// remote. Pair with WithConsumeOrigin for full control; omit both to get a
 // shared internal origin.
 func WithPublishOrigin(o *OriginProducer) ClientOption {
 	return func(c *clientConfig) { c.publish = o }
 }
 
-// WithSubscribeOrigin sets the origin that receives broadcasts consumed from
+// WithConsumeOrigin sets the origin that receives broadcasts consumed from
 // the remote.
-func WithSubscribeOrigin(o *OriginProducer) ClientOption {
-	return func(c *clientConfig) { c.subscribe = o }
+func WithConsumeOrigin(o *OriginProducer) ClientOption {
+	return func(c *clientConfig) { c.consume = o }
 }
 
 // Client is a connected MoQ client with automatic origin wiring. When no origin
@@ -203,74 +230,28 @@ type Client struct {
 	consumer  *OriginConsumer
 	session   *Session
 	closeOnce sync.Once
+	closeErr  error
 }
 
 // Dial connects to a MoQ server and returns the established client. Cancel ctx
 // to abort an in-flight connect.
 func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error) {
-	// Verification is on unless WithTLSVerify(false) says otherwise; the zero
-	// value would mean the opposite.
-	cfg := clientConfig{tlsVerify: true}
+	var cfg clientConfig
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-
-	c := &Client{}
-	inner := ffi.NewMoqClient()
-	var err error
-	if !cfg.tlsVerify {
-		err = inner.SetTlsVerify(false)
-	}
-	if err == nil && cfg.tlsRootsSet {
-		err = inner.SetTlsRoots(cfg.tlsRoots)
-	}
-	if err == nil && cfg.tlsSystemRootsSet {
-		err = inner.SetTlsSystemRoots(cfg.tlsSystemRoots)
-	}
-	if err == nil && cfg.tlsFingerprintsSet {
-		err = inner.SetTlsFingerprints(cfg.tlsFingerprints)
-	}
-	if err == nil && cfg.tlsCert != nil {
-		err = inner.SetTlsCert(cfg.tlsCert)
-	}
-	if err == nil && cfg.tlsKey != nil {
-		err = inner.SetTlsKey(cfg.tlsKey)
-	}
-	if err == nil && cfg.bind != nil {
-		err = inner.SetBind(*cfg.bind)
-	}
-	if err == nil && cfg.quicMaxStreams != nil {
-		err = inner.SetQuicMaxStreams(*cfg.quicMaxStreams)
-	}
-	if err == nil && cfg.websocketEnabled != nil {
-		err = inner.SetWebsocketEnabled(*cfg.websocketEnabled)
-	}
-	if err == nil && cfg.websocketDelay != nil {
-		if *cfg.websocketDelay < 0 {
-			err = fmt.Errorf("negative websocket delay: %v", *cfg.websocketDelay)
-		} else {
-			err = inner.SetWebsocketDelay(uint64(cfg.websocketDelay.Microseconds()))
-		}
-	}
-	if err == nil && cfg.reconnect != nil {
-		err = inner.SetReconnect(*cfg.reconnect)
-	}
-	if err == nil && cfg.backoff != nil {
-		err = inner.SetBackoff(cfg.backoff.ffi())
-	}
-	if err == nil && cfg.publish != nil {
-		err = inner.SetPublish(&cfg.publish.inner)
-	}
-	if err == nil && cfg.subscribe != nil {
-		err = inner.SetConsume(&cfg.subscribe.inner)
-	}
+	config, err := cfg.ffi()
 	if err != nil {
-		inner.Cancel()
 		return nil, err
 	}
-	c.inner = inner
 
-	session, err := runHandle(ctx, inner.Cancel, func(ctx context.Context) (*ffi.MoqSession, error) {
+	inner, err := ffi.NewMoqClient(config)
+	if err != nil {
+		return nil, err
+	}
+	c := &Client{inner: inner}
+
+	session, err := bridge.CallHandle(ctx, inner.Cancel, func(ctx context.Context) (*ffi.MoqSession, error) {
 		return inner.Connect(ctx, url)
 	})
 	if err != nil {
@@ -324,11 +305,11 @@ func (c *Client) Session() *Session {
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		if c.session != nil {
-			c.session.Shutdown()
+			c.closeErr = c.session.Shutdown(context.Background())
 		}
 		if c.inner != nil {
 			c.inner.Cancel()
 		}
 	})
-	return nil
+	return c.closeErr
 }

@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { Group, Error as NetError, Track } from "@moq/net";
+import { expect, spyOn, test } from "bun:test";
+import { Group, Track } from "@moq/net";
 import * as z from "@zod/mini";
 import { Desync } from "../error.ts";
 import { Decoder } from "./decoder.ts";
@@ -109,7 +109,7 @@ test("a rejected record ends the track without opening a group", async () => {
 	const subscriber = track.subscribe().ordered();
 	const producer = new Producer<unknown>({ track });
 
-	expect(() => producer.append(undefined)).toThrow("not representable as JSON");
+	expect(() => producer.append({ value: undefined })).toThrow("not representable as JSON");
 
 	// Nothing was appended, so the log has no group for a consumer to enter and wait in.
 	expect(subscriber.latest()).toBeUndefined();
@@ -160,11 +160,11 @@ test("a rejected record leaves the producer able to retry", () => {
 
 	// Closing the track makes every write fail, standing in for any post-appendGroup rejection.
 	track.close();
-	expect(() => producer.append({ n: 1 })).toThrow();
+	expect(() => producer.append({ value: { n: 1 } })).toThrow();
 
 	// The retry fails on the same closed track, but it must fail for that reason rather than the
 	// encoder having latched itself shut.
-	expect(() => producer.append({ n: 2 })).not.toThrow("compression desynchronized");
+	expect(() => producer.append({ value: { n: 2 } })).not.toThrow("compression desynchronized");
 });
 
 test("a failed write on the very first record still ends the track", async () => {
@@ -175,15 +175,23 @@ test("a failed write on the very first record still ends the track", async () =>
 	const subscriber = track.subscribe().ordered();
 	const producer = new Producer<string>({ track });
 
-	// Serializes past the group cache limit, so `appendGroup` succeeds and `writeFrame` rejects it.
-	const oversized = "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1);
-	expect(() => producer.append(oversized)).toThrow(NetError.FrameTooLarge);
+	// The budget check refuses anything the group would, so stub the write to stand in for any
+	// rejection past it: `appendGroup` succeeds and `writeFrame` throws.
+	const failure = new Error("write rejected");
+	const write = spyOn(Group.Producer.prototype, "writeFrame").mockImplementation(() => {
+		throw failure;
+	});
+	try {
+		expect(() => producer.append({ value: "x" })).toThrow(failure);
+	} finally {
+		write.mockRestore();
+	}
 
 	// The consumer is handed the group that was already published, and reading it surfaces the
 	// abort. Without ending the track that group stays open and empty, so this read hangs instead.
 	const group = await subscriber.nextGroup();
 	expect(group).toBeDefined();
-	await expect(group?.readFrame()).rejects.toThrow(NetError.FrameTooLarge);
+	await expect(group?.readFrame()).rejects.toThrow(failure);
 });
 
 test("stream schema validates on both sides", () => {

@@ -28,6 +28,13 @@ while IFS= read -r flag; do includes+=("$flag"); done <<<"$includes_raw"
 
 ffmpeg=$(pkg-config --cflags libavcodec libavutil libswscale)
 
+# The output and source tests run against the real moq-ffi, over a server in
+# the same process. The bindings compile here, with the tests' flags.
+moq_prefix=$("$here/moq.sh")
+export PKG_CONFIG_PATH="$moq_prefix/lib/pkgconfig"
+moq_sources=$(pkg-config --variable=sources moq-cpp)
+moq_libs=$(pkg-config --libs moq-cpp)
+
 flags=(-std=c++17 -g -O0 -pthread)
 if [ "$mode" = "tsan" ]; then
     flags+=(-fsanitize=thread)
@@ -36,19 +43,21 @@ fi
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
-# One binary per source under test: each test file defines its own libobs and
-# libmoq stubs, so two of them can't share a link. Header-only helpers
-# (quality defaults) build as a third binary with no plugin source.
-for name in moq-output moq-source; do
+"$cxx" "${flags[@]}" "${includes[@]}" -c "$moq_sources" -o "$out/moq.o"
+
+# One binary per source under test: each test file defines its own libobs
+# stubs, so two of them can't share a link. Header-only helpers (quality
+# defaults) build as separate binaries with no plugin source.
+for name in moq-output moq-source obs-moq; do
     # shellcheck disable=SC2086
-    # $ffmpeg stays unquoted on purpose: pkg-config hands back one
-    # space-separated string, and splitting it is the intended reading.
+    # $ffmpeg and $moq_libs stay unquoted on purpose: pkg-config hands back
+    # one space-separated string, and splitting it is the intended reading.
     "$cxx" "${flags[@]}" "${includes[@]}" $ffmpeg \
-        -o "$out/$name-test" "test/$name-test.cpp" "src/$name.cpp"
-    TSAN_OPTIONS="halt_on_error=1" "$out/$name-test"
+        -o "$out/$name-test" "test/$name-test.cpp" "src/$name.cpp" "$out/moq.o" $moq_libs
+    TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/test/tsan.supp" "$out/$name-test"
 done
 for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark; do
     "$cxx" "${flags[@]}" "${includes[@]}" \
         -o "$out/$name-test" "test/$name-test.cpp"
-    TSAN_OPTIONS="halt_on_error=1" "$out/$name-test"
+    TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/test/tsan.supp" "$out/$name-test"
 done

@@ -174,8 +174,8 @@ describe("relativeBroadcast", () => {
 		const { source, owner } = broadcast("a/b");
 		const effect = new Effect();
 		try {
-			// The catalog broadcast is consumed by an effect, which settles a microtask later.
-			await Promise.resolve();
+			// The catalog broadcast is consumed by an effect, which settles a few microtasks later.
+			await settle();
 			const own = source.out.active.peek();
 			expect(own).toBeDefined();
 			expect(source.relativeBroadcast(effect, undefined)).toBe(own);
@@ -230,6 +230,171 @@ describe("blind resolution", () => {
 	});
 });
 
+describe("restart", () => {
+	it.each([true, false])("follows a republish through its announcement (announced: %p)", async (announced) => {
+		const owner = new Origin.Producer();
+		const name = Path.from("live.hang");
+		const first = publish(owner, name);
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced, catalogFormat: "manual" });
+		await settle();
+		const old = source.out.active.peek();
+		expect(old).toBeDefined();
+
+		// A republish replaces the old instance, which ends the request on it; the restart
+		// announcement is what requests the new one.
+		const second = publish(owner, name);
+		await settle();
+		const restarted = source.out.active.peek();
+		expect(restarted).toBeDefined();
+		expect(restarted).not.toBe(old);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		// The publisher goes offline: offline, not an error, until it is announced again.
+		second.close();
+		first.close();
+		await settle();
+		expect(source.out.active.peek()).toBeUndefined();
+		expect(source.out.error.peek()).toBeUndefined();
+
+		const third = publish(owner, name);
+		await settle();
+		const resumed = source.out.active.peek();
+		expect(resumed).toBeDefined();
+		expect(resumed).not.toBe(restarted);
+
+		third.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+
+	it("opens no request after teardown races a start", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("live.hang");
+		const published = publish(owner, name);
+
+		// Count every request the player opens and closes.
+		let open = 0;
+		const request = owner.request.bind(owner);
+		owner.request = (path, options) => {
+			const opened = request(path, options);
+			open += 1;
+			const close = opened.close.bind(opened);
+			let closed = false;
+			opened.close = () => {
+				if (!closed) open -= 1;
+				closed = true;
+				close();
+			};
+			return opened;
+		};
+
+		// The initial start settles just before teardown, so its continuation runs after it.
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		queueMicrotask(() => queueMicrotask(() => source.close()));
+		await settle();
+		expect(open).toBe(0);
+
+		published.close();
+		owner.close();
+	});
+
+	it("moves to a more specific announcement of another instance", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("pool/job.hang");
+		const pool = owner.dynamic(Path.from("pool"), { epoch: Moq.Epoch.mint() });
+		const requests = pool.requested();
+		const upstream = new Moq.Broadcast.Producer();
+		void (async () => {
+			for await (const request of requests) request.accept(upstream);
+		})();
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		await settle();
+		const old = source.out.active.peek();
+		expect(old).toBeDefined();
+
+		// A newer publisher announces the exact path: a start, not a restart, for this name.
+		const exact = owner.createBroadcast(name);
+		exact.announce({ epoch: Moq.Epoch.mint() });
+		await settle();
+		const moved = source.out.active.peek();
+		expect(moved).toBeDefined();
+		expect(moved).not.toBe(old);
+
+		// The pool going leaves playback on the newer publisher.
+		pool.close();
+		await settle();
+		expect(source.out.active.peek()).toBe(moved);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		exact.close();
+		upstream.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+});
+
+describe("refusal", () => {
+	for (const announced of [true, false]) {
+		it(`reports a refusal until a fresh request (announced: ${announced})`, async () => {
+			const owner = new Origin.Producer();
+			const route = owner.dynamic(Path.from("room"));
+			const requests = route.requested();
+			const name = new Signal(Path.from("room/refused.hang"));
+			const enabled = new Signal(true);
+			const source = new Broadcast({ origin: owner, name, enabled, announced, catalogFormat: "hang" });
+
+			const first = await requests.next();
+			expect(first.value?.path).toBe(Path.from("room/refused.hang"));
+			first.value?.reject(new Error("not allowed"));
+			await settle();
+
+			expect(source.out.error.peek()?.message).toBe("not allowed");
+			expect(source.out.active.peek()).toBeUndefined();
+			expect(source.out.status.peek()).toBe("error");
+
+			// Terminal: the handler that said no is never asked again.
+			let again = requests.next();
+			let asked = false;
+			void again.then(() => {
+				asked = true;
+			});
+			for (let i = 0; i < 5; i++) await settle();
+			expect(asked).toBe(false);
+			expect(source.out.error.peek()?.message).toBe("not allowed");
+			expect(source.out.status.peek()).toBe("error");
+
+			// A new name is a fresh request: it clears the error and asks again.
+			name.set(Path.from("room/other.hang"));
+			const second = await again;
+			expect(second.value?.path).toBe(Path.from("room/other.hang"));
+			await settle();
+			expect(source.out.error.peek()).toBeUndefined();
+			expect(source.out.status.peek()).toBe("offline");
+
+			second.value?.reject(new Error("still not allowed"));
+			await settle();
+			expect(source.out.status.peek()).toBe("error");
+
+			// So is re-enabling.
+			again = requests.next();
+			enabled.set(false);
+			await settle();
+			expect(source.out.error.peek()).toBeUndefined();
+			expect(source.out.status.peek()).toBe("offline");
+			enabled.set(true);
+			const third = await again;
+			expect(third.value?.path).toBe(Path.from("room/other.hang"));
+
+			source.close();
+			route.close();
+			owner.close();
+			await settle();
+		});
+	}
+});
+
 describe("cross-broadcast renditions", () => {
 	it("hides a rendition until its broadcast is announced", async () => {
 		// A transcoder under `public/` referencing a source under `private/`: a viewer scoped to
@@ -264,6 +429,77 @@ describe("cross-broadcast renditions", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["local"]);
 		} finally {
+			source.close();
+			owner.close();
+		}
+	});
+
+	it("follows a republished rendition broadcast through its announcement", async () => {
+		const owner = new Origin.Producer();
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("public/transcode.hang"),
+			enabled: true,
+			catalogFormat: "manual",
+		});
+		const rel = Path.normalizeRelative("../private/source");
+		const resolved: (Moq.Broadcast.Consumer | undefined)[] = [];
+		const effect = new Effect();
+		effect.run((nested) => {
+			resolved.push(source.relativeBroadcast(nested, rel));
+		});
+
+		try {
+			const first = publish(owner, Path.from("private/source"));
+			await settle();
+			const old = resolved.at(-1);
+			expect(old).toBeDefined();
+
+			// The republish ends the request on the old instance; its restart requests the new one.
+			publish(owner, Path.from("private/source"));
+			await settle();
+			const restarted = resolved.at(-1);
+			expect(restarted).toBeDefined();
+			expect(restarted).not.toBe(old);
+			first.close();
+		} finally {
+			effect.close();
+			source.close();
+			owner.close();
+		}
+	});
+
+	it("follows a rendition broadcast that ends and starts again in one tick", async () => {
+		const owner = new Origin.Producer();
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("public/transcode.hang"),
+			enabled: true,
+			catalogFormat: "manual",
+		});
+		const rel = Path.normalizeRelative("../private/source");
+		const resolved: (Moq.Broadcast.Consumer | undefined)[] = [];
+		const effect = new Effect();
+		effect.run((nested) => {
+			resolved.push(source.relativeBroadcast(nested, rel));
+		});
+
+		try {
+			const first = publish(owner, Path.from("private/source"));
+			await settle();
+			const old = resolved.at(-1);
+			expect(old).toBeDefined();
+
+			// An end then a start, delivered back to back: a new instance all the same.
+			first.close();
+			const second = publish(owner, Path.from("private/source"));
+			await settle();
+			const restarted = resolved.at(-1);
+			expect(restarted).toBeDefined();
+			expect(restarted).not.toBe(old);
+			second.close();
+		} finally {
+			effect.close();
 			source.close();
 			owner.close();
 		}
@@ -309,6 +545,111 @@ describe("cross-broadcast renditions", () => {
 			expect(tracks("binary")).toEqual([]);
 		} finally {
 			source.close();
+			owner.close();
+		}
+	});
+});
+
+// A derived rendition produced only on demand by a service that claims a covering prefix (a
+// wildcard) instead of announcing each path. Nothing announces the rendition until something
+// subscribes to it, so the player must list it from the claim alone. The rendition is a sibling:
+// one beneath its source is already covered by the source's own announcement. The service prefix
+// is hidden, as a deployment keeps it out of listings, so the claim is only seen by opting in.
+describe("wildcard renditions", () => {
+	const name = Path.from("live/foo.hang");
+	const derived = Path.from(".pro/transcode/foo.hang");
+	const rel = Path.normalizeRelative("../.pro/transcode/foo.hang");
+
+	const watch = (owner: Origin.Producer) =>
+		new Broadcast({
+			origin: owner,
+			name,
+			enabled: true,
+			catalogFormat: "manual",
+			catalog: {
+				video: {
+					renditions: {
+						source: video("avc1.64001e"),
+						transcode: video("avc1.640028", rel),
+					},
+				},
+			} as Catalog.Root,
+		});
+
+	it("lists and demands a rendition only a wildcard covers", async () => {
+		const owner = new Origin.Producer();
+		const main = publish(owner, name);
+		const source = watch(owner);
+		const effect = new Effect();
+
+		try {
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source"]);
+
+			const worker = owner.dynamic(Path.from(".pro/transcode"));
+			const requests = worker.requested();
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
+
+			// Selecting the rendition is what asks the worker to start, before anything announces it.
+			let active: Moq.Broadcast.Consumer | undefined;
+			effect.run((nested) => {
+				active = source.relativeBroadcast(nested, rel);
+			});
+			const { value: request } = await requests.next();
+			expect(request?.path).toBe(derived);
+			expect(active).toBeUndefined();
+
+			const produced = new Moq.Broadcast.Producer();
+			produced
+				.createTrack("video", { timescale: Moq.Time.Timescale.MILLI })
+				.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Moq.Time.Timestamp.now() });
+			request?.accept(produced);
+			await settle();
+			expect(active).toBeDefined();
+			const track = active?.track("video").subscribe().ordered();
+			expect(await track?.readString()).toBe("frame");
+			track?.close();
+
+			// The worker announcing the path it now serves leaves the rendition where it was.
+			const concrete = owner.createBroadcast(derived);
+			concrete.announce();
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
+			expect(active).toBeDefined();
+
+			concrete.close();
+			worker.close();
+		} finally {
+			effect.close();
+			source.close();
+			main.close();
+			owner.close();
+		}
+	});
+
+	it("hides the rendition once the last covering wildcard is withdrawn", async () => {
+		const owner = new Origin.Producer();
+		const main = publish(owner, name);
+		const source = watch(owner);
+
+		try {
+			// A catch-all (an archive) and a narrower pool both cover the derived path.
+			const archive = owner.dynamic(Path.empty());
+			const worker = owner.dynamic(Path.from(".pro/transcode"));
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
+
+			worker.close();
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
+
+			archive.close();
+			await settle();
+			expect(videoRenditions(source)).toEqual(["source"]);
+		} finally {
+			source.close();
+			main.close();
 			owner.close();
 		}
 	});

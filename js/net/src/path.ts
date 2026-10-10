@@ -33,7 +33,10 @@
  * const joined = Path.join(base, Path.from("users"));
  * console.log(joined); // "api/v1/users"
  * ```
+ * @module
  */
+
+/** A normalized broadcast path. */
 export type Valid = string & { __brand: "Name" };
 
 /**

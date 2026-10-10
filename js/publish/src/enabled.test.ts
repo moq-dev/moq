@@ -2,8 +2,8 @@ import { expect, mock, test } from "bun:test";
 
 // Bun cannot load the blob-URL worker/worklet imports used by the media pipelines. Nothing in
 // these default-input tests reaches either implementation.
-mock.module("./video/capture-worker.ts?worker&inline", () => ({ default: class {} }));
-mock.module("./audio/capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
+mock.module("./video/capture-worker.ts?worklet", () => ({ default: async () => "blob:fake-worker" }));
+mock.module("./audio/capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
 
 const Publish = await import("./index");
 

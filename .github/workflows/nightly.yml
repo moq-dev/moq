@@ -9,8 +9,8 @@ name: Nightly
 # no artifacts with the default one, which is several minutes of duplicate work
 # that a PR gate can't justify for how rarely it catches something. `obs` is
 # diff-independent because its PR-time counterpart can't be: obs.yml has to
-# name the paths that can break an external link to libmoq.a, and no list of
-# paths covers every one of them (see the comment there).
+# name the paths that can break an external link to a Rust staticlib, and no
+# list of paths covers every one of them (see the comment there).
 #
 # The `release-*` jobs are diff-independent because the release workflows only
 # ever run on a tag: a change that compiles under plain cargo can still break a
@@ -43,6 +43,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  x11:
+    uses: ./.github/workflows/x11.yml
+
   nightly:
     name: Nightly
     runs-on: ubuntu-24.04-arm
@@ -79,6 +82,14 @@ jobs:
         run: nix develop --command just rs features
         env:
           NEXTEST_PROFILE: ci
+
+      - name: Audio grouping relay benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just bench-audio
+
+      - name: Audio mixer benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-playback
 
       # A single route re-price should expose any slope over the route table or
       # over independent observers of the new live broadcast map.
@@ -122,14 +133,45 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench track
 
+      - name: JS catalog estimate fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js catalog-bench
+
+      # Times Effect create and close beside a bare `new Error()`. No threshold: it only
+      # has to keep running, and its numbers track the creation stack's cost.
+      - name: JS signals effect benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js signals-bench
+
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
       # next manual run. Timing is not compared; nextest never runs a
-      # `harness = false` target. `fuzz` enables the announce bench, which the
-      # `'*'` glob otherwise refuses.
+      # `harness = false` target. `fuzz` enables the benches that require it,
+      # which the `'*'` glob otherwise refuses.
       - name: moq-net benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
+
+      # One relay's stats tick (drain plus plain and compressed encode), swept
+      # over held paths, tiers, and how many of those paths changed, plus the
+      # decode table. `--test` runs each tick routine once (decode ignores it
+      # and runs its whole table), so a panic (a plain
+      # frame past the cache cap, a drain that drops a held path) fails here
+      # instead of on the next manual run. Timing is not compared. `bench`
+      # exposes the hidden producer hook; without it the tick target is skipped.
+      - name: moq-stats producer tick and decode benchmarks
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-stats --test
+
+      # The catalog bench asserts the estimate rate limit's publish counts, so one pass is
+      # the regression check.
+      - name: moq-mux catalog estimate fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
+
+      - name: RTMP chunk-stream benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-rtmp --test
 
       - name: BBB rendition alignment
         if: ${{ !cancelled() }}
@@ -139,9 +181,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit
 
-      # The OBS plugin and libmoq's C fixtures are the only things that link
-      # libmoq.a from outside cargo, so a stale `rs/libmoq/native-libs/*.txt`
-      # breaks them and nothing else. obs.yml lists the inputs that can do that,
+      # The OBS plugin (over moq-ffi) and moq-c's C fixtures link a Rust
+      # staticlib from outside cargo, so a stale `rs/moq-c/native-libs/*.txt`
+      # breaks them and no cargo build. obs.yml lists the inputs that can do that,
       # but a list of paths can't be complete: a build script emitting
       # `cargo::rustc-link-lib` needs no manifest change, and widening that
       # filter to `rs/**` would run a link on nearly every PR. Being
@@ -151,7 +193,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop .#obs --command just obs ci
 
-      - name: libmoq C fixtures
+      - name: moq-c C fixtures
         if: ${{ !cancelled() }}
         run: nix develop --command just rs c-tests
 
@@ -209,6 +251,46 @@ jobs:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
 
+  # Instant/SystemTime ranges and native transport behavior differ by OS.
+  # The PR platform gate only compiles them; this job runs their tests nightly.
+  # Outside Nix like platform.yml, with no cache that would evict Linux's store.
+  platform-tests:
+    name: Tests (${{ matrix.recipe }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            recipe: rs windows-test
+          - os: macos-latest
+            recipe: rs macos-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: ./.github/actions/just
+      - name: Install nextest
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: nextest@0.9.146
+      - name: Test
+        shell: bash
+        run: just ${{ matrix.recipe }}
+        env:
+          NEXTEST_PROFILE: ci
+
   # Plays the matrix in headless Chromium through moq-shaper and grades what the
   # listener heard against test/audio-quality/budgets.json. ARM64 like wasm.yml,
   # the only architecture cache.yml warms a Rust store for.
@@ -240,7 +322,7 @@ jobs:
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
       - name: Audio quality
-        run: nix develop --command just test audio-quality --enforce
+        run: nix develop --command just test audio-quality --enforce --capture
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
@@ -296,9 +378,15 @@ jobs:
       contents: write
       id-token: write
 
-  release-libmoq:
-    name: libmoq
-    uses: ./.github/workflows/libmoq.yml
+  release-moq-c:
+    name: moq-c
+    uses: ./.github/workflows/moq-c.yml
+    permissions:
+      contents: write
+
+  release-cpp:
+    name: Release Cpp
+    uses: ./.github/workflows/release-cpp.yml
     permissions:
       contents: write
 

@@ -151,15 +151,20 @@ function serveSnapshot<T>(
 		const net = effect.get(broadcast.net);
 		if (!net) return;
 
-		// A day-long cache so a late joiner still replays the latest value.
-		const track = net.createTrack(name, { maxAge: Moq.Time.Milli(86_400_000), priority: PRIORITY });
+		// A day-long cache so a late joiner still replays the latest value. Each value is stamped
+		// when written, so the track is timed.
+		const track = net.createTrack(name, {
+			timescale: Moq.Time.Timescale.MILLI,
+			maxAge: Moq.Time.Milli(86_400_000),
+			priority: PRIORITY,
+		});
 		effect.cleanup(() => track.close());
 
 		const producer = new Json.Snapshot.Producer<T>({ track });
 		effect.cleanup(() => producer.finish());
 
 		effect.run((effect) => {
-			producer.update(value(effect));
+			producer.update({ value: value(effect), at: Moq.Time.Timestamp.now() });
 		});
 	});
 }

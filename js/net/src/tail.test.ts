@@ -3,11 +3,11 @@ import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
-import { createMockTransportPair } from "./mock.ts";
+import { createMockTransportPair, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { TAIL_GRACE_MS, Tail } from "./tail.ts";
-import { Milli } from "./time.ts";
+import { Milli, Timescale } from "./time.ts";
 import type { Ordered } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -15,7 +15,7 @@ const url = new URL("https://localhost:4443/test");
 
 // Long enough that no group is skipped as stale, and the moq-lite grace for the one group the
 // IETF case never produces.
-const MAX_AGE = Milli(100);
+const MAX_DELAY = Milli(100);
 
 async function session(protocol: string) {
 	const pair = createMockTransportPair(protocol);
@@ -26,9 +26,9 @@ async function session(protocol: string) {
 	]);
 	const broadcast = origin.createBroadcast(Path.from("test"));
 	broadcast.announce();
-	const video = broadcast.createTrack("video");
+	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const remote = wireOf(client).consume(Path.from("test"));
-	const reader = remote.track("video").subscribe({ maxAge: MAX_AGE }).ordered();
+	const reader = remote.track("video").subscribe({ maxDelay: MAX_DELAY }).ordered();
 
 	return {
 		video,
@@ -36,8 +36,8 @@ async function session(protocol: string) {
 		close: () => {
 			broadcast.close();
 			remote.close();
-			client.close();
-			server.close();
+			client.abort();
+			server.abort();
 		},
 	};
 }
@@ -58,15 +58,15 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 	async (alpn) => {
 		const { video, reader, close } = await session(alpn);
 		try {
-			video.writeString("0");
+			video.writeFrame(textFrame("0"));
 			expect(await reader.readString()).toBe("0");
-			video.writeString("1");
+			video.writeFrame(textFrame("1"));
 			expect(await reader.readString()).toBe("1");
 
 			video.finishAt(3);
 			expect(await reader.finished()).toBe(3);
 
-			video.writeString("2");
+			video.writeFrame(textFrame("2"));
 			video.close();
 			expect(await readAll(reader)).toEqual(["2"]);
 			expect(await reader.closed).toBeNull();
@@ -85,12 +85,12 @@ test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_20])(
 	async (alpn) => {
 		const { video, reader, close } = await session(alpn);
 		try {
-			video.writeString("0");
+			video.writeFrame(textFrame("0"));
 			expect(await reader.readString()).toBe("0");
 
 			video.finishAt(4);
-			video.writeString("1");
-			video.writeString("2");
+			video.writeFrame(textFrame("1"));
+			video.writeFrame(textFrame("2"));
 			const ended = performance.now();
 			video.close();
 

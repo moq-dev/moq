@@ -17,7 +17,7 @@
 //! considered, hardware (platform-gated) before the OpenH264 software fallback
 //! when this build enables it.
 
-use super::encoder::{Codec, Config, Kind};
+use super::encoder::{Applied, Codec, Config, Kind};
 use crate::encode::Encoded;
 use crate::{Error, Frame};
 
@@ -27,7 +27,7 @@ mod openh264;
 #[cfg(test)]
 pub(crate) mod probe;
 
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 mod videotoolbox;
 
 #[cfg(target_os = "windows")]
@@ -47,7 +47,8 @@ mod vaapi;
 
 /// An opened video encoder. Feed it frames at the configured resolution; get
 /// back zero or more access units in the codec's wire framing, each stamped with
-/// the timestamp of the frame it came from.
+/// the timestamp of the frame it came from and marked when it is a keyframe,
+/// whether forced by `cut` or placed by the backend's own GOP cadence.
 pub(crate) trait Backend {
 	/// Encode one frame, opening a group at it (an IDR) when `cut` is set.
 	/// Backends place group boundaries on their own per [`Config::gop`], so this
@@ -93,6 +94,56 @@ pub(crate) trait Backend {
 
 	/// The encoder name in use, e.g. `"videotoolbox"` (for logging and errors).
 	fn name(&self) -> &'static str;
+
+	/// The latency and compression controls this backend applied at open for
+	/// [`Config::preset`](super::Config::preset).
+	///
+	/// The default claims nothing, which is the honest answer for a backend that
+	/// has not confirmed its controls took effect.
+	fn applied(&self) -> Applied {
+		Applied::default()
+	}
+}
+
+/// Whether one NAL unit (header first, no start code) is a keyframe slice: an
+/// H.264 IDR (type 5), or an H.265 IRAP picture (BLA/IDR/CRA, types 16..=23).
+#[cfg(any(
+	apple,
+	target_os = "windows",
+	all(target_os = "linux", any(feature = "nvidia", feature = "vaapi", feature = "v4l2")),
+	test
+))]
+fn keyframe_nal(codec: Codec, nal: &[u8]) -> bool {
+	let Some(&header) = nal.first() else {
+		return false;
+	};
+	match codec {
+		Codec::H264 => header & 0x1f == 5,
+		Codec::H265 => (16..=23).contains(&((header >> 1) & 0x3f)),
+	}
+}
+
+/// Whether an Annex-B access unit is a keyframe, for a backend whose codec API
+/// hands back only the bytes. Decided by the first slice, since every slice of a
+/// picture shares its type; the parameter sets and SEI ahead of it are skipped.
+#[cfg(any(
+	target_os = "windows",
+	all(target_os = "linux", any(feature = "nvidia", feature = "vaapi", feature = "v4l2")),
+	test
+))]
+fn keyframe_annexb(codec: Codec, mut annexb: &[u8]) -> bool {
+	while let Some((at, len)) = moq_mux::codec::annexb::find_start_code(annexb) {
+		annexb = &annexb[at + len..];
+		let Some(&header) = annexb.first() else { break };
+		let slice = match codec {
+			Codec::H264 => (1..=5).contains(&(header & 0x1f)),
+			Codec::H265 => (header >> 1) & 0x3f < 32,
+		};
+		if slice {
+			return keyframe_nal(codec, annexb);
+		}
+	}
+	false
 }
 
 /// Every encoder backend this crate has a name for, on any platform.
@@ -121,40 +172,52 @@ struct Candidate {
 	name: &'static str,
 	codecs: &'static [Codec],
 	open: fn(&Config) -> Result<Box<dyn Backend>, Error>,
+	#[cfg(target_os = "linux")]
+	vulkan: bool,
 }
 
 /// Hardware backends, in priority order. Platform-gated so only the ones that
 /// could plausibly work on this target are even listed.
 const HARDWARE: &[Candidate] = &[
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	Candidate {
 		name: videotoolbox::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: videotoolbox::VideoToolbox::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	#[cfg(target_os = "windows")]
 	Candidate {
 		name: mediafoundation::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	#[cfg(all(target_os = "android", feature = "mediacodec"))]
 	Candidate {
 		name: mediacodec::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediacodec::MediaCodec::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Candidate {
 		name: nvenc::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: nvenc::Nvenc::open,
+		#[cfg(target_os = "linux")]
+		vulkan: true,
 	},
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	Candidate {
 		name: vaapi::NAME,
 		codecs: &[Codec::H264],
 		open: vaapi::Vaapi::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	// Last of the Linux hardware encoders: the SoC blocks it drives are the only
 	// hardware on a board that has neither an NVIDIA GPU nor a VAAPI stack, so it
@@ -164,6 +227,8 @@ const HARDWARE: &[Candidate] = &[
 		name: v4l2::NAME,
 		codecs: &[Codec::H264],
 		open: v4l2::V4l2::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 ];
 
@@ -176,6 +241,8 @@ const SOFTWARE: &[Candidate] = &[
 		name: openh264::NAME,
 		codecs: &[Codec::H264],
 		open: openh264::Openh264::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 ];
 
@@ -188,11 +255,15 @@ const NAMED_ONLY: &[Candidate] = &[
 		name: probe::NAME,
 		codecs: &[Codec::H264],
 		open: probe::Probe::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 	Candidate {
 		name: probe::NO_CUT,
 		codecs: &[Codec::H264],
 		open: probe::Probe::open_no_cut,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	},
 ];
 
@@ -262,6 +333,13 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 	for attempt in attempts {
 		let name = attempt.candidate.name;
 
+		#[cfg(target_os = "linux")]
+		if let Some(device) = config.input
+			&& (!attempt.hardware || !attempt.candidate.vulkan)
+		{
+			tried.push(format!("{name}: cannot import external Vulkan {device}"));
+			continue;
+		}
 		match (attempt.candidate.open)(config) {
 			Ok(backend) => {
 				// `Auto` returning a software encoder is otherwise invisible except for
@@ -297,6 +375,13 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 	// or a backend that does not take this codec. Reporting it as "no usable
 	// encoder (tried: )" tells the caller nothing, and naming what is here is
 	// most of the answer.
+	#[cfg(target_os = "linux")]
+	if let Some(device) = config.input {
+		return Err(Error::NoEncoder(format!(
+			"no backend can import external Vulkan {device} (tried: {})",
+			tried.join(", ")
+		)));
+	}
 	if tried.is_empty() {
 		let available = available_names(config.codec);
 		return match &config.kind {
@@ -455,6 +540,8 @@ mod tests {
 		name: "stub",
 		codecs: &[Codec::H264],
 		open: Stub::open,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	};
 
 	/// Compiled in but refusing at runtime, the way NVENC does on a host whose
@@ -463,6 +550,8 @@ mod tests {
 		name: "driverless",
 		codecs: &[Codec::H264],
 		open: |_| Err(Error::Codec(anyhow::anyhow!("driver libraries not found"))),
+		#[cfg(target_os = "linux")]
+		vulkan: false,
 	};
 
 	fn config() -> Config {
@@ -582,6 +671,45 @@ mod tests {
 				"{} is compiled in but missing from NAMES",
 				candidate.name,
 			);
+		}
+	}
+
+	/// The keyframe is decided by the first slice, past the parameter sets and SEI
+	/// that lead an H.264 IDR, and by either start code length.
+	#[test]
+	fn an_h264_keyframe_is_its_idr_slice() {
+		let idr = [
+			0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce, 0, 0, 1, 0x06, 0x05, 0, 0, 1, 0x65, 0x88,
+		];
+		assert!(keyframe_annexb(Codec::H264, &idr));
+
+		let delta = [0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0x41, 0x9a];
+		assert!(!keyframe_annexb(Codec::H264, &delta));
+
+		// Parameter sets with no slice are not a picture at all.
+		assert!(!keyframe_annexb(
+			Codec::H264,
+			&[0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce]
+		));
+		assert!(!keyframe_annexb(Codec::H264, &[]));
+	}
+
+	/// Every H.265 IRAP type (BLA, IDR, CRA) is a keyframe; a trailing picture is not.
+	#[test]
+	fn an_h265_keyframe_is_any_irap_slice() {
+		// VPS (32), SPS (33), PPS (34), then the slice, each with a two-byte header.
+		let with_slice = |nal_type: u8| {
+			let mut annexb = Vec::new();
+			for header in [32, 33, 34, nal_type] {
+				annexb.extend_from_slice(&[0, 0, 0, 1, header << 1, 0x01, 0xaf]);
+			}
+			annexb
+		};
+		for irap in 16..=23 {
+			assert!(keyframe_annexb(Codec::H265, &with_slice(irap)), "type {irap}");
+		}
+		for trailing in [0, 1] {
+			assert!(!keyframe_annexb(Codec::H265, &with_slice(trailing)), "type {trailing}");
 		}
 	}
 }

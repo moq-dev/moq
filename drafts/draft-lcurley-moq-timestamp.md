@@ -79,15 +79,16 @@ Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (
 A value of `0` is invalid; a receiver MUST treat a track that declares it as carrying no timeline.
 
 Absence is meaningful and is not an error.
-A track with no TIMESCALE has no media timeline: a receiver MUST NOT infer units for it, and MUST use wall-clock arrival time for age-based decisions on that track.
+A track with no TIMESCALE is untimed ({{untimed}}): a receiver MUST NOT infer units for it, and every object on it is untimed, even one that carries a TIMESTAMP.
 A publisher that emits Timestamps MUST send TIMESCALE, even for units a receiver might otherwise assume.
-{{loc}} permits a bare Timestamp and reads it as microseconds; a receiver that also implements LOC MAY apply that interpretation to a track that omits TIMESCALE, and MUST NOT apply any other.
+{{loc}} permits a bare Timestamp and reads it as microseconds; a receiver following this document MUST NOT apply that interpretation, or any other, to a track that omits TIMESCALE.
 
 The Timescale is fixed for the lifetime of the track and MUST NOT change.
-{{loc}} also registers TIMESCALE with Object scope; a receiver that implements both applies such an override to that object alone, and a publisher following this document SHOULD NOT send one.
+{{loc}} also registers TIMESCALE with Object scope.
+Whether a track is timed, and its units, are properties of the track, so a receiver MUST ignore an object-scope TIMESCALE, and a publisher SHOULD NOT send one.
 
 The track's properties are delivered in SUBSCRIBE_OK or TRACK_STATUS ({{moqt}} Section 12).
-Until they arrive, a receiver MUST fall back to wall-clock arrival time for any age-based decision.
+A receiver decides whether a track is timed when it accepts the track; a track accepted without its properties is untimed.
 
 
 # TIMESTAMP Object Property
@@ -108,11 +109,20 @@ Any value (including 0) is valid.
 
 Each Timestamp is absolute, not delta-encoded against a previous object: {{moqt}} does not guarantee delivery of every object, and a delta would be corrupted by any missing predecessor.
 
-On a track that declares a TIMESCALE, a publisher SHOULD attach TIMESTAMP to every object that has a media time.
-For an object with no TIMESTAMP, a receiver MUST treat its effective time as the wall-clock arrival time, which avoids stalling expiration on objects that intentionally carry no timestamp (e.g. keep-alives or gap markers).
-The same fallback covers every object on a track that declares no TIMESCALE, so a receiver needs one rule, not two.
+On a track that declares a TIMESCALE, a publisher MUST attach TIMESTAMP to every object with a payload, including an empty one.
+A receiver MUST treat such an object without a TIMESTAMP as malformed ({{moqt}}) rather than substitute a time.
+An object that only signals a status, such as End of Group or End of Track, carries no media time and needs no TIMESTAMP.
 
-## Age-Based Dropping
+## Untimed Tracks {#untimed}
+A track that declares no TIMESCALE is untimed: it has no media timeline, and none of its objects has a media time.
+A track is either timed or untimed for its whole lifetime; no track mixes timed and untimed objects.
+A receiver MUST NOT substitute a time for an untimed object, such as its arrival time, and a relay MUST forward an untimed track untimed, declaring no TIMESCALE downstream.
+Arrival time differs at every hop and changes when a route fails over, so a substituted time would not be the same timeline downstream.
+
+Age-based dropping ({{age}}) never drops an untimed object; a relay bounds how long it keeps one with its own cache policy.
+A new subscription to an untimed track that names no start begins at the latest group, since no age says how far back to reach.
+
+## Age-Based Dropping {#age}
 Given two objects on the same track, both with TIMESTAMP, a relay computes their relative age as the difference of their timestamps divided by the Timescale.
 A relay serving a live subscription MAY drop an object whose age relative to the most recent object on the track exceeds a locally configured or application-supplied threshold, resetting the corresponding stream per {{moqt}}.
 This decision is identical at every hop because it depends only on values embedded in the objects, not on arrival time.
@@ -145,6 +155,17 @@ An earlier version of this document requested its own code points (`0x915C0` and
 
 
 --- back
+
+# Appendix A: Changelog
+{:numbered="false"}
+
+## moq-timestamp-02
+{:numbered="false"}
+
+- Replaced the wall-clock arrival-time fallback with untimed tracks: a track without TIMESCALE has no media time, its objects are never dropped for age, and a relay forwards it untimed.
+- On a track with TIMESCALE, a publisher MUST attach TIMESTAMP to every object with a payload, and a receiver treats one without it as malformed.
+- A receiver ignores an object-scope TIMESCALE, and no longer reads a bare TIMESTAMP on a track without TIMESCALE as microseconds.
+- A new subscription to an untimed track that names no start begins at the latest group.
 
 # Acknowledgments
 {:numbered="false"}

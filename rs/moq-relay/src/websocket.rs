@@ -15,7 +15,7 @@ use axum::{
 use moq_net::origin;
 use moq_net::stats::Session;
 
-use crate::{auth, web::MtlsPeer, web::WebState, web::landing_response};
+use crate::{auth, refusals::Refusal, web::MtlsPeer, web::WebState, web::landing_response};
 
 // One axum extractor per fact the upgrade needs; there is no struct to fold them into.
 #[allow(clippy::too_many_arguments)]
@@ -59,21 +59,28 @@ pub(crate) async fn serve_ws(
 	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	let session_id = request.id.clone();
-	let lease = state.auth.admit(request.clone()).await?;
+	let lease = state
+		.auth
+		.admit(request.clone())
+		.await
+		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
 	let token = lease.token();
 	let publish = state.cluster.publisher(token);
 	// A verified client certificate marks a cluster peer, which discovers hidden
-	// routes; see `connection::authorize`.
+	// routes; see `Cluster::scope`.
 	let subscribe = state
 		.cluster
 		.subscriber(token)
 		.map(|subscribe| subscribe.consume().with_hidden(request.tls.is_some()));
-	let stats = state.cluster.stats.tier(token.tier.clone()).session(&token.root);
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
+		state.cluster.refusals.record(Refusal::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	}
+
+	// Only an admitted session counts as present, as on the native path.
+	let stats = state.cluster.stats.tier(token.tier.clone()).session(&token.root);
 	let lease = lease.with_stats(stats.clone());
 
 	Ok(ws.on_upgrade(async move |socket| {
@@ -244,7 +251,7 @@ where
 					err = &mut driver => ended(err),
 					_ = &mut drain => ended(driver.await),
 				};
-				lease.close("shutdown", crate::connection::session_bytes(&session));
+				lease.close(moq_auth::lease::Reason::Shutdown, crate::connection::session_bytes(&session));
 				return res;
 			}
 			() = nudged => lease.revalidate(),

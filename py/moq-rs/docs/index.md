@@ -16,9 +16,10 @@ import moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        async for announcement in client.announced():
-            broadcast = await client.request_broadcast(announcement.prefix)
-            print(await broadcast.catalog())
+        async for event in client.announced():
+            if isinstance(event, moq.AnnounceEventStart):
+                broadcast = await client.request_broadcast(event.announce.prefix)
+                print(await moq.media.catalog(broadcast))
 
 
 asyncio.run(main())
@@ -59,12 +60,8 @@ asyncio.run(main())
    TrackRequest
    GroupProducer
    GroupRequest
-   MediaProducer
-   MediaStreamProducer
    AudioProducer
    VideoProducer
-   JsonSnapshotProducer
-   JsonStreamProducer
 ```
 
 ## Subscribing
@@ -79,11 +76,51 @@ asyncio.run(main())
    BroadcastConsumer
    TrackConsumer
    GroupConsumer
-   MediaConsumer
    AudioConsumer
+```
+
+## Media
+
+`moq.media` owns catalogs, encoded-media importers, and container consumers.
+Every importer takes a broadcast; single-track imports choose a `Named` or `Requested` target.
+
+```{eval-rst}
+.. currentmodule:: moq.media
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   CatalogProducer
    CatalogConsumer
-   JsonSnapshotConsumer
-   JsonStreamConsumer
+   TrackProducer
+   TrackStreamProducer
+   ContainerProducer
+   ContainerStreamProducer
+   ContainerConsumer
+   ContainerGroupConsumer
+   Named
+   Requested
+   MediaFrame
+   catalog
+```
+
+## JSON tracks
+
+`moq.json` mirrors the `moq-json` crate: each type wraps a track from the
+broadcast, and producers advertise it in the catalog.
+
+```{eval-rst}
+.. currentmodule:: moq.json
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   SnapshotProducer
+   StreamProducer
+   SnapshotConsumer
+   StreamConsumer
 ```
 
 ## Origin and announcements
@@ -100,13 +137,17 @@ asyncio.run(main())
    OriginDynamic
    AnnounceConsumer
    AnnouncedBroadcast
-   AnnounceUpdate
+   Announce
+   AnnounceEvent
+   AnnounceEventStart
+   AnnounceEventUpdate
+   AnnounceEventEnd
 ```
 
 ## Data types
 
 These records, enums, and objects are re-exported from the native `moq_ffi` bindings; the
-wrapper surfaces them under `moq` unchanged. Their fields are defined on the
+wrapper groups them under `moq` and `moq.media`, with owned duration records at the boundary. Their fields are defined on the
 Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
 
 ```{eval-rst}
@@ -116,25 +157,25 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    :toctree: api
    :nosignatures:
 
-   Catalog
-   Container
+   media.Catalog
+   media.Container
    Frame
-   MediaFrame
+   media.MediaFrame
    Datagram
-   Video
-   VideoHint
-   VideoProperties
+   media.Video
+   media.VideoHint
+   media.VideoProperties
    VideoFrame
    VideoCodec
    VideoPixelFormat
    VideoEncoderInput
    VideoEncoderOutput
    VideoEncoderKind
-   Dimensions
-   Audio
+   media.Dimensions
+   media.Audio
    AudioFrame
    AudioCodec
-   AudioFormat
+   media.AudioFormat
    AudioDecoderOutput
    AudioEncoderInput
    AudioEncoderOutput

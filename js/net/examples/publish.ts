@@ -13,7 +13,8 @@ async function main() {
 
 	// Insert the "chat" track up front. A subscriber is served directly from this
 	// track, no requested() round-trip needed. Mirrors the Rust createTrack/insertTrack.
-	void publishTrack(broadcast.createTrack("chat"));
+	// Each frame is stamped with the time it was written, so the track declares a timescale.
+	void publishTrack(broadcast.createTrack("chat", { timescale: Moq.Time.Timescale.MILLI }));
 	console.log("Published broadcast: my-broadcast");
 
 	await connection.closed;
@@ -26,8 +27,8 @@ async function publishTrack(track: Moq.Track.Producer) {
 	const group = track.appendGroup();
 
 	// Write two frames to the group
-	for (const frame of ["Hello", "MoQ!"]) {
-		group.writeString(frame);
+	for (const text of ["Hello", "MoQ!"]) {
+		group.writeFrame({ payload: new TextEncoder().encode(text), timestamp: Moq.Time.Timestamp.now() });
 	}
 
 	// Mark the group as complete

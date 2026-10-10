@@ -5,9 +5,8 @@ use crate::Timestamp;
 /// A value to publish, and optionally when it was captured.
 ///
 /// `T` is the clock the time is on: a raw [`Timestamp`] by default, or whatever a higher layer
-/// maps onto one (`moq-mux` takes a [`std::time::Instant`]). Converts from a bare payload (bytes,
-/// or a `&V` to serialize), so a producer taking one still accepts the plain value, stamped when
-/// written.
+/// maps onto one. Converts from a bare payload (bytes, or a `&V` to serialize), so a producer
+/// taking one still accepts the plain value, stamped when written.
 #[derive(Debug, Clone, Copy)]
 pub struct Timed<P, T = Timestamp> {
 	/// The value to publish.

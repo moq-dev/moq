@@ -277,13 +277,13 @@ async fn embed_and_stop(mut config: Config) {
 	.expect("connect timeout")
 	.expect("connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announced.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
+	assert!(active, "expected announce, got retraction");
+	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -476,4 +476,14 @@ fn embedded_cli_merges_only_relay_settings() {
 		.unwrap();
 	assert_eq!(parsed.worker_name.as_deref(), Some("recorder"));
 	assert_eq!(parsed.relay.cluster.id, Some(9));
+}
+
+/// The next route and whether it is active.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	match announced.next().await? {
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		moq_net::announce::Event::End(route) => Some((route, false)),
+	}
 }
