@@ -936,9 +936,11 @@ struct ServeState {
 }
 
 /// Key of a remotely-served front: the absolute path and the requester's
-/// [`Horizon`]. Requesters excluding different peers get separate fronts, so a
-/// front's failover never adopts a route flowing back through one of its own
-/// readers, nor a local view a peer's route.
+/// [`Horizon::effective`] horizon. Requesters excluding a peer some covering
+/// route passes through get a front of their own, so its failover never adopts
+/// a route flowing back through one of its readers, nor a local view a peer's
+/// route. Every other requester shares the plain front, so fronts scale with
+/// the peers in the path's route chains rather than with viewer sessions.
 type FrontKey = (PathOwned, Horizon);
 
 /// Which routes a reader sees: the split-horizon exclusion and the local-only view.
@@ -956,6 +958,22 @@ impl Horizon {
 	/// Whether `entry` may be observed or served through this horizon.
 	fn admits(&self, entry: &RouteEntry) -> bool {
 		!(self.local && entry.peer) && entry.visible_to(self.exclude)
+	}
+
+	/// This horizon as it applies to the routes covering `path`: an excluded peer
+	/// that none of them passes through hides nothing, so it excludes nothing. Every
+	/// session carries a hop of its own, and a viewer's never shows up in a chain, so
+	/// this is what lets viewers share a front.
+	///
+	/// Decided per request: a peer whose hop joins a chain later gets the filtered
+	/// front on its next request, while what it already reads stays on the plain
+	/// front. That cannot loop, since the peer serves our requests through its own
+	/// split horizon, which never routes back through us.
+	fn effective(self, routes: &RouteTable, path: &Path) -> Self {
+		match self.exclude {
+			Some(peer) if routes.covering(path).any(|entry| !entry.visible_to(Some(peer))) => self,
+			_ => Self { exclude: None, ..self },
+		}
 	}
 }
 
@@ -3315,13 +3333,11 @@ struct OriginState {
 	// finds the cursors it can present on.
 	cursors: HashMap<ConsumerId, TableCursor>,
 
-	// The remotely-served fronts, keyed by absolute path and the requester's
-	// split-horizon exclusion. Each is a spliced broadcast whose watcher task
-	// materializes it from the best covering route and re-splices it through
-	// routes sharing its first hop, so a route change the identity survives is
-	// invisible to subscribers. Keyed per exclusion so a front's failover can
-	// never adopt a route flowing back through one of its own readers. Weak, so
-	// a front dies with its watcher and a later request re-creates it.
+	// The remotely-served fronts; see [`FrontKey`]. Each is a spliced broadcast
+	// whose watcher task materializes it from the best covering route and
+	// re-splices it through routes sharing its first hop, so a route change the
+	// identity survives is invisible to subscribers. Weak, so a front dies with
+	// its watcher and a later request re-creates it.
 	fronts: WeakCache<FrontKey, RemoteFront>,
 
 	// Peers that withdrew a prefix while routes there still passed through them,
@@ -4366,28 +4382,30 @@ impl Consumer {
 			return kio::Pending::new(Requesting::failed(Error::Closed));
 		}
 
+		let horizon = self.horizon.effective(&state.routes, &absolute.as_path());
+
 		// Nothing serves the path: no announced broadcast and no served route.
 		// Checked before joining a front, so a front still draining after its
 		// route retracted takes no newcomers.
 		if state
-			.best_route(&absolute.as_path(), self.horizon, Pin::Any, &HashSet::new())
+			.best_route(&absolute.as_path(), horizon, Pin::Any, &HashSet::new())
 			.is_none()
 		{
 			return kio::Pending::new(Requesting::failed(Error::Unroutable));
 		}
 
-		// Join the live front for this path and exclusion, if any: its watcher
+		// Join the live front for this path and horizon, if any: its watcher
 		// resolves (or already resolved) the request channel with the front's
 		// spliced broadcast, so repeat requests share one upstream
 		// subscription. Only while the best route still serves the front's
 		// content, though: once a different publisher wins (a cheaper route), a
 		// newcomer gets a fresh front from it, and the old front keeps serving the
 		// readers it has, since other content can't be spliced into it.
-		let key = (absolute.clone(), self.horizon);
+		let key = (absolute.clone(), horizon);
 		if let Some(front) = state.fronts.get(&key) {
 			let pin = *front.pin.lock();
 			let current = state
-				.best_route(&absolute.as_path(), self.horizon, Pin::Any, &HashSet::new())
+				.best_route(&absolute.as_path(), horizon, Pin::Any, &HashSet::new())
 				.is_some_and(|entry| entry.qualifies(pin));
 			if current {
 				let pending = Requesting::queued(front.request.consume())
@@ -4426,7 +4444,7 @@ impl Consumer {
 			shared: self.shared.clone(),
 			broadcast,
 			path: absolute,
-			horizon: self.horizon,
+			horizon,
 			watch,
 			request,
 			pin,
@@ -6867,6 +6885,108 @@ mod tests {
 		let clean = producer.consume().excluding(origin(8));
 		let pending = clean.request_broadcast("room/alice");
 		assert!(pending.now_or_never().is_none());
+	}
+
+	/// Every viewer session excludes a hop of its own that no route chain names, so
+	/// they all share the plain front instead of each minting one that outlives them
+	/// for as long as the route stands (#4799).
+	#[tokio::test(start_paused = true)]
+	async fn viewer_sessions_share_the_plain_front() {
+		let producer = origin(1).produce();
+		// A prefix route, which resolves any path beneath it optimistically.
+		let server = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let upstream = broadcast::Info::new().produce();
+		let source = upstream.create_track("video", None).unwrap();
+		let mut group = source.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
+
+		let counts = || {
+			let table = producer.shared.lock();
+			let watches = table
+				.routes
+				.root
+				.find(Path::new("room/alice").parts())
+				.map_or(0, |node| node.watches.len());
+			(table.fronts.len(), watches)
+		};
+
+		let mut first = None;
+		let mut front = None;
+		for viewer in 0..1000 {
+			let session = producer.consume().excluding(Hop::random());
+			let pending = session.request_broadcast("room/alice");
+			if viewer == 0 {
+				queued(&server).await.accept(&upstream);
+			}
+			let resolved = pending.await.expect("resolves");
+			let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+			next_group(&mut subscription).await.unwrap().expect("the live group");
+			drop(subscription);
+			first.get_or_insert_with(counts);
+			front = Some(resolved);
+		}
+		assert_eq!(first, Some((1, 1)), "one front and one watch for the first viewer");
+		assert_eq!(counts(), (1, 1), "viewers minted fronts of their own");
+		drop(front);
+	}
+
+	/// A requester excluding a peer that a covering route passes through gets a front
+	/// of its own. Decided per request: a peer whose hop joins a chain after it joined
+	/// the plain front gets the filtered one on its next request.
+	#[tokio::test]
+	async fn a_hop_in_a_chain_gets_its_own_front() {
+		let producer = origin(1).produce();
+		let _incumbent = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let fronts = || producer.shared.lock().fronts.len();
+
+		let peer = producer.consume().excluding(origin(7));
+		let _local = producer.consume().request_broadcast("room/alice");
+		let _peer = peer.request_broadcast("room/alice");
+		assert_eq!(fronts(), 1, "a hop no chain names excludes nothing");
+
+		// The same publisher, now also reached through the peer.
+		let _echo = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10, 7])))
+			.unwrap();
+		let _filtered = peer.request_broadcast("room/alice");
+		assert_eq!(fronts(), 2, "the peer still shares the plain front");
+		let _viewer = producer.consume().excluding(origin(8)).request_broadcast("room/alice");
+		assert_eq!(fronts(), 2, "a viewer left the plain front");
+	}
+
+	/// The hairpin the per-request choice accepts ends on its own. A peer still on the
+	/// plain front when the only route left runs through it gets that route, but its own
+	/// view withdraws the path, so it stops serving the path back to us.
+	#[tokio::test]
+	async fn a_hairpin_through_the_plain_front_is_withdrawn() {
+		let producer = origin(1).produce();
+		let peer = producer.consume().excluding(origin(7));
+		let mut view = peer.announced();
+		let incumbent = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		view.assert_next_active("room");
+
+		let pending = peer.request_broadcast("room/alice");
+		let source = broadcast::Info::new().produce();
+		queued(&incumbent).await.accept(&source);
+		let resolved = pending.await.expect("resolves through the incumbent");
+
+		// The same publisher, now also reached through the peer, outlives the incumbent.
+		let echo = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10, 7])))
+			.unwrap();
+		drop(incumbent);
+		drop(source);
+
+		let replacement = broadcast::Info::new().produce();
+		queued(&echo).await.accept(&replacement);
+		resolved.assert_not_closed();
+		view.assert_next_ended("room");
 	}
 
 	#[tokio::test]
