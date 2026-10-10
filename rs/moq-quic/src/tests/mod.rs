@@ -1127,6 +1127,37 @@ fn zero_rtt_incoming_buffer_size_total() {
     });
 }
 
+/// A server that defers accepting an Initial has the handshake idle timeout to do so, not the
+/// shorter idle timeout.
+#[test]
+fn deferred_accept_uses_handshake_idle_timeout() {
+    let _guard = subscribe();
+    let mut transport = cubic_transport();
+    transport.max_idle_timeout(Some(Duration::from_secs(2).try_into().unwrap()));
+    let mut server = server_config();
+    server.transport_config(Arc::new(transport));
+    let mut pair = Pair::new(Default::default(), server);
+    pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+
+    pair.begin_connect(client_config());
+    pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    let start = pair.time;
+    let late = pair.server.waiting_incoming.pop().unwrap();
+    let delayed = pair.server.waiting_incoming.pop().unwrap();
+
+    // Past the idle timeout, but within the handshake idle timeout.
+    pair.time = start + Duration::from_secs(3);
+    assert!(pair.server.try_accept(delayed, pair.time).is_ok());
+
+    pair.time = start + Duration::from_secs(10);
+    assert_matches!(
+        pair.server.try_accept(late, pair.time),
+        Err(ConnectionError::TimedOut)
+    );
+}
+
 /// Verify that datagrams arriving while a connection is in the `Accepting` state (between
 /// `start_accept` and `finish_accept`) are buffered in `incoming_buffers` and replayed into the
 /// connection after `finish_accept`. Drives through the full handshake and clean shutdown to
@@ -3331,14 +3362,18 @@ fn established_idles_out_at_negotiated_timeout() {
     // Nothing reaches the client once it is established.
     while !pair.client_conn_mut(client_ch).is_closed() {
         pair.client.inbound.clear();
-        if !pair.step()
-            && let Some(t) = pair.client.next_wakeup()
-        {
-            pair.time = t;
+        if !pair.step() && !pair.client_conn_mut(client_ch).is_closed() {
+            pair.time = pair
+                .client
+                .next_wakeup()
+                .expect("an open connection has an idle timer");
         }
     }
     let elapsed = pair.time - established;
-    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    assert!(
+        (Duration::from_secs(2)..Duration::from_secs(3)).contains(&elapsed),
+        "{elapsed:?}"
+    );
 }
 
 /// Ensures that the server can respond with 3 initial packets during the handshake

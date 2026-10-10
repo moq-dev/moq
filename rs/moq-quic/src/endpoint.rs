@@ -18,8 +18,8 @@ use thiserror::Error;
 use tracing::{debug, error, trace, warn};
 
 use crate::{
-    Duration, INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE, ResetToken,
-    Side, Transmit, TransportConfig, TransportError,
+    INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, RESET_TOKEN_SIZE, ResetToken, Side,
+    Transmit, TransportConfig, TransportError,
     cid_generator::ConnectionIdGenerator,
     coding::BufMutExt,
     config::{ClientConfig, EndpointConfig, ServerConfig},
@@ -599,13 +599,8 @@ impl Endpoint {
                 .clone()
         });
 
-        if server_config
-            .transport
-            .max_idle_timeout
-            .is_some_and(|timeout| {
-                incoming.received_at + Duration::from_millis(timeout.into()) <= now
-            })
-        {
+        // Still handshaking, so the handshake idle timeout applies, not the idle timeout.
+        if incoming.received_at + server_config.transport.handshake_idle_timeout <= now {
             debug!("abandoning accept of stale initial");
             self.ignore(incoming);
             return Err(Box::new(AcceptError {
