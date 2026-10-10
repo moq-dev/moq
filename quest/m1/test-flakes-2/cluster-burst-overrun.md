@@ -19,7 +19,7 @@ of what counts as an overrun.
 
 Public API: none. Wire: none.
 
-## Investigation checkpoint
+### Investigation checkpoint
 
 The impaired drill currently passes on this host with 116/120 groups delivered,
 seven FETCHes, and shaper queue overflows. That confirms the recovery path, but
