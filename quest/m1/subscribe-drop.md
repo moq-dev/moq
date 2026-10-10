@@ -11,8 +11,11 @@ brings it back in place of `Stream Count`.
 
 ## Plan
 
-Today SUBSCRIBE_DROP is on the wire for lite-03 through lite-06, and the Rust
-and `@moq/net` subscribers account for it. Once a track ends, the Rust
+Today SUBSCRIBE_DROP is defined on the wire for lite-03 through lite-06.
+The Rust and `@moq/net` lite-05/06 response paths account for it in the
+subscription tail. That accounting is not a terminal group disposition for
+live readers or recovery; the JS lite-03/04 path does not run that response
+loop. Once a track ends, the Rust
 publisher on lite-05 and lite-06 names every sequence from its
 SUBSCRIBE_START to the end that the subscription never got (skipped,
 stale, or missing its head), just before its FIN. Still missing: JS
@@ -44,7 +47,11 @@ Decided:
   delivered, so a lost one leaves an uncovered hole that waits out the tail
   grace, as today.
 - A resumed group that is the new copy's latest ends with the DROP's error
-  when the copy drops it.
+  when the copy drops it. Audit clarification (2026-10-10): test this while
+  the subscription is still open, with no successor and no later writes.
+  Both Rust and JS must settle the group wait on DROP, not only mark the
+  tail accounted at SUBSCRIBE_END. A pending recovery fetch cannot hide
+  that disposition or restart an unbounded route-retry loop.
 - A dropped or aborted group is visible to readers, not silently skipped.
   #4533 found the Rust model releases an aborted group's sequence and skips it,
   so a truncated first object is indistinguishable from a group never sent.
@@ -87,3 +94,9 @@ subscribers both settle on SUBSCRIBE_DROP through the relay, so a group the
 publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
+
+## Related
+
+- [Tail arrivals](/quest/m1/tail-arrivals.md) - per-track live dispositions survive cache eviction
+- [Resume reorder](/quest/m1/resume-reorder.md) - late stream headers are not proof that a group was dropped
+- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - age expiry and DROP independently settle pending recovery

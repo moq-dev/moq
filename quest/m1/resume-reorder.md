@@ -31,3 +31,8 @@ Public API: behavior only. Wire: none.
 ## Required
 
 - [Tail arrivals](/quest/m1/tail-arrivals.md) - the per-track arrival record this verdict reads
+
+## Related
+
+- [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - retain once-only delivery without excluding genuinely unseen late groups
+- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - explicit terminal dispositions end recovery without waiting for a newer group
