@@ -461,7 +461,11 @@ mod tests {
 				value.encode(&mut buf, version).unwrap();
 				let mut buf = buf.freeze();
 				let result = SubscribeNamespaceLegacy::decode_msg(&mut buf, version);
-				assert_eq!(result.is_ok(), version == Version::Draft14 || value <= 1, "{version} FORWARD={value}: {result:?}");
+				assert_eq!(
+					result.is_ok(),
+					version == Version::Draft14 || value <= 1,
+					"{version} FORWARD={value}: {result:?}"
+				);
 				if version == Version::Draft14 || value <= 1 {
 					assert!(buf.is_empty());
 				}
