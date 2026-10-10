@@ -460,13 +460,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
 		let route = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
-		let Ok(dynamic) = self.origin.dynamic(&path, route.clone()) else {
-			announced.declined(path);
-			return Ok(false);
-		};
-		announced.attach(path, route, dynamic);
-
-		Ok(true)
+		// Held to the limit like a start: a restart outside it is withheld, dropping the old instance.
+		Ok(announced.offer(self, path, route))
 	}
 
 	/// The full chain of an advertisement replacing a live one, or `None` when it is a
@@ -3361,6 +3356,49 @@ mod tests {
 
 		let route = cursor.assert_next_active("room/host");
 		assert_eq!(route.cost, crate::origin::Cost::new(5).charged(0));
+	}
+
+	/// A restart is held to the subscribe limit like a start: one the limit no longer
+	/// covers is withheld, ending the old instance rather than attaching the new one.
+	#[moq_net_sim::test]
+	async fn a_restart_outside_the_limit_is_withheld() {
+		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+		let auth = subscriber.auth.clone();
+
+		let mut announced = Announced::default();
+		let path = Path::new("room/host").to_owned();
+		subscriber
+			.start_announce(
+				path.clone(),
+				None,
+				crate::Hops::new(),
+				crate::origin::Cost::UNKNOWN,
+				0,
+				Some(crate::Hop::new(7).unwrap()),
+				&mut announced,
+			)
+			.unwrap();
+		let mut cursor = consumer.announced();
+		cursor.assert_next_active("room/host");
+
+		auth.authorize(&crate::auth::Grant {
+			publish: Default::default(),
+			subscribe: [crate::Pattern::subtree("other").unwrap()].into_iter().collect(),
+			expires: None,
+		});
+		announced.restart(&path, None);
+		let attached = subscriber
+			.restart_announce(
+				path.clone(),
+				crate::Hops::new(),
+				crate::origin::Cost::UNKNOWN,
+				0,
+				Some(crate::Hop::new(7).unwrap()),
+				&mut announced,
+			)
+			.unwrap();
+		assert!(!attached, "a restart outside the limit was attached");
+		cursor.assert_next_ended("room/host");
 	}
 
 	/// An announce stream that dies without an explicit `ended` retracts the route
