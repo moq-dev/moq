@@ -758,8 +758,8 @@ impl Admission {
 /// transport knows, nothing parsed on the server's behalf.
 pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
 	let transport = match request.transport() {
-		// The auth contract names QUIC either way; WebTransport is QUIC underneath.
-		moq_tokio::Transport::Quic | moq_tokio::Transport::WebTransport => moq_auth::Transport::Quic,
+		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
+		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
 		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
 		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
 		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,

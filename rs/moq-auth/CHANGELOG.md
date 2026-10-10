@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Auth requests distinguish `webtransport` from native `quic`. Upgrade auth servers before relays: older servers reject the new value. Rust and JavaScript auth parsers now map future transport names to `unknown`.
+
 ## [0.2.1](https://github.com/moq-dev/moq/compare/moq-auth-v0.2.0...moq-auth-v0.2.1) - 2026-10-03
 
 ### Fixed
