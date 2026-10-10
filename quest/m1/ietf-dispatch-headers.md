@@ -21,4 +21,7 @@ this is Rust only (decided 2026-10-08).
 Test, beside #5086's `a_silent_stream_does_not_hold_up_the_next`: a silent
 bidi request stream does not block a SUBSCRIBE on the next one.
 
+`release` has the same loop; once this lands on `main`, backport it the way
+#5125 carried the uni half.
+
 Public API: none. Wire: none.
