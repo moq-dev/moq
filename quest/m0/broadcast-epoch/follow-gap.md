@@ -28,4 +28,5 @@ then a same-epoch prefix route takes over while a reader is still draining;
 the follower must report the handoff, and `moq play` must restart. Start
 after #5154 merges.
 
-Public API: none expected. Wire: none.
+Public API: no new items, but `follow` reports a gap where it reported an
+`Update`, a behavior change to call out in the PR. Wire: none.
