@@ -16,7 +16,11 @@ the same once it reconnects.
 
 Classify dial errors at the source: the loop already treats non-retryable
 CONNECT statuses (`status_retryable`) as terminal; extend that to local
-errors, listed by type rather than by message. Fail loud with the error.
+errors, listed by type rather than by message. The dial races QUIC and
+WebSocket, so a local error is terminal only when every raced transport fails
+terminally, as the CONNECT status check already requires; one transport
+rejecting a scheme the other accepts must keep dialing. Fail loud with the
+error.
 Test with mocked time: an unsupported scheme fails at once under unlimited
 backoff, and a refused TCP connect still retries.
 
