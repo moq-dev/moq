@@ -229,7 +229,10 @@ fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> 
 	})?;
 
 	let mut config = VideoConfig::new(codec);
-	config.description = legacy_description(track)?;
+	config.description = match &container {
+		Container::Cmaf { init } => cmaf_video_description(track, init, &config.codec)?,
+		_ => legacy_description(track)?,
+	};
 	config.coded_width = track.width;
 	config.coded_height = track.height;
 	config.bitrate = track.bitrate;
@@ -352,10 +355,10 @@ fn derive_from_codec_config(track: &moq_msf::Track, codec: &AudioCodec, init: by
 	}
 }
 
-fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<DerivedAudio> {
+fn cmaf_moov(track: &moq_msf::Track, init: &[u8]) -> Result<mp4_atom::Moov> {
 	use mp4_atom::{Any, DecodeMaybe};
 
-	let mut cursor = std::io::Cursor::new(init.as_ref());
+	let mut cursor = std::io::Cursor::new(init);
 	let mut moov: Option<mp4_atom::Moov> = None;
 	while let Some(atom) =
 		mp4_atom::Any::decode_maybe(&mut cursor).map_err(|_| Error::MalformedInitSegment(track.name.clone()))?
@@ -365,7 +368,35 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 			break;
 		}
 	}
-	let moov = moov.ok_or_else(|| Error::MissingInitMoov(track.name.clone()))?;
+	Ok(moov.ok_or_else(|| Error::MissingInitMoov(track.name.clone()))?)
+}
+
+fn cmaf_video_description(track: &moq_msf::Track, init: &[u8], codec: &VideoCodec) -> Result<Option<bytes::Bytes>> {
+	use mp4_atom::{Atom, Codec};
+	let moov = cmaf_moov(track, init)?;
+	for sample in moov.trak.iter().flat_map(|trak| &trak.mdia.minf.stbl.stsd.codecs) {
+		let mut description = bytes::BytesMut::new();
+		match (codec, sample) {
+			(
+				VideoCodec::H264(_),
+				Codec::Avc1(mp4_atom::Avc1 { avcc, .. }) | Codec::Avc3(mp4_atom::Avc3 { avcc, .. }),
+			) => avcc.encode_body(&mut description)?,
+			(
+				VideoCodec::H265(_),
+				Codec::Hvc1(mp4_atom::Hvc1 { hvcc, .. }) | Codec::Hev1(mp4_atom::Hev1 { hvcc, .. }),
+			) => hvcc.encode_body(&mut description)?,
+			(VideoCodec::AV1(_), Codec::Av01(av01)) => av01.av1c.encode_body(&mut description)?,
+			(VideoCodec::VP9(_), Codec::Vp09(vp09)) => vp09.vpcc.encode_body(&mut description)?,
+			(VideoCodec::VP8, Codec::Vp08(_)) => return Ok(None),
+			_ => continue,
+		}
+		return Ok(Some(description.freeze()));
+	}
+	Err(crate::container::fmp4::Error::MissingCodec.into())
+}
+
+fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<DerivedAudio> {
+	let moov = cmaf_moov(track, &init)?;
 
 	// Walk every trak looking for an audio sample entry. A single-track audio init is
 	// the only thing we expect here, but rather than enforce that we just take the first
@@ -426,12 +457,11 @@ mod test {
 
 	#[test]
 	fn cmaf_video_yields_cmaf_container() {
-		// "AAAYZ2Z0eXA=" decodes to a tiny ftyp-shaped stub; we just verify the bytes
-		// round-trip through base64 into Container::Cmaf.init.
-		let init_b64 = "AAAYZ2Z0eXA=";
-		let expected_init = base64::engine::general_purpose::STANDARD.decode(init_b64).unwrap();
+		// The complete init segment survives the MSF base64 conversion.
+		let init_b64 = video_init("avc1.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0]);
+		let expected_init = base64::engine::general_purpose::STANDARD.decode(&init_b64).unwrap();
 
-		let msf = moq_msf::Catalog::new(vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))]);
+		let msf = moq_msf::Catalog::new(vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(&init_b64))]);
 
 		let catalog = from_msf::<()>(&msf).expect("CMAF video should convert");
 		let video = catalog.video.renditions.get("video0").expect("video0 rendition");
@@ -508,14 +538,69 @@ mod test {
 		assert_eq!(a.description.as_deref(), Some(description_bytes));
 	}
 
+	fn video_init(codec: &str, description: &[u8]) -> String {
+		use mp4_atom::Encode;
+		let mut config = VideoConfig::new(VideoCodec::from_str(codec).unwrap());
+		config.coded_width = Some(1920);
+		config.coded_height = Some(1080);
+		let trak = crate::container::fmp4::synthesize_video_trak(1, 90_000, &config, Some(description)).unwrap();
+		let moov = mp4_atom::Moov {
+			trak: vec![trak],
+			..Default::default()
+		};
+		let mut init = Vec::new();
+		mp4_atom::Ftyp {
+			major_brand: b"iso6".into(),
+			minor_version: 0,
+			compatible_brands: vec![],
+		}
+		.encode(&mut init)
+		.unwrap();
+		moov.encode(&mut init).unwrap();
+		base64::engine::general_purpose::STANDARD.encode(init)
+	}
+
 	#[test]
-	fn cmaf_description_stays_none() {
-		// CMAF tracks carry their bytes inside Container::Cmaf::init; description
-		// must stay None so downstream code reads the bytes from one place only.
-		let init_b64 = "AAAYZ2Z0eXA=";
-		let msf = moq_msf::Catalog::new(vec![video_track("video0", moq_msf::Packaging::Cmaf, Some(init_b64))]);
-		let catalog = from_msf::<()>(&msf).unwrap();
-		assert!(catalog.video.renditions["video0"].description.is_none());
+	fn cmaf_video_description_comes_from_sample_entry() {
+		use mp4_atom::Atom;
+		let mut hvcc = mp4_atom::Hvcc::new();
+		hvcc.length_size_minus_one = 3;
+		let mut hevc_description = Vec::new();
+		hvcc.encode_body(&mut hevc_description).unwrap();
+		for (codec, description) in [
+			("avc3.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0][..]),
+			("hev1.1.0.L93.00", hevc_description.as_slice()),
+		] {
+			let init = video_init(codec, description);
+			let mut track = video_track("video0", moq_msf::Packaging::Cmaf, Some(&init));
+			track.codec = Some(codec.to_string());
+			let catalog = from_msf::<()>(&moq_msf::Catalog::new(vec![track])).unwrap();
+			assert_eq!(
+				catalog.video.renditions["video0"].description.as_deref(),
+				Some(description)
+			);
+		}
+	}
+
+	#[test]
+	fn cmaf_video_refuses_missing_or_wrong_sample_entry() {
+		let init = video_init("avc3.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0]);
+		let mut track = video_track("video", moq_msf::Packaging::Cmaf, Some(&init));
+		track.codec = Some("hev1.1.0.L93.00".to_string());
+		let err = from_msf::<()>(&moq_msf::Catalog::new(vec![track])).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::Error::Cmaf(crate::container::fmp4::Error::MissingCodec)
+		));
+
+		let stub = base64::engine::general_purpose::STANDARD.encode(b"not an init segment");
+		let track = video_track("video", moq_msf::Packaging::Cmaf, Some(&stub));
+		assert!(matches!(
+			from_msf::<()>(&moq_msf::Catalog::new(vec![track])),
+			Err(crate::Error::Msf(
+				Error::MalformedInitSegment(_) | Error::MissingInitMoov(_)
+			))
+		));
 	}
 
 	#[test]

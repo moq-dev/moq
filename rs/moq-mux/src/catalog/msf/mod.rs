@@ -59,10 +59,10 @@ pub enum Error {
 	#[error("MSF audio track {0:?} omits samplerate/channelConfig; codec has no init_data parser")]
 	UnsupportedDerivationCodec(String),
 
-	#[error("MSF audio track {0:?} init segment is malformed")]
+	#[error("MSF track {0:?} init segment is malformed")]
 	MalformedInitSegment(String),
 
-	#[error("MSF audio track {0:?} init segment missing moov")]
+	#[error("MSF track {0:?} init segment missing moov")]
 	MissingInitMoov(String),
 
 	#[error("MSF audio track {0:?} CMAF init has no audio sample entry to derive samplerate/channelConfig from")]

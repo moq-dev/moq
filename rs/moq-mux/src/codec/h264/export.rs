@@ -5,12 +5,9 @@
 //! fuzzers, or recording one codec to disk. There is no container framing
 //! (timestamps are dropped).
 //!
-//! Two source shapes are accepted:
-//! - **avc3** (catalog `description` empty): payload is already Annex-B with
-//!   SPS/PPS inline. Pass through unchanged.
-//! - **avc1** (catalog `description` is the avcC): length-prefixed NALUs.
-//!   Length prefixes are replaced with `00 00 00 01` start codes; SPS/PPS
-//!   extracted from the avcC are injected ahead of every keyframe.
+//! A source without a decoder description is already Annex-B and passes through unchanged.
+//! With an avcC description, length prefixes become start codes and any out-of-band
+//! parameter sets precede keyframes. avc3 samples may carry all parameter sets inline.
 
 use std::task::{Poll, ready};
 
@@ -38,13 +35,12 @@ struct H264Track {
 	/// silently reusing a stale `convert`.
 	config: VideoConfig,
 	source: ExportSource,
-	/// `Some` for an avc1 source: SPS/PPS prefix prebuilt from the avcC, and
-	/// the avcC length-prefix size. `None` for an avc3 source: Annex-B passes
-	/// through without conversion.
-	convert: Option<Avc1Convert>,
+	/// A decoder description supplies length-prefix size and any out-of-band parameter sets.
+	/// Without one, the payload is already Annex-B.
+	convert: Option<Convert>,
 }
 
-struct Avc1Convert {
+struct Convert {
 	length_size: usize,
 	keyframe_prefix: Bytes,
 }
@@ -160,7 +156,9 @@ impl<S: Stream> Export<S> {
 			None => None,
 			Some(avcc) => {
 				let params = super::Avcc::parse(avcc)?;
-				if params.sps.is_empty() || params.pps.is_empty() {
+				if matches!(&config.codec, hang::catalog::VideoCodec::H264(codec) if !codec.inline)
+					&& (params.sps.is_empty() || params.pps.is_empty())
+				{
 					return Err(super::Error::MissingParamSets {
 						name: name.clone(),
 						sps: params.sps.len(),
@@ -169,7 +167,7 @@ impl<S: Stream> Export<S> {
 					.into());
 				}
 				let prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
-				Some(Avc1Convert {
+				Some(Convert {
 					length_size: params.length_size,
 					keyframe_prefix: prefix,
 				})
@@ -323,5 +321,41 @@ mod tests {
 			&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34],
 			"frame 1 P-slice must follow the prefix in Annex-B form"
 		);
+	}
+	#[tokio::test(start_paused = true)]
+	async fn in_band_export_accepts_empty_parameter_sets() {
+		for in_band in [false, true] {
+			let mut catalog = avc1_catalog("video", Bytes::from_static(&[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0]));
+			let config = catalog.video.renditions.get_mut("video").unwrap();
+			let hang::catalog::VideoCodec::H264(codec) = &mut config.codec else {
+				unreachable!()
+			};
+			codec.inline = in_band;
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast
+				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			let nals: &[&[u8]] = &[&[0x67, 0x42, 0, 0x1f], &[0x68, 0xce], &[0x65, 0x88]];
+			write_length_prefixed(&mut group, 0, nals);
+			group.finish().unwrap();
+			track.finish().unwrap();
+			let consumer = broadcast.consume();
+			let mut exporter = Export::new(crate::source::announced(&consumer), Once(Some(catalog)));
+			let result = exporter.next().await;
+			if in_band {
+				let expected: Vec<_> = nals
+					.iter()
+					.flat_map(|nal| [0, 0, 0, 1].into_iter().chain(nal.iter().copied()))
+					.collect();
+				assert_eq!(result.unwrap().unwrap().as_ref(), expected.as_slice());
+				assert!(exporter.next().await.unwrap().is_none());
+			} else {
+				assert!(matches!(
+					result,
+					Err(crate::Error::H264(super::super::Error::MissingParamSets { .. }))
+				));
+			}
+		}
 	}
 }
