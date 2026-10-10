@@ -26,7 +26,3 @@ both languages already cover (`a_newer_epoch_leaves_the_broadcast_in_flight`).
 Add the test to `js/net/src/origin.test.ts`, failing before the fix.
 
 Public API: behavior only. Wire: none.
-
-## Required
-
-- [Dynamic epoch](/quest/m0/broadcast-epoch/dynamic-epoch.md) - #5141, which corrects the Rust `Dynamic::update` doc this quest aligns JS to
