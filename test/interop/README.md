@@ -19,6 +19,13 @@ subscriber checks end-to-end: the browser encodes fake microphone audio, and the
 Python, Go, and C++ clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
 duration, so the matrix covers the FFI audio path with a non-default codec config.
 
+Every client closes its session on the way out: publishers stop when their input
+ends (the browser on SIGTERM), and subscribers close once they have their frame.
+After each publisher's round, the harness waits for the relay to log the close of
+every connection the round opened, and fails the round for any connection the relay
+timed out instead. A client that stalls and reconnects therefore fails, rather than
+passing as a slow cell, even when the idle-out lands after its cell finished.
+
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
 `WebTransport.closed` must carry the relay's code and reason. Chromium treats a

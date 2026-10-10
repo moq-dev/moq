@@ -94,6 +94,12 @@ std::shared_ptr<moq::Session> connect(const std::string &url, Clock::time_point 
     return until(client->connect(url), deadline, "connect");
 }
 
+// Closes the session and waits for the close to reach the relay. `cancel` would return at
+// once, and stopping the runtime right after it can leave the relay to time the connection out.
+void close_session(const std::shared_ptr<moq::Session> &session) {
+    until(session->shutdown(), Clock::now() + std::chrono::seconds(5), "session shutdown");
+}
+
 // Feeds the encoder a real-time tone until `stop` is set.
 void publish_tone(const std::shared_ptr<moq::AudioProducer> &audio, const std::atomic<bool> &stop) {
     const auto started = Clock::now();
@@ -161,7 +167,7 @@ int publish(const std::string &url, const std::string &path) {
     ok(audio->finish(), "audio finish");
     ok(media->finish(), "video finish");
     ok(broadcast->close(), "broadcast close");
-    session->cancel(0);
+    close_session(session);
     moq::shutdown();
     return 0;
 }
@@ -206,7 +212,7 @@ int subscribe(const std::string &url, const std::string &path, double timeout) {
         fail("no frame data received");
     }
     std::printf("received %zu bytes from \"%s\"\n", total, path.c_str());
-    session->cancel(0);
+    close_session(session);
     moq::shutdown();
     return 0;
 }

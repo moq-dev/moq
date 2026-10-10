@@ -120,9 +120,10 @@ impl Session {
 			let _consume = consume;
 
 			let res = tokio::select! {
-				// close() requested: a clean shutdown delivers a terminal 0.
-				_ = closed.1 => Ok(()),
-				res = Self::report(callback, reconnect) => res,
+				// close() requested: the terminal 0 waits for the close to reach the peer, so a
+				// caller that exits on it doesn't leave the peer to time the connection out.
+				_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
+				res = Self::report(callback, reconnect.clone()) => res,
 			};
 
 			// Deliver one final terminal callback (0 = closed, < 0 = error), then

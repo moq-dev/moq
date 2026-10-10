@@ -782,14 +782,15 @@ async fn serve_listening(
 	sessions: crate::session::Registry,
 ) -> anyhow::Result<()> {
 	while let Some(request) = listener.accept().await {
+		let id = cluster.next_connection_id();
 		let conn = Connection::new(request, cluster.clone(), auth.clone())
-			.with_id(cluster.next_connection_id())
+			.with_id(id)
 			.with_shutdown(shutdown.clone())
 			.with_sessions(sessions.clone());
 
 		tokio::spawn(async move {
 			if let Err(err) = conn.run().await {
-				tracing::warn!(%err, "connection closed");
+				tracing::warn!(id, %err, "connection closed");
 			}
 		});
 	}

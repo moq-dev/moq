@@ -99,7 +99,9 @@ try {
 
 	if (role === "publish") {
 		console.error(`publishing ${broadcast} (fake camera + microphone) to ${url}`);
-		await new Promise(() => {}); // stream until the orchestrator kills us
+		// Stream until the orchestrator stops us.
+		await new Promise((resolve) => process.once("SIGTERM", resolve));
+		code = 0;
 	} else {
 		const start = Date.now();
 		const startupDeadline = start + timeoutMs;
@@ -170,6 +172,11 @@ try {
 } finally {
 	// `code` is 0 only when the role's checks all passed, so it decides whether the trace is kept.
 	await finishTraces(code !== 0);
+	// Close the pages first, which closes their sessions. Closing the browser alone can end
+	// them without a close, leaving the relay to time them out.
+	for (const page of browser.contexts().flatMap((context) => context.pages())) {
+		await page.close().catch(() => {});
+	}
 	await browser.close().catch(() => {});
 	server.stop();
 }
