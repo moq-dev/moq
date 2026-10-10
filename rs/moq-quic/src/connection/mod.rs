@@ -2116,13 +2116,15 @@ impl Connection {
     }
 
     fn reset_idle_timeout(&mut self, now: Instant, space: SpaceId) {
-        let Some(timeout) = self.idle_timeout else {
-            return;
+        let timeout = match &self.state {
+            state if state.is_closed() => None,
+            State::Handshake(_) => Some(self.config.handshake_idle_timeout),
+            _ => self.idle_timeout,
         };
-        if self.state.is_closed() {
+        let Some(timeout) = timeout else {
             self.timers.stop(Timer::Idle);
             return;
-        }
+        };
         let dt = cmp::max(timeout, 3 * self.pto(space));
         self.timers.set(Timer::Idle, now + dt);
     }
@@ -2821,6 +2823,8 @@ impl Connection {
 
                 self.events.push_back(Event::Connected);
                 self.state = State::Established;
+                // Swap the handshake idle timeout for the negotiated one.
+                self.reset_idle_timeout(now, SpaceId::Data);
                 trace!("established");
                 Ok(())
             }

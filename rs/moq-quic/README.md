@@ -49,6 +49,8 @@ Changes on top of the upstream commit, besides the renames:
   Drop it if upstream lands [quinn#2748](https://github.com/quinn-rs/quinn/pull/2748) and we cherry-pick that.
 - Apple fast-path fallback preserves the segmentation of batches prepared before the fast path was disabled, including when a private symbol is unavailable.
 - Discarding Initial or Handshake keys resets the PTO backoff, as RFC 9002 A.11 does, so a client's Initial backoff no longer delays the retransmission of a lost Finished. Also [moq-dev/noq#32](https://github.com/moq-dev/noq/pull/32); not offered upstream yet.
+- `TransportConfig::handshake_idle_timeout` (default 10s, as msquic's `HandshakeIdleTimeoutMs`) governs the idle timer until the handshake completes, and the negotiated idle timeout takes over once established. A 2s idle timeout otherwise expires 3x the initial PTO in, just before the second Initial probe, leaving a client two flights. Also [moq-dev/noq#34](https://github.com/moq-dev/noq/pull/34).
+  quinn's `handshake_timeout` test in its async layer expects the handshake to end at the idle timeout, so the switch's import has to set both timeouts there.
 
 Recheck the BBR3 changes when cherry-picking quinn#2481 updates, or if it merges.
 

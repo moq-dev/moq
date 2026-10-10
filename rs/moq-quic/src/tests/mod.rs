@@ -3264,6 +3264,48 @@ fn lost_finished_after_initial_backoff() {
     assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
 }
 
+/// A short idle timeout does not cut the handshake to two Initial flights.
+///
+/// Before an RTT sample the PTO is 999ms, so a 2s idle timeout is armed at 2997ms, while
+/// the second probe is due 999ms + 1998ms after the first send, plus however late the first
+/// probe went out. The handshake idle timeout governs until the handshake completes.
+#[test]
+fn handshake_outlasts_short_idle_timeout() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let mut transport = cubic_transport();
+    transport.max_idle_timeout(Some(Duration::from_secs(2).try_into().unwrap()));
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+
+    let client_ch = pair.begin_connect(client);
+    let start = pair.time;
+    // The first flight is lost, and so is the first probe, which goes out 2ms late.
+    pair.drive_client();
+    pair.server.inbound.clear();
+    pair.time = pair.client.next_wakeup().unwrap() + Duration::from_millis(2);
+    loop {
+        pair.drive_client();
+        pair.server.inbound.clear();
+        pair.time = pair.client.next_wakeup().unwrap();
+        // Past any pacing: the second probe, due 2999ms after the first send, beyond the
+        // old 2997ms idle deadline.
+        if pair.time - start > Duration::from_secs(2) {
+            break;
+        }
+    }
+
+    pair.drive();
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::HandshakeDataReady)
+    );
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::Connected)
+    );
+}
+
 /// Ensures that the server can respond with 3 initial packets during the handshake
 /// before the anti-amplification limit kicks in when MTUs are similar.
 #[test]
