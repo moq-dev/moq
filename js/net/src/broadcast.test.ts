@@ -1,12 +1,11 @@
-import { expect, setSystemTime, spyOn, test } from "bun:test";
-import { Signal } from "@moq/signals";
+import { expect, setSystemTime, test } from "bun:test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { MAX_TRACK_SEQUENCES } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
-import { Producer as TrackProducer } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
 // The public API mints consumers internally (Producer.consume, the wire layers); tests act
@@ -91,6 +90,116 @@ test("dynamic track sequences continue across producer replacements", async () =
 	nextSubscriber.close();
 	broadcast.close();
 	nextGeneration.close();
+});
+
+test("createTrack answers a queued request", async () => {
+	const broadcast = new BroadcastProducer();
+	const pulled = wireOf(broadcast).requested();
+	const info = broadcast.track("media").info();
+	const subscriber = broadcast.track("media").subscribe().ordered();
+
+	// The track is created before any handler takes the queued request.
+	const producer = broadcast.createTrack("media", { timescale: Timescale.MILLI, priority: 3 });
+	producer.writeFrame(textFrame("hello"));
+	expect(await subscriber.readString()).toBe("hello");
+	expect((await info).priority).toBe(3);
+
+	// No handler ever sees the request, and the lookup that opened it leaves the track open.
+	expect(await pendingRequest(broadcast)).toBeUndefined();
+	subscriber.close();
+	await broadcast.demand().unused();
+	expect(producer.closed.peek()).toBeUndefined();
+
+	// Later subscriptions read the created track, and the name stays taken.
+	const again = broadcast.track("media").subscribe().ordered();
+	producer.writeFrame(textFrame("again"));
+	expect(await again.readString()).toBe("again");
+	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
+
+	broadcast.close();
+	expect(await pulled).toBeUndefined();
+});
+
+test("createTrack does not take over a request a handler already pulled", async () => {
+	const broadcast = new BroadcastProducer();
+	const pulled = wireOf(broadcast).requested();
+	broadcast.track("media").subscribe();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+
+	// The handler holds it, so the name stays duplicate until it answers, as in Rust.
+	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
+	request.reject();
+	broadcast.close();
+});
+
+test("created and requested tracks share a name's sequences", async () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	expect(first.appendGroup().sequence).toBe(0);
+	first.writeGroup(new GroupProducer(8));
+	first.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
+	first.close();
+
+	// A replacement continues past every explicit write.
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	expect(second.appendGroup().sequence).toBe(13);
+	second.close();
+
+	// An on-demand producer continues the same namespace, and so does a later created track.
+	broadcast.removeTrack("media");
+	const pulled = wireOf(broadcast).requested();
+	const subscriber = broadcast.track("media").subscribe();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	const requested = request.accept({ timescale: Timescale.MILLI });
+	expect(requested.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toBe(14);
+	subscriber.close();
+	requested.close();
+
+	const later = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	expect(later.appendGroup().sequence).toBe(15);
+	later.close();
+
+	// Only a new broadcast starts over.
+	const next = new BroadcastProducer();
+	expect(next.createTrack("media", { timescale: Timescale.MILLI }).appendGroup().sequence).toBe(0);
+	broadcast.close();
+	next.close();
+});
+
+test("a broadcast bounds the names it remembers sequences for", async () => {
+	const broadcast = new BroadcastProducer();
+
+	// Names that never wrote leave nothing behind once their tracks close.
+	for (let i = 0; i < MAX_TRACK_SEQUENCES * 2; i++) {
+		broadcast.createTrack(`unused-${i}`).close();
+	}
+
+	// Written names are remembered, and so is an open track that has not written yet.
+	const open = broadcast.createTrack("open");
+	for (let i = 1; i < MAX_TRACK_SEQUENCES; i++) {
+		const track = broadcast.createTrack(`written-${i}`);
+		track.appendGroup().close();
+		track.close();
+	}
+	expect(() => broadcast.createTrack("refused")).toThrow("too many track names");
+
+	// A remembered name is still admitted, continuing its sequences.
+	expect(broadcast.createTrack("written-1").appendGroup().sequence).toBe(1);
+
+	// An on-demand request past the bound is refused to its subscribers.
+	const pulled = wireOf(broadcast).requested();
+	const subscriber = broadcast.track("refused").subscribe();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	expect(() => request.accept()).toThrow("too many track names");
+	expect(await subscriber.closed).toBeInstanceOf(Error);
+
+	// Closing the open track without a write frees its slot.
+	open.close();
+	broadcast.createTrack("admitted");
+	broadcast.close();
 });
 
 test("publishing-side subscriptions coalesce onto one request", async () => {
@@ -236,14 +345,6 @@ test("a held info lookup ending after removeTrack leaves demand alone", async ()
 	await Promise.resolve();
 	expect(demand.used.peek()).toBe(false);
 
-	// Re-inserting the track counts it again.
-	broadcast.insertTrack(track);
-	expect(demand.used.peek()).toBe(false);
-	const resubscriber = track.subscribe();
-	await Promise.resolve();
-	expect(demand.used.peek()).toBe(true);
-
-	resubscriber.close();
 	track.close();
 	broadcast.close();
 });
@@ -372,8 +473,7 @@ test("consumer track subscriptions fan out and close independently", async () =>
 test("subscribe serves a statically inserted track without a request", async () => {
 	const broadcast = new BroadcastProducer();
 
-	const track1 = new TrackProducer("track1").accept({ timescale: Timescale.MILLI });
-	broadcast.insertTrack(track1);
+	const track1 = broadcast.createTrack("track1", { timescale: Timescale.MILLI });
 	track1.appendGroup().close();
 
 	// The track already exists, so subscribe resolves immediately (no requested()).
@@ -384,8 +484,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 	expect(await pendingRequest(broadcast)).toBeUndefined();
 
 	// A second static track behaves the same.
-	const track2 = new TrackProducer("track2").accept({ timescale: Timescale.MILLI });
-	broadcast.insertTrack(track2);
+	const track2 = broadcast.createTrack("track2", { timescale: Timescale.MILLI });
 
 	const sub2 = broadcast.track("track2").subscribe().ordered();
 	track2.appendGroup().close();
@@ -496,10 +595,10 @@ test("createTrack commits info up front", async () => {
 	expect(info.priority).toBe(3);
 });
 
-test("insertTrack rejects a duplicate live name", () => {
+test("createTrack rejects a duplicate live name", () => {
 	const broadcast = new BroadcastProducer();
 	broadcast.createTrack("dup", { timescale: Timescale.MILLI });
-	expect(() => broadcast.insertTrack(new TrackProducer("dup").accept({ timescale: Timescale.MILLI }))).toThrow();
+	expect(() => broadcast.createTrack("dup", { timescale: Timescale.MILLI })).toThrow("duplicate track");
 });
 
 test("a finished track is still served from its cache", async () => {
@@ -689,38 +788,7 @@ test("removeTrack stops counting the removed track's demand at once", async () =
 	broadcast.removeTrack("video");
 	expect(demand.used.peek()).toBe(false);
 
-	// Re-inserting the same track counts it again.
-	broadcast.insertTrack(video);
-	expect(demand.used.peek()).toBe(true);
-
 	subscriber.close();
 	video.close();
-	broadcast.close();
-});
-
-test("inserting a closed track leaves no demand watcher behind", () => {
-	const broadcast = new BroadcastProducer();
-	const track = new TrackProducer("video").accept({ timescale: Timescale.MILLI });
-	track.close();
-
-	// Count the listeners insertTrack attaches and never disposes.
-	let live = 0;
-	const subscribe = Signal.prototype.subscribe;
-	const spy = spyOn(Signal.prototype, "subscribe").mockImplementation(function (this: Signal<unknown>, fn) {
-		live++;
-		const dispose = subscribe.call(this, fn);
-		return () => {
-			live--;
-			dispose();
-		};
-	});
-	try {
-		broadcast.insertTrack(track);
-	} finally {
-		spy.mockRestore();
-	}
-
-	expect(live).toBe(0);
-	expect(broadcast.demand().used.peek()).toBe(false);
 	broadcast.close();
 });

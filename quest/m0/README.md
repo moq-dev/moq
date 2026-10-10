@@ -66,5 +66,4 @@ remain and no release waits on them.
 - [Check base](/quest/m0/check-base.md) - `just check` diffs against the PR's base whatever the local branch tracks, so scoped checks stay scoped
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
-- [JS track takeover](/quest/m0/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does, so a re-announced `@moq/publish` catalog never restarts its groups
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
