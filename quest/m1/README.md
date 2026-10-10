@@ -200,7 +200,6 @@ bench all require its crate.
 - [Tail arrivals](/quest/m1/tail-arrivals.md) - a track judges its pending tail from recorded arrivals, not a cache scan, and errors a reader whose tail ends short
 - [JS pending tail](/quest/m1/js-pending-tail.md) - a JS reader holds for a track's pending tail like Rust
 - [Group demand after accept](/quest/m1/group-demand-accept.md) - an accepted group request's demand ends cleanly instead of failing with NotFound
-- [Pool churn cursors](/quest/m1/pool-churn-cursors.md) - the origin pool churn benchmark sweeps announce cursors per prefix
 - [In-band CMAF follow-ups](/quest/m1/cmaf-inline-followups.md) - MSF, h264/h265 export, and gst caps handle avc3/hev1 CMAF
 - [Datagram replay bound](/quest/m1/datagram-replay-bound.md) - a new Rust datagram subscriber starts within its max delay of the newest datagram, not at a minutes-old buffer
 - [Catalog colour](/quest/m1/color-catalog.md) - the catalog describes a rendition's colour and HDR properties, which the WebGPU HDR renderer reads
