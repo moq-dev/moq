@@ -18,17 +18,15 @@ any relay-side session table. Downstream (moq.pro) keeps its project view.
 
 ## Plan
 
-Decided 2026-10-05, from moq.pro's
-[connection health](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/qos-connection-health.md):
-the health sample and its classification are generic, so they move upstream
+Decided 2026-10-05: the health sample and its classification are generic, so they move upstream
 into this line; moq.pro keeps the per-project view and dashboard. Rejected:
 deferring the model.
 
 The model reads the shapes this line settled after
 [#4510](https://github.com/moq-dev/moq/pull/4510): the publisher's `stats`
 track named in the catalog, keyed by rendition ID, and viewers' `.echo`
-broadcasts. moq.pro's plan predates that and read client stats from a
-`.stats` broadcast, which #4510 replaced with these tracks (the relay's own
+broadcasts. Older downstream plans read client stats from a `.stats`
+broadcast, which #4510 replaced with these tracks (the relay's own
 `.stats/node/<node>` is unchanged); do not revive the client one.
 
 Guidance, to be settled while building:
@@ -54,9 +52,7 @@ Guidance, to be settled while building:
   it shows a better home.
 
 A per-broadcast verdict combining client reports, the relay's starvation,
-and publisher timeliness lives in moq.pro's
-[health badge](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/qos/badge.md),
-not here.
+and publisher timeliness lives downstream, not here.
 
 Prove a degrading publisher self-report, a degrading viewer report, a stale
 report going unknown, and a counter reset by both a decrease and an epoch
@@ -70,8 +66,6 @@ Public API: new health types in `hang` and `@moq/hang`. Wire: none.
 
 ## Related
 
-- [moq.pro: connection health](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/qos-connection-health.md) - the per-project view built on this model
-- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, which moq.pro's combined verdict also reads
-- [moq.pro: health badge](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/qos/badge.md) - the per-broadcast verdict combining this one with relay lag and publisher timeliness
+- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, which a combined downstream verdict also reads
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a new epoch is one way a counter reset shows
 - [TS health counters](/quest/m2/ts-health-stats.md) - container counters kept out of the verdict

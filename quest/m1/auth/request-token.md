@@ -4,8 +4,9 @@
 
 A moq-transport peer authorizes a SUBSCRIBE or PUBLISH_NAMESPACE with the
 `AUTHORIZATION TOKEN` parameter (`0x03`) on that request, and refreshes it in
-band with an update (SUBSCRIBE_UPDATE on drafts 14 and 15, REQUEST_UPDATE
-from 16), on every supported draft. A request is authorized
+band with the draft's update: SUBSCRIBE_UPDATE for a subscription on drafts 14
+and 15, which cannot update a namespace, and REQUEST_UPDATE for either from
+16. A request is authorized
 by the session's grant first; when that does not cover it, by the token on the
 request; with neither it is refused `UNAUTHORIZED`. The token's grant covers
 only the request it rode on, never joins the session union, and ends with that
@@ -13,13 +14,12 @@ request. On any other request the token is ignored.
 
 ## Plan
 
-[#4675](https://github.com/moq-dev/moq/pull/4675) builds this and is in manual
-maintainer review. Decided 2026-10-09: an external moq-transport deployment
-needs per-request tokens with in-band renewal, so this quest keeps its full
-scope, reversing the 2026-10-08 shrink. The pieces that stand alone land first
-as the quests under Required; #4675 then rebases onto them and onto the line,
-which already routes draft-14/15/16 updates to their target (#4961), and drops
-its own copies.
+[#5148](https://github.com/moq-dev/moq/pull/5148) builds this, carrying
+Kyle Sletmoe's [#4675](https://github.com/moq-dev/moq/pull/4675) forward on a
+branch maintainers can push to. Decided 2026-10-09: an external moq-transport
+deployment needs per-request tokens with in-band renewal, so this quest keeps
+its full scope, reversing the 2026-10-08 shrink. The pieces that stand alone
+land first as the quests under Required; #5148 stacks on both.
 
 Decided, so review does not relitigate them:
 
@@ -53,36 +53,32 @@ Decided, so review does not relitigate them:
   accepted SUBSCRIBE_UPDATE, so its sender does not wait for one; test two
   successive replacements with no answers.
 - **Drafts.** Renewal works on every supported draft, 14 through 16 included
-  (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15.
+  (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15. A namespace must
+  renew from 16, whose REQUEST_UPDATE covers PUBLISH_NAMESPACE; #5148 starts
+  at 17 (see below).
 - `EXPIRED_AUTH_TOKEN` and `MALFORMED_AUTH_TOKEN` are not this quest's; they
   land with [Expired token error](/quest/m1/auth/expired-error.md), which
   does not block it (2026-10-01 Q4).
 
-Fix in #4675 before it merges, each with a regression test. Found by a
-2026-10-09 read of head `29ed74e78`, not yet reproduced:
+Of what a 2026-10-09 read of #4675 found, #5148 fixes updates answered out of
+order behind a pending renewal, a repeated 0x03 refused, duplicated admission
+and renewal logic, three parallel `Option`s on `auth::Request`, a request token
+silently ignored on moq-lite, an outbound update sniffer, unread
+`max_request_updates` and `decode_value`, and a refused renewal overloading
+`Error::Unsupported`. Still open in #5148, each fixed or settled by a recorded
+decision before it merges:
 
-- The publisher answers a token-less REQUEST_UPDATE while a renewal's verdict
-  is still pending (`handle_renewal_update`), so on draft-17+, where answers
-  are unkeyed, they go out of order.
-- The new 0x03 fields decode as `Option`, refusing a repeat the drafts allow;
-  [Request-token decode](/quest/m1/auth/request-token-decode.md) settles the
-  rule.
-- The admission sequence appears four times and the receiver renewal state
-  machine twice (publisher and subscriber); each becomes one helper.
-- `set_request_token` takes `setup::Token`, not encoded bytes, so a caller
-  cannot send an alias form. `auth::Request`'s `path`, `kind`, and
-  `token_kind` become one `Option`.
-- Setting a request token on a moq-lite session fails loud instead of doing
-  nothing.
-- Drop the outbound update sniffer in `ietf/adapter.rs`, which re-parses an ID
-  the sender already holds, and the unread `Peer::max_request_updates` and
-  `token::decode_value`.
+- `set_request_token` takes `setup::Token` and the encoder writes only
+  `USE_VALUE`, so a caller cannot send an alias form. Take encoded bytes, or
+  decide to keep the typed, value-only API.
+- A namespace renews only from draft 17; a token-bearing draft-16
+  REQUEST_UPDATE for a PUBLISH_NAMESPACE is still ignored.
 
 Open for review: one `requests()` consumer receives both session and request
 tokens, so an acceptor written for session tokens also answers request tokens.
 
-Public API: additive. moq-net gains `auth::RequestKind`, the request a
-`auth::Request` belongs to, `auth::Handle::set_request_token`, and
+Public API: additive. moq-net gains `auth::RequestKind`, `auth::Scope`,
+`auth::Request::scope`, `auth::Handle::set_request_token`, and
 `SessionError::TooManyRequestUpdates`, mirrored as a `js/net` `SessionCode`.
 moq-tokio gains `Auth`,
 `Connection::auth`, `connect::Config::with_request_token`, and

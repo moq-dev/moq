@@ -29,10 +29,10 @@ run 37139033242 (2026-10-03) failed `tail rust -> rust`, `rust ->
 js-native-node`, and `rust -> js-native-bun`. Merge `main` (after #4741 and
 #4813) into #4225, rerun, and record here whatever defect still fails.
 
-Found 2026-10-08: #4225's `go -> *` lanes fail on the
-[serve budget](/quest/m0/serve-budget.md) stall, where the go publisher's
-serve loop starves its own QUIC driver until the relay times it out. Rerun
-the lanes once that lands.
+Found 2026-10-08: #4225's `go -> *` lanes fail on a stall where the go
+publisher's serve loop starves its own QUIC driver until the relay times it
+out. The serve budgets (`kio::coop::Budget`) are meant to fix it; rerun the
+lanes.
 
 Decided in the 2026-09-30 audit: the lite-07 drop case moved into
 [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md)'s tests, so the basic Rust and
@@ -40,10 +40,6 @@ JS tail interop lands now instead of waiting on that [L] quest.
 
 QUIC on localhost rarely reorders, so this is a smoke check that the end is
 delivered and clean. The ordering race itself stays in the unit tests.
-
-## Required
-
-- [Serve budget](/quest/m0/serve-budget.md) - is meant to fix the stall that fails #4225's go lanes; rerun them once it lands
 
 ## Related
 

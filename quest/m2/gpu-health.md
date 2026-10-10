@@ -71,4 +71,3 @@ Public API: a device capacity and health snapshot in moq-video. Wire: none.
 
 - [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - picks a render node by the same `dev_t`
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the AMD backend whose sessions this counts
-- [moq.pro: transcode admission](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/transcode/ws3-admission.md) - the admission and health checks that consume this
