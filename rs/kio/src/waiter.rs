@@ -284,7 +284,8 @@ impl WaiterList {
 		}
 	}
 
-	/// Whether no live waiter remains, so a list kept in a map can be dropped.
+	/// Whether no live waiter remains, so a list kept in a map can be dropped. Walks the
+	/// list until it finds a live one.
 	pub fn is_empty(&self) -> bool {
 		self.entries.iter().all(|entry| entry.strong_count() == 0)
 	}

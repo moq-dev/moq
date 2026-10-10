@@ -1509,6 +1509,17 @@ mod test {
 		assert!(held.is_old());
 	}
 
+	/// The replacement passed the held group, so it looked lost, but its subscription
+	/// can still deliver it out of order: that landing is the continuation.
+	#[test]
+	fn a_group_no_route_continues_wakes_when_it_lands_late() {
+		let mut held = Held::new(&[(3, Some(3000))]);
+		let _newer = held.group(4);
+		held.settle();
+		let _late = held.group(2);
+		assert!(held.woken(), "the held group's own landing wakes it");
+	}
+
 	#[test]
 	fn a_half_read_frame_waits_for_the_replacement_header() {
 		for arrives in [true, false] {

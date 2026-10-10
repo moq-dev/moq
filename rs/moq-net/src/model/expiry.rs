@@ -38,11 +38,16 @@ struct Parked {
 	deadlines: BTreeMap<u64, kio::WaiterList>,
 	/// Reads by their group's sequence, woken when a group lands above them.
 	landings: BTreeMap<u64, kio::WaiterList>,
-	/// `landings` for groups held from another copy. Kept apart because this track may
-	/// never have held them, so falling below its oldest group does not end them. Their
-	/// readers are what end them, so each park prunes the lists every reader has left.
+	/// `landings` for groups held from another copy, also woken by their own group
+	/// landing here. Kept apart because this track may never have held them, so falling
+	/// below its oldest group does not end them; their readers leaving does.
 	held: BTreeMap<u64, kio::WaiterList>,
+	/// The `held` size that sweeps out the lists every reader has left.
+	held_sweep: usize,
 }
+
+/// The smallest `held` size worth sweeping.
+const HELD_SWEEP_MIN: usize = 16;
 
 impl Default for Wakes {
 	fn default() -> Self {
@@ -96,18 +101,25 @@ impl Wakes {
 			.register(waiter);
 	}
 
-	/// Park `waiter`, holding group `sequence` from another copy, until a group lands above it.
+	/// Park `waiter`, holding group `sequence` from another copy, until it or a group
+	/// above it lands.
 	pub(crate) fn watch_held(&self, sequence: u64, waiter: &kio::Waiter) {
 		let mut parked = self.parked.lock();
-		// Only held groups pay for this, and only the ones in flight at a route switch
-		// park here, so a full sweep stays small and keeps `landed` free of it.
-		parked.held.retain(|_, list| !list.is_empty());
+		let parked = &mut *parked;
+		// Sweep only once the map has doubled, so each sweep is paid for by the keys
+		// added before it: a switch holding N groups costs O(N), not O(N²). Here rather
+		// than in `landed`, which every insert takes.
+		if parked.held.len() >= parked.held_sweep {
+			parked.held.retain(|_, list| !list.is_empty());
+			parked.held_sweep = (parked.held.len() * 2).max(HELD_SWEEP_MIN);
+		}
 		parked.held.entry(sequence).or_default().register(waiter);
 	}
 
 	/// A servable group landed at `sequence`, so it succeeds every read from `below`, the
-	/// nearest servable group beneath it, up. Reads below `oldest`, the first group still
-	/// cached, can no longer expire and are forgotten; held groups are not.
+	/// nearest servable group beneath it, up, and continues a held group of its own
+	/// sequence. Reads below `oldest`, the first group still cached, can no longer expire
+	/// and are forgotten; held groups are not.
 	pub(crate) fn landed(&self, below: Option<u64>, sequence: u64, oldest: u64) {
 		let mut woken = Vec::new();
 		{
@@ -118,10 +130,12 @@ impl Wakes {
 			{
 				entry.remove();
 			}
-			for parked in [&mut parked.landings, &mut parked.held] {
-				while let Some(at) = parked.range(below.unwrap_or(0)..sequence).next().map(|(at, _)| *at) {
-					woken.extend(parked.remove(&at));
-				}
+			let from = below.unwrap_or(0);
+			while let Some(at) = parked.landings.range(from..sequence).next().map(|(at, _)| *at) {
+				woken.extend(parked.landings.remove(&at));
+			}
+			while let Some(at) = parked.held.range(from..=sequence).next().map(|(at, _)| *at) {
+				woken.extend(parked.held.remove(&at));
 			}
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
@@ -163,6 +177,9 @@ mod test {
 			wakes.watch_held(sequence, &waiter);
 			reader = Some(waiter);
 		}
-		assert_eq!(wakes.parked.lock().held.len(), 1, "only the live reader's group stays");
+		assert!(
+			wakes.parked.lock().held.len() <= HELD_SWEEP_MIN,
+			"the readers that left are swept"
+		);
 	}
 }

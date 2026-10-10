@@ -2940,7 +2940,7 @@ impl Consumer {
 	/// Poll for group `sequence` falling a full `budget` behind this track's live edge,
 	/// as a reader would judge it, whether the track holds it or not; see
 	/// `TrackState::drifted`. Parks in this track's expiry index, so only a change that can
-	/// make the group stale wakes it.
+	/// make the group stale, or land it here, wakes it. Pending for good once the track closes.
 	pub(crate) fn poll_stale(&self, sequence: u64, budget: Duration, waiter: &kio::Waiter) -> Poll<()> {
 		let state = self.state.read();
 		state.cache.wakes().watch_held(sequence, waiter);
