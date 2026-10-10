@@ -104,7 +104,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Malformed grant](/quest/m1/auth/malformed-grant.md) - a malformed or
   non-canonical grant pattern, or an out-of-range `Expires`, closes the
   session with PROTOCOL_VIOLATION in Rust and JS
-- [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 - [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
   refused up front and held to the grant through a gate its dispatcher owns
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
@@ -130,6 +129,8 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   the rest, with the URL kept for peers without the AUTH stream
 
 ## Related
+
+- [JS fetch grant watch](https://github.com/moq-dev/moq/pull/5260) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 
 - [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's node-bound credential,
   built on this line's relay tokens
