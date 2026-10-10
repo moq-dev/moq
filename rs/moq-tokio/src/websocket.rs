@@ -305,20 +305,6 @@ pub(crate) async fn connect(
 		return Err(Error::Disabled);
 	}
 
-	let key = won_key(&url)?;
-	let (host, port) = key.clone();
-
-	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
-	// unless we've already had to fall back to WebSockets for this server.
-	// TODO if let chain
-	match resolved.delay {
-		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
-			tokio::time::sleep(delay).await;
-			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
-		}
-		_ => {}
-	}
-
 	// Convert URL scheme: http:// -> ws://, https:// -> wss://
 	// Custom protocols (moqt://, moql://) use raw QUIC and don't support WebSocket.
 	let needs_tls = match url.scheme() {
@@ -334,6 +320,20 @@ pub(crate) async fn connect(
 		"wss" => true,
 		_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 	};
+
+	let key = won_key(&url)?;
+	let (host, port) = key.clone();
+
+	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
+	// unless we've already had to fall back to WebSockets for this server.
+	// TODO if let chain
+	match resolved.delay {
+		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
+			tokio::time::sleep(delay).await;
+			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
+		}
+		_ => {}
+	}
 
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via WebSocket");
 

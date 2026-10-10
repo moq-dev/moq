@@ -80,7 +80,7 @@ fn attempt_deadline(
 ///
 /// The delays carry jitter, so a fleet
 /// knocked offline together does not reconnect in lockstep. The timeout bounds every failure;
-/// only a settled response from the server short-circuits it.
+/// a settled rejection or invalid local configuration stops retrying.
 #[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -1026,12 +1026,7 @@ impl Connection {
 					}
 				}
 				Err(err) => {
-					if err.is_auth()
-						|| err
-							.status()
-							.is_some_and(|status| !crate::error::status_retryable(status))
-						|| !client.reconnect
-					{
+					if err.is_terminal() || !client.reconnect {
 						return Err(err);
 					}
 					retry.last_error = Some(err);
@@ -1074,6 +1069,7 @@ impl Connection {
 	) -> crate::Result<(crate::connect::Addr, crate::client::Dialed)> {
 		let candidates = addrs.as_slice();
 		let mut last = None;
+		let mut transient = None;
 
 		for (index, addr) in candidates.iter().enumerate() {
 			let url = addr.url();
@@ -1118,6 +1114,9 @@ impl Connection {
 				}
 				Err(err) => {
 					tracing::debug!(peer = %Endpoint(url), %err, "address unreachable");
+					if !err.is_terminal() {
+						transient = Some(err.clone());
+					}
 					last = Some(err);
 				}
 			}
@@ -1125,7 +1124,10 @@ impl Connection {
 
 		// `Addrs` is never empty, so the only way to get here without a failure is
 		// the budget running out before the first attempt started.
-		Err(last.unwrap_or_else(|| Error::Reconnect("retry window elapsed before dialing".to_string())))
+		// One unusable candidate must not turn another candidate's transient failure terminal.
+		Err(transient
+			.or(last)
+			.unwrap_or_else(|| Error::Reconnect("retry window elapsed before dialing".to_string())))
 	}
 
 	/// Poll until a session is established (the first connect, or the current one).
@@ -2172,6 +2174,41 @@ mod tests {
 		assert!(logs_contain("connecting"), "the dial never logged at all");
 		assert!(!logs_contain(SECRET), "a log line leaked the credential");
 		assert!(!format!("{err}").contains(SECRET), "the error leaked it: {err}");
+	}
+
+	/// Invalid local configuration must end an unlimited reconnect loop without waiting.
+	#[cfg(all(feature = "noq", feature = "websocket"))]
+	#[tokio::test(start_paused = true)]
+	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		config.backoff.timeout = Duration::ZERO;
+		let client = config.init(Default::default()).expect("build client");
+		let started = tokio::time::Instant::now();
+		let connection = client.connect(url("moqz://localhost/"));
+		let err = tokio::time::timeout(Duration::from_secs(1), connection.closed())
+			.await
+			.expect("invalid scheme kept retrying")
+			.expect_err("invalid scheme connected");
+		assert!(err.is_terminal(), "{err}");
+		assert_eq!(started.elapsed(), Duration::ZERO);
+	}
+
+	/// A refused socket still spends the retry budget rather than stopping on its first error.
+	#[cfg(feature = "tcp")]
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_tcp_dial_keeps_retrying() {
+		let (_socket, target) = refused();
+		let mut client = client();
+		client.backoff.initial = Duration::from_millis(50);
+		client.backoff.max = Duration::from_millis(50);
+		client.backoff.timeout = Duration::from_millis(200);
+		let started = tokio::time::Instant::now();
+		let connection = client.connect(target);
+		let err = connection.closed().await.expect_err("refused socket connected");
+		assert!(matches!(err, Error::Reconnect(_)), "{err}");
+		assert!(err.to_string().contains("Connection refused"), "{err}");
+		assert!(started.elapsed() >= Duration::from_millis(200));
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.

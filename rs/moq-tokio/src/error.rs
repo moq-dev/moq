@@ -234,6 +234,69 @@ pub enum Error {
 }
 
 impl Error {
+	/// A fixed local error or settled rejection that another dial cannot repair.
+	pub(crate) fn is_terminal(&self) -> bool {
+		match self {
+			#[cfg(feature = "websocket")]
+			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
+			Self::NoBackend(_)
+			| Self::Tls(_)
+			| Self::Deprecated(_)
+			| Self::IdleTimeoutRange
+			| Self::WindowRange(_)
+			| Self::QlogUnsupported
+			| Self::Connect(_) => true,
+			#[cfg(feature = "noq")]
+			Self::Noq(err) => {
+				matches!(
+					err.as_ref(),
+					crate::noq::Error::InvalidScheme
+						| crate::noq::Error::UnsupportedScheme(_)
+						| crate::noq::Error::InvalidDnsName
+						| crate::noq::Error::NoRuntime
+						| crate::noq::Error::NoInitialCipherSuite
+						| crate::noq::Error::Tls(_)
+				) || self.status().is_some_and(|status| !status_retryable(status))
+			}
+			#[cfg(feature = "websocket")]
+			Self::WebSocket(err) => match err.as_ref() {
+				crate::websocket::Error::Disabled
+				| crate::websocket::Error::MissingHostname
+				| crate::websocket::Error::UnsupportedScheme(_)
+				| crate::websocket::Error::BuildRequest(_)
+				| crate::websocket::Error::ProtocolHeader(_)
+				| crate::websocket::Error::ConnectRejected(_) => true,
+				crate::websocket::Error::Failover(attempts) => {
+					!attempts.is_empty()
+						&& attempts.iter().all(|attempt| {
+							matches!(&attempt.error, crate::websocket::Error::ConnectRejected(_))
+								|| attempt.error.status().is_some_and(|status| !status_retryable(status))
+						})
+				}
+				_ => self.status().is_some_and(|status| !status_retryable(status)),
+			},
+			#[cfg(feature = "tcp")]
+			Self::Tcp(err) => matches!(
+				err.as_ref(),
+				crate::tcp::Error::MissingHostname | crate::tcp::Error::MissingPort
+			),
+			#[cfg(all(feature = "uds", unix))]
+			Self::Unix(err) => matches!(err.as_ref(), crate::unix::Error::MissingPath),
+			#[cfg(feature = "iroh")]
+			Self::IrohDisabled => true,
+			#[cfg(feature = "iroh")]
+			Self::Iroh(err) => matches!(
+				err.as_ref(),
+				crate::iroh::Error::MissingHost
+					| crate::iroh::Error::InvalidEndpointId(_)
+					| crate::iroh::Error::InvalidUrl
+					| crate::iroh::Error::Url(_)
+					| crate::iroh::Error::NoVersions
+			),
+			_ => self.is_auth(),
+		}
+	}
+
 	/// The auth rejection behind this error, digging through backend and race variants.
 	pub fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
@@ -261,9 +324,8 @@ impl Error {
 	/// `None` covers everything else: a dial that never got a response, a QUIC handshake that
 	/// failed, a URL we couldn't parse. Only a status the peer actually sent shows up here, and
 	/// whether it invites another attempt is the caller's call (`408`, `429`, `502`, `503`, and
-	/// `504` are the ones worth repeating). This deliberately does not try to say whether some
-	/// *other* kind of failure is worth retrying; that's a guess, and a backoff budget bounds it
-	/// instead.
+	/// `504` are the ones worth repeating). This reports only HTTP responses; local configuration errors are
+	/// classified separately by the reconnect loop.
 	pub fn status(&self) -> Option<u16> {
 		match self {
 			// A race is only settled when both halves were answered, and answered with something not
@@ -354,6 +416,31 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(all(test, feature = "websocket"))]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn a_transport_race_is_terminal_only_when_every_arm_is_terminal() {
+		let local = || Error::WebSocket(Arc::new(crate::websocket::Error::UnsupportedScheme("bad".into())));
+		let transient = || Error::Io(Arc::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)));
+		assert!(local().is_terminal());
+		assert!(!transient().is_terminal());
+		for (quic, websocket) in [(local(), transient()), (transient(), local())] {
+			assert!(
+				!Error::TransportRace {
+					quic: Arc::new(quic),
+					websocket: Arc::new(websocket)
+				}
+				.is_terminal()
+			);
+		}
+		assert!(
+			Error::TransportRace {
+				quic: Arc::new(local()),
+				websocket: Arc::new(local())
+			}
+			.is_terminal()
+		);
+		assert!(Error::Tls(Arc::new(crate::tls::Error::NoRoots)).is_terminal());
+	}
 
 	#[test]
 	fn transport_race_propagates_nested_connect_errors() {
