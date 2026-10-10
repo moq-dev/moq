@@ -2,7 +2,7 @@
 
 ## Goal
 
-On `dev`, every JS package (net, signals, hang, watch, publish, room, auth,
+Every JS package (net, signals, hang, watch, publish, room, auth,
 json, flate, and the rest under `js/`) reads time and arms timers only
 through `@moq/time`. `@moq/net`'s `Time` units move to `@moq/time`.
 `@moq/signals`' `Effect.timer`, `timeout`, and `interval` run on the ambient
@@ -12,8 +12,7 @@ site move to the `Manual` clock or wait on an event.
 
 ## Plan
 
-Breaking (`@moq/net` loses its time units, with no re-export shim), so it
-targets `dev`. Tests that cross a real browser or socket follow the real-I/O
+Breaking: `@moq/net` loses its time units, with no re-export shim. Tests that cross a real browser or socket follow the real-I/O
 rule in [the line's README](/quest/m1/time/README.md). Split the PR by package
 if review needs it, but land every package before this closes.
 

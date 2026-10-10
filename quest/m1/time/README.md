@@ -57,10 +57,13 @@ reasons, so later sessions don't reopen them:
   `#[moq_net_sim::test]`.
 - **Tests move onto the sim wherever possible.** Real-I/O tests that cannot
   stay on paused tokio, whose backend `moq-time` reads, or sync on events.
-- **Landing.** The crate and the JS package are additive on `main` and are
-  backported to `release` so pinned consumers adopt them at once. Changing a published
-  type (moq-net's `time::Instant`, moq-mux's `Clock`, `@moq/net`'s time units)
-  is breaking and goes to `dev`.
+- **Landing.** Everything lands on `main`, the trunk. The crate and the JS
+  package land first and additively; the migrations that change a published
+  type (moq-net's `time::Instant`, moq-mux's `Clock`, `@moq/net`'s time
+  units) follow as breaking changes. No backport: `release` is touched only
+  to cut a release or backport a critical fix, so pinned consumers adopt
+  `moq-time` from the next cut (decided 2026-10-10 from review, replacing an
+  earlier backport plan).
 - **Lint ratchet.** Each migration quest bans direct clock reads and timers in
   the crates and packages it finishes: clippy `disallowed-methods` and
   `disallowed-types` in a per-crate `clippy.toml`, and a biome
@@ -83,9 +86,8 @@ state the real-I/O rule and the `moq-time` testing rule in `AGENTS.md`,
 
 - [The moq-time crate](/quest/m1/time/crate.md) - a logical clock, deadlines, ambient tokio and browser backends, and the simulator, published on `main`
 - [@moq/time](/quest/m1/time/js.md) - the same model in JS, with an installable clock
-- [Backport to release](/quest/m1/time/release.md) - `release` carries both, so pinned consumers adopt them before the breaking migrations
-- [moq-net on moq-time](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-time and moq-net-sim is gone, on `dev`
-- [JS on @moq/time](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/time`, on `dev`
+- [moq-net on moq-time](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-time and moq-net-sim is gone
+- [JS on @moq/time](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/time`
 - [Every crate on moq-time](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-time, and its tests run on the sim or paused tokio
 - [moq-uring on moq-time](/quest/m1/time/uring.md) - one clock read per worker turn and moq-time's deadline queue replace the private timer heap
 - [The relay seam](/quest/m1/time/relay-seam.md) - one in-memory session and a generic `moq_relay::Connection`, so relay tests run on the sim

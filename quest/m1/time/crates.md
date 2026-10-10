@@ -2,7 +2,7 @@
 
 ## Goal
 
-On `dev`, every remaining workspace crate (moq-tokio, moq-relay, moq-cli,
+Every remaining workspace crate (moq-tokio, moq-relay, moq-cli,
 moq-hls, moq-auth, moq-archive, moq-audio, moq-video, moq-gst, moq-rtc,
 moq-rtmp, moq-srt, moq-shaper, moq-sock, moq-transcode, moq-e2ee, moq-boy,
 moq-bench, moq-c, hang, and the rest under `rs/`) reads time and arms timers

@@ -39,5 +39,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [io_uring handshake deadline](/quest/m1/listener-deadlines.md) - arms its deadline on the worker's clock
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - reshapes the same worker turn
