@@ -946,14 +946,14 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 			UniType::Subgroup => {
 				let mut reader = reader.with_version(version);
 				let res = subscriber.recv_group(&mut reader).await;
-				stop_on_error(&mut reader, res);
+				stop_on_error(&mut reader, res)?;
 			}
 			// A fill fetch stream carries the head of the group a draft-20 subscription
 			// joined part way through. One answering no fill of ours is refused inside.
 			UniType::Fetch => {
 				let mut reader = reader.with_version(version);
 				let res = subscriber.recv_fill(&mut reader).await;
-				stop_on_error(&mut reader, res);
+				stop_on_error(&mut reader, res)?;
 			}
 			// The receiver MUST discard padding. We read it to the end rather than cancel,
 			// so a peer probing for bandwidth gets the throughput it is measuring.
@@ -991,12 +991,18 @@ where
 	}
 }
 
-/// Stop a data stream whose handler failed. The handler owns only the stream, so it
-/// cannot claim the session closed.
-fn stop_on_error<R: crate::transport::poll::RecvStream>(reader: &mut Reader<R, Version>, res: Result<(), Error>) {
+/// Stop a refused data stream, propagating ID overflow to session teardown.
+fn stop_on_error<R: crate::transport::poll::RecvStream>(
+	reader: &mut Reader<R, Version>,
+	res: Result<(), Error>,
+) -> Result<(), Error> {
 	let Err(err) = res else {
-		return;
+		return Ok(());
 	};
+	// An overflowing delta is a protocol violation, unlike an unsupported gap.
+	if matches!(err, Error::Decode(DecodeError::BoundsExceeded)) {
+		return Err(err);
+	}
 
 	tracing::debug!(%err, "uni stream error");
 	let reset = match StreamError::from(&err) {
@@ -1004,6 +1010,7 @@ fn stop_on_error<R: crate::transport::poll::RecvStream>(reader: &mut Reader<R, V
 		reset => reset,
 	};
 	reader.abort(reset);
+	Ok(())
 }
 
 /// Accept incoming bidi streams and dispatch to the correct handler based on message type.
@@ -1165,6 +1172,14 @@ async fn run_goaway<R: crate::transport::poll::RecvStream>(
 mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
+
+	#[test]
+	fn object_overflow_is_session_fatal_but_an_unsupported_gap_is_not() {
+		let mut reader = Reader::new(crate::lite::test_transport::PendingRecv, Version::Draft22);
+		let err = stop_on_error(&mut reader, Err(Error::Decode(DecodeError::BoundsExceeded))).unwrap_err();
+		assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation);
+		assert!(stop_on_error(&mut reader, Err(Error::Unsupported)).is_ok());
+	}
 
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();
