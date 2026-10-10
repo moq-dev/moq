@@ -852,6 +852,9 @@ export interface Table {
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
+	/** The announcements of the route serving `path`, as a live stream; see {@link Consumer.follow}. */
+	follow(path: Path.Valid): announce.Consumer;
+
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
 	dynamic(
 		prefix: Path.Valid,
@@ -1214,6 +1217,11 @@ export class Producer implements Table {
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
 		return this.#reader.announced(scope, options);
+	}
+
+	/** The announcements of the route serving `path`, as a live stream; see {@link Consumer.follow}. */
+	follow(path: Path.Valid): announce.Consumer {
+		return this.#reader.follow(path);
 	}
 
 	/** Close the origin, every broadcast it still routes, and its announcement streams. Idempotent. */
@@ -1611,6 +1619,22 @@ export class Consumer {
 		const producer = new announce.Producer();
 		void this.#runAnnounced(producer, this.#scope.patterns(scope), options?.hidden ?? false);
 		return producer.consume();
+	}
+
+	/**
+	 * The announcements of the routes covering `path`, reduced to the one serving it: the most
+	 * specific, which is the one a {@link request} resolves.
+	 *
+	 * This is how a player follows a broadcast across publisher restarts: play on `start`, drop
+	 * everything and request the path afresh on `restart`, and stop on `end`. An `update` is
+	 * the same publisher instance re-priced or failed over, which subscriptions already ride
+	 * out. Another route taking over is a `restart`, or an `update` when both carry the same
+	 * epoch. Throws when the path is outside this consumer's scope. Close it when done.
+	 */
+	follow(path: Path.Valid): announce.Consumer {
+		this.#scope.path(path);
+		// Hiding narrows discovery, not lookup, so a hidden path follows like any other.
+		return announce.follow(path, this.announced(Path.Pattern.subtree(path), { hidden: true }));
 	}
 
 	/** One snapshot shared by map readers and announcement-stream diffing. */

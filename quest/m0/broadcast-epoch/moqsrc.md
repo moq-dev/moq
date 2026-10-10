@@ -62,7 +62,7 @@ Decided in planning (2026-10-06, after #4955 found that no quest covered
   when the source is back, and a timer cannot tell a slow restart from a
   dead source.
 - **Where.** The logic stays in `rs/moq-gst/src/source`, following the path
-  through `moq_mux::Source::follow`, as `moq play` does.
+  through moq-net's `origin::Consumer::follow`, as `moq play` does.
 - **Test.** An in-process test republishes the path under a newer epoch while
   the old publisher stays up: the new run's buffers render through a synced
   sink, a pad linked by name keeps flowing, and the bus carries no error.

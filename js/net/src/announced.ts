@@ -5,7 +5,7 @@
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import type { Route } from "./hop.js";
-import type * as Path from "./path.js";
+import * as Path from "./path.js";
 
 /**
  * A route over a prefix, delivered inside an {@link Event}.
@@ -162,4 +162,57 @@ export class Consumer {
 	close(abort?: Error) {
 		closeState(this.#state, abort);
 	}
+}
+
+/**
+ * Reduce `source`, the announcements of the routes covering `path`, to those of the one route
+ * serving it: the most specific. Another route taking over is a `restart`, or an `update` when
+ * both carry the same epoch, since those serve the same bytes. Routes beneath `path` serve
+ * other broadcasts and are skipped. Closing the result closes `source`.
+ *
+ * Mirrors `announce::Follow` in rs/moq-net.
+ *
+ * @internal
+ */
+export function follow(path: Path.Valid, source: Consumer): Consumer {
+	const producer = new Producer();
+	void producer.closed.then(() => source.close());
+	void (async () => {
+		// Every route standing over the path, by prefix.
+		const covering = new Map<Path.Valid, Announce>();
+		const serving = () => {
+			let best: Announce | undefined;
+			for (const announce of covering.values()) {
+				if (!best || announce.prefix.length > best.prefix.length) best = announce;
+			}
+			return best;
+		};
+
+		try {
+			for await (const { kind, ...announce } of source) {
+				if (!Path.hasPrefix(announce.prefix, path)) continue;
+				const before = serving();
+				if (kind === "end") covering.delete(announce.prefix);
+				else covering.set(announce.prefix, announce);
+				const after = serving();
+
+				if (!before) {
+					if (after) producer.append({ kind: "start", ...after });
+				} else if (!after) {
+					producer.append({ kind: "end", ...before });
+				} else if (before.prefix !== after.prefix) {
+					const same = before.route.epoch !== undefined && before.route.epoch === after.route.epoch;
+					producer.append({ kind: same ? "update" : "restart", ...after });
+				} else if (after.prefix === announce.prefix) {
+					// A route less specific than the serving one changing is skipped: no request sees it.
+					producer.append({ kind: kind === "restart" ? "restart" : "update", ...after });
+				}
+			}
+			producer.close();
+		} catch (err) {
+			// Also reached when the reader closed between events; closing again is a no-op.
+			producer.close(err instanceof Error ? err : new Error(String(err)));
+		}
+	})();
+	return producer.consume();
 }

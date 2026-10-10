@@ -68,8 +68,8 @@ impl<O: Output> Media<O> {
 	/// and an end lets what is playing finish while waiting for the next start. An
 	/// update is the same instance, which its subscriptions already ride out.
 	async fn play(self) -> anyhow::Result<()> {
+		let mut follow = self.origin.follow(&self.broadcast)?;
 		let source = moq_mux::Source::new(self.origin.clone(), &self.broadcast);
-		let mut follow = source.follow()?;
 		let mut playing = None;
 
 		loop {
