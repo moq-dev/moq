@@ -17,6 +17,11 @@ pub struct Follow {
 	path: PathOwned,
 	/// Every route standing over the path.
 	covering: Vec<Announce>,
+	/// Covering prefixes that started since the cursor last ran dry. The cursor delivers by
+	/// prefix, not in order, so one of these may have arrived after the serving route ended.
+	fresh: Vec<PathOwned>,
+	/// Nothing has been reported serving the path since the last end.
+	idle: bool,
 }
 
 impl Follow {
@@ -25,6 +30,8 @@ impl Follow {
 			announced,
 			path,
 			covering: Vec::new(),
+			fresh: Vec::new(),
+			idle: true,
 		}
 	}
 
@@ -40,11 +47,12 @@ impl Follow {
 	/// beneath it) starts on the route serving the path rather than starting and restarting.
 	/// Once something serves it, each change comes through on its own: an end followed by a
 	/// start is a gap that ended any request on the old route, even when both routes carry one
-	/// epoch.
+	/// epoch. A route that started alongside the serving route's end may have arrived after it,
+	/// so taking over from it is reported as that gap.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
-		if self.serving().is_none() {
+		if self.idle {
 			let ended = loop {
-				match self.announced.poll_next(waiter) {
+				match self.poll_announced(waiter) {
 					Poll::Ready(Some(event)) => {
 						self.fold(event);
 					}
@@ -53,20 +61,34 @@ impl Follow {
 				}
 			};
 			return match (self.serving().cloned(), ended) {
-				(Some(serving), _) => Poll::Ready(Some(AnnounceEvent::Start(serving))),
+				(Some(serving), _) => {
+					self.idle = false;
+					Poll::Ready(Some(AnnounceEvent::Start(serving)))
+				}
 				(None, true) => Poll::Ready(None),
 				(None, false) => Poll::Pending,
 			};
 		}
 
 		loop {
-			let Some(event) = ready!(self.announced.poll_next(waiter)) else {
+			let Some(event) = ready!(self.poll_announced(waiter)) else {
 				return Poll::Ready(None);
 			};
 			if let Some(event) = self.fold(event) {
+				self.idle = matches!(event, AnnounceEvent::End(_));
 				return Poll::Ready(Some(event));
 			}
 		}
+	}
+
+	/// The cursor's next event. Running dry means every covering route started before any
+	/// end still to come, so none is fresh any more.
+	fn poll_announced(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
+		let poll = self.announced.poll_next(waiter);
+		if poll.is_pending() {
+			self.fresh.clear();
+		}
+		poll
 	}
 
 	/// The most specific route covering the path, which is the one a request resolves.
@@ -91,7 +113,12 @@ impl Follow {
 		self.covering.retain(|standing| standing.prefix != prefix);
 		let restart = match event {
 			AnnounceEvent::End(_) => false,
-			AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) => {
+			AnnounceEvent::Start(announce) => {
+				self.fresh.push(prefix.clone());
+				self.covering.push(announce);
+				false
+			}
+			AnnounceEvent::Update(announce) => {
 				self.covering.push(announce);
 				false
 			}
@@ -106,6 +133,12 @@ impl Follow {
 			(None, None) => None,
 			(None, Some(after)) => Some(AnnounceEvent::Start(after)),
 			(Some(before), None) => Some(AnnounceEvent::End(before)),
+			// The serving route ended, and the one left may have only arrived after it.
+			(Some(before), Some(after))
+				if before.prefix != after.prefix && before.prefix == prefix && self.fresh.contains(&after.prefix) =>
+			{
+				Some(AnnounceEvent::End(before))
+			}
 			(Some(before), Some(after)) if before.prefix != after.prefix => {
 				let same = before.route.epoch.is_some() && before.route.epoch == after.route.epoch;
 				Some(match same {
@@ -217,10 +250,18 @@ mod tests {
 		let mut follow = origin.consume().follow("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
+		// Both land before the follower reads again, and the cursor delivers the prefix's start
+		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		let _pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
+
+		// A prefix standing while the path's route goes takes over in place.
+		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
+		drop(exact);
+		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 	}
 
 	/// Without an epoch nothing says two routes serve the same bytes.

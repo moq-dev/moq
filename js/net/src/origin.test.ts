@@ -445,6 +445,13 @@ test("follow keeps a gap between routes of one epoch", async () => {
 	expect(await follow.next()).toMatchObject({ kind: "end", prefix: Path.from("pool/job") });
 	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool") });
 
+	// A prefix standing while the path's route goes takes over in place.
+	const again = origin.createBroadcast(Path.from("pool/job"));
+	again.announce({ epoch });
+	expect(await follow.next()).toMatchObject({ kind: "update", prefix: Path.from("pool/job") });
+	again.close();
+	expect(await follow.next()).toMatchObject({ kind: "update", prefix: Path.from("pool") });
+
 	follow.close();
 	pool.close();
 	origin.close();
