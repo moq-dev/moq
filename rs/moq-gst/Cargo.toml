@@ -20,6 +20,7 @@ anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
 gst = { package = "gstreamer", version = "0.23" }
 hang = { workspace = true }
+moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = true }
