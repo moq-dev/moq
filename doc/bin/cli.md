@@ -127,8 +127,17 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing. Playback is behind the `play` feature, since it pulls in
-windowing and audio-device dependencies:
+the one playing.
+
+The broadcast's announcement is its online signal, followed until the window
+closes. Playback starts when the name is announced. A
+[restarted publisher](#publisher-runs) starts it over on the new run, with a
+fresh catalog, decoders, and clock. When the announcement ends, what is playing
+finishes and the player waits for the name to return. The log names each run's
+epoch. A catalog with nothing this build can play still ends the player.
+
+Playback is behind the `play` feature, since it pulls in windowing and
+audio-device dependencies:
 
 ```bash
 cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"

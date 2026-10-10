@@ -529,6 +529,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 
 		// One publisher instance per run, unless redundant publishers named a shared one.
 		let epoch = moq.epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+		tracing::info!(%epoch, "publisher instance");
 
 		for stage in stages {
 			let name = stage.broadcast(&moq);

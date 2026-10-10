@@ -608,8 +608,8 @@ where
 	/// source, resuming on a re-anchored clock. Without it a break is invisible: the next
 	/// group looks exactly like the one that would have followed, and a consumer bounding a
 	/// sample by the next group's first frame hands it the entire gap as its duration. That
-	/// produced a 2405 second video sample out of a publisher that had been paused 40 minutes
-	/// (moq-dev/moq.pro#814). Consecutive sequence numbers can't rule a pause out, so this
+	/// produced a 2405 second video sample out of a publisher that had been paused 40 minutes.
+	/// Consecutive sequence numbers can't rule a pause out, so this
 	/// marker is the only thing that can say one happened.
 	///
 	/// It also fixes what a subscriber joining mid-break sees. A subscription starts at the
@@ -1082,7 +1082,7 @@ mod tests {
 	/// A subscription starts at the track's LATEST group, and the marker advances it even
 	/// though it carries nothing. So a subscriber arriving mid-break waits for real media
 	/// rather than being handed the pre-break group as if it were live -- which is how a
-	/// 40-minute-stale frame reached a VOD recording in moq-dev/moq.pro#814.
+	/// 40-minute-stale frame once reached a VOD recording.
 	#[tokio::test]
 	async fn discontinuity_moves_the_live_edge_off_stale_content() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));

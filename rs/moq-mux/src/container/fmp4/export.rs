@@ -1071,8 +1071,7 @@ pub(crate) fn apply_codec_durations(frames: &mut [Frame], opus: bool) {
 /// of that out, so the gap across a boundary is treated as a discontinuity, never a
 /// duration. Reading it as one makes a single sample last as long as the gap: a recording
 /// that woke a paused publisher got a 2405 second video sample, whose `EXTINF` put the HLS
-/// video timeline 9620 seconds ahead of audio and stalled the player outright
-/// (moq-dev/moq.pro#814).
+/// video timeline 9620 seconds ahead of audio and stalled the player outright.
 ///
 /// The last frame before a boundary falls back to `default_frame` (the catalog framerate /
 /// sample rate), which is what the gap works out to anyway on a continuous constant-rate
@@ -1308,7 +1307,7 @@ mod tests {
 		assert_eq!(durations, vec![(1_000, timescale); 3]);
 	}
 
-	/// The regression for moq-dev/moq.pro#814: a subscriber that got a stale cached group
+	/// The regression for the stalled HLS player: a subscriber that got a stale cached group
 	/// and then jumped to live sees a huge gap across the boundary. That gap is a
 	/// discontinuity, not a duration, so the frame before it must NOT swallow it -- it
 	/// takes `default_frame` and the fragment stays one frame long.

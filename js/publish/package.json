@@ -33,6 +33,7 @@
 		"@moq/json": "workspace:^",
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
+		"@moq/video": "workspace:^",
 		"mediabunny": "^1.60.0"
 	},
 	"devDependencies": {
