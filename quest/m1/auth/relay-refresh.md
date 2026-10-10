@@ -88,3 +88,11 @@ expiry, an expiry that leaves the union intact ends only that token, and
   proxy-mode outage on re-check keeps the token.
 
 Additive.
+
+**Investigation:** The persistent client AUTH handle and `server::Request::auth()` are already being introduced in [#5148](https://github.com/moq-dev/moq/pull/5148). That PR remains open and changes `auth::Request` to carry request-token scopes through the same `requests()` consumer. Adding an independent handle here would compete with that API and lose request-token state during a reconnect. Recommended landing order is #5148, then this quest extending that handle with session tokens.
+
+The current `moq_auth::lease::Consumer` carries a grant but no connection request identity. `Client::attach(&connection_lease, request)` therefore cannot yet establish that the request belongs to the connection. The current Driver also unconditionally POSTs `end` when a lease finishes, so simply reusing `connect` would end the shared session or free its limit slot when one token is withdrawn. The attach implementation needs explicit connection identity and lifecycle ownership in the lease, with only its owner reporting `end`. The auth server must recognize multiple grants with one session id without replacing or double-counting the session.
+
+The application-token queue is still unbounded (`Handle::requests` uses `Queue::new`), and `Serving::end` records peer closure only in the request's shared Issue. A queued Request is not removed when its stream closes. A bounded queue alone prevents memory growth but lets withdrawn tokens occupy every pending slot until the consumer drains them. Recommended queue design is a bounded per-session pending set that prunes closed Issues before admitting a new token and while reading, preserving arrival order. Its cap and overflow refusal need review; an AUTH-only semaphore would bound active streams but would not remove stale queued requests.
+
+No relay token verification or union-expiry behavior is implemented by this investigation. The quest remains open so the integration and security cases in the Plan cannot be mistaken for completed coverage.
