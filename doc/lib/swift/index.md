@@ -82,3 +82,7 @@ one to one; the API reference has the names.
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)
+
+Native media selection skips disabled renditions. If none are enabled, playback
+waits for a later catalog; disabling the current rendition selects an enabled
+replacement. Explicit convenience decoders reject disabled configurations.

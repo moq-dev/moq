@@ -78,3 +78,7 @@ one to one; the API reference has the names.
 - API reference: [pub.dev/documentation/moq](https://pub.dev/documentation/moq/latest/)
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)
+
+Native media selection skips disabled renditions. If none are enabled, playback
+waits for a later catalog; disabling the current rendition selects an enabled
+replacement. Explicit convenience decoders reject disabled configurations.

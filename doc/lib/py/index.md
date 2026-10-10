@@ -100,3 +100,7 @@ one to one; the API reference has the names.
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
+
+Native media selection skips disabled renditions. If none are enabled, playback
+waits for a later catalog; disabling the current rendition selects an enabled
+replacement. Explicit convenience decoders reject disabled configurations.

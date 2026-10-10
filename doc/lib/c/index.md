@@ -69,3 +69,7 @@ inside. The header is the reference: each function carries a doc comment.
 
 - API reference: [docs.rs/moq-c](https://docs.rs/moq-c)
 - Source and a worked example: [`rs/moq-c`](https://github.com/moq-dev/moq/tree/main/rs/moq-c)
+
+Native media selection skips disabled renditions. If none are enabled, playback
+waits for a later catalog; disabling the current rendition selects an enabled
+replacement. Explicit convenience decoders reject disabled configurations.

@@ -835,10 +835,10 @@ fn reconcile(
 		}
 		Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
 	};
-	for (name, config) in &catalog.video.renditions {
+	for (name, config) in catalog.video.enabled() {
 		insert(name, TrackKind::Video, video_caps(config), &config.container);
 	}
-	for (name, config) in &catalog.audio.renditions {
+	for (name, config) in catalog.audio.enabled() {
 		insert(name, TrackKind::Audio, audio_caps(config), &config.container);
 	}
 

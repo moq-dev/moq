@@ -192,3 +192,7 @@ Everything else maps one to one onto the
 header is the reference; every method carries its doc comment.
 
 - Source: [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq); `just cpp check` builds, installs, and tests it locally
+
+Native media selection skips disabled renditions. If none are enabled, playback
+waits for a later catalog; disabling the current rendition selects an enabled
+replacement. Explicit convenience decoders reject disabled configurations.

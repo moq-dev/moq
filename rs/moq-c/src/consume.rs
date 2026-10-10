@@ -421,6 +421,9 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
+		if !config.enabled {
+			return Err(moq_net::Error::NotFound.into());
+		}
 		let name = name.clone();
 		// Consume with the container the catalog actually advertises (Legacy / Cmaf / Loc)
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
@@ -482,6 +485,9 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
+		if !config.enabled {
+			return Err(moq_net::Error::NotFound.into());
+		}
 		let name = name.clone();
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
 		let reference = config.broadcast.clone();

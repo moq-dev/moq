@@ -330,3 +330,7 @@ so the other formats refuse `--linger`.
 relay is reachable and shows what it holds; see [Inspect a relay](/bin/inspect). Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.
+
+Native media selection skips disabled renditions. If none are enabled, playback
+waits for a later catalog; disabling the current rendition selects an enabled
+replacement. Explicit convenience decoders reject disabled configurations.
