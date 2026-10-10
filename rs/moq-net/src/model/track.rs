@@ -6495,7 +6495,10 @@ mod test {
 
 			let first = {
 				let mut next = std::pin::pin!(subscriber.recv_group());
-				assert!(futures::poll!(next.as_mut()).is_pending(), "the end waits for the group");
+				assert!(
+					futures::poll!(next.as_mut()).is_pending(),
+					"the end waits for the group"
+				);
 				match abort {
 					true => group.abort(Error::Cancel).unwrap(),
 					false => group.finish().unwrap(),
