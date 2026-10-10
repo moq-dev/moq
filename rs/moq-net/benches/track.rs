@@ -320,6 +320,46 @@ fn bench_subscriber_join(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Parked reads re-judge their reach, including the successor's abort waiter.
+/// Sweep readers and cached groups so added per-reader scans show up as a slope.
+fn bench_parked_read(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_parked_read");
+	for cached in [8, 64, 512] {
+		for readers in [1, 8, 64] {
+			let broadcast = broadcast::Info::default().produce();
+			let track = broadcast.create_track("bench", None).unwrap();
+			let mut head = track.append_group().unwrap();
+			head.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
+			for _ in 1..cached {
+				let mut next = track.append_group().unwrap();
+				next.write_frame(Timestamp::ZERO, Bytes::from_static(b"next")).unwrap();
+				next.finish().unwrap();
+			}
+			let waiters: Vec<_> = (0..readers).map(|_| kio::Waiter::noop()).collect();
+			let mut held: Vec<_> = waiters
+				.iter()
+				.map(|waiter| {
+					let mut sub = track.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(1)));
+					let Poll::Ready(Ok(Some(mut head))) = sub.poll_recv_group(waiter) else {
+						panic!("head is cached");
+					};
+					assert!(matches!(head.poll_read_frame(waiter), Poll::Ready(Ok(Some(_)))));
+					head
+				})
+				.collect();
+			group.throughput(Throughput::Elements(readers as u64));
+			group.bench_function(BenchmarkId::new(format!("cached_{cached}"), readers), |b| {
+				b.iter(|| {
+					for (head, waiter) in held.iter_mut().zip(&waiters) {
+						assert!(black_box(head.poll_read_frame(waiter)).is_pending());
+					}
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_fanout,
@@ -327,6 +367,7 @@ criterion_group!(
 	bench_aborted_scan,
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
-	bench_subscriber_join
+	bench_subscriber_join,
+	bench_parked_read
 );
 criterion_main!(benches);

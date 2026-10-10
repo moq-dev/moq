@@ -3722,6 +3722,87 @@ mod test {
 	}
 
 	#[tokio::test]
+	async fn aborted_stamped_successor_wakes_a_parked_read() {
+		tokio::time::pause();
+		let (a, a_read) = track_pair("a");
+		let (mut b, b_read) = track_pair("b");
+		let mut head = a.create_group(0u64.into()).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let mut successor = b.create_group(1u64.into()).unwrap();
+		successor
+			.write_frame(Duration::from_secs(30).try_into().unwrap(), b"b1".to_vec())
+			.unwrap();
+		write_group_at(&mut b, 2, "b2", Duration::from_secs(1));
+		write_group_at(&mut b, 3, "edge", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b_read, Position::group(1)).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut reading = sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "the rewound successor extends the reach");
+		assert_eq!(read(&mut reading), b"a0");
+
+		let (counter, waker) = CountWaker::new();
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		let before = counter.count();
+		successor.abort(Error::Cancel).unwrap();
+		assert!(
+			counter.count() > before,
+			"the stamped successor's abort lost its wakeup"
+		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// Cache eviction removes an unstamped successor from its track, so the next
+	/// segment's first group becomes the bound for the read already parked on A.
+	#[tokio::test]
+	async fn evicted_unstamped_successor_re_resolves_across_segments() {
+		tokio::time::pause();
+		let (a, a_read) = track_pair("a");
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let info = broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		};
+		let b = track::Producer::new(Arc::new(info), "b", None);
+		let (mut c, c_read) = track_pair("c");
+		let mut head = a.create_group(0u64.into()).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let successor = b.create_group(1u64.into()).unwrap();
+		// The live edge is protected from eviction and lies beyond B's segment.
+		let _protected = b.create_group(4u64.into()).unwrap();
+		write_group_at(&mut c, 2, "c2", Duration::from_secs(1));
+		write_group_at(&mut c, 3, "edge", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b.consume(), Position::group(1)).unwrap();
+		producer.switch(c_read, Position::group(2)).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut reading = sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "the unstamped successor leaves reach unbounded");
+		assert_eq!(read(&mut reading), b"a0");
+
+		let (counter, waker) = CountWaker::new();
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		let before = counter.count();
+		crate::model::clock::advance(Duration::from_secs(2));
+		pool.gc(crate::model::clock::now());
+		assert!(successor.is_aborted(), "cache GC evicted the successor");
+		assert!(
+			b.consume().peek_group(1).is_none(),
+			"the slot was removed from the cache"
+		);
+		assert!(counter.count() > before, "the successor's eviction lost its wakeup");
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	#[tokio::test]
 	async fn pruned_segment_boundary_is_judged_against_later_segments() {
 		let (mut a, a_read) = track_pair("a");
 		let mut producer = Producer::new();
