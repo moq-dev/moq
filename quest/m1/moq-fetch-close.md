@@ -24,3 +24,5 @@ which it excludes because they may not close cleanly or log which connection
 closed.
 
 Public API: none. Wire: none.
+
+**Draft progress:** The connection is now held outside the timed operation and explicitly closed before the client endpoint closes, including on errors and deadline cancellation. A current-relay FETCH round is wired into the existing interop CI lane and passes the idle-out check. The new round also passes before the fix locally, so it does not yet prove deterministic sensitivity to the process-exit close-flush race. The quest remains open for review of that coverage limitation.
