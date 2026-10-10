@@ -173,6 +173,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-rtmp --test
 
+      - name: Stream import throughput
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
+
       - name: BBB rendition alignment
         if: ${{ !cancelled() }}
         run: nix develop --command just pub check-bbb
