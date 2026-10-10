@@ -2116,15 +2116,18 @@ impl Connection {
     }
 
     fn reset_idle_timeout(&mut self, now: Instant, space: SpaceId) {
-        let Some(timeout) = self.idle_timeout else {
-            return;
+        let timeout = match &self.state {
+            state if state.is_closed() => None,
+            State::Handshake(_) => Some(self.config.handshake_idle_timeout),
+            _ => self.idle_timeout,
         };
-        if self.state.is_closed() {
-            self.timers.stop(Timer::Idle);
-            return;
+        // A deadline too far out to represent never fires.
+        let deadline =
+            timeout.and_then(|timeout| now.checked_add(cmp::max(timeout, 3 * self.pto(space))));
+        match deadline {
+            Some(deadline) => self.timers.set(Timer::Idle, deadline),
+            None => self.timers.stop(Timer::Idle),
         }
-        let dt = cmp::max(timeout, 3 * self.pto(space));
-        self.timers.set(Timer::Idle, now + dt);
     }
 
     fn reset_keep_alive(&mut self, now: Instant) {
@@ -2360,6 +2363,10 @@ impl Connection {
         for packet in sent_packets.into_values() {
             self.remove_in_flight(&packet);
         }
+        // Discarding keys is progress, so the backoff from probing the old space
+        // must not delay the next one (RFC 9002 A.11). A client never resets it on
+        // an Initial ACK, so this is where its handshake backoff ends.
+        self.pto_count = 0;
         self.set_loss_detection_timer(now)
     }
 
@@ -2817,6 +2824,8 @@ impl Connection {
 
                 self.events.push_back(Event::Connected);
                 self.state = State::Established;
+                // Swap the handshake idle timeout for the negotiated one.
+                self.reset_idle_timeout(now, SpaceId::Data);
                 trace!("established");
                 Ok(())
             }

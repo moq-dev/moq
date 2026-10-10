@@ -870,6 +870,7 @@ if [[ "$MEDIA" -eq 1 ]]; then
         run_media "control: silent audio" --fault silent-audio --cases none --expect-fail "audio tone"
         run_media "control: offset audio" --fault audio-offset --cases none --expect-fail "audio/video sync"
         run_media "control: leaked session" --leak --cases detach --expect-fail "resource baseline"
+        run_media "control: lagging latecomer" --lag --cases late-join --expect-fail "late join reaches live"
     fi
 elif [[ "$NEGATIVE" -eq 1 ]]; then
     # Negative control: no publisher. Every subscriber must FAIL (time out with

@@ -201,10 +201,12 @@ Each run covers, against a real local relay:
   The fake device is not physical hardware, and the headless permission decision
   is not a person clicking a browser prompt.
 - **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
-  **publisher stop and same-path republish**, and **late join**. The late join
-  must present the newest published GOP or a newer one. Its lower bound is the
-  encoded keyframe timestamp sampled before the existing viewer closes, since
-  painting the canvas does not mean capture and encoding have finished.
+  **publisher stop and same-path republish**, and **late join**. The late
+  joiner may first show the GOP from before the demand gap, but it must present
+  a frame within 5s of loading and then play, with the presented frame moving,
+  within 1.5s of the fixture's painted frame within 2s, both bounds about twice
+  the worst seen in looped runs under CPU load. A rejoin and a reattach cross
+  the same demand gap, so they must reach live the same way.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -215,8 +217,12 @@ median, and audio/video skew must stay within one 200ms tone step for 90% of
 samples. One step is the floor set by the analyser window straddling a step
 boundary and the canvas holding a frame up to one frame old.
 
-The run ends with negative controls. Each injects a defect in the fixture and
-names the assertion that has to catch it, and passes only by failing there:
+Each window opens once the player's audio buffer has filled and plays. Until
+then the player holds its first decoded frame, silent, for its sync delay, which
+rises past 400ms under load; that is startup, not a gap in playback.
+
+The run ends with negative controls. Each injects a defect and names the
+assertion that has to catch it, and passes only by failing there:
 
 | Control | Must fail |
 |---|---|
@@ -224,6 +230,7 @@ names the assertion that has to catch it, and passes only by failing there:
 | picture frozen after the first frame | `video progress` |
 | tone table shifted 800ms ahead of the picture | `audio/video sync` |
 | the detached player's session never torn down | `resource baseline` |
+| the latecomer's player delayed 3s behind live | `late join reaches live` |
 
 The leaked-session control waits for an extra `AudioContext` rather than an extra
 session: every player on one relay URL shares a transport, so a session count
