@@ -27,3 +27,25 @@ notes the change for their next rerun of those two cells.
 
 Public API: none. Wire: no format change, but a peer sees END_OF_TRACK at a
 different Location.
+
+**Investigation:**
+
+The standalone Rust marker sets END_OF_GROUP through GroupFlags::default(); a
+regression test demonstrates it and this draft clears the flag, matching JS.
+
+Exact Location preservation remains unresolved. The shared track model stores
+an exclusive final **group** sequence, not the upstream terminal Object ID.
+Both publishers receive this reduced boundary and currently reconstruct the
+marker as `final/0`. A private snapshot of the last group served cannot recover
+the upstream Location after cache eviction, when a subscription range excludes
+that group, or when the end arrived before the group's data. Group streams also
+FIN independently of the later track terminal, so an already finished stream
+cannot accept the status.
+
+Recommended follow-up is to preserve the terminal Location in the shared track
+model, then append the status to an open final stream or use a standalone marker
+at that Location after FIN. An alternative is to derive the Location from the
+last served group, with explicitly narrower guarantees. Retaining only the
+existing exclusive group boundary cannot meet the stated goal. The model/API
+and cross-language scope should be settled before the Location portion lands;
+the quest remains open.

@@ -2933,7 +2933,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			group_id: end,
 			sub_group_id: 0,
 			publisher_priority: super::priority::to_wire(self.track.info().priority),
-			flags: ietf::GroupFlags::default(),
+			flags: ietf::GroupFlags {
+				has_end: false,
+				..Default::default()
+			},
 		})?;
 		// Object ID delta 0, then an empty object whose status is END_OF_TRACK.
 		writer.buffer_varint(0)?;
@@ -3446,6 +3449,29 @@ mod group_priority_test {
 	use crate::coding::Decode;
 	use crate::ietf::priority;
 	use crate::lite::test_transport::SinkSession;
+
+	#[moq_net_sim::test]
+	async fn standalone_end_of_track_does_not_claim_end_of_group() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let mut serve = TrackServe::new(
+			session,
+			track.subscribe(None),
+			RequestId(0),
+			Version::Draft22,
+			ServeRange::default(),
+			None,
+		);
+		serve.write_end_of_track(0, 0).await.unwrap();
+		let bytes = log.writes.lock().unwrap().clone();
+		let mut decoder = crate::coding::Decoder::new(&bytes, Version::Draft22.into());
+		let header = ietf::GroupHeader::decode(&mut decoder, Version::Draft22).unwrap();
+		assert!(
+			!header.flags.has_end,
+			"END_OF_TRACK does not end a group that never existed"
+		);
+	}
 
 	/// The model's `Subscription::priority` is higher-first ("higher values preempt
 	/// lower ones"), matching the transport trait's send order, so a group stream must
