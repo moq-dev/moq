@@ -1348,10 +1348,17 @@ impl TrackState {
 		// `sealed` also ends a locally closed receive track without a declared end.
 		// An abort still wins unless that end had already settled: a group below it was still open.
 		let reached = self.sealed
-			|| self
-				.final_sequence
-				.is_some_and(|fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin);
+			|| self.final_sequence.is_some_and(|fin| {
+				self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin && !self.withholds(fin)
+			});
 		reached && (self.abort.is_none() || self.settled)
+	}
+
+	/// Whether a group below `fin` is still withheld from readers until its first frame
+	/// lands (see [`Producer::receive_group`]): the end is not reached before it shows, or
+	/// readers would end without it.
+	fn withholds(&self, fin: u64) -> bool {
+		self.lookup.range(..fin).any(|(_, slot)| slot.pending)
 	}
 
 	/// Whether the declared end is reached and every cached group below it finished,
@@ -6446,6 +6453,33 @@ mod test {
 		assert!(woken.load(Ordering::SeqCst), "the reveal wakes the expired read");
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// A route can declare the end, then land every group's header before its first frame.
+	/// Those groups are withheld until their frames land, so the end is not reached before
+	/// they show: a reader ending at the boundary would never see them.
+	#[test]
+	fn a_withheld_group_holds_the_end() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
+		producer.finish_at(2).unwrap();
+		let mut received: Vec<_> = (0..2)
+			.map(|sequence| producer.receive_group(group::Info { sequence }).unwrap())
+			.collect();
+		assert!(
+			subscriber.recv_group().now_or_never().is_none(),
+			"the end waits for the withheld groups"
+		);
+
+		for group in &mut received {
+			group
+				.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+				.unwrap();
+			producer.reveal_group(group);
+		}
+		assert_eq!(subscriber.assert_group().sequence, 0);
+		assert_eq!(subscriber.assert_group().sequence, 1);
+		assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
 	/// The ordinary live case, at the default real-time budget: 2s GOPs produced one at
