@@ -39,8 +39,8 @@ struct Parked {
 	/// Reads by their group's sequence, woken when a group lands above them.
 	landings: BTreeMap<u64, kio::WaiterList>,
 	/// `landings` for groups held from another copy. Kept apart because this track may
-	/// never have held them, so falling below its oldest group does not end them. Never
-	/// forgotten, but only the groups in flight at each route switch park here.
+	/// never have held them, so falling below its oldest group does not end them. Their
+	/// readers are what end them, so each park prunes the lists every reader has left.
 	held: BTreeMap<u64, kio::WaiterList>,
 }
 
@@ -98,7 +98,11 @@ impl Wakes {
 
 	/// Park `waiter`, holding group `sequence` from another copy, until a group lands above it.
 	pub(crate) fn watch_held(&self, sequence: u64, waiter: &kio::Waiter) {
-		self.parked.lock().held.entry(sequence).or_default().register(waiter);
+		let mut parked = self.parked.lock();
+		// Only held groups pay for this, and only the ones in flight at a route switch
+		// park here, so a full sweep stays small and keeps `landed` free of it.
+		parked.held.retain(|_, list| !list.is_empty());
+		parked.held.entry(sequence).or_default().register(waiter);
 	}
 
 	/// A servable group landed at `sequence`, so it succeeds every read from `below`, the
@@ -140,4 +144,25 @@ impl Wakes {
 /// Saturate a microsecond count into a deadline key.
 fn micros(value: u128) -> u64 {
 	value.try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	/// Each route switch parks the groups then in flight; once their readers drop, the
+	/// next switch's park must not find them still indexed.
+	#[test]
+	fn held_groups_do_not_accumulate_across_route_switches() {
+		let wakes = Wakes::default();
+		let mut reader = None;
+		for sequence in 0..100 {
+			// The last switch's reader gave its group up.
+			drop(reader.take());
+			let waiter = kio::Waiter::noop();
+			wakes.watch_held(sequence, &waiter);
+			reader = Some(waiter);
+		}
+		assert_eq!(wakes.parked.lock().held.len(), 1, "only the live reader's group stays");
+	}
 }

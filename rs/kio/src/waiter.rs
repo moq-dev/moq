@@ -284,6 +284,11 @@ impl WaiterList {
 		}
 	}
 
+	/// Whether no live waiter remains, so a list kept in a map can be dropped.
+	pub fn is_empty(&self) -> bool {
+		self.entries.iter().all(|entry| entry.strong_count() == 0)
+	}
+
 	/// Wake all live waiters, draining the list.
 	pub fn wake(&mut self) {
 		self.drained();
@@ -520,6 +525,17 @@ mod tests {
 			Waiter::noop().register(&mut list);
 		}
 		assert!(list.entries.len() <= 2);
+	}
+
+	#[test]
+	fn a_list_is_empty_once_its_waiters_drop() {
+		let mut list = WaiterList::new();
+		assert!(list.is_empty());
+		let waiter = Waiter::noop();
+		waiter.register(&mut list);
+		assert!(!list.is_empty());
+		drop(waiter);
+		assert!(list.is_empty());
 	}
 
 	/// Tasks parked on one list are retired and re-register in whatever order they
