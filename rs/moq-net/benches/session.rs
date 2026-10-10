@@ -220,6 +220,7 @@ struct Cluster {
 	_origins: Vec<origin::Producer>,
 	_pairs: Vec<MockPair>,
 	next_hop: u64,
+	pools: Vec<cache::Pool>,
 }
 
 impl Cluster {
@@ -232,6 +233,7 @@ impl Cluster {
 			_origins: Vec::new(),
 			_pairs: Vec::new(),
 			next_hop: 0,
+			pools: Vec::new(),
 		};
 
 		for _ in 0..shape.relays {
@@ -278,6 +280,7 @@ impl Cluster {
 		self.next_hop += 1;
 		let mut config = origin::Config::new(Hop::new(self.next_hop).unwrap());
 		config.pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		self.pools.push(config.pool.clone());
 		let (producer, driver) = origin::Producer::new(config);
 		support::harness::spawn(driver);
 		producer
@@ -337,6 +340,7 @@ struct Room {
 	writing: Vec<Option<group::Producer>>,
 	/// The group each viewer's subscriber is reading, when paced, flattened in viewer order.
 	reading: Vec<Option<group::Consumer>>,
+	cache_now: moq_net::time::Instant,
 }
 
 impl Room {
@@ -368,6 +372,12 @@ impl Room {
 			viewers.push(viewer);
 		}
 
+		// First measure the complete batch without eviction. The delivery benchmark must
+		// fit its working set; cache-pressure loss is a different workload.
+		let capacities: Vec<_> = cluster.pools.iter().map(cache::Pool::capacity).collect();
+		for pool in &cluster.pools {
+			pool.resize(None);
+		}
 		let mut room = Self {
 			cluster,
 			viewers,
@@ -382,6 +392,7 @@ impl Room {
 			written: 0,
 			writing: Vec::new(),
 			reading: Vec::new(),
+			cache_now: moq_net::time::Instant::now(),
 		};
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
@@ -389,10 +400,27 @@ impl Room {
 		for _ in 0..FRAMES / shape.frames() {
 			room.round().await;
 		}
+		for (pool, capacity) in room.cluster.pools.iter().zip(capacities) {
+			// Keep the old and current batch resident during the handover, including
+			// bookkeeping rather than estimating a group from payload bytes alone.
+			pool.resize(capacity.map(|capacity| capacity.max(pool.used() * 2)));
+		}
+		// Exercise turnover as well as the empty cache, including Criterion's one-pass
+		// nightly smoke mode.
+		for _ in 0..4 {
+			room.round().await;
+		}
 		room
 	}
 
 	async fn round(&mut self) {
+		// Unpaced rounds otherwise collapse many complete batches into one cache
+		// tick, where yesterday's read outranks today's unread write. Sample a new
+		// recency epoch per batch without sleeping or changing protocol time.
+		self.cache_now += Duration::from_secs(1);
+		for pool in &self.cluster.pools {
+			pool.gc(self.cache_now);
+		}
 		if self.shape.paced {
 			return self.paced_round().await;
 		}
@@ -888,7 +916,7 @@ fn session(c: &mut Criterion) {
 	delivery(
 		c,
 		"burst",
-		[(1, 1), (1, 8), (1, 64), (8, 1), (8, 8)].map(|(watch, burst)| Shape {
+		[(1, 1), (1, 8), (1, 64), (8, 1), (8, 8), (16, 16), (16, 64)].map(|(watch, burst)| Shape {
 			publishers: 1,
 			broadcasts: 16,
 			viewers: 1,
