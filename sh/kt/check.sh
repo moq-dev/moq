@@ -34,4 +34,9 @@ DOCS_DIR="$KT_DIR/moq/src/jvmAndAndroidTest/kotlin/dev/moq/docs"
     bash "$KT_DIR/../doc/lib/samples.sh" kotlin "$KT_DIR/../doc/lib/kt/index.md" "$KT_DIR/README.md"
 } >"$DOCS_DIR/Samples.kt"
 
-"$GRADLE_CMD" -p "$KT_DIR" -Pmoqffi.version=0.0.0-dev :moq-ffi:jvmTest :moq:jvmTest
+"$GRADLE_CMD" -p "$KT_DIR" -Pmoqffi.version=0.0.0-dev -Pmoqffi.local=true :moq-ffi:jvmTest :moq:jvmTest
+
+# Publication must resolve published bindings rather than the local dev project.
+"$GRADLE_CMD" -p "$KT_DIR" :moq:generatePomFileForKotlinMultiplatformPublication :moq:generatePomFileForJvmPublication
+
+python3 "$SCRIPT_DIR/check-poms.py" "$KT_DIR/moq/build/publications"

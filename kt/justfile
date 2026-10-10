@@ -29,3 +29,9 @@ generate:
 [positional-arguments]
 package *args:
     {{ quote(justfile_directory() / "sh/kt/package.sh") }} "$@"
+
+# Refuse development dependencies in generated or locally published POMs.
+[no-cd]
+[positional-arguments]
+check-poms +directories:
+    python3 {{ quote(justfile_directory() / "sh/kt/check-poms.py") }} "$@"

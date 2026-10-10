@@ -12,9 +12,8 @@
 // floating range so consumers transitively pick up new bindings patches
 // without this wrapper being re-cut. See MOQ_FFI_RANGE below.
 //
-// Local builds and CI resolve `moq-ffi` from the sibling project via the
-// dependency substitution below, so tests run against freshly-built bindings.
-// The published POM keeps the range (substitution only affects resolution).
+// `just kt check` opts into the sibling project so tests use fresh bindings.
+// Publication resolves the declared module range without that substitution.
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
 // `:moq:publishAndReleaseToMavenCentral`. Credentials come from env vars set by
@@ -53,9 +52,11 @@ if (androidEnabled) {
 
 // Resolve `dev.moq:moq-ffi` from the sibling project for local/CI builds while
 // the published metadata keeps the floating range declared below.
-configurations.all {
-    resolutionStrategy.dependencySubstitution {
-        substitute(module("dev.moq:moq-ffi")).using(project(":moq-ffi"))
+if (providers.gradleProperty("moqffi.local").orNull == "true") {
+    configurations.configureEach {
+        resolutionStrategy.dependencySubstitution {
+            substitute(module("dev.moq:moq-ffi")).using(project(":moq-ffi"))
+        }
     }
 }
 
@@ -153,6 +154,19 @@ mavenPublishing {
     coordinates("dev.moq", "moq", version.toString())
 
     pom {
+        // KMP resolves target artifact coordinates but replaces the declared range with
+        // the selected patch. Maven consumers need the same patch range as Gradle metadata.
+        withXml {
+            val dependencies = asElement().getElementsByTagName("dependency")
+            for (index in 0 until dependencies.length) {
+                val dependency = dependencies.item(index) as org.w3c.dom.Element
+                val group = dependency.getElementsByTagName("groupId").item(0).textContent
+                val artifact = dependency.getElementsByTagName("artifactId").item(0).textContent
+                if (group == "dev.moq" && (artifact == "moq-ffi" || artifact.startsWith("moq-ffi-"))) {
+                    dependency.getElementsByTagName("version").item(0).textContent = MOQ_FFI_RANGE
+                }
+            }
+        }
         name.set("moq")
         description.set("Ergonomic Kotlin bindings for Media over QUIC")
         url.set("https://github.com/moq-dev/moq")

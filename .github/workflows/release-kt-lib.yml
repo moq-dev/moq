@@ -232,3 +232,13 @@ jobs:
             -Pmoq.version="$MOQ_VERSION" \
             -Pandroid.enabled=true \
             :moq:publishToMavenLocal --no-configuration-cache
+
+      - name: Check published POM dependencies
+        if: github.event_name == 'pull_request'
+        env:
+          MOQ_VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          just kt check-poms \
+            "$HOME/.m2/repository/dev/moq/moq/$MOQ_VERSION" \
+            "$HOME/.m2/repository/dev/moq/moq-jvm/$MOQ_VERSION" \
+            "$HOME/.m2/repository/dev/moq/moq-android/$MOQ_VERSION"
