@@ -14,7 +14,9 @@ A published `rs/moq-time` crate gives the workspace one clock:
   `interval()` that resolve to the current runtime's clock, with tokio
   (paused tokio included) and browser wasm backends.
 - The simulator from `rs/moq-net/sim` behind a `sim` feature, starting at
-  zero, with `#[moq_time::test]`.
+  zero, with `#[moq_time::test]`. The attribute needs a proc-macro crate, so
+  `moq-net-sim-macros` becomes a published `moq-time-macros` that `moq-time`
+  re-exports.
 - `doc/lib/rs/moq-time.md` explains the clock, the sim, and how to test with
   them.
 
@@ -45,4 +47,4 @@ Settle in the PR:
 Ban direct clock reads in `moq-time` itself, outside its backend modules
 (the first `clippy.toml` of the ratchet). Report the new public API in the PR.
 
-Public API: a new crate. Wire: none.
+Public API: two new crates, `moq-time` and its `moq-time-macros` helper. Wire: none.

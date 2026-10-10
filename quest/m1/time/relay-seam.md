@@ -2,10 +2,12 @@
 
 ## Goal
 
-One in-memory session pair implements moq-net's transport traits and replaces
-the duplicate test transports (`rs/moq-net/tests/support/mock.rs`,
-`rs/moq-e2ee/tests/support/mock.rs`, moq-tokio's `FakeSession` and
-`Scripted`, and the session bench's transport). `moq_relay::Connection` runs
+One in-memory session pair implements moq-net's poll transport traits and
+replaces the duplicate poll-session mocks (`rs/moq-net/tests/support/mock.rs`,
+`rs/moq-e2ee/tests/support/mock.rs`, and the session bench's transport).
+moq-tokio's `FakeSession` and `Scripted` stay: they implement
+`web_transport_trait::Session` to test moq-tokio's adapter onto the poll
+traits, which this pair cannot stand in for. `moq_relay::Connection` runs
 over any moq-net transport session, not only a `moq_tokio::server::Request`,
 so moq-relay's integration tests (auth, the cluster origin, stats) run on the
 sim with no sockets, and [the relay session bench](/quest/m1/bench-relay.md)
