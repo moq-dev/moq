@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.12](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.11...moq-hls-v0.5.12) - 2026-10-10
+
+### Fixed
+
+- *(hls)* retain init decoded from completed segments ([#4840](https://github.com/moq-dev/moq/pull/4840))
+
 ## [0.5.11](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.10...moq-hls-v0.5.11) - 2026-10-05
 
 ### Other

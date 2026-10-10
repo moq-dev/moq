@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.24](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.23...moq-tokio-v0.19.24) - 2026-10-10
+
+### Fixed
+
+- *(tokio)* keep a deferred FIN when a send stream drops mid-watch
+- *(net)* keep IETF subscriptions alive after a request FIN (backport #4658)
+
+### Other
+
+- Merge pull request #5126 from moq-dev/backport/anonymous-dial-hop
+
 ## [0.19.23](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.22...moq-tokio-v0.19.23) - 2026-10-06
 
 ### Fixed

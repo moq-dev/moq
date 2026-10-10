@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.12](https://github.com/moq-dev/moq/compare/hang-v0.21.11...hang-v0.21.12) - 2026-10-10
+
+### Fixed
+
+- *(hang)* accept AV1 profile 2 codec strings ([#5064](https://github.com/moq-dev/moq/pull/5064))
+
 ## [0.21.11](https://github.com/moq-dev/moq/compare/hang-v0.21.10...hang-v0.21.11) - 2026-10-05
 
 ### Other

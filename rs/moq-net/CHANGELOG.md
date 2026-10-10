@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.11](https://github.com/moq-dev/moq/compare/moq-net-v0.3.10...moq-net-v0.3.11) - 2026-10-10
+
+### Fixed
+
+- *(net)* move open IETF group streams on a priority update
+- *(net)* read each IETF uni stream's type in its own task (backport #5086)
+- *(net)* an ended track expires a shared group unless it is a live edge
+- *(net)* a warm copy's expiry no longer aborts the relay's latest group
+- *(net)* accept a clear FIRST_OBJECT that starts at object 0 (backport #5027) ([#5069](https://github.com/moq-dev/moq/pull/5069))
+
+### Other
+
+- Merge pull request #5164 from moq-dev/backport/ietf-fin-review-followups
+- *(net)* an unacknowledged FIN follows priority updates
+- Merge pull request #5126 from moq-dev/backport/anonymous-dial-hop
+- Merge pull request #5133 from moq-dev/backport/ietf-fin-keeps-subscription
+- Merge pull request #5127 from moq-dev/backport/end-of-group-status
+- Merge pull request #5094 from moq-dev/quest/m0/release-22/location-filter
+- *(net)* pin when ended tracks sharing a group release it
+
 ## [0.3.10](https://github.com/moq-dev/moq/compare/moq-net-v0.3.9...moq-net-v0.3.10) - 2026-10-05
 
 ### Fixed
