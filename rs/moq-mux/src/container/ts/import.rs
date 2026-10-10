@@ -1849,13 +1849,22 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
+				let params = split.params();
 				// Each PES is one access unit, so flush to emit it immediately.
-				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
-				frames.extend(split.flush(pts).map_err(unit_error)?);
-				let mut published = 0;
-				for frame in frames {
-					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+				let published = (|| {
+					let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
+					frames.extend(split.flush(pts).map_err(unit_error)?);
+					let mut published = 0;
+					for frame in frames {
+						published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+					}
+					anyhow::Ok(published)
+				})();
+				// A refused unit must not leave its parameter sets for a bare keyframe to re-inject.
+				if published.as_ref().is_err_and(|err| err.is::<Damaged>()) {
+					split.restore(params);
 				}
+				let published = published?;
 				// After decode, so the track (and its catalog rendition) exists.
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder)?;
@@ -1865,13 +1874,22 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H265 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
+				let params = split.params();
 				// Each PES is one access unit, so flush to emit it immediately.
-				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
-				frames.extend(split.flush(pts).map_err(unit_error)?);
-				let mut published = 0;
-				for frame in frames {
-					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+				let published = (|| {
+					let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
+					frames.extend(split.flush(pts).map_err(unit_error)?);
+					let mut published = 0;
+					for frame in frames {
+						published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+					}
+					anyhow::Ok(published)
+				})();
+				// A refused unit must not leave its parameter sets for a bare keyframe to re-inject.
+				if published.as_ref().is_err_and(|err| err.is::<Damaged>()) {
+					split.restore(params);
 				}
+				let published = published?;
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder)?;
 				}
@@ -6730,6 +6748,76 @@ pub(super) mod test {
 	#[tokio::test(start_paused = true)]
 	async fn clean_video_has_no_damage() {
 		damaged_video_recovers("clean").await;
+	}
+
+	/// A keyframe refused for a malformed inline SPS must not replace the splitter's last good
+	/// parameter sets: a later bare keyframe re-injects those and recovers.
+	async fn damaged_sps_keeps_the_last_good_parameter_sets(stream_type: StreamType) {
+		let (params, idr, delta): (&[&[u8]], &[u8], &[u8]) = match stream_type {
+			StreamType::H264 => {
+				use crate::container::test_util::{IDR, PPS, SPS};
+				(&[SPS, PPS], IDR, &[0x41, 0x9a, 0x00, 0x01])
+			}
+			StreamType::H265 => {
+				use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+				(&[VPS, SPS, PPS], &[0x26, 0x01, 0x80, 0xaa], &[0x02, 0x01, 0x80, 0x33])
+			}
+			_ => unreachable!(),
+		};
+		let good_sps = params[params.len() - 2];
+		// The SPS keeps its NAL header and loses the rest.
+		let truncated = &good_sps[..2];
+		let au = |nals: &[&[u8]]| {
+			let mut out = Vec::new();
+			for nal in nals {
+				out.extend_from_slice(&[0, 0, 0, 1]);
+				out.extend_from_slice(nal);
+			}
+			out
+		};
+		let mut keyframe = params.to_vec();
+		keyframe.push(idr);
+		let mut damaged = params.to_vec();
+		damaged[params.len() - 2] = truncated;
+		damaged.push(idr);
+		let units = [
+			au(&keyframe),
+			au(&[delta]),
+			au(&damaged),
+			au(&[delta]),
+			au(&[idr]),
+			au(&[delta]),
+		];
+		let mut data = synth_pmt(&[(stream_type, VIDEO)], false);
+		for (cc, unit) in units.iter().enumerate() {
+			let pts = 90_000 + cc as u64 * FRAME;
+			data.extend(video_pes(VIDEO, cc as u8, pts, None, unit));
+		}
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.decode(&data).expect("a damaged SPS stays local to its unit");
+		import.finish().unwrap();
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		let frames = read_track(&consumer, &name, crate::container::Kind::Video).await;
+		assert_eq!(frames.len(), 4, "the bare keyframe after the damage recovers");
+		assert!(frames[2].keyframe);
+		assert!(
+			frames[2].payload.windows(good_sps.len()).any(|bytes| bytes == good_sps),
+			"the recovery keyframe carries the last good SPS"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_h264_sps_keeps_the_last_good_parameter_sets() {
+		damaged_sps_keeps_the_last_good_parameter_sets(StreamType::H264).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_h265_sps_keeps_the_last_good_parameter_sets() {
+		damaged_sps_keeps_the_last_good_parameter_sets(StreamType::H265).await;
 	}
 
 	/// A dedicated PCR PID's malformed adaptation field cannot declare a timebase break.
