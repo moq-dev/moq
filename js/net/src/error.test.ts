@@ -230,6 +230,7 @@ test("the code tables match the spec", () => {
 		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 		StreamCode.TimestampMismatch,
+		StreamCode.Unauthorized,
 	];
 	for (const code of Object.values(StreamCode)) {
 		if (assignedLite.includes(code)) {
@@ -248,6 +249,7 @@ test("the code tables match the spec", () => {
 	expect(Number(StreamCode.Unroutable)).toBe(0x36);
 	expect(Number(StreamCode.FrameTooLarge)).toBe(0x38);
 	expect(Number(StreamCode.TimestampMismatch)).toBe(0x39);
+	expect(Number(StreamCode.Unauthorized)).toBe(0x3b);
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
 	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));

@@ -216,6 +216,7 @@ export class PublishError {
 /** PUBLISH_DONE status codes this implementation distinguishes. Stable across drafts 14 through 22. */
 export const PublishDoneStatus = {
 	INTERNAL_ERROR: 0x0,
+	UNAUTHORIZED: 0x1,
 	TRACK_ENDED: 0x2,
 	/** Removed in draft-20, where 0x3 is unassigned. */
 	SUBSCRIPTION_ENDED: 0x3,

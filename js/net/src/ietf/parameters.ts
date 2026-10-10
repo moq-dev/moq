@@ -20,6 +20,8 @@ export const SetupOption = {
 	Solicit: 0x40b5an,
 	/** HIDDEN, from the MoQ Hidden extension. See `hidden.ts`. */
 	Hidden: 0x40b5cn,
+	/** AUTH, from the MoQ Auth extension. See `auth.ts`. */
+	Auth: 0x40b60n,
 } as const;
 
 // Unknown SETUP options may repeat, including GREASE (draft-21 section 9.1).

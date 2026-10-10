@@ -39,6 +39,7 @@ Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,
 [hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
+[auth](/draft/moq-auth) to tell each peer what it may publish and subscribe to,
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
 before a `SUBSCRIBE_NAMESPACE` is caught up, and
 [probe](/draft/moq-probe) for bandwidth estimation.

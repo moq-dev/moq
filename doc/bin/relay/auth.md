@@ -39,10 +39,15 @@ nothing is admitted because the server was down. A grant that names nothing
 refuses, and so does one already expired: expiry is exact, with no grace for
 clock skew, so keep the auth server's clock in sync.
 
-**Revalidate.** On the grant's cadence the relay asks again. A grant that no
-longer covers what the session holds, or that changes `root`, `mounts`,
-`peer`, or `upstream`, closes the session; it is not resized in place. A
-changed `tier` keeps the session and moves its stats from then on. A 401 or
+**Revalidate.** On the grant's cadence the relay asks again. A grant with the
+same `root` and `mounts` resizes the live session in place, narrower or wider,
+so a moderation decision lands on the session it targets and can be lifted the
+same way: what falls outside a narrower grant resets with `Unauthorized`, the
+broadcasts the session published outside it abort, and everything else keeps
+flowing. A wider grant brings those paths back, up to what the session was
+admitted with. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
+changed `root`, `mounts`, `peer`, or `upstream` closes the session. A changed
+`tier` keeps the session and moves its stats from then on. A 401 or
 403 closes it. Any other failure retries with backoff and the session lives
 until `expires`, so an outage always has the bound the server chose. A grant
 with `revalidate` must set `expires` for that reason.

@@ -546,8 +546,13 @@ struct BroadcastState {
 	route: crate::origin::Route,
 
 	// The served route: dropping it (and the serve task's clone) retracts the
-	// route and rejects its queued requests.
-	dynamic: crate::origin::Dynamic,
+	// route and rejects its queued requests. `None` while the session's limit holds
+	// it back, though the peer still advertises it.
+	dynamic: Option<crate::origin::Dynamic>,
+
+	// Bumped each time the route attaches, so a serve task outlived by a limit that
+	// took the route away and gave it back ends rather than serve beside the new one.
+	generation: u64,
 
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
@@ -600,6 +605,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// deliberately past draft-19 section 10.4's SHOULD NOT: refusing them would
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
+	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
+	auth: crate::auth::Handle,
 	// What this session may allocate up front for objects still arriving.
 	frames: frame::Budget,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`).
@@ -684,9 +691,69 @@ where
 			tasks,
 			version,
 			going_away,
+			auth: crate::auth::Handle::new(false),
 			frames: Default::default(),
 			announces: Default::default(),
 		}
+	}
+
+	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth),
+	/// and what the peer may publish to us by the session's limit, as either changes.
+	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+		self.auth = auth;
+		let this = self.clone();
+		self.tasks.push(async move { this.run_limit().await });
+		self
+	}
+
+	/// Follow the session's limit, attaching every withheld namespace a new limit
+	/// covers. Each route's own serve task holds itself back when a limit no longer
+	/// covers it.
+	async fn run_limit(&self) {
+		let mut epoch = 0;
+		loop {
+			let permit = kio::wait(|waiter| {
+				self.auth
+					.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter)
+			})
+			.await;
+			let mut state = self.state.lock();
+			let mut attached = Vec::new();
+			for (path, entry) in state.broadcasts.iter_mut() {
+				let allowed = permit.within_limit(path.as_str());
+				match &entry.dynamic {
+					None if allowed => {
+						let mut route = entry.route.clone();
+						if self.going_away.is_set() {
+							route.cost = crate::origin::Cost::DRAIN;
+						}
+						let Ok(dynamic) = self.origin.dynamic(path, route) else {
+							continue;
+						};
+						tracing::info!(route = %self.origin.absolute(path), "namespace authorized again");
+						entry.dynamic = Some(dynamic);
+						entry.generation += 1;
+						attached.push((path.clone(), entry.generation));
+					}
+					_ => {}
+				}
+			}
+			drop(state);
+			for (path, generation) in attached {
+				self.serve_route(path, generation);
+			}
+		}
+	}
+
+	/// Serve the requests beneath one attached namespace on its own task.
+	fn serve_route(&self, path: PathOwned, generation: u64) {
+		let this = self.clone();
+		self.tasks.push(async move {
+			// stop_announce is the authoritative remover: it drops the entry
+			// (retracting the route) once the announce refcount hits zero,
+			// which is what makes run_route exit, as does a limit holding it back.
+			this.run_route(path, generation).await;
+		});
 	}
 
 	/// End every active subscription with the error that ended the session.
@@ -1557,7 +1624,9 @@ where
 				// tracks keep flowing.
 				let entry = entry.into_mut();
 				entry.route = route.clone();
-				entry.dynamic.update(route)?;
+				if let Some(dynamic) = &entry.dynamic {
+					dynamic.update(route)?;
+				}
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
@@ -1567,26 +1636,34 @@ where
 						.clone()
 						.close(crate::SessionError::from(err).to_code(), "too many announcements");
 				})?;
+				// Outside the session's limit: held, not refused, so a wider limit can
+				// attach it while the peer still advertises it.
+				if !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
+					tracing::debug!(route = %self.origin.absolute(&path), "withholding announce outside the limit");
+					entry.insert(BroadcastState {
+						route,
+						dynamic: None,
+						generation: 0,
+						count: 1,
+						live: Default::default(),
+						_slot: slot,
+					});
+					return Ok(());
+				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
 				let dynamic = self.origin.dynamic(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route,
-					dynamic,
+					dynamic: Some(dynamic),
+					generation: 0,
 					count: 1,
 					live: Default::default(),
 					_slot: slot,
 				});
 
 				tracing::debug!(route = %self.origin.absolute(&path), "announce");
-
-				let this = self.clone();
-				self.tasks.push(async move {
-					// stop_announce is the authoritative remover: it drops the entry
-					// (retracting the route) once the announce refcount hits zero,
-					// which is what makes run_route exit.
-					this.run_route(path).await;
-				});
+				self.serve_route(path, 0);
 
 				Ok(())
 			}
@@ -1633,9 +1710,10 @@ where
 	/// per requested path and serve its track requests until the route is
 	/// retracted or the session dies. Tracks in flight at a retraction run to
 	/// their own end.
-	async fn run_route(&self, path: PathOwned) {
+	async fn run_route(&self, path: PathOwned, generation: u64) {
 		let mut broadcasts = TaskSet::owned();
 		let mut closed_session = self.session.clone();
+		let mut epoch = 0;
 		loop {
 			let next = broadcasts
 				.drive(|waiter| {
@@ -1650,11 +1728,33 @@ where
 					if self.going_away.poll(waiter).is_ready() {
 						self.drain_route(&path);
 					}
+					// A limit that no longer covers the namespace holds the route back as a
+					// retraction would, closing its sources. Tracks in flight end on their
+					// own gates, with `Unauthorized`.
+					let mut excluded = false;
+					while let Poll::Ready(permit) =
+						self.auth
+							.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter)
+					{
+						excluded = !permit.within_limit(path.as_str());
+					}
 					// The route lives in the entry: stop_announce removing it retracts
 					// the route, and this loop ends with it.
 					let mut state = self.state.lock();
-					match state.broadcasts.get_mut(&path) {
-						Some(entry) => entry.dynamic.poll_requested_broadcast(waiter).map(Some),
+					let Some(entry) = state.broadcasts.get_mut(&path) else {
+						return Poll::Ready(None);
+					};
+					if entry.generation != generation {
+						return Poll::Ready(None);
+					}
+					if excluded && entry.dynamic.is_some() {
+						tracing::info!(route = %self.origin.absolute(&path), "namespace no longer authorized");
+						entry.dynamic = None;
+						// Dropping the namespace's token closes every source minted under it.
+						entry.live = Default::default();
+					}
+					match &mut entry.dynamic {
+						Some(dynamic) => dynamic.poll_requested_broadcast(waiter).map(Some),
 						None => Poll::Ready(None),
 					}
 				})
@@ -1716,7 +1816,9 @@ where
 			return;
 		}
 		entry.route.cost = crate::origin::Cost::DRAIN;
-		let _ = entry.dynamic.update(entry.route.clone());
+		if let Some(dynamic) = &entry.dynamic {
+			let _ = dynamic.update(entry.route.clone());
+		}
 	}
 
 	/// Serve one minted source's track requests, taken through its `broadcast` handler,
@@ -1791,6 +1893,21 @@ where
 	) {
 		// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model request
 		// pending until its immutable track metadata is known.
+		// Subscribe only to what our grant covers (MoQ Auth), and cancel once it no longer
+		// does, leaving the rest of the session alone.
+		if !self
+			.auth
+			.allows(crate::auth::Direction::Subscribe, broadcast_path.as_str())
+		{
+			request.reject(Error::Unauthorized);
+			return;
+		}
+		let mut gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			broadcast_path.to_owned(),
+			crate::auth::Direction::Subscribe,
+		);
+
 		let track_name = request.name().to_owned();
 		// Group FETCHes for cache misses: standalone, so they outlive each subscription.
 		let mut group_fetches = TaskSet::owned();
@@ -1805,7 +1922,7 @@ where
 					return;
 				};
 				let Some(next) = self
-					.linger(&broadcast_path, &track_name, idle, &mut group_fetches)
+					.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
 					.await
 				else {
 					return;
@@ -1816,13 +1933,13 @@ where
 		};
 		loop {
 			let Some(idle) = self
-				.subscribe_once(&broadcast_path, &track_name, target, &mut group_fetches)
+				.subscribe_once(&broadcast_path, &track_name, target, &mut group_fetches, &mut gate)
 				.await
 			else {
 				return;
 			};
 			let Some(next) = self
-				.linger(&broadcast_path, &track_name, idle, &mut group_fetches)
+				.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
 				.await
 			else {
 				return;
@@ -1840,6 +1957,7 @@ where
 		track_name: &str,
 		target: Target,
 		group_fetches: &mut TaskSet,
+		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
 		let subscription = target.subscription();
 		let start = subscription.as_ref().and_then(|s| s.start);
@@ -2149,11 +2267,14 @@ where
 		// does not disturb subscriptions already in flight.
 		enum End {
 			Idle,
+			Revoked,
 			Done(Result<u64, Error>),
 			Fetch(group::Request),
 		}
 
 		let mut fetch_done = fetching.is_none();
+		// Our grant stopped covering the track, which is aborted rather than kept lingering.
+		let mut revoked = false;
 		let demand = track.demand();
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
 		let mut subscribed = track.subscription().is_some();
@@ -2166,6 +2287,9 @@ where
 						&& waiter.poll_future(fut.as_mut()).is_ready()
 					{
 						fetch_done = true;
+					}
+					if gate.poll_denied(waiter).is_ready() {
+						return Poll::Ready(End::Revoked);
 					}
 					// An error is the track closing, which the arms below report.
 					if let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(waiter) {
@@ -2194,6 +2318,12 @@ where
 				.await;
 
 				match end {
+					End::Revoked => {
+						tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscription no longer authorized");
+						let _ = track.clone().abort(Error::Unauthorized);
+						revoked = true;
+						break true;
+					}
 					End::Fetch(request) => {
 						let fetch = self.clone().run_group_fetch(
 							broadcast_path.to_owned(),
@@ -2267,12 +2397,12 @@ where
 		// What the copy cached goes stale from here. Marked before the cancel, which waits
 		// on the publisher: it stops serving as soon as the cancel lands, and a reader
 		// returning in between must not take the cache as the live edge.
-		if !aborted {
+		if !aborted && !revoked {
 			track.set_idle();
 		}
 		self.cancel_subscribe(stream, request_id).await;
-		// A session abort took the copy too.
-		if aborted {
+		// A session abort took the copy too, and a revoked grant ended it.
+		if aborted || revoked {
 			return None;
 		}
 		Some(Idle {
@@ -2292,6 +2422,7 @@ where
 		track_name: &str,
 		mut idle: Idle,
 		group_fetches: &mut TaskSet,
+		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
 		// Registered so a session abort ends the copy with its error.
 		let id = {
@@ -2307,12 +2438,16 @@ where
 			Fetch(group::Request),
 			Subscribe,
 			Expired,
+			Revoked,
 			Closed,
 		}
 		let resume = loop {
 			let step = kio::wait(|waiter| {
 				if idle.track.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Step::Closed);
+				}
+				if gate.poll_denied(waiter).is_ready() {
+					return Poll::Ready(Step::Revoked);
 				}
 				if let Poll::Ready(Ok(request)) = idle.dynamic.poll_requested_group(waiter) {
 					return Poll::Ready(Step::Fetch(request));
@@ -2363,6 +2498,11 @@ where
 						linger.set(None);
 					}
 				},
+				Step::Revoked => {
+					tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "lingering track no longer authorized");
+					let _ = idle.track.clone().abort(Error::Unauthorized);
+					break false;
+				}
 				Step::Closed => break false,
 			}
 		};

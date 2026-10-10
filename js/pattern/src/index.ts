@@ -402,7 +402,9 @@ export class Pattern {
 	 */
 	static parse(text: string): Pattern {
 		if (text === "") return new Pattern([]);
-		return new Pattern(text.split("/").map(parseSegment));
+		// One past the limit is enough for the constructor to refuse, without splitting
+		// a peer's megabytes of `a/a/...` into segments first.
+		return new Pattern(text.split("/", MAX_PATTERN_SEGMENTS + 1).map(parseSegment));
 	}
 
 	/** A pattern from its segments, validating the grammar. Throws {@link InvalidPattern}. */

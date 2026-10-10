@@ -514,7 +514,7 @@ export class AnnounceInit {
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		AnnounceInit.#guard(version);
-		return Message.encode(w, this.#encode.bind(this), AnnounceInit.MAX_SIZE);
+		return Message.encode(w, this.#encode.bind(this), { max: AnnounceInit.MAX_SIZE });
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AnnounceInit> {

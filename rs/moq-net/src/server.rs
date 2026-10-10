@@ -94,6 +94,7 @@ impl Server {
 		version: lite::Version,
 		client_setup: Option<lite::AcceptedSetup<S>>,
 		peer_hop: Option<crate::Hop>,
+		auth: crate::auth::Handle,
 	) -> Result<(Session, crate::Driver<S>), Error>
 	where
 		S: crate::transport::poll::Session,
@@ -118,6 +119,7 @@ impl Server {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			client: false,
 			limits: self.limits,
 			session: session.clone(),
 			setup_stream: None,
@@ -127,6 +129,7 @@ impl Server {
 			version,
 			our_setup,
 			peer_setup: client_setup,
+			auth,
 		})?;
 
 		Ok(Session::new(
@@ -135,8 +138,11 @@ impl Server {
 			version.into(),
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
-			start.goaway,
-			start.setup,
+			crate::session::Handles {
+				goaway: start.goaway,
+				auth: start.auth,
+				setup: start.setup,
+			},
 		))
 	}
 
@@ -230,6 +236,12 @@ impl Server {
 			_ => return Err(Error::Version),
 		};
 
+		let auth = crate::auth::Handle::new(match &handshake {
+			PausedHandshake::LiteBare { version, .. } | PausedHandshake::LiteSetup { version, .. } => {
+				version.has_auth()
+			}
+			PausedHandshake::Boxed(_) => false,
+		});
 		Ok(Handshake {
 			path,
 			role,
@@ -237,6 +249,7 @@ impl Server {
 			// moq-lite carries no SETUP token.
 			token: None,
 			assigned_hop: crate::Hop::random(),
+			auth,
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -387,6 +400,8 @@ impl Server {
 			origin: None,
 			token,
 			assigned_hop: crate::Hop::random(),
+			// Lite 01/02 and moq-transport 14-16 carry no AUTH.
+			auth: crate::auth::Handle::new(false),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -423,6 +438,8 @@ impl Server {
 			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
 			token: peer_setup.token.clone(),
 			assigned_hop: crate::Hop::random(),
+			// The client's SETUP already settled whether MoQ Auth is negotiated.
+			auth: crate::auth::Handle::new(peer_setup.declared.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -452,6 +469,9 @@ pub struct Handshake<S: crate::transport::poll::Session> {
 	/// peer declares none on the wire; it never enters a hop chain. Fresh per request unless the caller overrides it
 	/// ([`Handshake::with_peer_hop`]).
 	assigned_hop: crate::Hop,
+	/// The session's auth handle, available before [`Handshake::ok`] so the caller can
+	/// take the peer's token requests before any arrive.
+	auth: crate::auth::Handle,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
 	inner: Option<RequestInner<S>>,
 }
@@ -495,7 +515,13 @@ type Accept<S> = crate::util::MaybeSendBox<'static, Result<(Session, crate::Driv
 /// `&Handshake: Send`, which is `Handshake: Sync`, which is this.
 trait Paused<S: crate::transport::poll::Session>: MaybeSend + MaybeSync {
 	/// Complete the handshake with the final server config.
-	fn ok(self: Box<Self>, server: Server, runtime: Clock, peer_hop: Option<crate::Hop>) -> Accept<S>;
+	fn ok(
+		self: Box<Self>,
+		server: Server,
+		runtime: Clock,
+		peer_hop: Option<crate::Hop>,
+		auth: crate::auth::Handle,
+	) -> Accept<S>;
 
 	/// Reject the handshake, closing the transport with `err`'s wire code.
 	fn close(self: Box<Self>, err: Error);
@@ -516,7 +542,13 @@ where
 	S::SendStream: MaybeSync,
 	S::RecvStream: MaybeSync,
 {
-	fn ok(self: Box<Self>, server: Server, runtime: Clock, peer_hop: Option<crate::Hop>) -> Accept<S> {
+	fn ok(
+		self: Box<Self>,
+		server: Server,
+		runtime: Clock,
+		peer_hop: Option<crate::Hop>,
+		auth: crate::auth::Handle,
+	) -> Accept<S> {
 		use crate::util::MaybeBoxedExt as _;
 		async move {
 			let Self {
@@ -545,6 +577,7 @@ where
 				authority: None,
 				peer_setup_stream: Some(peer_setup.stream),
 				peer_declared: Some(peer_setup.declared),
+				auth: auth.clone(),
 				early_unis: peer_setup.early,
 			})?;
 			tracing::debug!(?version, "connected");
@@ -554,8 +587,7 @@ where
 				version.into(),
 				None,
 				crate::driver::Protocol::Ietf(protocol),
-				goaway,
-				setup,
+				crate::session::Handles { goaway, auth, setup },
 			))
 		}
 		.maybe_boxed()
@@ -584,7 +616,13 @@ where
 	S::SendStream: MaybeSync,
 	S::RecvStream: MaybeSync,
 {
-	fn ok(self: Box<Self>, server: Server, runtime: Clock, peer_hop: Option<crate::Hop>) -> Accept<S> {
+	fn ok(
+		self: Box<Self>,
+		server: Server,
+		runtime: Clock,
+		peer_hop: Option<crate::Hop>,
+		auth: crate::auth::Handle,
+	) -> Accept<S> {
 		use crate::util::MaybeBoxedExt as _;
 		async move {
 			let Self {
@@ -620,12 +658,13 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway, setup) = match version {
+			let (recv_bw, protocol, goaway, auth, setup) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
 					let start = lite::start(lite::Config {
 						runtime: runtime.clone(),
+						client: false,
 						limits: server.limits,
 						session: session.clone(),
 						setup_stream: Some(stream),
@@ -635,11 +674,13 @@ where
 						version: v,
 						our_setup: lite::Setup::default(),
 						peer_setup: None,
+						auth,
 					})?;
 					(
 						start.recv_bandwidth,
 						crate::driver::Protocol::Lite(Box::new(start.driver)),
 						start.goaway,
+						start.auth,
 						start.setup,
 					)
 				}
@@ -662,14 +703,20 @@ where
 						authority: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
+						auth: auth.clone(),
 						early_unis: Vec::new(),
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway, setup)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup)
 				}
 			};
 
 			Ok(Session::new(
-				runtime, session, version, recv_bw, protocol, goaway, setup,
+				runtime,
+				session,
+				version,
+				recv_bw,
+				protocol,
+				crate::session::Handles { goaway, auth, setup },
 			))
 		}
 		.maybe_boxed()
@@ -716,6 +763,14 @@ where
 	/// authenticated identity: authorize on the token or client certificate.
 	pub fn peer_hop(&self) -> Option<crate::Hop> {
 		self.origin
+	}
+
+	/// The session's auth handle, the same one [`Session::auth`] returns once accepted.
+	///
+	/// Take [`requests`](crate::auth::Handle::requests) here to answer the client's
+	/// tokens yourself; the choice is fixed once the session's driver first runs.
+	pub fn auth(&self) -> crate::auth::Handle {
+		self.auth.clone()
 	}
 
 	/// The credential the client presented in its SETUP's `AUTHORIZATION TOKEN` option.
@@ -772,6 +827,7 @@ where
 	/// Poll or spawn the returned driver to run the session.
 	pub async fn ok(mut self) -> Result<(Session, crate::Driver<S>), Error> {
 		let peer_hop = Some(self.assigned_hop);
+		let auth = self.auth.clone();
 		let RequestInner {
 			server,
 			runtime,
@@ -780,14 +836,14 @@ where
 
 		match handshake {
 			PausedHandshake::LiteBare { session, version } => {
-				server.start_lite(runtime, session, version, None, peer_hop)
+				server.start_lite(runtime, session, version, None, peer_hop, auth)
 			}
 			PausedHandshake::LiteSetup {
 				session,
 				version,
 				client_setup,
-			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop),
-			PausedHandshake::Boxed(paused) => paused.ok(server, runtime, peer_hop).await,
+			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth),
+			PausedHandshake::Boxed(paused) => paused.ok(server, runtime, peer_hop, auth).await,
 		}
 	}
 
@@ -1274,6 +1330,7 @@ mod tests {
 			origin: None,
 			token: None,
 			assigned_hop: Hop::random(),
+			auth: crate::auth::Handle::new(false),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
 				runtime: Clock::new(moq_net_sim::now()),

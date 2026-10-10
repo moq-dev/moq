@@ -141,6 +141,24 @@ A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
 its scope can use.
 
+## Authorization
+
+On moq-lite 07 (`moq-lite-07-wip`, opt-in) each side presents a token on its
+own Auth stream and learns what it may publish and subscribe to: a union of
+[path patterns](#path-patterns), delivered exactly as issued rather than widened
+to a prefix. Right after setup both sides present the credential the connection
+already carried (the URL token, a client certificate, or nothing), so a
+publisher learns before anyone subscribes whether its broadcasts can reach the
+peer. More tokens can be added without reconnecting; the session's scope is the
+union of every open token's grant.
+
+A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
+code and the session stays up. A client that publishes outside its grant closes
+the session with `UNAUTHORIZED`, naming the path. moq-transport carries the same
+exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
+to namespace prefixes. Older versions have no grant; the URL token keeps working
+everywhere.
+
 ## Subscriptions
 
 A subscriber names a broadcast and track. Delivery starts at the oldest group

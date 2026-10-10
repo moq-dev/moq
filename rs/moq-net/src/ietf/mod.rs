@@ -8,6 +8,7 @@
 mod parameters;
 pub mod active_count;
 mod adapter;
+pub(crate) mod auth;
 pub mod cluster;
 mod control;
 mod datagram;

@@ -59,11 +59,8 @@ Remaining:
   Landed so far: #4403 wildcard, #4034 archive (with #4255 folded in), #4080
   obs-moq-video, #4162 audio-jitter-target, #4180 transport-upgrade, #4437
   rs2ts (with #4438 folded in), #4640 tstd, #4653 test-flakes-2, #4079 cpp,
-  and #4519 ffi-shape. As of the 2026-10-10 audit, only #4039 auth remains
-  open. Its `wip-version.md` child landed on the line (#5004). The line's
-  UNAUTHORIZED stream code collides with `main`'s NOT_FETCHABLE (0x3A) and
-  moves to 0x3B before it lands. Reconcile its remaining code and quests with
-  `main` before landing it.
+  #4519 ffi-shape, and #4039 auth (UNAUTHORIZED moved to 0x3B). No umbrella
+  PR remains open.
 - #4133 qos closed without landing (2026-10-09). Its egress `lag` histogram
   is owned by [Viewer lag histogram](/quest/m1/qos/lag-histogram.md), which
   ports it once stats-split lands. Do not reopen the umbrella PR.

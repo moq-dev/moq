@@ -73,6 +73,7 @@
 // `Arc` stays and the lint is unactionable here.
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
+pub mod auth;
 mod client;
 mod coding;
 mod driver;

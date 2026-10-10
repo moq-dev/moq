@@ -67,10 +67,32 @@ async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.Video
 
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
-	const connect = process.env.INTEROP_COMPAT_TRANSPORT
-		? (await import(process.env.INTEROP_COMPAT_TRANSPORT)).connect
-		: Moq.Connection.connect;
-	const connection = await connect({ url: new URL(url as string), consume: origin });
+	// A released-compat run pins its version through its own transport and runs anonymous.
+	// Otherwise the grant arrives over AUTH, which only the work-in-progress moq-lite-07
+	// carries and no client offers by default. The WebSocket fallback cannot offer it, so it
+	// stays off.
+	const compat = process.env.INTEROP_COMPAT_TRANSPORT;
+	const connection: Moq.Connection.Established = compat
+		? await (await import(compat)).connect({ url: new URL(url as string), consume: origin })
+		: await Moq.Connection.connect({
+				url: new URL(url as string),
+				consume: origin,
+				webtransport: { protocols: ["moq-lite-07-wip"] },
+				websocket: { enabled: false },
+			});
+	// The grant the relay sent, in the Rust client's `auth granted` shape, so the harness can
+	// check it against the token this cell minted.
+	const printGrant = (grant: Moq.Auth.Grant | undefined) => {
+		if (!grant) return;
+		const publish = JSON.stringify(grant.publish);
+		const subscribe = JSON.stringify(grant.subscribe);
+		console.error(`auth granted publish=${publish} subscribe=${subscribe}`);
+	};
+	let unwatch = () => {};
+	if (!compat) {
+		printGrant(connection.auth.grant.peek());
+		unwatch = connection.auth.grant.subscribe(printGrant);
+	}
 	let requested: Moq.Origin.Requesting | undefined;
 	try {
 		const path = Moq.Path.from(broadcast as string);
@@ -122,6 +144,7 @@ async function run(): Promise<void> {
 		}
 		throw new Error("no frame data received");
 	} finally {
+		unwatch();
 		requested?.close();
 		// Wait for the transport to report the close too, so it reaches the relay before
 		// process.exit; otherwise the relay times the connection out.

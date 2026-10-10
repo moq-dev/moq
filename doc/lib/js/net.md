@@ -43,6 +43,7 @@ broadcast.announce();
 - **Timing is per track, with no default.** A track that declares a `timescale` carries a `timestamp` on every frame; one without is [untimed](/concept/moq-lite#subscriptions) and its frames carry none. Unlike Rust, omitting it means untimed. Nothing stamps a frame for you: the publisher passes the timestamp, and the `Timed` type (`{ value, at }`) carries one into the `@moq/json` and `@moq/flate` producers.
 - **Subscriber staleness is `maxDelay`.** It is media time. Passing the old `maxAge` key throws a `TypeError` naming `maxDelay`. Publisher retention is the separate `Track.Info.maxAge`.
 - **Hidden paths** stay out of discovery unless the announce request opts in. See [hidden broadcasts](/concept/moq-lite#hidden-broadcasts).
+- **Authorization is in band.** On moq-lite 07 (offered only when `moq-lite-07-wip` is listed in `webtransport.protocols`; the WebSocket fallback cannot offer it) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `auth.grant` watches what the relay lets this side publish and subscribe to, and `auth.add(token)` presents another token without reconnecting. Publishing outside the grant closes the connection with `SessionCode.Unauthorized`, naming the path. On moq-lite, a subscription the grant stops covering resets with `StreamCode.Unauthorized` and the session stays up.
 - **A graceful close waits.** `await connection.close()` withdraws announcements and gives finished tracks up to one second. `abort()` ends immediately.
 
 Examples:

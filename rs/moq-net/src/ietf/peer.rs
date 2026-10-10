@@ -20,6 +20,9 @@ pub(crate) struct Peer {
 	/// SUBSCRIBE_NAMESPACE, so we may send it.
 	pub hidden: bool,
 
+	/// MoQ Auth: whether both sides negotiated the Auth request streams.
+	pub auth: bool,
+
 	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
 	/// NAMESPACE messages before the subscription is caught up, in both directions.
 	pub active_count: bool,
@@ -92,6 +95,7 @@ mod tests {
 			},
 			solicit: None,
 			hidden: false,
+			auth: false,
 			active_count: false,
 		};
 
@@ -104,6 +108,7 @@ mod tests {
 			},
 			solicit: Some(true),
 			hidden: true,
+			auth: true,
 			active_count: true,
 		});
 
