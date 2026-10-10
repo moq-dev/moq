@@ -25,8 +25,8 @@ Neither can express a unified order, so js/net is unchanged.
 Decided 2026-10-10 with the maintainer:
 
 - **Unified priority, not "datagrams always first".** It matches MoQT
-  draft-21 section 7, where datagrams and subgroups share one priority
-  order and a datagram wins a tie. Strict datagrams-first lets a busy
+  draft-21 section 5.1.2, where datagrams and subgroups share one priority
+  order and a datagram wins a tie within one group. Strict datagrams-first lets a busy
   datagram track starve streams up to the congestion window, which is what
   every stack does today.
 - **A datagram queue per send group.** Each send group (one per
