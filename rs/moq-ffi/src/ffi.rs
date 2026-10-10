@@ -17,9 +17,22 @@ pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
-	/// Set by [`shutdown`], so a [`Task::run`] awaited in place resolves `Cancelled` rather than
-	/// polling timers and sockets whose driver is gone.
+	/// Set by [`shutdown`] to wake the [`Task::run`] calls parked in place, so they observe
+	/// [`Polls::stopped`] and resolve `Cancelled`.
 	stopped: tokio::sync::watch::Sender<bool>,
+	/// The [`Task::run`] polls in flight on host threads, which [`shutdown`] waits out.
+	polls: std::sync::Mutex<Polls>,
+	/// Notified when the last in-flight poll finishes.
+	idle: std::sync::Condvar,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct Polls {
+	active: usize,
+	/// Set by [`shutdown`]: no poll may start once the drivers are about to stop, because a
+	/// tokio timer polled after its driver is gone panics rather than erroring.
+	stopped: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -65,6 +78,8 @@ pub(crate) fn runtime() -> &'static Runtime {
 			handle,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
 			stopped: tokio::sync::watch::Sender::new(false),
+			polls: Default::default(),
+			idle: Default::default(),
 		}
 	})
 }
@@ -79,6 +94,10 @@ pub(crate) fn shutdown() {
 		return;
 	};
 	// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
+	let mut polls = runtime.polls.lock().unwrap();
+	polls.stopped = true;
+	drop(runtime.idle.wait_while(polls, |polls| polls.active > 0).unwrap());
+	// Outside the lock: a waker may poll inline, which takes it.
 	runtime.stopped.send_replace(true);
 	let _ = thread.stop.send(());
 	let _ = thread.join.join();
@@ -96,6 +115,46 @@ async fn stopped() {
 #[cfg(target_arch = "wasm32")]
 async fn stopped() {
 	std::future::pending().await
+}
+
+/// Marks a [`Task::run`] poll in flight, so [`shutdown`] waits for it to finish.
+#[cfg(not(target_arch = "wasm32"))]
+struct Polling;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Polling {
+	/// `None` once [`shutdown`] has begun.
+	fn start() -> Option<Self> {
+		let mut polls = runtime().polls.lock().unwrap();
+		if polls.stopped {
+			return None;
+		}
+		polls.active += 1;
+		Some(Self)
+	}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Polling {
+	fn drop(&mut self) {
+		let runtime = runtime();
+		let mut polls = runtime.polls.lock().unwrap();
+		polls.active -= 1;
+		if polls.active == 0 {
+			runtime.idle.notify_all();
+		}
+	}
+}
+
+/// wasm32's runtime is the JS event loop, which never stops under us.
+#[cfg(target_arch = "wasm32")]
+struct Polling;
+
+#[cfg(target_arch = "wasm32")]
+impl Polling {
+	fn start() -> Option<Self> {
+		Some(Self)
+	}
 }
 
 /// Enter the runtime context, so a handle built outside [`Task::run`] can still spawn.
@@ -257,6 +316,9 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 			}
 		});
 		std::future::poll_fn(|cx| {
+			let Some(_polling) = Polling::start() else {
+				return std::task::Poll::Ready(Err(MoqError::Cancelled));
+			};
 			let _runtime = enter();
 			run.as_mut().poll(cx)
 		})
