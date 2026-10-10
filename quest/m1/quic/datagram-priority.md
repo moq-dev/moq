@@ -31,19 +31,32 @@ Decided 2026-10-10 with the maintainer:
   every stack does today.
 - **A datagram queue per send group.** Each send group (one per
   subscription, from [the scheduler](/quest/m1/quic/scheduler.md)) owns a
-  datagram queue that drains ahead of its own streams, which is the MoQT tie
-  rule and puts the subscription's newest data first. Datagram bytes spend
+  datagram queue. Datagram bytes spend
   the group's fair-share credit, so a datagram-heavy subscription buys no
   extra bandwidth over its equal-priority peers. The datagram send API takes
   the same send-group handle as a stream; a datagram without one joins the
-  default group. Control streams stay above datagrams because of their
+  default group.
+- **A datagram carries its order within the group**, the same value a stream
+  gets (its group sequence), so it merges into the subscription's
+  newest-first order: a queued datagram for group 10 waits behind a stream
+  for group 11. Only on a tie, a datagram and a stream of the same group,
+  does the datagram go first, which is MoQT draft-21's rule (group order
+  before forwarding preference). Decided 2026-10-10 after review: draining
+  every datagram ahead of the group's streams broke newest-first. Control streams stay above datagrams because of their
   priority, not because of frame order. Rejected: a separate datagram group
   per subscription (two groups each, and it breaks the tie rule) and a
   global datagram queue compared by scalar (it bypasses the fair tier).
-- **Eviction: the lowest-priority oldest datagram goes first.** Keep one
-  connection-wide byte budget (`datagram_send_buffer_size`). When a new
-  datagram doesn't fit, evict the oldest datagram of the lowest-priority
-  group, or drop the new one if it would itself rank lowest. Sending never
+- **Eviction is domain-aware: the lowest-priority oldest datagram goes
+  first.** Keep one connection-wide byte budget
+  (`datagram_send_buffer_size`). When a new datagram doesn't fit, pick the
+  scheduling domain holding the most queued datagram bytes, then evict the
+  oldest datagram of that domain's lowest-priority group, oldest first among
+  equal priorities. Drop the new datagram instead if it would itself be that
+  victim. Priorities are compared only inside a domain, because
+  [Scope track priority](/quest/m1/track-priority-scope.md) confines them to
+  the broadcast when cluster fairness is on; with fairness off there is one
+  domain. Decided 2026-10-10 after review: a connection-wide comparison let
+  one busy high-priority broadcast evict every datagram of another. Sending never
   blocks, so moq-net's `poll_send_datagram` loses its Pending case, and
   moq-tokio (drop oldest today) and moq-uring (drop newest today) behave the
   same. Each runtime keeps its current budget size. Rejected: RTT-based
@@ -51,21 +64,35 @@ Decided 2026-10-10 with the maintainer:
   grows with subscriptions).
 - **Draft:** add a sentence to the Prioritization section of
   `drafts/draft-lcurley-moq-lite.md`: a publisher SHOULD apply a
-  subscription's priority to its datagrams as to its streams, and SHOULD
-  send the datagram first on a tie. No wire change. Run `just drafts check`.
+  subscription's priority and group order to its datagrams as to its
+  streams, and SHOULD send the datagram first when both carry the same
+  group. No wire change. Run `just drafts check`.
 - **No browser quest**, and no comment on neqo#3813.
 
 Tests in `moq-quic`, reusing the scheduler's saturation fixtures: a
 low-priority datagram group waits behind a higher-priority stream, a
-high-priority datagram preempts a lower-priority stream, on a tie a group's
-datagram goes ahead of its own stream, datagram and stream bytes share one
-group's fair-share credit, and eviction removes the lowest-priority oldest
-datagram first. In moq-net, a lite and an IETF publisher pass the
-subscription's send group with each datagram.
+high-priority datagram preempts a lower-priority stream, a datagram for an
+older group waits behind a stream for a newer one, a datagram goes ahead of
+a stream of its own group, datagram and stream bytes share one group's
+fair-share credit, eviction removes the lowest-priority oldest datagram
+first, and with fairness on two saturated broadcasts both keep sending
+datagrams. In moq-net, a lite and an IETF publisher pass the subscription's
+send group and group sequence with each datagram.
 
-Public API: the datagram send path in `moq-quic`, moq-tokio and moq-net's
-transport trait takes a send-group handle, and `poll_send_datagram` no
-longer returns Pending. Wire: none.
+Eviction fans out over domains, send groups, and queued datagrams, so add a
+benchmark sweeping active send groups and queued datagrams; picking a victim
+must not scan every group on each enqueue.
+
+Public API: the datagram send path in `moq-quic` and moq-net's transport
+trait (`poll_send_datagram` in `rs/moq-net/src/transport.rs`) takes a
+send-group handle and a group sequence, and no longer returns Pending.
+Every implementation follows: moq-tokio (`transport.rs`,
+`transport/owned.rs`), moq-uring (`transport/adapter.rs`,
+`quic/noq/connection.rs`, `quic/web.rs`), moq-ffi and moq-wasm
+(`transport/adapter.rs`), moq-net's `ietf/adapter.rs`, and the test mocks.
+moq-wasm sits on browser WebTransport, which cannot rank a datagram against
+a stream, so it ignores the handle and order and keeps its current
+best-effort send. Wire: none.
 
 ## Required
 

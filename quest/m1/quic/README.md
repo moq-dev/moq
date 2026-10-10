@@ -44,8 +44,8 @@ byte-fair service between send groups at the same priority, then the
 subscription's chosen group order within its own bucket. On a relay-to-relay
 session with fairness enabled, the send group is the broadcast. The default
 MoQ order is newest group first; an ordered subscription keeps oldest first.
-Datagrams join their subscription's send group and drain ahead of its
-streams.
+Datagrams join their subscription's send group in its group order, ahead
+of a stream of the same group.
 This is a transport API change, not a MoQ wire change.
 
 Decided in the 2026-09-30 audit: deadlines, qmux, BBR loss parity, ECN

@@ -18,7 +18,9 @@ control, so priority decides. Within one stream, its retransmits still go
 before its new data.
 
 Add a unit test beside the existing `StreamsState` tests in `state.rs`: send
-on a low-priority stream, mark its range lost through `retransmit`, write
+on a low-priority stream until it has nothing left to send (otherwise
+`retransmit` keeps its existing queue entry and the test proves nothing),
+mark its range lost through `retransmit`, write
 new data on a high-priority stream, and assert that `write_stream_frames`
 emits the high-priority stream first and the retransmit after it.
 
