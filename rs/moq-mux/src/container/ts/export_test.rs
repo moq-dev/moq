@@ -7583,3 +7583,32 @@ async fn a_follower_continues_on_the_same_instance_returning() {
 	assert!(end.is_none());
 	assert_eq!(start.elapsed(), Duration::from_secs(3) + linger);
 }
+
+/// The exact route going and a covering prefix of the same epoch taking over after the gap
+/// reaches the follower as an update rather than an end and a start
+/// (`quest/m0/broadcast-epoch/follow-gap.md`), so the export sees its broadcast end while its
+/// own instance still serves the path. It must never take that for a replacement: the export
+/// ends rather than splicing, and once the follower reports the gap it carries on.
+#[tokio::test(start_paused = true)]
+async fn a_follower_takes_a_same_epoch_handoff_after_a_gap_for_no_replacement() {
+	let origin = crate::source::produce_origin();
+	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let mut exact = origin.publish("pool/job", route.clone()).unwrap();
+	let catalog = crate::catalog::Producer::<()>::new(&mut exact, Default::default()).unwrap();
+	let source = crate::Source::new(origin.consume(), "pool/job");
+	let linger = Duration::from_secs(10);
+	let mut follower = super::Follower::new(Export::new(source).await.unwrap())
+		.unwrap()
+		.with_linger(linger);
+
+	// Left unpolled across the handoff, and long enough for the exact route's retraction to
+	// end the export's request before the prefix arrives.
+	drop((exact, catalog));
+	tokio::time::sleep(Duration::from_secs(1)).await;
+	let _pool = origin.dynamic("pool", route).unwrap();
+
+	let end = tokio::time::timeout(linger * 2, follower.next())
+		.await
+		.expect("the export settles within the linger");
+	assert!(!matches!(end, Err(crate::Error::Replaced(_))), "{end:?}");
+}
