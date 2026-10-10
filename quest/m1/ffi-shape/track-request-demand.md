@@ -13,8 +13,11 @@ still wants the track and stop producing it. Mirrors Rust's
 Found in #5139 (group request demand), decided 2026-10-09: that quest
 assumed `MoqTrackRequest.demand()` already existed, but moq-ffi only has
 `demand()` on `MoqTrackProducer` and the media and JSON producers. Follow
-#5139's `MoqGroupRequest.demand()` shape, including returning `Closed` once
-the request is answered or aborted.
+#5139's `MoqGroupRequest.demand()` binding shape, but keep Rust's lifetime:
+`accept` hands the same track state to the producer, so the handle keeps
+watching it and returns `Closed` only once the request is rejected or the
+track closes. A dynamic server can then stop producing when the last
+subscriber leaves.
 
 Additive in every binding. It edits the same wrappers as
 [Bindings](/quest/m0/broadcast-epoch/bindings.md) (#5146), so land it after

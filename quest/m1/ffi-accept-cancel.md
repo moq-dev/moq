@@ -8,9 +8,10 @@ releases the bound port, and every server call then resolves `Cancelled`.
 
 ## Plan
 
-Found in #5140 (ffi-cancel-read), decided 2026-10-09. That PR made
-`Task::run` await in place, so a cancelled future that is never polled again
-makes no progress. `MoqServer::listen` and `accept` kept the spawned path
+Found in #5140 (ffi-cancel-read), decided 2026-10-09. Start after #5140
+lands: on `main` today `Task::run` still spawns every call and there is no
+`Task::spawn`. That PR makes `Task::run` await in place, so a cancelled
+future that is never polled again makes no progress. `MoqServer::listen` and `accept` keep the spawned path
 (`Task::spawn`) because `MoqServer::cancel` blocks its thread until the
 in-flight call finishes, and an `accept` parked on that same thread would
 never finish (`server_cancel_releases_the_bound_port` hangs). So an `accept`
