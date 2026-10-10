@@ -2799,6 +2799,27 @@ fn group_request_demand_follows_the_fetch() {
 		"an answered request has no demand"
 	);
 
+	// Accepting the request also ends the watcher with an error: the accept fails any joined
+	// fetch it can't cover, and the watcher reads that as the request's end.
+	let fetch = fetch_group(broadcast, "data", 7, 0, 0);
+	let request = id(group_cb.recv());
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_group_request_demand(request, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+	let group = id(moq_group_request_accept(request));
+	let mut code = demand_cb.recv();
+	if code == moq_demand::MOQ_DEMAND_UNUSED as i32 {
+		code = demand_cb.recv();
+	}
+	assert!(code < 0, "an accepted request is a negative terminal, got {code}");
+	let payload = b"fetched";
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), 100_000) },
+		0
+	);
+	assert_eq!(moq_publish_group_finish(group), 0);
+	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), (0, payload.to_vec()));
+
 	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
