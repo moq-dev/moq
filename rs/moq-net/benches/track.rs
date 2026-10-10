@@ -393,6 +393,37 @@ fn bench_subscriber_join(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Late joins scan a bounded datagram ring; sweep both the backlog and the joining audience.
+fn bench_datagram_subscriber_join(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_datagram_subscriber_join");
+	for buffered in [0, 1, 8, 64] {
+		for join in [1, 8, 64] {
+			group.throughput(Throughput::Elements(join as u64));
+			group.bench_function(BenchmarkId::new(format!("{buffered}d"), join), |b| {
+				b.iter_batched(
+					|| {
+						let broadcast = broadcast::Info::default().produce();
+						let mut track = broadcast.create_track("bench", None).unwrap();
+						for millis in 0..buffered {
+							track
+								.append_datagram(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
+								.unwrap();
+						}
+						(broadcast, track)
+					},
+					|(broadcast, track)| {
+						let preferences = track::Subscription::default().with_max_delay(Duration::from_millis(5));
+						let viewers: Vec<_> = (0..join).map(|_| track.subscribe(preferences.clone())).collect();
+						(broadcast, track, viewers)
+					},
+					BatchSize::SmallInput,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
 /// Queues a parked read as woken, so the bench visits only what an append wakes.
 struct Woken {
 	read: usize,
@@ -485,6 +516,7 @@ criterion_group!(
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
 	bench_subscriber_join,
+	bench_datagram_subscriber_join,
 	bench_parked_read
 );
 criterion_main!(benches);
