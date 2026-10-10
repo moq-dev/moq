@@ -112,8 +112,14 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			timer: None,
 		};
 		// Take the start naming the route the export resolved now, before anything else can
-		// fold into it.
+		// fold into it. The cursor replays the routes on hand at once, so none means the route
+		// already went, and the next start is a return.
 		follower.poll_announced(&kio::Waiter::noop());
+		if !follower.started {
+			follower.started = true;
+			follower.serving = Serving::Gone;
+			follower.ended = true;
+		}
 		Ok(follower)
 	}
 
@@ -255,7 +261,14 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 							// An instance that went before it resolved is no return or switch yet.
 							// Until the next announcement says otherwise, nothing serves the path:
 							// a stitch stays on the export it has, and a return keeps lingering.
+							// A refusal from an instance still up fails loud instead.
 							Err(err) => {
+								if !matches!(
+									err,
+									crate::Error::Moq(moq_net::Error::Unroutable | moq_net::Error::Dropped)
+								) {
+									return Poll::Ready(Err(err));
+								}
 								tracing::warn!(path = %self.path, %err, "broadcast went before it resolved, still waiting");
 								self.serving = Serving::Gone;
 								self.state = match settling {

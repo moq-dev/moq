@@ -7625,6 +7625,62 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 	assert!(matches!(end, Ok(None)), "{end:?}");
 }
 
+/// A replacement that stays announced but refuses its catalog fails a stitch loudly, rather
+/// than leaving the export on the instance it replaced.
+#[tokio::test(start_paused = true)]
+async fn a_follower_fails_a_stitch_onto_a_replacement_that_refuses_its_catalog() {
+	let origin = crate::source::produce_origin();
+	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut follower = follower(&origin).await.with_stitch(true);
+
+	let _second = origin
+		.publish(
+			"live",
+			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+		)
+		.unwrap();
+	let end = tokio::time::timeout(Duration::from_secs(10), follower.next())
+		.await
+		.expect("the refusal ends the export");
+	assert!(end.is_err(), "the refusal fails the export: {end:?}");
+}
+
+/// An export whose route went before the follower was built has already lost it, so the same
+/// instance announcing again is a return to follow.
+#[tokio::test(start_paused = true)]
+async fn a_follower_built_after_its_route_went_follows_the_return() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let first = publish_bare(&origin, Some(&epoch));
+	let source = crate::Source::new(origin.consume(), "live");
+	let export = Export::new(source).await.unwrap();
+	let start = tokio::time::Instant::now();
+	finish(first);
+	tokio::time::sleep(Duration::from_secs(1)).await;
+
+	let linger = Duration::from_secs(10);
+	let mut follower = super::Follower::new(export).unwrap().with_linger(linger);
+	assert!(
+		tokio::time::timeout(Duration::from_secs(2), follower.next())
+			.await
+			.is_err(),
+		"lingering"
+	);
+	let second = publish_bare(&origin, Some(&epoch));
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"carried on"
+	);
+
+	// Carried on into the return, so its end starts the linger over.
+	finish(second);
+	let end = follower.next().await;
+	assert!(matches!(end, Ok(None)), "{end:?}");
+	assert_eq!(start.elapsed(), Duration::from_secs(4) + linger);
+}
+
 /// Without stitching, another instance taking the path fails the follower once the export
 /// ends, however long the linger.
 #[tokio::test(start_paused = true)]
