@@ -42,6 +42,11 @@ Decided in planning:
 - The work lives in a `sh/` script behind a `just` recipe, and `nightly.yml`
   calls the recipe.
 
+**Draft validation remaining:** the collector, trend reducer, and dependent nightly
+job are implemented. Validate the full native and packaged shipping matrix before
+removing this quest. The draft's portable proof covers synthetic regression cases
+and built consumer bundles; the existing Nightly alert path handles failures.
+
 Considered and declined (do not re-ask):
 
 - Shrinking npm install size by dropping sourcemaps or `inlineSources`. Maps
