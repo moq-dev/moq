@@ -23,6 +23,14 @@ Release build time went from 5m to 9m on that machine.
 
 ## Plan
 
+Draft implementation unifies the settings and preserves profiling symbols.
+Linux x86_64 FFI builds passed: shared library 25,224,272 bytes, static library
+59,638,882 bytes (below the Go mirror limit). Remaining: the complete Linux
+x86_64 and aarch64 artifact matrix and controlled comparative link times. The existing macOS table above
+is planning evidence, not a new measurement from this draft. Keep this quest
+until the Linux matrix is recorded.
+
+
 Decided in planning:
 
 - `lto = "fat"` and `codegen-units = 1`, not thin: the extra link time is paid
