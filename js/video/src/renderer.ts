@@ -107,7 +107,7 @@ export class Renderer {
 
 			if (typeof device === "string") {
 				if (backend === "webgpu") {
-					console.error(`[video] renderer="webgpu" is unsupported: ${device}`);
+					console.error(`[video] backend="webgpu" is unsupported: ${device}`);
 					this.#out.error.set("unsupported");
 					return;
 				}

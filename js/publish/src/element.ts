@@ -15,7 +15,7 @@ import * as Source from "./source";
 import { clearSourceState } from "./source-state";
 import * as Video from "./video";
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "renderer", "announce"] as const;
+const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "backend", "announce"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -68,7 +68,7 @@ function parsePreview(value: string | null): Preview.Mode {
 function parseBackend(value: string | null): Preview.Backend {
 	if (value === null) return "auto";
 	if (value === "auto" || value === "webgpu" || value === "2d") return value;
-	console.warn(`moq-publish: invalid renderer="${value}", expected "auto", "webgpu", or "2d"`);
+	console.warn(`moq-publish: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
 	return "auto";
 }
 
@@ -318,7 +318,7 @@ export default class MoqPublish extends HTMLElement {
 			this.controls.invisible.set(parseBoolean(newValue, false));
 		} else if (name === "preview") {
 			this.controls.preview.set(parsePreview(newValue));
-		} else if (name === "renderer") {
+		} else if (name === "backend") {
 			this.controls.backend.set(parseBackend(newValue));
 		} else {
 			const exhaustive: never = name;
@@ -459,7 +459,7 @@ export default class MoqPublish extends HTMLElement {
 		this.controls.preview.set(value);
 	}
 
-	/** Which graphics API draws a <canvas> preview, mirroring the `renderer` attribute. */
+	/** Which graphics API draws a <canvas> preview. */
 	get backend(): Preview.Backend {
 		return this.controls.backend.peek();
 	}

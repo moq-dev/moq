@@ -20,7 +20,7 @@ const renderer = new Video.Renderer({ canvas, frame, presentation: { rotation: 9
 
 ## WebGPU or Canvas2D
 
-The `backend` input (the elements' `renderer` attribute) picks the graphics API:
+The `backend` input (also an attribute on the elements) picks the graphics API:
 
 - `auto` (default): WebGPU where it can render a `VideoFrame`, else Canvas2D.
   WebGPU imports each frame without a copy where the browser allows, in the

@@ -24,7 +24,7 @@ const OBSERVED = [
 	"volume",
 	"muted",
 	"visible",
-	"renderer",
+	"backend",
 	"announced",
 	"delay",
 	"buffer",
@@ -51,12 +51,12 @@ function parseVisible(value: string | null): Video.Visible {
 	return "20%";
 }
 
-// Parse the `renderer` attribute, falling back to "auto".
+// Parse the `backend` attribute, falling back to "auto".
 function parseBackend(value: string | null): Video.Backend {
 	const trimmed = value?.trim();
 	if (!trimmed) return "auto";
 	if (trimmed === "auto" || trimmed === "webgpu" || trimmed === "2d") return trimmed;
-	console.warn(`moq-watch: invalid renderer="${value}", expected "auto", "webgpu", or "2d"`);
+	console.warn(`moq-watch: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
 	return "auto";
 }
 
@@ -313,7 +313,7 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			this.setAttribute("renderer", effect.get(this.controls.backend));
+			this.setAttribute("backend", effect.get(this.controls.backend));
 		});
 
 		// Each knob is 1:1 with its attribute, so the echo back through attributeChangedCallback
@@ -397,7 +397,7 @@ export default class MoqWatch extends HTMLElement {
 			this.controls.muted.set(parseBoolean(newValue, false));
 		} else if (name === "visible") {
 			this.controls.visible.set(parseVisible(newValue));
-		} else if (name === "renderer") {
+		} else if (name === "backend") {
 			this.controls.backend.set(parseBackend(newValue));
 		} else if (name === "announced") {
 			this.#announced.set(parseBoolean(newValue, true));
@@ -468,7 +468,7 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.visible.set(value);
 	}
 
-	/** Which graphics API paints the canvas, mirroring the `renderer` attribute. See {@link Video.Backend}. */
+	/** Which graphics API paints the canvas. See {@link Video.Backend}. */
 	get backend(): Video.Backend {
 		return this.controls.backend.peek();
 	}
