@@ -29,9 +29,11 @@ Decided in the 2026-10-09 planning session:
   dependency bump, which every job already builds. To keep that true, delete `.github/workflows/dependabot.yml` (its
   only job enables auto-merge on Dependabot PRs) and drop the Dependabot check
   from [Merge queue](/quest/m1/merge-queue-settings.md); a maintainer enqueues
-  Dependabot PRs by hand (decided on review: the
-  `merge_group` event cannot name its PRs' authors, and a router job was
-  rejected). Routing in `check.yml`:
+  Dependabot PRs by hand (decided on review: the `merge_group` event cannot
+  name its PRs' authors, and a router job was rejected). Deleting the workflow
+  leaves auto-merge set on Dependabot PRs already open, so run
+  `gh pr merge --disable-auto` on each before setting `CI_RUNNER`. Routing in
+  `check.yml`:
   `runs-on: ${{ (github.event_name == 'merge_group' || (!github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-24.04-arm' }}`.
   Guarding is by review only, with a comment at each use; no lint.
 - **Architecture:** the host is x86, while the hosted fallback is ARM. PRs on
@@ -53,7 +55,10 @@ Decided in the 2026-10-09 planning session:
   [GPU CI](/quest/m1/gpu-ci.md) with `PrivateDevices=false` and
   `DeviceAllow` for `/dev/nvidia*`; it never takes `moq-ci` work. Put the
   kixelated cachix substituter in the module's `nix.settings`, since dynamic
-  users are not `trusted-users` and cannot pass `extra-substituters`.
+  users are not `trusted-users` and cannot pass `extra-substituters`. The
+  shared store grows with every flake revision, so enable disk-aware
+  `nix.gc` (with `min-free`/`max-free`) and keep a GC root on the current
+  dev shell closure so collection never cools the warm store.
 - **Registration:** a dedicated GitHub App holding only the org
   "Self-hosted runners" permission, its key on the host. Register as org
   runners in a runner group restricted to `moq-dev/moq`; that is narrower than
