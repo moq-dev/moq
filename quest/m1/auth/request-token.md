@@ -65,14 +65,15 @@ order behind a pending renewal, a repeated 0x03 refused, duplicated admission
 and renewal logic, three parallel `Option`s on `auth::Request`, a request token
 silently ignored on moq-lite, an outbound update sniffer, unread
 `max_request_updates` and `decode_value`, and a refused renewal overloading
-`Error::Unsupported`. Still open in #5148, each fixed or settled by a recorded
-decision before it merges:
+`Error::Unsupported`. Still open in #5148, to fix before it merges:
 
-- `set_request_token` takes `setup::Token` and the encoder writes only
-  `USE_VALUE`, so a caller cannot send an alias form. Take encoded bytes, or
-  decide to keep the typed, value-only API.
 - A namespace renews only from draft 17; a token-bearing draft-16
-  REQUEST_UPDATE for a PUBLISH_NAMESPACE is still ignored.
+  REQUEST_UPDATE for a PUBLISH_NAMESPACE is still ignored. Implement it
+  (decided 2026-10-09: draft-16 allows it, and the Drafts decision covers 16).
+
+Decided 2026-10-09: `set_request_token` keeps the typed `setup::Token` and
+the encoder writes only `USE_VALUE`. Alias forms wait for a consumer that
+needs them, rather than an untyped bytes API now.
 
 Open for review: one `requests()` consumer receives both session and request
 tokens, so an acceptor written for session tokens also answers request tokens.
