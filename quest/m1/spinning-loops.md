@@ -32,6 +32,10 @@ Decided 2026-10-09 while reworking #5088:
   datagram backlog after `TrackServe` yields, and its drain arm would skip
   datagrams after a yield unless it returns `Poll`.
 
+## Required
+
+- [The moq-time crate](/quest/m1/time/crate.md) - the sim, which hosts the poll counter, moves into moq-time
+
 ## Related
 
 - [Session burst hang](/quest/m1/session-burst-hang.md) - the same bench shapes that hang
