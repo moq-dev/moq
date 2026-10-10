@@ -106,7 +106,6 @@ ladders.
 - [AudioToolbox encode](/quest/m1/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
 - [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table
-- [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the maintainer registers the host that runs the NVIDIA tests
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
 - [Rendition preference](/quest/m1/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
 - [Native enabled](/quest/m1/native-enabled.md) - native players and the ffi/C paths never select a disabled rendition, and move off one disabled mid-playback
