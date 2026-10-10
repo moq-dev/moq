@@ -40,6 +40,13 @@ pub struct Split {
 	pending: Vec<crate::container::Frame>,
 }
 
+/// A snapshot of [`Split`]'s retained parameter sets.
+pub(crate) struct Params {
+	vps: Vec<Bytes>,
+	sps: Vec<Bytes>,
+	pps: Vec<Bytes>,
+}
+
 #[derive(Default)]
 struct Au {
 	chunks: BytesMut,
@@ -238,6 +245,23 @@ impl Split {
 		self.current = Au::default();
 		self.tail.clear();
 		self.pending.clear();
+	}
+
+	/// The retained parameter sets, to [`restore`](Self::restore) if the caller refuses
+	/// the access unit that replaced them.
+	pub(crate) fn params(&self) -> Params {
+		Params {
+			vps: self.vps.clone(),
+			sps: self.sps.clone(),
+			pps: self.pps.clone(),
+		}
+	}
+
+	/// Put back parameter sets taken by [`params`](Self::params).
+	pub(crate) fn restore(&mut self, params: Params) {
+		self.vps = params.vps;
+		self.sps = params.sps;
+		self.pps = params.pps;
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {

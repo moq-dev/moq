@@ -1849,13 +1849,24 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
-				// Each PES is one access unit, so flush to emit it immediately.
-				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
-				frames.extend(split.flush(pts).map_err(unit_error)?);
-				let mut published = 0;
-				for frame in frames {
-					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
-				}
+				// A refused unit must not leave its parameter sets behind for later bare
+				// keyframes to re-inject, or every one of them is refused too.
+				let params = split.params();
+				let published = (|| {
+					// Each PES is one access unit, so flush to emit it immediately.
+					let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
+					frames.extend(split.flush(pts).map_err(unit_error)?);
+					let mut published = 0;
+					for frame in frames {
+						published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+					}
+					anyhow::Ok(published)
+				})()
+				.inspect_err(|err| {
+					if err.is::<Damaged>() {
+						split.restore(params);
+					}
+				})?;
 				// After decode, so the track (and its catalog rendition) exists.
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder)?;
@@ -1865,13 +1876,23 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H265 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
-				// Each PES is one access unit, so flush to emit it immediately.
-				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
-				frames.extend(split.flush(pts).map_err(unit_error)?);
-				let mut published = 0;
-				for frame in frames {
-					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
-				}
+				// See the H.264 arm.
+				let params = split.params();
+				let published = (|| {
+					// Each PES is one access unit, so flush to emit it immediately.
+					let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
+					frames.extend(split.flush(pts).map_err(unit_error)?);
+					let mut published = 0;
+					for frame in frames {
+						published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+					}
+					anyhow::Ok(published)
+				})()
+				.inspect_err(|err| {
+					if err.is::<Damaged>() {
+						split.restore(params);
+					}
+				})?;
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder)?;
 				}
@@ -6730,6 +6751,76 @@ pub(super) mod test {
 	#[tokio::test(start_paused = true)]
 	async fn clean_video_has_no_damage() {
 		damaged_video_recovers("clean").await;
+	}
+
+	/// A keyframe refused for its malformed SPS leaves the last valid parameter sets for the
+	/// next bare keyframe to re-inject. Kept, the malformed SPS would refuse every one of them.
+	async fn refused_params_keep_the_last_valid(
+		stream_type: StreamType,
+		params: &[&[u8]],
+		damaged: &[&[u8]],
+		idr: &[u8],
+		delta: &[u8],
+	) {
+		let au = |nals: &[&[u8]]| {
+			let mut out = Vec::new();
+			for nal in nals {
+				out.extend_from_slice(&[0, 0, 0, 1]);
+				out.extend_from_slice(nal);
+			}
+			out
+		};
+		let units = [
+			au(&[params, &[idr]].concat()),
+			au(&[delta]),
+			au(&[damaged, &[idr]].concat()),
+			au(&[idr]),
+			au(&[delta]),
+		];
+		let mut data = synth_pmt(&[(stream_type, VIDEO)], false);
+		for (i, unit) in units.iter().enumerate() {
+			let pts = 90_000 + i as u64 * FRAME;
+			data.extend_from_slice(&video_pes(VIDEO, i as u8, pts, None, unit));
+		}
+
+		let (consumer, catalog, import) = import_all(&data).expect("damage must stay local to the unit");
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		let frames = read_track(&consumer, &name, crate::container::Kind::Video).await;
+		assert_eq!(frames.len(), 4, "only the damaged keyframe is refused");
+		assert!(frames[2].keyframe, "the bare keyframe recovers");
+		let mut expected = au(params);
+		expected.extend_from_slice(&au(&[idr]));
+		assert_eq!(
+			frames[2].payload, expected,
+			"the last valid parameter sets are re-injected"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn refused_h264_params_keep_the_last_valid() {
+		use crate::container::test_util::{IDR, PPS, SPS};
+		refused_params_keep_the_last_valid(
+			StreamType::H264,
+			&[SPS, PPS],
+			&[&[0x67], PPS],
+			IDR,
+			&[0x41, 0x9a, 0x00, 0x01],
+		)
+		.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn refused_h265_params_keep_the_last_valid() {
+		use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+		refused_params_keep_the_last_valid(
+			StreamType::H265,
+			&[VPS, SPS, PPS],
+			&[VPS, &SPS[..8], PPS],
+			&[0x26, 0x01, 0x80, 0xaa],
+			&[0x02, 0x01, 0x80, 0x55],
+		)
+		.await;
 	}
 
 	/// A dedicated PCR PID's malformed adaptation field cannot declare a timebase break.
