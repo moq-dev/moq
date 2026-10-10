@@ -13,9 +13,9 @@ at raw-sample precision.
 
 ## Plan
 
-Decided 2026-10-05 in moq.pro's quest audit: percentiles neither window nor
-merge, and moq.pro's load harness sums several generators against one relay,
-so the bench emits mergeable buckets. Approved as recommended.
+Decided 2026-10-05 by the maintainer: percentiles neither window nor merge,
+and a load harness sums several generators against one relay, so the bench
+emits mergeable buckets.
 
 - `Latency` (`rs/moq-bench/src/stats.rs`) counts 1 ms buckets for the whole
   run and diffs them each interval for the `latency_interval_*` percentiles
@@ -38,12 +38,8 @@ so the bench emits mergeable buckets. Approved as recommended.
   taken. Update `rs/moq-bench/README.md`.
 
 Lands on main, then is backported to `release` as an additive cherry-pick
-PR, like [#4882](https://github.com/moq-dev/moq/pull/4882), since moq.pro's load
-harness tracks `release` (decided 2026-10-05). The backport carries #5021's
+PR, like [#4882](https://github.com/moq-dev/moq/pull/4882), since downstream load
+harnesses track `release` (decided 2026-10-05). The backport carries #5021's
 delta along if `release` does not have it yet.
 
 Public API: none (CLI output only). Wire: none.
-
-## Related
-
-- [moq.pro: benchmark output pin](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/kick/bench-pin.md) - the load harness that sums these across generators
