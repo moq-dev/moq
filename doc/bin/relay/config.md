@@ -53,7 +53,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-keep_alive = "3s"                    # Ping interval; "0s" disables it. Ignored by iroh. Default.
+keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh's 5s path heartbeat stays. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).

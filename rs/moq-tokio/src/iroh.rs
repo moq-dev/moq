@@ -198,11 +198,10 @@ impl Config {
 	/// registers the ALPNs of its configured versions.
 	///
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
-	/// section (the per-connection knobs are symmetric). It only honors the knobs
-	/// its transport-config builder exposes (stream limits, idle timeout, MTU
-	/// discovery, congestion control, flow-control windows); it has no keep-alive
-	/// knob and cannot disable GSO, so `gso = false` fails with
-	/// [`Error::GsoUnsupported`].
+	/// section (the per-connection knobs are symmetric). It honors the knobs its
+	/// transport-config builder exposes (stream limits, idle timeout, keep-alive,
+	/// MTU discovery, congestion control, flow-control windows). It cannot disable
+	/// GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
@@ -243,28 +242,7 @@ impl Config {
 			SecretKey::generate()
 		};
 
-		// MoQ opens a stream per group, so raise the low default; also carry the
-		// shared idle-timeout / MTU knobs onto iroh's own transport config.
-		let max_streams = iroh::endpoint::VarInt::from_u64(quic.max_streams).unwrap_or(iroh::endpoint::VarInt::MAX);
-		let mut transport = iroh::endpoint::QuicTransportConfig::builder()
-			.max_concurrent_bidi_streams(max_streams)
-			.max_concurrent_uni_streams(max_streams)
-			.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
-		if !quic.mtu_discovery {
-			transport = transport.mtu_discovery_config(None);
-		}
-		// iroh's connection window is unlimited, so apply ours when unset.
-		let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
-		let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
-		transport = transport.receive_window(window);
-		if let Some(window) = quic.stream_receive_window {
-			let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
-			transport = transport.stream_receive_window(window);
-		}
-		if let Some(window) = quic.send_window {
-			transport = transport.send_window(window);
-		}
-		transport = transport.congestion_controller_factory(congestion_factory(quic.congestion()));
+		let transport = transport_config(&quic);
 
 		let mut builder = if self.disable_relay.unwrap_or(false) {
 			Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
@@ -285,6 +263,43 @@ impl Config {
 
 		Ok(Some(endpoint))
 	}
+}
+
+/// The per-connection transport config, shared by both roles.
+///
+/// `keep_alive` is the value [`crate::quic::Config::resolve`] already produced:
+/// `Some` is the interval, and `None` (`0s`) means disabled. iroh 1.2's setter
+/// only stores `Some`, and the builder starts at its own 5s heartbeat, so a
+/// disabled interval cannot be written. A zero duration would rearm the timer
+/// for immediately and spin, so it is not passed. iroh's separate per-path
+/// heartbeat stays at the 5s it ships with: that setter ignores anything longer
+/// and cannot clear it either.
+fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTransportConfigBuilder {
+	// MoQ opens a stream per group, so raise the low default; also carry the
+	// shared idle-timeout / MTU knobs onto iroh's own transport config.
+	let max_streams = iroh::endpoint::VarInt::from_u64(quic.max_streams).unwrap_or(iroh::endpoint::VarInt::MAX);
+	let mut transport = iroh::endpoint::QuicTransportConfig::builder()
+		.max_concurrent_bidi_streams(max_streams)
+		.max_concurrent_uni_streams(max_streams)
+		.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
+	if let Some(interval) = quic.keep_alive {
+		transport = transport.keep_alive_interval(interval);
+	}
+	if !quic.mtu_discovery {
+		transport = transport.mtu_discovery_config(None);
+	}
+	// iroh's connection window is unlimited, so apply ours when unset.
+	let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
+	let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+	transport = transport.receive_window(window);
+	if let Some(window) = quic.stream_receive_window {
+		let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+		transport = transport.stream_receive_window(window);
+	}
+	if let Some(window) = quic.send_window {
+		transport = transport.send_window(window);
+	}
+	transport.congestion_controller_factory(congestion_factory(quic.congestion()))
 }
 
 /// Register the ALPNs a listener accepts on `endpoint`, one per configured version.
@@ -527,5 +542,22 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<noq_proto::congestion::Bbr3>().is_ok());
+	}
+
+	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat.
+	///
+	/// iroh's builder starts at 5s and used to ignore `quic.keep_alive`. The
+	/// setter cannot store `None`, so a disabled interval is not asserted here.
+	#[test]
+	fn keep_alive_interval_follows_resolved_config() {
+		for interval in [std::time::Duration::from_secs(3), std::time::Duration::from_millis(500)] {
+			let quic = crate::quic::Resolved {
+				keep_alive: Some(interval),
+				..Default::default()
+			};
+			let rendered = format!("{:?}", transport_config(&quic));
+			let needle = format!("keep_alive_interval: Some({interval:?})");
+			assert!(rendered.contains(&needle), "{rendered}");
+		}
 	}
 }

@@ -156,7 +156,10 @@ pub struct Config {
 	idle_timeout_arg: Option<CliDuration>,
 
 	/// Keep-alive ping interval. Defaults to 3s; set `0s` to disable.
-	/// Ignored by the iroh backend, which has no keep-alive knob.
+	///
+	/// The iroh backend applies this to its connection keep-alive. It also keeps
+	/// a 5s per-path heartbeat that its builder will not raise or clear, so `0s`
+	/// and any interval above 5s still send those path pings.
 	#[usage(skip)]
 	#[serde(with = "crate::cli::duration::serde_duration")]
 	pub keep_alive: Duration,

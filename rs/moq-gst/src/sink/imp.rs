@@ -192,7 +192,7 @@ impl ObjectImpl for MoqSink {
 					.build(),
 				glib::ParamSpecUInt64::builder("quic-keep-alive")
 					.nick("QUIC keep-alive")
-					.blurb("QUIC keep-alive interval in milliseconds, 0 to disable; ignored by iroh")
+					.blurb("QUIC keep-alive interval in milliseconds, 0 to disable")
 					.default_value(quic.keep_alive.map(duration_millis).unwrap_or(0))
 					.mutable_ready()
 					.build(),
