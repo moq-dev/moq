@@ -554,7 +554,7 @@ impl MoqClient {
 	/// A native session automatically reconnects with backoff when the transport drops
 	/// (unless [`MoqClientConfig::once`] is set), and broadcasts consumed through it ride out
 	/// the gap. Watch [`MoqSession::status`] for the connect/disconnect transitions,
-	/// [`MoqSession::epoch`] for the reconnect count, and [`MoqSession::closed`] for the
+	/// [`MoqSession::connects`] for the reconnect count, and [`MoqSession::closed`] for the
 	/// connection giving up for good.
 	///
 	/// Both origin sides are always accessible via [`MoqSession::publish`] and
@@ -788,16 +788,16 @@ impl MoqSession {
 			.await
 	}
 
-	/// The connection epoch: 1 for the connect this session was built from, one more
+	/// How many times this session has connected: 1 for the connect it was built from, one more
 	/// on each reconnect. A server-accepted session is a single transport, so it stays 1.
 	///
 	/// The count pairs with [`status`](Self::status): a `Connected` transition whose
-	/// epoch grew is a reconnect, so a worker can log each one by number. Migrations
+	/// count grew is a reconnect, so a worker can log each one by number. Migrations
 	/// count too, since the replacement is a new session.
-	pub fn epoch(&self) -> u64 {
+	pub fn connects(&self) -> u64 {
 		match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => connection.epoch(),
+			Inner::Connection(connection) => connection.connects(),
 			Inner::Session(_) => 1,
 		}
 	}

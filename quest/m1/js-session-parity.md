@@ -18,7 +18,7 @@ since it waits on #4225 and the caps do not.
 
 Decided 2026-10-08: the resolved-epoch check is done for JS
 (`broadcast.Consumer.epoch` mirrors `broadcast::Info::epoch`), and the
-bindings' epoch surface is [Bindings](/quest/m0/broadcast-epoch/bindings.md)'s.
+bindings expose epochs on announced routes through moq-ffi.
 
 ## Related
 

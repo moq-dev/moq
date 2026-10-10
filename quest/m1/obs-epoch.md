@@ -16,9 +16,5 @@ release gate waits only on `moqsink`.
   the C++ line moves the plugin onto (decided in the 2026-09-30 audit: libmoq,
   now moq-c, gets no new API).
 - Nothing mints by default: the plugin mints one per Start Streaming and
-  announces it through the route.
+  announces it through the route: `moq::mint_epoch()` into `Route::epoch`.
 - Show the epoch in the dock, and update `doc/bin/obs.md` if it shows it.
-
-## Required
-
-- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi exposes epochs

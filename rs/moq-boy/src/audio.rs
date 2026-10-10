@@ -3,7 +3,7 @@
 //! A thin wrapper over [`moq_audio::encode::Producer`], which resamples to
 //! 48 kHz, encodes Opus, and anchors timestamps to a wall clock so audio stays
 //! in sync with video. `push_samples` stamps each buffer with the shared
-//! emulator clock; `reset_epoch` re-anchors on pause/resume so the gap lands in
+//! emulator clock; `reanchor` re-anchors on pause/resume so the gap lands in
 //! the PTS.
 
 use std::time::Duration;
@@ -41,11 +41,11 @@ impl AudioEncoder {
 	}
 
 	/// Re-anchor the timeline so a pause gap shows up in the audio PTS.
-	pub fn reset_epoch(&mut self) {
-		self.producer.reset_epoch();
+	pub fn reanchor(&mut self) {
+		self.producer.reanchor();
 	}
 
-	/// Publish a marker group marking the pause, so the gap the re-anchored epoch is about
+	/// Publish a marker group marking the pause, so the gap the reanchor is about
 	/// to open reads as a break rather than one very long packet.
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.producer.discontinuity()?;

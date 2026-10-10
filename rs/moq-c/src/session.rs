@@ -199,7 +199,7 @@ impl Session {
 			}));
 		}
 
-		// A server-accepted session is a single transport, so it only ever reaches epoch 1.
+		// A server-accepted session is a single transport, so it only ever connects once.
 		callback.call(1);
 		Err(session.closed().await.into())
 	}
@@ -248,7 +248,7 @@ impl Session {
 		}
 	}
 
-	/// Forward connection epochs to the status callback until the reconnect loop stops.
+	/// Forward connect counts to the status callback until the reconnect loop stops.
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
 	/// clean close (delivered as the terminal callback once the task ends).
@@ -257,11 +257,11 @@ impl Session {
 		loop {
 			if let moq_tokio::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {
 				connects += 1;
-				// Positive status carries the connection epoch, so callers can tell a
+				// Positive status carries the connect count, so callers can tell a
 				// reconnect (>1) from the first connect (1). No lock is held, so the C
 				// callback is free to re-enter moq-c.
 				let code = i32::try_from(connects)
-					.context("connection epoch exceeded i32::MAX")
+					.context("connect count exceeded i32::MAX")
 					.map_err(|err| Error::Connect(Arc::new(err)))?;
 				callback.call(code);
 			}

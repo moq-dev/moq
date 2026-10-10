@@ -20,13 +20,11 @@ media, and request-accept children, and the remaining children PR straight to
 - The bindings still break once per release, not once per merge: binding
   releases (moq-ffi and the Python, Go, Swift, Kotlin, Dart, and C++
   packages) wait until [Codecs](/quest/m1/ffi-shape/codec.md) merges. Codecs
-  ranks first below for that reason, and the other breaking children
-  ([Bindings](/quest/m0/broadcast-epoch/bindings.md)' `epoch()` rename and
-  [named error fields](/quest/m1/ffi-shape/error-fields.md)) should land
-  before that release too. Dart is published (`moq` 0.1.0, `moq_ffi` 0.4.x), so
-  its renames get the same upgrade notes as the others.
-- Bindings no longer lands first (reversing the 2026-10-05 audit): it adopts
-  the reshaped wrappers on `main` instead of this line rebasing onto it.
+  ranks first below for that reason, and the other breaking child
+  ([named error fields](/quest/m1/ffi-shape/error-fields.md)) should land
+  before that release too, joining the broadcast-epoch renames already on
+  `main` (`connects()`, `reanchor()`). Dart is published (`moq` 0.1.0,
+  `moq_ffi` 0.4.x), so its renames get the same upgrade notes as the others.
 - The C++ package (#4079) landed first, so #4519 ported `cpp/moq` (including
   the hand-kept `moq::` aliases `just cpp check` audits), `cpp/obs`, and the
   C++ interop client. C++ stays a flat `moq::` namespace with `Media*` type
@@ -74,7 +72,6 @@ runs `just test interop --all`.
 
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video producers, codec-only encoders, and decoders move under their own namespaces, named as in Rust; binding releases wait for it
 - [Named error fields](/quest/m1/ffi-shape/error-fields.md) - `MoqError` variants name their fields, so no binding exposes a positional `v1`
-- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - the wrappers expose epochs and rename `session.epoch()`, on the reshaped wrappers
 - [Group request demand](/quest/m1/ffi-shape/group-request-demand.md) - `MoqGroupRequest::demand()` in moq-ffi and every wrapper
 - [Track request demand](/quest/m1/ffi-shape/track-request-demand.md) - `MoqTrackRequest::demand()` in moq-ffi and every wrapper, after Bindings
 - [Layers guide](/quest/m1/ffi-shape/layers-guide.md) - a `doc/lib` page maps each Rust layer to every binding's module, once Codecs adds `audio` and `video`

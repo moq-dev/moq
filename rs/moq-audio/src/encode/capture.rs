@@ -532,7 +532,7 @@ impl<E: CatalogExt> Driver<E> {
 			match event {
 				DriveEvent::Control(None) => return Ok(()),
 				DriveEvent::Control(Some(_)) => {
-					self.producer_mut().reset_epoch();
+					self.producer_mut().reanchor();
 				}
 				DriveEvent::Capture(Ok(())) => return Ok(()),
 				DriveEvent::Capture(Err(err)) => {
@@ -818,7 +818,7 @@ trait Output {
 	fn starting(&mut self) {}
 	fn live(&mut self, _device: Option<capture::Device>) {}
 	fn failed(&mut self, _error: &Error) {}
-	fn reset_epoch(&mut self);
+	fn reanchor(&mut self);
 	/// The broadcast timestamp of a buffer captured at `captured`, or now when unknown.
 	fn stamp(&self, captured: Option<Instant>) -> Result<u64, Error>;
 	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error>;
@@ -864,8 +864,8 @@ impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
 		);
 	}
 
-	fn reset_epoch(&mut self) {
-		self.producer.reset_epoch();
+	fn reanchor(&mut self) {
+		self.producer.reanchor();
 	}
 
 	fn stamp(&self, captured: Option<Instant>) -> Result<u64, Error> {
@@ -966,7 +966,7 @@ impl Converter {
 	}
 
 	/// Return converted samples plus the timestamp of the first input buffered
-	/// into them. The timestamp preserves the epoch when resampling spans reads.
+	/// into them. The timestamp preserves the anchor when resampling spans reads.
 	fn process(
 		&mut self,
 		mut samples: capture::Samples,
@@ -1115,7 +1115,7 @@ impl Supervisor {
 								biased;
 								unused = demand.unused() => {
 									drop(input);
-									output.reset_epoch();
+									output.reanchor();
 									if !unused {
 										return match last_error {
 											Some(err) => Err(err),
@@ -1140,7 +1140,7 @@ impl Supervisor {
 									// A bounded-queue drop is a real hole in the timeline. The next
 									// buffer re-anchors at its own capture instant.
 									if samples.gap {
-										output.reset_epoch();
+										output.reanchor();
 									}
 									let timestamp_us = output.stamp(samples.captured)?;
 									if let Some((samples, timestamp_us)) = converter.process(samples, timestamp_us)? {
@@ -1167,7 +1167,7 @@ impl Supervisor {
 
 				// The failed stream was dropped by the match above. Reset before waiting
 				// so a publication that ends during recovery cannot flush stale samples.
-				output.reset_epoch();
+				output.reanchor();
 				tracing::warn!(error = %failure, "audio capture unavailable");
 				last_error = Some(failure);
 
@@ -1338,7 +1338,7 @@ mod tests {
 	}
 
 	impl Output for MockOutput {
-		fn reset_epoch(&mut self) {
+		fn reanchor(&mut self) {
 			self.events.push(OutputEvent::Reset);
 		}
 
@@ -1921,7 +1921,7 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn successful_reopen_resumes_the_same_output_after_an_epoch_reset() {
+	async fn successful_reopen_resumes_the_same_output_after_a_reanchor() {
 		let (failed_tx, failed) = stream(None);
 		failed_tx
 			.try_push(Err(capture::Failure::retry(Error::Capture("lost".into()))))
@@ -2338,7 +2338,7 @@ mod tests {
 		}
 
 		/// A device that fails and reopens counts its samples from zero again. The broadcast
-		/// continues forward from the reopen instead of rewinding to the old epoch.
+		/// continues forward from the reopen instead of rewinding to the old anchor.
 		#[tokio::test]
 		async fn a_device_restart_continues_forward() {
 			let (first, failing) = stream(None);

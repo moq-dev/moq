@@ -449,7 +449,7 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 	}
 
 	conn->session = *result;
-	LOG_INFO("MoQ session connected (epoch %llu)", (unsigned long long)conn->session->epoch());
+	LOG_INFO("MoQ session connected (connect %llu)", (unsigned long long)conn->session->connects());
 	moq_source_watch_status(ctx, conn);
 
 	// Wait for the broadcast to be announced. Announcements arrive over the session
@@ -524,7 +524,7 @@ static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<C
 	switch (*result) {
 	case moq::ConnectionStatus::kConnected:
 		// The existing subscriptions ride out the gap; nothing to redo.
-		LOG_INFO("MoQ session reconnected (epoch %llu)", (unsigned long long)conn->session->epoch());
+		LOG_INFO("MoQ session reconnected (connect %llu)", (unsigned long long)conn->session->connects());
 		break;
 	case moq::ConnectionStatus::kDisconnected:
 		LOG_WARNING("MoQ session dropped, reconnecting");

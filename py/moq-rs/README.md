@@ -30,7 +30,7 @@ async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
             if not isinstance(event, moq.AnnounceEventStart):
-                continue  # AnnounceEventUpdate or AnnounceEventEnd
+                continue  # AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventRestart
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request_broadcast(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
@@ -69,7 +69,8 @@ async def main():
         audio.write_frame(payload, timestamp=timedelta(milliseconds=20))
         audio.cut()
 
-        broadcast.announce()
+        # A fresh epoch per run tells viewers a restart is a new broadcast.
+        broadcast.announce(moq.Route(epoch=moq.mint_epoch()))
 
         # Clean up
         audio.finish()
@@ -149,7 +150,7 @@ client = moq.Client(
   - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain finished tracks within one second, raising on failure.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
-  - `await .status() → ConnectionStatus`, `.epoch()`. Watch reconnects; the epoch counts connections, 1 on the first.
+  - `await .status() → ConnectionStatus`, `.connects()`. Watch reconnects; `connects()` counts connections, 1 on the first.
   - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
 
 ### Publishing
@@ -222,7 +223,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`, each carrying an `Announce`); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits until something serves the path)
   - `.request_broadcast(path) → BroadcastConsumer` (awaitable; announced now or a dynamic fallback, else raises)
 

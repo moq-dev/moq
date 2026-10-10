@@ -955,7 +955,7 @@ async fn noq_client_close_drains_migrated_predecessor() {
 			subscribed_tx.send(()).unwrap();
 
 			// Once the replacement is live, only the predecessor serves the subscription.
-			while connection.epoch() < 2 || !connection.connected() {
+			while connection.connects() < 2 || !connection.connected() {
 				connection.status().await.expect("connection stopped");
 			}
 			migrated_tx.send(()).unwrap();

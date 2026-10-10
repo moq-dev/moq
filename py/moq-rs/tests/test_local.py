@@ -2,7 +2,7 @@
 
 import asyncio
 import struct
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import moq
@@ -369,6 +369,32 @@ async def test_announced_broadcast():
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         _catalog = await moq.media.CatalogConsumer.subscribe(broadcast_consumer)
         break
+
+
+async def test_announced_epoch_restarts():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    announced = consumer.announced()
+    broadcast = origin.create_broadcast("epoch")
+
+    first = moq.mint_epoch()
+    assert abs(moq.epoch_time(first) - datetime.now(timezone.utc)) < timedelta(minutes=1)
+    broadcast.announce(moq.Route(epoch=first))
+    start = await next_route(announced)
+    assert isinstance(start, moq.AnnounceEventStart)
+    assert start.announce.route.epoch == first
+
+    second = moq.mint_epoch()
+    broadcast.announce(moq.Route(epoch=second))
+    restart = await next_route(announced)
+    assert isinstance(restart, moq.AnnounceEventRestart)
+    assert restart.announce.route.epoch == second
+
+    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
+        moq.epoch_time(first.upper())
+    with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
+        broadcast.announce(moq.Route(epoch="not-an-epoch"))
+    broadcast.close()
 
 
 def test_publish_lifecycle():
