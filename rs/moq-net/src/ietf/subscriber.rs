@@ -3178,7 +3178,6 @@ where
 /// status for empty objects, and the streamed payload.
 struct GroupIngest {
 	has_extensions: bool,
-	has_end: bool,
 	timescale: Option<Timescale>,
 	version: Version,
 	prior_object: Option<u64>,
@@ -3217,7 +3216,6 @@ impl GroupIngest {
 	) -> Self {
 		Self {
 			has_extensions: group.flags.has_extensions,
-			has_end: group.flags.has_end,
 			timescale,
 			version: subscriber.version,
 			prior_object: None,
@@ -4264,7 +4262,9 @@ impl GroupIngest {
 							frame.finish()?;
 						}
 						self.phase = IngestPhase::Delta;
-					} else if status == END_OF_GROUP && !self.has_end {
+					} else if status == END_OF_GROUP {
+						// Allowed even when the header marks the group's end: that bit only
+						// lets a FIN imply it, and imquic sends both.
 						self.phase = IngestPhase::Finished(Ended::Group);
 					} else if status == END_OF_TRACK {
 						// Defined on every implemented draft, whether or not the header marks
@@ -5877,10 +5877,10 @@ mod tests {
 	}
 
 	/// Two sessions assigned the same identity announce the same anonymous chain.
-	/// The cursor treats that as an identical re-announce, so a reconnect is
-	/// invisible and retracting the stale session leaves the fresh route standing.
+	/// Without an epoch the fresh session is another source, so consumers restart
+	/// once, and retracting the stale session leaves the fresh route standing quietly.
 	#[moq_net_sim::test]
-	async fn reconnecting_peer_joins_the_front_it_replaces() {
+	async fn reconnecting_peer_restarts_the_route() {
 		let peer = crate::Hop::new(777).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
 
@@ -5915,8 +5915,9 @@ mod tests {
 		announced.assert_next_active("room/host");
 
 		// The peer reconnects before the old session is retired: an identical route
-		// from the fresh session joins without any consumer-visible churn.
+		// from the fresh session wins at once, as another source.
 		let _second = connect();
+		announced.assert_next_restarted("room/host");
 		announced.assert_next_wait();
 
 		// Neither route is offered back to the peer they both came from.
@@ -7989,10 +7990,10 @@ mod stitch_tests {
 		}
 	}
 
-	/// Append an END_OF_TRACK object: delta 0, an empty payload, then its status.
-	fn end_of_track(mut stream: Vec<u8>) -> Vec<u8> {
+	/// Append a status object such as END_OF_TRACK: delta 0, an empty payload, then its status.
+	fn end_marker(mut stream: Vec<u8>, status: u64) -> Vec<u8> {
 		// The id delta, an empty extension block, a zero size, and the status.
-		for value in [0u64, 0, 0, END_OF_TRACK] {
+		for value in [0u64, 0, 0, status] {
 			crate::coding::Encoder::new(&mut stream, VERSION.into())
 				.varint(value)
 				.unwrap();
@@ -8066,7 +8067,10 @@ mod stitch_tests {
 	/// END_OF_TRACK after a group's last object ends the track right after that group.
 	#[moq_net_sim::test]
 	async fn an_end_of_track_after_a_group_ends_the_track_after_it() {
-		let h = Harness::new(Fill::Done, vec![end_of_track(tail_stream(SEQUENCE, 0, &[b"last"]))]);
+		let h = Harness::new(
+			Fill::Done,
+			vec![end_marker(tail_stream(SEQUENCE, 0, &[b"last"]), END_OF_TRACK)],
+		);
 		let mut consumer = h.track.subscribe(None);
 		let mut stream = h.stream().await;
 
@@ -8101,7 +8105,10 @@ mod stitch_tests {
 	/// and no group is created for it.
 	#[moq_net_sim::test]
 	async fn an_end_of_track_at_object_zero_creates_no_group() {
-		let h = Harness::new(Fill::Done, vec![end_of_track(tail_stream(SEQUENCE, 0, &[]))]);
+		let h = Harness::new(
+			Fill::Done,
+			vec![end_marker(tail_stream(SEQUENCE, 0, &[]), END_OF_TRACK)],
+		);
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
@@ -8399,6 +8406,35 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].1, b"whole");
 		assert_eq!(frames[1].1, b"next");
+	}
+
+	/// The END_OF_GROUP header bit only lets a FIN imply the group's end, so an explicit
+	/// END_OF_GROUP status on the same stream ends the group there rather than failing it.
+	#[moq_net_sim::test]
+	async fn an_end_of_group_status_on_a_marked_stream_finishes_the_group() {
+		use futures::FutureExt;
+
+		let payloads: [&[u8]; 5] = [b"o0", b"o1", b"o2", b"o3", b"o4"];
+		let bytes = end_marker(draft18_subgroup(SEQUENCE, true, 0, &payloads), END_OF_GROUP);
+		let flags = ietf::GroupFlags::decode(u64::from(bytes[0]), Version::Draft18).unwrap();
+		assert!(flags.has_end, "the header marks the group's end");
+
+		let mut h = Harness::new(Fill::Done, vec![bytes]);
+		h.subscriber.version = Version::Draft18;
+		let mut consumer = h.track.subscribe(None);
+		let mut stream = read_draft18(&h.session).await;
+
+		h.subscriber.clone().recv_group(&mut stream).await.expect("the group");
+
+		// The stream was read to its end, so everything is already delivered.
+		let mut group = consumer.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(group.sequence, SEQUENCE);
+		for payload in payloads {
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(frame.payload.as_ref(), payload);
+		}
+		let end = group.read_frame().now_or_never().expect("the group is closed");
+		assert!(matches!(end, Ok(None)), "the group is finished, not aborted: {end:?}");
 	}
 
 	/// A clear FIRST_OBJECT whose first ID is not 0 still has a hole at the front, so

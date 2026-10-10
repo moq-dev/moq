@@ -560,15 +560,21 @@ impl<S: web_transport_trait::SendStream + 'static> Drop for SendStream<S> {
 					});
 				}
 			}
+			// Both deferred actions fired the watch's interrupt when recorded, so
+			// the salvage task reclaims the stream without waiting on the peer.
 			Some(SendState::Closing(fut)) => {
 				let reset = self.reset.take();
-				if reset.is_some()
+				let finish = std::mem::take(&mut self.finish);
+				if (reset.is_some() || finish)
 					&& let Ok(handle) = tokio::runtime::Handle::try_current()
 				{
 					handle.spawn(async move {
 						let (mut stream, _) = fut.await;
-						if let Some(code) = reset {
-							stream.reset(code);
+						match reset {
+							Some(code) => stream.reset(code),
+							None => {
+								let _ = stream.finish();
+							}
 						}
 					});
 				}
@@ -1196,6 +1202,25 @@ mod tests {
 		.await
 		.expect("the salvage task never applied the reset");
 		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[9]);
+	}
+
+	// An idle closed watch owns the stream, so a FIN recorded against it and then
+	// dropped must still go out instead of the backend's drop reset.
+	#[tokio::test(start_paused = true)]
+	async fn a_deferred_finish_survives_a_drop_mid_watch() {
+		let fake = FakeSend::default();
+		let mut send = SendStream::new(fake.clone());
+		let mut cx = cx();
+
+		assert!(send.poll_closed(&mut cx).is_pending());
+		send.finish().unwrap();
+		drop(send);
+
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
+		assert!(fake.finished.load(Ordering::SeqCst), "the deferred FIN was lost");
+		assert!(fake.resets.lock().unwrap().is_empty());
 	}
 
 	// The receive-side twin: a reader dropped mid-read still sends the deferred

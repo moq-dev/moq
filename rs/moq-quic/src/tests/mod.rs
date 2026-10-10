@@ -1127,6 +1127,37 @@ fn zero_rtt_incoming_buffer_size_total() {
     });
 }
 
+/// A server that defers accepting an Initial has the handshake idle timeout to do so, not the
+/// shorter idle timeout.
+#[test]
+fn deferred_accept_uses_handshake_idle_timeout() {
+    let _guard = subscribe();
+    let mut transport = cubic_transport();
+    transport.max_idle_timeout(Some(Duration::from_secs(2).try_into().unwrap()));
+    let mut server = server_config();
+    server.transport_config(Arc::new(transport));
+    let mut pair = Pair::new(Default::default(), server);
+    pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+
+    pair.begin_connect(client_config());
+    pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    let start = pair.time;
+    let late = pair.server.waiting_incoming.pop().unwrap();
+    let delayed = pair.server.waiting_incoming.pop().unwrap();
+
+    // Past the idle timeout, but within the handshake idle timeout.
+    pair.time = start + Duration::from_secs(3);
+    assert!(pair.server.try_accept(delayed, pair.time).is_ok());
+
+    pair.time = start + Duration::from_secs(10);
+    assert_matches!(
+        pair.server.try_accept(late, pair.time),
+        Err(ConnectionError::TimedOut)
+    );
+}
+
 /// Verify that datagrams arriving while a connection is in the `Accepting` state (between
 /// `start_accept` and `finish_accept`) are buffered in `incoming_buffers` and replayed into the
 /// connection after `finish_accept`. Drives through the full handshake and clean shutdown to
@@ -3222,6 +3253,142 @@ fn handshake_anti_deadlock_probe() {
     assert_matches!(
         pair.client_conn_mut(client_ch).poll(),
         Some(Event::Connected)
+    );
+}
+
+/// A client's lost Finished is probed at the Handshake space's own PTO, not one
+/// still backed off from Initials lost before it (RFC 9002 A.11).
+#[test]
+fn lost_finished_after_initial_backoff() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    // Without latency the RTT is zero and every PTO is the timer granularity.
+    pair.latency = Duration::from_millis(50);
+
+    let client_ch = pair.begin_connect(client_config());
+    // The client's first Initial and two probes are lost, backing its PTO off three times.
+    for _ in 0..3 {
+        pair.drive_client();
+        pair.server.inbound.clear();
+        pair.time = pair.client.next_wakeup().unwrap();
+    }
+
+    // The next probe gets through, until the client's Finished, which is lost.
+    loop {
+        pair.drive_client();
+        if !pair.client_conn_mut(client_ch).is_handshaking() {
+            break;
+        }
+        pair.drive_server();
+        pair.time = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()).unwrap();
+    }
+    pair.server.inbound.clear();
+    let lost = pair.time;
+
+    let server_ch = pair.server.assert_accept();
+    while pair.server_conn_mut(server_ch).is_handshaking() {
+        assert!(pair.step());
+    }
+    // One RTT is 100ms, so a retransmitted Finished arrives within about 400ms;
+    // still backed off, it takes 2.5s.
+    let elapsed = pair.time - lost;
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+}
+
+/// A short idle timeout does not cut the handshake to two Initial flights.
+///
+/// Before an RTT sample the PTO is 999ms, so a 2s idle timeout is armed at 2997ms, while
+/// the second probe is due 999ms + 1998ms after the first send, plus however late the first
+/// probe went out. The handshake idle timeout governs until the handshake completes.
+#[test]
+fn handshake_outlasts_short_idle_timeout() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let mut transport = cubic_transport();
+    transport.max_idle_timeout(Some(Duration::from_secs(2).try_into().unwrap()));
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+
+    let client_ch = pair.begin_connect(client);
+    let start = pair.time;
+    // The first flight is lost, and so is the first probe, which goes out 2ms late.
+    pair.drive_client();
+    pair.server.inbound.clear();
+    pair.time = pair.client.next_wakeup().unwrap() + Duration::from_millis(2);
+    loop {
+        pair.drive_client();
+        pair.server.inbound.clear();
+        pair.time = pair.client.next_wakeup().unwrap();
+        // Past any pacing: the second probe, due 2999ms after the first send, beyond the
+        // old 2997ms idle deadline.
+        if pair.time - start > Duration::from_secs(2) {
+            break;
+        }
+    }
+
+    pair.drive();
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::HandshakeDataReady)
+    );
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::Connected)
+    );
+}
+
+/// A handshake idle timeout too long to add to an `Instant` never fires, instead of panicking.
+#[test]
+fn unbounded_handshake_idle_timeout() {
+    let _guard = subscribe();
+    let mut transport = cubic_transport();
+    transport.handshake_idle_timeout(Duration::MAX);
+    let transport = Arc::new(transport);
+    let mut server = server_config();
+    server.transport = transport.clone();
+    let mut client = client_config();
+    client.transport_config(transport);
+
+    let mut pair = Pair::new(Default::default(), server);
+    pair.connect_with(client);
+}
+
+/// Once established, a connection whose peer goes silent idles out at the negotiated idle
+/// timeout, not the longer handshake idle timeout.
+#[test]
+fn established_idles_out_at_negotiated_timeout() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let mut transport = cubic_transport();
+    transport.max_idle_timeout(Some(Duration::from_secs(2).try_into().unwrap()));
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+
+    let client_ch = pair.begin_connect(client);
+    loop {
+        pair.drive_client();
+        if !pair.client_conn_mut(client_ch).is_handshaking() {
+            break;
+        }
+        pair.drive_server();
+        pair.time = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()).unwrap();
+    }
+    let established = pair.time;
+
+    // Nothing reaches the client once it is established.
+    while !pair.client_conn_mut(client_ch).is_closed() {
+        pair.client.inbound.clear();
+        if !pair.step() && !pair.client_conn_mut(client_ch).is_closed() {
+            pair.time = pair
+                .client
+                .next_wakeup()
+                .expect("an open connection has an idle timer");
+        }
+    }
+    let elapsed = pair.time - established;
+    assert!(
+        (Duration::from_secs(2)..Duration::from_secs(3)).contains(&elapsed),
+        "{elapsed:?}"
     );
 }
 

@@ -49,7 +49,7 @@ import {
 	hasDatagrams,
 	hasProbeRtt,
 	hasStreamCount,
-	restartSupported,
+	updateSupported,
 	Version,
 	waitsForSubscriberFin,
 } from "./version.ts";
@@ -76,6 +76,16 @@ function supportsTrackStream(version: Version): boolean {
 		default:
 			return true;
 	}
+}
+
+/**
+ * What a consumed broadcast captured when it was opened: the epoch it asks for, and its own id.
+ * Fetches are shared only within one consume, so a fresh consume for a replaced instance never
+ * reads a FETCH the old one opened.
+ */
+interface Consumed {
+	readonly epoch?: Epoch.Valid;
+	readonly id?: number;
 }
 
 interface SubscribeEntry {
@@ -148,14 +158,16 @@ export class Subscriber {
 
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
+	#consumeNext = 0;
 
 	// The epoch each live advertisement named, by path. A consumed broadcast captures it
 	// once and asks for it on every request, so a later epoch never feeds an older handle.
 	#epochs = new Map<Path.Valid, Epoch.Valid>();
 
-	// Dedup in-flight one-shot fetches, keyed by [broadcast, track, sequence]. Concurrent (or
-	// repeat, while still open) fetchGroup() calls for the same group share one FETCH stream and
-	// each get an independent mirror; the entry is evicted once the group closes.
+	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, epoch, track, sequence].
+	// Concurrent (or repeat, while still open) fetchGroup() calls for the same group of one consume
+	// share one FETCH stream and each get an independent mirror; the entry is evicted once the
+	// group closes.
 	#fetches = new Map<string, { group: netGroup.Producer; accepted: Promise<void> }>();
 
 	// The peer's PROBE estimates, written as they arrive (Lite03+ only).
@@ -333,7 +345,7 @@ export class Subscriber {
 			stopDrain = this.#goaway?.changed(() => drainAdvertised());
 
 			// Lite06+: announce ids. Each received `active` implicitly assigns the next
-			// per-stream ordinal; `endedId`/`restart` reference it, and lite-07 bases copy
+			// per-stream ordinal; `endedId`/`update`/`restart` reference it, and lite-07 bases copy
 			// from it. Tracked even for announces we skip as reflected, since the sender
 			// doesn't know we skipped.
 			const history = new AnnounceHistory();
@@ -350,11 +362,13 @@ export class Subscriber {
 
 				let path: Path.Valid;
 				let active: boolean;
-				// Present on active/restart; ended messages never carry hops worth checking.
+				// Present on active/update/restart; ended messages never carry hops worth checking.
 				let hops: Hop[] | undefined;
 				let cost: Cost | undefined;
-				// Present on active; a restart never changes it.
+				// Present on active and restart; an update never changes it.
 				let epoch: Epoch.Valid | undefined;
+				// Another publisher instance replaces the advertisement (lite-07).
+				let restart = false;
 
 				switch (announce.status) {
 					case "active": {
@@ -377,13 +391,24 @@ export class Subscriber {
 						path = Path.join(prefix, history.end(announce.id));
 						active = false;
 						break;
-					case "restart": {
+					case "update": {
 						// Resolve the id; it stays live (the replacement reuses it).
 						const resolved = history.update(announce);
 						path = Path.join(prefix, resolved.suffix);
 						active = true;
 						hops = resolved.hops;
 						cost = announce.cost;
+						break;
+					}
+					case "restart": {
+						// Resolved like an update: the id stays live.
+						const resolved = history.update(announce);
+						path = Path.join(prefix, resolved.suffix);
+						active = true;
+						hops = resolved.hops;
+						cost = announce.cost;
+						epoch = announce.epoch;
+						restart = true;
 						break;
 					}
 					case "skipped":
@@ -401,8 +426,8 @@ export class Subscriber {
 				// idiom. lite-06 gave that its own message and older versions never had one, so
 				// a duplicate means the same thing on both sides of it. Mirrors the branch the
 				// Rust announce loop takes before `start_announce`.
-				const duplicateIsRestart = restartSupported(this.version) && !hasAnnounceId(this.version);
-				if (announce.status === "active" && !duplicateIsRestart && advertised.has(path)) {
+				const duplicateIsUpdate = updateSupported(this.version) && !hasAnnounceId(this.version);
+				if (announce.status === "active" && !duplicateIsUpdate && advertised.has(path)) {
 					throw new ProtocolViolation(`duplicate announce for ${path}`);
 				}
 
@@ -425,16 +450,16 @@ export class Subscriber {
 					});
 				};
 
-				// A restart keeps the epoch its announcement named, even through a placeholder
-				// below: a later restart that is not reflected still names that instance.
-				epoch ??= advertised.get(path)?.route.epoch;
+				// An update keeps the epoch its announcement named, even through a placeholder
+				// below: a later update that is not reflected still names that instance.
+				if (!restart) epoch ??= advertised.get(path)?.route.epoch;
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
 				if (hops !== undefined) {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
 					if (full.includes(this.hop)) {
-						// A reflected restart means the peer's remaining route loops back through
+						// A reflected update means the peer's remaining route loops back through
 						// us, so the route is gone even though the message says active. The
 						// advertisement stays live: the peer still holds the path and its id still
 						// resolves here.
@@ -477,10 +502,22 @@ export class Subscriber {
 					continue;
 				}
 
-				// A second advertisement for a path we already carry is a restart: either an
+				// Another publisher instance: whatever was consumed at the path is the old one, so
+				// the next consume subscribes fresh, while the handles already out keep theirs.
+				const previous = advertised.get(path);
+				if (restart && previous?.live) {
+					this.#consumes.evict(path);
+					advertised.set(path, { live: true, route, captures });
+					if (epoch) this.#epochs.set(path, epoch);
+					else this.#epochs.delete(path);
+					console.debug(`announced: broadcast=${path} restart=true epoch=${epoch}`);
+					announced.append({ prefix: path, captures, kind: "restart", route });
+					continue;
+				}
+
+				// A second advertisement for a path we already carry is an update: either an
 				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE. It updates the
 				// route in place, so a forwarder re-prices without retracting.
-				const previous = advertised.get(path);
 				if (previous?.live) {
 					// Even from another publisher: the path still names the same broadcast, so
 					// the shared consume stays.
@@ -494,8 +531,9 @@ export class Subscriber {
 
 				advertised.set(path, { live: true, route, captures });
 				if (epoch) this.#epochs.set(path, epoch);
+				else this.#epochs.delete(path);
 
-				console.debug(`announced: broadcast=${path} active=true`);
+				console.debug(`announced: broadcast=${path} active=true epoch=${epoch}`);
 				announced.append({ prefix: path, captures, kind: "start", route });
 			}
 
@@ -539,7 +577,7 @@ export class Subscriber {
 		// back into this Subscriber (see ConsumeBroadcast below), rather than the wire
 		// installing callbacks on the broadcast.
 		const epoch = this.#epochs.get(path);
-		const consumer = new ConsumeBroadcast(this, path, epoch);
+		const consumer = new ConsumeBroadcast(this, path, { epoch, id: this.#consumeNext++ });
 
 		void (async () => {
 			for (;;) {
@@ -829,8 +867,9 @@ export class Subscriber {
 		track: string,
 		sequence: number,
 		options: track.FetchGroupOptions = {},
-		epoch?: Epoch.Valid,
+		consumed: Consumed = {},
 	): Promise<netGroup.Consumer> {
+		const { epoch } = consumed;
 		options.signal?.throwIfAborted();
 
 		// Coalesce onto a still-open fetch of the same group so we don't open a second FETCH
@@ -840,7 +879,7 @@ export class Subscriber {
 		// demand from the start, and a fast FIN cannot discard frames before these callers
 		// receive their handles. An abort closes only this caller's mirror, so the stream is
 		// cancelled once the last one leaves.
-		const key = JSON.stringify([broadcast, epoch, track, sequence]);
+		const key = JSON.stringify([consumed.id, broadcast, epoch, track, sequence]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {
@@ -1395,22 +1434,22 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
 class ConsumeBroadcast extends broadcast.Consumer {
 	#subscriber: Subscriber;
 	#path: Path.Valid;
-	#epoch?: Epoch.Valid;
+	#consumed: Consumed;
 
-	constructor(subscriber: Subscriber, path: Path.Valid, epoch: Epoch.Valid | undefined, state?: never) {
+	constructor(subscriber: Subscriber, path: Path.Valid, consumed: Consumed, state?: never) {
 		super(state);
 		overrideBroadcastWire(this, {
-			resolveTrackInfo: (name, hold) => subscriber.resolveTrackInfo(path, name, epoch, hold),
-			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, epoch),
+			resolveTrackInfo: (name, hold) => subscriber.resolveTrackInfo(path, name, consumed.epoch, hold),
+			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, consumed),
 		});
 		this.#subscriber = subscriber;
 		this.#path = path;
-		this.#epoch = epoch;
+		this.#consumed = consumed;
 	}
 
 	// Preserve the subclass (and its wire-backed info/fetchGroup) when the consume cache shares
 	// this broadcast across callers.
 	override clone(): ConsumeBroadcast {
-		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#epoch, this.shareState());
+		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#consumed, this.shareState());
 	}
 }

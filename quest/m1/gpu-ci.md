@@ -45,17 +45,22 @@ skipping inside the Nix shell.
   NVENC and CUDA external-image import (the verification #4975 deferred here).
 - Nightly: a job in `.github/workflows/nightly.yml` runs `nix develop
   --command just rs nvidia` on the self-hosted runner, a recipe and not a
-  script path, like every other workflow step. A self-hosted runner on a public repository must
-  never run untrusted code: only `schedule` and `workflow_dispatch`, with the
-  job gated to `refs/heads/main`, never `pull_request`; a dedicated label only
-  this job selects; read-only `permissions`. Read GitHub's self-hosted runner
-  hardening guidance before wiring it.
+  script path, like every other workflow step. It targets the `moq-gpu`
+  runner that [Self-hosted CI](/quest/m0/self-hosted-ci.md)'s module defines,
+  which stays stricter than the `moq-ci` runners that take same-repo PRs: only
+  `schedule` and `workflow_dispatch`, with the job gated to `refs/heads/main`,
+  never `pull_request`; a label only this job selects; read-only
+  `permissions`. Read GitHub's self-hosted runner hardening guidance before
+  wiring it.
+- The host runs NixOS, where the driver libraries live under
+  `/run/opengl-driver/lib`, not `/usr/lib/x86_64-linux-gnu`. The script must
+  find them in either place, since local runs happen on Ubuntu.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the host the nightly job runs on
+- [CI host](/quest/m0/ci-host.md) - the host whose `moq-gpu` runner the nightly job runs on
 
 ## Related
 

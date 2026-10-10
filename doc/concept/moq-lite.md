@@ -81,18 +81,21 @@ authorization and hidden names work exactly as without one.
 - **Same epoch resumes.** A subscription moves between routes with the same
   epoch without a seam, continuing from the first frame it lacks. A route
   without an epoch keeps its subscriptions until that route goes, which is how
-  a transcoder claim stays on the worker that first served it.
-- **A newer epoch replaces.** Subscriptions to the old instance end, and
-  clients re-request the path to get the new broadcast. That is how a restarted
-  encoder, whose group numbers start over, takes the name instead of stalling
-  viewers on the old sequence.
+  a transcoder claim stays on the worker that first served it, and a track that
+  fails ends instead of resuming, so request the path again.
+- **Another instance restarts.** A newer epoch, or, without one, another route
+  winning the path, is announced as a restart. Subscriptions already open stay
+  on the old instance until dropped or its route goes, while new requests get
+  the new one, so a player follows the restart by requesting the path again.
+  That is how a restarted encoder, whose group numbers start over, takes the
+  name instead of stalling viewers on the old sequence. A relay drops its copy
+  of the old instance, so a new subscriber never sees its cached groups.
 
-The epoch travels on moq-lite 07, which is opt-in. Older moq-lite versions and
-moq-transport cannot carry it, so their routes have no epoch: a relay keeps a
-subscription on the route it first resolved through, and viewers of a
-restarted publisher wait until the old session closes. In a mixed deployment
-the epoch-carrying route supersedes the one without each time it appears, so a
-flapping moq-lite 07 link cuts viewers that resolved through the older link.
+The epoch and the restart message travel on moq-lite 07, which is opt-in.
+Older moq-lite versions and moq-transport carry neither, so their routes have
+no epoch and a restart reaches them as an end then a start of the path. Without
+an epoch, any other route winning is a restart, even a reconnect over the same
+path, since nothing says it serves the same bytes.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
 RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by

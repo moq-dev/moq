@@ -51,8 +51,7 @@ Decided:
   hard switch that ended subscriptions in flight with `Unroutable` (decided
   2026-10-06 for epochs, and 2026-10-07 in #5013 for routes without one) is
   reversed (2026-10-07): subscriptions stay sticky on their route and an
-  explicit `Restart` announce event tells players to follow, through
-  [Restart](/quest/m0/broadcast-epoch/restart.md). When the newest goes and
+  explicit `Restart` announce event tells players to follow. When the newest goes and
   an older one is still live, the older one wins again as a new broadcast.
 - [Claim-served epochs](/quest/m1/claim-epochs.md), where a
   lite-07 claim's answer carries the served broadcast's own epoch, no longer
@@ -60,9 +59,9 @@ Decided:
   to m1.
 - A catalog `broadcast` reference by name follows the newest epoch, since a
   path cannot name one.
-- Every first-party publisher that can restart mints its own: the apps and
-  moq-boy through [Apps](/quest/m0/broadcast-epoch/apps.md), the
-  ingest gateways, moqsink, and the bindings below. moq-stats mints one per
+- Every first-party publisher that can restart mints its own: the apps,
+  moq-boy, the ingest gateways, moqsink, and the bindings below. Players
+  (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
   [group announcement](/doc/concept/stats.md#broadcasts), which also gated
   the release (decided 2026-10-04).
 - The m1 quests gating this line moved under it in the 2026-10-05 audit, and
@@ -85,19 +84,21 @@ epoch while the old publisher's session stays open. A lite-07 viewer and a lite-
 that follow the announce `Restart` (or END then START) both reach the new
 epoch within one RTT-scale bound rather than the idle timeout, and killing the
 newest epoch falls back to a still-live older one.
+The same test drives the real players (decided 2026-10-09, from #5154):
+`moq play` and a browser `@moq/watch`, the latter through the `just test
+media` lane, both show the new run within that bound, without a manual
+republish against a live relay.
 
 When the release cut carries stats epochs, drop
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and
-its `doc/concept/stats.md` sentence from `release`; release-to-main
-back-merges keep `main`'s `rs/moq-stats` and `doc/concept/stats.md` until
-then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
+its `doc/concept/stats.md` sentence from `release`; until then, the
+maintainer's pre-release merge of `release` into `main` keeps `main`'s
+`rs/moq-stats` and `doc/concept/stats.md`. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 
 ## Required
 
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - a replaced broadcast reaches announce consumers as an explicit Restart, subscriptions stay sticky, and new requests never join a replaced route's front
-- [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
+- [Export ts](/quest/m0/broadcast-epoch/export-ts.md) - `export ts` and SRT egress linger only for the same epoch, and switch to a replacement only with `--stitch`, as a full program switch
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) - moqsrc switches to the new broadcast on a `Restart`, keeping its pads by rendition name
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
-- [Dynamic epoch update](/quest/m0/broadcast-epoch/dynamic-epoch.md) - an epoch change through `Dynamic::update` announces a `Restart` downstream, so subscribers drop the old copy and resubscribe, while the origin keeps serving

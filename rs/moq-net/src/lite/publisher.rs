@@ -693,8 +693,7 @@ impl AnnounceRun {
 		suffix: crate::PathOwned,
 		hops: Hops,
 		cost: crate::origin::Cost,
-		// Fixed while the peer holds the advertisement: the origin delivers a new
-		// epoch as a retraction and a fresh start.
+		// Fixed while the peer holds the advertisement: a new one is a restart.
 		epoch: Option<crate::Epoch>,
 	) -> Result<(), Error> {
 		let (id, wire, chain) = self.encoder.start(suffix.clone(), hops.clone());
@@ -705,6 +704,42 @@ impl AnnounceRun {
 			hops: chain,
 			cost,
 		})?;
+		Ok(())
+	}
+
+	/// Replace the peer's advertisement for `suffix` with another publisher instance:
+	/// ANNOUNCE_RESTART on lite-07, an end and a fresh start before it.
+	fn restart<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		suffix: crate::PathOwned,
+		hops: Hops,
+		cost: crate::origin::Cost,
+		epoch: Option<crate::Epoch>,
+		absolute: &crate::Path,
+	) -> Result<(), Error> {
+		tracing::debug!(route = %absolute, "restart");
+		let id = self.live.get(&suffix).and_then(|advertised| advertised.id);
+		match id {
+			Some(id) if self.version.has_announce_restart() => {
+				self.live.insert(
+					suffix,
+					Advertised {
+						id: Some(id),
+						hops: hops.clone(),
+						cost,
+					},
+				);
+				let hops = self.encoder.update(id, hops);
+				stream
+					.writer
+					.buffer(&lite::AnnounceBroadcast::Restart { id, epoch, hops, cost })?;
+			}
+			_ => {
+				self.retract(stream, suffix.clone(), absolute)?;
+				self.start(stream, suffix, hops, cost, epoch)?;
+			}
+		}
 		Ok(())
 	}
 
@@ -750,7 +785,9 @@ impl AnnounceRun {
 				// We use `try_next()` to synchronously get the initial updates.
 				while let Some(event) = announced.try_next() {
 					let (update, active) = match event {
-						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
+						announce::Event::Start(update)
+						| announce::Event::Update(update)
+						| announce::Event::Restart(update) => (update, true),
 						announce::Event::End(update) => (update, false),
 					};
 					let absolute = origin.absolute(&update.prefix);
@@ -785,7 +822,9 @@ impl AnnounceRun {
 				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost, Option<crate::Epoch>)> = Vec::new();
 				while let Some(event) = announced.try_next() {
 					let (update, active) = match event {
-						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
+						announce::Event::Start(update)
+						| announce::Event::Update(update)
+						| announce::Event::Restart(update) => (update, true),
 						announce::Event::End(update) => (update, false),
 					};
 					let absolute = origin.absolute(&update.prefix);
@@ -880,9 +919,10 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let (update, active) = match next {
-				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true),
-				Some(announce::Event::End(update)) => (update, false),
+			let (update, active, restart) = match next {
+				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true, false),
+				Some(announce::Event::Restart(update)) => (update, true, true),
+				Some(announce::Event::End(update)) => (update, false, false),
 				None => {
 					// The buffer is empty (flushed at the loop top), so FIN now and
 					// wait for the acknowledgement.
@@ -901,12 +941,15 @@ impl AnnounceRun {
 			}
 
 			match self.outgoing(&update.route, &absolute) {
+				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
+					self.restart(stream, suffix, hops, cost, update.route.epoch, &absolute)?;
+				}
 				Some((hops, cost)) => match self.live.get_mut(&suffix) {
 					// The peer would decode what it already holds.
 					Some(advertised) if advertised.hops == hops && advertised.cost == cost => {}
 					// A metadata update on a live advertisement: restart it in
 					// place (lite-05 restarts via a duplicate ANNOUNCE).
-					Some(advertised) if lite::restart_supported(self.version) => {
+					Some(advertised) if lite::update_supported(self.version) => {
 						tracing::debug!(route = %absolute, "reannounce");
 						advertised.hops = hops.clone();
 						advertised.cost = cost;
@@ -915,7 +958,7 @@ impl AnnounceRun {
 								let hops = self.encoder.update(id, hops);
 								stream
 									.writer
-									.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?
+									.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?
 							}
 							// lite-05: a duplicate ANNOUNCE, which assigns no id.
 							None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
@@ -1024,6 +1067,8 @@ struct RequestServe<S: crate::transport::poll::Session, R: Request<S>> {
 	// Log context, filled in after the decode.
 	absolute: crate::PathOwned,
 	track: String,
+	// A reply that always has another group ready still lets the session's other tasks run.
+	budget: kio::coop::Budget,
 }
 
 enum RequestState<M, R> {
@@ -1060,6 +1105,7 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 			update: None,
 			absolute: Default::default(),
 			track: Default::default(),
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -1095,6 +1141,7 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 		loop {
+			ready!(self.budget.poll_yield(waiter));
 			// Once answered, the requester's FIN is the normal end, not a cancel.
 			if matches!(self.state, RequestState::Resolve { .. } | RequestState::Serve(_))
 				&& let Poll::Ready(res) = self.poll_requester(&mut cx)
@@ -1940,6 +1987,7 @@ mod announce_test {
 	struct Wire {
 		writes: Arc<Mutex<Vec<u8>>>,
 		cursor: usize,
+		version: Version,
 	}
 
 	impl Wire {
@@ -1951,7 +1999,8 @@ mod announce_test {
 		fn take_ok(&mut self) -> lite::AnnounceOk {
 			let buf = self.pending();
 			let mut slice = &buf[..];
-			let ok = crate::coding::decode_buf(&mut slice, VERSION, lite::AnnounceOk::decode).expect("announce ok");
+			let ok =
+				crate::coding::decode_buf(&mut slice, self.version, lite::AnnounceOk::decode).expect("announce ok");
 			self.cursor += buf.len() - slice.len();
 			ok
 		}
@@ -1963,7 +2012,7 @@ mod announce_test {
 			let mut msgs = Vec::new();
 			while !slice.is_empty() {
 				msgs.push(
-					crate::coding::decode_buf(&mut slice, VERSION, lite::AnnounceBroadcast::decode)
+					crate::coding::decode_buf(&mut slice, self.version, lite::AnnounceBroadcast::decode)
 						.expect("announce message")
 						.into_owned(),
 				);
@@ -2005,6 +2054,11 @@ mod announce_test {
 
 	/// Announce one route with cost 7 and run the announce loop against it.
 	async fn harness() -> Harness {
+		harness_on(VERSION).await
+	}
+
+	/// [`harness`] on another version.
+	async fn harness_on(version: Version) -> Harness {
 		let origin = Hop::new(1).unwrap().produce();
 		let announcement = origin
 			.announce(
@@ -2017,17 +2071,21 @@ mod announce_test {
 		let writes = log.writes.clone();
 		let consumer = origin.consume();
 		let mut stream = Stream::<SinkSession, Version> {
-			writer: Writer::new(SinkSend::new(log), VERSION),
-			reader: Reader::new(PendingRecv, VERSION),
+			writer: Writer::new(SinkSend::new(log), version),
+			reader: Reader::new(PendingRecv, version),
 		};
 		let task = moq_net_sim::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = consumer.hop();
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION).await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, version).await
 		});
 		settle().await;
 
-		let mut wire = Wire { writes, cursor: 0 };
+		let mut wire = Wire {
+			writes,
+			cursor: 0,
+			version,
+		};
 		assert_eq!(wire.take_ok().active, 1, "expected one initial announce");
 		match wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, hops, cost, .. }] => {
@@ -2083,7 +2141,7 @@ mod announce_test {
 		moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { id: 0, hops, cost }] => {
+			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
 				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}
@@ -2104,24 +2162,80 @@ mod announce_test {
 	}
 
 	/// A new best route the wire cannot tell apart (another session, same chain and
-	/// cost) sends nothing, in either direction.
+	/// cost) and without an epoch is another source, in either direction: an
+	/// ANNOUNCE_RESTART on lite-07, which may carry an epoch, and an end and a fresh
+	/// start before it.
 	#[moq_net_sim::test]
-	async fn source_flip_is_quiet() {
-		let h = harness().await;
-		let peer = h
+	async fn source_flip_restarts() {
+		for version in [Version::Lite06, Version::Lite07] {
+			let mut h = harness_on(version).await;
+			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
+			let peer = h.origin.clone().peer().announce("cam", route.clone()).unwrap();
+			// A restart waits out the update hold like an update.
+			moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			settle().await;
+			let restarted = |msgs: Vec<lite::AnnounceBroadcast<'static>>| match (version, msgs.as_slice()) {
+				(
+					Version::Lite07,
+					[
+						lite::AnnounceBroadcast::Restart {
+							id: 0,
+							epoch: None,
+							cost,
+							..
+						},
+					],
+				) => {
+					assert_eq!(*cost, crate::origin::Cost::new(7))
+				}
+				(
+					Version::Lite06,
+					[
+						lite::AnnounceBroadcast::EndedId { .. },
+						lite::AnnounceBroadcast::Active { suffix, .. },
+					],
+				) => {
+					assert_eq!(suffix.rest.as_str(), "cam")
+				}
+				(_, other) => panic!("expected a restart on {version}, got {other:?}"),
+			};
+			restarted(h.wire.take_announces());
+
+			drop(peer);
+			moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			settle().await;
+			restarted(h.wire.take_announces());
+			h.assert_idle();
+		}
+	}
+
+	/// A newer epoch restarts the advertisement, carrying the epoch on lite-07.
+	#[moq_net_sim::test]
+	async fn a_newer_epoch_restarts_with_it() {
+		let mut h = harness_on(Version::Lite07).await;
+		let epoch = crate::Epoch::mint();
+		let _newer = h
 			.origin
-			.clone()
-			.peer()
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_hops(pub_hops()).with_cost(7),
+				crate::origin::Route::default()
+					.with_epoch(epoch.clone())
+					.with_hops(pub_hops())
+					.with_cost(7),
 			)
 			.unwrap();
+		moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
-		h.assert_idle();
-
-		drop(peer);
-		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[
+				lite::AnnounceBroadcast::Restart {
+					id: 0,
+					epoch: Some(sent),
+					..
+				},
+			] => assert_eq!(*sent, epoch),
+			other => panic!("expected a restart, got {other:?}"),
+		}
 		h.assert_idle();
 	}
 
@@ -2171,7 +2285,11 @@ mod announce_test {
 		});
 		settle().await;
 
-		let mut wire = Wire { writes, cursor: 0 };
+		let mut wire = Wire {
+			writes,
+			cursor: 0,
+			version: VERSION,
+		};
 		assert_eq!(wire.take_ok().active, 1, "only the clean route is announced");
 		match wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.rest.as_str(), "local"),
@@ -2210,7 +2328,7 @@ mod announce_test {
 		moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Restart { cost, .. }] => {
+			[lite::AnnounceBroadcast::Update { cost, .. }] => {
 				assert_eq!(*cost, crate::origin::Cost::MAX);
 			}
 			other => panic!("expected a clamped restart, got {other:?}"),
@@ -2855,6 +2973,8 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	// subsequent delta is signed against the previous frame.
 	prev_ts: u64,
 	state: GroupState<S>,
+	// A long cached group drains a slice per poll, so its siblings still run.
+	budget: kio::coop::Budget,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -2897,6 +3017,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			frame_start,
 			prev_ts: 0,
 			state: GroupState::Open,
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -2994,6 +3115,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 							break 'serve Err(Error::Cancel);
 						}
 						loop {
+							ready!(self.budget.poll_yield(waiter));
 							match writer.poll_flush(&mut cx) {
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
@@ -3647,6 +3769,58 @@ mod serve_group_test {
 			.write_frame(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
 			.unwrap();
 		group.finish().unwrap();
+	}
+
+	/// A group with more frames ready than one poll's budget drains over several polls,
+	/// so a sibling (the transport's driver, say) runs in between.
+	#[test]
+	fn a_long_group_drains_within_the_budget() {
+		/// `GroupServe`'s passes per poll; each writes at most one frame.
+		const BUDGET: usize = 32;
+		const FRAMES: usize = 4_000;
+		const PAYLOAD: usize = 100;
+
+		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let log = Log::default();
+		let (mut run, mut writer, _) = lite07_run(SinkSession::new(log.clone()).with_unacked_fin(), subscriber);
+
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		for millis in 0..FRAMES as u64 {
+			group
+				.write_frame(Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
+				.unwrap();
+		}
+		group.finish().unwrap();
+
+		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
+		let turns = Arc::new(AtomicU64::new(0));
+		let counted = turns.clone();
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			counted.fetch_add(1, Ordering::Relaxed);
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			run.poll(&mut writer, waiter).map(|res| res.expect("serve"))
+		}));
+
+		// A frame's header takes well under a payload more, and a poll may also flush what
+		// the last one buffered.
+		let most = 2 * (BUDGET + 1) * 2 * PAYLOAD;
+		let owner = kio::Waiter::noop();
+		let mut polls = 0;
+		while log.writes.lock().unwrap().len() < FRAMES * PAYLOAD {
+			let before = log.writes.lock().unwrap().len();
+			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			polls += 1;
+			let wrote = log.writes.lock().unwrap().len() - before;
+			assert!(wrote <= most, "one poll wrote {wrote} bytes");
+			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
+			assert!(polls <= FRAMES as u64, "the serve stalled");
+		}
 	}
 
 	/// SUBSCRIBE_END counts the group streams opened, not the groups below the end: a
@@ -4553,6 +4727,129 @@ mod tests {
 			panic!("the subscription is not running");
 		};
 		assert_eq!(*run.track_priority_tx.read(), 7, "the update was lost");
+	}
+
+	/// A subscription that always has another group ready yields within its budget, so a
+	/// sibling (the transport's driver, say) runs between its polls. Without it, one poll
+	/// served every group the producer kept appending and starved the rest of the runtime
+	/// (a go publisher's 2.5 ms audio groups timed its session out).
+	#[moq_net_sim::test]
+	async fn a_busy_subscription_yields_to_its_siblings() {
+		/// `RequestServe`'s passes per poll; each serves at most one group.
+		const BUDGET: u64 = 32;
+		const GROUPS: u64 = 10_000;
+		const BATCH: u64 = 1_000;
+
+		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		let mut dynamic = broadcast.dynamic();
+		broadcast.announce(Default::default()).unwrap();
+
+		let peer_setup = crate::lite::PeerSetup::default();
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let version = Version::Lite07;
+		let publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::sim(),
+			session: ScriptedSession::new(Vec::new()),
+			origin: origin.consume(),
+			version,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			subscriptions: Default::default(),
+		});
+
+		let mut script = Vec::new();
+		lite::Subscribe {
+			epoch: None,
+			id: 0,
+			broadcast: crate::Path::new("room"),
+			track: "video".into(),
+			priority: 0,
+			max_delay: Duration::from_secs(3600),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+		.unwrap();
+		let mut session = ScriptedSession::new(script);
+		let (send, recv) = futures::future::poll_fn(|cx| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<ScriptedSession, Version> {
+			writer: Writer::new(send, version),
+			reader: crate::coding::Reader::new(recv, version),
+		};
+		let mut serve = RequestServe::<_, SubscribeServe<ScriptedSession>>::new(publisher.shared.clone(), stream);
+		assert!(!drive(&mut serve).await);
+		let track = dynamic
+			.requested_track()
+			.now_or_never()
+			.expect("track requested")
+			.unwrap()
+			.accept(None);
+		assert!(!drive(&mut serve).await, "the subscription ended");
+		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
+			panic!("the subscription is not running");
+		};
+		let opens = run.ctx.opens.clone();
+
+		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
+
+		// The producer appends a batch of ready groups on each of its turns.
+		let mut appended = 0;
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			for _ in 0..BATCH.min(GROUPS - appended) {
+				let mut group = track.create_group(group::Info { sequence: appended }).unwrap();
+				group
+					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
+					.unwrap();
+				group.finish().unwrap();
+				appended += 1;
+			}
+			if appended == GROUPS {
+				return Poll::Ready(());
+			}
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+
+		// Stands in for the transport's driver: it only needs a turn.
+		let turns = Arc::new(AtomicU64::new(0));
+		let counted = turns.clone();
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			counted.fetch_add(1, Ordering::Relaxed);
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			serve.poll(waiter).map(|res| res.expect("serve"))
+		}));
+
+		let owner = kio::Waiter::noop();
+		let mut polls = 0;
+		while opens.opened.load(Ordering::Relaxed) < GROUPS {
+			let before = opens.opened.load(Ordering::Relaxed);
+			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			polls += 1;
+			let served = opens.opened.load(Ordering::Relaxed) - before;
+			assert!(served <= BUDGET, "one poll served {served} groups");
+			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
+			assert!(polls <= 2 * GROUPS, "the serve stalled");
+		}
+		assert!(
+			session.log.resets().is_empty(),
+			"a group was reset: {:?}",
+			session.log.resets()
+		);
 	}
 
 	/// A SUBSCRIBE or a TRACK past the session's cap closes the session with

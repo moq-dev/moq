@@ -1,7 +1,7 @@
 # Commits
 
 PRs into `main` are squash-merged through the merge queue, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
-The one exception is the release back-merge, which lands as a merge commit (see [Merge queue](#merge-queue)).
+The one exception is the maintainer's pre-release merge of `release` into `main`, which lands as a merge commit (see [Releases](#releases)).
 PRs into `release` use a merge commit, so their history survives until they land.
 
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
@@ -34,10 +34,7 @@ Enqueue a reviewed PR with `gh pr merge <number>`.
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
 Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.
 
-Never bypass the queue with `--admin`, with one exception: the queue only squashes, so Check's `land` job has moq-bot merge the release back-merge with `--admin` as a merge commit once Check and Test pass on its head.
-moq-bot can bypass the queue only when merging a pull request, never on a direct push.
-The `land` job fires only for this repository's `merge/release-into-main` branch, so anyone with write access who pushes to that branch gets a passing head merged past the queue, unreviewed.
-Never enqueue the back-merge, since the queue would squash it; if `land` fails, re-run it from the PR's Check run.
+Never bypass the queue with `--admin`, with one exception: the maintainer's pre-release merge of `release` into `main`, since the queue would squash it.
 
 # AI
 
@@ -86,7 +83,7 @@ For an advisory against noq or Quinn, compare the pinned release's `PARENT` with
 
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
 - Consider a backport for any critical bug fix (crash, security, data loss, broken interop): land it on `main` first, then cherry-pick it onto `release` as a separate PR.
-- After every push to `release`, the Back-merge workflow opens a PR merging `release` into `main`, so trunk carries the published versions and CHANGELOGs. It lands as a merge commit, outside the merge queue; never squash it, or the next back-merge conflicts.
+- Nothing merges `release` into `main` automatically. Before cutting a minor or breaking release, the maintainer merges `release` into `main` once, so trunk carries the published versions, CHANGELOGs, and any `release`-only commits. It lands as a merge commit with `--admin`, never squashed, so the cut starts from an advanced merge base.
 
 # Versions
 
@@ -97,4 +94,5 @@ Releases are cut separately; bump only when asked. Each package's version lives 
 - **Python**: `py/moq-rs/pyproject.toml`, plus the matching `moq-rs` entry in the root `uv.lock`; `py/moq-ffi` follows the `moq-ffi-v*` tag and Rust crate.
 - **Swift**: `swift/VERSION`. **Kotlin**: `moq.version` in `kt/gradle.properties`. **Dart**: `version` in `dart/moq/pubspec.yaml`. Their FFI counterparts track the Rust crate.
 - **Go**: `go/wrapper/VERSION` holds a human-owned `MAJOR.MINOR` line; CI derives the patch, so only edit it for a breaking API. Leave the placeholder FFI version in `go.mod` alone.
-- **OBS**: release builds take their version from the `moq-c-v*` tag that release-plz cuts for the `moq-c` crate (`cpp/obs/build.sh --moq-c-release`), not from any manifest, so there is nothing to bump.
+- **C++**: `cpp/moq/VERSION`, human-owned; a `cpp-v<version>` tag releases it.
+- **OBS**: `cpp/obs/VERSION`, human-owned; each C++ release also cuts `obs-moq-v<version>`, and refuses one whose version already names an earlier release.

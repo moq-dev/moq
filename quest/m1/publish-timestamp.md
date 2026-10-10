@@ -53,8 +53,10 @@ Swift wrappers default them to 0.
   `= 0` defaults go with it.
 - Go (`go/wrapper/moq`) and Python (`py/moq-rs`) wrap only the JSON
   producers; [#4137](https://github.com/moq-dev/moq/pull/4137) added
-  `publish_binary_snapshot` / `publish_binary_stream` (now
-  `publish_flate_*`) to moq-ffi without them. Add hand-written flate wrappers there. The maintainer asked for this.
+  `publish_binary_snapshot` / `publish_binary_stream` (now the
+  `MoqFlateSnapshotProducer` / `MoqFlateStreamProducer` constructors) to
+  moq-ffi without them. Add hand-written flate wrappers there, in a `flate`
+  namespace beside each wrapper's `json` one (see `rs/moq-ffi/AGENTS.md`). The maintainer asked for this.
   Each wrapper gets a test that a timestamp round-trips and an untimed payload
   arrives untimed.
 - Docs: "stamped when written" in `doc/lib/rs/{moq-json,moq-flate}.md` and

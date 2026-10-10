@@ -1,108 +1,50 @@
 import MoqFFI
 
-/// A MoQ client. Configure the optional knobs, then `connect(to:)`.
-///
-/// Setters write the configuration `connect` snapshots. They throw `.Busy` while
-/// a connect is in flight and `.Cancelled` after `cancel()`. A finished connect
-/// does not freeze the handle: later setters apply to the next dial until cancel.
+/// A MoQ client, built from its configuration and then dialed with `connect(to:)`.
 public final class Client: Sendable {
     let ffi: MoqClient
 
-    /// Create a client with default settings, ready to configure and `connect(to:)`.
-    public init() {
-        ffi = MoqClient()
-    }
-
-    /// Toggle TLS certificate verification. Defaults to on; pass `false` only
-    /// against a relay with a self-signed certificate during development.
-    public func setTlsVerify(_ verify: Bool) throws {
-		try ffi.setTlsVerify(verify: verify)
-    }
-
-    /// Trust these PEM root certificate file path(s) instead of the system roots.
-    public func setTlsRoots(_ paths: [String]) throws {
-        try ffi.setTlsRoots(paths: paths)
-    }
-
-    /// Configure whether platform roots are trusted in addition to custom roots.
-    public func setTlsSystemRoots(_ enabled: Bool) throws {
-        try ffi.setTlsSystemRoots(systemRoots: enabled)
-    }
-
-    /// Pin the peer certificate to these hex SHA-256 fingerprints, the native
-    /// equivalent of `serverCertificateHashes`. Accepts the values a server
-    /// reports via `Server.certFingerprints`, so a self-signed certificate can be
-    /// trusted without disabling verification.
-    public func setTlsFingerprints(_ fingerprints: [String]) throws {
-        try ffi.setTlsFingerprints(fingerprints: fingerprints)
-    }
-
-    /// Set the path to a PEM certificate chain to present when the relay requires mTLS.
-    public func setTlsCert(_ path: String?) throws {
-        try ffi.setTlsCert(path: path)
-    }
-
-    /// Set the path to a PEM private key to present when the relay requires mTLS.
-    public func setTlsKey(_ path: String?) throws {
-        try ffi.setTlsKey(path: path)
-    }
-
-    /// Set the local UDP socket bind address (defaults to `[::]:0`). Throws if
-    /// the address cannot be parsed, if a connect is in flight, or after cancel.
-    public func bind(_ addr: String) throws {
-        try ffi.setBind(addr: addr)
-    }
-
-    /// Cap the concurrent QUIC streams the peer may open toward this connection
-    /// (defaults to 1024). MoQ opens a stream per group, and for a subscriber
-    /// those arrive from the relay, so subscribing to many tracks may want this
-    /// raised. Ignored by the WebSocket fallback.
-    public func setQuicMaxStreams(_ maxStreams: UInt64) throws {
-        try ffi.setQuicMaxStreams(maxStreams: maxStreams)
-    }
-
-    /// Enable or disable the WebSocket fallback (on by default), which races QUIC
-    /// for `http(s)` URLs. Disable it against a relay that only serves QUIC.
-    public func setWebsocketEnabled(_ enabled: Bool) throws {
-        try ffi.setWebsocketEnabled(enabled: enabled)
-    }
-
-    /// Set the head start, in microseconds, QUIC gets before the WebSocket
-    /// fallback joins the race (defaults to 200ms). Zero races both at once.
-    public func setWebsocketDelay(_ delayUs: UInt64) throws {
-        try ffi.setWebsocketDelay(delayUs: delayUs)
-    }
-
-    /// Wire the origin whose local broadcasts get advertised to the remote. If
-    /// left unset, `connect` auto-creates one, reachable via `Session.publish`.
-    public func setPublish(_ origin: OriginProducer?) throws {
-        try ffi.setPublish(origin: origin?.ffi)
-    }
-
-    /// Wire the origin used to receive the remote's announcements. If left
-    /// unset, `connect` auto-creates one, reachable via `Session.consume`.
-    public func setConsume(_ origin: OriginProducer?) throws {
-        try ffi.setConsume(origin: origin?.ffi)
-    }
-
-    /// Enable or disable automatic reconnecting (on by default). When enabled, the
-    /// session redials with backoff whenever the transport drops, and broadcasts
-    /// consumed through it ride out the gap. Disable for a one-shot dial whose
-    /// transport close ends the session.
-    public func setReconnect(_ enabled: Bool) throws {
-        try ffi.setReconnect(enabled: enabled)
-    }
-
-    /// Configure retry pacing for the automatic reconnect.
-    public func setBackoff(_ backoff: Backoff) throws {
-        try ffi.setBackoff(backoff: backoff)
+    /// Create a client. Every argument has a default, so pass only what you need.
+    ///
+    /// - Parameters:
+    ///   - bind: The local UDP address to bind; `nil` binds an ephemeral dual-stack port.
+    ///   - versions: Protocol versions to offer, most preferred first (`"moq-lite-03"`);
+    ///     empty offers every supported version.
+    ///   - tls: Certificate trust (`insecure`, `roots`, `fingerprints`, ...) and the mTLS identity.
+    ///   - quic: QUIC tuning, such as the peer's inbound stream cap.
+    ///   - websocket: The WebSocket fallback raced against QUIC for `http(s)` URLs.
+    ///   - once: Dial once instead of redialing with backoff whenever the transport drops.
+    ///   - backoff: Retry pacing for the automatic reconnect.
+    ///   - publish: The origin whose broadcasts are published to the remote.
+    ///   - consume: The origin that receives the remote's broadcasts. With neither origin
+    ///     given, both sides of each session share one, so a broadcast announced via
+    ///     `Session.publish` is also discoverable through `Session.consume`.
+    /// - Throws: `MoqError.Config` for a value the native side cannot use.
+    public init(
+        bind: String? = nil,
+        versions: [String] = [],
+        tls: ClientTls = ClientTls(),
+        quic: QuicConfig = QuicConfig(),
+        websocket: WebSocketConfig = WebSocketConfig(),
+        once: Bool = false,
+        backoff: Backoff = Backoff(),
+        publish: OriginProducer? = nil,
+        consume: OriginProducer? = nil
+    ) throws {
+        ffi = try MoqClient(config: MoqClientConfig(
+            bind: bind,
+            versions: versions,
+            tls: tls,
+            quic: quic,
+            websocket: websocket,
+            once: once,
+            backoff: backoff,
+            publish: publish?.ffi,
+            consume: consume?.ffi
+        ))
     }
 
     /// Connect and wait for the session to be established. Cancellable via `cancel()`.
-    ///
-    /// With neither `setPublish` nor `setConsume` wired, both sides of the session share one
-    /// origin, so a broadcast announced via `Session.publish` is also discoverable through
-    /// `Session.consume`. Wiring either side opts out and isolates the two directions.
     public func connect(to url: String) async throws -> Session {
         Session(try await ffi.connect(url: url))
     }
@@ -122,13 +64,13 @@ public final class Session: Sendable {
     }
 
     /// The publish-side origin: where local broadcasts are advertised to the
-    /// remote. Either the one wired via `Client.setPublish`, or auto-created.
+    /// remote. Either the one wired via `Client(publish:)`, or auto-created.
     public var publish: OriginProducer {
         OriginProducer(ffi.publish())
     }
 
     /// The subscribe-side origin: a read handle for the remote's announcements.
-    /// Either derived from `Client.setConsume`, or auto-created.
+    /// Either derived from `Client(consume:)`, or auto-created.
     public var consume: OriginConsumer {
         OriginConsumer(ffi.consume())
     }

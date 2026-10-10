@@ -13,7 +13,7 @@ import { Milli, Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
-import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
 import { encodeDatagram } from "./datagram.ts";
@@ -75,9 +75,9 @@ function change(
 	held: Advertised | undefined,
 	next: Advertised | undefined,
 ): "same" | "restart" | Reprice {
-	if (held === undefined || next === undefined || held.identity !== next.identity) return "restart";
-	// A new epoch is another broadcast, even from the same entry.
-	if (held.route.epoch !== next.route.epoch) return "restart";
+	// Another publisher instance: moq-transport has no restart, so the peer sees the namespace
+	// end and start again, and resubscribes.
+	if (held === undefined || next === undefined || !sameInstance(held, next)) return "restart";
 	const from = clusterFor(base, held.route);
 	const to = clusterFor(base, next.route);
 	if (from === undefined || to === undefined) return from === to ? "same" : "restart";
@@ -679,7 +679,9 @@ export class Publisher {
 					hasExtensions: timescale !== undefined,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
-					hasEnd: true,
+					// A stream capped by the range stops before the group may end, so its FIN
+					// cannot claim END_OF_GROUP.
+					hasEnd: slice.until === undefined,
 					hasPriority: true,
 					// Only honest when the stream really starts at the group's first object;
 					// a trimmed head starts partway through.
@@ -1161,8 +1163,8 @@ export class Publisher {
 		for (const key of [...ns.refused.keys()]) {
 			const snap = updated.get(key);
 			const offered = ns.offered.get(key);
-			// A new epoch is another broadcast too, even from the same front.
-			if (snap === undefined || offered?.identity !== snap.identity || offered.route.epoch !== snap.route.epoch) {
+			// Another publisher instance is another broadcast too.
+			if (snap === undefined || offered === undefined || !sameInstance(offered, snap)) {
 				ns.refused.delete(key);
 				ns.offered.delete(key);
 			}

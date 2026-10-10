@@ -25,32 +25,34 @@ The wrapper's POM declares `dev.moq:moq-ffi:[0.4.3,0.5)`, so Gradle resolves the
 
 ```kotlin
 import dev.moq.*
+import dev.moq.media.*
 import kotlinx.coroutines.flow.collect
 
 // connect() wires up an internal origin and returns a live connection.
 Moq.connect("https://relay.example.com").use { moq ->
-    moq.announcements(AnnounceConfig(prefix = "demos/", filter = "*/camera")).collect { event ->
+    moq.announced(AnnounceConfig(prefix = "demos/", filter = "*/camera")).updates().collect { event ->
         if (event !is AnnounceEventStart) return@collect
         // Prefix stays origin-relative; captures reports what * matched.
         println("got broadcast ${event.announce.prefix}")
         println("captures ${event.announce.captures}")
 
-        val catalog = moq.requestBroadcast(event.announce.prefix).catalog()
+        val catalog = dev.moq.media.catalog(moq.requestBroadcast(event.announce.prefix))
         println("catalog: $catalog")
     }
 }
 ```
 
-`Moq.connect` builds the `MoqClient`, applies TLS / bind options, wires the publish + subscribe origins, and hands back a `Moq` you can `use {}`. Cancelling the surrounding coroutine scope propagates through the Flow extensions to the native consumer's `cancel()` via their `onCompletion` hook.
+`Moq.connect(url, ClientConfig(...))` builds the `MoqClient` from the config record, wires the publish + consume origins, and hands back a `Moq` you can `use {}`. Cancelling the surrounding coroutine scope propagates through the Flow extensions to the native consumer's `cancel()` via their `onCompletion` hook.
 
 ### What the wrapper adds
 
 The `dev.moq` package is intentionally thin: Kotlin has extension functions, so we keep the FFI objects and decorate them rather than re-wrapping every type.
 
 - **`Moq.connect(...)`**: a connection facade (`Moq.kt`), so you never hand-wire a `MoqClient`.
-- **Typealiases** (`Aliases.kt`): re-export the `Moq*`-prefixed FFI types under clean `dev.moq` names (`OriginProducer`, `BroadcastConsumer`, `Catalog`, `Frame`, ...), so you import `dev.moq.*` only. A couple of sealed types (`Container`, `MoqException`) are not aliased because Kotlin can't resolve their subtypes through a typealias; use `uniffi.moq.*` for those.
-- **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, `frames()`, `announcements()`, `catalog()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through. `frames()` covers the media, audio, and video consumers alike.
-- **Fetched media**: `fetchMediaGroup(...).frames()` streams the decoded frames of one retained group, then completes.
+- **Typealiases** (`Aliases.kt`): re-export the `Moq*`-prefixed FFI types under clean `dev.moq` names (`OriginProducer`, `BroadcastConsumer`, `Frame`, ...), so you import `dev.moq.*` only. `MoqException` is not aliased because Kotlin can't resolve its subtypes through a typealias; use `uniffi.moq.*` for it.
+- **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, and `frames()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through.
+- **Media** (`dev.moq.media`): catalog, importers, and container consumers, with `catalog(broadcast)` for a one-shot catalog read and `frames()` for container-decoded media.
+- **Fetched media**: `ContainerGroupConsumer.fetch(...).frames()` streams the decoded frames of one retained group, then completes.
 - **Duration extensions** (`Durations.kt`): the FFI carries microseconds as integers, so `stats.rtt`, `backoff.initial`, `frame.timestamp`, and their siblings read back as a `kotlin.time.Duration`.
 - **`logLevel(...)`**: configures native Rust tracing without importing the raw bindings package.
 - **Raw datagrams**: `TrackProducer.appendDatagram(Frame(payload, timestampUs))` sends one best-effort frame and returns its sequence; `TrackConsumer.recvDatagram()` and `datagrams()` receive them. Payloads are capped at 1200 bytes, require a datagram-capable transport plus lite-05 or newer moq-lite or moq-transport, and have no stream fallback.

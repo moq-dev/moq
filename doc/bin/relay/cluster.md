@@ -37,18 +37,20 @@ order by creation time, so a reconnect to a different gateway assumes the two
 gateways' clocks roughly agree. Seamless failover needs a publisher that
 announces an epoch and moq-lite 07 on every link the route crosses. A route
 without an epoch, including every route on moq-lite 06 and older or
-moq-transport, keeps its subscriptions until it goes. In a cluster that mixes
-moq-lite 06 and 07 links to the same content, the route carrying the epoch
-supersedes the one without each time it appears, so a flapping 07 link cuts
-the viewers resolved through the 06 one.
+moq-transport, keeps its subscriptions until it goes or a track fails
+upstream, and any other route winning it is announced as a restart. Viewers
+re-request on a restart, and a relay drops its copy of the old instance,
+including every path beneath a prefix claim when one of them moves to another
+worker.
 
 Failover routes must carry copies of the same broadcast: a source whose track
 differs in timescale, retention, publisher priority, or group order is refused
 for that track.
 
-A route whose original publisher (its first hop) changes is updated in place on
-both wire protocols, so the broadcast never briefly vanishes downstream, and
-subscriptions in flight carry on through it.
+A route whose original publisher (its first hop) changes under the same epoch is
+updated in place on both wire protocols, so the broadcast never briefly vanishes
+downstream, and subscriptions in flight carry on through it. Without an epoch
+that is another source, so it restarts.
 
 ## Topology
 

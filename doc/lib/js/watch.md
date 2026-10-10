@@ -34,6 +34,7 @@ in sync at the latency you ask for.
 | `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
+| `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can mount before the stream exists. |
 | `catalog-format` | `hang`, `hangz`, `msf`, or `manual`; detected from the name by default. |
 
@@ -45,6 +46,14 @@ buffering indicator, and a stats panel.
 `el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. On
 `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
 and the player does not ask again until it is pointed elsewhere or re-enabled.
+
+The broadcast's announcement is its online signal: the player starts when a
+route serving the name is announced, goes `offline` when none is left, and
+waits for one to return for as long as it is mounted. When the exact route
+ends while a covering prefix still serves the name, it moves to the prefix. A
+name outside the origin's scope is an `error`. A restarted publisher at the same name is followed at
+once, with a fresh catalog, and video, audio, and the clock start over on its
+timeline instead of waiting for it to catch up to the old one.
 
 ## Binding from a framework
 
@@ -103,7 +112,10 @@ const dispose = el.signals.run((effect) => {
 ```
 
 Call `dispose()` on unmount. The effect re-runs when the catalog or the
-active broadcast changes, so a reconnect resubscribes on its own.
+active broadcast changes, so a reconnect resubscribes on its own: the broadcast
+requests the path again whenever it is announced (a start or a restart), and
+switches only when that resolves another broadcast. A request ending is never
+the trigger, so following a restart needs a relay with discovery.
 
 ## Without the element
 
@@ -112,7 +124,8 @@ import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
 
 // Shared with every other component pointed at the same relay; the broadcast
-// handle reads from its origin and spans reconnects.
+// handle reads from its origin and requests again on each announcement, so it
+// follows reconnects and restarts.
 const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 const player = new Watch.Player({
     origin: connection.origin,

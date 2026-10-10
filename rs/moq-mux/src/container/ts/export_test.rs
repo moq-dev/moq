@@ -1101,6 +1101,9 @@ async fn exported_ac3(payload: Vec<u8>) -> Vec<(u64, usize)> {
 		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
 	)
 	.unwrap();
+	// Reserve before the hand-written track below, so its catalog edit is withheld and the
+	// import still places the clock, keeping bbb's PTS that track is stamped against.
+	let reserved = catalog.reserve();
 	let ac3_track = broadcast
 		.unique_track(".ac3", hang::container::track_info(hang::catalog::PRIORITY.audio))
 		.unwrap();
@@ -1131,7 +1134,7 @@ async fn exported_ac3(payload: Vec<u8>) -> Vec<(u64, usize)> {
 	ac3.cut(None).unwrap();
 	ac3.finish().unwrap();
 
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	let mut import = crate::container::ts::Import::new(broadcast, reserved);
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 	let ts = drain_with(
@@ -1184,6 +1187,9 @@ async fn export_scte35_roundtrip() {
 		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
 	)
 	.unwrap();
+	// Reserve before the hand-written track below, so its catalog edit is withheld and the
+	// import still places the clock, keeping bbb's PTS that track is stamped against.
+	let reserved = catalog.reserve();
 
 	// Create and write the SCTE-35 cue track BEFORE moving `broadcast` into
 	// `Import` (which consumes it); the producer stays alive so the exporter can
@@ -1221,7 +1227,7 @@ async fn export_scte35_roundtrip() {
 	scte_producer.finish().unwrap();
 
 	// Now add the real video/audio by importing bbb.ts (this moves `broadcast`).
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	let mut import = crate::container::ts::Import::new(broadcast, reserved);
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
@@ -1319,6 +1325,9 @@ async fn export_pes_verbatim_roundtrip() {
 		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
 	)
 	.unwrap();
+	// Reserve before the hand-written track below, so its catalog edit is withheld and the
+	// import still places the clock, keeping bbb's PTS that track is stamped against.
+	let reserved = catalog.reserve();
 
 	// Build the verbatim PES track BEFORE moving `broadcast` into `Import`; the
 	// producer stays alive so the exporter can subscribe to the retained track.
@@ -1354,7 +1363,7 @@ async fn export_pes_verbatim_roundtrip() {
 	data_producer.finish().unwrap();
 
 	// Real video/audio supplies the media clock (moves `broadcast`).
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	let mut import = crate::container::ts::Import::new(broadcast, reserved);
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
 
