@@ -760,7 +760,7 @@ impl<E: catalog::Catalog> Export<E> {
 
 	/// Export `broadcast`, the one at `source`'s path, pinning every later request for that
 	/// path to its instance.
-	async fn build_on(
+	pub(super) async fn build_on(
 		source: crate::Source,
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog_format: CatalogFormat,

@@ -121,7 +121,7 @@ impl Client {
 
 	/// Follow another publisher instance replacing the broadcast [`publish`](Self::publish)
 	/// reads, as a full program switch on the same connection. Off by default, which ends the
-	/// push with [`Error::Replaced`](crate::Error::Replaced).
+	/// push with [`moq_mux::Error::Replaced`].
 	pub fn with_stitch(mut self, stitch: bool) -> Self {
 		self.stitch = stitch;
 		self

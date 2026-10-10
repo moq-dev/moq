@@ -77,7 +77,7 @@ pub struct Config {
 
 	/// Whether an egress follows another publisher instance replacing its broadcast, as a full
 	/// program switch on the same SRT connection. Off by default, which ends the stream with
-	/// [`Error::Replaced`](crate::Error::Replaced). Only affects egress (`m=request`).
+	/// [`moq_mux::Error::Replaced`]. Only affects egress (`m=request`).
 	pub stitch: bool,
 }
 

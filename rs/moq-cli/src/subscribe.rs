@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
@@ -354,19 +353,17 @@ impl Subscribe {
 	async fn run_ts(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		// The path's announcements drive the export, as they drive a player: the instance
-		// serving it now, against the one being written.
-		let mut watch = Watch::new(self.origin.clone(), self.path.clone())?;
-		let _first = watch.first().await?;
-
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
-		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
-		// selects the `mpegts` catalog extension so undecoded elementary streams
+		// is re-framed as ADTS. `fragment_duration` does not apply to TS. The export
+		// carries the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
-		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
+		// The path's announcements drive it, as they drive a player.
+		let mut ts = moq_mux::container::ts::Follower::new(self.origin, &self.path, self.catalog)
 			.await?
-			.with_delay(self.args.max_delay);
+			.with_delay(self.args.max_delay)
+			.with_linger(self.args.linger)
+			.with_stitch(self.args.stitch);
 		if let Some(mux_rate) = self.args.mux_rate {
 			ts = ts.with_mux_rate(mux_rate);
 		}
@@ -375,7 +372,6 @@ impl Subscribe {
 		// carrier of each frame's spacing (#2984). The export lays each slice of the PCR
 		// grid out at its time on its own clock, which follows the source's, so each is
 		// written as it comes.
-		let (linger, stitch) = (self.args.linger, self.args.stitch);
 		// Reports a track that stops reaching the output while the rest keeps flowing,
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
@@ -391,42 +387,29 @@ impl Subscribe {
 			);
 		};
 		loop {
-			let end = loop {
-				tokio::select! {
-					next = ts.next() => match next {
-						Ok(Some(frame)) => {
-							stdout.write_all(&frame.payload).await?;
-							stdout.flush().await?;
-
-							if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
-								sampled = tokio::time::Instant::now();
-								let stats = ts.stats();
-								if (stats.dropped, stats.out_of_tolerance) != reported {
-									reported = (stats.dropped, stats.out_of_tolerance);
-									release(&stats);
-								}
-								log.sample(stats.into());
-							}
-						}
-						Ok(None) => break Ok(()),
-						Err(err) => break Err(err),
-					},
-					// Subscriptions are sticky, so a replacement leaves the export on the
-					// old instance until it ends, unless asked to switch at once.
-					true = watch.changed(), if !watch.closed => {
-						if stitch && matches!(watch.serving, Serving::Other(_)) {
-							tracing::info!("broadcast replaced, switching the program to the new instance");
-							ts = watch.follow(ts).await?;
-						}
-					}
-				}
+			let frame = match ts.next().await {
+				Ok(Some(frame)) => frame,
+				Ok(None) => break,
+				Err(moq_mux::Error::Replaced(path)) => anyhow::bail!(
+					"another publisher instance replaced broadcast `{path}`; pass --stitch to follow it as a program switch"
+				),
+				Err(err) => return Err(err.into()),
 			};
-			release(&ts.stats());
-			match watch.settle(ts, end, linger, stitch).await? {
-				Some(next) => ts = next,
-				None => return Ok(()),
+			stdout.write_all(&frame.payload).await?;
+			stdout.flush().await?;
+
+			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
+				sampled = tokio::time::Instant::now();
+				let stats = ts.stats();
+				if (stats.dropped, stats.out_of_tolerance) != reported {
+					reported = (stats.dropped, stats.out_of_tolerance);
+					release(&stats);
+				}
+				log.sample(stats.into());
 			}
 		}
+		release(&ts.stats());
+		Ok(())
 	}
 
 	async fn run_flv(self) -> anyhow::Result<()> {
@@ -445,328 +428,5 @@ impl Subscribe {
 		}
 
 		Ok(())
-	}
-}
-
-/// How long an export failure waits for its broadcast to go before it counts as the export's own.
-///
-/// A killed publisher's tracks can error just before its route is withdrawn, so the two need not
-/// land together.
-const CLOSE_GRACE: Duration = Duration::from_secs(1);
-
-type TsExport = moq_mux::container::ts::Export<moq_mux::container::ts::Ext>;
-
-/// What the announcements say serves the exported path.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Serving {
-	/// Nothing: every route went.
-	Gone,
-	/// The publisher instance being exported.
-	Ours,
-	/// Another instance: a newer epoch, or any return of an epochless route.
-	Other(Option<moq_net::Epoch>),
-}
-
-/// Follows the announcements covering the exported path, against the instance the export reads.
-struct Watch {
-	origin: moq_net::origin::Consumer,
-	path: moq_net::PathOwned,
-	announced: moq_net::announce::Consumer,
-	/// The epoch of the instance being exported.
-	epoch: Option<moq_net::Epoch>,
-	serving: Serving,
-	/// Every route went since the export resolved its broadcast.
-	ended: bool,
-	/// The origin closed, so nothing more is announced.
-	closed: bool,
-}
-
-impl Watch {
-	fn new(origin: moq_net::origin::Consumer, path: moq_net::PathOwned) -> anyhow::Result<Self> {
-		// A max-depth path cannot be spelled as a subtree, so it watches every announcement.
-		let announced = match moq_net::Pattern::subtree(path.as_str()) {
-			Ok(subtree) => origin
-				.scope("", &moq_net::Patterns::from(subtree))
-				.with_context(|| format!("`{path}` is outside the session's scope"))?
-				.announced(),
-			Err(_) => origin.announced(),
-		};
-		Ok(Self {
-			origin,
-			path,
-			announced,
-			epoch: None,
-			serving: Serving::Gone,
-			ended: false,
-			closed: false,
-		})
-	}
-
-	/// Wait for the first instance to serve the path, and resolve it.
-	async fn first(&mut self) -> anyhow::Result<moq_net::broadcast::Consumer> {
-		while self.serving == Serving::Gone {
-			anyhow::ensure!(
-				self.changed().await,
-				"origin closed before broadcast `{}` was announced",
-				self.path
-			);
-		}
-		self.resolve().await
-	}
-
-	/// Apply the next announcement covering the path, or `false` once the origin closes.
-	async fn changed(&mut self) -> bool {
-		loop {
-			let Some(event) = self.announced.next().await else {
-				self.closed = true;
-				return false;
-			};
-			let (announce, restart) = match event {
-				moq_net::announce::Event::Start(announce) => (announce, false),
-				moq_net::announce::Event::Restart(announce) => (announce, true),
-				moq_net::announce::Event::End(announce) => {
-					if self.path.has_prefix(&announce.prefix) {
-						self.serving = Serving::Gone;
-						self.ended = true;
-						return true;
-					}
-					continue;
-				}
-				// The same instance over another route.
-				moq_net::announce::Event::Update(_) => continue,
-			};
-			if !self.path.has_prefix(&announce.prefix) {
-				continue;
-			}
-			let epoch = announce.route.epoch;
-			self.serving = match !restart && epoch.is_some() && epoch == self.epoch {
-				true => Serving::Ours,
-				false => Serving::Other(epoch),
-			};
-			return true;
-		}
-	}
-
-	/// Resolve the instance serving the path now, and export it from here on.
-	async fn resolve(&mut self) -> anyhow::Result<moq_net::broadcast::Consumer> {
-		let epoch = match &self.serving {
-			Serving::Other(epoch) => epoch.clone(),
-			Serving::Ours | Serving::Gone => self.epoch.clone(),
-		};
-		let broadcast = self.origin.request_broadcast(&self.path, epoch).await?;
-		self.epoch = broadcast.info().epoch.clone();
-		self.serving = Serving::Ours;
-		self.ended = false;
-		tracing::info!(
-			epoch = self.epoch.as_ref().map(tracing::field::display),
-			"exporting broadcast"
-		);
-		Ok(broadcast)
-	}
-
-	/// Carry `ts` on into the instance serving the path now.
-	async fn follow(&mut self, ts: TsExport) -> anyhow::Result<TsExport> {
-		let broadcast = self.resolve().await?;
-		Ok(ts.follow(broadcast).await?)
-	}
-
-	/// Decide what follows the export's `end`: the export carried on into a return, or `None`
-	/// once a clean end has waited out the `linger` with nothing to follow.
-	///
-	/// The same instance coming back within the linger continues the stream. A replacement
-	/// fails unless `stitch` follows it, and the linger bounds the whole return, catalog
-	/// subscription included.
-	async fn settle(
-		&mut self,
-		ts: TsExport,
-		end: moq_mux::Result<()>,
-		linger: Duration,
-		stitch: bool,
-	) -> anyhow::Result<Option<TsExport>> {
-		let deadline = tokio::time::Instant::now() + linger;
-		// A failure ends the broadcast only if the broadcast goes too. One still announced
-		// cannot return, so the failure is the export's own and exits now.
-		if let Err(err) = &end
-			&& !self.ended
-			&& self.serving == Serving::Ours
-		{
-			let grace = tokio::time::Instant::now() + CLOSE_GRACE.min(linger);
-			while self.serving == Serving::Ours && tokio::time::timeout_at(grace, self.changed()).await == Ok(true) {}
-			if self.serving == Serving::Ours {
-				tracing::warn!(%err, "export failed with the broadcast still up, so not lingering");
-				return Err(end.unwrap_err().into());
-			}
-		}
-		if !linger.is_zero() {
-			match &end {
-				Ok(()) => tracing::info!(?linger, "broadcast finished, waiting for it to return"),
-				Err(err) => tracing::warn!(%err, ?linger, "broadcast ended, waiting for it to return"),
-			}
-		}
-
-		loop {
-			let follow = match &self.serving {
-				Serving::Ours => self.ended,
-				Serving::Other(_) if stitch => true,
-				Serving::Other(_) => anyhow::bail!(
-					"another publisher instance replaced broadcast `{}`; pass --stitch to follow it as a program switch",
-					self.path
-				),
-				Serving::Gone => false,
-			};
-			if follow {
-				return match tokio::time::timeout_at(deadline, self.follow(ts)).await {
-					Ok(next) => {
-						tracing::info!("broadcast returned, carrying on");
-						next.map(Some)
-					}
-					Err(_) => {
-						tracing::info!(?linger, "broadcast did not return");
-						Ok(end.map(|()| None)?)
-					}
-				};
-			}
-			if !matches!(tokio::time::timeout_at(deadline, self.changed()).await, Ok(true)) {
-				tracing::info!(?linger, "broadcast did not return");
-				return Ok(end.map(|()| None)?);
-			}
-		}
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	fn publish(origin: &moq_net::origin::Producer, epoch: &moq_net::Epoch) -> moq_net::broadcast::Producer {
-		let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
-		origin.publish("live", route).unwrap()
-	}
-
-	fn watch(origin: &moq_net::origin::Producer) -> Watch {
-		Watch::new(origin.consume(), moq_net::Path::new("live").to_owned()).unwrap()
-	}
-
-	async fn export(source: moq_mux::Source) -> TsExport {
-		moq_mux::container::ts::Export::with_ts(source, CatalogFormat::Hang)
-			.await
-			.unwrap()
-	}
-
-	/// A failure while the broadcast stays announced is the export's own: it exits after the
-	/// grace, without waiting out the linger.
-	#[tokio::test(start_paused = true)]
-	async fn a_failure_with_the_broadcast_up_exits_after_the_grace() {
-		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-		tokio::spawn(moq_net::time::run(driver));
-		let mut live = publish(&origin, &moq_net::Epoch::mint());
-		let _catalog = moq_mux::catalog::Producer::new(&mut live, Default::default()).unwrap();
-		let mut watch = watch(&origin);
-		watch.first().await.unwrap();
-		let ts = export(moq_mux::Source::new(origin.consume(), "live")).await;
-
-		let start = tokio::time::Instant::now();
-		let failed = moq_mux::Error::from(anyhow::anyhow!("boom"));
-		let end = watch.settle(ts, Err(failed), Duration::from_secs(10), false).await;
-		assert!(end.is_err(), "the export's own failure exits 1");
-		assert_eq!(start.elapsed(), CLOSE_GRACE);
-	}
-
-	/// A replacement followed under `--stitch` that never serves its catalog gives up at the
-	/// linger, rather than waiting on the catalog past it.
-	#[tokio::test(start_paused = true)]
-	async fn a_return_without_a_catalog_expires_with_the_linger() {
-		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-		tokio::spawn(moq_net::time::run(driver));
-		let mut first = publish(&origin, &moq_net::Epoch::mint());
-		let catalog = moq_mux::catalog::Producer::new(&mut first, Default::default()).unwrap();
-		let mut watch = watch(&origin);
-		watch.first().await.unwrap();
-		let ts = export(moq_mux::Source::new(origin.consume(), "live")).await;
-		drop((first, catalog));
-
-		// Replaced, but the replacement's catalog request is never answered.
-		let second = publish(&origin, &moq_net::Epoch::mint());
-		let _unanswered = second.dynamic();
-
-		let linger = Duration::from_secs(10);
-		let start = tokio::time::Instant::now();
-		let end = watch.settle(ts, Ok(()), linger, true).await.unwrap();
-		assert!(end.is_none(), "a return that never resumes is no return");
-		assert_eq!(start.elapsed(), linger);
-	}
-
-	/// Without `--stitch`, another instance taking the path after the export ends fails it,
-	/// naming the flag, however long the linger.
-	#[tokio::test(start_paused = true)]
-	async fn a_replacement_fails_without_stitch() {
-		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-		tokio::spawn(moq_net::time::run(driver));
-		let mut first = publish(&origin, &moq_net::Epoch::mint());
-		let catalog = moq_mux::catalog::Producer::new(&mut first, Default::default()).unwrap();
-		let mut watch = watch(&origin);
-		watch.first().await.unwrap();
-		let ts = export(moq_mux::Source::new(origin.consume(), "live")).await;
-		drop((first, catalog));
-		let _second = publish(&origin, &moq_net::Epoch::mint());
-
-		let start = tokio::time::Instant::now();
-		let err = watch
-			.settle(ts, Ok(()), Duration::from_secs(10), false)
-			.await
-			.err()
-			.expect("a replacement fails the export");
-		assert!(err.to_string().contains("--stitch"), "{err}");
-		assert!(start.elapsed() < Duration::from_secs(1), "no wait for a return");
-	}
-
-	/// An epochless route has no instance to match, so even its own return is a replacement.
-	#[tokio::test(start_paused = true)]
-	async fn an_epochless_return_is_a_replacement() {
-		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-		tokio::spawn(moq_net::time::run(driver));
-		let mut first = origin.publish("live", Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut first, Default::default()).unwrap();
-		let mut watch = watch(&origin);
-		watch.first().await.unwrap();
-		let ts = export(moq_mux::Source::new(origin.consume(), "live")).await;
-		drop((first, catalog));
-		let _second = origin.publish("live", Default::default()).unwrap();
-
-		let err = watch
-			.settle(ts, Ok(()), Duration::from_secs(10), false)
-			.await
-			.err()
-			.expect("an epochless return fails the export");
-		assert!(err.to_string().contains("--stitch"), "{err}");
-	}
-
-	/// The same instance coming back within the linger carries the export on.
-	#[tokio::test(start_paused = true)]
-	async fn the_same_instance_returning_continues() {
-		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-		tokio::spawn(moq_net::time::run(driver));
-		let epoch = moq_net::Epoch::mint();
-		let mut first = publish(&origin, &epoch);
-		let catalog = moq_mux::catalog::Producer::new(&mut first, Default::default()).unwrap();
-		let mut watch = watch(&origin);
-		watch.first().await.unwrap();
-		let ts = export(moq_mux::Source::new(origin.consume(), "live")).await;
-		drop((first, catalog));
-
-		let returned = async {
-			tokio::time::sleep(Duration::from_secs(2)).await;
-			let mut second = publish(&origin, &epoch);
-			let catalog = moq_mux::catalog::Producer::new(&mut second, Default::default()).unwrap();
-			std::future::pending::<()>().await;
-			drop((second, catalog));
-		};
-		let start = tokio::time::Instant::now();
-		let next = tokio::select! {
-			next = watch.settle(ts, Ok(()), Duration::from_secs(10), false) => next.unwrap(),
-			_ = returned => unreachable!(),
-		};
-		assert!(next.is_some(), "the export carries on");
-		assert_eq!(start.elapsed(), Duration::from_secs(2), "as soon as it is back");
 	}
 }
