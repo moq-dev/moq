@@ -114,7 +114,7 @@ the delay; a frame that cannot arrive in time at the rate fails the export.
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
-moq ... play --no-video             # audio only
+moq ... play --no-video             # audio only, without a window
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where

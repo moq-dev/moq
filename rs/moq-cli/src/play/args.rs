@@ -56,7 +56,7 @@ impl fmt::Display for Delay {
 	}
 }
 
-/// Play one MoQ broadcast through a native window and speaker.
+/// Play one MoQ broadcast through a native window or an audio-only speaker.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {

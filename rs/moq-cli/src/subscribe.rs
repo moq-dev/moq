@@ -97,7 +97,7 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub video_codec: Option<VideoCodecArg>,
 
-	/// Leave video out (audio only).
+	/// Leave video out (audio only); native playback opens no window.
 	#[usage(long, conflicts("--video-name", "--video-codec", "--no-audio"))]
 	pub no_video: bool,
 

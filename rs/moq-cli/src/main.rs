@@ -497,7 +497,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 	let client = net.client(moq.client.clone())?;
 	let Attached { origin, .. } = spawn_moq(&moq, &net, client, cluster, directions, &mut tasks).await?;
 
-	play::run(origin.consume(), name, args, tasks)
+	play::run(origin.consume(), name, args, tasks).await
 }
 
 /// Run every stage over one Origin and one MoQ attachment.

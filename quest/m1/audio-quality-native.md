@@ -9,21 +9,12 @@ from whichever platform a user happened to be on.
 
 ## Plan
 
-- Drive the shipped binary, not a purpose-built harness: `moq play` against a
-  local relay behind the same seeded shaper, on a cpal null or dummy backend so
-  CI needs no audio hardware. The speaker is only half of it: `play::run` is the
-  winit event loop (`rs/moq-cli/src/play/mod.rs` re-exports `window::run`), and
-  `resumed` builds a `Display` with a real window and a presentable wgpu surface
-  even for an audio-only broadcast, so the lane dies on a headless runner before
-  it measures anything. Settle which way out: a virtual display and software
-  rendering in CI, or an audio-only mode in `moq play` that never opens a
-  window. The second is worth having on its own, and it is the smaller
-  dependency to keep working. Recorded in the 2026-10-05 audit:
-  `moq play --no-video` still shows a blank, closable window, so this quest
-  owns the headless audio-only path, built on `--no-video`. A real device callback is part of what is being
-  measured, so keep the real backend rather than substituting a fake clock, and
-  accept that the timing noise it adds sets the floor for the native budgets.
-  That floor is worth measuring on its own before the budgets are written.
+- Drive the shipped binary, not a purpose-built harness: `moq play --no-video`
+  against a local relay behind the same seeded shaper, on a cpal null or dummy
+  backend so CI needs no audio hardware. The draft supplies the headless path
+  through the real speaker without constructing a window. A real device callback
+  is part of what is measured, so keep the production backend rather than a fake
+  clock. Measure that timing noise before writing native budgets.
 - `moq play` needs to emit the run's counters and stage timings as JSON for the
   analyzer. Add that output, and keep it useful outside the test: a user
   debugging their own latency wants the same dump.
@@ -47,6 +38,22 @@ totals alone proves nothing about the estimator.
 Standalone in m1 rather than a child of the m0 audio quality harness line
 (decided in the 2026-09-28 quest audit): nothing in m0 waits on it. The native jitter target
 it grades is done on the jitter target line.
+
+### Draft progress
+
+The draft routes `moq play --no-video` through an async event receiver instead
+of constructing winit or a wgpu surface. It still opens the production
+moq-audio Engine and uses the same Media tasks. Native playback tests cover
+the actual dispatch and transport-error propagation, and the existing native
+playback suite passes.
+
+The metric lane remains unfinished. The native driver exposes device failures
+and sink writes, not the browser schema's rendered quantum, short-quantum,
+stall, and stage series. Those measurements must be collected at the device
+callback and decoder boundaries before emitting compatible JSON. No fake zero
+metrics, unmeasured budget values, or passing native nightly row are added.
+Measure the real dummy-device floor, then complete JSON output, analyzer
+integration, and nightly wiring here.
 
 ## Related
 
