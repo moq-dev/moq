@@ -4926,7 +4926,8 @@ fn shutdown_waits_for_an_in_place_poll() {
 			// Holds this poll open while shutdown starts on another thread.
 			release_rx.recv().unwrap();
 			tokio::time::sleep(Duration::from_millis(1)).await;
-			Ok(())
+			// Even if the sleep is already due, only the shutdown may finish this call.
+			std::future::pending::<Result<(), MoqError>>().await
 		});
 		tokio::runtime::Builder::new_current_thread()
 			.build()
