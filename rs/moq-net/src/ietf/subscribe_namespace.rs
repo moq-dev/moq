@@ -138,10 +138,20 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 		};
 
 		// The token is ignored: the session's grant is what authorizes the request.
-		decode_params!(r, version,
-			0x03 => _authorization_token: Vec<super::Opaque>,
-			HIDDEN_PARAM => hidden: Option<u64>,
-		);
+		let hidden = if version == Version::Draft14 {
+			decode_params!(r, version,
+				0x03 => _authorization_token: Vec<super::Opaque>,
+				HIDDEN_PARAM => hidden: Option<u64>,
+			);
+			hidden
+		} else {
+			decode_params!(r, version,
+				0x03 => _authorization_token: Vec<super::Opaque>,
+				0x10 => _forward: Option<bool>,
+				HIDDEN_PARAM => hidden: Option<u64>,
+			);
+			hidden
+		};
 
 		Ok(Self {
 			request_id,
@@ -431,6 +441,32 @@ mod tests {
 		msg.encode_msg(&mut buf, version).unwrap();
 		let mut bytes = buf.freeze();
 		assert!(super::super::PublishNamespace::decode_body(&mut bytes, version, false).is_err());
+	}
+
+	#[test]
+	fn forward_follows_the_draft() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+			for value in [0u64, 1, 2] {
+				let mut buf = BytesMut::new();
+				RequestId(1).encode(&mut buf, version).unwrap();
+				if version == Version::Draft17 {
+					0u64.encode(&mut buf, version).unwrap();
+				}
+				encode_namespace(&mut buf, &Path::default(), version).unwrap();
+				if matches!(version, Version::Draft16 | Version::Draft17) {
+					1u64.encode(&mut buf, version).unwrap();
+				}
+				1u64.encode(&mut buf, version).unwrap();
+				0x10u64.encode(&mut buf, version).unwrap();
+				value.encode(&mut buf, version).unwrap();
+				let mut buf = buf.freeze();
+				let result = SubscribeNamespaceLegacy::decode_msg(&mut buf, version);
+				assert_eq!(result.is_ok(), version == Version::Draft14 || value <= 1, "{version} FORWARD={value}: {result:?}");
+				if version == Version::Draft14 || value <= 1 {
+					assert!(buf.is_empty());
+				}
+			}
+		}
 	}
 
 	#[test]

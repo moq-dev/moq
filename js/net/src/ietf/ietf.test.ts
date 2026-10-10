@@ -1945,3 +1945,12 @@ test("Subscribe v16: rejects INCLUDE_PROPERTIES", async () => {
 	const body = framed([...TRACK_HEAD, 0x01, 0x35, 0x01, 0x00]);
 	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow();
 });
+
+for (const version of [Version.DRAFT_14, Version.DRAFT_15]) {
+	test(`Parameters ${version}: unknown key does not hide a later known value`, async () => {
+		for (const bytes of [new Uint8Array([2, 0x3e, 1, 0x20, 7]), new Uint8Array([2, 0x3d, 1, 42, 0x20, 7])]) {
+			const params = await Parameters.decode(new Reader(undefined, bytes, version), version);
+			expect(params.subscriberPriority).toBe(7);
+		}
+	});
+}

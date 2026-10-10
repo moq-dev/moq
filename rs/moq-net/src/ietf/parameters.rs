@@ -583,6 +583,16 @@ macro_rules! decode_params {
 						continue;
 					}
 				)*
+				// Drafts 14 and 15 use Key-Value-Pairs and require unknown ids to be ignored.
+				if matches!(_version, $crate::ietf::Version::Draft14 | $crate::ietf::Version::Draft15) {
+					if _key % 2 == 0 {
+						<u64 as $crate::coding::Decode<$crate::ietf::Version>>::decode($r, _version)?;
+					} else {
+						let _value = <Vec<u8> as $crate::coding::Decode<$crate::ietf::Version>>::decode($r, _version)?;
+						if _value.len() > (1 << 16) - 1 { return Err($crate::coding::DecodeError::BoundsExceeded); }
+					}
+					continue;
+				}
 				return Err($crate::coding::DecodeError::InvalidValue);
 			}
 		}
@@ -1015,10 +1025,27 @@ mod tests {
 				let _ = val;
 				Ok(())
 			})();
-			assert!(
-				matches!(result, Err(DecodeError::InvalidValue)),
-				"expected InvalidValue for unknown param in {version}"
-			);
+			if matches!(version, Version::Draft14 | Version::Draft15) {
+				result.unwrap();
+				assert!(!bytes.has_remaining());
+			} else {
+				assert!(matches!(result, Err(DecodeError::InvalidValue)), "{version}");
+			}
+		}
+	}
+
+	#[test]
+	fn legacy_unknown_parameter_is_ignored() {
+		for version in [Version::Draft14, Version::Draft15] {
+			for data in [&[2, 0x3e, 1, 0x20, 7][..], &[2, 0x3d, 1, 42, 0x20, 7][..]] {
+				let mut bytes = data;
+				let result: Result<Option<u8>, DecodeError> = (|| {
+					decode_params!(&mut bytes, version, 0x20 => priority: Option<u8>);
+					Ok(priority)
+				})();
+				assert_eq!(result.unwrap(), Some(7));
+				assert!(bytes.is_empty());
+			}
 		}
 	}
 
