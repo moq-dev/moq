@@ -91,9 +91,9 @@ republish against a live relay.
 
 When the release cut carries stats epochs, drop
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and
-its `doc/concept/stats.md` sentence from `release`; release-to-main
-back-merges keep `main`'s `rs/moq-stats` and `doc/concept/stats.md` until
-then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
+its `doc/concept/stats.md` sentence from `release`; until then, the
+maintainer's pre-release merge of `release` into `main` keeps `main`'s
+`rs/moq-stats` and `doc/concept/stats.md`. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 
 ## Required
 
