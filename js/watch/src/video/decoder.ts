@@ -15,7 +15,6 @@ import {
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
-import type { Broadcast } from "../broadcast";
 import { nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
@@ -99,9 +98,9 @@ export class Decoder {
 	#pending = new Signal<{ track: string; catalog: Getter<Catalog.Root | undefined> } | undefined>(undefined);
 	// The active track's arrival estimate from its container consumer.
 	#spread = new Signal<Time.Milli | undefined>(undefined);
-	// The catalog broadcast the last rendition subscribed under, and its instance. Every handle to
-	// one instance shares `closed`, so it identifies the instance where the handle itself does not.
-	#instance?: { broadcast: Broadcast; closed: unknown };
+	// The path of the media the last rendition read, and its instance. Every handle to one instance
+	// shares `closed`, so it identifies the instance where the handle itself does not.
+	#instance?: { path: Moq.Path.Valid; closed: unknown };
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
@@ -192,13 +191,13 @@ export class Decoder {
 			return;
 		}
 
-		// A republish at the same name is another instance, whose timeline starts over. Waiting for
+		// A republish of the media this rendition reads (the catalog's own broadcast, or the one a
+		// `broadcast` override names) is another instance, whose timeline starts over. Waiting for
 		// it to catch up to the old picture would freeze video until it passed the old timestamps,
 		// so switch at once and re-anchor the clock. A rendition switch within one instance, or a
-		// switch to another name, still waits.
-		const closed = effect.get(broadcast.out.active)?.closed;
-		const republished = this.#instance?.broadcast === broadcast && this.#instance.closed !== closed;
-		this.#instance = { broadcast, closed };
+		// switch to another path, still waits.
+		const republished = this.#instance?.path === active.path && this.#instance.closed !== active.closed;
+		this.#instance = { path: active.path, closed: active.closed };
 		if (republished) this.sync.reset();
 
 		// Start a new pending effect.

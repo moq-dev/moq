@@ -24,14 +24,17 @@ function config(fields: Record<string, unknown>): Catalog.VideoConfig {
 }
 
 // The subscription is already closed, so the track never reaches VideoDecoder.
-function closedConsumer(): Moq.Broadcast.Consumer {
-	return { closed: new Signal("ended") } as unknown as Moq.Broadcast.Consumer;
+function closedConsumer(path: string): Moq.Broadcast.Consumer {
+	return { closed: new Signal("ended"), path } as unknown as Moq.Broadcast.Consumer;
 }
 
+// Each source is another broadcast, at its own path.
+let sources = 0;
 function watchBroadcast(catalog: Signal<Catalog.Root>): Broadcast {
+	const media = closedConsumer(`source-${sources++}`);
 	return {
 		out: { catalog, active: new Signal(undefined) },
-		relativeBroadcast: () => closedConsumer(),
+		relativeBroadcast: () => media,
 	} as unknown as Broadcast;
 }
 
@@ -245,13 +248,23 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const video = config({ codedWidth: 16, codedHeight: 16, description: "01640028ffe100046764002801000268ee" });
 	if (kind === "cmaf")
 		video.container = { kind, init: Buffer.from(Container.Cmaf.createVideoInitSegment(video)).toString("base64") };
+	// The catalog's own broadcast, and the one the rendition reads. They differ once only one of
+	// them is republished, as with a rendition's `broadcast` override.
 	let producer = new Moq.Broadcast.Producer();
+	let mediaProducer = producer;
 	const active = new Signal<Moq.Broadcast.Consumer>(producer.consume());
+	const media = new Signal<Moq.Broadcast.Consumer>(producer.consume());
 	const catalog = new Signal<Catalog.Root>({ video: { renditions: { video } } });
 	const broadcast = new Signal<Broadcast | undefined>({
 		out: { catalog, active },
-		relativeBroadcast: (effect: Effect) => effect.get(active),
+		relativeBroadcast: (effect: Effect) => effect.get(media),
 	} as unknown as Broadcast);
+	const closeAll = () => {
+		active.peek().close();
+		media.peek().close();
+		producer.close();
+		mediaProducer.close();
+	};
 	const source = new Source({ broadcast, supported: async () => true });
 	const sync = new Sync({ delay: "instant" });
 	const enabled = new Signal(true);
@@ -269,17 +282,29 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		},
 		// A restarted publisher takes the name: another instance of the same broadcast.
 		republish() {
+			closeAll();
+			producer = new Moq.Broadcast.Producer();
+			mediaProducer = producer;
+			active.set(producer.consume());
+			media.set(producer.consume());
+		},
+		// Only the catalog's broadcast restarts; the media the rendition reads stays up.
+		republishCatalog() {
 			active.peek().close();
-			producer.close();
 			producer = new Moq.Broadcast.Producer();
 			active.set(producer.consume());
+		},
+		// Only the media the rendition reads restarts, under the same catalog.
+		republishMedia() {
+			media.peek().close();
+			mediaProducer = new Moq.Broadcast.Producer();
+			media.set(mediaProducer.consume());
 		},
 		close() {
 			decoder.close();
 			source.close();
 			sync.close();
-			active.peek().close();
-			producer.close();
+			closeAll();
 			next.mockRestore();
 			for (const [name, original] of [
 				["VideoDecoder", originalDecoder],
@@ -324,6 +349,40 @@ it("switches to a republished broadcast at once, its timeline starting over", as
 		// Waiting to catch up to the old picture would hold it until the new timeline passed 10s.
 		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
 		expect(reset).toHaveBeenCalledTimes(1);
+	} finally {
+		playback.close();
+	}
+});
+
+it("switches at once when only the media a rendition reads is republished", async () => {
+	const reads = [sample(10, 10_000_000)];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		const reset = spyOn(playback.sync, "reset");
+
+		reads.push(sample(0, 1000));
+		playback.republishMedia();
+		await microtasks();
+
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		expect(reset).toHaveBeenCalledTimes(1);
+	} finally {
+		playback.close();
+	}
+});
+
+it("keeps the clock when only the catalog's broadcast is republished", async () => {
+	const reads = [sample(10, 10_000_000)];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		const reset = spyOn(playback.sync, "reset");
+
+		playback.republishCatalog();
+		await microtasks();
+
+		// The media is the same instance, so its timeline did not start over.
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(10_000));
+		expect(reset).not.toHaveBeenCalled();
 	} finally {
 		playback.close();
 	}
