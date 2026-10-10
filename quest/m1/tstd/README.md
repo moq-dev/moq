@@ -37,7 +37,6 @@ nightly.
 
 - [Send-ahead within the delay](/quest/m1/tstd/send-ahead.md) - total lag is `--delay`, send-ahead included, with a 1 s default
 - [Mux-rate hold](/quest/m1/tstd/mux-rate-hold.md) - import publishes its catalog once the mux rate is measured, so export is constant-rate from the start
-- [Slot layout](/quest/m1/tstd/slot-layout.md) - each slot interleaves its PIDs evenly, so video stays within its transport buffer when the multiplex runs above its Rx
 
 ## Related
 
