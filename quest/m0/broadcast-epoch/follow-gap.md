@@ -1,0 +1,31 @@
+# [S] A followed path reports a gap that ended its request
+
+## Goal
+
+`origin::Consumer::follow` reports a gap that ended the request (an `End`
+then `Start`, or a `Restart`) even when the next serving route is a covering
+prefix with the same epoch, so `moq play` never misses a handoff while it is
+still draining the old run.
+
+## Plan
+
+Found by the OpenAI review of #5154 (2026-10-10), which added `follow` in
+moq-net and `@moq/net`. A same-epoch handoff from the exact route to a
+covering prefix, after a gap that ended the old request, reaches the Rust
+follower as an `Update`, because the announce cursor delivers by prefix and
+the follower never sees the gap. If that `Update` arrives while `moq play` is
+draining the old run, playback never restarts. JS sees the gap and is
+correct.
+
+Decided 2026-10-10: merge #5154 and fix the cause in moq-net here, in m0
+because the epoch line gates the release. Rejected: re-requesting in
+`moq play` whenever a run fails while the path is still served, which loops
+tightly on a broadcast that fails every time.
+
+Fix it in the announce cursor or the follower so the gap surfaces, matching
+JS. Regression with simulated time: an exact route ends, its request ends,
+then a same-epoch prefix route takes over while a reader is still draining;
+the follower must report the handoff, and `moq play` must restart. Start
+after #5154 merges.
+
+Public API: none expected. Wire: none.
