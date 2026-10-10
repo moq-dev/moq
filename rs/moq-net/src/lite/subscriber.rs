@@ -1593,6 +1593,24 @@ mod tests {
 
 	const VERSION: Version = Version::Lite05;
 
+	/// A fetch held for a pre-lite-05 feed is released once its caller gives up, rather
+	/// than waiting, track handle and all, for a group the feed may never reach.
+	#[moq_net_sim::test]
+	async fn an_abandoned_feed_fetch_is_released() {
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let dynamic = track.dynamic();
+		let fetching = track.consume().fetch_group(100, None);
+		let req = dynamic.requested_group().now_or_never().expect("queued").unwrap();
+
+		let mut held = vec![(req, track.consume())];
+		ServeLoop::<SinkSession>::poll_feed_fetches(&mut held, &kio::Waiter::noop());
+		assert_eq!(held.len(), 1, "held while its caller waits");
+
+		drop(fetching);
+		ServeLoop::<SinkSession>::poll_feed_fetches(&mut held, &kio::Waiter::noop());
+		assert!(held.is_empty(), "released once abandoned");
+	}
+
 	/// The owed groups start at the floor the demand last asked for, which an update can move
 	/// either way after SUBSCRIBE_START answered the SUBSCRIBE.
 	#[moq_net_sim::test]
@@ -4477,9 +4495,13 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 	/// Settle the fetches held for the live feed. A pre-lite-05 peer has no FETCH, but a
 	/// group its subscription delivers lands in the cache, where the waiting fetches read
 	/// it once the request is dropped. A group the feed went past (or started past, or
-	/// ended before) is a miss, the same answer as an evicted one.
+	/// ended before) is a miss, the same answer as an evicted one. A fetch nobody waits on
+	/// any more is dropped, as [`FetchServeRun`] does, so a far-future one isn't held forever.
 	fn poll_feed_fetches(feed_fetches: &mut Vec<(group::Request, track::Consumer)>, waiter: &kio::Waiter) {
 		for (req, feed) in std::mem::take(feed_fetches) {
+			if req.demand().poll_unused(waiter).is_ready() {
+				continue;
+			}
 			match feed.poll_group(req.sequence(), waiter) {
 				Poll::Ready(Some(_)) => drop(req),
 				Poll::Ready(None) => req.reject(Error::NotFound),
