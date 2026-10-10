@@ -30,7 +30,7 @@ async fn ffi_caught_up() {
 	rx.await.expect("ffi runtime dropped the catch-up task");
 }
 
-/// Spawn `fut` and wait until the FFI runtime has driven its inner `Task::run`.
+/// Spawn `fut`, poll it once, and wait until the FFI runtime has caught up with what that started.
 async fn spawn_parked<F, T>(fut: F) -> tokio::task::JoinHandle<T>
 where
 	F: Future<Output = T> + Send + 'static,
@@ -3319,6 +3319,31 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 	assert_eq!(frame.timestamp_us, Some(2_000));
 }
 
+/// A foreign cancel only stops polling a read; uniffi drops it later, at `rust_future_free`.
+/// Until then the cancelled read must not take the frame the next read is waiting for.
+#[tokio::test]
+async fn raw_read_frame_cancelled_before_free_leaves_the_frame() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	// Poll once, then stop without dropping, which is all `rust_future_cancel` does.
+	let mut cancelled = Box::pin(consumer.read_frame());
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx))).await;
+	assert!(first.is_pending());
+
+	track.write_frame(group_frame(b"next")).unwrap();
+	// Give anything still driving the cancelled read the chance to take the frame.
+	ffi_caught_up().await;
+
+	let next = consumer.read_frame();
+	drop(cancelled);
+	let frame = tokio::time::timeout(TIMEOUT, next)
+		.await
+		.expect("the cancelled read took the frame")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, b"next".to_vec());
+}
+
 /// Cancelling `read_frame` after it has taken the next group must not drop that
 /// group: the next read still returns its first frame.
 #[tokio::test]
@@ -4782,18 +4807,27 @@ async fn request_accept_cancelled_after_cancel() {
 	server.cancel();
 }
 
-/// Stopping the runtime is process-wide, so the scenario runs in a child test process: this
-/// test re-runs its own binary filtered to itself with the marker set, and judges the exit.
+/// Stopping the runtime is process-wide, so a shutdown scenario runs in a child test process.
+///
+/// Returns true in the child. In the parent, re-runs this binary filtered to `test` with a
+/// marker set, judges its exit, and returns false.
+fn shutdown_child(test: &str) -> bool {
+	const MARKER: &str = "MOQ_FFI_TEST_SHUTDOWN_CHILD";
+	if std::env::var_os(MARKER).is_some() {
+		return true;
+	}
+	let status = std::process::Command::new(std::env::current_exe().unwrap())
+		.args(["--exact", &format!("test::{test}")])
+		.env(MARKER, "1")
+		.status()
+		.expect("failed to spawn the child test process");
+	assert!(status.success(), "child test process failed: {status}");
+	false
+}
+
 #[tokio::test]
 async fn shutdown_cancels_and_drops_cleanly() {
-	const MARKER: &str = "MOQ_FFI_TEST_SHUTDOWN_CHILD";
-	if std::env::var_os(MARKER).is_none() {
-		let status = std::process::Command::new(std::env::current_exe().unwrap())
-			.args(["--exact", "test::shutdown_cancels_and_drops_cleanly"])
-			.env(MARKER, "1")
-			.status()
-			.expect("failed to spawn the child test process");
-		assert!(status.success(), "child test process failed: {status}");
+	if !shutdown_child("shutdown_cancels_and_drops_cleanly") {
 		return;
 	}
 
@@ -4873,6 +4907,56 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	drop(server);
 	drop(client_origin);
 	drop(server_origin);
+}
+
+/// A `Task::run` polled in place on a host thread must finish its poll before shutdown stops
+/// the drivers: a tokio timer polled after its driver is gone panics.
+#[test]
+fn shutdown_waits_for_an_in_place_poll() {
+	if !shutdown_child("shutdown_waits_for_an_in_place_poll") {
+		return;
+	}
+
+	let (entered, entered_rx) = std::sync::mpsc::channel();
+	let (release, release_rx) = std::sync::mpsc::channel::<()>();
+	let poller = std::thread::spawn(move || {
+		let task = crate::ffi::Task::new(());
+		let run = task.run(|_| async move {
+			entered.send(()).unwrap();
+			// Holds this poll open while shutdown starts on another thread.
+			release_rx.recv().unwrap();
+			tokio::time::sleep(Duration::from_millis(1)).await;
+			// Even if the sleep is already due, only the shutdown may finish this call.
+			std::future::pending::<Result<(), MoqError>>().await
+		});
+		tokio::runtime::Builder::new_current_thread()
+			.build()
+			.unwrap()
+			.block_on(run)
+	});
+	entered_rx.recv().unwrap();
+
+	let shutdown = std::thread::spawn(|| crate::moq_ffi_shutdown());
+
+	// A fresh call resolves `Cancelled` on its first poll once shutdown has begun.
+	let probe = crate::ffi::Task::new(());
+	loop {
+		let mut call = std::pin::pin!(probe.run(|_| std::future::pending::<Result<(), MoqError>>()));
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		match call.as_mut().poll(&mut cx) {
+			std::task::Poll::Ready(result) => {
+				assert!(matches!(result, Err(MoqError::Cancelled)), "{result:?}");
+				break;
+			}
+			std::task::Poll::Pending => std::thread::yield_now(),
+		}
+	}
+
+	// Shutdown has begun: the held poll now polls its timer.
+	release.send(()).unwrap();
+	let result = poller.join().expect("the in-place poll panicked");
+	assert!(matches!(result, Err(MoqError::Cancelled)), "{result:?}");
+	shutdown.join().unwrap();
 }
 
 /// The broadcast's current catalog, read on the publish side.
