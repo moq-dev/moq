@@ -854,10 +854,11 @@ async fn pair_behind_a_relay_ends_lite_06() {
 }
 
 /// `P` serves `video` on demand and replaces its producer partway through the broadcast,
-/// the way a publisher restarts an encoder. `R` reads through `A`, whose route stays up,
-/// so the logical track resumes onto the replacement. The replacement continues the
-/// track's sequence namespace, so its first group reaches `R` at once instead of being
-/// skipped until a fresh counter caught up with what `R` already read.
+/// the way a publisher restarts an encoder. The epoch lets `P`'s own front resume the
+/// logical track onto the replacement, so `A` and `R` never see the abort. The
+/// replacement continues the track's sequence namespace, so its first group reaches
+/// `R` at once instead of being skipped until a fresh counter caught up with what `R`
+/// already read.
 async fn producer_replaced(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
@@ -866,7 +867,9 @@ async fn producer_replaced(version: &str) {
 
 	let broadcast = publisher.create_broadcast("live").unwrap();
 	let mut dynamic = broadcast.dynamic();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast
+		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.unwrap();
 	let (tx, mut producers) = mpsc::unbounded();
 	moq_net_sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {

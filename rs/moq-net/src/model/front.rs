@@ -12,11 +12,11 @@
 //! The driver only offers a front routes that serve its broadcast: those with the
 //! epoch it first resolved, whose tracks resume where they stopped, or its first
 //! route alone when that had no epoch, since nothing says another serves the
-//! same bytes. Even that route can answer a re-request with another instance
-//! upstream, so without an epoch a track whose remote copy fails ends with the
-//! error instead of re-splicing. Another instance winning the path leaves the front
-//! alone: its readers stay until they leave or its routes go, and new requests
-//! get a fresh front for the winner.
+//! same bytes. Even that route can answer a re-request with another instance, so
+//! without an epoch a track whose copy fails ends with the error instead of
+//! re-splicing. Another instance winning the path leaves the front alone: its
+//! readers stay until they leave or its routes go, and new requests get a fresh
+//! front for the winner.
 //!
 //! A front nothing needs retires: once every track is forgotten (after the linger,
 //! so a returning reader still finds the cache) and no consumer holds its broadcast,
@@ -41,9 +41,8 @@ pub(super) struct Candidate {
 	pub route: u64,
 	pub local: bool,
 	/// Whether a track whose copy failed may be asked for again through the route:
-	/// the request names the epoch, so it resumes the same broadcast or is refused.
-	/// Without one, a remote route could answer with whatever instance now wins
-	/// upstream; a local broadcast is its own instance either way.
+	/// the epoch says the answer is the same broadcast. Without one, the route could
+	/// answer with whatever instance now wins upstream.
 	pub epoch: bool,
 }
 
@@ -550,12 +549,7 @@ impl Front {
 			}
 			// Died mid-serve after delivering from the same instance: normal
 			// failover, re-splice from the serving source at the first missing group.
-			Err(_)
-				if delivered
-					&& self
-						.serving
-						.is_some_and(|(_, candidate)| candidate.epoch || candidate.local) =>
-			{
+			Err(_) if delivered && self.serving.is_some_and(|(_, candidate)| candidate.epoch) => {
 				track.state = TrackState::Idle;
 				self.redispatch(name, actions);
 			}
@@ -1066,15 +1060,15 @@ mod tests {
 		);
 	}
 
-	/// Without an epoch a re-request through a peer's route could reach another
-	/// instance upstream, so the track ends with the error instead.
+	/// Without an epoch a re-request could reach another instance, so the track ends
+	/// with the error instead, whether the route is a peer's or a local broadcast.
 	#[test]
-	fn a_remote_copy_dying_without_an_epoch_ends_the_track() {
-		for closing in [false, true] {
+	fn a_copy_dying_without_an_epoch_ends_the_track() {
+		for (local, closing) in [(false, false), (false, true), (true, false)] {
 			let mut front = serving(
 				Candidate {
 					route: 1,
-					local: false,
+					local,
 					epoch: false,
 				},
 				100,
@@ -1095,33 +1089,6 @@ mod tests {
 			// A returning reader is not re-spliced either.
 			assert_actions(front.step(Event::Used { track: name("video") }), &[]);
 		}
-	}
-
-	/// A broadcast published on this origin is its own instance, so its track is
-	/// re-spliced without an epoch, such as when the publisher replaces it.
-	#[test]
-	fn a_local_copy_dying_without_an_epoch_resplices() {
-		let mut front = serving(
-			Candidate {
-				route: 1,
-				local: true,
-				epoch: false,
-			},
-			100,
-		);
-		assert_actions(
-			front.step(Event::TrackEnded {
-				track: name("video"),
-				source: 100,
-				closing: false,
-				result: Err(Error::Dropped),
-				delivered: true,
-			}),
-			&[Action::Query {
-				track: name("video"),
-				source: 100,
-			}],
-		);
 	}
 
 	#[test]
