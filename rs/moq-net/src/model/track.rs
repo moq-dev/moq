@@ -3425,6 +3425,15 @@ impl group::Expiry for GroupExpiry {
 					}
 				};
 				let edge = state.drift_edge(cap, outer, successor);
+				// Likewise the edge: its abort hands the edge to a lower group, which the
+				// scan below skips.
+				if let Some(live) = edge.presentation
+					&& let Some(slot) = state.lookup.get(&live.sequence)
+					&& slot.group.poll_closed(waiter).is_ready()
+					&& slot.group.is_aborted()
+				{
+					continue;
+				}
 				expired = state.is_stale(self.sequence, &edge, budget);
 				if expired {
 					break;
@@ -3435,8 +3444,8 @@ impl group::Expiry for GroupExpiry {
 				// unstamped immediate successor (a reach where there was none).
 				// Register on the candidate, its successor, and every servable group
 				// past the edge. If one raced this scan, resolve the edge again before
-				// Pending. Groups between the successor and the edge can move neither,
-				// and walking them would cost each of N parked serves the whole
+				// Pending. Groups between the successor and the edge can move neither
+				// while the edge stands (its abort is watched above), and walking them would cost each of N parked serves the whole
 				// backlog, O(N^2) per track change.
 				let mut timestamp_raced = false;
 				if let Some(slot) = state.lookup.get(&self.sequence) {
@@ -6223,6 +6232,50 @@ mod test {
 		assert!(
 			woken.load(Ordering::SeqCst),
 			"the replacement's first frame bounds the reach"
+		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// An aborted edge hands the edge back to a lower group, which sits below the old edge
+	/// and so is watched only because the read observes the edge's abort. Neither the
+	/// abort nor that group's first frame touches the track.
+	#[test]
+	fn a_parked_read_watches_its_edge_abort() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(5)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		append_at(&mut producer, 1000); // the successor bounds the head's reach
+		let mut between = producer.append_group().unwrap();
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		edge.finish().unwrap();
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0);
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		edge.abort(Error::Cancel).unwrap();
+		between
+			.write_frame(Timestamp::from_millis(10_000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the edge's abort, then a new edge below it, lost the wakeup"
 		);
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
