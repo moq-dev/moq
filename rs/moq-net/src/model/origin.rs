@@ -1990,6 +1990,9 @@ impl AnnounceProducer {
 		if shared.closed {
 			return Err(Error::Closed);
 		}
+		// The requests an epoch change released, refused once the table lock is gone: the
+		// refusal wakes their fronts, which read the table.
+		let mut released = Vec::new();
 		for (prefix, id) in &self.entries {
 			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
@@ -2007,7 +2010,7 @@ impl AnnounceProducer {
 			if renewed {
 				entry.generation = generation;
 				if let Some(server) = &entry.server {
-					server.lock().renew();
+					released.extend(server.lock().renew());
 				}
 			}
 			entry.hops = route.hops.clone();
@@ -2022,6 +2025,12 @@ impl AnnounceProducer {
 			}
 			shared.sync_route(prefix, &claim);
 			shared.prune_withdrawn(prefix);
+		}
+		drop(shared);
+		for producer in released {
+			if let Ok(mut request) = producer.write() {
+				request.resolved.get_or_insert(Err(Error::Unroutable));
+			}
 		}
 		Ok(())
 	}
@@ -3881,17 +3890,16 @@ impl ServeState {
 	}
 
 	/// Release every request, queued or handed to a handler, and forget the answers served,
-	/// because the route now names another publisher instance. The fronts waiting on a
-	/// released request ask again under the new one; the handler's answer to it is dropped.
-	fn renew(&mut self) {
+	/// because the route now names another publisher instance. Returns the released
+	/// requests for the caller to refuse once it holds no lock, since the refusal wakes
+	/// their fronts. Those ask again under the new instance; the handler's answer to a
+	/// released request is dropped.
+	#[must_use = "the released requests must be refused"]
+	fn renew(&mut self) -> Vec<kio::Producer<PendingBroadcast>> {
 		// Counted before any release wakes a front, which reads the count without the lock.
 		self.renewals.fetch_add(1, Ordering::Release);
-		for producer in self.requests.drain_all() {
-			if let Ok(mut request) = producer.write() {
-				request.resolved.get_or_insert(Err(Error::Unroutable));
-			}
-		}
 		self.served = WeakCache::default();
+		self.requests.drain_all()
 	}
 
 	/// Drop the still-pending entry, if it is still ours.
