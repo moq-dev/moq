@@ -4429,6 +4429,8 @@ mod serve_tests {
 		}
 
 		assert!(!serve(Some(0)).await.flags.has_end, "capped at object 0 of 3");
+		assert!(!serve(Some(2)).await.flags.has_end, "capped at the last object");
+		assert!(!serve(Some(3)).await.flags.has_end, "capped past the last object");
 		assert!(serve(None).await.flags.has_end, "the whole group");
 	}
 }
