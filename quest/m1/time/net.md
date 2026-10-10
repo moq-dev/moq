@@ -40,7 +40,12 @@ Ban direct clock reads and timers in these crates (the ratchet). Update
 `rs/moq-net/AGENTS.md`'s test rule and every doc that names `moq_net_sim`.
 Report the API break in the PR.
 
-Public API: breaking (`time::Instant`, `moq_mux::Clock`). Wire: none.
+Public API: breaking. Every public signature in these crates that takes or
+returns `std::time::Instant` moves to `moq_time::Instant`, since a logical
+instant has no general conversion back: `time::Instant`, `moq_mux::Clock`,
+and moq-mux's `flush`/`update` family among them (`container::Producer`,
+`catalog::Estimator`, `rate::Control`, the codec and import producers). The
+PR enumerates each break and migrates its in-tree callers. Wire: none.
 
 ## Required
 
