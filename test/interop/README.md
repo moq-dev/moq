@@ -337,8 +337,8 @@ hands moq-net's QUIC and leading-ones encodings of each varint size boundary
 `number` conversion, and returns js/net's own encodings, which Rust requires to
 match byte for byte and decode back to the same value.
 
-`lite_auth_unsupported_interop` sends an AUTH_OK followed by AUTH_ERROR
-NOT_SUPPORTED across Rust and JS in both directions, checking that the later
+`lite_auth_unsupported_interop` sends an AUTH\_OK followed by AUTH\_ERROR
+NOT\_SUPPORTED across Rust and JS in both directions, checking that the later
 refusal retains its meaning and both bindings emit the same bytes.
 
 `lite_varint_interop` runs next to it and does the same through moq-lite's
