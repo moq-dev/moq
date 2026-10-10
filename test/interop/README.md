@@ -23,7 +23,7 @@ The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
 native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` covers
-Node and Bun. `--tail` runs just these five lanes.
+Node and Bun. `--tail` runs just these five lanes. The wire-compat lanes, which swap in released relays and clients, skip them.
 
 The finite clients keep their session alive until the harness acknowledges the
 reader's complete clean end over stdin, so a lane tests delivery rather than

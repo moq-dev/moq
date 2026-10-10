@@ -1432,17 +1432,19 @@ impl TrackState {
 		if !self.tail_pending || self.abort.is_some() {
 			return false;
 		}
-		// Without a declared start, the lowest group that arrived stands in for it.
+		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
+		// groups count. Without a declared start, the lowest one stands in for it.
 		let floor = match self.start_sequence {
 			Some(start) => start,
 			None if self.start_pending => return true,
-			None => match self.lookup.keys().next() {
-				Some(&first) => first,
+			None => match self.lookup.iter().find(|(_, slot)| slot.visible) {
+				Some((&first, _)) => first,
 				None => return fin > 0,
 			},
 		}
 		.min(fin);
-		(self.lookup.range(floor..fin).count() as u64) < fin - floor
+		let arrived = self.lookup.range(floor..fin).filter(|(_, slot)| slot.visible).count();
+		(arrived as u64) < fin - floor
 	}
 
 	/// Whether the declared end is reached and every cached group below it finished,
@@ -7847,6 +7849,28 @@ mod test {
 		assert_eq!(arrival.assert_group().sequence, 1);
 		drop(producer);
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A fetched copy of a group the live feed still owes never reaches an arrival-order
+	/// reader, so it does not fill the hole: the reader waits for the live group.
+	#[moq_net_sim::test]
+	async fn a_fetched_group_does_not_fill_a_pending_tail() {
+		let mut producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let mut arrival = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(2).unwrap();
+		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
+
+		let _pending = consumer.fetch_group(0, None);
+		let req = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		req.accept(None).unwrap().finish().unwrap();
+		assert!(
+			arrival.recv_group().now_or_never().is_none(),
+			"the live group 0 is still owed"
+		);
 	}
 
 	/// An abort ends the wait for a pending tail. Whatever reached the end finished, so

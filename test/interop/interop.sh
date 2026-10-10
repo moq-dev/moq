@@ -30,13 +30,13 @@ RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTER
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
-# The idle-out check guards this checkout's relay and clients. A run that swaps in other
-# binaries or JS clients (the wire-compat lanes run released ones) can't be held to it: a
-# released client may not close cleanly, and a released relay names no connection when one
-# closes.
-IDLE_CHECK=1
+# The idle-out check and the finite-tail lanes guard this checkout's relay and clients. A
+# run that swaps in other binaries or JS clients (the wire-compat lanes run released ones)
+# can't be held to them: a released client may not close cleanly, a released relay names no
+# connection when one closes, and the tail clients are built from this checkout only.
+IN_TREE=1
 if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
-    IDLE_CHECK=0
+    IN_TREE=0
 fi
 TIMEOUT="${INTEROP_TIMEOUT:-20}"
 FPS="${INTEROP_FPS:-30}"
@@ -865,7 +865,7 @@ run_round() {
         stop_publisher "$pub_pid" "$pub"
     fi
     # The negative control's subscribers end by timing out, which is its point.
-    [[ "$NEGATIVE" -eq 1 || "$IDLE_CHECK" -eq 0 ]] || check_idle_outs "$pub" "$from"
+    [[ "$NEGATIVE" -eq 1 || "$IN_TREE" -eq 0 ]] || check_idle_outs "$pub" "$from"
     return 0
 }
 
@@ -1007,7 +1007,7 @@ elif [[ "$TAIL_ONLY" -eq 0 ]]; then
     fi
 fi
 
-if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 ]]; then
+if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 && "$IN_TREE" -eq 1 ]]; then
     echo "=== finite track tails ==="
     run_tail_pair rust rust
     for runtime in js-native-node js-native-bun; do
