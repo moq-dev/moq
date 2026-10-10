@@ -8,7 +8,7 @@ use moq_relay::{Config, Relay};
 use url::Url;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const PATH: &str = "opalin/cell-clumsy-octopus/cameras/left.hang";
+const PATH: &str = "robot/cell-clumsy-octopus/cameras/left.hang";
 
 async fn spawn_relay(
 	id: u64,

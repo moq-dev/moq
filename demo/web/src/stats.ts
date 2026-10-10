@@ -136,22 +136,26 @@ discovery.run((effect) => {
 			const node = Net.Path.stripPrefix(prefix, path);
 			if (!node) continue;
 
-			if (entry.kind !== "end") {
-				if (subs.has(node)) continue;
-				const ne = new Signals.Effect();
-				subs.set(node, ne);
-				subscribeNode(ne, origin, path, node);
-			} else {
+			// The same node re-priced or failed over: its counters carry on.
+			if (entry.kind === "update") continue;
+			if (entry.kind === "start" && subs.has(node)) continue;
+
+			// An end, or a restart: another instance at the path counts from zero, so neither
+			// series may splice across it.
+			if (entry.kind !== "start") {
 				subs.get(node)?.close();
 				subs.delete(node);
 				nodeStats.mutate((s) => {
 					delete s[node];
 				});
-				// A restart ends the old epoch and starts a new one at the same path,
-				// counting from zero, so neither series may splice across it.
 				history.delete(node);
 				clusterMembership = "";
 			}
+			if (entry.kind === "end") continue;
+
+			const ne = new Signals.Effect();
+			subs.set(node, ne);
+			subscribeNode(ne, origin, path, node);
 		}
 	});
 });

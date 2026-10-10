@@ -147,6 +147,12 @@ drain *args:
 wasm *args:
     ./wasm/run.sh "$@"
 
+# The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
+video:
+    cd .. && bun install --frozen-lockfile
+    cd video && bunx playwright install chromium
+    cd video && bun test ./renderer.browser.ts
+
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
     cargo nextest run --locked -p moq-tokio --test max_age --run-ignored all

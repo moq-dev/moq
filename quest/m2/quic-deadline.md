@@ -60,6 +60,6 @@ Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
 - [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures whether
   receive timestamps give a forward delay worth replacing the half-RTT estimate
 - [ACK hook](/quest/m2/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`
-- [Discover media headroom](/quest/m2/quic-probe.md) - can reuse
+- [Discover media headroom](/quest/m1/quic-probe.md) - can reuse
   retransmission machinery if redundant capacity probes prove worthwhile
 - [noq#813](https://github.com/n0-computer/noq/issues/813) - the per-stream deadline proposal to n0

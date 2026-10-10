@@ -4,9 +4,7 @@
 
 kixelated decides two questions [#4822](https://github.com/moq-dev/moq/pull/4822)
 (the untimed model) raised, and each answer becomes a quest or is dropped.
-Requested by an external consumer (OneTooMany), who leaves these calls to the
-maintainer. This quest waits on that decision; delete it once both are
-answered.
+This quest waits on that decision; delete it once both are answered.
 
 ## Plan
 
@@ -39,4 +37,3 @@ malformed rule can't reach them, and nothing is left to decide there.
 ## Related
 
 - [One max_age meaning](/quest/m1/cache-max-age.md) - the other untimed follow-up, already planned
-- [FETCH_OK carries the track's properties](/quest/m1/fetch-ok-properties.md) - also touches how a FETCH learns timedness
