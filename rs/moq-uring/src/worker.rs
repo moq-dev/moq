@@ -38,8 +38,9 @@ const PRODUCTION_CQ_ENTRIES: u32 = 2048;
 const CQ_ENTRIES: u32 = PRODUCTION_CQ_ENTRIES;
 // Unit tests exercise overflow handling but do not need production pool capacity.
 // Small rings leave room for independent nextest invocations under one user.
+// Keep the CQ above twice the SQ so the explicit-sizing regression stays sensitive.
 #[cfg(test)]
-const CQ_ENTRIES: u32 = 256;
+const CQ_ENTRIES: u32 = 512;
 
 /// Maximum completions copied at once while teardown is deadline-bounded.
 const TEARDOWN_CQE_BATCH: usize = 64;
@@ -920,9 +921,9 @@ mod tests {
 	#[test]
 	fn the_ring_honors_the_requested_cq_depth() {
 		// The kernel-reported geometry, not the constant: dropping the
-		// `setup_cqsize` call would silently fall back to a CQ of twice the SQ
-		// (512), and the overflow test below cannot catch that because it
-		// expects overflow. This one pins the operative fix.
+		// `setup_cqsize` call would silently fall back to a CQ of twice the SQ.
+		// Both builds request more; the overflow test below cannot catch a
+		// smaller queue because it expects overflow.
 		let Some(worker) = worker() else { return };
 		let cq = worker.shared.ring.borrow().params().cq_entries();
 		assert!(cq >= CQ_ENTRIES, "kernel granted a {cq}-entry CQ, wanted {CQ_ENTRIES}");

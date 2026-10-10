@@ -115,7 +115,7 @@ just rs bench-echo
 ## Parallel test runs
 
 Locked memory is charged per user across processes, not per nextest run.
-Unit tests use 128 SQ entries and 256 CQ entries instead of the production
+Unit tests use 128 SQ entries and 512 CQ entries instead of the production
 256/2048 geometry. Integration tests still exercise production rings.
 The nextest group allows four ring tests per invocation.
 
