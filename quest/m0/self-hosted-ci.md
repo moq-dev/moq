@@ -22,8 +22,13 @@ Decided in the 2026-10-09 planning session:
   allows editing workflows, so fork PRs are untrusted. So are Dependabot PRs:
   Dependabot pushes its branches into this repository, but they carry
   third-party build code, and `dependabot.yml` already treats them as
-  untrusted. Merge-queue runs are trusted: a maintainer approved their code
-  for `main`. Routing in `check.yml`:
+  untrusted. Merge-queue runs are trusted because a maintainer enqueues every
+  entry. To keep that true, delete `.github/workflows/dependabot.yml` (its
+  only job enables auto-merge on Dependabot PRs) and drop the Dependabot check
+  from [Merge queue](/quest/m1/merge-queue-settings.md); a maintainer enqueues
+  Dependabot PRs by hand (decided on review: the
+  `merge_group` event cannot name its PRs' authors, and a router job was
+  rejected). Routing in `check.yml`:
   `runs-on: ${{ (github.event_name == 'merge_group' || (!github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-24.04-arm' }}`.
   Guarding is by review only, with a comment at each use; no lint.
 - **Architecture:** the host is x86, while the hosted fallback is ARM. PRs on
@@ -49,8 +54,10 @@ Decided in the 2026-10-09 planning session:
   runners in a runner group restricted to `moq-dev/moq`; that is narrower than
   the repository Administration permission a repo-level runner needs. Never
   reuse moq-bot or a PAT.
-- **Cache:** run `jdx/mr-boxington-cache` on the host with filesystem storage,
-  bound to loopback. Writes require a GitHub OIDC token whose `workflow_ref`
+- **Cache:** run `jdx/mr-boxington-cache` on the host with filesystem blob
+  storage and a durable metadata database (the default `memory://` loses the
+  index on restart, orphaning the blobs; PostgreSQL via `services.postgresql`
+  unless a persistent embedded backend is supported), bound to loopback. Writes require a GitHub OIDC token whose `workflow_ref`
   is `moq-dev/moq/.github/workflows/cache.yml@refs/heads/main`, with
   `repository`, `repository_owner_id`, `ref: refs/heads/main`, and
   `event_name` of `push` or `workflow_dispatch` also checked
