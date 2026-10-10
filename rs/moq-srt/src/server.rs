@@ -185,7 +185,7 @@ pub struct Server {
 	incoming: SrtIncoming,
 	local_addr: SocketAddr,
 	/// The negotiated SRT receive latency, reused as the egress skip threshold on
-	/// each [`Subscribe`] (see [`crate::ts::Options::latency`]).
+	/// each [`Subscribe`] (see [`crate::ts::Subscriber::new`]).
 	latency: Duration,
 }
 
@@ -545,29 +545,22 @@ pub(crate) async fn serve_subscribe(
 	mut socket: SrtSocket,
 	options: crate::ts::Options,
 ) -> Result<()> {
-	// Resolve the broadcast, but watch the socket while we wait: the follower parks
-	// forever for a stream that is never published, and nothing else polls the
+	// Resolve the broadcast, but watch the socket while we wait: `routed`
+	// parks forever for a stream that is never published, and nothing else polls the
 	// socket during that wait, so without this a caller who requests a non-existent
 	// stream (or hangs up before it starts) would leak this task and its socket.
-	let follower = tokio::select! {
+	let subscriber = tokio::select! {
 		biased;
 		_ = wait_closed(&mut socket) => {
 			tracing::debug!(%path, "SRT subscribe closed before its broadcast was available");
 			return Ok(());
 		}
-		follower = moq_mux::container::ts::Follower::new(origin.clone(), path, moq_mux::catalog::CatalogFormat::Hang) => follower,
+		subscriber = crate::ts::Subscriber::new(origin, path, options) => subscriber?,
 	};
-	let mut subscriber = match follower {
-		Ok(follower) => follower
-			.with_delay(options.latency)
-			.with_linger(options.linger)
-			.with_stitch(options.stitch),
-		// The broadcast can never be served: outside the consumer's scope, or the origin closed.
-		Err(moq_mux::Error::Moq(moq_net::Error::Unauthorized | moq_net::Error::Closed)) => {
-			tracing::warn!(%path, "SRT subscribe for an unroutable broadcast");
-			return Ok(());
-		}
-		Err(err) => return Err(err.into()),
+
+	let Some(mut subscriber) = subscriber else {
+		tracing::warn!(%path, "SRT subscribe for an unroutable broadcast");
+		return Ok(());
 	};
 
 	let mut egress = Egress::default();

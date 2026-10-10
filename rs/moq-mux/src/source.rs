@@ -52,6 +52,14 @@ impl Source {
 		self
 	}
 
+	pub(crate) fn origin(&self) -> &moq_net::origin::Consumer {
+		&self.origin
+	}
+
+	pub(crate) fn path(&self) -> &moq_net::PathOwned {
+		&self.path
+	}
+
 	/// Resolve and subscribe to the catalog broadcast (the one at this source's path).
 	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
 		Ok(self.request_catalog().await?)

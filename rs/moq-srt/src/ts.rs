@@ -3,14 +3,14 @@
 //! SRT carries MPEG-TS, so ingest is the same three steps every time: create a
 //! broadcast, publish it into the origin so downstream subscribers can find it,
 //! and feed the incoming bytes through a [`moq_mux`] TS importer that demuxes
-//! them into MoQ tracks. [`Publisher`] packages that up. Egress is the mirror image:
-//! a [`ts::Follower`] consumes a broadcast from the origin and re-muxes it back to
-//! MPEG-TS for an SRT caller (VLC, ffmpeg) to play, configured by [`Options`].
+//! them into MoQ tracks. [`Publisher`] packages that up. [`Subscriber`] is the
+//! mirror image for egress: it consumes a broadcast from the origin and re-muxes
+//! it back to MPEG-TS for an SRT caller (VLC, ffmpeg) to play.
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_mux::container::ts;
+use moq_mux::container::{Frame, ts};
 use moq_net::origin;
 
 use crate::Result;
@@ -160,21 +160,78 @@ impl Publisher {
 	}
 }
 
-/// How an egress muxes its broadcast, and treats it ending or being replaced
-/// (see [`ts::Follower`]).
+/// How an egress treats its broadcast ending or being replaced.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Options {
-	/// The muxer's jitter-buffer delay: each frame is muxed that long after its decode time, a
-	/// frame arriving later is dropped, and a stalled group is skipped after half of it. We reuse
-	/// the locally configured SRT receive latency for it, the same budget an SRT hop gives a
-	/// packet. It's the configured value, not the handshake result (srt-tokio doesn't expose the
-	/// negotiated latency), so a peer that requests a higher receive latency gets a larger actual
-	/// buffer than this delay.
+	/// The muxer's jitter-buffer delay ([`Subscriber::new`]).
 	pub latency: Duration,
 	/// How long to wait for the same publisher instance to come back once its broadcast ends.
 	pub linger: Duration,
 	/// Follow another instance replacing the broadcast, as a full program switch.
 	pub stitch: bool,
+}
+
+/// Muxes a single MoQ broadcast back into an MPEG-TS byte stream for egress.
+///
+/// The mirror of [`Publisher`]: where that demuxes SRT-carried TS into the
+/// origin, this consumes a broadcast from the origin and re-muxes it to TS so an
+/// SRT caller can play it. Pull frames with [`next`](Self::next); each carries
+/// the TS bytes plus the media timestamp used to pace delivery.
+///
+/// The path's announcements drive it through [`ts::Follower`], as they drive a player: the same
+/// publisher instance returning within the linger continues the stream, and a replacement either
+/// ends it with [`moq_mux::Error::Replaced`] or, with `stitch`, switches the program.
+pub struct Subscriber {
+	follower: ts::Follower<ts::Ext>,
+}
+
+impl Subscriber {
+	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
+	///
+	/// `options.latency` is the muxer's jitter-buffer delay: each frame is muxed that long after
+	/// its decode time, a frame arriving later is dropped, and a stalled group is
+	/// skipped after half of it. We reuse the locally configured SRT receive latency for
+	/// it, the same budget an SRT hop gives a packet. It's the configured value,
+	/// not the handshake result (srt-tokio doesn't expose the negotiated latency),
+	/// so a peer that requests a higher receive latency gets a larger actual
+	/// buffer than this delay.
+	///
+	/// Returns `Ok(None)` if the broadcast can never be served (path outside the
+	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
+	/// to be announced, so a caller may connect before the publisher does.
+	pub(crate) async fn new(origin: &origin::Consumer, path: &str, options: Options) -> Result<Option<Self>> {
+		if origin.routed(path).await.is_none() {
+			return Ok(None);
+		}
+
+		// The export resolves the broadcast (and any referenced sibling broadcast, via the
+		// catalog `broadcast` field) through the origin, joining the one just announced.
+		let source = moq_mux::Source::new(origin.consume(), path);
+		let export = ts::Export::with_ts(source, moq_mux::catalog::CatalogFormat::Hang)
+			.await?
+			.with_delay(options.latency);
+		let follower = ts::Follower::new(export)?
+			.with_linger(options.linger)
+			.with_stitch(options.stitch);
+		Ok(Some(Self { follower }))
+	}
+
+	/// Pull the next muxed frame (TS bytes + media timestamp), or `None` once the
+	/// broadcast ends with nothing to follow.
+	pub async fn next(&mut self) -> Result<Option<Frame>> {
+		Ok(self.follower.next().await?)
+	}
+
+	/// The muxer's generation counter for the frame [`next`](Self::next) just
+	/// returned, which increments each time the program clock restarts: a marker that
+	/// breaks the publisher's timeline, or a switch to another instance.
+	///
+	/// A caller pacing on the media timestamps has to drop its own anchor with it: sample
+	/// this after every frame and re-anchor when it changes, or the new clock maps
+	/// through the old anchor and the whole new generation collapses onto one instant.
+	pub fn discontinuity(&self) -> u64 {
+		self.follower.export().discontinuity()
+	}
 }
 
 #[cfg(test)]
@@ -579,8 +636,9 @@ mod tests {
 		let expected_cue = cue.payload;
 		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
 
-		let mut subscriber = ts::Follower::new(origin.consume(), "ingest", CatalogFormat::Hang)
+		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", Options::default())
 			.await
+			.unwrap()
 			.expect("the ingest broadcast is available for SRT egress");
 		let mut output = Vec::new();
 		loop {

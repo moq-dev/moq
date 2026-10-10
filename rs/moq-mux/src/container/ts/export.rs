@@ -755,19 +755,20 @@ impl<E: catalog::Catalog> Export<E> {
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	async fn build(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
 		let broadcast = source.broadcast().await?;
-		Self::build_on(source, &broadcast, catalog_format).await
+		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
+		Ok(Self::build_with(source, &broadcast, catalog_format, catalog))
 	}
 
-	/// Export `broadcast`, the one at `source`'s path, pinning every later request for that
-	/// path to its instance.
-	pub(super) async fn build_on(
+	/// Export `broadcast`, the one at `source`'s path, from its subscribed `catalog`, pinning
+	/// every later request for that path to its instance.
+	fn build_with(
 		source: crate::Source,
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
+		catalog: crate::catalog::Consumer<E>,
+	) -> Self {
 		let instance = broadcast.info().epoch.clone();
-		let catalog = crate::catalog::Consumer::new(broadcast, catalog_format).await?;
-		Ok(Self {
+		Self {
 			source: source.pinned(instance.clone()),
 			catalog: Some(catalog),
 			catalog_format,
@@ -799,7 +800,7 @@ impl<E: catalog::Catalog> Export<E> {
 			video_start: None,
 			mux_rate: None,
 			mux_rate_override: None,
-		})
+		}
 	}
 
 	/// Pad the output with null packets to `mux_rate` bits per second, whatever the
@@ -1456,6 +1457,15 @@ impl<E: catalog::Catalog> Export<E> {
 		self.emitted_epoch
 	}
 
+	pub(super) fn source(&self) -> &crate::Source {
+		&self.source
+	}
+
+	/// The publisher epoch of the broadcast being exported, `None` for an epochless route.
+	pub(super) fn instance(&self) -> Option<&moq_net::Epoch> {
+		self.instance.as_ref()
+	}
+
 	/// Carry on into `broadcast`, the one now at this export's path.
 	///
 	/// The same publisher instance (an equal epoch) continues the stream: the program and
@@ -1466,11 +1476,27 @@ impl<E: catalog::Catalog> Export<E> {
 	/// fresh export of `broadcast` with a new PMT from its catalog, and nothing carried from
 	/// this one but the PAT and PMT `version_number`s, both advanced. Every PID's first packet
 	/// flags the break with `discontinuity_indicator`, and each stream starts on a keyframe.
-	/// The caller decides whether to follow a replacement at all.
+	/// The caller decides whether to follow a replacement at all; [`Follower`](super::Follower)
+	/// decides from the path's announcements.
 	pub async fn follow(mut self, broadcast: moq_net::broadcast::Consumer) -> Result<Self, crate::Error> {
+		let catalog = crate::catalog::Consumer::new(&broadcast, self.catalog_format).await?;
+		self.followed(&broadcast, catalog)?;
+		Ok(self)
+	}
+
+	pub(super) fn catalog_format(&self) -> CatalogFormat {
+		self.catalog_format
+	}
+
+	/// [`Self::follow`], once `broadcast`'s catalog is subscribed.
+	pub(super) fn followed(
+		&mut self,
+		broadcast: &moq_net::broadcast::Consumer,
+		catalog: crate::catalog::Consumer<E>,
+	) -> Result<(), crate::Error> {
 		let same = self.instance.is_some() && broadcast.info().epoch == self.instance;
 		if !same || self.psi.is_none() {
-			let mut next = Self::build_on(self.source.clone(), &broadcast, self.catalog_format).await?;
+			let mut next = Self::build_with(self.source.clone(), broadcast, self.catalog_format, catalog);
 			next.replay = self.replay;
 			next = next.with_delay(self.delay);
 			if let Some(rate) = self.mux_rate_override {
@@ -1485,10 +1511,11 @@ impl<E: catalog::Catalog> Export<E> {
 				next.epoch = self.epoch + 1;
 				next.emitted_epoch = self.emitted_epoch;
 			}
-			return Ok(next);
+			*self = next;
+			return Ok(());
 		}
 
-		self.catalog = Some(crate::catalog::Consumer::new(&broadcast, self.catalog_format).await?);
+		self.catalog = Some(catalog);
 		self.si_flushed = false;
 		// A name no entry carries, so the returned catalog repoints every SI entry.
 		for si in self.si.values_mut() {
@@ -1501,7 +1528,7 @@ impl<E: catalog::Catalog> Export<E> {
 			track.finished = true;
 			self.stale.insert(name.clone());
 		}
-		Ok(self)
+		Ok(())
 	}
 
 	/// Discard what has not gone out and restart the program clock. Every rendition

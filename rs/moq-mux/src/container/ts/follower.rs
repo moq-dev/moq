@@ -1,13 +1,13 @@
-//! [`Follower`]: an [`Export`] that follows its path across publisher instances.
+//! [`Follower`]: an [`Export`] driven by its path's announcements, as a player is.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
-use moq_net::AsPath;
-use moq_net::announce::Event;
-use web_async::time::{Instant, timeout_at};
+use web_async::time::Instant;
 
 use super::{Export, catalog};
-use crate::catalog::CatalogFormat;
 use crate::container::Frame;
 
 /// How long an export failure waits for its broadcast to go before it counts as the export's own.
@@ -16,187 +16,13 @@ use crate::container::Frame;
 /// land together.
 const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
-/// An MPEG-TS export of the broadcast at one path, driven by the path's announcements the way a
-/// player is.
-///
-/// The same publisher instance (an equal epoch) coming back within the
-/// [linger](Self::with_linger) continues the stream. Another instance taking the path ends it with
-/// [`Error::Replaced`](crate::Error::Replaced), or with [stitch](Self::with_stitch) switches the
-/// program to it at once (see [`Export::follow`]). Subscriptions are sticky, so without stitch a
-/// replaced publisher that stays up keeps the export until it ends.
-///
-/// Like [`Export::with_ts`], it carries the `mpegts` streams the catalog lists verbatim.
-pub struct Follower {
-	/// Taken only while [`Export::follow`] carries it on, and gone once the export ends.
-	export: Option<Export<catalog::Ext>>,
-	watch: Watch,
-	linger: Duration,
-	stitch: bool,
-}
+/// The subscriptions carrying an export on into another broadcast.
+type Resolved<E> = crate::Result<(moq_net::broadcast::Consumer, crate::catalog::Consumer<E>)>;
 
-impl Follower {
-	/// Wait for a broadcast to serve `path` on `origin`, and export it with its `format` catalog.
-	///
-	/// Fails with [`moq_net::Error::Unauthorized`] for a path outside the origin's scope, and
-	/// with [`moq_net::Error::Closed`] when the origin closes first.
-	pub async fn new(
-		origin: moq_net::origin::Consumer,
-		path: impl AsPath,
-		format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
-		let path = path.as_path().to_owned();
-		let mut watch = Watch {
-			follow: origin.follow(&path)?,
-			origin,
-			path,
-			epoch: None,
-			serving: Serving::Gone,
-			ended: false,
-			closed: false,
-		};
-		while watch.serving == Serving::Gone {
-			if !watch.changed().await {
-				return Err(moq_net::Error::Closed.into());
-			}
-		}
-		let broadcast = watch.resolve().await?;
-		let source = crate::Source::new(watch.origin.clone(), &watch.path);
-		let export = Export::build_on(source, &broadcast, format).await?;
-		Ok(Self {
-			export: Some(export),
-			watch,
-			linger: Duration::ZERO,
-			stitch: false,
-		})
-	}
-
-	/// See [`Export::with_delay`].
-	pub fn with_delay(mut self, delay: Duration) -> Self {
-		self.export = self.export.map(|export| export.with_delay(delay));
-		self
-	}
-
-	/// See [`Export::with_mux_rate`].
-	pub fn with_mux_rate(mut self, mux_rate: u64) -> Self {
-		self.export = self.export.map(|export| export.with_mux_rate(mux_rate));
-		self
-	}
-
-	/// Wait up to `linger` for the same publisher instance to come back once the broadcast ends,
-	/// carrying on with the same stream. Defaults to zero, which ends at the broadcast's end.
-	pub fn with_linger(mut self, linger: Duration) -> Self {
-		self.linger = linger;
-		self
-	}
-
-	/// Follow another publisher instance taking the path as a full program switch, instead of
-	/// ending with [`Error::Replaced`](crate::Error::Replaced). Off by default.
-	pub fn with_stitch(mut self, stitch: bool) -> Self {
-		self.stitch = stitch;
-		self
-	}
-
-	/// The next muxed frame (see [`Export::next`]), or `None` once the broadcast ends with
-	/// nothing to follow.
-	///
-	/// An export failure while the broadcast is still announced is the export's own, so it is
-	/// returned without lingering.
-	pub async fn next(&mut self) -> crate::Result<Option<Frame>> {
-		loop {
-			let Some(export) = self.export.as_mut() else {
-				return Ok(None);
-			};
-			let end = tokio::select! {
-				next = export.next() => match next {
-					Ok(Some(frame)) => return Ok(Some(frame)),
-					Ok(None) => Ok(()),
-					Err(err) => Err(err),
-				},
-				true = self.watch.changed(), if !self.watch.closed => {
-					if self.stitch && matches!(self.watch.serving, Serving::Other(_)) {
-						tracing::info!(path = %self.watch.path, "broadcast replaced, switching the program to the new instance");
-						let export = self.export.take().expect("an export between follows");
-						self.export = Some(self.watch.carry(export).await?);
-					}
-					continue;
-				}
-			};
-			let export = self.export.take().expect("an export between follows");
-			self.export = self.settle(export, end).await?;
-		}
-	}
-
-	/// See [`Export::stats`].
-	pub fn stats(&self) -> super::stats::Export {
-		self.export.as_ref().map(Export::stats).unwrap_or_default()
-	}
-
-	/// See [`Export::discontinuity`].
-	pub fn discontinuity(&self) -> u64 {
-		self.export.as_ref().map_or(0, Export::discontinuity)
-	}
-
-	/// Decide what follows the export's `end`: the export carried on into a return, or `None`
-	/// once a clean end has waited out the linger with nothing to follow.
-	///
-	/// The linger bounds the whole return, catalog subscription included.
-	async fn settle(
-		&mut self,
-		export: Export<catalog::Ext>,
-		end: crate::Result<()>,
-	) -> crate::Result<Option<Export<catalog::Ext>>> {
-		let watch = &mut self.watch;
-		let deadline = Instant::now() + self.linger;
-		// A failure ends the broadcast only if the broadcast goes too. One still announced
-		// cannot return, so the failure is the export's own.
-		if let Err(err) = &end
-			&& !watch.ended
-			&& watch.serving == Serving::Ours
-		{
-			let grace = Instant::now() + CLOSE_GRACE.min(self.linger);
-			while watch.serving == Serving::Ours && timeout_at(grace, watch.changed()).await == Ok(true) {}
-			if watch.serving == Serving::Ours {
-				tracing::warn!(path = %watch.path, %err, "export failed with the broadcast still up, so not lingering");
-				return Err(end.unwrap_err());
-			}
-		}
-		if !self.linger.is_zero() {
-			match &end {
-				Ok(()) => {
-					tracing::info!(path = %watch.path, linger = ?self.linger, "broadcast finished, waiting for it to return")
-				}
-				Err(err) => {
-					tracing::warn!(path = %watch.path, %err, linger = ?self.linger, "broadcast ended, waiting for it to return")
-				}
-			}
-		}
-
-		loop {
-			let follow = match &watch.serving {
-				Serving::Ours => watch.ended,
-				Serving::Other(_) if self.stitch => true,
-				Serving::Other(_) => return Err(crate::Error::Replaced(watch.path.to_string())),
-				Serving::Gone => false,
-			};
-			if follow {
-				return match timeout_at(deadline, watch.carry(export)).await {
-					Ok(next) => {
-						tracing::info!(path = %watch.path, "broadcast returned, carrying on");
-						next.map(Some)
-					}
-					Err(_) => {
-						tracing::info!(path = %watch.path, linger = ?self.linger, "broadcast did not return");
-						end.map(|()| None)
-					}
-				};
-			}
-			if !matches!(timeout_at(deadline, watch.changed()).await, Ok(true)) {
-				tracing::info!(path = %watch.path, linger = ?self.linger, "broadcast did not return");
-				return end.map(|()| None);
-			}
-		}
-	}
-}
+#[cfg(not(target_family = "wasm"))]
+type Resolving<E> = Pin<Box<dyn Future<Output = Resolved<E>> + Send>>;
+#[cfg(target_family = "wasm")]
+type Resolving<E> = Pin<Box<dyn Future<Output = Resolved<E>>>>;
 
 /// What the announcements say serves the exported path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,225 +31,305 @@ enum Serving {
 	Gone,
 	/// The publisher instance being exported.
 	Ours,
-	/// Another instance: another epoch, or any return of an epochless route.
+	/// Another instance: a newer epoch, or any return of an epochless route.
 	Other(Option<moq_net::Epoch>),
 }
 
-/// The path's announcements, against the instance the export reads.
-struct Watch {
-	origin: moq_net::origin::Consumer,
+enum State<E: catalog::Catalog> {
+	/// Exporting.
+	Running,
+	/// The export ended with `end`, waiting for the announcements to say what follows.
+	Settling {
+		end: crate::Result<()>,
+		/// Until when a failure with the broadcast still announced waits for it to go.
+		grace: Option<Instant>,
+		/// When the linger runs out.
+		deadline: Instant,
+	},
+	/// Resolving the instance serving the path now, to carry the export on into it.
+	Following {
+		resolving: Resolving<E>,
+		/// How the export ended and when the linger runs out, or `None` for a stitch mid-stream.
+		settling: Option<(crate::Result<()>, Instant)>,
+	},
+	/// Nothing follows.
+	Done,
+}
+
+/// Carries an [`Export`] across its broadcast's returns, following the path's announcements.
+///
+/// The same publisher instance (the same epoch) returning within the [linger](Self::with_linger)
+/// continues the stream. Another instance taking the path fails with
+/// [`Error::Replaced`](crate::Error::Replaced), unless [stitching](Self::with_stitch), which
+/// switches the program to it at once. Subscriptions are sticky, so without stitching a
+/// replaced publisher that stays up keeps the export until it ends. An export that fails
+/// while its broadcast stays announced fails here too, without lingering.
+///
+/// An epochless route has no instance to match, so any return of one is a replacement.
+pub struct Follower<E: catalog::Catalog = ()> {
+	export: Export<E>,
+	state: State<E>,
+	announced: moq_net::announce::Follow,
 	path: moq_net::PathOwned,
-	follow: moq_net::announce::Follow,
 	/// The epoch of the instance being exported.
 	epoch: Option<moq_net::Epoch>,
 	serving: Serving,
-	/// Nothing served the path at some point since the export resolved its broadcast.
+	/// Every route went since the export resolved its broadcast.
 	ended: bool,
+	/// An announcement arrived since the follower was built.
+	started: bool,
 	/// The origin closed, so nothing more is announced.
 	closed: bool,
+	linger: Duration,
+	stitch: bool,
+	timer: Option<Pin<Box<web_async::time::Sleep>>>,
 }
 
-impl Watch {
-	/// Apply the next change to the route serving the path, or `false` once the origin closes.
-	async fn changed(&mut self) -> bool {
-		let Some(event) = self.follow.next().await else {
-			self.closed = true;
-			return false;
+impl<E: catalog::Catalog + 'static> Follower<E> {
+	/// Follow the path `export` reads, from the broadcast it resolved.
+	///
+	/// Fails when the export's origin can never cover its path.
+	pub fn new(export: Export<E>) -> crate::Result<Self> {
+		let source = export.source();
+		let announced = source.origin().follow(source.path())?;
+		let path = source.path().clone();
+		let epoch = export.instance().cloned();
+		let mut follower = Self {
+			export,
+			state: State::Running,
+			announced,
+			path,
+			epoch,
+			serving: Serving::Ours,
+			ended: false,
+			started: false,
+			closed: false,
+			linger: Duration::ZERO,
+			stitch: false,
+			timer: None,
 		};
-		match event {
-			Event::Start(announce) => {
-				let epoch = announce.route.epoch;
-				self.serving = match epoch.is_some() && epoch == self.epoch {
-					true => Serving::Ours,
-					false => Serving::Other(epoch),
-				};
-			}
-			Event::Restart(announce) => self.serving = Serving::Other(announce.route.epoch),
-			// The same instance re-priced or failed over, which subscriptions ride out.
-			Event::Update(_) => {}
-			Event::End(_) => {
-				self.serving = Serving::Gone;
-				self.ended = true;
-			}
-		}
-		true
+		// Take the start naming the route the export resolved now, before anything else can
+		// fold into it.
+		follower.poll_announced(&kio::Waiter::noop());
+		Ok(follower)
 	}
 
-	/// Resolve the instance serving the path now, and export it from here on.
-	async fn resolve(&mut self) -> crate::Result<moq_net::broadcast::Consumer> {
+	/// Wait up to `linger` for the same instance to return once the broadcast ends. Defaults to
+	/// [`Duration::ZERO`].
+	///
+	/// It bounds the whole return, catalog subscription included.
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.linger = linger;
+		self
+	}
+
+	/// Follow another publisher instance taking the path, as a full program switch (see
+	/// [`Export::follow`]). Defaults to `false`.
+	pub fn with_stitch(mut self, stitch: bool) -> Self {
+		self.stitch = stitch;
+		self
+	}
+
+	/// The export being carried on.
+	pub fn export(&self) -> &Export<E> {
+		&self.export
+	}
+
+	/// Get the next muxed frame, or `None` once the broadcast ends with nothing to follow.
+	pub async fn next(&mut self) -> crate::Result<Option<Frame>> {
+		kio::wait(|waiter| self.poll_next(waiter)).await
+	}
+
+	/// Poll for the next muxed frame, registering `waiter` when there is none yet.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+		let next = self.poll_state(waiter);
+		if matches!(next, Poll::Ready(Ok(None) | Err(_))) {
+			self.state = State::Done;
+		}
+		next
+	}
+
+	fn poll_state(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+		loop {
+			match std::mem::replace(&mut self.state, State::Done) {
+				State::Done => return Poll::Ready(Ok(None)),
+				State::Running => {
+					self.poll_announced(waiter);
+					// Subscriptions are sticky, so a replacement leaves the export on the old
+					// instance until it ends, unless asked to switch at once.
+					if self.stitch && matches!(self.serving, Serving::Other(_)) {
+						tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
+						self.state = State::Following {
+							resolving: self.resolve(),
+							settling: None,
+						};
+						continue;
+					}
+					self.state = State::Running;
+					let end = match ready!(self.export.poll_next(waiter)) {
+						Ok(Some(frame)) => return Poll::Ready(Ok(Some(frame))),
+						Ok(None) => Ok(()),
+						Err(err) => Err(err),
+					};
+					let now = Instant::now();
+					// A failure ends the broadcast only if the broadcast goes too.
+					let grace = (end.is_err() && !self.ended && self.serving == Serving::Ours)
+						.then(|| now + CLOSE_GRACE.min(self.linger));
+					if grace.is_none() {
+						self.lingering(&end);
+					}
+					self.state = State::Settling {
+						end,
+						grace,
+						deadline: now + self.linger,
+					};
+				}
+				State::Settling {
+					end,
+					mut grace,
+					deadline,
+				} => {
+					self.poll_announced(waiter);
+					if grace.is_some() && self.serving != Serving::Ours {
+						grace = None;
+						self.lingering(&end);
+					}
+					if let Some(at) = grace {
+						// One still announced cannot return, so the failure is the export's own.
+						if self.closed || self.elapsed(waiter, at) {
+							let err = end.expect_err("only a failure waits out the grace");
+							tracing::warn!(path = %self.path, %err, "export failed with the broadcast still up, so not lingering");
+							return Poll::Ready(Err(err));
+						}
+						self.state = State::Settling { end, grace, deadline };
+						return Poll::Pending;
+					}
+
+					let follow = match &self.serving {
+						Serving::Ours => self.ended,
+						Serving::Other(_) if self.stitch => true,
+						Serving::Other(_) => return Poll::Ready(Err(crate::Error::Replaced(self.path.to_string()))),
+						Serving::Gone => false,
+					};
+					if follow {
+						self.state = State::Following {
+							resolving: self.resolve(),
+							settling: Some((end, deadline)),
+						};
+						continue;
+					}
+					if self.closed || self.elapsed(waiter, deadline) {
+						tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
+						return Poll::Ready(end.map(|()| None));
+					}
+					self.state = State::Settling { end, grace, deadline };
+					return Poll::Pending;
+				}
+				State::Following {
+					mut resolving,
+					settling,
+				} => {
+					// Announcements wait until the export is on the instance they describe.
+					if let Poll::Ready(resolved) = waiter.poll_future(resolving.as_mut()) {
+						let (broadcast, catalog) = resolved?;
+						self.export.followed(&broadcast, catalog)?;
+						self.epoch = self.export.instance().cloned();
+						self.serving = Serving::Ours;
+						self.ended = false;
+						tracing::info!(
+							path = %self.path,
+							epoch = self.epoch.as_ref().map(tracing::field::display),
+							"exporting broadcast"
+						);
+						self.state = State::Running;
+						continue;
+					}
+					if let Some((end, deadline)) = &settling
+						&& self.elapsed(waiter, *deadline)
+					{
+						tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
+						return Poll::Ready(end.clone().map(|()| None));
+					}
+					self.state = State::Following { resolving, settling };
+					return Poll::Pending;
+				}
+			}
+		}
+	}
+
+	/// Apply every announcement on hand.
+	fn poll_announced(&mut self, waiter: &kio::Waiter) {
+		while !self.closed {
+			match self.announced.poll_next(waiter) {
+				Poll::Ready(Some(event)) => self.apply(event),
+				Poll::Ready(None) => self.closed = true,
+				Poll::Pending => return,
+			}
+		}
+	}
+
+	fn apply(&mut self, event: moq_net::announce::Event) {
+		let first = !std::mem::replace(&mut self.started, true);
+		self.serving = match event {
+			moq_net::announce::Event::Start(announce) => {
+				let epoch = announce.route.epoch;
+				// The first start names the route the export resolved, as near as an epochless
+				// route can tell.
+				match epoch == self.epoch && (epoch.is_some() || first) {
+					true => Serving::Ours,
+					false => Serving::Other(epoch),
+				}
+			}
+			moq_net::announce::Event::Restart(announce) => Serving::Other(announce.route.epoch),
+			moq_net::announce::Event::End(_) => {
+				self.ended = true;
+				Serving::Gone
+			}
+			// The same instance over another route.
+			moq_net::announce::Event::Update(_) => return,
+		};
+	}
+
+	/// Begin resolving the instance serving the path now.
+	fn resolve(&self) -> Resolving<E> {
 		let epoch = match &self.serving {
 			Serving::Other(epoch) => epoch.clone(),
 			Serving::Ours | Serving::Gone => self.epoch.clone(),
 		};
-		let broadcast = self.origin.request_broadcast(&self.path, epoch).await?;
-		self.epoch = broadcast.info().epoch.clone();
-		self.serving = Serving::Ours;
-		self.ended = false;
-		tracing::info!(path = %self.path, epoch = self.epoch.as_ref().map(tracing::field::display), "exporting broadcast");
-		Ok(broadcast)
+		let request = self.export.source().origin().request_broadcast(&self.path, epoch);
+		let format = self.export.catalog_format();
+		Box::pin(async move {
+			let broadcast = request.await?;
+			let catalog = crate::catalog::Consumer::new(&broadcast, format).await?;
+			Ok((broadcast, catalog))
+		})
 	}
 
-	/// Carry `export` on into the instance serving the path now.
-	async fn carry(&mut self, export: Export<catalog::Ext>) -> crate::Result<Export<catalog::Ext>> {
-		let broadcast = self.resolve().await?;
-		export.follow(broadcast).await
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	fn route(epoch: &moq_net::Epoch) -> moq_net::origin::Route {
-		moq_net::origin::Route::default().with_epoch(epoch.clone())
-	}
-
-	fn origin() -> moq_net::origin::Producer {
-		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-		tokio::spawn(moq_net::time::run(driver));
-		origin
+	fn lingering(&self, end: &crate::Result<()>) {
+		if self.linger.is_zero() {
+			return;
+		}
+		match end {
+			Ok(()) => {
+				tracing::info!(path = %self.path, linger = ?self.linger, "broadcast finished, waiting for it to return")
+			}
+			Err(err) => {
+				tracing::warn!(path = %self.path, %err, linger = ?self.linger, "broadcast ended, waiting for it to return")
+			}
+		}
 	}
 
-	/// A broadcast at `path` with a catalog, so an export of it resolves.
-	fn publish(
-		origin: &moq_net::origin::Producer,
-		path: &str,
-		route: moq_net::origin::Route,
-	) -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
-		let mut broadcast = origin.publish(path, route).unwrap();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		(broadcast, catalog)
-	}
-
-	async fn follower(origin: &moq_net::origin::Producer, path: &str) -> Follower {
-		Follower::new(origin.consume(), path, CatalogFormat::Hang)
-			.await
-			.unwrap()
-	}
-
-	/// A failure while the broadcast stays announced is the export's own: it ends after the
-	/// grace, without waiting out the linger.
-	#[tokio::test(start_paused = true)]
-	async fn a_failure_with_the_broadcast_up_ends_after_the_grace() {
-		let origin = origin();
-		let _live = publish(&origin, "live", route(&moq_net::Epoch::mint()));
-		let mut follower = follower(&origin, "live").await.with_linger(Duration::from_secs(10));
-
-		let start = Instant::now();
-		let export = follower.export.take().unwrap();
-		let failed = crate::Error::from(anyhow::anyhow!("boom"));
-		let end = follower.settle(export, Err(failed)).await;
-		assert!(end.is_err(), "the export's own failure ends it");
-		assert_eq!(start.elapsed(), CLOSE_GRACE);
-	}
-
-	/// A replacement followed under stitch that never serves its catalog gives up at the
-	/// linger, rather than waiting on the catalog past it.
-	#[tokio::test(start_paused = true)]
-	async fn a_return_without_a_catalog_expires_with_the_linger() {
-		let origin = origin();
-		let first = publish(&origin, "live", route(&moq_net::Epoch::mint()));
-		let linger = Duration::from_secs(10);
-		let mut follower = follower(&origin, "live").await.with_linger(linger).with_stitch(true);
-		drop(first);
-
-		// Replaced, but the replacement's catalog request is never answered.
-		let second = origin.publish("live", route(&moq_net::Epoch::mint())).unwrap();
-		let _unanswered = second.dynamic();
-
-		let start = Instant::now();
-		let export = follower.export.take().unwrap();
-		let end = follower.settle(export, Ok(())).await.unwrap();
-		assert!(end.is_none(), "a return that never resumes is no return");
-		assert_eq!(start.elapsed(), linger);
-	}
-
-	/// Without stitch, another instance taking the path after the export ends fails it,
-	/// however long the linger.
-	#[tokio::test(start_paused = true)]
-	async fn a_replacement_fails_without_stitch() {
-		let origin = origin();
-		let first = publish(&origin, "live", route(&moq_net::Epoch::mint()));
-		let mut follower = follower(&origin, "live").await.with_linger(Duration::from_secs(10));
-		drop(first);
-		let _second = publish(&origin, "live", route(&moq_net::Epoch::mint()));
-
-		let start = Instant::now();
-		let export = follower.export.take().unwrap();
-		let err = follower
-			.settle(export, Ok(()))
-			.await
-			.err()
-			.expect("a replacement fails");
-		assert!(matches!(err, crate::Error::Replaced(_)), "{err}");
-		assert!(start.elapsed() < Duration::from_secs(1), "no wait for a return");
-	}
-
-	/// An epochless route has no instance to match, so even its own return is a replacement.
-	#[tokio::test(start_paused = true)]
-	async fn an_epochless_return_is_a_replacement() {
-		let origin = origin();
-		let first = publish(&origin, "live", Default::default());
-		let mut follower = follower(&origin, "live").await.with_linger(Duration::from_secs(10));
-		drop(first);
-		let _second = publish(&origin, "live", Default::default());
-
-		let export = follower.export.take().unwrap();
-		let err = follower
-			.settle(export, Ok(()))
-			.await
-			.err()
-			.expect("a replacement fails");
-		assert!(matches!(err, crate::Error::Replaced(_)), "{err}");
-	}
-
-	/// The same instance coming back within the linger carries the export on.
-	#[tokio::test(start_paused = true)]
-	async fn the_same_instance_returning_continues() {
-		let origin = origin();
-		let epoch = moq_net::Epoch::mint();
-		let first = publish(&origin, "live", route(&epoch));
-		let mut follower = follower(&origin, "live").await.with_linger(Duration::from_secs(10));
-		drop(first);
-
-		let returned = async {
-			tokio::time::sleep(Duration::from_secs(2)).await;
-			let _second = publish(&origin, "live", route(&epoch));
-			std::future::pending::<()>().await;
-		};
-		let start = Instant::now();
-		let export = follower.export.take().unwrap();
-		let next = tokio::select! {
-			next = follower.settle(export, Ok(())) => next.unwrap(),
-			_ = returned => unreachable!(),
-		};
-		assert!(next.is_some(), "the export carries on");
-		assert_eq!(start.elapsed(), Duration::from_secs(2), "as soon as it is back");
-	}
-
-	/// The exact route going and a covering prefix of the same epoch taking over after the gap
-	/// reaches the follower as an update rather than an end and a start
-	/// (`quest/m0/broadcast-epoch/follow-gap.md`), so the export sees its broadcast end while
-	/// its own instance still serves the path. It must never take that for a replacement: the
-	/// export ends rather than splicing, and once the follower reports the gap it carries on.
-	#[tokio::test(start_paused = true)]
-	async fn a_same_epoch_handoff_after_a_gap_is_no_replacement() {
-		let origin = origin();
-		let epoch = moq_net::Epoch::mint();
-		let exact = publish(&origin, "pool/job", route(&epoch));
-		let linger = Duration::from_secs(10);
-		let mut follower = follower(&origin, "pool/job").await.with_linger(linger);
-
-		// Left unpolled across the handoff, and long enough for the exact route's retraction to
-		// end the export's request before the prefix arrives.
-		drop(exact);
-		tokio::time::sleep(Duration::from_secs(1)).await;
-		let _pool = origin.dynamic("pool", route(&epoch)).unwrap();
-
-		let end = tokio::time::timeout(linger * 2, follower.next())
-			.await
-			.expect("the export settles within the linger");
-		assert!(!matches!(end, Err(crate::Error::Replaced(_))), "{end:?}");
-		assert!(!matches!(follower.watch.serving, Serving::Other(_)));
+	/// Whether `at` has come, registering `waiter` to wake then if not.
+	fn elapsed(&mut self, waiter: &kio::Waiter, at: Instant) -> bool {
+		if Instant::now() >= at {
+			return true;
+		}
+		let timer = self
+			.timer
+			.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(at)));
+		if timer.deadline() != at {
+			timer.as_mut().reset(at);
+		}
+		waiter.poll_future(timer.as_mut()).is_ready()
 	}
 }

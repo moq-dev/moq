@@ -7444,3 +7444,142 @@ async fn export_stats_count_a_gap_longer_than_the_backfill() {
 	let quiet = running.quiet.expect("the output carries a PCR");
 	assert!(quiet < Duration::from_millis(200), "{quiet:?}");
 }
+
+/// Publish a catalog-only broadcast at `live`, for a test of what follows its end.
+fn publish_bare(
+	origin: &moq_net::origin::Producer,
+	epoch: Option<&moq_net::Epoch>,
+) -> (moq_net::broadcast::Producer, crate::catalog::Producer<()>) {
+	let route = moq_net::origin::Route::default();
+	publish_live::<()>(
+		origin,
+		epoch.map_or(route.clone(), |epoch| route.with_epoch(epoch.clone())),
+	)
+}
+
+/// Follow the broadcast at `live` with a fresh export of it.
+async fn follower(origin: &moq_net::origin::Producer) -> super::Follower {
+	let source = crate::Source::new(origin.consume(), "live");
+	super::Follower::new(Export::new(source).await.unwrap()).unwrap()
+}
+
+/// End a catalog-only broadcast cleanly.
+fn finish((broadcast, mut catalog): (moq_net::broadcast::Producer, crate::catalog::Producer<()>)) {
+	catalog.finish().unwrap();
+	drop((broadcast, catalog));
+}
+
+/// A failure while the broadcast stays announced is the export's own: it fails after the
+/// grace, without waiting out the linger.
+#[tokio::test(start_paused = true)]
+async fn a_follower_fails_with_the_broadcast_up_after_the_grace() {
+	let origin = crate::source::produce_origin();
+	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"nothing to mux yet"
+	);
+
+	track.abort(moq_net::Error::Cancel);
+	let start = tokio::time::Instant::now();
+	let end = follower.next().await;
+	assert!(end.is_err(), "the export's own failure fails the follower: {end:?}");
+	assert_eq!(start.elapsed(), Duration::from_secs(1));
+}
+
+/// A replacement followed with stitching that never serves its catalog gives up at the
+/// linger, rather than waiting on the catalog past it.
+#[tokio::test(start_paused = true)]
+async fn a_follower_return_without_a_catalog_expires_with_the_linger() {
+	let origin = crate::source::produce_origin();
+	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let linger = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_linger(linger).with_stitch(true);
+	let start = tokio::time::Instant::now();
+	finish(first);
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"lingering"
+	);
+
+	// Replaced, but the replacement's catalog request is never answered.
+	let second = origin
+		.publish(
+			"live",
+			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+		)
+		.unwrap();
+	let _unanswered = second.dynamic();
+	let end = follower.next().await.unwrap();
+	assert!(end.is_none(), "a return that never resumes is no return");
+	assert_eq!(start.elapsed(), linger);
+}
+
+/// Without stitching, another instance taking the path fails the follower once the export
+/// ends, however long the linger.
+#[tokio::test(start_paused = true)]
+async fn a_follower_fails_on_a_replacement_without_stitch() {
+	let origin = crate::source::produce_origin();
+	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
+	finish(first);
+	let _second = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+
+	let start = tokio::time::Instant::now();
+	let err = follower.next().await.expect_err("a replacement fails the follower");
+	assert!(matches!(err, crate::Error::Replaced(_)), "{err}");
+	assert!(start.elapsed() < Duration::from_secs(1), "no wait for a return");
+}
+
+/// An epochless route has no instance to match, so even its own return is a replacement.
+#[tokio::test(start_paused = true)]
+async fn a_follower_takes_an_epochless_return_as_a_replacement() {
+	let origin = crate::source::produce_origin();
+	let first = publish_bare(&origin, None);
+	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
+	finish(first);
+	let _second = publish_bare(&origin, None);
+
+	let err = follower
+		.next()
+		.await
+		.expect_err("an epochless return fails the follower");
+	assert!(matches!(err, crate::Error::Replaced(_)), "{err}");
+}
+
+/// The same instance coming back within the linger carries the export on: when it ends
+/// again, the linger starts over from there.
+#[tokio::test(start_paused = true)]
+async fn a_follower_continues_on_the_same_instance_returning() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let first = publish_bare(&origin, Some(&epoch));
+	let linger = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_linger(linger);
+	let start = tokio::time::Instant::now();
+	finish(first);
+	assert!(
+		tokio::time::timeout(Duration::from_secs(2), follower.next())
+			.await
+			.is_err(),
+		"lingering"
+	);
+
+	let second = publish_bare(&origin, Some(&epoch));
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"carried on"
+	);
+	finish(second);
+	let end = follower.next().await.unwrap();
+	assert!(end.is_none());
+	assert_eq!(start.elapsed(), Duration::from_secs(3) + linger);
+}

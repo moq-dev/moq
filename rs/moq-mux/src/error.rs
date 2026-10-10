@@ -203,11 +203,6 @@ pub enum Error {
 		last: hang::timeline::Position,
 	},
 
-	/// Another publisher instance took the followed broadcast's path, and following it was not
-	/// asked for (see [`ts::Follower::with_stitch`](crate::container::ts::Follower::with_stitch)).
-	#[error("another publisher instance replaced broadcast `{0}`")]
-	Replaced(String),
-
 	/// The catalog's `archive` entry indexes no timeline for this track.
 	#[error("no timeline for track {0}")]
 	TimelineMissing(String),
@@ -257,6 +252,10 @@ pub enum Error {
 	/// A capture instant is ahead of the broadcast clock's now, or before its epoch.
 	#[error("capture time is outside the broadcast clock")]
 	InvalidCapture,
+
+	/// Another publisher instance replaced a followed broadcast, and stitching was off.
+	#[error("another publisher instance replaced broadcast `{0}`; enable stitch to follow it as a program switch")]
+	Replaced(String),
 }
 
 impl Error {

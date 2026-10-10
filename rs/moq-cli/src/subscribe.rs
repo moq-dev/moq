@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
@@ -353,17 +354,21 @@ impl Subscribe {
 	async fn run_ts(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
+		self.origin.routed(&self.path).await.with_context(|| {
+			format!(
+				"broadcast `{}` is outside the session's scope, or the origin closed before it was announced",
+				self.path
+			)
+		})?;
+
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
-		// is re-framed as ADTS. `fragment_duration` does not apply to TS. The export
-		// carries the `mpegts` catalog extension so undecoded elementary streams
+		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
+		// selects the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
-		// The path's announcements drive it, as they drive a player.
-		let mut ts = moq_mux::container::ts::Follower::new(self.origin, &self.path, self.catalog)
+		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
-			.with_delay(self.args.max_delay)
-			.with_linger(self.args.linger)
-			.with_stitch(self.args.stitch);
+			.with_delay(self.args.max_delay);
 		if let Some(mux_rate) = self.args.mux_rate {
 			ts = ts.with_mux_rate(mux_rate);
 		}
@@ -371,7 +376,11 @@ impl Subscribe {
 		// A TS byte stream carries no per-frame timing, so delivery time is the only
 		// carrier of each frame's spacing (#2984). The export lays each slice of the PCR
 		// grid out at its time on its own clock, which follows the source's, so each is
-		// written as it comes.
+		// written as it comes. The path's announcements carry it across the broadcast's
+		// returns, as they drive a player.
+		let mut ts = moq_mux::container::ts::Follower::new(ts)?
+			.with_linger(self.args.linger)
+			.with_stitch(self.args.stitch);
 		// Reports a track that stops reaching the output while the rest keeps flowing,
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
@@ -386,30 +395,32 @@ impl Subscribe {
 				"TS export release clock"
 			);
 		};
-		loop {
+		let end = loop {
 			let frame = match ts.next().await {
 				Ok(Some(frame)) => frame,
-				Ok(None) => break,
-				Err(moq_mux::Error::Replaced(path)) => anyhow::bail!(
-					"another publisher instance replaced broadcast `{path}`; pass --stitch to follow it as a program switch"
-				),
-				Err(err) => return Err(err.into()),
+				Ok(None) => break Ok(()),
+				Err(err) => break Err(err),
 			};
 			stdout.write_all(&frame.payload).await?;
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
-				let stats = ts.stats();
+				let stats = ts.export().stats();
 				if (stats.dropped, stats.out_of_tolerance) != reported {
 					reported = (stats.dropped, stats.out_of_tolerance);
 					release(&stats);
 				}
 				log.sample(stats.into());
 			}
+		};
+		release(&ts.export().stats());
+		match end {
+			Err(err @ moq_mux::Error::Replaced(_)) => {
+				Err(anyhow::Error::from(err).context("pass --stitch to follow a replacement as a program switch"))
+			}
+			end => Ok(end?),
 		}
-		release(&ts.stats());
-		Ok(())
 	}
 
 	async fn run_flv(self) -> anyhow::Result<()> {
