@@ -59,9 +59,9 @@ Decided:
   to m1.
 - A catalog `broadcast` reference by name follows the newest epoch, since a
   path cannot name one.
-- Every first-party publisher that can restart mints its own: the apps and
-  moq-boy through [Apps](/quest/m0/broadcast-epoch/apps.md), the
-  ingest gateways, moqsink, and the bindings below. moq-stats mints one per
+- Every first-party publisher that can restart mints its own: the apps,
+  moq-boy, the ingest gateways, moqsink, and the bindings below. Players
+  (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
   [group announcement](/doc/concept/stats.md#broadcasts), which also gated
   the release (decided 2026-10-04).
 - The m1 quests gating this line moved under it in the 2026-10-05 audit, and
@@ -97,7 +97,6 @@ maintainer's pre-release merge of `release` into `main` keeps `main`'s
 
 ## Required
 
-- [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Export ts](/quest/m0/broadcast-epoch/export-ts.md) - `export ts` and SRT egress linger only for the same epoch, and switch to a replacement only with `--stitch`, as a full program switch
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
