@@ -575,12 +575,29 @@ impl Run {
 	}
 }
 
-/// Whether `err` is the source going away (its session closing, its route going) rather than
-/// something wrong with what it sent.
+/// Whether `err`, from a track that was streaming, is its source going away (its session
+/// closing, its route going) rather than something wrong with what it sent. A producer going
+/// away mid-stream surfaces as almost any error, a group that can never be served included, so
+/// only malformed content counts against the source.
 fn source_lost(err: &moq_mux::Error) -> bool {
+	use moq_net::{Error, StreamError};
+	match err {
+		moq_mux::Error::Moq(err) | moq_mux::Error::Json(moq_json::Error::Net(err)) => !matches!(
+			err,
+			Error::MalformedTrack | Error::Decode(_) | Error::Stream(StreamError::MalformedTrack)
+		),
+		_ => false,
+	}
+}
+
+/// Whether a subscribe that failed with `err` was refused by a source that is still up, or that
+/// lacks the track, rather than losing its source. Little more survives a relay, where a dropped
+/// producer arrives as an internal error, so anything else is a loss.
+fn refused(err: &moq_net::Error) -> bool {
+	use moq_net::{Error, StreamError};
 	matches!(
 		err,
-		moq_mux::Error::Moq(_) | moq_mux::Error::Json(moq_json::Error::Net(_))
+		Error::NotFound | Error::Unauthorized | Error::Stream(StreamError::NotFound)
 	)
 }
 
@@ -605,8 +622,9 @@ async fn follow_catalog(
 				.await
 		} => match track {
 			Ok(track) => track,
+			Err(err) if refused(&err) => return Err(err).context("failed to subscribe to the catalog"),
 			Err(err) => {
-				gst::warning!(CAT, "catalog failed to subscribe: {err:?}");
+				gst::info!(CAT, "catalog lost its source before subscribing: {err}");
 				return Ok(());
 			}
 		},
@@ -1663,6 +1681,25 @@ mod session_tests {
 		assert!(!eos.load(Ordering::Relaxed), "the held pad emitted EOS");
 		pads.clear(&element.downgrade());
 		drop(stop);
+	}
+
+	/// A broadcast that is up without a catalog has not lost its source: the session fails,
+	/// rather than holding for a catalog that never comes.
+	#[test]
+	fn a_broadcast_without_a_catalog_fails_the_session() {
+		let element = element();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let (_stop, session) = follow(&element, broadcast.consume());
+
+		let err = super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
+			.expect("the session held for a catalog that never comes")
+			.unwrap()
+			.expect_err("a missing catalog was taken for a lost source");
+		assert!(
+			matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::NotFound)),
+			"{err:?}"
+		);
 	}
 
 	/// A publisher that ends one rendition finishes its track and retires it from the catalog,
