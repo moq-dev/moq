@@ -2765,7 +2765,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
 		// Read first: `update` replaces these preferences.
-		let floored = self.track.subscription().start.is_some_and(|start| start.group > 0);
+		let requested = self.track.subscription().start.map(|start| start.group);
+		let floored = requested.is_some_and(|group| group > 0);
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
@@ -2791,11 +2792,13 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		}
 		if let Some(start) = lowered {
 			self.track.start_at(start);
-			// The subscriber owes itself the groups it newly asks for and restarts their
-			// gap ages, so the drops at the end count from there too, on the same clock.
+			// The subscriber owes itself the groups it newly asks for, below the floor it
+			// asked for last, and restarts their gap ages, so the drops at the end count
+			// from there too, on the same clock.
 			if let Some(resolved) = self.start {
 				if let Some(served) = &mut self.served {
-					served.demand(start..resolved, self.ctx.runtime.now());
+					let floor = requested.unwrap_or(resolved);
+					served.demand(start..floor, self.ctx.runtime.now());
 				}
 				self.start = Some(resolved.min(start));
 			}
@@ -4051,6 +4054,47 @@ mod serve_group_test {
 			run.await.unwrap();
 		}
 		assert_eq!(drops(writer, &log, version).await, [(0, 1), (3, 4)]);
+	}
+
+	/// After a raised start, lowering it again restarts the gaps below the raised floor, not
+	/// only those below the lowest start ever asked for.
+	#[moq_net_sim::test]
+	async fn the_end_drops_below_a_start_raised_then_lowered() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscription = track::Subscription::default()
+			.with_start(track::Position::group(0))
+			.with_max_delay(Duration::from_secs(1));
+		let subscriber = track.subscribe(subscription);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.start.is_none() {
+			let step = run.poll_step(&mut writer, &kio::Waiter::noop());
+			assert!(step.is_ready(), "the start never resolved");
+		}
+
+		let update = |start_group| lite::SubscribeUpdate {
+			priority: 0,
+			max_delay: Duration::from_secs(1),
+			start_group: Some(start_group),
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		};
+		run.update(update(5));
+		{
+			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			write_group(&mut track, 5, 0);
+			assert!(futures::poll!(run.as_mut()).is_pending());
+		}
+
+		moq_net_sim::advance(Duration::from_millis(900)).await;
+		run.update(update(2));
+		moq_net_sim::advance(Duration::from_millis(200)).await;
+		track.finish_at(6).unwrap();
+		drop(track);
+		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
+		assert_eq!(drops(writer, &log, version).await, [(1, 4)]);
 	}
 
 	/// A gap older than the subscriber's grace is one it no longer waits for, so the run loop
