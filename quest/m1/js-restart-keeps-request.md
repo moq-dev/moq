@@ -19,7 +19,8 @@ and documenting the difference.
 
 Find where `js/net/src/origin.ts` ends the resolved handle on a server reset
 and keep it, without letting it serve anything new under the old epoch
-(never-stitch still holds). Mirror Rust's test in `js/net/src/origin.test.ts`,
-failing before the fix.
+(never-stitch still holds). Mirror Rust's
+`a_newer_epoch_leaves_the_broadcast_in_flight` (`rs/moq-net/src/model/origin.rs`)
+in `js/net/src/origin.test.ts`, failing before the fix.
 
 Public API: behavior only. Wire: none.

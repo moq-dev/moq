@@ -9,7 +9,7 @@ evidence.
 
 ## Plan
 
-Planned 2026-10-10 as a follow-up of #5138, which shipped the renderer
+Planned 2026-10-10 as a follow-up of #5138, which ships the renderer
 untested on Safari. Known Safari 26 issues with `importExternalTexture`: H.264
 frames, biplanar formats, and iOS orientation.
 
@@ -26,6 +26,10 @@ Needs a human-run or hosted Safari session; a background agent reports
 instead of guessing.
 
 Public API: possibly a new `RendererError` value. Wire: none.
+
+## Required
+
+- [WebGPU renderer](/quest/m1/webgpu-renderer.md) - the renderer and `@moq/video` package (#5138) this verifies
 
 ## Related
 

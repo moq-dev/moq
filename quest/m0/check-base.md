@@ -21,6 +21,9 @@ pays for it: pick the base from what the branch merges into, not from what it
 tracks. For example, prefer the open PR's base when `gh` finds one, then an
 upstream named `main` or `release`, then `origin/main`. `GITHUB_BASE_REF` in CI
 and an explicit `BASE` argument keep winning. Print the chosen base, as today.
+A stacked PR diffs against its base PR's branch. A missing, offline, or
+unauthenticated `gh` falls through quickly and silently, so a local check
+never hangs or fails on the lookup.
 If the change contradicts AGENTS.md's "set the upstream to the base branch",
 fix that line in the same PR.
 
