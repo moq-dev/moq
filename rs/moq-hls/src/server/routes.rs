@@ -507,7 +507,11 @@ mod tests {
 	}
 
 	async fn lite_pair_pub(config: impl Into<moq_net::origin::Config>) -> LitePair {
-		let lite: moq_net::Version = "moq-lite-05".parse().expect("lite version");
+		lite_pair_on("moq-lite-05", config).await
+	}
+
+	async fn lite_pair_on(version: &str, config: impl Into<moq_net::origin::Config>) -> LitePair {
+		let lite: moq_net::Version = version.parse().expect("lite version");
 		let pub_origin = moq_tokio::origin::spawn_config(config.into());
 		let sub_origin = moq_tokio::origin::spawn();
 
@@ -652,6 +656,67 @@ mod tests {
 		assert!(body.contains("seg/656e3d1b.0.m4s?jwt=abc"), "{body}");
 
 		pair.accept.abort();
+	}
+
+	/// A recorder's cursor gets the media of a publisher whose moq-lite has no FETCH: the
+	/// cursor's own subscription carries every group to the subscriber's cache.
+	#[tokio::test]
+	async fn a_cursor_records_a_publisher_without_fetch() {
+		for version in [
+			"moq-lite-01",
+			"moq-lite-02",
+			"moq-lite-03",
+			"moq-lite-04",
+			"moq-lite-05",
+		] {
+			let pair = lite_pair_on(version, moq_net::Hop::random()).await;
+			let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
+			broadcast.announce(Default::default()).expect("announce");
+			let (_catalog, _registration, track, mut media) = publish_video(&mut broadcast, video_config(), None);
+
+			let origin = pair.sub_origin.consume();
+			tokio::time::timeout(TIMEOUT, origin.routed("live"))
+				.await
+				.expect("announce timed out")
+				.expect("routed");
+			let source = moq_mux::Source::new(origin, "live");
+			let broadcaster = tokio::time::timeout(
+				TIMEOUT,
+				crate::export::Broadcaster::new(source, crate::export::Config::default()),
+			)
+			.await
+			.expect("broadcaster timed out")
+			.expect("broadcaster");
+			// Recorded as soon as the catalog lists it, before any media, as a recorder does.
+			let mut renditions = broadcaster.renditions();
+			let rendition = match tokio::time::timeout(TIMEOUT, renditions.next()).await {
+				Ok(Some(crate::export::renditions::Event::Added(rendition))) => rendition,
+				_ => panic!("{version}: the catalog never listed the rendition"),
+			};
+			let mut cursor = rendition.segments();
+			let mut next = std::pin::pin!(cursor.next());
+			// Waiting for its first segment, the cursor subscribes before any media exists.
+			let demand = track.demand();
+			tokio::time::timeout(TIMEOUT, async {
+				tokio::select! {
+					_ = next.as_mut() => panic!("{version}: a segment before any media"),
+					used = demand.used() => used.expect("track open"),
+				}
+			})
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the cursor never subscribed"));
+
+			write_three_gops(&mut media);
+			let segment = tokio::time::timeout(TIMEOUT, next)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: no segment recorded"))
+				.unwrap_or_else(|err| panic!("{version}: {err}"))
+				.expect("a segment");
+			assert_eq!(segment.segment, 0, "{version}");
+			assert!(!segment.media.is_empty(), "{version}");
+
+			pair.accept.abort();
+		}
 	}
 
 	async fn status(app: &axum::Router, uri: &str) -> StatusCode {
