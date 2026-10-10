@@ -20,8 +20,8 @@ added this quest):
   #1071) with no stated reason.
 - Use `new_multi_thread().enable_all()` with tokio's default worker count.
   No configuration knob until an embedder needs one. Rejected: a small fixed
-  pool, and keeping `current_thread` behind the
-  [serve budget](/quest/m0/serve-budget.md) alone.
+  pool, and keeping `current_thread` behind the serve budgets
+  (`kio::coop::Budget`) alone.
 - Keep the "foreign caller's thread never drives our futures" property: work
   still runs via `Task::run` and `detached`. Check the exported async fns that
   await in place (`subscribe_catalog`, `subscribe_track`, `fetch_group`,
@@ -51,6 +51,5 @@ Public API: callbacks may fire concurrently on any runtime thread
 
 ## Related
 
-- [Serve budget](/quest/m0/serve-budget.md) - the root fix for a task hogging its thread
 - [Kotlin/JVM exit](/quest/m2/kt-jvm-exit.md) - runtime-thread shutdown
 - [Generated C bindings](/quest/m1/c/README.md) - inherits the moq-ffi runtime, so hand-written moq-c needs no change
