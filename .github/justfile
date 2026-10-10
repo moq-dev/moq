@@ -38,3 +38,8 @@ install-formula *args:
 [positional-arguments]
 trigger-repo-publish *args:
     sh/gh/trigger-repo-publish.sh "$@"
+
+# Install the rendered GStreamer formula against the current macOS tarball.
+[positional-arguments]
+gst-formula *args:
+    python3 sh/gh/gst-formula.py "$@"
