@@ -122,6 +122,7 @@ impl Server {
 		// A covering dynamic route may never answer, so the request is bounded too.
 		let broadcast = tokio::time::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
 			.await
+			.map_err(|_| tracing::warn!(%name, "timed out resolving broadcast"))
 			.ok()?
 			.map_err(|err| tracing::warn!(%err, %name, "failed to resolve broadcast"))
 			.ok()?;

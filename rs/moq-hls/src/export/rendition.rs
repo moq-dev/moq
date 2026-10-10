@@ -146,29 +146,33 @@ impl Media {
 			return self.handle.lock().expect("media lock poisoned").binding.clone();
 		};
 		let mut handle = self.handle.lock().expect("media lock poisoned");
-		match handle.binding.poll_broadcast(waiter) {
-			Poll::Ready(Ok(broadcast)) if !handle.ended && broadcast.poll_closed(waiter).is_ready() => {
-				// A broadcast end carries no cause, so a clean end and a replacement look the
-				// same. Either way its rows can no longer be fetched, and a new instance only
-				// comes with a new catalog instance, so the playlist ends here.
-				tracing::error!(broadcast = %rel, "rendition's sibling broadcast ended; ending its playlist");
-				handle.ended = true;
-				window.clear();
-				window.end();
-			}
-			Poll::Ready(Ok(_)) => {}
-			Poll::Ready(Err(_)) => {
-				// Binding never retries a failed request. Re-issue so a sibling still being
-				// announced binds once it is. Only a bind that never resolved fails, and the
-				// source pins every one that did, so this never re-resolves a sibling.
-				if let Ok(next) = source.bind(Some(rel)) {
-					let _ = next.poll_broadcast(waiter);
-					handle.binding = Arc::new(next);
+		let mut reissued = false;
+		loop {
+			match handle.binding.poll_broadcast(waiter) {
+				Poll::Ready(Ok(broadcast)) if !handle.ended && broadcast.poll_closed(waiter).is_ready() => {
+					// A broadcast end carries no cause, so a clean end and a replacement look the
+					// same. Either way its rows can no longer be fetched, and a new instance only
+					// comes with a new catalog instance, so the playlist ends here.
+					tracing::error!(broadcast = %rel, "rendition's sibling broadcast ended; ending its playlist");
+					handle.ended = true;
+					window.clear();
+					window.end();
 				}
+				// Binding never retries a failed request. Re-issue it, once per poll, so a sibling
+				// still being announced binds once it is, and poll the new one. Only a bind that
+				// never resolved fails, and the source pins every one that did, so this never
+				// re-resolves a sibling.
+				Poll::Ready(Err(_)) if !reissued => {
+					reissued = true;
+					if let Ok(next) = source.bind(Some(rel)) {
+						handle.binding = Arc::new(next);
+						continue;
+					}
+				}
+				_ => {}
 			}
-			Poll::Pending => {}
+			return handle.binding.clone();
 		}
-		handle.binding.clone()
 	}
 }
 
