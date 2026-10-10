@@ -1513,14 +1513,21 @@ impl<E: catalog::Catalog> Export<E> {
 			if let Some(rate) = self.mux_rate_override {
 				next = next.with_mux_rate(rate);
 			}
-			if !same && self.psi.is_some() {
+			// A switch away from a program that went out, or one still pending because this
+			// program never built its tables, carries to the next: its tables must read as new,
+			// every PID flags the break, and a pacing caller re-anchors on the new clock. Only a
+			// program that went out advances them again.
+			let emitted = self.psi.is_some();
+			if (!same && emitted) || self.flagged.is_some() {
 				next.version = self.version;
-				next.version.increment();
 				next.flagged = Some(HashSet::new());
 				next.pcr_discontinuity = true;
-				// A pacing caller re-anchors on the new program clock.
-				next.epoch = self.epoch + 1;
+				next.epoch = self.epoch;
 				next.emitted_epoch = self.emitted_epoch;
+				if !same && emitted {
+					next.version.increment();
+					next.epoch += 1;
+				}
 			}
 			*self = next;
 			return Ok(());

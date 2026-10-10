@@ -330,7 +330,15 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					false => Serving::Other(epoch),
 				}
 			}
-			moq_net::announce::Event::Restart(announce) => Serving::Other(announce.route.epoch),
+			// The export's own instance winning the path back, as when a more specific route of
+			// another instance goes, is still its own.
+			moq_net::announce::Event::Restart(announce) => {
+				let epoch = announce.route.epoch;
+				match epoch.is_some() && epoch == self.epoch {
+					true => Serving::Ours,
+					false => Serving::Other(epoch),
+				}
+			}
 			moq_net::announce::Event::End(_) => {
 				self.ended = true;
 				Serving::Gone

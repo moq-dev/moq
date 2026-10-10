@@ -7091,6 +7091,60 @@ async fn the_same_instance_continues_after_a_drop() {
 	same_instance_returns(false).await;
 }
 
+/// A switch onto an instance that is itself replaced before it builds its tables still
+/// reaches the next program as a switch: its tables carry a new version, every PID's first
+/// packet flags the break, and pacing sees a new generation.
+#[tokio::test(start_paused = true)]
+async fn a_switch_carries_through_an_instance_that_never_built_its_tables() {
+	let origin = crate::source::produce_origin();
+	let source = crate::Source::new(origin.consume(), "live");
+	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+
+	let (mut old, mut old_catalog) = publish_live::<()>(&origin, route());
+	let mut old_audio = aac_rendition(&mut old, &mut old_catalog, "a.aac");
+	let mut export = Export::new(source.clone())
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut old_audio, ms);
+	}
+	let before = drain_frames(&mut export).await;
+	assert!(!pats(&before).is_empty(), "the first program went out");
+
+	// Switched to an instance whose catalog lists nothing, so it never builds its tables...
+	let (_bare, _bare_catalog) = publish_live::<()>(&origin, route());
+	let bare = origin.consume().request_broadcast("live", None).await.unwrap();
+	let mut export = export.follow(bare).await.unwrap();
+	assert!(
+		pats(&drain_frames(&mut export).await).is_empty(),
+		"no tables for an empty catalog"
+	);
+
+	// ...and then to another.
+	let (mut new, mut new_catalog) = publish_live::<()>(&origin, route());
+	let mut new_audio = aac_rendition(&mut new, &mut new_catalog, "b.aac");
+	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+	let mut export = export.follow(replacement).await.unwrap();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut new_audio, ms);
+	}
+	let after = drain_frames(&mut export).await;
+	assert!(!pats(&after).is_empty(), "the last program went out");
+	assert!(
+		pats(&after).iter().all(|&(version, _)| version >= 1),
+		"the PAT reads as new: {:?}",
+		pats(&after)
+	);
+	assert!(
+		pmts(&after).iter().all(|(version, _)| *version >= 1),
+		"the PMT reads as new"
+	);
+	assert_eq!(unflagged(&after), Vec::<u16>::new(), "every PID flags the break");
+	assert!(export.discontinuity() >= 1, "pacing sees a new generation");
+}
+
 /// Following another instance is a full program switch, even while the old one stays up and
 /// keeps writing: a new PMT version from the replacement's catalog, whatever its codecs and
 /// tracks, every PID's first packet flagging the break, each stream starting on a keyframe,
@@ -7679,6 +7733,52 @@ async fn a_follower_built_after_its_route_went_follows_the_return() {
 	let end = follower.next().await;
 	assert!(matches!(end, Ok(None)), "{end:?}");
 	assert_eq!(start.elapsed(), Duration::from_secs(4) + linger);
+}
+
+/// The export's own instance winning the path back from a more specific route that went is no
+/// replacement: its end ends the export cleanly, without stitching.
+#[tokio::test(start_paused = true)]
+async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let route = |epoch| moq_net::origin::Route::default().with_epoch(epoch);
+
+	// The export resolves through a prefix claim serving its own instance.
+	let mut info = moq_net::broadcast::Info::new();
+	info.epoch = Some(epoch.clone());
+	let mut served = info.produce();
+	let mut catalog = crate::catalog::Producer::<()>::new(&mut served, Default::default()).unwrap();
+	let pool = origin.dynamic("pool", route(epoch)).unwrap();
+	let consumer = served.consume();
+	tokio::spawn(async move {
+		while let Ok(request) = pool.requested_broadcast().await {
+			request.accept(consumer.clone());
+		}
+	});
+	let source = crate::Source::new(origin.consume(), "pool/job");
+	let mut follower = super::Follower::new(Export::new(source).await.unwrap()).unwrap();
+
+	// A more specific route takes the path for a while, then goes.
+	let exact = origin.publish("pool/job", route(moq_net::Epoch::mint())).unwrap();
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"still on its own instance"
+	);
+	drop(exact);
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"its own instance wins back"
+	);
+
+	catalog.finish().unwrap();
+	let end = tokio::time::timeout(Duration::from_secs(10), follower.next())
+		.await
+		.expect("its own end ends the export");
+	assert!(matches!(end, Ok(None)), "{end:?}");
 }
 
 /// Without stitching, another instance taking the path fails the follower once the export
