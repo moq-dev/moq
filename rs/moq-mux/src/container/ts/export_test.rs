@@ -7234,3 +7234,90 @@ async fn export_stats_count_a_gap_longer_than_the_backfill() {
 	let quiet = running.quiet.expect("the output carries a PCR");
 	assert!(quiet < Duration::from_millis(200), "{quiet:?}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_large_pmt_is_split_across_packets() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut config = tscat::Mpegts::default();
+	let mut producers = Vec::new();
+	for index in 0..24 {
+		let name = format!("audio{index:02}");
+		let track = broadcast
+			.create_track(
+				name.as_str(),
+				hang::container::track_info(hang::catalog::PRIORITY.audio),
+			)
+			.unwrap();
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name.clone(), AudioConfig::new(AAC { profile: 2 }, 48_000, 2));
+		let mut entry = tscat::Track::new(0x1001 + index);
+		entry.descriptors = vec![tscat::Descriptor {
+			tag: 0x0a,
+			data: Bytes::from_static(b"eng\0"),
+		}];
+		config.tracks.insert(name, entry);
+		let mut producer = Producer::new(track, HangContainer::Legacy(Kind::Data));
+		producer
+			.write(Frame {
+				timestamp: Timestamp::ZERO,
+				duration: None,
+				keyframe: true,
+				payload: Bytes::from_static(b"aac"),
+			})
+			.unwrap();
+		producer.finish().unwrap();
+		producers.push(producer);
+	}
+	catalog.modify().unwrap().ext.mpegts = config;
+	let exporter = Export::with_ts(crate::source::announced(&broadcast.consume()), Default::default())
+		.await
+		.unwrap();
+	let ts = drain_with(exporter).await;
+	let mut section = Vec::new();
+	let mut counters = Vec::new();
+	for packet in ts.as_chunks::<188>().0 {
+		let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+		if pid != 0x1000 {
+			continue;
+		}
+		counters.push(packet[3] & 0x0f);
+		let offset = if packet[3] & 0x20 != 0 {
+			5 + usize::from(packet[4])
+		} else {
+			4
+		};
+		if packet[1] & 0x40 != 0 {
+			assert!(section.is_empty());
+			assert_eq!(packet[offset], 0);
+			section.extend_from_slice(&packet[offset + 1..]);
+		} else {
+			section.extend_from_slice(&packet[offset..]);
+		}
+		let length = 3 + (((usize::from(section[1]) & 0x0f) << 8) | usize::from(section[2]));
+		if section.len() >= length {
+			section.truncate(length);
+			break;
+		}
+	}
+	assert!(counters.len() > 1, "PMT must span packets");
+	for pair in counters.windows(2) {
+		assert_eq!(pair[1], (pair[0] + 1) & 0x0f);
+	}
+	assert!(super::psi::crc_ok(&section));
+	let pmt = super::psi::Pmt::parse(&section).unwrap();
+	assert_eq!(pmt.streams.len(), 24);
+	for (index, stream) in pmt.streams.iter().enumerate() {
+		assert_eq!(stream.pid.as_u16(), 0x1001 + index as u16);
+		assert_eq!(stream.stream_type, 0x0f);
+		assert_eq!(stream.descriptors[0].data.as_ref(), b"eng\0");
+	}
+}
