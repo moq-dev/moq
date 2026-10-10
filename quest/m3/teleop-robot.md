@@ -9,7 +9,7 @@ the gate for the rest of the questline.
 ## Plan
 
 Decided 2026-10-08: parked in m3. No teleoperation consumer needs the crate
-yet; OneTooMany's telemetry need is [data sync](/quest/m2/watch-data-sync.md),
+yet; telemetry beside video needs [data sync](/quest/m2/watch-data-sync.md),
 not this primitive.
 
 ### Direction

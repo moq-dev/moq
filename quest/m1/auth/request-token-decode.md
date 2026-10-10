@@ -13,8 +13,8 @@ request decodes the key and ignores it.
 
 ## Plan
 
-Carve this from [#4675](https://github.com/moq-dev/moq/pull/4675) so it
-lands first; [Request tokens](/quest/m1/auth/request-token.md) then gives a
+[#5107](https://github.com/moq-dev/moq/pull/5107) carves this from
+[#4675](https://github.com/moq-dev/moq/pull/4675) so it lands first; [Request tokens](/quest/m1/auth/request-token.md) then gives a
 `USE_VALUE` token meaning. The decode needs neither [Relay
 tokens](/quest/m1/auth/relay-refresh.md) nor a lease.
 
