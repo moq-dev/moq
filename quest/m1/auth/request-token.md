@@ -4,8 +4,9 @@
 
 A moq-transport peer authorizes a SUBSCRIBE or PUBLISH_NAMESPACE with the
 `AUTHORIZATION TOKEN` parameter (`0x03`) on that request, and refreshes it in
-band with an update (SUBSCRIBE_UPDATE on drafts 14 and 15, REQUEST_UPDATE
-from 16), on every supported draft. A request is authorized
+band with the draft's update: SUBSCRIBE_UPDATE for a subscription on drafts 14
+and 15, which cannot update a namespace, and REQUEST_UPDATE for either from
+16. A request is authorized
 by the session's grant first; when that does not cover it, by the token on the
 request; with neither it is refused `UNAUTHORIZED`. The token's grant covers
 only the request it rode on, never joins the session union, and ends with that
@@ -51,19 +52,25 @@ Decided, so review does not relitigate them:
   subscription on drafts that answer an update. Draft-14 never answers an
   accepted SUBSCRIBE_UPDATE, so its sender does not wait for one; test two
   successive replacements with no answers.
-- **Drafts.** Subscription renewal works on every supported draft, 14 through
-  16 included (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15.
-  Namespace renewal is draft-17+, since earlier drafts cannot update an
-  announce in place.
+- **Drafts.** Renewal works on every supported draft, 14 through 16 included
+  (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15. A namespace renews
+  from 16, whose REQUEST_UPDATE covers PUBLISH_NAMESPACE.
 - `EXPIRED_AUTH_TOKEN` and `MALFORMED_AUTH_TOKEN` are not this quest's; they
   land with [Expired token error](/quest/m1/auth/expired-error.md), which
   does not block it (2026-10-01 Q4).
 
-#5148 also fixes what a 2026-10-09 read of #4675 found: updates answered out
-of order behind a pending renewal, duplicated admission and renewal logic, a
-byte-encoded `set_request_token`, three parallel `Option`s on `auth::Request`,
-a request token silently ignored on moq-lite, an outbound update sniffer, and
-a refused renewal overloading `Error::Unsupported`.
+#5148 fixes most of what a 2026-10-09 read of #4675 found: updates answered out
+of order behind a pending renewal, a repeated 0x03 refused, duplicated
+admission and renewal logic, three parallel `Option`s on `auth::Request`, a
+request token silently ignored on moq-lite, an outbound update sniffer, and a
+refused renewal overloading `Error::Unsupported`. Still open in #5148, each
+fixed or settled by a recorded decision before it merges:
+
+- `set_request_token` takes `setup::Token` and the encoder writes only
+  `USE_VALUE`, so a caller cannot send an alias form. Take encoded bytes, or
+  decide to keep the typed, value-only API.
+- A namespace renews only from draft 17; a token-bearing draft-16
+  REQUEST_UPDATE for a PUBLISH_NAMESPACE is still ignored.
 
 Open for review: one `requests()` consumer receives both session and request
 tokens, so an acceptor written for session tokens also answers request tokens.
