@@ -57,8 +57,10 @@ literal. Update the wrappers and docs that restate 20000 (the Python test
 asserting the default, `doc/lib/{py,swift,kt,go,dart}`). libmoq already
 reads 0 as the default.
 
-Binding releases wait for this quest, so the bindings break once after the
-line's other children landed on `main` (decided 2026-10-09 on #4519). The
+Binding releases wait for this quest, the
+[epoch rename](/quest/m0/broadcast-epoch/bindings.md), and
+[named error fields](/quest/m1/ffi-shape/error-fields.md), so consumers take
+one breaking release (hard gates confirmed in the 2026-10-10 audit). The
 generated C++ follows moq-ffi: update `cpp/moq`'s `moq::` aliases (which
 `just cpp check` audits), anything in `cpp/obs` that calls the moved verbs,
 and `doc/lib/cpp`.
