@@ -3670,22 +3670,39 @@ impl Cursor {
 	fn new(state: kio::Consumer<TrackState>, subscription: kio::Producer<Subscription>) -> Self {
 		// An explicit start says how far back to reach, so only an unfloored subscription
 		// jumps to an untimed track's latest group.
-		let min_sequence = {
+		let (min_sequence, datagram_index) = {
 			let preferences = subscription.read();
-			match preferences.start {
+			let state = state.read();
+			let min_sequence = match preferences.start {
 				Some(_) => floor_of(&preferences),
 				None => {
 					let cap = preferences.end.and_then(|end| Cap::from(end.group_end()).exclusive());
-					state.read().untimed_start(cap).unwrap_or(0)
+					state.untimed_start(cap).unwrap_or(0)
 				}
-			}
+			};
+			// Arrival order need not be timestamp order. Only skip the initial stale prefix;
+			// subsequent delivery stays in arrival order, including late datagrams.
+			let newest = state.datagrams.iter().filter_map(|datagram| datagram.timestamp).max();
+			let start = newest.map_or(0, |newest| {
+				let cutoff = Duration::from(newest).saturating_sub(preferences.max_delay);
+				state
+					.datagrams
+					.iter()
+					.position(|datagram| {
+						datagram
+							.timestamp
+							.is_none_or(|timestamp| Duration::from(timestamp) >= cutoff)
+					})
+					.expect("the newest datagram is within max delay")
+			});
+			(min_sequence, state.datagram_offset + start)
 		};
 		Self {
 			state,
 			subscription,
 			min_sequence,
 			index: 0,
-			datagram_index: 0,
+			datagram_index,
 			next_sequence: 0,
 			end_sequence: None,
 			parked: BTreeMap::new(),
@@ -4088,8 +4105,10 @@ impl Subscriber {
 	///
 	/// Datagrams are a separate best-effort channel from groups (see
 	/// [`Producer::append_datagram`]); they share only the sequence namespace, and
-	/// neither cursor moves the other. A new subscriber may get the few still in the send
-	/// buffer, and any outside its group range are skipped. A consumer that falls too far
+	/// neither cursor moves the other. A new timed subscriber skips the buffered prefix older
+	/// than its max delay behind the highest timestamp; untimed subscribers keep the whole
+	/// buffer. Later arrival-order delivery is unchanged, and any outside its group range
+	/// are skipped. A consumer that falls too far
 	/// behind silently loses the oldest datagrams.
 	///
 	/// Returns `Poll::Ready(Ok(Some(datagram)))` when one is available,
@@ -5004,6 +5023,62 @@ mod test {
 		assert_eq!(&recv_datagram(&mut a).payload[..], b"second");
 		assert_eq!(&recv_datagram(&mut b).payload[..], b"first");
 		assert_eq!(&recv_datagram(&mut b).payload[..], b"second");
+	}
+
+	#[test]
+	fn datagram_replay_starts_within_max_delay() {
+		let info = Info::default().with_timescale(Timescale::MICRO);
+		let mut producer = track_producer("sparse", info);
+		let timestamps = [0, 179_949, 179_950, 180_000, 179_975];
+		for millis in timestamps {
+			producer
+				.append_datagram(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
+				.unwrap();
+			elapse(&producer, Duration::from_secs(1));
+		}
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(50)));
+		// The edge is captured at attachment, not when the subscriber first reads.
+		producer
+			.append_datagram(Timestamp::from_secs(600).unwrap(), b"newer".as_slice())
+			.unwrap();
+		for sequence in [2, 3, 4, 5] {
+			assert_eq!(recv_datagram(&mut subscriber).sequence, sequence);
+		}
+		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
+
+		// The initial bound does not filter arrivals after attachment, even when they are old.
+		producer
+			.append_datagram(Timestamp::from_millis(0).unwrap(), b"later".as_slice())
+			.unwrap();
+		assert_eq!(recv_datagram(&mut subscriber).sequence, 6);
+	}
+
+	#[test]
+	fn datagram_replay_starts_after_evicted_entries_with_zero_delay() {
+		let mut producer = track_producer("test", None);
+		for _ in 0..MAX_DATAGRAMS + 1 {
+			producer.append_datagram(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		}
+		let sequence = producer
+			.append_datagram(Timestamp::from_secs(180).unwrap(), b"new".as_slice())
+			.unwrap();
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::ZERO));
+		assert_eq!(recv_datagram(&mut subscriber).sequence, sequence);
+		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
+	}
+
+	#[test]
+	fn untimed_datagram_replay_keeps_the_buffer() {
+		let mut producer = untimed_producer();
+		for _ in 0..3 {
+			producer.append_datagram(None, b"x".as_slice()).unwrap();
+			elapse(&producer, Duration::from_secs(60));
+		}
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::ZERO));
+		for sequence in 0..3 {
+			assert_eq!(recv_datagram(&mut subscriber).sequence, sequence);
+		}
+		assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
 	}
 
 	#[test]
