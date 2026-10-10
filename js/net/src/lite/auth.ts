@@ -1,6 +1,6 @@
 import { Unsupported } from "../auth.ts";
 import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
-import { type SessionCode, SessionError } from "../error.ts";
+import { closeReason, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream, type Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -100,7 +100,13 @@ export class AuthOk {
 
 	static async decode(r: Reader, version: Version): Promise<AuthOk> {
 		guardAuth(version);
-		return Message.decode(r, AuthOk.#decode);
+		return Message.decode(r, async (body) => {
+			try {
+				return await AuthOk.#decode(body);
+			} catch (cause) {
+				throw new ProtocolViolation("malformed AUTH_OK", { cause });
+			}
+		});
 	}
 }
 
@@ -181,7 +187,15 @@ export class LiteAuthWire implements AuthWire {
 	}
 
 	async read(stream: Stream): Promise<WireReply | undefined> {
-		const reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
+		let reply: AuthReply | undefined;
+		try {
+			reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
+		} catch (err) {
+			if (err instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: SessionCode.ProtocolViolation, reason: closeReason(err.message) });
+			}
+			throw err;
+		}
 		if (!reply) return undefined;
 		if (reply instanceof AuthOk) {
 			return { grant: { publish: reply.publish, subscribe: reply.subscribe, expires: reply.expires } };
