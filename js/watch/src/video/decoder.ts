@@ -13,6 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { rotateVideoDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
 import type { Broadcast } from "../broadcast";
 import { nextMedia, subscribeMedia } from "../media";
@@ -26,7 +27,6 @@ import {
 	supportCacheKey,
 } from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
-import { rotateVideoDimensions } from "./presentation";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.

@@ -311,6 +311,8 @@ class ServeState {
 	demanding = new Map<Path.Valid, number>();
 	closed = new Once<Error | null>();
 	settled = new Signal(0);
+	/** Counts {@link reset}s, so a waiter can tell its request was released rather than answered. */
+	resets = 0;
 	onChange: (path: Path.Valid) => void = () => {};
 	onReject: (path: Path.Valid, err: Error) => void = () => {};
 
@@ -367,8 +369,12 @@ class ServeState {
 		this.reset(err);
 	}
 
-	/** Release answers and invalidate pending handlers when the publisher instance changes. */
+	/**
+	 * Release answers and the requests handlers hold when the publisher instance changes: a
+	 * handler's late answer is for the old one, and the requesters ask the new one again.
+	 */
 	reset(err: Error = unroutable()): void {
+		this.resets++;
 		const queued = [...this.pending.values()];
 		this.pending.clear();
 		this.queue.mutate((queue) => {
@@ -1762,47 +1768,56 @@ export class Consumer {
 	 * @internal
 	 */
 	async #demand(path: Path.Valid, epoch?: Epoch.Valid): Promise<broadcast.Consumer | undefined> {
-		const local = this.#local(path);
-		if (local) {
-			// A peer naming one publisher instance is never handed another.
-			if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch)
-				throw unroutable();
-			return local;
-		}
-		const entry = this.#state.bestEntry(path, received);
-		if (!entry?.server) return undefined;
-		if (epoch !== undefined && entry.route.peek().epoch !== epoch) throw unroutable();
-
-		const server = entry.server;
-		const live = server.served.get(path);
-		if (live && live.closed.peek() === undefined) return live;
-
-		server.enqueue(path);
-		server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
-		try {
-			for (;;) {
-				// The route may name another instance by the time its handler answers.
-				if (epoch !== undefined && this.#state.bestEntry(path, received)?.route.peek().epoch !== epoch)
+		// Each pass asks the instance that wins now; an epoch change releasing the request starts another.
+		for (;;) {
+			const local = this.#local(path);
+			if (local) {
+				// A peer naming one publisher instance is never handed another.
+				if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch)
 					throw unroutable();
-				const served = server.served.get(path);
-				if (served && served.closed.peek() === undefined) return served;
-				const rejected = server.rejected.get(path);
-				if (rejected) {
-					server.rejected.delete(path);
-					throw rejected;
-				}
-				const closed = server.closed.peek();
-				if (closed !== undefined) {
-					if (closed) throw closed;
-					return undefined;
-				}
-				if (!server.pending.has(path)) return undefined;
-				await Signal.race(server.settled, server.closed);
+				return local;
 			}
-		} finally {
-			const n = (server.demanding.get(path) ?? 1) - 1;
-			if (n <= 0) server.demanding.delete(path);
-			else server.demanding.set(path, n);
+			const entry = this.#state.bestEntry(path, received);
+			if (!entry?.server) return undefined;
+			if (epoch !== undefined && entry.route.peek().epoch !== epoch) throw unroutable();
+
+			const server = entry.server;
+			const live = server.served.get(path);
+			if (live && live.closed.peek() === undefined) return live;
+
+			const resets = server.resets;
+			server.enqueue(path);
+			server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
+			try {
+				for (;;) {
+					// The route may name another instance by the time its handler answers.
+					if (epoch !== undefined && this.#state.bestEntry(path, received)?.route.peek().epoch !== epoch)
+						throw unroutable();
+					const served = server.served.get(path);
+					if (served && served.closed.peek() === undefined) return served;
+					const rejected = server.rejected.get(path);
+					if (rejected) {
+						server.rejected.delete(path);
+						throw rejected;
+					}
+					const closed = server.closed.peek();
+					if (closed !== undefined) {
+						if (closed) throw closed;
+						return undefined;
+					}
+					// Released by an epoch change, which also dropped this pass's count: ask again.
+					if (server.resets !== resets) break;
+					if (!server.pending.has(path)) return undefined;
+					await Signal.race(server.settled, server.closed);
+				}
+			} finally {
+				// A reset already cleared the count, and a later pass may have registered anew.
+				if (server.resets === resets) {
+					const n = (server.demanding.get(path) ?? 1) - 1;
+					if (n <= 0) server.demanding.delete(path);
+					else server.demanding.set(path, n);
+				}
+			}
 		}
 	}
 }
@@ -1844,8 +1859,17 @@ export class Dynamic {
 	/**
 	 * Replace the route in place. The prefix is fixed at announce time.
 	 *
-	 * The route is taken as given, epoch included: another epoch (or none) names another
-	 * publisher instance, so re-price from the current one, `update({ ...dynamic.route, cost })`.
+	 * The route is taken as given. At the same epoch this re-prices: consumers see an update
+	 * and every handle survives. Another epoch, or none, names another publisher instance:
+	 * consumers see a restart, the requests resolved through the old one end, and a
+	 * re-request never joins it. Requests still waiting on this handle carry over: the handler
+	 * is asked again under the new epoch, and its answer to a request asked before the change
+	 * is dropped, never served under the new epoch. A request pinned to the old epoch is
+	 * refused as unroutable. The answers already served are forgotten, so the next request
+	 * for one of those paths asks the handler again too. The broadcasts it served keep
+	 * running for the subscriptions already on them; close them to end those too.
+	 * Route selection still applies: another route still at the old epoch outranks one
+	 * without. To re-price, start from the current route, `update({ ...dynamic.route, cost })`.
 	 */
 	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] }): void {
 		if (this.#closed) throw new Error("dynamic is closed");
