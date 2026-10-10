@@ -38,9 +38,7 @@ ladders.
 
 ## Required
 
-- [WebGPU renderer](/quest/m1/webgpu-renderer.md) - a new `@moq/video` renders frames through WebGPU in their own colour space, with Canvas2D where WebGPU is missing, for watch and the publish preview
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
-- [Held group wakes](/quest/m1/held-group-wakes.md) - a group held across a route switch wakes when its successor's first timestamp or abort makes it stale; cache-max-age's wall-clock budget rides the same wake
 - [Upstream position regression](/quest/m1/largest-regression.md) - a relay copy that sees upstream's largest group go backwards on moq-transport or epochless lite-07 fails loud instead of serving the old instance's cache
 - [Untimed decisions](/quest/m1/untimed-decisions.md) - the maintainer decides whether moq-archive keeps refusing untimed tracks, and whether a malformed FETCH object ends its track
 - [Untimed by default in Rust](/quest/m1/rust-untimed-default.md) - an undeclared Rust timescale means untimed, and shared-clock publishers declare milliseconds
@@ -63,7 +61,6 @@ ladders.
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - the moq.pro dashboard hosts the worklets and calls `assets()` after the release
-- [Media audio-tone check](/quest/m1/media-audio-tone.md) - the media lane's audio-tone check passes under load, fixed at its cause
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Test TypeScript check](/quest/m1/test-ts-check.md) - `just check` type-checks the TypeScript harnesses under test/
 - [IETF request headers](/quest/m1/ietf-dispatch-headers.md) - each bidi request reads its header in its own task, so a slow one never blocks the next
@@ -109,7 +106,6 @@ ladders.
 - [AudioToolbox encode](/quest/m1/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
 - [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table
-- [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the maintainer registers the host that runs the NVIDIA tests
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
 - [Rendition preference](/quest/m1/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
 - [Native enabled](/quest/m1/native-enabled.md) - native players and the ffi/C paths never select a disabled rendition, and move off one disabled mid-playback
@@ -198,3 +194,7 @@ ladders.
 - [Catalog colour](/quest/m1/color-catalog.md) - the catalog describes a rendition's colour and HDR properties, which the WebGPU HDR renderer reads
 - [WebGPU HDR](/quest/m1/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [Request ID order](/quest/m1/request-id-order.md) - drafts 14 to 16 refuse a reused or lower Request ID in both languages
+- [Watch follows a covering prefix](/quest/m1/watch-follow-prefix.md) - `@moq/watch` moves to a covering prefix when the exact route ends, as `moq play` does
+- [Import catalog drop](/quest/m1/import-catalog-drop.md) - moq-cli import never drops a catalog producer without finishing it
+- [JS restart keeps the request](/quest/m1/js-restart-keeps-request.md) - a resolved `@moq/net` request survives a Restart, as in Rust
+- [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS

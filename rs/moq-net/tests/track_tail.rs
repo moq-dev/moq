@@ -358,3 +358,63 @@ async fn a_lost_datagram_never_delays_the_end() {
 		drop((pair, _keep));
 	}
 }
+
+/// A publisher can declare the end, then open each group's stream before writing its first
+/// frame. The subscriber withholds a group until that frame lands, and the end waits for
+/// it: a reader that ended at the boundary would miss every group.
+#[moq_net_sim::test]
+async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+		let Pair {
+			pair,
+			mut track,
+			remote,
+			_keep,
+		} = connect(version).await;
+
+		let reader = moq_net_sim::spawn(async move {
+			let subscription = moq_net::track::Subscription::default()
+				.with_start(moq_net::track::Position::group(0))
+				.with_max_delay(TIMEOUT);
+			let mut sub = remote
+				.track("video")
+				.unwrap()
+				.subscribe(subscription)
+				.await
+				.expect("subscribe");
+			let mut groups = Vec::new();
+			while let Some(mut group) = sub.recv_group().await.expect("track aborted") {
+				let frame = group.read_frame().await.expect("group aborted").expect("a frame");
+				assert_eq!(&frame.payload[..], PAYLOAD);
+				groups.push(group.sequence);
+			}
+			groups
+		});
+		moq_net_sim::timeout(TIMEOUT, support::harness::subscribed(&track))
+			.await
+			.expect("no subscriber appeared");
+
+		track.finish_at(2).unwrap();
+		let mut groups = [track.append_group().unwrap(), track.append_group().unwrap()];
+		// Paused time advances only once every task is idle: both headers and the end
+		// have reached the subscriber, ahead of any frame.
+		moq_net_sim::sleep(GRACE / 10).await;
+		assert!(
+			!reader.is_finished(),
+			"{version}: the track ended before its groups showed"
+		);
+
+		for group in &mut groups {
+			group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+			group.finish().unwrap();
+		}
+		let mut groups = moq_net_sim::timeout(TIMEOUT, reader)
+			.await
+			.expect("the subscription never ended")
+			.expect("reader panicked");
+		// Arrival order: either group's frame may land first.
+		groups.sort();
+		assert_eq!(groups, [0, 1], "{version}");
+		drop((track, pair, _keep));
+	}
+}

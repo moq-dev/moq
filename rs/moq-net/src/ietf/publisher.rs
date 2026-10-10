@@ -3820,6 +3820,39 @@ mod serve_tests {
 		}
 	}
 
+	/// A reset request stream still cancels the subscription on every draft.
+	#[moq_net_sim::test]
+	async fn requester_reset_cancels_subscriptions() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let h = serve(version);
+			let mut session = ScriptedSession::per_stream_reset(vec![vec![]]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let run = h
+				.publisher
+				.run_subscription(&mut stream, &mut serving, &mut finished, async {});
+			assert!(futures::poll!(std::pin::pin!(run)).is_ready(), "{version}");
+		}
+	}
+
 	/// A close must count requests before their first poll and release them even
 	/// when a dispatched task is cancelled or its message is refused.
 	#[moq_net_sim::test]
@@ -6293,6 +6326,8 @@ mod serve_tests {
 		}
 
 		assert!(!serve(Some(0)).await.flags.has_end, "capped at object 0 of 3");
+		assert!(!serve(Some(2)).await.flags.has_end, "capped at the last object");
+		assert!(!serve(Some(3)).await.flags.has_end, "capped past the last object");
 		assert!(serve(None).await.flags.has_end, "the whole group");
 	}
 }
