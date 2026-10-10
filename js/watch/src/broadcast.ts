@@ -260,9 +260,10 @@ export class Broadcast {
 
 	// Subscribe to the broadcast, by default waiting for its announcement so we never race a
 	// publisher that comes online after us. A request stays on the publisher instance it resolved
-	// and ends once that stops serving, so a republish or reconnect is followed by requesting
-	// again whenever the path is announced (a start or a restart); the request ending is never
-	// the trigger. Mirror its handle into `active`, and a refusal into `error`.
+	// and ends once that stops serving, so a republish, a reconnect, or a covering prefix taking
+	// over is followed by requesting again whenever the route serving the path starts or restarts;
+	// the request ending is never the trigger. Mirror its handle into `active`, and a refusal
+	// into `error`.
 	#runBroadcast(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
@@ -273,21 +274,29 @@ export class Broadcast {
 		const name = effect.get(this.in.name);
 		const announced = effect.get(this.in.announced);
 
+		// Observed whether or not the first request waits for an announcement: announcements are
+		// the only restart signal. Each start or restart of the route serving the name requests
+		// afresh, and the fresh request replaces the current one unless both resolve the same
+		// broadcast. Following first means a name outside the origin's scope is refused here,
+		// before any request, and reported like any other refusal.
+		let stream: Moq.Announce.Consumer;
+		try {
+			stream = origin.follow(name);
+		} catch (err) {
+			effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
+			return;
+		}
+		effect.cleanup(() => stream.close());
+
 		const current = new Signal(origin.request(name, { announced }));
 		effect.cleanup(() => current.peek().close());
 
-		// Observed whether or not the first request waits for an announcement: announcements are
-		// the only restart signal. Each start or restart covering the name requests afresh, and
-		// the fresh request replaces the current one unless both resolve the same broadcast.
-		const stream = origin.announced(Path.Pattern.literal(name), { hidden: true });
-		effect.cleanup(() => stream.close());
 		effect.spawn(async () => {
 			for (;;) {
 				const entry = await effect.race(stream.next());
 				// An event that settled just before teardown still resumes here: open nothing then.
 				if (!entry || effect.abort.aborted) break;
 				if (entry.kind === "end" || entry.kind === "update") continue;
-				if (!Path.hasPrefix(entry.prefix, name)) continue;
 				const previous = current.peek();
 				const fresh = origin.request(name, { announced });
 				const was = previous.active.peek();

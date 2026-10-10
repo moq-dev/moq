@@ -13,6 +13,7 @@
  *
  *     bun media.ts --url http://127.0.0.1:4443 [--timeout 30] [--cases pause,detach]
  *     bun media.ts --url ... --fault silent-audio --cases none --expect-fail "audio tone"
+ *     bun media.ts --url ... --lag --cases late-join --expect-fail "late join reaches live"
  *
  * @module
  */
@@ -47,7 +48,6 @@ import {
 import {
 	type CaptureState,
 	FAULTS,
-	lateJoinStartsLive,
 	leakedPlayerStarted,
 	SAMPLE_MS,
 	SAMPLE_RATE,
@@ -65,6 +65,7 @@ const { values } = parseArgs({
 		fault: { type: "string", default: "none" },
 		cases: { type: "string" },
 		leak: { type: "boolean", default: false },
+		lag: { type: "boolean", default: false },
 		"expect-fail": { type: "string" },
 	},
 });
@@ -79,7 +80,7 @@ const selected = new Set<string>(
 const unknown = [...selected].filter((name) => !CASES.some((c) => c === name));
 if (!url || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || !FAULTS.some((f) => f === fault) || unknown.length > 0) {
 	console.error(
-		`usage: media.ts --url U [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${CASES.join(",")}] [--leak] [--expect-fail TEXT]`,
+		`usage: media.ts --url U [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${CASES.join(",")}] [--leak] [--lag] [--expect-fail TEXT]`,
 	);
 	process.exit(2);
 }
@@ -166,6 +167,92 @@ async function waitFrozen(page: Page, errors: BrowserErrors, assertion: string, 
 	throw new Failure(assertion, `${description}: the presented frame is still advancing, now ${frame}`);
 }
 
+/**
+ * A presented frame at most this far behind the fixture's painted counter counts as live.
+ *
+ * The lag spans capture, encode, relay, playout delay, and decode. Loaded runs settle at 4 to 24
+ * frames with spikes to 33, while a player stuck on the GOP from before a demand gap sits 60 or more
+ * behind.
+ */
+const LIVE_LAG_FRAMES = 45;
+
+/** How long a latecomer may take to present its first frame, from its page loading. Loaded runs take up to 2.6s. */
+const LATE_START_MS = 5000;
+
+/** How long a latecomer may take to reach live after its first frame. Loaded runs take up to 0.3s. */
+const LATE_CATCHUP_MS = 2000;
+
+/** A player delay far enough behind {@link LIVE_LAG_FRAMES} that `--lag` must fail "late join reaches live". */
+const LAGGED_DELAY = "3s";
+
+const framesToMs = (frames: number) => Math.round((frames * 1000) / Pattern.FPS);
+
+/**
+ * Wait until the player is playing within {@link LIVE_LAG_FRAMES} of the frame the fixture last
+ * painted, and report how far behind its first reading was.
+ *
+ * Both pages are read at once, in separate browsers, so the lag is what a viewer would see against
+ * the source. After a demand gap the relay may hand over the GOP from before the gap, so the first
+ * frame can be stale; `assertion` names the check that playback then fast-forwards to live.
+ *
+ * Only a frame that moved since the last reading counts. The player paints the first frame it decodes
+ * as a preview and holds it until its sync delay comes up, so a held frame says nothing about where
+ * playback runs: a player delayed seconds behind live still shows a near-live preview first.
+ */
+async function waitForLive(
+	publisher: Page,
+	publisherErrors: BrowserErrors,
+	player: Page,
+	playerErrors: BrowserErrors,
+	assertion: string,
+): Promise<{ first: number; lag: number; after: number }> {
+	const since = Date.now();
+	let first: number | undefined;
+	let lag: number | undefined;
+	let frame: number | undefined;
+	let moved = false;
+	while (Date.now() < since + LATE_CATCHUP_MS) {
+		throwPageErrors(publisherErrors);
+		throwPageErrors(playerErrors);
+		const [fixture, state] = await Promise.all([readFixtureState(publisher), readPlayerState(player)]).catch(
+			() => [],
+		);
+		if (fixture && state?.frameId !== undefined) {
+			lag = fixture.frameId - state.frameId;
+			first ??= lag;
+			moved = frame !== undefined && state.frameId !== frame;
+			frame = state.frameId;
+			if (moved && lag <= LIVE_LAG_FRAMES) return { first, lag, after: Date.now() - since };
+		}
+		await sleep(POLL_INTERVAL_MS);
+	}
+	throwPageErrors(publisherErrors);
+	throwPageErrors(playerErrors);
+	throw new Failure(
+		assertion,
+		`${moved ? "still" : "held a frame"} ${lag === undefined ? "?" : framesToMs(lag)}ms behind the fixture ` +
+			`${LATE_CATCHUP_MS}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback`,
+	);
+}
+
+/**
+ * Measure one window of playback, opened once the player has filled its audio buffer and plays.
+ *
+ * A player shows its first frame as soon as it decodes, then holds that frame silent while it buffers
+ * up to its sync delay, which rises past 400ms under load. A window opened on that held frame counts
+ * the buffering as missing tone. Only the ring filling opens the window, never a tone, so silence
+ * still fails {@link assertMedia} rather than this wait.
+ */
+async function measurePlayback(player: Page, playerErrors: BrowserErrors, label: string): Promise<void> {
+	await waitForState(player, playerErrors, {
+		deadline: Date.now() + SETTLE_MS,
+		assertion: "playback starts",
+		description: `${label}: the audio buffer to fill to the player's delay and play`,
+		predicate: (state) => state.audioContext === "running" && !state.audioStalled,
+	});
+	assertMedia(await collect(player, playerErrors, WINDOW_MS), label);
+}
+
 // One sample as a line: elapsed time, the frame on the canvas, the tone step heard against the one
 // that frame belongs to, how far the tone stood above the noise floor, and whether audio was
 // arriving at all, which separates a silent player from a publisher that stopped sending.
@@ -175,7 +262,8 @@ function traceLine(sample: PlayerState, start: number): string {
 	return (
 		`    +${((sample.at - start) / 1000).toFixed(2)}s frame=${sample.frameId ?? "-"} ` +
 		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
-		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
+		`rms=${sample.rms?.toFixed(3) ?? "-"} ats=${sample.audioTimestamp?.toFixed(0) ?? "-"} vts=${sample.videoTimestamp?.toFixed(0) ?? "-"} ` +
+			`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
 	);
 }
 
@@ -339,21 +427,26 @@ async function browserFor(args: string[] = []): Promise<Browser> {
 	return browser;
 }
 
+/** How a subscriber page is set up. */
+type SubscriberProps = {
+	muted?: boolean;
+	/** Start a Playwright trace. Defaults to true. */
+	trace?: boolean;
+	/** The player's `delay` attribute, when not its adaptive default. */
+	delay?: string;
+};
+
 /** Open a subscriber page and wait for the player to start sampling. Never reloads. */
 async function subscriber(
 	broadcast: string,
 	label: string,
-	muted = false,
-	trace = true,
+	{ muted = false, trace = true, delay }: SubscriberProps = {},
 ): Promise<[Page, BrowserErrors]> {
-	const [page, errors] = await open(
-		await browserFor(),
-		// visible="always" because the window is never frontmost in a headless run, and the default
-		// policy would stop downloading video and leave the canvas black.
-		pageUrl(server.origin, "subscribe", { url: relay, broadcast, visible: "always", muted: String(muted) }),
-		label,
-		trace,
-	);
+	// visible="always" because the window is never frontmost in a headless run, and the default
+	// policy would stop downloading video and leave the canvas black.
+	const params: Record<string, string> = { url: relay, broadcast, visible: "always", muted: String(muted) };
+	if (delay !== undefined) params.delay = delay;
+	const [page, errors] = await open(await browserFor(), pageUrl(server.origin, "subscribe", params), label, trace);
 	await waitForWatch(page);
 	return [page, errors];
 }
@@ -374,7 +467,7 @@ async function readCapture(page: Page): Promise<CaptureState> {
 /** A denied browser permission is visible, silent to discovery, and revives on a later grant. */
 async function captureDenial(broadcast: string): Promise<void> {
 	console.error("=== capture denial and grant ===");
-	const [viewer, viewerErrors] = await subscriber(broadcast, "capture viewer", true);
+	const [viewer, viewerErrors] = await subscriber(broadcast, "capture viewer", { muted: true });
 	const [publisher, publisherErrors] = await open(
 		await browserFor(["--use-fake-device-for-media-stream"]),
 		pageUrl(server.origin, "publish", { url: relay, broadcast }),
@@ -482,7 +575,7 @@ try {
 	console.error("=== cold start ===");
 	// No trace yet. DOM snapshots evaluate with a user gesture, and the player's graph is built
 	// after the first of those, so Chromium would start it running and the gate below would fail.
-	let [player, playerErrors] = await subscriber(broadcast, "player", false, false);
+	let [player, playerErrors] = await subscriber(broadcast, "player", { trace: false });
 
 	// Video has to reach the canvas with no gesture at all: only audio is ever gated.
 	const first = await waitForState(player, playerErrors, {
@@ -519,7 +612,7 @@ try {
 		predicate: (state) => state.audioContext === "running",
 	});
 
-	assertMedia(await collect(player, playerErrors, WINDOW_MS), "cold start");
+	await measurePlayback(player, playerErrors, "cold start");
 
 	// ── pause and resume ─────────────────────────────────────────────────────
 	if (wants("pause")) {
@@ -562,7 +655,7 @@ try {
 			predicate: (state) => !state.paused && (state.frameId ?? 0) > paused,
 		});
 		console.error(`  resumed ${(resumed.frameId ?? 0) - paused} frames past the pause`);
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after resume");
+		await measurePlayback(player, playerErrors, "after resume");
 	}
 
 	// ── disable and re-enable the video rendition ────────────────────────────
@@ -600,7 +693,7 @@ try {
 			predicate: (state) => (state.frameId ?? 0) > (before.frameId ?? 0),
 		});
 		console.error(`  black while disabled, then resumed at frame ${resumed.frameId}`);
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after enable");
+		await measurePlayback(player, playerErrors, "after enable");
 	}
 
 	// ── unsubscribe and rejoin ───────────────────────────────────────────────
@@ -621,7 +714,8 @@ try {
 			description: `the presented frame to move past the ${left} it stopped on`,
 			predicate: (state) => (state.frameId ?? 0) > left,
 		});
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after rejoin");
+		await waitForLive(publisher, publisherErrors, player, playerErrors, "rejoin reaches live");
+		await measurePlayback(player, playerErrors, "after rejoin");
 	}
 
 	// ── detach and reattach ──────────────────────────────────────────────────
@@ -662,7 +756,8 @@ try {
 			description: `the presented frame to move past the ${busy.frameId} showing before the detach`,
 			predicate: (state) => (state.frameId ?? 0) > (busy.frameId ?? 0),
 		});
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after reattach");
+		await waitForLive(publisher, publisherErrors, player, playerErrors, "reattach reaches live");
+		await measurePlayback(player, playerErrors, "after reattach");
 	}
 
 	// ── publisher stop and same-path republish ───────────────────────────────
@@ -687,35 +782,36 @@ try {
 			predicate: (state) => state.frameId !== undefined && state.frameId < (before.frameId ?? 0),
 		});
 		console.error(`  recovered at frame ${recovered.frameId}, restarted from ${before.frameId}`);
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after republish");
+		await measurePlayback(player, playerErrors, "after republish");
 	}
 
 	// ── late join ────────────────────────────────────────────────────────────
-	// A fresh page against a broadcast that has been running for a while: the player has to tune in
-	// at the live edge rather than replay what it missed.
+	// A fresh page against a broadcast that has been running for a while, after a demand gap. The
+	// relay may hand over the GOP from before the gap, so the first frame can be stale; the player
+	// has to show it promptly and then fast-forward to live rather than replay what it missed.
 	if (wants("late-join")) {
 		console.error("=== late join ===");
-		const live = await command(publisher, "liveGop");
 		await player.close();
-		[player, playerErrors] = await subscriber(broadcast, "latecomer");
-		await gesture(player);
-		const joined = await waitForState(player, playerErrors, {
-			deadline: Date.now() + timeoutMs,
-			assertion: "late join presents media",
-			description: "the latecomer to present the fixture",
-			predicate: (state) => state.frameId !== undefined && state.audioContext === "running",
+		[player, playerErrors] = await subscriber(broadcast, "latecomer", {
+			delay: values.lag ? LAGGED_DELAY : undefined,
 		});
-		// requestFrame() is asynchronous, and capture timestamps decide keyframes. The painted
-		// counter can therefore be over 15 ticks ahead of a still-current encoded GOP under load.
-		// Compare against its actual published keyframe, sampled while the old viewer held demand.
-		check(
-			lateJoinStartsLive(live, joined.videoTimestamp),
-			"late join starts live",
-			() =>
-				`joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms before the current GOP's ${live.timestamp}ms keyframe`,
+		const joined = Date.now();
+		await gesture(player);
+
+		const shown = await waitForState(player, playerErrors, {
+			deadline: joined + LATE_START_MS,
+			assertion: "late join shows video",
+			description: `a presented fixture frame within ${LATE_START_MS}ms of the latecomer loading`,
+			predicate: (state) => state.frameId !== undefined,
+		});
+		const startMs = Date.now() - joined;
+
+		const live = await waitForLive(publisher, publisherErrors, player, playerErrors, "late join reaches live");
+		console.error(
+			`  showed frame ${shown.frameId} after ${startMs}ms, ${framesToMs(live.first)}ms behind the fixture; ` +
+				`live ${live.after}ms later, ${framesToMs(live.lag)}ms behind`,
 		);
-		console.error(`  joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms, current GOP began at ${live.timestamp}ms`);
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "late join");
+		await measurePlayback(player, playerErrors, "late join");
 	}
 
 	if (wants("capture-denial")) await captureDenial(`${broadcast}-capture.hang`);

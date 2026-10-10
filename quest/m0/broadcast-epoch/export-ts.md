@@ -95,5 +95,4 @@ no longer follows a replacement. Wire: none.
 
 ## Related
 
-- [No stitch](/quest/m0/broadcast-epoch/no-stitch.md) - stops moq-net hiding a replacement from the export
 - [Two TS export legs](/quest/m2/ts-hitless.md) - identical output within one epoch

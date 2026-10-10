@@ -1,0 +1,7 @@
+{
+	// Build-only variant of tsconfig.json that keeps tests out of dist/, so they
+	// are neither published nor discovered by `bun test` at the package root.
+	// `tsc --noEmit` still uses tsconfig.json, so tests stay type-checked.
+	"extends": "./tsconfig.json",
+	"exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+}

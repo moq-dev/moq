@@ -28,7 +28,6 @@ on:
     # request.
     workflows:
       - apt-repo
-      - Back-merge
       - Cache
       - Cachix
       - Check
@@ -60,6 +59,7 @@ on:
       - release-winget
       - rpm-repo
       - Swift
+      - Video
     types:
       - completed
 

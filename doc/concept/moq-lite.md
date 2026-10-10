@@ -81,7 +81,8 @@ authorization and hidden names work exactly as without one.
 - **Same epoch resumes.** A subscription moves between routes with the same
   epoch without a seam, continuing from the first frame it lacks. A route
   without an epoch keeps its subscriptions until that route goes, which is how
-  a transcoder claim stays on the worker that first served it.
+  a transcoder claim stays on the worker that first served it, and a track that
+  fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
   winning the path, is announced as a restart. Subscriptions already open stay
   on the old instance until dropped or its route goes, while new requests get

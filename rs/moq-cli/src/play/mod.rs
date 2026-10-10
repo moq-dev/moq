@@ -18,7 +18,6 @@ mod args;
 mod buffer;
 mod layout;
 mod playback;
-mod source;
 mod timeline;
 
 #[cfg(all(test, feature = "play"))]
