@@ -81,3 +81,8 @@ one to one; the API reference has the names.
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [`kt/`](https://github.com/moq-dev/moq/tree/main/kt); `just kt check` builds and tests locally
 - Artifacts: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq), [dev.moq:moq-ffi](https://central.sonatype.com/artifact/dev.moq/moq-ffi)
+
+A dynamic track request exposes `demand()` (`Demand()` in Go). Obtain it before
+accepting the request to watch subscribers through the handoff to its producer;
+wait for it to become unused before stopping expensive production. The watch is
+weak and ends when the track closes or the request is rejected.

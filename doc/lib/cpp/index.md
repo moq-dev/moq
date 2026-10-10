@@ -192,3 +192,8 @@ Everything else maps one to one onto the
 header is the reference; every method carries its doc comment.
 
 - Source: [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq); `just cpp check` builds, installs, and tests it locally
+
+A dynamic track request exposes `demand()` (`Demand()` in Go). Obtain it before
+accepting the request to watch subscribers through the handoff to its producer;
+wait for it to become unused before stopping expensive production. The watch is
+weak and ends when the track closes or the request is rejected.

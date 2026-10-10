@@ -100,3 +100,8 @@ one to one; the API reference has the names.
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
+
+A dynamic track request exposes `demand()` (`Demand()` in Go). Obtain it before
+accepting the request to watch subscribers through the handoff to its producer;
+wait for it to become unused before stopping expensive production. The watch is
+weak and ends when the track closes or the request is rejected.

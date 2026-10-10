@@ -82,3 +82,8 @@ one to one; the API reference has the names.
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)
+
+A dynamic track request exposes `demand()` (`Demand()` in Go). Obtain it before
+accepting the request to watch subscribers through the handoff to its producer;
+wait for it to become unused before stopping expensive production. The watch is
+weak and ends when the track closes or the request is rejected.
