@@ -70,4 +70,7 @@ Shared decisions, which Rust implements and [JavaScript](/quest/m1/transport-upg
 ## Required
 
 - [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through the client-goaway handover
-- [Closed fallback](/quest/m1/transport-upgrade/closed-fallback.md) - a WebSocket session that closes right after connecting falls back to the pending QUIC dial instead of redialing
+
+## Related
+
+- [Closed fallback](https://github.com/moq-dev/moq/pull/5284) - a WebSocket session that closes right after connecting falls back to the pending QUIC dial instead of redialing
