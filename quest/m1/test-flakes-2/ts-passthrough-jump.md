@@ -19,3 +19,7 @@ observable events where the fixture allows. Never widen the wait or add a
 retry, per this questline's rules.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [The moq-time crate](/quest/m1/time/crate.md) - the controlled clock and sim this tests on
