@@ -334,6 +334,8 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x3A  | NOT_FETCHABLE | The FETCH named a group delivered only as a datagram, which is never cached (see [Datagrams](#datagrams)). It has no moq-transport value; a bridge refuses the FETCH with DOES_NOT_EXIST. |
 | ------- | ------------- | ----------- |
+|  0x3B  | UNAUTHORIZED | The endpoint does not authorize this request, or no longer does, such as when the [scope](#auth-stream) does not cover it. The session stays up. |
+| ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
 An endpoint terminating a stream because the session is ending SHOULD use SESSION_CLOSED rather than the session's own code, since the two spaces are disjoint.
@@ -363,6 +365,8 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 |    0x5  | Goaway       | Either      |
 | ------- | ------------- | ----------- |
 |    0x6  | Track        | Subscriber  |
+| ------- | ------------- | ----------- |
+|    0x7  | Auth         | Either      |
 | ------- | ------------- | ----------- |
 
 ### Announce
@@ -523,6 +527,25 @@ A publisher that advertised Report but not Increase ignores the target and only 
 In either case the publisher periodically replies with PROBE messages on the same bidirectional stream containing the current estimated bitrate and smoothed RTT.
 
 If the publisher advertised no Probe capability (e.g., the congestion controller is not exposed), it MUST reset the stream.
+
+### Auth {#auth-stream}
+Either endpoint can open an Auth Stream (0x7) to present a token and learn what it grants.
+
+The opener sends a single AUTH message and keeps its side open for as long as the token applies.
+Each endpoint SHOULD open one Auth Stream with an empty token right after the session starts, so both learn what the credential the connection already presented (the request URI, a client certificate, or nothing) allows.
+The acceptor replies with an AUTH_OK carrying the grant, or an AUTH_ERROR refusing the token.
+It MAY send further AUTH_OK messages to replace the grant, such as with a lowered expiry, and MAY send an AUTH_ERROR after an AUTH_OK to revoke it; the latest AUTH_OK is the token's grant.
+After an AUTH_ERROR the acceptor closes its side of the stream.
+The opener withdraws a token by closing or resetting its side of the stream, and the acceptor then closes its own.
+
+A grant names the paths the opener may publish to the acceptor and subscribe to from it, relative to the session.
+An endpoint's scope is the union of the grants of its open Auth Streams, and a stream that ends removes its grant from the union.
+When the union shrinks, an endpoint SHOULD withdraw its announcements and cancel its subscriptions that the union no longer covers, keeping the session and everything still covered.
+An endpoint that cancels a subscription, or refuses or stops serving a request, because the union does not cover it resets the stream with UNAUTHORIZED.
+An endpoint that announces a broadcast outside the union once its own setup tokens are answered SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
+
+An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, resets the stream, the same as a peer that does not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
+An opener that sees the stream reset before any reply treats the token as unsupported rather than refused.
 
 ### Goaway
 Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session shutdown.
@@ -1108,7 +1131,7 @@ A value of 0 means the whole group (default).
 A non-zero value is the absolute frame index + 1, matching `Group End`.
 MUST be 0 when `Group End` is 0, since an unbounded subscription has no end group to qualify.
 
-`Group Start` and `Group End` are offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence.
+`Group End` and `Frame End` are offset by 1 so 0 can mean "absent". `Group Start` is an absolute sequence, and 0 is group 0.
 
 ## SUBSCRIBE_UPDATE
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
@@ -1217,9 +1240,13 @@ SUBSCRIBE_OK Message {
 Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
 **Group**:
-The absolute sequence number of the first group that will be delivered.
-It MUST be greater than or equal to the requested start group; any groups in between are unavailable.
-A subscriber that requested the latest group learns the resolved sequence here.
+The absolute sequence number where delivery starts when the subscription resolves.
+Group streams can arrive out of order, so it need not be the first group sent.
+It MUST be greater than or equal to the requested `Group Start`.
+This group is not a new floor.
+A subscriber SHOULD NOT wait for a group between the requested floor and this group.
+The publisher still delivers such a group if it is created or becomes available later, while it is within `Subscriber Max Age`.
+A subscriber whose `Subscriber Max Age` resolves the start to the latest group learns that sequence here.
 
 There is no matching frame field, because the start frame is never in doubt: a partial group is only delivered when it was asked for, so the subscription starts either exactly where it asked or at the beginning of a later group (see [Positions](#positions)).
 The subscriber derives the start frame from `Group` and its own request:
@@ -1361,6 +1388,84 @@ A peer that reconnects to a provided URI SHOULD keep using that URI for subseque
 A relay that receives a GOAWAY SHOULD treat the announcements that arrived on that session as the most expensive routes available, so a subscription it can serve from another session moves at the next Group boundary rather than when the draining session finally closes.
 The routes stay usable: a broadcast reachable only over the draining session MUST keep being served until the session ends, which is what makes the sender's deadline a handover window rather than a cutoff.
 
+## AUTH {#auth-message}
+AUTH is the first message on an Auth Stream, presenting a token.
+
+~~~
+AUTH Message {
+  Message Length (i)
+  Token (b)
+}
+~~~
+
+**Token**:
+The credential to verify, opaque to moq-lite.
+An empty token presents the credential the connection already carried, or nothing.
+
+## AUTH_OK {#auth-ok}
+AUTH_OK grants a token, and replaces any grant sent before it on the same stream.
+
+~~~
+AUTH_OK Message {
+  Type (i) = 0x0
+  Message Length (i)
+  Publish Count (i)
+  Publish Pattern (s) ...
+  Subscribe Count (i)
+  Subscribe Pattern (s) ...
+  Expires (i)
+}
+~~~
+
+**Publish Pattern**:
+A [pattern](#path-pattern) matching broadcast paths the opener may announce and serve.
+A count of zero grants none.
+
+**Subscribe Pattern**:
+A [pattern](#path-pattern) matching broadcast paths the opener may subscribe to.
+
+**Expires**:
+The number of milliseconds until the grant lapses, or 0 for never.
+The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
+
+### Path Pattern {#path-pattern}
+A pattern is a set of broadcast paths, written as `/`-separated segments.
+Each segment is one of:
+
+- a literal, matching that segment exactly;
+- `*`, matching any one segment;
+- a literal with one `*` inside it, such as `cam-*.hang`, matching any segment that starts with the bytes before the `*` and ends with the bytes after it, without overlapping them;
+- `**`, matching zero or more segments.
+
+A pattern matches a path when its segments match the path's segments in order, covering the whole path.
+The empty pattern matches only the empty path, `room/**` matches `room` and every path beneath it, and `**` matches every path.
+
+A pattern has at most 32 segments and at most one `**`.
+It has no leading, trailing, or repeated `/`, no segment with more than one `*`, and no `**` combined with other bytes in a segment.
+It is canonical: a `**` is never immediately preceded by a `*` segment, since `*/**` and `**/*` match the same paths and only `**/*` is valid.
+A pattern that breaks any of these rules is a PROTOCOL_VIOLATION.
+
+A grant covers a request when one of its patterns matches the path.
+
+## AUTH_ERROR {#auth-error}
+AUTH_ERROR refuses a token, or revokes it after an AUTH_OK.
+
+~~~
+AUTH_ERROR Message {
+  Type (i) = 0x1
+  Message Length (i)
+  Error Code (i)
+  Reason Phrase (s)
+}
+~~~
+
+**Error Code**:
+A code from the [session error registry](#session-error-codes), such as UNAUTHORIZED.
+A code that does not fit in 32 bits is a PROTOCOL_VIOLATION that closes the session.
+
+**Reason Phrase**:
+A human-readable reason, at most 8,192 bytes.
+
 ## GROUP
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.
 
@@ -1419,6 +1524,8 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
+- Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
@@ -1442,6 +1549,7 @@ The `Message Length` describes the payload size on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
+- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 
 ## moq-lite-06
 
@@ -1457,6 +1565,7 @@ The `Message Length` describes the payload size on the wire.
 - Split the reserved stream error range: 32 through 47 stays reserved, and 48 through 63 is moq-lite's own, assigned by the tables and mapped rather than forwarded across a bridge. Assigned 0x32 GROUP_TOO_LARGE: a group that grew past the publisher's cache budget is aborted. Every code is terminal.
 - Assigned 0x33 NOT_FOUND, 0x34 OLD, and 0x35 EVICTED in the stream error table: a group the publisher cannot serve because it was never here, has been superseded, or was dropped under memory pressure.
 - Assigned 0x36 UNROUTABLE, 0x37 WRONG_SIZE, 0x38 FRAME_TOO_LARGE, and 0x39 TIMESTAMP_MISMATCH in the stream error table, moving them out of the reserved 32 through 47 range, which no longer carries provisional placeholders.
+- Assigned 0x3B UNAUTHORIZED in the stream error table: a request reset because the endpoint does not authorize it, or no longer does, distinct from SESSION_CLOSED.
 - Assigned 0x31 CONTROL_TIMEOUT in the stream error table: a request stream torn down because the peer never answered, which DELIVERY_TIMEOUT described as late content. It has no moq-transport value and bridges to INTERNAL_ERROR.
 - A disallowed stream type, a role mismatch, or a missing extension is a PROTOCOL_VIOLATION; the session table gains no code for them, so nothing is sent from the reserved 32 through 47 range in either registry.
 - Added implicit Announce IDs: each ANNOUNCE_START assigns the next per-stream ordinal.
@@ -1608,6 +1717,10 @@ moq-lite inherits the transport security of the underlying connection: QUIC and 
 
 ## Bandwidth Probing
 The `Increase` Probe level (see [Probe Parameter](#probe-parameter)) lets a subscriber ask the publisher to pad the connection up to a target bitrate. A publisher MUST NOT treat the target as authorization to send beyond what congestion control allows: padding is bounded by the congestion window, so probing cannot be used to amplify traffic toward the subscriber or a spoofed address. A publisher that only advertised `Report` MUST NOT pad above its current sending rate. Because all data flows on an established, congestion-controlled session to the connecting peer, moq-lite offers no off-path amplification vector.
+
+## Authorization
+An AUTH_OK tells the opener what the acceptor will allow; it does not replace the acceptor's own enforcement, which MUST still refuse what the grant does not cover.
+A token presented on an Auth Stream is as sensitive as one in the request URI, and relies on the same transport confidentiality.
 
 ## Session Redirection
 GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy (scheme, authority, and port) before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.

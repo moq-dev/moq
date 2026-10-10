@@ -62,8 +62,13 @@ and is excluded from the count: groups just behind it may still be in flight, so
 gap is only blamed once a higher group confirms it was truly skipped. A group the
 relay fails part-way (it gives up on a subscriber that fell behind) ends that
 group alone and lands in the same accounting; the subscription stays for the next
-one, so the offered load holds at the configured count. The JSON
-keyframe at the start of each group is parsed back to recover the publisher's
+one, so the offered load holds at the configured count. Subscribers use
+`--max-delay` (default `2s`, the players' automatic budget), so a group still in
+flight when the next one starts is waited on, as a viewer would, rather than
+counted lost. A new subscription also starts up to that far behind the live
+edge, so its first latency samples include the catch-up. `--max-delay 0` keeps
+only the live edge, which with short groups measures skip timing more than
+relay cost. The JSON keyframe at the start of each group is parsed back to recover the publisher's
 shape, so a subscriber works against peers it didn't publish itself.
 
 ## Usage
@@ -93,6 +98,7 @@ table (`fps = { min = 24, max = 60 }`).
 | `--frame-size` | E | Bytes per frame |
 | `--group-size` | F | Zeroed frames per group after the keyframe |
 | `--fanout` | | Publish one named broadcast and point every other connection at it |
+| `--max-delay` | | How long a subscriber waits on a late group before skipping it (default `2s`) |
 | `--startup` | | Ramp window for staggering connections/subscriptions |
 | `--duration` | | Stop after this long (runs until interrupted otherwise) |
 | `--report` | | How often to log throughput stats |
