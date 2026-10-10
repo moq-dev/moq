@@ -53,6 +53,7 @@ ladders.
 - [moq-bot may push workflow changes](/quest/m1/bot-workflows-permission.md) - condition: the maintainer grants moq-bot's GitHub App the `workflows` permission, so back-merges carrying workflow changes go through
 - [main merges through a squash queue](/quest/m1/merge-queue-settings.md) - condition: once `release` carries the new back-merge script, the maintainer enables the squash merge queue and moq-bot's pull_request bypass together
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
+- [Per-frame arrivals in @moq/watch](/quest/m1/watch-arrivals.md) - the audio and video decoders expose a window of recent frame arrivals, late and skipped marks included, as a signal
 - [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - condition: moq-dev/web-transport#419 ships in a release, then moq's iroh HTTP/3 client reports a peer's close capsule
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [lite-07 Live flag](/quest/m1/lite-live.md) - a separate `Live` field on lite-07 SUBSCRIBE, so merged floors never starve a subscriber; late lower groups build on it
