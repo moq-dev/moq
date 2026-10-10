@@ -139,46 +139,54 @@ async fn a_quiet_catalog_reaches_a_late_reader_after_its_route_dies() {
 /// group. A fresh reader must still receive that group.
 #[moq_net_sim::test]
 async fn a_quiet_catalog_reaches_a_fresh_reader_when_a_peer_resumes_past_it() {
-	each_version(LITE, |version| async move {
-		let publisher = produce_origin(1);
-		let relay = produce_origin(2);
-		let resuming = produce_origin(3);
-		let fresh = produce_origin(4);
-		let (_broadcast, mut track) = publish(&publisher);
+	each_version(LITE, |version| resume_then_fresh(version, false)).await;
+}
 
-		let _upstream = link(version, &publisher, &relay).await;
-		let _resume_link = link(version, &relay, &resuming).await;
-		let _fresh_link = link(version, &relay, &fresh).await;
+/// The same, with the fresh reader in-process at the relay. It names no floor at all,
+/// so the aggregate must not keep the resume's floor above the only group.
+#[moq_net_sim::test]
+async fn a_quiet_catalog_reaches_an_unfloored_relay_reader_when_a_peer_resumes_past_it() {
+	each_version(LITE, |version| resume_then_fresh(version, true)).await;
+}
 
-		let resume_remote = request(&resuming).await;
-		// Held until the scenario returns. Dropping it would cancel the upstream
-		// subscription and let the fresh reader open a new one at the live edge.
-		let _resume = moq_net_sim::spawn(async move {
-			let _sub = resume_remote
-				.track("catalog.json")
-				.unwrap()
-				.subscribe(track::Subscription::default().with_start(track::Position::group(1)))
-				.await
-				.expect("resume subscribe");
-			moq_net_sim::sleep(Duration::from_secs(60)).await;
-		});
+async fn resume_then_fresh(version: Version, in_process: bool) -> Result<(), String> {
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let resuming = produce_origin(3);
+	let fresh = produce_origin(4);
+	let (_broadcast, mut track) = publish(&publisher);
 
-		// Wait for the resume to reach the publisher, so the fresh reader widens it
-		// rather than opening its own floorless subscription.
-		let resumed = Some(track::Position::group(1));
-		moq_net_sim::timeout(TIMEOUT, async {
-			while track.subscription().map(|sub| sub.start) != Some(resumed) {
-				track.subscription_changed().await.unwrap();
-			}
-		})
-		.await
-		.map_err(|_| "the resume never reached the publisher")?;
+	let _upstream = link(version, &publisher, &relay).await;
+	let _resume_link = link(version, &relay, &resuming).await;
+	let _fresh_link = link(version, &relay, &fresh).await;
 
-		let remote = request(&fresh).await;
-		read_snapshot(&remote)
+	let resume_remote = request(&resuming).await;
+	// Held until the scenario returns. Dropping it would cancel the upstream
+	// subscription and let the fresh reader open a new one at the live edge.
+	let _resume = moq_net_sim::spawn(async move {
+		let _sub = resume_remote
+			.track("catalog.json")
+			.unwrap()
+			.subscribe(track::Subscription::default().with_start(track::Position::group(1)))
 			.await
-			.map_err(|err| format!("fresh reader: {err}"))?;
-		Ok(())
+			.expect("resume subscribe");
+		moq_net_sim::sleep(Duration::from_secs(60)).await;
+	});
+
+	// Wait for the resume to reach the publisher, so the fresh reader widens it
+	// rather than opening its own floorless subscription.
+	let resumed = Some(track::Position::group(1));
+	moq_net_sim::timeout(TIMEOUT, async {
+		while track.subscription().map(|sub| sub.start) != Some(resumed) {
+			track.subscription_changed().await.unwrap();
+		}
 	})
-	.await;
+	.await
+	.map_err(|_| "the resume never reached the publisher")?;
+
+	let remote = request(if in_process { &relay } else { &fresh }).await;
+	read_snapshot(&remote)
+		.await
+		.map_err(|err| format!("fresh reader: {err}"))?;
+	Ok(())
 }

@@ -4909,8 +4909,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 											let _ = self.serving.start_at(start.group);
 										}
 										active.served = Some(start.group);
-										// The groups the SUBSCRIBE asked for below it are
-										// unavailable, whatever the demand asks later.
+										// The groups the SUBSCRIBE asked for below it are not
+										// waited for, whatever the demand asks later. One that
+										// still arrives is delivered.
 										if let Some(requested) = active.requested
 											&& let Ok(mut tail) = active.tail.write()
 										{

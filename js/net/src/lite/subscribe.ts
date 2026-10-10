@@ -9,17 +9,16 @@ import { hasFrameBounds, hasGroupOrder, hasLargest, hasStreamCount, resolvesStar
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
  *
- * Lite-06 writes the raw floor (`undefined` and 0 are the same absence of a constraint),
- * while a pre-06 wire encodes the sequence + 1 and gets a vacuous floor folded back to
- * absent: an explicit group 0 there means "replay from the beginning", which is not what
- * a floor of 0 asks for.
+ * Lite-06 writes the raw floor (`undefined` and 0 are both group 0). A pre-06 wire
+ * encodes the sequence + 1: omitting the floor is 0 (the latest group, where the
+ * publisher starts) and an explicit 0 is 1, replay from the beginning.
  */
 async function encodeStartGroup(w: Writer, version: Version, startGroup?: number) {
 	if (resolvesStart(version)) {
 		await w.u53(startGroup ?? 0);
 		return;
 	}
-	await w.u53(startGroup !== undefined && startGroup > 0 ? startGroup + 1 : 0);
+	await w.u53(startGroup === undefined ? 0 : startGroup + 1);
 }
 
 /**

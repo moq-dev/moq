@@ -60,6 +60,7 @@ import {
 	hasDatagrams,
 	hasProbeRtt,
 	hasStreamCount,
+	resolvesStart,
 	updateSupported,
 	Version,
 	waitsForSubscriberFin,
@@ -1100,8 +1101,8 @@ export class Subscriber {
 
 			if ("start" in resp) {
 				entry.start = resp.start.group;
-				// The groups the SUBSCRIBE asked for below it are unavailable, whatever the
-				// demand asks later.
+				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
+				// demand asks later. One that still arrives is delivered.
 				if (entry.requested !== undefined) entry.tail.account(entry.requested, entry.start);
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
@@ -1220,9 +1221,14 @@ export class Subscriber {
 	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
 		const ag = groupBounds(a.groups);
 		const bg = groupBounds(b.groups);
+		// `groupBounds` reads an omitted start as 0. A pre-06 wire tells them apart: omitted
+		// joins at the publisher's start, and 0 is group 0. Lite-06 encodes both as 0.
+		const sameStart =
+			resolvesStart(this.version) || (a.groups?.start === undefined) === (b.groups?.start === undefined);
 		return (
 			(a.priority ?? 0) === (b.priority ?? 0) &&
 			(a.maxDelay ?? 0) === (b.maxDelay ?? 0) &&
+			sameStart &&
 			ag.start === bg.start &&
 			ag.end === bg.end
 		);

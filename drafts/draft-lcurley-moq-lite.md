@@ -1131,7 +1131,7 @@ A value of 0 means the whole group (default).
 A non-zero value is the absolute frame index + 1, matching `Group End`.
 MUST be 0 when `Group End` is 0, since an unbounded subscription has no end group to qualify.
 
-`Group Start` and `Group End` are offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence.
+`Group End` and `Frame End` are offset by 1 so 0 can mean "absent". `Group Start` is an absolute sequence, and 0 is group 0.
 
 ## SUBSCRIBE_UPDATE
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
@@ -1240,9 +1240,13 @@ SUBSCRIBE_OK Message {
 Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
 **Group**:
-The absolute sequence number of the first group that will be delivered.
-It MUST be greater than or equal to the requested start group; any groups in between are unavailable.
-A subscriber that requested the latest group learns the resolved sequence here.
+The absolute sequence number where delivery starts when the subscription resolves.
+Group streams can arrive out of order, so it need not be the first group sent.
+It MUST be greater than or equal to the requested `Group Start`.
+This group is not a new floor.
+A subscriber SHOULD NOT wait for a group between the requested floor and this group.
+The publisher still delivers such a group if it is created or becomes available later, while it is within `Subscriber Max Age`.
+A subscriber whose `Subscriber Max Age` resolves the start to the latest group learns that sequence here.
 
 There is no matching frame field, because the start frame is never in doubt: a partial group is only delivered when it was asked for, so the subscription starts either exactly where it asked or at the beginning of a later group (see [Positions](#positions)).
 The subscriber derives the start frame from `Group` and its own request:
@@ -1520,6 +1524,8 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
+- Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
