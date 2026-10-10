@@ -63,7 +63,8 @@ install:
 
 # Lints, compiles, and tests only the packages the branch changed plus
 # everything depending on them; `check --all` is the unscoped suite. BASE
-# defaults to the branch's upstream. Rust compiles once: its test build doubles
+# defaults to the PR base, then a main/release upstream, then origin/main.
+# Rust compiles once: its test build doubles
 # as the clippy gate (see `rs check-test`).
 
 # Lint, compile, and test what the branch changed since BASE, plus its dependents.
