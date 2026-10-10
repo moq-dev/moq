@@ -199,6 +199,12 @@ export class Connection implements Established {
 		});
 		this.#client = client;
 
+		this.#auth.violated.subscribe((err) => {
+			if (!err) return;
+			this.#quic.close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
+			this.abort();
+		});
+
 		this.#publisher = new Publisher({
 			quic: this.#quic,
 			session: this.#session,

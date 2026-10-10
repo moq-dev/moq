@@ -3,13 +3,16 @@ import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, toStreamCode } from "./error.ts";
+import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
 import * as Ietf from "./ietf/index.ts";
-import { LiteAuthWire } from "./lite/auth.ts";
+import * as IetfMessage from "./ietf/message.ts";
+import { AuthMessage as LiteAuthMessage, LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
+import * as LiteMessage from "./lite/message.ts";
 import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { Writer } from "./stream.ts";
+import { type Stream, Writer } from "./stream.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -392,5 +395,120 @@ test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 		upSub.close();
 		client.abort();
 		server.abort();
+	}
+});
+
+// Capture the acceptor's actual AUTH writer after a valid setup grant. The following
+// bytes travel through the same connection dispatcher and presenter as a real peer.
+describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (protocol) => {
+	test("a second presenter message closes the session", async () => {
+		const streams: Stream[] = [];
+		const prototype = protocol === Lite.ALPN_07_WIP ? LiteAuthWire.prototype : IetfAuthWire.prototype;
+		const original = prototype.present;
+		const spy = spyOn(prototype, "present").mockImplementation(async function (
+			this: LiteAuthWire & IetfAuthWire,
+			token,
+		) {
+			const stream = await original.call(this, token);
+			streams.push(stream);
+			return stream;
+		});
+		let pair: Pair | undefined;
+		try {
+			pair = await connect({ protocol });
+			await waitFor(pair.client.auth.grant, (g) => g !== undefined);
+			await waitFor(pair.server.auth.grant, (g) => g !== undefined);
+			await streams[0]?.writer.u53(0);
+			expect((await withTimeout(pair.transport.closed, 100, "second AUTH did not close")).closeCode).toBe(
+				SessionCode.ProtocolViolation,
+			);
+		} finally {
+			spy.mockRestore();
+			pair?.client.abort();
+			pair?.server.abort();
+		}
+	});
+
+	test("a malformed presenter AUTH closes the session", async () => {
+		const pair = await connect({ protocol });
+		await waitFor(pair.client.auth.grant, (g) => g !== undefined);
+		await waitFor(pair.server.auth.grant, (g) => g !== undefined);
+		const lite = protocol === Lite.ALPN_07_WIP;
+		const prototype = lite ? LiteAuthMessage.prototype : IetfAuthMessage.prototype;
+		const spy = spyOn(prototype, "encode").mockImplementation(async (writer: Writer) => {
+			const body = async (w: Writer) => {
+				if (!lite) await w.u62(2n);
+				await w.u53(2);
+			};
+			if (lite) await LiteMessage.encode(writer, body);
+			else await IetfMessage.encode(writer, body, IetfAuthMessage.id);
+		});
+		const added = pair.client.auth.add("bad").catch(() => undefined);
+		try {
+			expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
+				SessionCode.ProtocolViolation,
+			);
+		} finally {
+			spy.mockRestore();
+			pair.client.abort();
+			pair.server.abort();
+			await added;
+		}
+	});
+
+	for (const fault of [
+		"unknown reply",
+		"oversized code",
+		"truncated error",
+		"extra body",
+		"oversized expiry",
+	] as const) {
+		test(`${fault} closes the session`, async () => {
+			const streams: Stream[] = [];
+			const lite = protocol === Lite.ALPN_07_WIP;
+			const prototype = lite ? LiteAuthWire.prototype : IetfAuthWire.prototype;
+			const original = prototype.grant;
+			const spy = spyOn(prototype, "grant").mockImplementation(async function (
+				this: LiteAuthWire & IetfAuthWire,
+				stream,
+				value,
+			) {
+				streams.push(stream);
+				await original.call(this, stream, value);
+			});
+			let pair: Pair | undefined;
+			try {
+				pair = await connect({ protocol });
+				await waitFor(pair.client.auth.grant, (g) => g !== undefined);
+				await waitFor(pair.server.auth.grant, (g) => g !== undefined);
+				const stream = streams[0];
+				if (!stream) throw new Error("setup AUTH writer missing");
+				if (fault === "unknown reply") {
+					await stream.writer.u53(99);
+				} else {
+					const body = async (writer: Writer) => {
+						if (fault === "oversized expiry") {
+							await writer.u53(0);
+							await writer.u53(0);
+							await writer.u62(1n << 53n);
+						} else {
+							await writer.u62(fault === "oversized code" ? 1n << 32n : 1n);
+							if (fault !== "truncated error") await writer.string("");
+							if (fault === "extra body") await writer.u53(0);
+						}
+					};
+					const id = fault === "oversized expiry" ? (lite ? 0 : 0x40b62) : lite ? 1 : 0x40b63;
+					if (lite) await LiteMessage.encode(stream.writer, body, { id });
+					else await IetfMessage.encode(stream.writer, body, id);
+				}
+				expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
+					SessionCode.ProtocolViolation,
+				);
+			} finally {
+				spy.mockRestore();
+				pair?.client.abort();
+				pair?.server.abort();
+			}
+		});
 	}
 });

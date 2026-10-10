@@ -1447,6 +1447,9 @@ A pattern that breaks any of these rules is a PROTOCOL_VIOLATION.
 
 A grant covers a request when one of its patterns matches the path.
 
+An endpoint MUST close the session with PROTOCOL_VIOLATION when an AUTH stream message fails to decode, has trailing body bytes, or has an unexpected type for its direction.
+The opener sends exactly one AUTH; any additional message on its side is a PROTOCOL_VIOLATION.
+
 ## AUTH_ERROR {#auth-error}
 AUTH_ERROR refuses a token, or revokes it after an AUTH_OK.
 

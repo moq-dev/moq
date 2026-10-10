@@ -417,7 +417,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let res = ready!(self.poll_serve(waiter));
+		let res = ready!(self.poll_serve(waiter)).map_err(crate::auth::protocol_error);
 		let err = match res {
 			Ok(()) => Error::Cancel,
 			Err(err) => {
@@ -434,7 +434,14 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			}
 		};
 		if let Some(serving) = &self.serving {
-			serving.end(err);
+			serving.end(err.clone());
+		}
+		if matches!(err, Error::ProtocolViolation) {
+			self.shared.auth.close(err.clone());
+			self.shared
+				.session
+				.clone()
+				.close(SessionError::ProtocolViolation.to_code(), &err.to_string());
 		}
 		Poll::Ready(Ok(()))
 	}
@@ -479,7 +486,12 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 
 			// The presenter withdrew the token, by FIN or by a cancelling reset, or its
 			// stream died.
-			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
+			if let Poll::Ready(res) = stream.reader.poll_read_chunk(&mut cx, 1).map(|res| {
+				res.and_then(|chunk| match chunk {
+					None => Ok(()),
+					Some(_) => Err(Error::ProtocolViolation),
+				})
+			}) {
 				match res {
 					Ok(()) | Err(Error::Stream(crate::StreamError::Cancel)) => {}
 					Err(err) => return Poll::Ready(Err(err)),

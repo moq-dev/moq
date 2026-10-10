@@ -195,6 +195,7 @@ export class AuthError {
 		guard(version);
 		return Message.decode(r, async (rd) => {
 			const code = await rd.u53();
+			if (code > 0xffffffff) throw new Error("AUTH_ERROR code exceeds 32 bits");
 			const reason = await rd.string();
 			if (new TextEncoder().encode(reason).byteLength > MAX_REASON) {
 				throw new Error("AUTH_ERROR reason exceeds 8,192 bytes");

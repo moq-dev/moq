@@ -487,7 +487,7 @@ where
 				)));
 				let mut datagrams = std::pin::pin!(err_only(run_datagrams(session.clone(), subscriber.clone())));
 				let mut goaway_recv = std::pin::pin!(err_only(goaway_recv));
-				let mut present = std::pin::pin!(present);
+				let mut present = std::pin::pin!(err_only(present));
 				let mut enforce = std::pin::pin!(err_only(enforce));
 				let mut setup = std::pin::pin!(setup);
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
@@ -532,8 +532,10 @@ where
 					if let Poll::Ready(err) = waiter.poll_future(goaway_recv.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
-					// Presenting tokens never ends the session.
-					let _ = waiter.poll_future(present.as_mut());
+					// Malformed replies are session-fatal, unlike token refusals.
+					if let Poll::Ready(err) = waiter.poll_future(present.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
 					if let Poll::Ready(err) = waiter.poll_future(enforce.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
@@ -1122,6 +1124,7 @@ where
 	let declared = subscriber.solicit().await;
 
 	let mut tasks = TaskSet::owned();
+	let violation: kio::Shared<Option<Error>> = Default::default();
 	// Each AUTH serve task settles `Issued::closed` from whatever the auth handle
 	// holds when it drops, and the first reason wins. So the error that ends the
 	// session has to reach the handle while `tasks` is still alive, or every grant
@@ -1136,6 +1139,12 @@ where
 		loop {
 			let mut stream = tasks
 				.drive(|waiter| {
+					if let std::task::Poll::Ready(mut err) = violation.poll(waiter, |err| match err.is_some() {
+						true => std::task::Poll::Ready(()),
+						false => std::task::Poll::Pending,
+					}) {
+						return std::task::Poll::Ready(Err(err.take().unwrap()));
+					}
 					let mut cx = waiter.context();
 					Stream::poll_accept(&mut accept, version, &mut cx)
 				})
@@ -1146,6 +1155,12 @@ where
 			let mut hdr_id: Option<u64> = None;
 			let header = tasks
 				.drive(|waiter| {
+					if let std::task::Poll::Ready(mut err) = violation.poll(waiter, |err| match err.is_some() {
+						true => std::task::Poll::Ready(()),
+						false => std::task::Poll::Pending,
+					}) {
+						return std::task::Poll::Ready(Err(err.take().unwrap()));
+					}
 					let mut cx = waiter.context();
 					let id = match hdr_id {
 						Some(id) => id,
@@ -1204,7 +1219,13 @@ where
 					if !data.is_empty() {
 						return Err(Error::WrongSize);
 					}
-					tasks.push(serve.clone().run(stream, msg, version));
+					let serve = serve.clone();
+					let violation = violation.clone();
+					tasks.push(async move {
+						if let Err(err) = serve.run(stream, msg, version).await {
+							violation.lock().get_or_insert(err);
+						}
+					});
 				}
 				_ => {
 					tracing::warn!(id, "unexpected bidi stream type");
@@ -1323,6 +1344,101 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
+
+	#[moq_net_sim::test]
+	async fn malformed_auth_replies_close_the_session() {
+		for version in [Version::Draft17, Version::Draft22] {
+			for (id, body) in [
+				(99, vec![]),
+				(auth::AuthError::ID, vec![0xc0, 0, 0, 1, 0, 0, 0, 0, 0]),
+				(auth::AuthError::ID, vec![1]),
+				(auth::AuthError::ID, vec![1, 0, 0]),
+				(auth::AuthOk::ID, vec![0, 0, 0xc0, 0x20, 0, 0, 0, 0, 0, 0]),
+			] {
+				let mut script = Vec::new();
+				let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+				encoder.varint(id).unwrap();
+				encoder.u16(body.len() as u16);
+				script.extend(body);
+				let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
+				let log = session.log.clone();
+				let (driver, _, _) = start(Config {
+					runtime: crate::time::Clock::sim(),
+					session,
+					setup: None,
+					request_id_max: None,
+					limits: Default::default(),
+					client: true,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					cost: None,
+					version,
+					path: None,
+					authority: None,
+					peer_setup_stream: None,
+					peer_declared: Some(peer::Peer {
+						auth: true,
+						..Default::default()
+					}),
+					auth: crate::auth::Handle::new(true),
+					early_unis: Vec::new(),
+				})
+				.unwrap();
+				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+					.await
+					.expect("the session outlived a malformed AUTH reply")
+					.expect_err("malformed AUTH is fatal");
+				assert!(is_protocol_violation(&err), "{err:?}");
+				assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn malformed_presenter_auth_closes_the_session() {
+		for version in [Version::Draft17, Version::Draft22] {
+			for body in [vec![0, 2], vec![0, 0, 0]] {
+				let mut script = Vec::new();
+				let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+				encoder.varint(auth::Auth::ID).unwrap();
+				encoder.u16(2);
+				script.extend(body);
+				let session =
+					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
+				let log = session.log.clone();
+				let (driver, _, _) = start(Config {
+					runtime: crate::time::Clock::sim(),
+					session,
+					setup: None,
+					request_id_max: None,
+					limits: Default::default(),
+					client: false,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					cost: None,
+					version,
+					path: None,
+					authority: None,
+					peer_setup_stream: None,
+					peer_declared: Some(peer::Peer {
+						auth: true,
+						..Default::default()
+					}),
+					auth: crate::auth::Handle::new(true),
+					early_unis: Vec::new(),
+				})
+				.unwrap();
+				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+					.await
+					.expect("malformed presenter AUTH was ignored")
+					.expect_err("malformed AUTH is fatal");
+				assert!(is_protocol_violation(&err), "{err:?}");
+				assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
+			}
+		}
+	}
 
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();
