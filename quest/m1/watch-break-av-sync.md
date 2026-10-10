@@ -2,7 +2,7 @@
 
 ## Goal
 
-After a demand break (the viewer leaves and returns, or the publisher pauses),
+After a demand break (the viewer leaves and returns),
 `@moq/watch` never plays pre-break audio out of sync with pre-break video: it
 either plays them together or jumps straight to live.
 
