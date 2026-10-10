@@ -595,13 +595,10 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 		.expect("open group aborted")
 		.expect("open group finished");
 
+	// Start the replacement while the original still holds its port, so the two
+	// can never share one. Clients keep dialing the dead relay until the retarget.
+	let replacement = RelayHost::start(relay_config()).await;
 	relay.kill().await;
-
-	// Take the dead relay's port the way another process's ephemeral bind can,
-	// so the restart below never depends on getting it back. A failed bind means
-	// someone else already holds it, which tests the same thing.
-	let old = relay.addr();
-	let _taken = std::net::UdpSocket::bind(old).ok();
 
 	// Terminal result: the unread half of the open group fails. `Ok(None)` here
 	// would be the relay's death passing for the publisher finishing.
@@ -615,10 +612,7 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	expect_status(&mut subscribe_loop, moq_tokio::Status::Disconnected, "subscriber").await;
 	expect_status(&mut publish_loop, moq_tokio::Status::Disconnected, "publisher").await;
 
-	let relay = RelayHost::start(relay_config()).await;
-	// Whoever held the old port may have released it by now, so check the
-	// address too: a restart that reclaimed it must not pass.
-	assert_ne!(relay.addr(), old, "the restarted relay reused the dead relay's port");
+	let relay = replacement;
 	path.retarget(&relay);
 
 	expect_status(&mut subscribe_loop, moq_tokio::Status::Connected, "subscriber").await;

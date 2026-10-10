@@ -63,8 +63,9 @@ bounded rather than fast.
 The replacement relay binds a fresh ephemeral port, never the dead one's: in
 those two seconds any process's ephemeral bind can take the freed port. So this
 drill's clients dial a shaper in both lanes, unimpaired on loopback, and
-`Shaper::retarget` points it at the replacement. The drill holds the dead port
-itself so a restart that needed it back fails every run.
+`Shaper::retarget` points it at the replacement. The replacement starts before
+the kill, while the original still holds its port, so a restart that needed
+that port back fails every run.
 
 ## Two lanes
 
