@@ -119,9 +119,10 @@ impl Server {
 			.flatten()?;
 
 		let origin = self.inner.origin.consume();
-		let broadcast = origin
-			.request_broadcast(name, None)
+		// A covering dynamic route may never answer, so the request is bounded too.
+		let broadcast = tokio::time::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
 			.await
+			.ok()?
 			.map_err(|err| tracing::warn!(%err, %name, "failed to resolve broadcast"))
 			.ok()?;
 		let broadcaster = Broadcaster::new(moq_mux::Source::new(origin, broadcast), self.inner.config.clone());

@@ -2571,6 +2571,55 @@ mod tests {
 		drop((new_media, _new_track, new_server, catalog, live));
 	}
 
+	// A recorder waiting at the live edge ends when the bound sibling ends, with nothing else
+	// (a playlist request, a timeline update) touching the rendition.
+	#[tokio::test]
+	async fn a_cursor_at_the_edge_ends_when_its_sibling_ends() {
+		tokio::time::pause();
+		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
+
+		let origin = produce_origin();
+		let mut live = origin.create_broadcast("live").expect("publish allowed");
+		live.announce(Default::default()).expect("publish allowed");
+		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
+		let mut media = moq_net::broadcast::Info::new().produce();
+		let track = write_routed_media(&mut media, OLD, recorder, 0);
+		let server = origin.dynamic("media", sibling_route(10)).unwrap();
+		settle().await;
+
+		let upstream = crate::resolved(&origin, "live").await;
+		let mut config = video_config();
+		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
+		let (rendition, watcher) = export(&upstream, &config);
+		accept_sibling(&server, &media).await;
+		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+			.await
+			.expect("the timeline reaches the rendition");
+
+		let mut cursor = rendition.segments();
+		loop {
+			match tokio::time::timeout(Duration::from_secs(1), cursor.next()).await {
+				Ok(Ok(Some(_))) => continue,
+				Err(_) => break,
+				other => panic!(
+					"the cursor waits at the live edge: {:?}",
+					other.map(|r| r.map(|s| s.is_some()))
+				),
+			}
+		}
+
+		// Only the sibling broadcast goes: its recorder stays, so the timeline stays quiet.
+		drop((server, media));
+		let end = tokio::time::timeout(Duration::from_secs(5), cursor.next())
+			.await
+			.expect("the cursor wakes when its sibling ends")
+			.unwrap();
+		assert!(end.is_none(), "the cursor ends with its sibling");
+		watcher.abort();
+		drop((track, catalog, live));
+	}
+
 	// A sibling not yet announced when the rendition binds it fails that first lookup. The
 	// catalog's rows are still listed, and the bind is issued again until the sibling resolves.
 	#[tokio::test]

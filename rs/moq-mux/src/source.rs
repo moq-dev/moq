@@ -27,8 +27,8 @@ type Pins = Arc<Mutex<HashMap<moq_net::PathOwned, moq_net::broadcast::Consumer>>
 /// handle ([`broadcast`](Self::broadcast), [`catalog`](Self::catalog),
 /// [`resolve`](Self::resolve), [`bind`](Self::bind), [`subscribe_track`](Self::subscribe_track),
 /// and an export's track requests). A route replaced after that is never resolved, epoch or
-/// not, so two publishers never splice into one export; a request on a held broadcast that
-/// went fails instead. Clones share the held broadcasts.
+/// not, so two publishers never splice into one export; a request on a held broadcast that has
+/// ended fails instead. Clones share the held broadcasts.
 #[derive(Clone)]
 pub struct Source {
 	origin: moq_net::origin::Consumer,
@@ -43,7 +43,8 @@ impl Source {
 	/// `broadcast` reference resolves against its [path](moq_net::broadcast::Info::path), and the
 	/// referenced broadcast is fetched via
 	/// [`origin.request_broadcast`](moq_net::origin::Consumer::request_broadcast), so it must be
-	/// reachable through `origin` (by exact path, or served by a dynamic handler).
+	/// reachable through `origin` (by exact path, or served by a dynamic handler). A standalone
+	/// broadcast has an empty path, so it is its own root and any `..` reference escapes.
 	pub fn new(origin: moq_net::origin::Consumer, broadcast: moq_net::broadcast::Consumer) -> Self {
 		let path = broadcast.info().path.clone();
 		let pins = HashMap::from([(path.clone(), broadcast)]);

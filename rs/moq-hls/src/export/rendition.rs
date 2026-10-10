@@ -136,12 +136,18 @@ impl Media {
 
 	/// End the window when a bound sibling has ended; return the binding listed rows belong to.
 	fn sync(&self, window: &segments::Producer) -> Arc<moq_mux::Binding> {
+		self.poll_sync(&kio::Waiter::noop(), window)
+	}
+
+	/// [`sync`](Self::sync), registering `waiter` to wake when the sibling resolves or ends, so a
+	/// waiter on the window learns of an end that nothing else touches the rendition for.
+	fn poll_sync(&self, waiter: &kio::Waiter, window: &segments::Producer) -> Arc<moq_mux::Binding> {
 		let Some((source, rel)) = &self.sibling else {
 			return self.handle.lock().expect("media lock poisoned").binding.clone();
 		};
 		let mut handle = self.handle.lock().expect("media lock poisoned");
-		match handle.binding.poll_broadcast(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(broadcast)) if broadcast.is_closed() && !handle.ended => {
+		match handle.binding.poll_broadcast(waiter) {
+			Poll::Ready(Ok(broadcast)) if !handle.ended && broadcast.poll_closed(waiter).is_ready() => {
 				// A broadcast end carries no cause, so a clean end and a replacement look the
 				// same. Either way its rows can no longer be fetched, and a new instance only
 				// comes with a new catalog instance, so the playlist ends here.
@@ -156,6 +162,7 @@ impl Media {
 				// announced binds once it is. Only a bind that never resolved fails, and the
 				// source pins every one that did, so this never re-resolves a sibling.
 				if let Ok(next) = source.bind(Some(rel)) {
+					let _ = next.poll_broadcast(waiter);
 					handle.binding = Arc::new(next);
 				}
 			}
@@ -524,8 +531,13 @@ impl Rendition {
 
 	/// Poll until this rendition has a renderable media playlist.
 	pub(crate) fn poll_playable(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.media.sync(&self.live);
+		self.poll_media(waiter);
 		self.live.poll_playable(waiter)
+	}
+
+	/// End the window if the bound sibling ended, registering `waiter` to wake when it does.
+	pub(crate) fn poll_media(&self, waiter: &kio::Waiter) {
+		self.media.poll_sync(waiter, &self.live);
 	}
 
 	/// Render this rendition's media playlist from the current timeline window, or `None` when
@@ -656,7 +668,7 @@ impl Rendition {
 		if self.kind == Kind::Audio {
 			return self.poll_playable(waiter);
 		}
-		self.media.sync(&self.live);
+		self.poll_media(waiter);
 		if self.run().startable == Some(self.live.resets()) {
 			return self.poll_playable(waiter);
 		}

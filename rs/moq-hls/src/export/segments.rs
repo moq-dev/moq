@@ -477,6 +477,8 @@ impl Consumer {
 	}
 
 	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
+		// An ended sibling ends the window, which nothing else may wake this cursor for.
+		self.rendition.poll_media(waiter);
 		let poll = self
 			.state
 			.poll(waiter, |state| match state.next_after(self.after.as_ref()) {
