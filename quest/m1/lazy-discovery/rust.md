@@ -31,6 +31,10 @@ Open for the plan round: the Rust equivalent of an announced request, how the
 watch set crosses the poll-based session driver, and moq-ffi and binding
 fallout (see the Cross-Package Sync table in `AGENTS.md`).
 
+Tests must pin the relay side: an origin in relay mode (cluster and upstream
+sessions on the client subscriber path) still sends a root request, so
+lazy discovery never narrows what a relay discovers.
+
 ## Required
 
 - [JS lazy discovery](/quest/m1/lazy-discovery/js.md) - Rust mirrors the settled JS shape

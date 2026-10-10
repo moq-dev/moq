@@ -38,5 +38,8 @@ resolves again on the next start; an `epoch`-pinned request still refuses
 another instance; @moq/watch plays through a publisher restart.
 
 Public API: `Origin.Consumer.follow` and `broadcasts` removed (also on
-`Producer`); `request(..., { announced: true })` semantics change. Wire:
-none.
+`Producer`); `request(..., { announced: true })` semantics change: `active`
+swaps on a restart instead of the request erroring. External callers (the
+customer is on 0.4.2) need a migration note in the PR description and
+`doc/lib/js/net.md`, with before and after for the follow-and-re-request
+pattern. Wire: none.
