@@ -30,6 +30,12 @@ regression, and the audio jitter target line here from m0; moved uring,
 capture-chain, and first-FETCH pipelining work to m2; and deleted quests that
 were done or not worth their cost.
 
+Promoted from m2 on 2026-10-09 by maintainer priority: mobile capture and
+completion, the capacity probe, the viewer up-switch, and native enabled,
+which simulcast rung disable requires. Added the same day:
+simulcast rung disable, OBS multitrack, MoQ in obs-studio, and portrait
+ladders.
+
 ## Required
 
 - [WebGPU renderer](/quest/m1/webgpu-renderer.md) - a new `@moq/video` renders frames through WebGPU in their own colour space, with Canvas2D where WebGPU is missing, for watch and the publish preview
@@ -47,10 +53,10 @@ were done or not worth their cost.
 - [moq-bot may push workflow changes](/quest/m1/bot-workflows-permission.md) - condition: the maintainer grants moq-bot's GitHub App the `workflows` permission, so back-merges carrying workflow changes go through
 - [main merges through a squash queue](/quest/m1/merge-queue-settings.md) - condition: once `release` carries the new back-merge script, the maintainer enables the squash merge queue and moq-bot's pull_request bypass together
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
+- [Per-frame arrivals in @moq/watch](/quest/m1/watch-arrivals.md) - the audio and video decoders expose a window of recent frame arrivals, late and skipped marks included, as a signal
 - [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - condition: moq-dev/web-transport#419 ships in a release, then moq's iroh HTTP/3 client reports a peer's close capsule
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [lite-07 Live flag](/quest/m1/lite-live.md) - a separate `Live` field on lite-07 SUBSCRIBE, so merged floors never starve a subscriber; late lower groups build on it
-- [FETCH_OK properties](/quest/m1/fetch-ok-properties.md) - our FETCH_OK carries the track properties SUBSCRIBE_OK does, as draft 16+ requires
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges in either order and replaces FETCH; relays fill misses by range, including over moq-transport
 - [Cross-relay bursts re-run](/quest/m1/cross-relay-bursts.md) - condition: the #4349 reporter re-runs their A/B/C comparison against current cdn.moq.pro
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 carries an untimed track in both languages; lite-05/06 write send time
@@ -66,6 +72,8 @@ were done or not worth their cost.
 - [FFI runtime](/quest/m1/ffi-runtime.md) - moq-ffi drives moq on a multi-thread runtime instead of one thread
 - [Audio group duration](/quest/m1/audio-group-duration.md) - audio groups span at least 20 ms by default, so small frames don't mint a group each
 - [Pipelined requests](/quest/m1/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
+- [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
+- [A busy js/net serve yields](/quest/m1/js-serve-yield.md) - js/net's serve loop leaves the browser its event loop under a fast publisher, if it does not already
 - [Kotlin wrapper POMs](/quest/m1/kt-ffi-pom.md) - Maven builds of `dev.moq:moq` resolve a published moq-ffi instead of the missing `0.0.0-dev`
 - [Installable moq-gst](/quest/m1/gst-brew-path.md) - `brew install moq-gst` installs the plugin from the tarball's `lib/gstreamer-1.0/`, and the Nix package carries `x264enc`, `avenc_aac`, and `avdec_h264`
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
@@ -95,6 +103,8 @@ were done or not worth their cost.
 - [Retire the libmoq stub](/quest/m1/libmoq-retire.md) - the published `libmoq` crate stops after its final release points users at `moq-c`
 - [VideoToolbox presets](/quest/m1/videotoolbox-presets.md) - VideoToolbox honors Balanced and Quality instead of always reporting LowLatency
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
+- [OBS multitrack](/quest/m1/obs-multitrack.md) - the obs-moq output publishes OBS's native multitrack video encoders as simulcast renditions, configured like OBS multitrack and over obs-websocket
+- [MoQ in obs-studio](/quest/m1/obs-studio/README.md) - a native MoQ output and service merged into obs-studio, once its maintainers agree; the plugin carries it until then
 - [AudioToolbox decode](/quest/m1/audio-decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
 - [AudioToolbox encode](/quest/m1/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
@@ -102,6 +112,10 @@ were done or not worth their cost.
 - [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the maintainer registers the host that runs the NVIDIA tests
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
 - [Rendition preference](/quest/m1/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
+- [Native enabled](/quest/m1/native-enabled.md) - native players and the ffi/C paths never select a disabled rendition, and move off one disabled mid-playback
+- [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - JS, Rust/FFI, and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
+- [Discover media headroom](/quest/m1/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
+- [Viewer up-switch](/quest/m1/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms
 - [Session outcomes](/quest/m1/session-outcomes.md) - the relay's session stats count refusals by reason and ends by kind, per root and tier
@@ -145,6 +159,9 @@ were done or not worth their cost.
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [E2EE](/quest/m1/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
 - [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - the catalog rotation follows the live camera's orientation
+- [Portrait ladder](/quest/m1/portrait-ladder.md) - portrait video plays end to end through transcode, with rungs sized by the source's short side
+- [iOS capture](/quest/m1/mobile-capture-ios.md) - Rust captures the camera and screen on iOS, setting the catalog rotation
+- [Android capture](/quest/m1/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
 - [Native audio quality](/quest/m1/audio-quality-native.md) - the browser lane's profiles, budgets, and metric schema run against `moq play` on a dummy device
 - [Caption import](/quest/m1/captions-import.md) - fMP4 and MKV subtitle tracks import as text renditions instead of erroring or being dropped
@@ -170,6 +187,7 @@ were done or not worth their cost.
 - [Dart on iOS](/quest/m1/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [Dart publish](/quest/m1/dart-publish.md) - a `moq-dart-v*` tag publishes `moq` to pub.dev unattended, as `moq_ffi`'s tags already do
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart is the one binding that cannot originate media
+- [Mobile completion](/quest/m1/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture before closing #700
 - [`moq --listen` drain and stats](/quest/m1/cli-serve.md) - a listening CLI session, already admitted through the relay's auth, is counted and drained like a relay's
 - [#709](/quest/m1/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate through rustls-acme over TLS-ALPN-01, persisted on disk
 - [Draft 14-16 updates](/quest/m1/ietf-legacy-updates.md) - Rust and JS apply and answer moq-transport 14-16 request updates without ending or leaking the request

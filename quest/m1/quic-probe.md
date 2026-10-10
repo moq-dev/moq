@@ -44,13 +44,16 @@ is not proof of full path capacity. Persist regressions in CI and broader
 network scenarios at least nightly. A measured no-go is a valid outcome;
 retain the baseline and record why before exposing an ineffective option.
 
+Promoted from m2 on 2026-10-09 by maintainer priority: the viewer up-switch
+requires it.
+
 ## Required
 
 - [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 
 ## Related
 
-- [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side, which requires this
+- [Viewer up-switch](/quest/m1/viewer-upswitch.md) - the viewer side, which requires this
 - [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
 - [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures forward delay, which a later delay-based controller would read headroom from
 - [noq#811](https://github.com/n0-computer/noq/issues/811) - probing while app-limited, proposed to n0

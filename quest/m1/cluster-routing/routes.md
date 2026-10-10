@@ -92,14 +92,14 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
 relay, dropping subscribers for about a second while the relay kept serving;
-holding without retracting brought hunting back (moq-dev/moq.pro#2116 has the
-measurements, and #4642's 300 ms cursor hold is the production mitigation).
+holding without retracting brought hunting back in measurements, and
+#4642's 300 ms cursor hold is the production mitigation.
 Separating "the path changed" (ROUTE) from "the broadcast ended" (ANNOUNCE)
 removes that trade, and the failover tests must show no front loses its
 route while a working one exists. Decide whether #4642's hold can then go.
 
-Simulator findings so far, from moq-dev/moq.pro#2152 (open, awaiting the
-maintainer's decision on a design revision):
+Simulator findings so far (awaiting the maintainer's decision on a design
+revision):
 
 - Live origin-end costs 134.5 KiB against path vector's 3668.1/1243.0 KiB,
   but still emits 2150 client updates against an 840 once-only minimum and
