@@ -308,7 +308,8 @@ These land with the next breaking release, not the 2026-09-23 train.
   `unknown` (logging, `JSON.stringify`, a generic setter) still compiles but
   now gets the wrapper and every intermediate state, so search for each
   `next()` and `for await` over a snapshot consumer rather than relying on
-  type errors.
+  type errors. On an untimed track nothing marks a group stale, so a `next()`
+  reader that falls behind replays the whole backlog where it used to skip it.
 
 ## Wire
 
