@@ -30,6 +30,14 @@ RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTER
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
+# The idle-out check guards this checkout's relay and clients. A run that swaps in other
+# binaries or JS clients (the wire-compat lanes run released ones) can't be held to it: a
+# released client may not close cleanly, and a released relay names no connection when one
+# closes.
+IDLE_CHECK=1
+if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
+    IDLE_CHECK=0
+fi
 TIMEOUT="${INTEROP_TIMEOUT:-20}"
 FPS="${INTEROP_FPS:-30}"
 SIZE="${INTEROP_SIZE:-320x240}"
@@ -512,7 +520,8 @@ run_publisher() {
             ffmpeg_h264 | "$CPP_INTEROP" publish --url "$URL" --broadcast "$broadcast"
             ;;
         js-native)
-            bun "$INTEROP_JS_PUBLISH_CLIENT/client.ts" publish "$URL" "$broadcast"
+            # exec, so the client leads the group and `stop_publisher` waits for its own close.
+            exec bun "$INTEROP_JS_PUBLISH_CLIENT/client.ts" publish "$URL" "$broadcast"
             ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
@@ -538,17 +547,20 @@ start_publisher() {
 
 # Stop a publisher the way a real one ends, so it closes its session and the idle-out check
 # below counts only real stalls. A stdin-fed client finishes once ffmpeg exits and its input
-# ends; the browser driver closes its pages on SIGTERM. Whatever is still running after the
-# wait is killed, and its connection then fails the round as an idle-out.
+# ends; the browser driver and the native JS client close on SIGTERM. Whatever is still
+# running after the wait is killed, and its connection then fails the round as an idle-out.
 stop_publisher() {
     local pid="$1" lang="$2" deadline=$((SECONDS + 10))
     case "$lang" in
-        js) kill -TERM -- -"$pid" 2>/dev/null || true ;;
+        js | js-native) kill -TERM -- -"$pid" 2>/dev/null || true ;;
         *) pkill -TERM -g "$pid" -x ffmpeg 2>/dev/null || true ;;
     esac
     while ! harness_exited "$pid" && ((SECONDS < deadline)); do
         sleep 0.1
     done
+    if ! harness_exited "$pid"; then
+        echo "  WARN  publisher '$lang' was still running 10 s after it was stopped; killing it"
+    fi
     harness_reap "$pid"
 }
 
@@ -563,7 +575,8 @@ relay_log_since() {
 }
 
 # Print each relay connection that appears from log line FROM on, with how it closed: the
-# relay's close error, or "open" while it hasn't closed yet.
+# relay's close error, or "open" while it hasn't closed yet. The patterns follow the relay's
+# `conn{id=...}` span and its `connection closed` warning (`rs/moq-relay/src/relay.rs`).
 relay_connections() {
     relay_log_since "$1" | awk '
         match($0, /conn\{id=[0-9]+ /) {
@@ -823,7 +836,7 @@ run_round() {
         stop_publisher "$pub_pid" "$pub"
     fi
     # The negative control's subscribers end by timing out, which is its point.
-    [[ "$NEGATIVE" -eq 1 ]] || check_idle_outs "$pub" "$from"
+    [[ "$NEGATIVE" -eq 1 || "$IDLE_CHECK" -eq 0 ]] || check_idle_outs "$pub" "$from"
     return 0
 }
 

@@ -814,7 +814,8 @@ impl Connection {
 		let upgrade = async move {
 			if let Some(upgrade) = upgrade {
 				upgrade.abort(moq_net::Error::Cancel);
-				upgrade.closed().await;
+				// Within the live session's one second, so a stuck transport can't hold `close`.
+				let _ = tokio::time::timeout(Duration::from_secs(1), upgrade.closed()).await;
 			}
 		};
 		let (session, predecessor, ()) = tokio::join!(session, predecessor, upgrade);
@@ -2729,6 +2730,46 @@ mod tests {
 			code(&moq_net::Error::GoawayTimeout),
 			"the upgrade ended without the abort's error: {err}"
 		);
+	}
+
+	/// Closing while a QUIC upgrade is still in its MoQ handshake ends the upgrade too, and
+	/// returns promptly rather than waiting on it.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[tokio::test]
+	async fn close_ends_an_upgrade_in_flight() {
+		let origin = crate::origin::spawn();
+		let mut fallback = Fallback::start(&origin, Quic::Refused).await;
+
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(crate::origin::spawn());
+		let mut connection = tokio::time::timeout(UPGRADE_WAIT, client.connect(fallback.url.clone()).established())
+			.await
+			.expect("never connected")
+			.unwrap();
+		let _websocket = fallback.accept().await;
+
+		fallback.forwarder.open();
+		let request = fallback.held().await;
+		let status = tokio::time::timeout(UPGRADE_WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Migrating);
+
+		// Inside the one second the live session may take to drain, plus slack.
+		tokio::time::timeout(Duration::from_secs(2), connection.close())
+			.await
+			.expect("close waited on the upgrade")
+			.unwrap();
+		let closed = async {
+			if let Ok(session) = request.ok().await {
+				session.closed().await;
+			}
+		};
+		tokio::time::timeout(UPGRADE_WAIT, closed)
+			.await
+			.expect("the upgrade's connection was left open");
 	}
 
 	/// When WebSocket wins the race but its MoQ handshake fails, the attempt falls back
