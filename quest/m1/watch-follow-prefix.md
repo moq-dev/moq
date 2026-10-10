@@ -10,7 +10,8 @@ offline, as Rust's `moq play` does through the shared follow helper.
 
 Found in #5154 (broadcast-epoch apps), decided 2026-10-09:
 `Broadcast.#runBroadcast` in `js/watch` ignores `End`, so the player goes
-offline even though a covering prefix still announces the path.
+offline even though a covering prefix still announces the path. Start after
+#5154 lands, since it adds the helper this quest uses.
 
 - Decided: use the shared follow helper. #5154 moves it from
   `moq_mux::Source::follow` into moq-net (`origin::Consumer::follow`) and
