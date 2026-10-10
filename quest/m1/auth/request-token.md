@@ -34,8 +34,8 @@ Decided, so review does not relitigate them:
   REQUEST_ERROR ends only that request, with PUBLISH_DONE `UPDATE_FAILED` for
   a subscription. A namespace ends with a closed stream from 17, and with
   PUBLISH_NAMESPACE_CANCEL on 16, where it shares the control stream (16
-  section 9.24). The session stays up and the old grant does not survive. A lapse or acceptor revoke also ends only
-  that request (2026-10-05).
+  section 9.24). The session stays up and the old grant does not survive. A
+  lapse or acceptor revoke also ends only that request (2026-10-05).
 - **Client credential.** `auth::Handle::set_request_token`, beside session
   tokens, with no `Client` methods. moq-tokio's `Connection` owns the token
   across reconnects: `Connection::auth()` renews it on a live connection and
