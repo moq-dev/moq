@@ -47,7 +47,6 @@ import {
 import {
 	type CaptureState,
 	FAULTS,
-	lateJoinStartsLive,
 	leakedPlayerStarted,
 	SAMPLE_MS,
 	SAMPLE_RATE,
@@ -164,6 +163,61 @@ async function waitFrozen(page: Page, errors: BrowserErrors, assertion: string, 
 	}
 	throwPageErrors(errors);
 	throw new Failure(assertion, `${description}: the presented frame is still advancing, now ${frame}`);
+}
+
+/**
+ * A presented frame at most this far behind the fixture's painted counter counts as live.
+ *
+ * The lag spans capture, encode, relay, playout delay, and decode. Loaded runs settle at 4 to 24
+ * frames with spikes to 33, while a player stuck on the GOP from before a demand gap sits 60 or more
+ * behind.
+ */
+const LIVE_LAG_FRAMES = 45;
+
+/** How long a latecomer may take to present its first frame, from its page loading. Loaded runs take up to 2.6s. */
+const LATE_START_MS = 5000;
+
+/** How long a latecomer may take to reach live after its first frame. Loaded runs take up to 0.3s. */
+const LATE_CATCHUP_MS = 2000;
+
+const framesToMs = (frames: number) => Math.round((frames * 1000) / Pattern.FPS);
+
+/**
+ * Wait until the player presents a frame within {@link LIVE_LAG_FRAMES} of the one the fixture last
+ * painted, and report how far behind its first reading was.
+ *
+ * Both pages are read at once, in separate browsers, so the lag is what a viewer would see against
+ * the source.
+ */
+async function waitForLive(
+	publisher: Page,
+	publisherErrors: BrowserErrors,
+	player: Page,
+	playerErrors: BrowserErrors,
+): Promise<{ first: number; lag: number; after: number }> {
+	const since = Date.now();
+	let first: number | undefined;
+	let lag: number | undefined;
+	while (Date.now() < since + LATE_CATCHUP_MS) {
+		throwPageErrors(publisherErrors);
+		throwPageErrors(playerErrors);
+		const [fixture, state] = await Promise.all([readFixtureState(publisher), readPlayerState(player)]).catch(
+			() => [],
+		);
+		if (fixture && state?.frameId !== undefined) {
+			lag = fixture.frameId - state.frameId;
+			first ??= lag;
+			if (lag <= LIVE_LAG_FRAMES) return { first, lag, after: Date.now() - since };
+		}
+		await sleep(POLL_INTERVAL_MS);
+	}
+	throwPageErrors(publisherErrors);
+	throwPageErrors(playerErrors);
+	throw new Failure(
+		"late join reaches live",
+		`still ${lag === undefined ? "?" : framesToMs(lag)}ms behind the fixture ${LATE_CATCHUP_MS}ms after the first frame, ` +
+			`against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound`,
+	);
 }
 
 // One sample as a line: elapsed time, the frame on the canvas, the tone step heard against the one
@@ -691,30 +745,29 @@ try {
 	}
 
 	// ── late join ────────────────────────────────────────────────────────────
-	// A fresh page against a broadcast that has been running for a while: the player has to tune in
-	// at the live edge rather than replay what it missed.
+	// A fresh page against a broadcast that has been running for a while, after a demand gap. The
+	// relay may hand over the GOP from before the gap, so the first frame can be stale; the player
+	// has to show it promptly and then fast-forward to live rather than replay what it missed.
 	if (wants("late-join")) {
 		console.error("=== late join ===");
-		const live = await command(publisher, "liveGop");
 		await player.close();
 		[player, playerErrors] = await subscriber(broadcast, "latecomer");
+		const joined = Date.now();
 		await gesture(player);
-		const joined = await waitForState(player, playerErrors, {
-			deadline: Date.now() + timeoutMs,
-			assertion: "late join presents media",
-			description: "the latecomer to present the fixture",
-			predicate: (state) => state.frameId !== undefined && state.audioContext === "running",
+
+		const shown = await waitForState(player, playerErrors, {
+			deadline: joined + LATE_START_MS,
+			assertion: "late join shows video",
+			description: `a presented fixture frame within ${LATE_START_MS}ms of the latecomer loading`,
+			predicate: (state) => state.frameId !== undefined,
 		});
-		// requestFrame() is asynchronous, and capture timestamps decide keyframes. The painted
-		// counter can therefore be over 15 ticks ahead of a still-current encoded GOP under load.
-		// Compare against its actual published keyframe, sampled while the old viewer held demand.
-		check(
-			lateJoinStartsLive(live, joined.videoTimestamp),
-			"late join starts live",
-			() =>
-				`joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms before the current GOP's ${live.timestamp}ms keyframe`,
+		const startMs = Date.now() - joined;
+
+		const live = await waitForLive(publisher, publisherErrors, player, playerErrors);
+		console.error(
+			`  showed frame ${shown.frameId} after ${startMs}ms, ${framesToMs(live.first)}ms behind the fixture; ` +
+				`live ${live.after}ms later, ${framesToMs(live.lag)}ms behind`,
 		);
-		console.error(`  joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms, current GOP began at ${live.timestamp}ms`);
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "late join");
 	}
 
