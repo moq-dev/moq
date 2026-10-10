@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -570,12 +570,13 @@ async fn follow_path(
 	let mut follow = origin.follow(path)?;
 	let pads = Pads::default();
 	let mut runs = tokio::task::JoinSet::new();
-	let mut latest: Option<Run> = None;
+	// Cancels the latest run.
+	let mut latest: Option<watch::Sender<bool>> = None;
 	let mut lost = std::pin::pin!(lost);
 
 	tracing::info!(%path, "waiting for broadcast to be announced");
 	let result = loop {
-		let play = tokio::select! {
+		let start = tokio::select! {
 			_ = shutdown.changed() => break Ok(()),
 			err = &mut lost => break Err(err),
 			event = follow.next() => match event {
@@ -585,52 +586,32 @@ async fn follow_path(
 					tracing::info!(%path, epoch = announce.route.epoch.as_ref().map(tracing::field::display), "online");
 					true
 				}
-				// The same instance, re-priced or failed over, which the run rides out. Unless the
-				// broadcast the run resolved has ended: then this is the path served again after a
-				// gap the announcements folded away, so play it.
-				Some(Event::Update(_)) => match &mut latest {
-					Some(run) if !run.ended() => {
-						run.updated = !run.done;
-						false
-					}
-					_ => true,
-				},
+				// The same instance, re-priced or failed over, which the run rides out.
+				Some(Event::Update(_)) => false,
 				Some(Event::End(_)) => {
 					tracing::info!(%path, "offline, holding pads until it returns");
 					false
 				}
 			},
-			joined = runs.join_next_with_id(), if !runs.is_empty() => {
-				let (id, result) = match joined.expect("guarded by is_empty") {
-					Ok(joined) => joined,
-					Err(err) => break Err(anyhow::Error::from(err).context("run panicked")),
-				};
-				if let Err(err) = result {
-					break Err(err);
-				}
-				// An update that arrived while the run drained a broadcast that has since ended.
-				match &mut latest {
-					Some(run) if run.id == id => {
-						run.done = true;
-						std::mem::take(&mut run.updated) && run.ended()
-					}
-					_ => false,
-				}
-			}
+			joined = runs.join_next(), if !runs.is_empty() => match joined.expect("guarded by is_empty") {
+				Ok(Ok(())) => false,
+				Ok(Err(err)) => break Err(err),
+				Err(err) => break Err(anyhow::Error::from(err).context("run panicked")),
+			},
 		};
 
-		if play {
+		if start {
 			// Cut over at once: the old run's pumps hand their pads back without waiting for their
 			// subscriptions to end.
-			if let Some(run) = latest.take() {
-				let _ = run.cancel.send(true);
+			if let Some(cancel) = latest.take() {
+				let _ = cancel.send(true);
 			}
-			latest = Some(Run::spawn(&mut runs, origin, path, &pads, &element, &shutdown));
+			latest = Some(play(&mut runs, origin, path, &pads, &element, &shutdown));
 		}
 	};
 
-	if let Some(run) = latest.take() {
-		let _ = run.cancel.send(true);
+	if let Some(cancel) = latest.take() {
+		let _ = cancel.send(true);
 	}
 	while runs.join_next().await.is_some() {}
 	// A stop removes the pads; anything else ends the stream downstream first.
@@ -638,78 +619,43 @@ async fn follow_path(
 	result
 }
 
-/// One request for the path and the catalog it serves, from a start or restart until it ends or
-/// the next one replaces it.
-struct Run {
-	id: tokio::task::Id,
-	cancel: watch::Sender<bool>,
-	/// The demand of the broadcast the request resolved, once it has: a weak handle, so a run
-	/// that ended doesn't keep the broadcast up.
-	resolved: Arc<OnceLock<moq_net::broadcast::Demand>>,
-	/// The task has ended.
-	done: bool,
-	/// An update arrived while the run was still draining.
-	updated: bool,
-}
-
-impl Run {
-	fn spawn(
-		runs: &mut tokio::task::JoinSet<Result<()>>,
-		origin: &moq_net::origin::Consumer,
-		path: &str,
-		pads: &Pads,
-		element: &glib::WeakRef<super::MoqSrc>,
-		shutdown: &watch::Receiver<bool>,
-	) -> Self {
-		let (cancel, mut cancelled) = watch::channel(false);
-		let resolved = Arc::new(OnceLock::new());
-		let demand = resolved.clone();
-		let (origin, path, pads, task_element, shutdown) = (
-			origin.clone(),
-			path.to_string(),
-			pads.clone(),
-			element.clone(),
-			shutdown.clone(),
-		);
-		let task = runs.spawn_on(
-			STREAMING.scope(element.clone(), async move {
-				let broadcast = tokio::select! {
-					_ = cancelled.changed() => return Ok(()),
-					broadcast = origin.request_broadcast(&path, None) => match broadcast {
-						Ok(broadcast) => broadcast,
-						// The route went between the announcement and the request.
-						Err(err) if source_lost(&err) => {
-							tracing::warn!(%path, %err, "broadcast unavailable, holding pads");
-							return Ok(());
-						}
-						Err(err) => return Err(anyhow::Error::from(err).context("broadcast refused")),
-					},
-				};
-				let _ = demand.set(broadcast.demand());
-				follow_catalog(broadcast, &pads, task_element, &shutdown, &mut cancelled).await
-			}),
-			RUNTIME.handle(),
-		);
-		Self {
-			id: task.id(),
-			cancel,
-			resolved,
-			done: false,
-			updated: false,
-		}
-	}
-
-	/// Whether the broadcast this run resolved has ended, or it ended without resolving one.
-	fn ended(&self) -> bool {
-		match self.resolved.get() {
-			// An ended broadcast answers its demand with an error.
-			Some(demand) => matches!(
-				demand.poll_used(&moq_net::kio::Waiter::noop()),
-				std::task::Poll::Ready(Err(_))
-			),
-			None => self.done,
-		}
-	}
+/// Start a run: one request for the path and the catalog it serves, until it ends or the next
+/// start or restart replaces it. Returns what cancels it.
+fn play(
+	runs: &mut tokio::task::JoinSet<Result<()>>,
+	origin: &moq_net::origin::Consumer,
+	path: &str,
+	pads: &Pads,
+	element: &glib::WeakRef<super::MoqSrc>,
+	shutdown: &watch::Receiver<bool>,
+) -> watch::Sender<bool> {
+	let (cancel, mut cancelled) = watch::channel(false);
+	let (origin, path, pads, task_element, shutdown) = (
+		origin.clone(),
+		path.to_string(),
+		pads.clone(),
+		element.clone(),
+		shutdown.clone(),
+	);
+	runs.spawn_on(
+		STREAMING.scope(element.clone(), async move {
+			let broadcast = tokio::select! {
+				_ = cancelled.changed() => return Ok(()),
+				broadcast = origin.request_broadcast(&path, None) => match broadcast {
+					Ok(broadcast) => broadcast,
+					// The route went between the announcement and the request.
+					Err(err) if source_lost(&err) => {
+						tracing::warn!(%path, %err, "broadcast unavailable, holding pads");
+						return Ok(());
+					}
+					Err(err) => return Err(anyhow::Error::from(err).context("broadcast refused")),
+				},
+			};
+			follow_catalog(broadcast, &pads, task_element, &shutdown, &mut cancelled).await
+		}),
+		RUNTIME.handle(),
+	);
+	cancel
 }
 
 /// Whether a failure is the source going away (its session closing, or its route going), which
