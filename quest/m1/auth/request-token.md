@@ -32,8 +32,9 @@ Decided, so review does not relitigate them:
   one, SUBSCRIBE_UPDATE included; ignored on every other request (2026-10-05).
 - **Refused renewal** follows drafts 16 section 9.11.1 and 18 section 10.9.1:
   REQUEST_ERROR ends only that request, with PUBLISH_DONE `UPDATE_FAILED` for
-  a subscription or a closed stream for a namespace. The session stays up and
-  the old grant does not survive. A lapse or acceptor revoke also ends only
+  a subscription. A namespace ends with a closed stream from 17, and with
+  PUBLISH_NAMESPACE_CANCEL on 16, where it shares the control stream (16
+  section 9.24). The session stays up and the old grant does not survive. A lapse or acceptor revoke also ends only
   that request (2026-10-05).
 - **Client credential.** `auth::Handle::set_request_token`, beside session
   tokens, with no `Client` methods. moq-tokio's `Connection` owns the token
@@ -53,9 +54,8 @@ Decided, so review does not relitigate them:
   accepted SUBSCRIBE_UPDATE, so its sender does not wait for one; test two
   successive replacements with no answers.
 - **Drafts.** Renewal works on every supported draft, 14 through 16 included
-  (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15. A namespace must
-  renew from 16, whose REQUEST_UPDATE covers PUBLISH_NAMESPACE; #5148 starts
-  at 17 (see below).
+  (2026-10-09), tested with SUBSCRIBE_UPDATE on 14 and 15. A namespace renews
+  from 16, whose REQUEST_UPDATE covers PUBLISH_NAMESPACE.
 - `EXPIRED_AUTH_TOKEN` and `MALFORMED_AUTH_TOKEN` are not this quest's; they
   land with [Expired token error](/quest/m1/auth/expired-error.md), which
   does not block it (2026-10-01 Q4).
@@ -69,7 +69,8 @@ silently ignored on moq-lite, an outbound update sniffer, unread
 
 - A namespace renews only from draft 17; a token-bearing draft-16
   REQUEST_UPDATE for a PUBLISH_NAMESPACE is still ignored. Implement it
-  (decided 2026-10-09: draft-16 allows it, and the Drafts decision covers 16).
+  (decided 2026-10-09: draft-16 allows it, and the Drafts decision covers 16),
+  with a test that a refused one sends PUBLISH_NAMESPACE_CANCEL.
 
 Decided 2026-10-09: `set_request_token` keeps the typed `setup::Token` and
 the encoder writes only `USE_VALUE`. Alias forms wait for a consumer that
