@@ -4468,19 +4468,16 @@ impl Consumer {
 	/// [`Restart`](AnnounceEvent::Restart), and stop on an [`End`](AnnounceEvent::End). An
 	/// [`Update`](AnnounceEvent::Update) is the same publisher instance re-priced or failed
 	/// over, which subscriptions already ride out. Fails with [`Error::Unauthorized`] when
-	/// this consumer's scope can never cover the path.
+	/// this consumer's scope can never cover the path, and with [`Error::InvalidPath`] when no
+	/// pattern can spell it (a segment containing `*`).
 	pub fn follow(&self, path: impl AsPath) -> Result<crate::announce::Follow, Error> {
 		let path = path.as_path();
 
 		// Scope down to the path itself, which still sees every route whose claim covers it:
 		// the rest of the origin never wakes it, and a route claiming only paths beneath it
 		// (a scoped dynamic at the same prefix) never masks the one that serves it, just as a
-		// request skips it. A path no pattern can spell (a segment containing `*`) watches
-		// everything instead, and the follower skips the routes that do not cover it.
-		let consumer = match Pattern::literal(path.as_str()) {
-			Ok(literal) => self.scope("", &Patterns::from(literal))?,
-			Err(_) => self.clone(),
-		};
+		// request skips it.
+		let consumer = self.scope("", &Patterns::from(Pattern::literal(path.as_str())?))?;
 
 		// `scope` keeps narrower permissions intact: on a consumer limited to
 		// `foo/specific`, no route can ever cover `foo`.

@@ -219,6 +219,17 @@ mod tests {
 		);
 	}
 
+	/// A path no pattern can spell is refused rather than followed through the whole scope,
+	/// where a route that never serves it could win its prefix.
+	#[test]
+	fn follow_refuses_a_path_no_pattern_can_spell() {
+		let origin = Hop::new(1).unwrap().produce();
+		assert!(matches!(
+			origin.consume().follow("camera*main"),
+			Err(Error::InvalidPath(_))
+		));
+	}
+
 	/// A path the consumer's scope can never cover fails at once instead of waiting forever.
 	#[test]
 	fn follow_refuses_a_path_outside_the_scope() {

@@ -413,16 +413,9 @@ test("follow ignores a route scoped beneath the path", async () => {
 	origin.close();
 });
 
-test("follow accepts a path no pattern can spell", async () => {
+test("follow refuses a path no pattern can spell", () => {
 	const origin = new Producer();
-	const path = Path.from("camera*main");
-	const follow = origin.consume().follow(path);
-
-	const broadcast = publish(origin, path);
-	expect(await follow.next()).toMatchObject({ kind: "start", prefix: path });
-
-	follow.close();
-	broadcast.close();
+	expect(() => origin.consume().follow(Path.from("camera*main"))).toThrow();
 	origin.close();
 });
 
