@@ -274,6 +274,8 @@ async function windowed(
 	const control = await Stream.open(pair.server, { version });
 	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, client, window);
 	const running = adapter.run();
+	// A peer write may yield a browser task before the assertion awaits this rejection.
+	void running.catch(() => {});
 	const peer = await Stream.accept(pair.client, version);
 	if (!peer) throw new Error("no control stream");
 	return { pair, adapter, peer, running };
