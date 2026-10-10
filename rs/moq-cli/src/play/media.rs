@@ -79,6 +79,11 @@ impl<O: Output> Media<O> {
 					let Some(event) = event else { return Ok(()) };
 					let announce = match event {
 						AnnounceEvent::Start(announce) | AnnounceEvent::Restart(announce) => announce,
+						// The same instance, which what is playing rides out. With nothing
+						// playing, it is the path served again after a gap the announcements
+						// folded away (a covering route of one epoch arriving as the exact one
+						// went), so play it.
+						AnnounceEvent::Update(announce) if playing.is_none() => announce,
 						AnnounceEvent::Update(_) => continue,
 						AnnounceEvent::End(_) => {
 							tracing::info!(broadcast = %self.broadcast, "offline, waiting for it to return");
@@ -766,6 +771,50 @@ mod tests {
 			PACKET_DURATION * 10,
 			"the new broadcast did not play in full"
 		);
+	}
+
+	/// A covering route of the same epoch that arrives as the exact route goes, both
+	/// before the player looks, reaches it as an update: the announcements never show
+	/// the path unserved. A player with nothing playing still plays it.
+	#[tokio::test]
+	async fn an_update_while_idle_plays_the_route() {
+		tokio::time::pause();
+
+		const OLD: f32 = 0.25;
+		const NEW: f32 = 0.5;
+		let origin = moq_tokio::origin::spawn();
+		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+
+		let (exact, mut exact_catalog, mut old) = publish(&origin, route.clone());
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut old, 10, OLD).await;
+		old.finish().unwrap();
+		exact_catalog.finish().unwrap();
+		drop((exact_catalog, old));
+		// The broadcast ends while its route stands, so the player goes idle.
+		tokio::time::sleep(Duration::from_secs(60)).await;
+
+		let mut served = moq_net::broadcast::Info::new().produce();
+		let served_catalog = catalog::Producer::new(&mut served, Default::default()).unwrap();
+		let mut new = rendition(&served, &served_catalog, "audio");
+		let pool = origin.dynamic("", route).unwrap();
+		drop(exact);
+		let consumer = served.consume();
+		tokio::spawn(async move {
+			while let Ok(request) = pool.requested_broadcast().await {
+				request.accept(consumer.clone());
+			}
+		});
+		write(&mut new, 10, NEW).await;
+
+		settle(player, &recorder).await;
+		assert_eq!(
+			played(&recorder, NEW).0,
+			PACKET_DURATION * 10,
+			"the idle player never played the covering route"
+		);
+		drop((served, served_catalog));
 	}
 
 	/// Re-pricing the same instance is an update, which playback rides through on
