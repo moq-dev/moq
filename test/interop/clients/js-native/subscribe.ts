@@ -123,7 +123,10 @@ async function run(): Promise<void> {
 		throw new Error("no frame data received");
 	} finally {
 		requested?.close();
-		connection.close(); // returns void, not a promise
+		// Wait for the transport to report the close too, so it reaches the relay before
+		// process.exit; otherwise the relay times the connection out.
+		await connection.close();
+		await connection.closed;
 		origin.close();
 	}
 }
