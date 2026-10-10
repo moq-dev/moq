@@ -258,8 +258,10 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		announced: &mut announce::Consumer,
 		self_origin: Hop,
 		version: Version,
+		auth: Option<crate::auth::Handle>,
 	) -> Result<(), Error> {
 		let mut run = AnnounceRun::new(crate::PathOwned::default(), self_origin, version);
+		run.auth = auth;
 		kio::wait(|waiter| run.poll(stream, origin, announced, waiter)).await
 	}
 }
@@ -911,75 +913,50 @@ impl AnnounceRun {
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
-		announced: &mut announce::Consumer,
 		permit: crate::auth::Permit,
 	) -> Result<(), Error> {
 		let grew = !self.permit.covers(&permit);
 		self.permit = permit;
 
+		let revoked: Vec<_> = self
+			.live
+			.keys()
+			.filter(|suffix| !self.permitted(suffix))
+			.cloned()
+			.collect();
+		for suffix in revoked {
+			let absolute = origin.absolute(&suffix);
+			tracing::debug!(route = %absolute, "announce no longer authorized");
+			self.retract(stream, suffix, &absolute)?;
+		}
 		if !grew {
-			let revoked: Vec<_> = self
-				.live
-				.keys()
-				.filter(|suffix| !self.permitted(suffix))
-				.cloned()
-				.collect();
-			for suffix in revoked {
-				let absolute = origin.absolute(&suffix);
-				tracing::debug!(route = %absolute, "announce no longer authorized");
-				self.retract(stream, suffix, &absolute)?;
-			}
 			return Ok(());
 		}
 
-		// A route withheld earlier left no trace, so take a fresh cursor: its initial
-		// burst is the origin's current state, which is then diffed against what the
-		// peer holds.
-		*announced = origin.announced();
+		// A route withheld earlier left no trace on the cursor, so read the origin's current
+		// state from a fresh one and start what the grant now covers. The cursor itself stays:
+		// whatever it has pending for the routes the peer holds (an update, a restart, an end
+		// still waiting out its hold) arrives through the loop as usual.
+		let mut snapshot = origin.announced();
 		let mut current: HashMap<crate::PathOwned, crate::origin::Route> = HashMap::new();
-		let mut restarted = std::collections::HashSet::new();
-		while let Some(event) = announced.try_next() {
+		while let Some(event) = snapshot.try_next() {
 			match event {
-				announce::Event::Start(update) | announce::Event::Update(update) => {
-					current.insert(update.prefix, update.route);
-				}
-				// Only a prefix this cursor already delivered restarts, so never in the
-				// initial burst, but one may follow it before the drain ends.
-				announce::Event::Restart(update) => {
-					restarted.insert(update.prefix.clone());
+				announce::Event::Start(update) | announce::Event::Update(update) | announce::Event::Restart(update) => {
 					current.insert(update.prefix, update.route);
 				}
 				announce::Event::End(update) => {
-					restarted.remove(&update.prefix);
 					current.remove(&update.prefix);
 				}
 			}
 		}
 
-		let stale: Vec<_> = self
-			.live
-			.keys()
-			.filter(|suffix| !current.contains_key(*suffix) || !self.permitted(suffix))
-			.cloned()
-			.collect();
-		for suffix in stale {
-			let absolute = origin.absolute(&suffix);
-			self.retract(stream, suffix, &absolute)?;
-		}
-
 		for (suffix, route) in current {
-			if !self.permitted(&suffix) {
+			if self.live.contains_key(&suffix) || !self.permitted(&suffix) {
 				continue;
 			}
 			let absolute = origin.absolute(&suffix);
-			// Still held: bring its metadata up to date in case the old cursor had an
-			// update pending.
-			match self.outgoing(&route, &absolute) {
-				Some((hops, cost)) if restarted.contains(&suffix) && self.live.contains_key(&suffix) => {
-					self.restart(stream, suffix, hops, cost, route.epoch, &absolute)?;
-				}
-				Some((hops, cost)) => self.advertise(stream, suffix, hops, cost, route.epoch, &absolute)?,
-				None => {}
+			if let Some((hops, cost)) = self.outgoing(&route, &absolute) {
+				self.advertise(stream, suffix, hops, cost, route.epoch, &absolute)?;
 			}
 		}
 		Ok(())
@@ -1308,7 +1285,7 @@ impl AnnounceRun {
 				&& let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Publish, &mut self.epoch, waiter)
 				&& self.permit != permit
 			{
-				self.regrant(stream, origin, announced, permit)?;
+				self.regrant(stream, origin, permit)?;
 				continue;
 			}
 
@@ -2450,6 +2427,11 @@ mod announce_test {
 
 	/// [`harness`] on another version.
 	async fn harness_on(version: Version) -> Harness {
+		harness_with(version, None).await
+	}
+
+	/// [`harness_on`], announcing under `auth`'s grant.
+	async fn harness_with(version: Version, auth: Option<crate::auth::Handle>) -> Harness {
 		let origin = Hop::new(1).unwrap().produce();
 		let announcement = origin
 			.announce(
@@ -2468,7 +2450,7 @@ mod announce_test {
 		let task = moq_net_sim::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = consumer.hop();
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, version).await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, version, auth).await
 		});
 		settle().await;
 
@@ -2630,6 +2612,46 @@ mod announce_test {
 		h.assert_idle();
 	}
 
+	/// A grant that grows while a new instance replaces an advertised one still restarts it,
+	/// whether the instance carries a newer epoch or is an anonymous source: the regrant takes
+	/// in what the old cursor had pending rather than dropping it.
+	#[moq_net_sim::test]
+	async fn a_restart_pending_when_the_grant_grows_still_restarts() {
+		// The peer's ceiling: what it may subscribe to is what we may announce to it.
+		let grant = |paths: &[&str]| crate::auth::Grant {
+			publish: Default::default(),
+			subscribe: paths
+				.iter()
+				.map(|path| crate::Pattern::subtree(path).unwrap())
+				.collect(),
+			expires: None,
+		};
+		for anonymous in [false, true] {
+			let auth = crate::auth::Handle::new(false);
+			auth.authorize(&grant(&["cam"]));
+			let mut h = harness_with(Version::Lite07, Some(auth.clone())).await;
+
+			// Same chain and cost, so only the instance changed. Both land before the loop polls.
+			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
+			let epoch = (!anonymous).then(crate::Epoch::mint);
+			let _newer = match &epoch {
+				Some(epoch) => h.origin.announce("cam", route.with_epoch(epoch.clone())),
+				None => h.origin.clone().peer().announce("cam", route),
+			}
+			.unwrap();
+			auth.authorize(&grant(&["cam", "other"]));
+			moq_net_sim::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+			settle().await;
+			match h.wire.take_announces().as_slice() {
+				[lite::AnnounceBroadcast::Restart { id: 0, epoch: sent, .. }] => {
+					assert_eq!(*sent, epoch, "anonymous={anonymous}")
+				}
+				other => panic!("expected a restart (anonymous={anonymous}), got {other:?}"),
+			}
+			h.assert_idle();
+		}
+	}
+
 	/// Costs past the wire ceiling clamp to the same value, so moving between them
 	/// sends nothing.
 	#[moq_net_sim::test]
@@ -2672,7 +2694,7 @@ mod announce_test {
 		let task = moq_net_sim::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = consumer.hop();
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION).await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
 		});
 		settle().await;
 
@@ -4584,6 +4606,7 @@ mod tests {
 			&mut announced,
 			self_origin,
 			Version::Lite01,
+			None,
 		));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -4618,6 +4641,7 @@ mod tests {
 			&mut announced,
 			self_origin,
 			Version::Lite01,
+			None,
 		));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		drop(cam);
@@ -5166,6 +5190,9 @@ mod tests {
 			goaway,
 			peer_hop: None,
 			subscriptions: Default::default(),
+			auth: crate::auth::Handle::new(false),
+			peer_grant: Default::default(),
+			client: false,
 		});
 
 		let mut script = Vec::new();
