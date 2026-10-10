@@ -3337,6 +3337,22 @@ fn handshake_outlasts_short_idle_timeout() {
     );
 }
 
+/// A handshake idle timeout too long to add to an `Instant` never fires, instead of panicking.
+#[test]
+fn unbounded_handshake_idle_timeout() {
+    let _guard = subscribe();
+    let mut transport = cubic_transport();
+    transport.handshake_idle_timeout(Duration::MAX);
+    let transport = Arc::new(transport);
+    let mut server = server_config();
+    server.transport = transport.clone();
+    let mut client = client_config();
+    client.transport_config(transport);
+
+    let mut pair = Pair::new(Default::default(), server);
+    pair.connect_with(client);
+}
+
 /// Once established, a connection whose peer goes silent idles out at the negotiated idle
 /// timeout, not the longer handshake idle timeout.
 #[test]

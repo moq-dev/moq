@@ -600,7 +600,11 @@ impl Endpoint {
         });
 
         // Still handshaking, so the handshake idle timeout applies, not the idle timeout.
-        if incoming.received_at + server_config.transport.handshake_idle_timeout <= now {
+        if incoming
+            .received_at
+            .checked_add(server_config.transport.handshake_idle_timeout)
+            .is_some_and(|deadline| deadline <= now)
+        {
             debug!("abandoning accept of stale initial");
             self.ignore(incoming);
             return Err(Box::new(AcceptError {

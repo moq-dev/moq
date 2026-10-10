@@ -2121,12 +2121,13 @@ impl Connection {
             State::Handshake(_) => Some(self.config.handshake_idle_timeout),
             _ => self.idle_timeout,
         };
-        let Some(timeout) = timeout else {
-            self.timers.stop(Timer::Idle);
-            return;
-        };
-        let dt = cmp::max(timeout, 3 * self.pto(space));
-        self.timers.set(Timer::Idle, now + dt);
+        // A deadline too far out to represent never fires.
+        let deadline =
+            timeout.and_then(|timeout| now.checked_add(cmp::max(timeout, 3 * self.pto(space))));
+        match deadline {
+            Some(deadline) => self.timers.set(Timer::Idle, deadline),
+            None => self.timers.stop(Timer::Idle),
+        }
     }
 
     fn reset_keep_alive(&mut self, now: Instant) {
