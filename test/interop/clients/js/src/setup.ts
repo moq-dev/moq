@@ -84,6 +84,10 @@ if (role === "publish") {
 	const visible = params.get("visible");
 	if (visible) el.setAttribute("visible", visible);
 
+	// Only the late-join negative control passes this, to hold the player behind live.
+	const delay = params.get("delay");
+	if (delay) el.setAttribute("delay", delay);
+
 	const player = document.createElement("moq-watch-ui");
 	player.appendChild(el);
 	document.body.appendChild(player);
