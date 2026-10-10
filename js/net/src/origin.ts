@@ -311,6 +311,8 @@ class ServeState {
 	demanding = new Map<Path.Valid, number>();
 	closed = new Once<Error | null>();
 	settled = new Signal(0);
+	/** Counts {@link reset}s, so a waiter can tell its request was released rather than answered. */
+	resets = 0;
 	onChange: (path: Path.Valid) => void = () => {};
 	onReject: (path: Path.Valid, err: Error) => void = () => {};
 
@@ -372,6 +374,7 @@ class ServeState {
 	 * handler's late answer is for the old one, and the requesters ask the new one again.
 	 */
 	reset(err: Error = unroutable()): void {
+		this.resets++;
 		const queued = [...this.pending.values()];
 		this.pending.clear();
 		this.queue.mutate((queue) => {
@@ -1728,52 +1731,55 @@ export class Consumer {
 	 * @internal
 	 */
 	async #demand(path: Path.Valid, epoch?: Epoch.Valid): Promise<broadcast.Consumer | undefined> {
-		const local = this.#local(path);
-		if (local) {
-			// A peer naming one publisher instance is never handed another.
-			if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch)
-				throw unroutable();
-			return local;
-		}
-		const entry = this.#state.bestEntry(path, received);
-		if (!entry?.server) return undefined;
-		if (epoch !== undefined && entry.route.peek().epoch !== epoch) throw unroutable();
-
-		const server = entry.server;
-		const live = server.served.get(path);
-		if (live && live.closed.peek() === undefined) return live;
-
-		const asked = entry.route.peek().epoch;
-		server.enqueue(path);
-		server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
-		try {
-			for (;;) {
-				// The route may name another instance by the time its handler answers.
-				if (epoch !== undefined && this.#state.bestEntry(path, received)?.route.peek().epoch !== epoch)
+		// Each pass asks the instance that wins now; an epoch change releasing the request starts another.
+		for (;;) {
+			const local = this.#local(path);
+			if (local) {
+				// A peer naming one publisher instance is never handed another.
+				if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch)
 					throw unroutable();
-				const served = server.served.get(path);
-				if (served && served.closed.peek() === undefined) return served;
-				const rejected = server.rejected.get(path);
-				if (rejected) {
-					server.rejected.delete(path);
-					throw rejected;
-				}
-				const closed = server.closed.peek();
-				if (closed !== undefined) {
-					if (closed) throw closed;
-					return undefined;
-				}
-				if (!server.pending.has(path)) {
-					// Released by an epoch change: its answer belongs to the old instance, so ask the new one.
-					if (entry.route.peek().epoch !== asked) return await this.#demand(path, epoch);
-					return undefined;
-				}
-				await Signal.race(server.settled, server.closed);
+				return local;
 			}
-		} finally {
-			const n = (server.demanding.get(path) ?? 1) - 1;
-			if (n <= 0) server.demanding.delete(path);
-			else server.demanding.set(path, n);
+			const entry = this.#state.bestEntry(path, received);
+			if (!entry?.server) return undefined;
+			if (epoch !== undefined && entry.route.peek().epoch !== epoch) throw unroutable();
+
+			const server = entry.server;
+			const live = server.served.get(path);
+			if (live && live.closed.peek() === undefined) return live;
+
+			const resets = server.resets;
+			server.enqueue(path);
+			server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
+			try {
+				for (;;) {
+					// The route may name another instance by the time its handler answers.
+					if (epoch !== undefined && this.#state.bestEntry(path, received)?.route.peek().epoch !== epoch)
+						throw unroutable();
+					const served = server.served.get(path);
+					if (served && served.closed.peek() === undefined) return served;
+					const rejected = server.rejected.get(path);
+					if (rejected) {
+						server.rejected.delete(path);
+						throw rejected;
+					}
+					const closed = server.closed.peek();
+					if (closed !== undefined) {
+						if (closed) throw closed;
+						return undefined;
+					}
+					if (!server.pending.has(path)) {
+						// Released by an epoch change: its answer belongs to the old instance.
+						if (server.resets !== resets) break;
+						return undefined;
+					}
+					await Signal.race(server.settled, server.closed);
+				}
+			} finally {
+				const n = (server.demanding.get(path) ?? 1) - 1;
+				if (n <= 0) server.demanding.delete(path);
+				else server.demanding.set(path, n);
+			}
 		}
 	}
 }

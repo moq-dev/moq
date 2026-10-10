@@ -2181,6 +2181,33 @@ test("demand held across an epoch change asks again, unless it named the old epo
 	origin.close();
 });
 
+test("demand held across an epoch round trip still asks again", async () => {
+	const origin = new Producer();
+	const path = Path.from("live/cam");
+	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const it = handle.requested();
+	const demanded = wireOf(origin.consume()).demand(path);
+	const { value: req } = await it.next();
+
+	// Released by the first change; the epoch coming back does not undo that.
+	handle.update({ ...handle.route, epoch: NEWER });
+	handle.update({ ...handle.route, epoch: EPOCH });
+	req?.accept(new BroadcastProducer().consume());
+
+	const next = new BroadcastProducer();
+	const track = next.createTrack("video");
+	(await it.next()).value?.accept(next);
+	const subscription = (await demanded)?.track("video").subscribe();
+	track.writeGroup(new GroupProducer(7));
+	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+
+	subscription?.close();
+	await it.return?.();
+	next.close();
+	handle.close();
+	origin.close();
+});
+
 test("re-pricing from the current route keeps the epoch", () => {
 	const origin = new Producer();
 	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH, cost: 5n });

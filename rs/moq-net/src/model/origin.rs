@@ -2399,7 +2399,8 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 	/// What the wait below returns: one thing that happened.
 	enum Step {
 		Assigned(track::Request),
-		Resolved(u64, Result<broadcast::Consumer, Error>),
+		/// The route, its answer, and whether an epoch change released the request.
+		Resolved(u64, Result<broadcast::Consumer, Error>, bool),
 		SourceClosed(u64),
 		Info(Arc<str>, u64, Result<track::Info, Error>),
 		Ended(Arc<str>, u64, Result<(), Error>, bool),
@@ -2802,18 +2803,15 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 			}
 			if let Some((route, _, pending)) = &upstream
 				&& let Poll::Ready(result) = pending.poll(waiter, |p| match &p.resolved {
-					Some(result) => Poll::Ready(result.clone()),
+					Some(result) => Poll::Ready((result.clone(), p.released)),
 					None => Poll::Pending,
 				}) {
-				return Poll::Ready(Step::Resolved(
-					*route,
-					match result {
-						Ok(resolved) => resolved,
-						// The queue died unresolved (its handler dropped): the route
-						// could not serve.
-						Err(_closed) => Err(Error::Unroutable),
-					},
-				));
+				return Poll::Ready(match result {
+					Ok((resolved, released)) => Step::Resolved(*route, resolved, released),
+					// The queue died unresolved (its handler dropped): the route
+					// could not serve.
+					Err(_closed) => Step::Resolved(*route, Err(Error::Unroutable), false),
+				});
 			}
 			if let Some(id) = front.serving()
 				&& let Some(source) = sources.get(&id)
@@ -2901,12 +2899,21 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					now: timers.now(),
 				}
 			}
-			Step::Resolved(route, result) => {
+			Step::Resolved(route, result, released) => {
 				let Some((_, asked, _)) = upstream.take() else { continue };
 				match result {
-					// The route moved to another instance, or another won the path, while
-					// the request was in flight: ask again rather than resolve requesters
-					// onto a broadcast that is already replaced.
+					// An epoch change released the request, the route moved to another
+					// instance, or another won the path, while the request was in flight:
+					// ask again rather than resolve requesters onto a broadcast that is
+					// already replaced. A release is its own signal, since the epoch may
+					// have come back by now.
+					_ if released => Event::Resolved {
+						route,
+						result: Err(Refusal {
+							err: Error::Unroutable,
+							standing: false,
+						}),
+					},
 					Ok(_) if stale(&front, route, &asked, &resolved) => Event::Resolved {
 						route,
 						result: Err(Refusal {
@@ -2921,13 +2928,11 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 						instances.insert(id, asked);
 						Event::Resolved { route, result: Ok(id) }
 					}
-					// A refusal for an instance the route has since left, such as a request
-					// released by an epoch change, is not the new one's answer either: ask again.
 					Err(err) => Event::Resolved {
 						route,
 						result: Err(Refusal {
 							err,
-							standing: !stale(&front, route, &asked, &resolved) && standing(&front, route, &resolved),
+							standing: standing(&front, route, &resolved),
 						}),
 					},
 				}
@@ -3640,6 +3645,9 @@ impl OriginState {
 #[derive(Default)]
 struct PendingBroadcast {
 	resolved: Option<Result<broadcast::Consumer, Error>>,
+	/// Set when an epoch change released the request: whatever it resolved to speaks
+	/// for the old instance, so the front asks again.
+	released: bool,
 }
 
 /// A front's verdict, which its requesters wait on: the instance it resolved, or the
@@ -3850,6 +3858,7 @@ impl ServeState {
 		for producer in self.requests.drain_all() {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
+				request.released = true;
 			}
 		}
 		self.served = WeakCache::default();
@@ -8261,6 +8270,36 @@ mod tests {
 	#[moq_net_sim::test]
 	async fn an_answer_before_an_epoch_change_is_asked_again() {
 		held_request_across_an_epoch_change(true).await;
+	}
+
+	/// A release is not undone by the epoch coming back before the front looks: a
+	/// request held across A to B to A is asked again, not refused.
+	#[moq_net_sim::test]
+	async fn a_request_held_across_an_epoch_round_trip_is_asked_again() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let old = crate::Epoch::mint();
+		let dynamic = producer
+			.dynamic("room", Route::default().with_epoch(old.clone()))
+			.unwrap();
+		let pending = consumer.request_broadcast("room/alice", None);
+		let request = queued(&dynamic).await;
+
+		dynamic
+			.update(dynamic.route().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		dynamic.update(dynamic.route().with_epoch(old.clone())).unwrap();
+		let stale = broadcast::Info::new().produce();
+		let _stale_track = stale.create_track("video", None).unwrap();
+		request.accept(&stale);
+
+		let fresh = broadcast::Info::new().produce();
+		let fresh_track = fresh.create_track("video", None).unwrap();
+		queued(&dynamic).await.accept(&fresh);
+		let resolved = pending.await.expect("the request carries over");
+		assert_eq!(resolved.info().epoch.as_ref(), Some(&old));
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		deliver(&fresh_track, &mut subscription, b"new").await;
 	}
 
 	/// A route that gains an epoch and then drops it serves a third instance, not the
