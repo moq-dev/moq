@@ -118,7 +118,7 @@ impl Path {
 	async fn through(relay: &RelayHost, profile: moq_shaper::Profile, seed: u64) -> Self {
 		let shaper = moq_shaper::Shaper::bind(moq_shaper::Config {
 			bind: "127.0.0.1:0".parse().unwrap(),
-			target: format!("127.0.0.1:{}", relay.port).parse().unwrap(),
+			target: relay.addr(),
 			seed,
 			up: profile.clone(),
 			down: profile,
@@ -131,6 +131,16 @@ impl Path {
 			url: format!("https://{}/drill", shaper.addr()).parse().unwrap(),
 			shaper: Some(shaper),
 		}
+	}
+
+	/// Forward to `relay` from now on, so clients reach it at the address they
+	/// already dial.
+	fn retarget(&self, relay: &RelayHost) {
+		self.shaper
+			.as_ref()
+			.expect("only a path through a shaper can move")
+			.retarget(relay.addr())
+			.expect("retarget the shaper");
 	}
 
 	/// Fail the drill unless the impairment it ran under actually acted.
@@ -239,18 +249,23 @@ impl RelayHost {
 			.expect("relay shutdown panicked");
 	}
 
+	/// The relay's UDP address.
+	fn addr(&self) -> std::net::SocketAddr {
+		std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, self.port))
+	}
+
 	/// The URL clients dial. `https` is WebTransport over QUIC.
 	fn url(&self) -> url::Url {
-		format!("https://127.0.0.1:{}/drill", self.port)
+		format!("https://{}/drill", self.addr())
 			.parse()
 			.expect("parse relay url")
 	}
 }
 
-/// A public relay on loopback with a generated certificate, on `port` or an ephemeral one.
-fn relay_config(port: Option<u16>) -> Config {
+/// A public relay on an ephemeral loopback port with a generated certificate.
+fn relay_config() -> Config {
 	let mut config = Config::default();
-	config.listen.bind = Some(format!("127.0.0.1:{}", port.unwrap_or_default()).parse().unwrap());
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config
@@ -412,7 +427,7 @@ async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 /// keeps being served. The rejoin below is the half of that behavior worth
 /// grading here.
 async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
-	let relay = RelayHost::start(relay_config(None)).await;
+	let relay = RelayHost::start(relay_config()).await;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
 
@@ -533,10 +548,18 @@ lanes!(cancel_under_backpressure_releases_the_reader);
 /// into one is the worst possible failure mode. And the reconnect loop has to
 /// restore service: the dead session's broadcast closes with it, and a fresh
 /// subscribe through the same origin resumes once the relay returns.
+///
+/// Clients dial a shaper in both lanes, unimpaired on loopback, so the relay
+/// can come back on a fresh port behind the address they already dial. The
+/// dead relay's port is free for any process's ephemeral bind to take, so a
+/// restart that needed it back would fail whenever one did.
 async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
-	let mut relay = RelayHost::start(relay_config(None)).await;
-	let port = relay.port;
-	let path = Path::start(lane, &relay).await;
+	let mut relay = RelayHost::start(relay_config()).await;
+	let profile = match lane {
+		Lane::Loopback => Default::default(),
+		Lane::Impaired => impairment(),
+	};
+	let path = Path::through(&relay, profile, seed(lane)).await;
 	let url = path.url.clone();
 
 	let publisher = moq_tokio::origin::spawn();
@@ -574,6 +597,11 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 
 	relay.kill().await;
 
+	// Take the dead relay's port the way another process's ephemeral bind can,
+	// so the restart below never depends on getting it back. A failed bind means
+	// someone else already holds it, which tests the same thing.
+	let _taken = std::net::UdpSocket::bind(relay.addr()).ok();
+
 	// Terminal result: the unread half of the open group fails. `Ok(None)` here
 	// would be the relay's death passing for the publisher finishing.
 	let err = tokio::time::timeout(TIMEOUT, open_reader.read_frame())
@@ -586,8 +614,8 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	expect_status(&mut subscribe_loop, moq_tokio::Status::Disconnected, "subscriber").await;
 	expect_status(&mut publish_loop, moq_tokio::Status::Disconnected, "publisher").await;
 
-	let relay = RelayHost::start(relay_config(Some(port))).await;
-	assert_eq!(relay.port, port, "relay bound the wrong port");
+	let relay = RelayHost::start(relay_config()).await;
+	path.retarget(&relay);
 
 	expect_status(&mut subscribe_loop, moq_tokio::Status::Connected, "subscriber").await;
 	expect_status(&mut publish_loop, moq_tokio::Status::Connected, "publisher").await;
@@ -640,7 +668,7 @@ async fn expect_status(reconnect: &mut moq_tokio::Connection, want: moq_tokio::S
 /// subscriber that re-consumes the same name after a republish gets what the
 /// new publisher is sending, never the previous one's cache.
 async fn interrupted_publisher_republishes_new_content(lane: Lane) {
-	let relay = RelayHost::start(relay_config(None)).await;
+	let relay = RelayHost::start(relay_config()).await;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
 
@@ -927,7 +955,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// bound each relay's side of an impaired handshake, which can sit silent
 	// that long between the client's backed-off retransmits. So a cut peer link
 	// idles out only after `relay_idle`, which the flap's waits allow for.
-	let mut config = relay_config(None);
+	let mut config = relay_config();
 	config.quic = credit(lane, config.quic);
 	let relay_idle = config.quic.idle_timeout;
 	let origin = RelayHost::start(config).await;
@@ -942,7 +970,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// The edge relay dials the origin as a cluster peer, through its own path.
 	let mut peer_url = peer.url.clone();
 	peer_url.set_path("/");
-	let mut config = relay_config(None);
+	let mut config = relay_config();
 	config.quic = credit(lane, config.quic);
 	config.connect = dial();
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
@@ -1234,7 +1262,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 /// harness with no publisher and requires that no announcement and no broadcast
 /// ever arrive, so "the frame showed up" cannot be a harness artifact.
 async fn no_publisher_never_delivers(lane: Lane) {
-	let relay = RelayHost::start(relay_config(None)).await;
+	let relay = RelayHost::start(relay_config()).await;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
 

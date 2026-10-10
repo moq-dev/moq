@@ -413,6 +413,8 @@ pub struct Shaper {
 	failed: Arc<OnceLock<String>>,
 	/// How many [`Outage`]s are holding the path down.
 	cuts: Arc<AtomicU64>,
+	/// Where datagrams go now, which [`Shaper::retarget`] moves.
+	target: Arc<Mutex<SocketAddr>>,
 	task: tokio::task::JoinHandle<()>,
 }
 
@@ -432,13 +434,15 @@ impl Shaper {
 		let tally = Arc::new([Tally::default(), Tally::default()]);
 		let failed = Arc::new(OnceLock::new());
 		let cuts = Arc::new(AtomicU64::new(0));
+		let target = Arc::new(Mutex::new(config.target));
 		let task = tokio::spawn({
 			let setup = setup.clone();
 			let tally = tally.clone();
 			let failed = failed.clone();
 			let cuts = cuts.clone();
+			let target = target.clone();
 			async move {
-				if let Err(err) = run(Arc::new(listen), setup, tally, cuts).await {
+				if let Err(err) = run(Arc::new(listen), setup, tally, cuts, target).await {
 					let _ = failed.set(format!("{err:#}"));
 				}
 			}
@@ -450,6 +454,7 @@ impl Shaper {
 			tally,
 			failed,
 			cuts,
+			target,
 			task,
 		})
 	}
@@ -466,12 +471,29 @@ impl Shaper {
 		}
 	}
 
+	/// Forward to `target` from now on, keeping the address clients send to.
+	///
+	/// The way a server comes back somewhere new behind a stable address: each
+	/// client keeps its flow, so the new target sees the same source addresses,
+	/// and datagrams already on their way still land at the old target. The new
+	/// target must be reachable the way the first one was, loopback or not and
+	/// in the same address family, since the flows' sockets are already bound.
+	pub fn retarget(&self, target: SocketAddr) -> anyhow::Result<()> {
+		let mut current = self.target.lock().expect("target poisoned");
+		anyhow::ensure!(
+			local_ip(target) == local_ip(*current),
+			"cannot retarget from {current} to {target}: the flows' sockets cannot reach it"
+		);
+		*current = target;
+		Ok(())
+	}
+
 	/// The address clients send to.
 	pub fn addr(&self) -> SocketAddr {
 		self.addr
 	}
 
-	/// The configuration this shaper runs, including its seed.
+	/// The configuration this shaper started with, including its seed.
 	pub fn config(&self) -> &Config {
 		&self.setup.config
 	}
@@ -602,8 +624,13 @@ fn bump(counter: &AtomicU64) {
 /// A flow is a socket of its own toward the target, so the target sees one
 /// address per client just as it would without the shaper in the way. Each
 /// flow takes a link of its own each way, unless the path is shared.
-async fn run(listen: Arc<UdpSocket>, setup: Setup, tally: Arc<[Tally; 2]>, cuts: Arc<AtomicU64>) -> anyhow::Result<()> {
-	let config = &setup.config;
+async fn run(
+	listen: Arc<UdpSocket>,
+	setup: Setup,
+	tally: Arc<[Tally; 2]>,
+	cuts: Arc<AtomicU64>,
+	target: Arc<Mutex<SocketAddr>>,
+) -> anyhow::Result<()> {
 	let mut flows = HashMap::<SocketAddr, Flow>::new();
 	let mut tasks = JoinSet::new();
 	let mut buf = vec![0u8; u16::MAX as usize];
@@ -629,12 +656,13 @@ async fn run(listen: Arc<UdpSocket>, setup: Setup, tally: Arc<[Tally; 2]>, cuts:
 			continue;
 		}
 		let now = Instant::now();
+		let to = *target.lock().expect("target poisoned");
 
 		let number = flows.len() as u64;
 		let flow = match flows.entry(from) {
 			hash_map::Entry::Occupied(entry) => entry.into_mut(),
 			hash_map::Entry::Vacant(entry) => {
-				let upstream = Arc::new(bind_toward(config.target).await?);
+				let upstream = Arc::new(bind_toward(to).await?);
 
 				let [up, down] = match &shared {
 					Some(links) => links.clone(),
@@ -642,7 +670,7 @@ async fn run(listen: Arc<UdpSocket>, setup: Setup, tally: Arc<[Tally; 2]>, cuts:
 				};
 				tasks.spawn(reply(
 					upstream.clone(),
-					config.target,
+					target.clone(),
 					down,
 					listen.clone(),
 					from,
@@ -655,7 +683,7 @@ async fn run(listen: Arc<UdpSocket>, setup: Setup, tally: Arc<[Tally; 2]>, cuts:
 		};
 		let datagram = buf[..size].to_vec();
 		let mut up = flow.up.lock().expect("link poisoned");
-		up.push(now, datagram, &flow.upstream, config.target, &tally[UP]);
+		up.push(now, datagram, &flow.upstream, to, &tally[UP]);
 	}
 }
 
@@ -692,24 +720,28 @@ fn link(
 	)))
 }
 
-/// A socket that can reach `target`: loopback for a loopback target, so the
-/// shaper never opens a port beyond the host when it does not need to.
+/// A socket that can reach `target`.
 async fn bind_toward(target: SocketAddr) -> anyhow::Result<UdpSocket> {
-	let ip = match (target.ip().is_loopback(), target.is_ipv4()) {
+	UdpSocket::bind(SocketAddr::new(local_ip(target), 0))
+		.await
+		.with_context(|| format!("bind a socket toward {target}"))
+}
+
+/// The address a socket toward `target` binds: loopback for a loopback target,
+/// so the shaper never opens a port beyond the host when it does not need to.
+fn local_ip(target: SocketAddr) -> IpAddr {
+	match (target.ip().is_loopback(), target.is_ipv4()) {
 		(true, true) => IpAddr::V4(Ipv4Addr::LOCALHOST),
 		(true, false) => IpAddr::V6(Ipv6Addr::LOCALHOST),
 		(false, true) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
 		(false, false) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-	};
-	UdpSocket::bind(SocketAddr::new(ip, 0))
-		.await
-		.with_context(|| format!("bind a socket toward {target}"))
+	}
 }
 
 /// Feed what the target sends a flow into the link back toward its client.
 async fn reply(
 	socket: Arc<UdpSocket>,
-	target: SocketAddr,
+	target: Arc<Mutex<SocketAddr>>,
 	link: Arc<Mutex<Link>>,
 	listen: Arc<UdpSocket>,
 	client: SocketAddr,
@@ -720,7 +752,7 @@ async fn reply(
 	loop {
 		let (size, from) = socket.recv_from(&mut buf).await.context("receive from the target")?;
 		// Anything else reaching this ephemeral port is not part of the path.
-		if from != target || is_cut(&cuts) {
+		if from != *target.lock().expect("target poisoned") || is_cut(&cuts) {
 			continue;
 		}
 		let datagram = buf[..size].to_vec();
@@ -1075,6 +1107,42 @@ mod tests {
 		drop(outage);
 		let got = round_trip(&client, 10).await;
 		assert_eq!(got, (0..10).collect::<Vec<_>>(), "the restored path lost datagrams");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_retarget_moves_the_flow_and_ignores_the_old_target() {
+		let first = UdpSocket::bind(LOCALHOST).await.unwrap();
+		let second = UdpSocket::bind(LOCALHOST).await.unwrap();
+		let shaper = Shaper::bind(Config {
+			bind: LOCALHOST,
+			target: first.local_addr().unwrap(),
+			seed: 1,
+			up: Profile::default(),
+			down: Profile::default(),
+		})
+		.await
+		.unwrap();
+		let client = UdpSocket::bind(LOCALHOST).await.unwrap();
+		client.connect(shaper.addr()).await.unwrap();
+		let mut buf = [0u8; 8];
+
+		client.send(b"before").await.unwrap();
+		let (_, flow) = first.recv_from(&mut buf).await.unwrap();
+
+		shaper.retarget(second.local_addr().unwrap()).unwrap();
+		client.send(b"after").await.unwrap();
+		let (size, from) = second.recv_from(&mut buf).await.unwrap();
+		assert_eq!(&buf[..size], b"after");
+		assert_eq!(from, flow, "the new target saw a different flow");
+
+		// The old target answering late is no longer part of the path.
+		first.send_to(b"stale", flow).await.unwrap();
+		second.send_to(b"fresh", flow).await.unwrap();
+		let size = client.recv(&mut buf).await.unwrap();
+		assert_eq!(&buf[..size], b"fresh");
+
+		let ipv6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
+		assert!(shaper.retarget(ipv6).is_err(), "retargeted where no flow can reach");
 	}
 
 	#[tokio::test(start_paused = true)]

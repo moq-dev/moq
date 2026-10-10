@@ -60,6 +60,12 @@ the clients discover the loss through the QUIC idle timeout. The drills set that
 to two seconds (and the keep-alive well inside it), which is what keeps a crash
 bounded rather than fast.
 
+The replacement relay binds a fresh ephemeral port, never the dead one's: in
+those two seconds any process's ephemeral bind can take the freed port. So this
+drill's clients dial a shaper in both lanes, unimpaired on loopback, and
+`Shaper::retarget` points it at the replacement. The drill holds the dead port
+itself so a restart that needed it back fails every run.
+
 ## Two lanes
 
 Every drill runs twice, as `<drill>::loopback` and `<drill>::impaired`. The
