@@ -3306,6 +3306,41 @@ fn handshake_outlasts_short_idle_timeout() {
     );
 }
 
+/// Once established, a connection whose peer goes silent idles out at the negotiated idle
+/// timeout, not the longer handshake idle timeout.
+#[test]
+fn established_idles_out_at_negotiated_timeout() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let mut transport = cubic_transport();
+    transport.max_idle_timeout(Some(Duration::from_secs(2).try_into().unwrap()));
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+
+    let client_ch = pair.begin_connect(client);
+    loop {
+        pair.drive_client();
+        if !pair.client_conn_mut(client_ch).is_handshaking() {
+            break;
+        }
+        pair.drive_server();
+        pair.time = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()).unwrap();
+    }
+    let established = pair.time;
+
+    // Nothing reaches the client once it is established.
+    while !pair.client_conn_mut(client_ch).is_closed() {
+        pair.client.inbound.clear();
+        if !pair.step()
+            && let Some(t) = pair.client.next_wakeup()
+        {
+            pair.time = t;
+        }
+    }
+    let elapsed = pair.time - established;
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+}
+
 /// Ensures that the server can respond with 3 initial packets during the handshake
 /// before the anti-amplification limit kicks in when MTUs are similar.
 #[test]

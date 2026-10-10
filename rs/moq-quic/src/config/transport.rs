@@ -109,7 +109,10 @@ impl TransportConfig {
     ///
     /// Used in place of [`max_idle_timeout`](Self::max_idle_timeout) until the handshake
     /// completes, so a short idle timeout meant to detect a dead peer quickly does not also cut
-    /// a handshake off after a single probe. Defaults to 10 seconds.
+    /// a handshake off after a single probe. It applies whether the idle timeout is shorter,
+    /// longer, or disabled, and whatever idle timeout the peer advertises; the negotiated idle
+    /// timeout takes over once the connection is established. Defaults to 10 seconds, as
+    /// msquic's `HandshakeIdleTimeoutMs`.
     pub fn handshake_idle_timeout(&mut self, value: Duration) -> &mut Self {
         self.handshake_idle_timeout = value;
         self
@@ -394,7 +397,6 @@ impl Default for TransportConfig {
             max_concurrent_uni_streams: 100u32.into(),
             // 30 second default recommended by RFC 9308 § 3.2
             max_idle_timeout: Some(VarInt(30_000)),
-            // msquic's HandshakeIdleTimeoutMs default
             handshake_idle_timeout: Duration::from_secs(10),
             stream_receive_window: STREAM_RWND.into(),
             receive_window: VarInt::MAX,
