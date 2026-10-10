@@ -78,3 +78,7 @@ one to one; the API reference has the names.
 - API reference: [pub.dev/documentation/moq](https://pub.dev/documentation/moq/latest/)
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)
+
+Error variants carrying a diagnostic expose a named `message` payload (`Message`
+in Go); structured protocol errors expose `details` (`Details` in Go). Their
+display text and error classification stay the same.

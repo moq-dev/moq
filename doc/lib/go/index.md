@@ -105,3 +105,7 @@ one to one; the API reference has the names.
 - API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [`go/`](https://github.com/moq-dev/moq/tree/main/go); `just go check` builds and tests locally
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)
+
+Error variants carrying a diagnostic expose a named `message` payload (`Message`
+in Go); structured protocol errors expose `details` (`Details` in Go). Their
+display text and error classification stay the same.

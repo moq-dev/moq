@@ -100,3 +100,7 @@ one to one; the API reference has the names.
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
+
+Error variants carrying a diagnostic expose a named `message` payload (`Message`
+in Go); structured protocol errors expose `details` (`Details` in Go). Their
+display text and error classification stay the same.
