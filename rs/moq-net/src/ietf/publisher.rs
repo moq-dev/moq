@@ -865,12 +865,10 @@ where
 					.await;
 				return Some((result.and(Err(Error::Unsupported)), filled));
 			}
-			if let Some(priority) = update.priority {
-				let mut subscription = serve.track.subscription();
-				subscription.priority = super::priority::from_wire(priority);
-				if let Err(err) = serve.track.update(subscription) {
-					return Some((Err(err), filled));
-				}
+			if let Some(priority) = update.priority
+				&& let Err(err) = serve.set_priority(super::priority::from_wire(priority))
+			{
+				return Some((Err(err), filled));
 			}
 			let acked = async {
 				stream.writer.encode(&ietf::RequestOk::ID).await?;
@@ -2282,6 +2280,8 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	range: ServeRange,
 	timescale: Option<Timescale>,
 	children: kio::Tasks<GroupServe<S>>,
+	/// The subscriber priority, which every group stream follows while it is open.
+	priority: kio::Producer<u8>,
 	/// The track finished: the in-flight group machines drain, then FIN.
 	draining: bool,
 	/// Group streams opened, shared with the group machines.
@@ -2312,6 +2312,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		}
 		track.end_at(range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group)));
 		let datagrams = session.max_datagram_size() > 0;
+		let priority = kio::Producer::new(track.subscription().priority);
 
 		Self {
 			datagrams,
@@ -2322,10 +2323,22 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			range,
 			timescale,
 			children: kio::Tasks::new(),
+			priority,
 			draining: false,
 			opened: Default::default(),
 			end: None,
 		}
+	}
+
+	/// Move the subscriber priority, for the group streams already open as well as later ones.
+	fn set_priority(&mut self, priority: u8) -> Result<(), Error> {
+		let mut subscription = self.track.subscription();
+		subscription.priority = priority;
+		self.track.update(subscription)?;
+		if let Ok(mut current) = self.priority.write() {
+			*current = priority;
+		}
+		Ok(())
 	}
 
 	/// Group streams opened so far.
@@ -2418,7 +2431,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						GroupServe::new(
 							self.session.clone(),
 							msg,
-							self.track.subscription().priority,
+							self.priority.consume(),
 							group,
 							self.timescale,
 							self.version,
@@ -2502,7 +2515,10 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	/// The subscription's count of opened streams, bumped once this one opens.
 	opened: Arc<AtomicU64>,
 	msg: ietf::GroupHeader,
-	priority: u8,
+	/// The subscription's priority, followed while the stream is open.
+	priority: kio::Consumer<u8>,
+	/// The priority last handed to the stream.
+	applied: u8,
 	group: group::Consumer,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -2546,7 +2562,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	fn new(
 		session: S,
 		msg: ietf::GroupHeader,
-		priority: u8,
+		priority: kio::Consumer<u8>,
 		mut group: group::Consumer,
 		timescale: Option<Timescale>,
 		version: Version,
@@ -2555,10 +2571,12 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		group.skip_to(slice.skip);
 		group.end_at(slice.until.map_or(Bound::Unbounded, Bound::Excluded));
 		let object_delta = group.index();
+		let applied = *priority.read();
 		Self {
 			session,
 			opened: Default::default(),
 			msg,
+			applied,
 			priority,
 			group,
 			timescale,
@@ -2576,6 +2594,18 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = std::task::Context::from_waker(waiter.waker());
+		// A REQUEST_UPDATE can move the subscriber priority while this stream is open.
+		let applied = self.applied;
+		let mut moved = match self.priority.poll(waiter, |priority| match **priority == applied {
+			true => Poll::Pending,
+			false => Poll::Ready(**priority),
+		}) {
+			Poll::Ready(Ok(priority)) => {
+				self.applied = priority;
+				Some(priority)
+			}
+			_ => None,
+		};
 		loop {
 			match &mut self.state {
 				GroupState::Open => {
@@ -2592,7 +2622,8 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					};
 					self.opened.fetch_add(1, Ordering::Relaxed);
 					let mut stream = stream;
-					stream.set_priority(self.priority);
+					self.applied = *self.priority.read();
+					stream.set_priority(self.applied);
 
 					let mut writer = Writer::new(stream, self.version);
 					if let Err(err) = writer.buffer(&self.msg) {
@@ -2614,6 +2645,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					batch,
 					batch_pos,
 				} => {
+					if let Some(priority) = moved.take() {
+						writer.set_priority(priority);
+					}
 					// The peer closing first cancels the group.
 					if writer.poll_closed(&mut cx).is_ready() {
 						self.state = GroupState::Done;
@@ -2731,6 +2765,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					}
 				}
 				GroupState::Closed { writer } => {
+					if let Some(priority) = moved.take() {
+						writer.set_priority(priority);
+					}
 					// Wait until everything is acknowledged by the peer so we can still
 					// cancel the stream. poll_close releases the stream on completion so
 					// the Drop fallback cannot reset the acknowledged stream.
@@ -2851,7 +2888,7 @@ mod group_priority_test {
 		let mut serve = GroupServe::new(
 			session,
 			msg,
-			200,
+			kio::Producer::new(200).consume(),
 			consumer,
 			Some(Timescale::default()),
 			Version::Draft14,
@@ -2953,7 +2990,7 @@ mod group_priority_test {
 				publisher_priority: 0,
 				flags: Default::default(),
 			},
-			0,
+			kio::Producer::new(0).consume(),
 			group,
 			Some(Timescale::default()),
 			Version::Draft19,
@@ -2998,7 +3035,7 @@ mod group_priority_test {
 				publisher_priority: 0,
 				flags: Default::default(),
 			},
-			0,
+			kio::Producer::new(0).consume(),
 			group,
 			Some(Timescale::default()),
 			Version::Draft19,
@@ -3048,7 +3085,7 @@ mod group_priority_test {
 				publisher_priority: 0,
 				flags: Default::default(),
 			},
-			0,
+			kio::Producer::new(0).consume(),
 			group,
 			Some(Timescale::default()),
 			Version::Draft19,
@@ -4455,7 +4492,7 @@ mod serve_tests {
 			let mut serve = GroupServe::new(
 				session,
 				header(),
-				0,
+				kio::Producer::new(0).consume(),
 				consumer,
 				Some(Timescale::default()),
 				Version::Draft20,
@@ -4578,6 +4615,31 @@ mod serve_tests {
 			// REQUEST_OK with no parameters, once per update.
 			assert_eq!(occurrences(&requester.log, &[0x07, 0, 1, 0]), 2, "{version}");
 		}
+	}
+
+	/// A priority update moves the group streams already in flight too, not only the
+	/// ones opened after it.
+	#[tokio::test(start_paused = true)]
+	async fn subscription_update_reprioritizes_open_group_streams() {
+		let h = serve(Version::Draft22);
+		let requester = ScriptedSession::new(Vec::new());
+		let mut run = std::pin::pin!(start_subscription(&h, requester.clone()).await);
+		assert!(!drive(run.as_mut()).await);
+
+		// An unfinished group keeps its stream open.
+		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(timestamp(), b"open".as_slice()).unwrap();
+		assert!(!drive(run.as_mut()).await);
+		let before = h.log.priorities();
+		assert_eq!(before.len(), 1, "{before:?}");
+		assert_ne!(before[0], 245);
+
+		// REQUEST_UPDATE with SUBSCRIBER_PRIORITY 10.
+		requester.push(&[0x02, 0, 4, 2, 1, 0x20, 10]);
+		assert!(!drive(run.as_mut()).await);
+		assert_eq!(h.track.subscription().unwrap().priority, 245);
+		let after = h.log.priorities();
+		assert_eq!(after.last(), Some(&245), "{after:?}");
 	}
 
 	/// An update we cannot apply is refused NOT_SUPPORTED and ends the subscription with
