@@ -400,7 +400,9 @@ func (r *GroupRequest) Abort(errorCode uint16) error {
 //
 // It is weak: holding it does not keep the request alive. The last caller to
 // leave withdraws the request, so once unused, demand never returns: drop the
-// request. Waits return ErrClosed once the request is released.
+// request. Waits fail once the request is answered: ErrClosed if it was
+// dropped, otherwise the error the accept or reject left for the waiting
+// fetches.
 type GroupDemand struct {
 	inner *ffi.MoqGroupDemand
 }

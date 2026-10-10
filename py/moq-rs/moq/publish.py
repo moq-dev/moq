@@ -200,8 +200,9 @@ class GroupDemand:
 
     Returned by ``GroupRequest.demand()``. Weak: holding it does not keep the
     request alive. The last caller to leave withdraws the request, so once
-    unused, demand never returns: drop the request. Waits raise
-    ``moq.Error.Closed`` once the request is released.
+    unused, demand never returns: drop the request. Waits raise once the
+    request is answered: ``moq.Error.Closed`` if it was dropped, otherwise the
+    error the accept or reject left for the waiting fetches.
     """
 
     def __init__(self, inner: MoqGroupDemand) -> None:
