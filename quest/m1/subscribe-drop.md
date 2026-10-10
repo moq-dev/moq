@@ -81,14 +81,9 @@ its header; on each version the subscriber settles without waiting out the
 grace. A skipped sequence at the end is covered on lite-05 through lite-07
 (`track_tail::skipped_groups_end_without_the_grace`).
 
-Add the lite-07 drop case to the tail interop harness from
-[track tail interop](/quest/m1/track-tail-interop.md): Rust and JS
+Add the lite-07 drop case to the tail interop harness
+(`just test interop --tail`, `test/interop/clients/*/tail.*`): Rust and JS
 subscribers both settle on SUBSCRIBE_DROP through the relay, so a group the
 publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
-
-
-## Related
-
-- [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS tail harness the lite-07 drop case extends

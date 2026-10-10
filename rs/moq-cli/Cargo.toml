@@ -154,3 +154,7 @@ vt100 = "0.16.2"
 [[bench]]
 name = "play_buffer"
 harness = false
+
+[[example]]
+name = "interop-tail"
+path = "../../test/interop/clients/rust/tail.rs"

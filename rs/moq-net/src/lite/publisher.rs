@@ -1459,7 +1459,13 @@ enum SubscribeServe<S: crate::transport::poll::Session> {
 	/// is moved on every transition.
 	Run(Box<TrackRun<S>>),
 	/// The track finished: draining the in-flight group streams before the FIN.
-	Drain { children: kio::Tasks<GroupServe<S>> },
+	Drain {
+		children: kio::Tasks<GroupServe<S>>,
+		/// The subscription's demand lasts until its groups drain. A relay cancels its
+		/// upstream subscription once nobody subscribes, and the publisher then resets
+		/// every group still on the wire. `None` only in passing between states.
+		_track: Option<Box<track::Subscriber>>,
+	},
 }
 
 impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
@@ -1525,6 +1531,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						self,
 						Self::Drain {
 							children: Default::default(),
+							_track: None,
 						},
 					)
 					else {
@@ -1590,10 +1597,22 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					if ready!(run.poll_step(writer, waiter))?.is_continue() {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
-					let children = std::mem::take(&mut run.children);
-					*self = Self::Drain { children };
+					let Self::Run(run) = std::mem::replace(
+						self,
+						Self::Drain {
+							children: Default::default(),
+							_track: None,
+						},
+					) else {
+						unreachable!()
+					};
+					let TrackRun { children, track, .. } = *run;
+					*self = Self::Drain {
+						children,
+						_track: Some(Box::new(track)),
+					};
 				}
-				Self::Drain { children } => {
+				Self::Drain { children, .. } => {
 					ready!(children.poll(waiter));
 					return Poll::Ready(Ok(ControlFlow::Break(())));
 				}
