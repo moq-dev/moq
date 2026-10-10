@@ -3878,8 +3878,8 @@ async fn server_cert_fingerprints_rejected_after_cancel() {
 }
 
 /// Cancelling a listening server releases its socket before it returns, so the
-/// same address binds again without a retry. The accept is parked first, so
-/// cancel has to unwind an in-flight run rather than an idle state.
+/// same address binds again without a retry. The accept is parked first on this
+/// thread, so cancel has to close the listener without the lock that accept holds.
 #[tokio::test]
 async fn server_cancel_releases_the_bound_port() {
 	let server = MoqServer::new(MoqServerConfig {
@@ -3922,6 +3922,68 @@ async fn server_cancel_releases_the_bound_port() {
 	assert!(matches!(accept, Err(MoqError::Cancelled)));
 
 	rebound.cancel();
+}
+
+/// A foreign cancel only stops polling an accept; uniffi drops it later, at `rust_future_free`.
+/// Until then the cancelled accept must not take the session the next accept is waiting for.
+#[tokio::test]
+async fn server_accept_cancelled_before_free_leaves_the_session() {
+	struct Woken(tokio::sync::Notify);
+	impl std::task::Wake for Woken {
+		fn wake(self: Arc<Self>) {
+			self.0.notify_one();
+		}
+	}
+
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = server.listen().await.expect("listen failed");
+
+	// Poll once, then stop without dropping, which is all `rust_future_cancel` does.
+	let woken = Arc::new(Woken(tokio::sync::Notify::new()));
+	let waker = std::task::Waker::from(woken.clone());
+	let mut cancelled = Box::pin(server.accept());
+	assert!(
+		cancelled
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(&waker))
+			.is_pending()
+	);
+
+	// Dial once: a redial would hand the next accept a fresh session and hide the lost one.
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
+	let connect = tokio::spawn(async move { client.connect(format!("https://{addr}")).await });
+
+	// The wake means the session is ready for the cancelled accept, wherever it now sits.
+	tokio::time::timeout(TIMEOUT, woken.0.notified())
+		.await
+		.expect("the session never reached the cancelled accept");
+	drop(cancelled);
+
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("the cancelled accept took the session")
+		.expect("accept errored")
+		.expect("accept returned None");
+	let server_session = request.accept(None, None).await.expect("accept the session");
+	let _client_session = tokio::time::timeout(TIMEOUT, connect)
+		.await
+		.expect("connect timed out")
+		.expect("connect task panicked")
+		.expect("connect failed");
+
+	server_session.cancel(0);
+	server.cancel();
 }
 
 #[tokio::test]
