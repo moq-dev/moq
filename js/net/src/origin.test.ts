@@ -2181,6 +2181,27 @@ test("demand held across an epoch change asks again, unless it named the old epo
 	origin.close();
 });
 
+test("a demand refused across an epoch change does not lose the carried demand's answer", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("live/cam");
+	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const it = handle.requested();
+	const unpinned = wireOf(consumer).demand(path);
+	const pinned = wireOf(consumer).demand(path, EPOCH);
+	await it.next();
+
+	handle.update({ ...handle.route, epoch: NEWER });
+	await expect(pinned).rejects.toThrow("unroutable");
+	// The replacement's refusal reaches the demand that carried over.
+	(await it.next()).value?.reject(new Error("gone"));
+	await expect(unpinned).rejects.toThrow("gone");
+
+	await it.return?.();
+	handle.close();
+	origin.close();
+});
+
 test("demand held across an epoch round trip still asks again", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");

@@ -1768,17 +1768,18 @@ export class Consumer {
 						if (closed) throw closed;
 						return undefined;
 					}
-					if (!server.pending.has(path)) {
-						// Released by an epoch change: its answer belongs to the old instance.
-						if (server.resets !== resets) break;
-						return undefined;
-					}
+					// Released by an epoch change, which also dropped this pass's count: ask again.
+					if (server.resets !== resets) break;
+					if (!server.pending.has(path)) return undefined;
 					await Signal.race(server.settled, server.closed);
 				}
 			} finally {
-				const n = (server.demanding.get(path) ?? 1) - 1;
-				if (n <= 0) server.demanding.delete(path);
-				else server.demanding.set(path, n);
+				// A reset already cleared the count, and a later pass may have registered anew.
+				if (server.resets === resets) {
+					const n = (server.demanding.get(path) ?? 1) - 1;
+					if (n <= 0) server.demanding.delete(path);
+					else server.demanding.set(path, n);
+				}
 			}
 		}
 	}

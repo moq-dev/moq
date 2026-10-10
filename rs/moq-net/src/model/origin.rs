@@ -907,6 +907,10 @@ struct ServeState {
 	// long-lived origin serving many distinct one-shot paths stays bounded by the live count.
 	served: WeakCache<PathOwned, broadcast::WeakConsumer>,
 
+	// How many times the route changed instance: a front compares it to the count when
+	// it asked to tell a released request from an answered one.
+	renewals: u64,
+
 	// Set when the announcement is retracted or the origin tears down: new requests
 	// fail immediately and the handler observes the end instead of parking forever.
 	closed: bool,
@@ -2399,8 +2403,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 	/// What the wait below returns: one thing that happened.
 	enum Step {
 		Assigned(track::Request),
-		/// The route, its answer, and whether an epoch change released the request.
-		Resolved(u64, Result<broadcast::Consumer, Error>, bool),
+		Resolved(Result<broadcast::Consumer, Error>),
 		SourceClosed(u64),
 		Info(Arc<str>, u64, Result<track::Info, Error>),
 		Ended(Arc<str>, u64, Result<(), Error>, bool),
@@ -2420,8 +2423,18 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 	// The instance each source's route served when it was asked: what its content is from.
 	let mut instances: HashMap<u64, Instance> = HashMap::new();
 	let mut next_source = 0u64;
-	// The in-flight upstream request: the route, its instance when asked, and its pending channel.
-	let mut upstream: Option<(u64, Instance, kio::Consumer<PendingBroadcast>)> = None;
+	/// The in-flight upstream request.
+	struct Upstream {
+		route: u64,
+		/// The route's instance when asked.
+		asked: Instance,
+		pending: kio::Consumer<PendingBroadcast>,
+		/// The queue asked, and its [`ServeState::renewals`] then: a renewal since
+		/// released the request, whatever it resolved to and whenever.
+		server: kio::Shared<ServeState>,
+		renewals: u64,
+	}
+	let mut upstream: Option<Upstream> = None;
 	let mut tracks: HashMap<Arc<str>, TrackIo> = HashMap::new();
 	let mut deadline = crate::time::Deadline::new(&timers);
 	// The watch generation the last selection saw.
@@ -2600,7 +2613,15 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 								}
 							}
 						};
-						upstream = Some((route, instance, pending));
+						let renewals = serve.renewals;
+						drop(serve);
+						upstream = Some(Upstream {
+							route,
+							asked: instance,
+							pending,
+							server,
+							renewals,
+						});
 					}
 					Action::Detach { source } => {
 						// Readers keep reading the source's copy until a replacement is
@@ -2801,17 +2822,17 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 			if let Poll::Ready(Ok(request)) = dynamic.poll_requested_track(waiter) {
 				return Poll::Ready(Step::Assigned(request));
 			}
-			if let Some((route, _, pending)) = &upstream
-				&& let Poll::Ready(result) = pending.poll(waiter, |p| match &p.resolved {
-					Some(result) => Poll::Ready((result.clone(), p.released)),
+			if let Some(upstream) = &upstream
+				&& let Poll::Ready(result) = upstream.pending.poll(waiter, |p| match &p.resolved {
+					Some(result) => Poll::Ready(result.clone()),
 					None => Poll::Pending,
 				}) {
-				return Poll::Ready(match result {
-					Ok((resolved, released)) => Step::Resolved(*route, resolved, released),
+				return Poll::Ready(Step::Resolved(match result {
+					Ok(resolved) => resolved,
 					// The queue died unresolved (its handler dropped): the route
 					// could not serve.
-					Err(_closed) => Step::Resolved(*route, Err(Error::Unroutable), false),
-				});
+					Err(_closed) => Err(Error::Unroutable),
+				}));
 			}
 			if let Some(id) = front.serving()
 				&& let Some(source) = sources.get(&id)
@@ -2899,14 +2920,26 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					now: timers.now(),
 				}
 			}
-			Step::Resolved(route, result, released) => {
-				let Some((_, asked, _)) = upstream.take() else { continue };
+			Step::Resolved(result) => {
+				let Some(Upstream {
+					route,
+					asked,
+					server,
+					renewals,
+					..
+				}) = upstream.take()
+				else {
+					continue;
+				};
+				// Counted rather than read off the request, which an answer just before
+				// the change already took out of the queue, and rather than compared by
+				// epoch, which may have come back since.
+				let released = server.lock().renewals != renewals;
 				match result {
 					// An epoch change released the request, the route moved to another
 					// instance, or another won the path, while the request was in flight:
 					// ask again rather than resolve requesters onto a broadcast that is
-					// already replaced. A release is its own signal, since the epoch may
-					// have come back by now.
+					// already replaced.
 					_ if released => Event::Resolved {
 						route,
 						result: Err(Refusal {
@@ -3645,9 +3678,6 @@ impl OriginState {
 #[derive(Default)]
 struct PendingBroadcast {
 	resolved: Option<Result<broadcast::Consumer, Error>>,
-	/// Set when an epoch change released the request: whatever it resolved to speaks
-	/// for the old instance, so the front asks again.
-	released: bool,
 }
 
 /// A front's verdict, which its requesters wait on: the instance it resolved, or the
@@ -3858,10 +3888,10 @@ impl ServeState {
 		for producer in self.requests.drain_all() {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
-				request.released = true;
 			}
 		}
 		self.served = WeakCache::default();
+		self.renewals += 1;
 	}
 
 	/// Drop the still-pending entry, if it is still ours.
@@ -8270,6 +8300,29 @@ mod tests {
 	#[moq_net_sim::test]
 	async fn an_answer_before_an_epoch_change_is_asked_again() {
 		held_request_across_an_epoch_change(true).await;
+	}
+
+	/// A refusal that lands just before an epoch change, before the front takes it,
+	/// was the old instance's answer: the request is asked again, not ended.
+	#[moq_net_sim::test]
+	async fn a_refusal_before_an_epoch_change_is_asked_again() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let dynamic = producer
+			.dynamic("room", Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		let pending = consumer.request_broadcast("room/alice", None);
+		queued(&dynamic).await.reject(Error::NotFound);
+		let epoch = crate::Epoch::mint();
+		dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
+
+		let fresh = broadcast::Info::new().produce();
+		let fresh_track = fresh.create_track("video", None).unwrap();
+		queued(&dynamic).await.accept(&fresh);
+		let resolved = pending.await.expect("the request carries over");
+		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		deliver(&fresh_track, &mut subscription, b"new").await;
 	}
 
 	/// A release is not undone by the epoch coming back before the front looks: a
