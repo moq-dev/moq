@@ -32,5 +32,4 @@ Public API: a changed default in moq-audio and `@moq/publish`. Wire: none.
 
 ## Related
 
-- [Serve budget](/quest/m0/serve-budget.md) - bounds the serve loop whatever the group rate
 - [FFI codec namespaces](/quest/m1/ffi-shape/codec.md) - owns the FFI encoder's frame duration default, a separate knob
