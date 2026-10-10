@@ -202,4 +202,3 @@ ladders.
 - [JS restart keeps the request](/quest/m1/js-restart-keeps-request.md) - a resolved `@moq/net` request survives a Restart, as in Rust
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [A/V sync across a break](/quest/m1/watch-break-av-sync.md) - `@moq/watch` never plays pre-break audio out of sync with pre-break video
-- [Visible back-merge conflict](/quest/m1/back-merge-conflict-visible.md) - a back-merge that cannot take a release comments on its open PR
