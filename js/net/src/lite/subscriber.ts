@@ -16,6 +16,7 @@ import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { ANNOUNCES, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -143,6 +144,7 @@ function closeReason(text: string): string {
 }
 
 export class Subscriber {
+	#announceSlots: Slots;
 	#quic: WebTransport;
 
 	// The version of the connection.
@@ -203,6 +205,7 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>,
 	) {
 		this.#quic = quic;
+		this.#announceSlots = new Slots(ANNOUNCES, quic);
 		this.version = version;
 		this.hop = hop;
 		this.#probe = probe;
@@ -266,6 +269,7 @@ export class Subscriber {
 		}
 
 		let stopDrain: Dispose | undefined;
+		const held = new Set<Path.Valid>();
 		try {
 			// Send the announce interest.
 			await stream.writer.u53(StreamId.Announce);
@@ -314,6 +318,8 @@ export class Subscriber {
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
+						this.#announceSlots.acquire();
+						held.add(path);
 						const route = { hops: [UNKNOWN_HOP], cost: this.#cost() };
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
@@ -431,6 +437,12 @@ export class Subscriber {
 				if (announce.status === "active" && !duplicateIsUpdate && advertised.has(path)) {
 					throw new ProtocolViolation(`duplicate announce for ${path}`);
 				}
+
+				if (active && !held.has(path)) {
+					this.#announceSlots.acquire();
+					held.add(path);
+				}
+				if (!active && held.delete(path)) this.#announceSlots.release();
 
 				// Retract the path: forget the advertisement, drop the shared consume entry so a
 				// later announce subscribes fresh rather than cloning the dead generation's tracks,
@@ -556,6 +568,7 @@ export class Subscriber {
 		} finally {
 			// Releases this interest's routes on a session that never drains.
 			stopDrain?.();
+			this.#announceSlots.release(held.size);
 		}
 	}
 

@@ -12,6 +12,7 @@ import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Interests, Slots, SUBSCRIPTIONS } from "../util/limits.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -365,6 +366,7 @@ function positionCursor(track: track.Subscriber, version: Version, startGroup: n
  * @internal
  */
 export class Publisher {
+	#interests: Interests;
 	#withdrawal = new Withdrawal();
 
 	// Served SUBSCRIBE, FETCH, and TRACK requests, from dispatch until they end, which a
@@ -412,6 +414,7 @@ export class Publisher {
 	 */
 	constructor(quic: WebTransport, version: Version, hop: Hop, publish?: OriginConsumer) {
 		this.#quic = quic;
+		this.#interests = new Interests(new Slots(SUBSCRIPTIONS, quic));
 		this.version = version;
 		this.hop = hop;
 		const origin = publish && wireOf(publish);
@@ -618,6 +621,15 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		const interest = this.#interests.acquire(msg.broadcast, msg.track, "subscribe");
+		try {
+			await this.#runSubscribe(msg, stream);
+		} finally {
+			interest.release();
+		}
+	}
+
+	async #runSubscribe(msg: Subscribe, stream: Stream) {
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
@@ -1032,7 +1044,9 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
+		const interest = this.#interests.acquire(msg.broadcast, msg.track, "track");
 		const hold = new AbortController();
+		hold.signal.addEventListener("abort", () => interest.release(), { once: true });
 		// Watched from the start, so a requester leaving while the reply is still blocked on
 		// flow control lets go of the track too.
 		void stream.reader.done().then(

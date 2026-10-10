@@ -133,6 +133,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench track
 
+      - name: JS session interest accounting benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench interests
+
       - name: JS catalog estimate fanout benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js catalog-bench

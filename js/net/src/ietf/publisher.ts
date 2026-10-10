@@ -11,6 +11,7 @@ import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
+import { Slots, SUBSCRIPTIONS } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -226,6 +227,7 @@ interface RunFill {
  * @internal
  */
 export class Publisher {
+	#subscriptions: Slots;
 	#withdrawal = new Withdrawal();
 
 	withdraw(): Promise<void> {
@@ -281,6 +283,7 @@ export class Publisher {
 		cluster?: Cluster.Hops;
 	}) {
 		this.#quic = quic;
+		this.#subscriptions = new Slots(SUBSCRIPTIONS, quic);
 		this.#session = session;
 		const origin = publish && wireOf(publish);
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
@@ -309,6 +312,16 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		const supported = msg.forward && !msg.rangeFilters;
+		if (supported) this.#subscriptions.acquire();
+		try {
+			await this.#runSubscribe(msg, stream);
+		} finally {
+			if (supported) this.#subscriptions.release();
+		}
+	}
+
+	async #runSubscribe(msg: Subscribe, stream: Stream) {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		let broadcast: broadcast.Consumer | undefined;

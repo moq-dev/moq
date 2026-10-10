@@ -22,6 +22,7 @@ import { type Cursor, Reader, type Stream, UnexpectedEnd } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Milli, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
+import { ANNOUNCES, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -115,6 +116,7 @@ function sees(filter: Filter, path: Path.Valid): boolean {
  * @internal
  */
 export class Subscriber {
+	#announceSlots: Slots;
 	#session: Session;
 	#localClose = false;
 
@@ -198,6 +200,7 @@ export class Subscriber {
 	}) {
 		this.#session = session;
 		this.#quic = quic;
+		this.#announceSlots = new Slots(ANNOUNCES, quic);
 		this.#cluster = cluster;
 		this.#hidden = hidden;
 		this.#solicit = solicit;
@@ -298,6 +301,7 @@ export class Subscriber {
 			if (this.#goingAway()) this.#updateAnnounce(path, existing.route);
 			return;
 		}
+		this.#announceSlots.acquire();
 		this.#announced.set(path, { count: 1, route });
 
 		console.debug(`announced: broadcast=${path} active=true`);
@@ -339,6 +343,7 @@ export class Subscriber {
 		}
 
 		this.#announced.delete(path);
+		this.#announceSlots.release();
 
 		// The path is gone, so stop sharing its broadcast: a holder outliving the publisher
 		// would otherwise hand the dead generation to whoever consumes the path next.
