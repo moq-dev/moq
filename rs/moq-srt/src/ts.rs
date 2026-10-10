@@ -217,7 +217,8 @@ impl Subscriber {
 	}
 
 	/// Pull the next muxed frame (TS bytes + media timestamp), or `None` once the
-	/// broadcast ends with nothing to follow.
+	/// broadcast ends with nothing to follow. Dropping the future before it resolves loses
+	/// nothing.
 	pub async fn next(&mut self) -> Result<Option<Frame>> {
 		Ok(self.follower.next().await?)
 	}

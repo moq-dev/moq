@@ -100,6 +100,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<E>>,
 	catalog_format: CatalogFormat,
+	/// A snapshot arrived on `catalog` since it was subscribed.
+	cataloged: bool,
 	/// The publisher epoch of the broadcast being exported, `None` for an epochless route.
 	instance: Option<moq_net::Epoch>,
 	/// Tracks [`Self::follow`] left on the ended broadcast, resubscribed as the returned
@@ -772,6 +774,7 @@ impl<E: catalog::Catalog> Export<E> {
 			source: source.pinned(instance.clone()),
 			catalog: Some(catalog),
 			catalog_format,
+			cataloged: false,
 			instance,
 			stale: HashSet::new(),
 			version: VersionNumber::default(),
@@ -877,7 +880,10 @@ impl<E: catalog::Catalog> Export<E> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(snapshot)?,
+				Poll::Ready(Some(snapshot)) => {
+					self.cataloged = true;
+					self.update_catalog(snapshot)?
+				}
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
@@ -1488,6 +1494,11 @@ impl<E: catalog::Catalog> Export<E> {
 		self.catalog_format
 	}
 
+	/// Whether the catalog this export last subscribed has delivered a snapshot.
+	pub(super) fn cataloged(&self) -> bool {
+		self.cataloged
+	}
+
 	/// [`Self::follow`], once `broadcast`'s catalog is subscribed.
 	pub(super) fn followed(
 		&mut self,
@@ -1516,6 +1527,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		self.catalog = Some(catalog);
+		self.cataloged = false;
 		self.si_flushed = false;
 		// A name no entry carries, so the returned catalog repoints every SI entry.
 		for si in self.si.values_mut() {

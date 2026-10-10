@@ -564,7 +564,20 @@ pub(crate) async fn serve_subscribe(
 	};
 
 	let mut egress = Egress::default();
-	while let Some(frame) = subscriber.next().await? {
+	loop {
+		// Keep watching the socket: a linger can hold `next` for as long as it is set, and
+		// nothing is sent meanwhile, so a caller who hangs up would otherwise hold the task.
+		let next = tokio::select! {
+			biased;
+			_ = wait_closed(&mut socket) => {
+				tracing::debug!(%path, "SRT subscribe closed by the caller");
+				return Ok(());
+			}
+			next = subscriber.next() => next?,
+		};
+		let Some(frame) = next else {
+			break;
+		};
 		// Sample the muxer's generation alongside the frame it describes, so a new
 		// program clock re-anchors the pacing rather than mapping the new timeline
 		// through the old anchor.
@@ -596,7 +609,7 @@ fn clamp_to_floor(send_at: Instant, floor: &mut Option<Instant>) -> Instant {
 
 /// Resolve once the SRT caller hangs up (a clean close or an error), draining and
 /// ignoring any unexpected inbound packets. A subscribe caller normally sends
-/// nothing, so this is purely a disconnect signal to race against the announce wait.
+/// nothing, so this is purely a disconnect signal to race against waiting on the broadcast.
 async fn wait_closed(socket: &mut SrtSocket) {
 	use futures::TryStreamExt;
 	while let Ok(Some(_)) = socket.try_next().await {}
@@ -1176,6 +1189,35 @@ mod tests {
 		.expect("the SRT stream stayed open past the linger");
 		assert!(ended.elapsed() >= LINGER, "closed after only {:?}", ended.elapsed());
 		egress.await.unwrap().unwrap();
+	}
+
+	/// A caller hanging up while the egress lingers ends it then, rather than holding the
+	/// task and its socket until the linger runs out.
+	#[tokio::test]
+	async fn a_caller_hanging_up_during_the_linger_ends_the_egress() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let mut live = Instance::publish(&origin, "a.aac");
+		let (mut receiver, egress) = egress(&origin, Duration::from_secs(600), false).await;
+
+		live.write(5, 0);
+		tokio::time::timeout(Duration::from_secs(10), receiver.next())
+			.await
+			.expect("the first payload never arrived")
+			.expect("the SRT egress closed early")
+			.unwrap();
+		live.finish();
+		// Take everything the broadcast sent, so the egress is lingering when the caller goes.
+		while let Ok(Some(payload)) = tokio::time::timeout(Duration::from_secs(2), receiver.next()).await {
+			payload.unwrap();
+		}
+		receiver.close().await.unwrap();
+
+		tokio::time::timeout(Duration::from_secs(10), egress)
+			.await
+			.expect("the egress outlived its caller")
+			.unwrap()
+			.unwrap();
 	}
 
 	/// Whether a payload carries a TS packet whose adaptation field sets

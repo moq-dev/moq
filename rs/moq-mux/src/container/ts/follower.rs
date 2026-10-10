@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Poll, ready};
+use std::task::Poll;
 use std::time::Duration;
 
 use web_async::time::Instant;
@@ -36,8 +36,11 @@ enum Serving {
 }
 
 enum State<E: catalog::Catalog> {
-	/// Exporting.
-	Running,
+	/// Exporting. A return carries how the export ended and when the linger runs out until its
+	/// catalog delivers a snapshot, since a subscribed catalog that never answers is no return.
+	Running {
+		settling: Option<(crate::Result<()>, Instant)>,
+	},
 	/// The export ended with `end`, waiting for the announcements to say what follows.
 	Settling {
 		end: crate::Result<()>,
@@ -96,7 +99,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		let epoch = export.instance().cloned();
 		let mut follower = Self {
 			export,
-			state: State::Running,
+			state: State::Running { settling: None },
 			announced,
 			path,
 			epoch,
@@ -117,7 +120,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	/// Wait up to `linger` for the same instance to return once the broadcast ends. Defaults to
 	/// [`Duration::ZERO`].
 	///
-	/// It bounds the whole return, catalog subscription included.
+	/// It bounds the whole return, up to the returned catalog's first snapshot.
 	pub fn with_linger(mut self, linger: Duration) -> Self {
 		self.linger = linger;
 		self
@@ -153,7 +156,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		loop {
 			match std::mem::replace(&mut self.state, State::Done) {
 				State::Done => return Poll::Ready(Ok(None)),
-				State::Running => {
+				State::Running { mut settling } => {
 					self.poll_announced(waiter);
 					// Subscriptions are sticky, so a replacement leaves the export on the old
 					// instance until it ends, unless asked to switch at once.
@@ -161,15 +164,31 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
 						self.state = State::Following {
 							resolving: self.resolve(),
-							settling: None,
+							settling,
 						};
 						continue;
 					}
-					self.state = State::Running;
-					let end = match ready!(self.export.poll_next(waiter)) {
-						Ok(Some(frame)) => return Poll::Ready(Ok(Some(frame))),
-						Ok(None) => Ok(()),
-						Err(err) => Err(err),
+					let next = self.export.poll_next(waiter);
+					if self.export.cataloged() {
+						settling = None;
+					}
+					let end = match next {
+						Poll::Ready(Ok(Some(frame))) => {
+							self.state = State::Running { settling };
+							return Poll::Ready(Ok(Some(frame)));
+						}
+						Poll::Ready(Ok(None)) => Ok(()),
+						Poll::Ready(Err(err)) => Err(err),
+						Poll::Pending => {
+							if let Some((end, deadline)) = &settling
+								&& self.elapsed(waiter, *deadline)
+							{
+								tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
+								return Poll::Ready(end.clone().map(|()| None));
+							}
+							self.state = State::Running { settling };
+							return Poll::Pending;
+						}
 					};
 					let now = Instant::now();
 					// A failure ends the broadcast only if the broadcast goes too.
@@ -241,7 +260,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 							epoch = self.epoch.as_ref().map(tracing::field::display),
 							"exporting broadcast"
 						);
-						self.state = State::Running;
+						self.state = State::Running { settling };
 						continue;
 					}
 					if let Some((end, deadline)) = &settling
