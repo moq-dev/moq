@@ -3,10 +3,8 @@
 #
 # Usage: sh/changed.sh [BASE]
 #
-# BASE: the argument, then $GITHUB_BASE_REF (a PR checkout has no upstream),
-# then the upstream, then origin/main. `git push -u` points the upstream at the
-# branch's own remote copy, which would diff HEAD against itself, so that case
-# falls through to origin/main.
+# BASE: the argument, then $GITHUB_BASE_REF, then the open PR's base,
+# then an upstream named main or release, then origin/main.
 set -euo pipefail
 
 base=${1:-}
@@ -17,9 +15,33 @@ if [[ -z "$base" && -n "${GITHUB_BASE_REF:-}" ]]; then
     base="origin/$GITHUB_BASE_REF"
 fi
 if [[ -z "$base" ]]; then
-    base=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
-    if [[ -z "$base" || "$base" == */"$(git branch --show-current)" ]]; then
-        base=origin/main
+    upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+    head=$(git branch --show-current)
+    heads=("$head")
+    case "$upstream" in
+        */main | */release | "") ;;
+        *) [[ "${upstream#*/}" == "$head" ]] || heads+=("${upstream#*/}") ;;
+    esac
+
+    # Prefer the local branch's PR; an upstream may be its stacked base.
+    # Tracking a PR head under a different local name must also find that PR.
+    # Bound optional network lookups and disable authentication prompts.
+    if command -v gh >/dev/null && command -v timeout >/dev/null; then
+        for head in "${heads[@]}"; do
+            [[ -n "$head" ]] || continue
+            pr_base=$(GH_PROMPT_DISABLED=1 timeout 3s gh pr view "$head" \
+                --json baseRefName,state --jq 'select(.state == "OPEN") | .baseRefName' 2>/dev/null || true)
+            if [[ -n "$pr_base" ]]; then
+                base="origin/$pr_base"
+                break
+            fi
+        done
+    fi
+    if [[ -z "$base" ]]; then
+        case "$upstream" in
+            */main | */release) base=$upstream ;;
+            *) base=origin/main ;;
+        esac
     fi
 fi
 merge_base=$(git merge-base "$base" HEAD) || {
