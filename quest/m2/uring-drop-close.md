@@ -23,6 +23,3 @@ Decided 2026-10-08: moved to m2, since the relay goes through moq's session
 machine, which the `Connection` doc says closes explicitly.
 
 Public API: none expected. Wire: none.
-
-## Related
-
