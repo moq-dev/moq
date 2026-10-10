@@ -857,7 +857,24 @@ impl Connection {
 					// connection, and draining any predecessor left over from a migration. A QUIC
 					// dial that lands after WebSocket won takes over here without a redial.
 					let ended = loop {
-						match run_session(shared, &session, &mut draining, &mut upgrade).await {
+						let mut next = run_session(shared, &session, &mut draining, &mut upgrade).await;
+						#[cfg(all(feature = "websocket", feature = "noq"))]
+						if connected.elapsed() < initial
+							&& upgrade.is_some() && let Next::Ended(Ended::Closed(result)) = next
+						{
+							// A short-lived fallback has not won the race against the QUIC
+							// attempt we already started. Its existing connect deadline bounds
+							// this wait, including in one-shot mode.
+							shared.migrating();
+							next = match kio::wait(|waiter| poll_upgrade(shared, &mut upgrade, waiter)).await {
+								Ok((next, transport)) => Next::Upgraded(next, transport),
+								Err(quic) => Next::Ended(Ended::Closed(Err(crate::client::race_error(
+									quic,
+									result.err().unwrap_or_else(|| moq_net::Error::Cancel.into()),
+								)))),
+							};
+						}
+						match next {
 							Next::Ended(ended) => break ended,
 							Next::Upgraded(next, transport) => {
 								tracing::info!(peer = %Endpoint(&url), %transport, "upgraded from WebSocket");
@@ -977,7 +994,7 @@ impl Connection {
 					// specified, so this is the peer telling us these credentials will
 					// never work, not a code we guessed at.
 					if let Ended::Closed(Err(err)) = &ended {
-						let err = Error::from(err.clone());
+						let err = err.clone();
 						if err.is_auth() {
 							return Err(err);
 						}
@@ -988,7 +1005,7 @@ impl Connection {
 					// A GOAWAY already returned above.
 					if !client.reconnect {
 						return match ended {
-							Ended::Closed(res) => res.map_err(Error::from),
+							Ended::Closed(res) => res,
 							Ended::Goaway(_) => unreachable!("handled before the migration branch"),
 						};
 					}
@@ -1004,7 +1021,7 @@ impl Connection {
 						// escalate instead of spinning the CPU. This is what bounds a redirect
 						// loop between two peers.
 						let err = match ended {
-							Ended::Closed(Err(err)) => Some(Error::from(err)),
+							Ended::Closed(Err(err)) => Some(err),
 							Ended::Closed(Ok(())) => None,
 							// Handled above: a GOAWAY never reaches here.
 							Ended::Goaway(_) => None,
@@ -1342,7 +1359,7 @@ enum Next {
 /// Why a session stopped being the live one.
 enum Ended {
 	/// The transport closed.
-	Closed(Result<(), moq_net::Error>),
+	Closed(crate::Result<()>),
 	/// The peer sent a GOAWAY; the session is still up and serving.
 	Goaway(moq_net::goaway::Goaway),
 }
@@ -1491,10 +1508,18 @@ async fn run_session(
 		}
 
 		if let Poll::Ready(err) = waiter.poll_future(closed.as_mut()) {
-			return Poll::Ready(Next::Ended(Ended::Closed(Err(err))));
+			return Poll::Ready(Next::Ended(Ended::Closed(Err(err.into()))));
 		}
 
-		poll_upgrade(shared, upgrade, waiter).map(|(session, transport)| Next::Upgraded(session, transport))
+		match poll_upgrade(shared, upgrade, waiter) {
+			Poll::Ready(Ok((session, transport))) => Poll::Ready(Next::Upgraded(session, transport)),
+			Poll::Ready(Err(err)) => {
+				tracing::debug!(%err, "QUIC upgrade failed; staying on WebSocket");
+				shared.stayed();
+				Poll::Pending
+			}
+			Poll::Pending => Poll::Pending,
+		}
 	})
 	.await
 }
@@ -1504,22 +1529,19 @@ fn poll_upgrade(
 	shared: &Shared,
 	upgrade: &mut Option<crate::client::Upgrade>,
 	waiter: &kio::Waiter,
-) -> Poll<(moq_net::Session, crate::Transport)> {
+) -> Poll<crate::Result<(moq_net::Session, crate::Transport)>> {
 	while let Some(pending) = upgrade.as_mut() {
 		match ready!(pending.poll(waiter)) {
 			Ok(crate::client::Step::Handshaking) => shared.migrating(),
 			Ok(crate::client::Step::Session(session)) => shared.upgrading(Some(&session)),
 			Ok(crate::client::Step::Done(session, transport)) => {
 				*upgrade = None;
-				return Poll::Ready((session, transport));
+				return Poll::Ready(Ok((session, transport)));
 			}
 			Err(err) => {
-				// Only the Handshaking stage moved the status, but restoring it is harmless
-				// either way: this session was serving throughout.
-				tracing::debug!(%err, "QUIC upgrade failed; staying on WebSocket");
-				shared.stayed();
 				shared.upgrading(None);
 				*upgrade = None;
+				return Poll::Ready(Err(err));
 			}
 		}
 	}
@@ -2506,7 +2528,13 @@ mod tests {
 		assert!(upgrade.is_some());
 
 		fail.send(()).unwrap();
-		assert!(poll_upgrade(&shared, &mut upgrade, &waiter).is_pending());
+		assert!(matches!(
+			poll_upgrade(&shared, &mut upgrade, &waiter),
+			Poll::Ready(Err(Error::ConnectFailed))
+		));
+		// The caller decides whether a live WebSocket stays or an ended arm loses
+		// the transport race. Polling the upgrade itself only reports the failure.
+		shared.stayed();
 		assert_eq!(shared.state.consume().read().status, Some(Status::Connected));
 		assert!(upgrade.is_none(), "a failed upgrade is not retried");
 	}
@@ -2801,6 +2829,40 @@ mod tests {
 			!crate::websocket::won(&fallback.url),
 			"the fallback kept WebSocket's win"
 		);
+	}
+
+	/// One-shot proves this reuses the held dial rather than redialing QUIC.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[tokio::test]
+	async fn closed_websocket_session_falls_back_to_pending_quic() {
+		for error in [moq_net::Error::Cancel, moq_net::Error::Unauthorized] {
+			let origin = crate::origin::spawn();
+			let mut fallback = Fallback::start(&origin, Quic::Held).await;
+			let mut config = crate::connect::Config::default();
+			config.tls.insecure = Some(true);
+			let client = config.init(Default::default()).unwrap().with_reconnect(false);
+			let mut connection = tokio::time::timeout(UPGRADE_WAIT, client.connect(fallback.url.clone()).established())
+				.await
+				.expect("never connected")
+				.unwrap();
+			assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+			let (_, websocket) = fallback.accept().await;
+			websocket.abort(error.clone());
+			let _ = websocket.closed().await;
+			fallback.forwarder.open();
+			loop {
+				if connection.transport() == Some(crate::Transport::WebTransport) {
+					break;
+				}
+				tokio::time::timeout(UPGRADE_WAIT, connection.status())
+					.await
+					.expect("pending QUIC dial never took over")
+					.expect("connection ended before pending QUIC dial");
+			}
+			let (transport, _) = fallback.accept().await;
+			assert_eq!(transport, crate::Transport::WebTransport);
+			assert_eq!(connection.epoch(), 2);
+		}
 	}
 
 	/// When QUIC wins the race nothing changes: one session, over QUIC, and no
