@@ -80,7 +80,7 @@ the line reports rather than alarms; `Import::stats` carries the same counters
 for a caller that sets its own limit.
 
 A corrupt media packet, malformed PES header, or damaged codec access unit is
-refused whole and logged as a warning. Ingest continues on every other PID.
+dropped and logged as a warning. Ingest continues on every other PID.
 Video closes its group at the break and resumes at its next keyframe, as it does
 after a continuity-counter gap: the pictures in between may reference the lost
 one, so they are dropped rather than decoded with artefacts. Each break freezes

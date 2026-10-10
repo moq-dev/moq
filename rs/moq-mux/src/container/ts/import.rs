@@ -1947,6 +1947,8 @@ impl<E: catalog::Catalog> Stream<E> {
 					anyhow::Ok(published)
 				})();
 				// A refused unit must not leave its parameter sets for a bare keyframe to re-inject.
+				// The snapshot is per PES, so if one carries several AUs, a later damaged AU also rolls
+				// back new parameter sets an earlier, already published AU brought.
 				if published.as_ref().is_err_and(|err| err.is::<Damaged>()) {
 					split.restore(params);
 				}
@@ -1978,6 +1980,8 @@ impl<E: catalog::Catalog> Stream<E> {
 					anyhow::Ok(published)
 				})();
 				// A refused unit must not leave its parameter sets for a bare keyframe to re-inject.
+				// The snapshot is per PES, so if one carries several AUs, a later damaged AU also rolls
+				// back new parameter sets an earlier, already published AU brought.
 				if published.as_ref().is_err_and(|err| err.is::<Damaged>()) {
 					split.restore(params);
 				}
