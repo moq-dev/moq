@@ -91,13 +91,14 @@ republish against a live relay.
 
 When the release cut carries stats epochs, drop
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and
-its `doc/concept/stats.md` sentence from `release`; release-to-main
-back-merges keep `main`'s `rs/moq-stats` and `doc/concept/stats.md` until
-then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
+its `doc/concept/stats.md` sentence from `release`; until then, the
+maintainer's pre-release merge of `release` into `main` keeps `main`'s
+`rs/moq-stats` and `doc/concept/stats.md`. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 
 ## Required
 
 - [Export ts](/quest/m0/broadcast-epoch/export-ts.md) - `export ts` and SRT egress linger only for the same epoch, and switch to a replacement only with `--stitch`, as a full program switch
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
+- [Follow gap](/quest/m0/broadcast-epoch/follow-gap.md) - a followed path reports a gap that ended its request, even onto a same-epoch covering prefix
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)

@@ -10,5 +10,5 @@ group server can see when nobody still wants the group and stop producing it.
 
 Decided in #4868; the bullet was lost when #4946 removed `net.md`, and it
 moved out of the FFI shape README into its own quest when the line landed
-(2026-10-09). Mirror `MoqTrackRequest`'s existing `demand()`, which returns a
+(2026-10-09). Mirror `MoqTrackProducer`'s existing `demand()`, which returns a
 `MoqTrackDemand`. Additive in every binding. Wire: none.
