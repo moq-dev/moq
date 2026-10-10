@@ -120,6 +120,25 @@ The `config/` directory has a few starting points:
 
 ## Machine-readable output
 
+Each line includes `interval_start_ms` and `interval_end_ms` (Unix milliseconds),
+and `latency_interval_histogram`: `{ "version": 1, "unit": "ms", "buckets": [[index, count], ...] }`.
+Version 1 is a sparse encoding of 60,001 dense one-millisecond buckets: omitted
+indices have count zero, indices 0 through 59,999 mean that many milliseconds,
+and index 60,000 contains every latency at or above 60 seconds. Pairs are sorted
+by index and contain only nonzero counts. Sparse encoding preserves the existing
+percentile resolution without writing 60,001 zeros per report. The pair counts
+sum to `latency_interval_samples`; an empty interval has `buckets: []` and no
+percentiles. Add counts with the same index across generators and whole intervals,
+then compute nearest-rank percentiles once from that merged distribution. Never
+average percentiles or split samples in an interval that overlaps a window edge.
+
+The first interval starts at the reporter's initial snapshot, so setup samples
+before that snapshot are absent. Cancellation stops reporting without writing a
+partial final interval; the last emitted line covers exactly its recorded bounds.
+Ticker delays can extend or shorten a reported interval, so use its actual bounds
+rather than assuming the configured cadence.
+
+
 `--output stats.jsonl` mirrors every report interval to a file as one JSON
 line, each stamped with `timestamp_ms`. The frame, byte, and group counters are
 cumulative and monotonic, so a consumer diffs successive lines to compute
@@ -128,7 +147,8 @@ and `subscriptions` are live gauges that fall as work ends; diff only the
 counters.
 
 Latency is measured from wall-clock milliseconds embedded by the publisher.
-Keep separate publisher and subscriber hosts NTP-synchronized. Samples where
+Run each publisher and its subscribers on the same host so a latency sample closes
+on one clock. Several generators on several hosts may then merge whole intervals. Samples where
 the receiver clock is behind the sender are omitted and counted in
 `latency_clock_skew`; values at or above 60 seconds share the last percentile
 bucket while `latency_max_ms` preserves the exact maximum.

@@ -89,6 +89,7 @@ impl Stats {
 		ticker.tick().await;
 
 		let mut prev = Snapshot::take(self);
+		let mut interval_start_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
 		loop {
 			ticker.tick().await;
 			let now = Snapshot::take(self);
@@ -96,12 +97,12 @@ impl Stats {
 			// count cannot drift from the delta those percentiles describe.
 			let latency_interval = IntervalLatency::from_delta(&prev.latency_buckets, &now.latency_buckets);
 
+			let interval_end_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
 			if let Some(file) = &mut output {
 				let record = Record {
-					timestamp_ms: SystemTime::now()
-						.duration_since(UNIX_EPOCH)
-						.unwrap_or_default()
-						.as_millis(),
+					timestamp_ms: interval_end_ms,
+					interval_start_ms,
+					interval_end_ms,
 					snapshot: &now,
 					interval: &latency_interval,
 				};
@@ -152,6 +153,7 @@ impl Stats {
 			);
 
 			prev = now;
+			interval_start_ms = interval_end_ms;
 		}
 	}
 }
@@ -167,6 +169,8 @@ impl Stats {
 struct Record<'a> {
 	/// Wall-clock milliseconds since the Unix epoch.
 	timestamp_ms: u128,
+	interval_start_ms: u128,
+	interval_end_ms: u128,
 	#[serde(flatten)]
 	snapshot: &'a Snapshot,
 	#[serde(flatten)]
@@ -207,7 +211,16 @@ struct Snapshot {
 /// cannot move these numbers. `latency_interval_samples` is the sum of that
 /// delta and the only sample count that belongs with these percentiles.
 #[derive(Serialize)]
+struct Histogram {
+	version: u8,
+	unit: &'static str,
+	/// Sparse pairs of millisecond bucket index and count, sorted by index.
+	buckets: Vec<(u32, u64)>,
+}
+
+#[derive(Serialize)]
 struct IntervalLatency {
+	latency_interval_histogram: Histogram,
 	latency_interval_samples: u64,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	latency_interval_p50_ms: Option<u64>,
@@ -232,6 +245,15 @@ impl IntervalLatency {
 			.collect();
 		let samples = buckets.iter().sum();
 		Self {
+			latency_interval_histogram: Histogram {
+				version: 1,
+				unit: "ms",
+				buckets: buckets
+					.iter()
+					.enumerate()
+					.filter_map(|(index, &count)| (count > 0).then_some((index as u32, count)))
+					.collect(),
+			},
 			latency_interval_samples: samples,
 			latency_interval_p50_ms: percentile(&buckets, samples, 50),
 			latency_interval_p90_ms: percentile(&buckets, samples, 90),
@@ -430,6 +452,8 @@ mod tests {
 
 		let record = Record {
 			timestamp_ms: 1,
+			interval_start_ms: 0,
+			interval_end_ms: 1,
 			snapshot: &steady,
 			interval: &interval,
 		};
@@ -439,6 +463,37 @@ mod tests {
 		assert_eq!(line["latency_p99_ms"], serde_json::json!(500));
 		assert_eq!(line["latency_interval_p99_ms"], serde_json::json!(99));
 		assert!(line.get("latency_buckets").is_none());
+	}
+
+	#[test]
+	fn sparse_runs_merge_at_bucket_resolution() {
+		let runs = [vec![0, 1, 1, 200, 60_000, 80_000], vec![1, 2, 4, 200, 200, 90_000]];
+		let mut merged = vec![0_u64; LATENCY_BUCKETS];
+		let mut concatenated = vec![0_u64; LATENCY_BUCKETS];
+		let zeros = vec![0; LATENCY_BUCKETS];
+		for samples in runs {
+			let mut counts = zeros.clone();
+			for sample in samples {
+				let index = sample.min(LATENCY_BUCKETS - 1);
+				counts[index] += 1;
+				concatenated[index] += 1;
+			}
+			let interval = IntervalLatency::from_delta(&zeros, &counts);
+			let histogram = interval.latency_interval_histogram;
+			assert_eq!(histogram.version, 1);
+			assert_eq!(histogram.unit, "ms");
+			assert_eq!(
+				histogram.buckets.iter().map(|(_, count)| count).sum::<u64>(),
+				interval.latency_interval_samples
+			);
+			for (index, count) in histogram.buckets {
+				merged[index as usize] += count;
+			}
+		}
+		assert_eq!(merged, concatenated);
+		for percent in [50, 90, 99, 100] {
+			assert_eq!(percentile(&merged, 12, percent), percentile(&concatenated, 12, percent));
+		}
 	}
 
 	#[test]
@@ -454,6 +509,8 @@ mod tests {
 
 		let record = Record {
 			timestamp_ms: 1,
+			interval_start_ms: 0,
+			interval_end_ms: 1,
 			snapshot: &again,
 			interval: &interval,
 		};
