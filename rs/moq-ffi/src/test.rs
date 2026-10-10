@@ -1366,6 +1366,62 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 }
 
 #[tokio::test]
+async fn group_request_demand_ends_when_the_fetcher_leaves() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+		.await
+		.expect("timed out waiting for group request")
+		.unwrap();
+	let demand = request.demand().unwrap();
+	assert_eq!(demand.sequence(), 5);
+	assert!(demand.is_used());
+
+	fetch.abort();
+	tokio::time::timeout(TIMEOUT, demand.unused())
+		.await
+		.expect("timed out waiting for the abandoned fetch to become unused")
+		.unwrap();
+	assert!(!demand.is_used());
+
+	request.abort(404).unwrap();
+	assert!(matches!(request.demand(), Err(MoqError::Closed)));
+}
+
+/// An accepted request's demand ends with the `NotFound` the accept leaves for joined fetches
+/// it can't cover, not `Closed`.
+#[tokio::test]
+async fn group_request_demand_fails_after_accept() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+		.await
+		.expect("timed out waiting for group request")
+		.unwrap();
+	let demand = request.demand().unwrap();
+	let group = request.accept().unwrap();
+	group.finish().unwrap();
+
+	let used = tokio::time::timeout(TIMEOUT, demand.used())
+		.await
+		.expect("timed out waiting for an accepted demand to end");
+	assert!(matches!(used, Err(MoqError::NotFound)), "got {used:?}");
+	tokio::time::timeout(TIMEOUT, fetch)
+		.await
+		.expect("timed out waiting for fetch")
+		.expect("fetch task panicked")
+		.unwrap();
+}
+
+#[tokio::test]
 async fn dynamic_track_rejects_fetch_miss() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
