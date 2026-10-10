@@ -1,7 +1,9 @@
 /** Sweep observers against routes for one route update, and against tracks for one demand edge. */
 
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
+import { BroadcastCache } from "../src/consume.ts";
 import * as Epoch from "../src/epoch.ts";
+import { Route } from "../src/hop.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 
@@ -118,5 +120,31 @@ for (const pinned of [false, true]) {
 			for (const request of [...requests, ...background]) request.close();
 			origin.close();
 		}
+	}
+}
+
+// Only a touched announcement and path should cost work, regardless of unrelated routes or consumes.
+console.log("subscriber,announcements,consumers,update_and_consume_us");
+for (const routeCount of routeCounts) {
+	for (const consumerCount of [8, 32, 128]) {
+		const cache = new BroadcastCache();
+		const owners = Array.from({ length: routeCount }, () => ({}));
+		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`pool/${i}`), owners[i], Route.default);
+		const sources = Array.from({ length: consumerCount }, () => new BroadcastProducer());
+		const held = sources.map((source, i) => {
+			const path = Path.from(`pool/${i % routeCount}/job/${i}`);
+			return cache.insert(path, cache.instance(path), source.consume());
+		});
+		const touched = Path.from("pool/0/job/0");
+		const start = performance.now();
+		for (let i = 0; i < 4096; i++) {
+			cache.announce(Path.from("pool/0"), owners[0], { ...Route.default, cost: BigInt(i) });
+			const shared = cache.get(touched, cache.instance(touched));
+			if (!shared || shared.closed !== held[0].closed) throw new Error("update replaced the source");
+			shared.close();
+		}
+		console.log(`cache,${routeCount},${consumerCount},${(((performance.now() - start) * 1000) / 4096).toFixed(2)}`);
+		for (const consumer of held) consumer.close();
+		for (const source of sources) source.close();
 	}
 }

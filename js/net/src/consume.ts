@@ -1,68 +1,63 @@
 import type * as broadcast from "./broadcast.ts";
-import * as Path from "./path.ts";
+import type { Route } from "./hop.ts";
+import { compareRouteCandidates, coveringPrefixes } from "./internal.ts";
+import type * as Path from "./path.ts";
+import { type Instance, sameInstance } from "./wire.ts";
 
-/**
- * Per-path dedup cache for consumed broadcasts, shared by the moq-lite and moq-ietf
- * subscribers.
- *
- * Resolving the same path must not mint a fresh subscription per call: repeat requests
- * for the same path (e.g. several renditions referencing one `broadcast: "./source"`) should
- * share a single upstream subscription. This mirrors the Rust `origin::Consumer` weak-cache:
- * a still-live path resolves to a shared {@link broadcast.Consumer.clone}, a closed one is
- * re-consumed on the next request. Each handle is reference-counted, so the shared broadcast
- * closes once every caller has closed its handle.
- *
- * @internal
- */
+/** Consumed broadcasts shared only within the selected serving instance. @internal */
 export class BroadcastCache {
-	// The base handle per path; callers get reference-counted clones of it.
-	#cache = new Map<Path.Valid, broadcast.Consumer>();
+	#cache = new Map<Path.Valid, { consumer: broadcast.Consumer; instance: Instance }>();
+	#announced = new Map<Path.Valid, Map<object, { identity: object; route: Route }>>();
+	#blind: Instance = { identity: {}, route: {} };
 
-	/** A shared handle to the live broadcast cached for `path`, or `undefined` on a miss. */
-	get(path: Path.Valid): broadcast.Consumer | undefined {
-		const base = this.#cache.get(path);
-		if (base && base.closed.peek() === undefined) return base.clone();
+	/** Record this interest's live advertisement, preserving identity across route updates. */
+	announce(path: Path.Valid, owner: object, route: Route, restart = false): void {
+		let entries = this.#announced.get(path);
+		if (!entries) {
+			entries = new Map();
+			this.#announced.set(path, entries);
+		}
+		const identity = (!restart && entries.get(owner)?.identity) || {};
+		entries.set(owner, { identity, route });
+	}
+
+	/** Withdraw this interest's advertisement without disturbing another interest's routes. */
+	withdraw(path: Path.Valid, owner: object): void {
+		const entries = this.#announced.get(path);
+		entries?.delete(owner);
+		if (entries?.size === 0) this.#announced.delete(path);
+	}
+
+	/** Resolve the same most-specific-prefix and route preference as the origin. */
+	instance(path: Path.Valid): Instance {
+		for (const prefix of coveringPrefixes(path)) {
+			const entries = this.#announced.get(prefix);
+			if (!entries) continue;
+			let best: { identity: object; route: Route } | undefined;
+			for (const entry of entries.values()) {
+				if (!best || compareRouteCandidates(path, entry.route, best.route) < 0) best = entry;
+			}
+			if (best) return best;
+		}
+		return this.#blind;
+	}
+
+	/** Clone the live cached consumer only when it serves the selected instance. */
+	get(path: Path.Valid, instance: Instance): broadcast.Consumer | undefined {
+		const cached = this.#cache.get(path);
+		if (cached && cached.consumer.closed.peek() === undefined && sameInstance(cached.instance, instance)) {
+			return cached.consumer.clone();
+		}
 		return undefined;
 	}
 
-	/**
-	 * Cache `consumer` as the base handle for `path` (evicting it once it closes) and return it.
-	 * Call on a {@link get} miss, after wiring up the fresh consumer's subscribe loop.
-	 */
-	insert(path: Path.Valid, consumer: broadcast.Consumer): broadcast.Consumer {
-		this.#cache.set(path, consumer);
-
-		// Drop the entry once the broadcast closes (every handle released), so the next request
-		// re-consumes rather than cloning a dead handle. Guard against a newer entry for the path.
+	/** Cache a new consumer without closing handles pinned to the previous instance. */
+	insert(path: Path.Valid, instance: Instance, consumer: broadcast.Consumer): broadcast.Consumer {
+		const entry = { instance, consumer };
+		this.#cache.set(path, entry);
 		void consumer.closed.then(() => {
-			if (this.#cache.get(path) === consumer) this.#cache.delete(path);
+			if (this.#cache.get(path) === entry) this.#cache.delete(path);
 		});
-
 		return consumer;
-	}
-
-	/**
-	 * Stop sharing the broadcasts cached at or beneath `path`, so the next request subscribes fresh.
-	 *
-	 * Call when the advertisement for `path` goes away or is replaced. It covered every path
-	 * beneath it, so those go too, even one a more specific advertisement also covers: that costs
-	 * a duplicate subscription, never a stale one. A handle only leaves the cache on its own
-	 * once *every* holder has closed it, so one holder outliving the publisher (a second
-	 * watcher, or a caller consuming the path directly) would otherwise keep the dead
-	 * generation's cached tracks alive and hand them to whoever consumes the path next.
-	 * Existing handles are left alone: they belong to their holders, and the wire resets
-	 * whatever they still have open.
-	 *
-	 * Eviction is unconditional, which costs a dedup miss when two announcement streams watch
-	 * one path: the second stream's retraction can arrive after the first has already seen the
-	 * replacement, dropping the fresh entry so the next request subscribes again instead of
-	 * sharing. Telling that stale retraction from a live one needs a generation id on the
-	 * advertisement (moq-lite's `Epoch`, not yet on the wire), so until then this errs toward a
-	 * duplicate subscription rather than risk handing out a dead one.
-	 */
-	evict(path: Path.Valid): void {
-		for (const cached of this.#cache.keys()) {
-			if (Path.hasPrefix(path, cached)) this.#cache.delete(cached);
-		}
 	}
 }
