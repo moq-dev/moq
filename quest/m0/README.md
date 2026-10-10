@@ -61,6 +61,8 @@ remain and no release waits on them.
 
 ## Required
 
+- [Self-hosted CI](/quest/m0/self-hosted-ci.md) - same-repo Check and Test run on a self-hosted NixOS runner with a main-written local cache, behind a `CI_RUNNER` kill switch
+- [CI host](/quest/m0/ci-host.md) - the maintainer brings up the spare desktop as the `moq-ci` and `moq-gpu` runner host
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.4, before Seattle
 - [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - every Go, Python, and C++ publisher cell passes reliably with the serve budgets, and a cell fails when a connection idles out
 - [Check base](/quest/m0/check-base.md) - `just check` diffs against the PR's base whatever the local branch tracks, so scoped checks stay scoped
