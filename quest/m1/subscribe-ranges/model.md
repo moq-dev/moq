@@ -22,9 +22,20 @@ Guidance:
   (`fetch_group`, `requested_group`), moq-c (`poll_requested_group`), every
   binding wrapper and its `doc/lib` page, and `moq fetch` through
   `moq_relay::fetch_group` (added in the 2026-10-05 audit).
-- `max_delay` caps every range.
+- Decided in the 2026-10-10 audit: `max_delay` caps every range, including
+  historical FETCH replacements, and publisher `max_age` always clamps it.
+  A FETCH with no reader delay uses publisher max-age alone, not the live
+  SUBSCRIBE zero-delay default. Preserve that distinction when translating
+  FETCH into a range request. Sharing a range never relaxes a caller's
+  budget or lets one expired caller cancel another still-valid reader.
+  [FETCH max-delay](/quest/m1/fetch-max-delay.md) owns the FETCH option and
+  enforcement; reuse its contract rather than restoring a historical exemption.
 - Benchmark range count and span as separate axes (AGENTS.md fan-out rule).
 
 ## Required
 
 - [lite-07 Live flag](/quest/m1/lite-live.md) - reshapes the same `Subscription` first
+
+## Related
+
+- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical request budgets and per-caller enforcement

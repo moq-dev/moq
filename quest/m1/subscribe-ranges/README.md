@@ -19,7 +19,10 @@ relay bounds a sparse FETCH only if the model can request ranges:
   (an open end means live) in place of Group Start/End, plus
   `order: asc | desc` (desc, newest first, is today's rule and the default).
   Subscriber Max Age (the model's `max_delay`) stays as a cap alongside the
-  ranges, since a group's timestamp isn't always known. SUBSCRIBE_UPDATE
+  ranges, since a group's timestamp isn't always known. Decided 2026-10-10:
+  historical requests also obey that cap and publisher max-age. An omitted
+  FETCH budget means publisher max-age alone; translation to a range must
+  not accidentally give it the live SUBSCRIBE zero-delay default. SUBSCRIBE_UPDATE
   replaces the list. Lite FETCH is removed from
   lite-07; published versions keep it, answered through the same model.
 - **Holes.** SUBSCRIBE_DROP (restored in lite-07 by
@@ -66,3 +69,5 @@ every sequence delivered or dropped.
 ## Related
 
 - [Track priority scope](/quest/m1/track-priority-scope.md) - group order within a track now follows the subscription
+- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - the age contract applies to past ranges and held readers too
+- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age
