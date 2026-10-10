@@ -25,7 +25,6 @@
 		"@moq/qmux": "^0.3.3",
 		"@moq/signals": "workspace:*",
 		"async-mutex": "^0.5.0",
-		"bowser": "^2.14.1",
 		"uuid": "^14.0.2"
 	},
 	"peerDependencies": {

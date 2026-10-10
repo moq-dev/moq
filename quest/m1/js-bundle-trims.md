@@ -15,6 +15,16 @@ cannot remove. Measured in bundled, minified form (2026-09-26):
 
 ## Plan
 
+Draft measurements show Bowser removal and lazy captions reduce first-load
+bundles. Remaining: cold fallback-connect measurements before choosing a lazy
+qmux boundary, and real-browser caption selection/teardown coverage. Keep qmux
+eager until cold-connect evidence supports a split; it participates in transport
+classification as well as connection setup. Pako 3.0.2 root ESM tree-shakes smaller than its prebundled browser halves
+(Deflate 8,150 vs 8,406 gzip bytes; Inflate 10,091 vs 10,352), so keep the root
+import. Keep this quest until
+those decisions and browser proof are recorded.
+
+
 Decided in planning: all three trims are in scope (worklet minification
 landed with the strict-CSP worklet change). Mediabunny already loads only
 when a file source needs it (#4893).
