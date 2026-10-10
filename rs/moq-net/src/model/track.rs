@@ -3583,7 +3583,20 @@ impl group::Expiry for GroupExpiry {
 		// Registered before the edge is resolved, so a write crossing the deadline is
 		// either seen here or wakes us.
 		wakes.watch_deadline(reach, budget, waiter);
-		state.is_stale(self.sequence, &state.drift_edge(cap), budget)
+		loop {
+			let edge = state.drift_edge(cap);
+			// The edge's abort presents nothing and never touches the track, yet hands the
+			// edge to a lower group that may already sit past the deadline. Watch it, and
+			// re-resolve if it already landed.
+			if let Some(live) = edge.presentation
+				&& let Some(slot) = state.lookup.get(&live.sequence)
+				&& slot.group.poll_closed(waiter).is_ready()
+				&& slot.group.is_aborted()
+			{
+				continue;
+			}
+			return state.is_stale(self.sequence, &edge, budget);
+		}
 	}
 }
 
@@ -6401,6 +6414,44 @@ mod test {
 			woken.load(Ordering::SeqCst),
 			"the replacement's first frame bounds the reach"
 		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// A rewound edge's abort hands the edge back to a lower group that already presented
+	/// past the deadline. No frame write crosses it afterwards, and the abort never touches
+	/// the track, so only the read watching the edge's abort sees the head go stale.
+	#[test]
+	fn a_parked_read_watches_its_edge_abort() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		append_at(&mut producer, 1000); // the successor bounds the head's reach
+		append_at(&mut producer, 10_000); // past the deadline, but below the edge
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		edge.finish().unwrap();
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0, "the rewound edge keeps the head within budget");
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		edge.abort(Error::Cancel).unwrap();
+		assert!(woken.load(Ordering::SeqCst), "the edge's abort lost its wakeup");
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}
