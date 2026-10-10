@@ -323,12 +323,11 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 				Next::Reply(Err(err)) => return err,
 			};
 
-			let mut data = body.decoder(self.version);
 			match id {
 				AuthOk::ID => {
-					let ok = match AuthOk::decode_msg(&mut data, self.version) {
+					let ok: AuthOk = match decode_reply(&body, self.version) {
 						Ok(ok) => ok,
-						Err(err) => return err.into(),
+						Err(err) => return err,
 					};
 					let now = self.runtime.now();
 					// The expiry is the peer's number: one past the local clock's range is
@@ -348,9 +347,9 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 					);
 				}
 				AuthError::ID => {
-					let refused = match AuthError::decode_msg(&mut data, self.version) {
+					let refused: AuthError = match decode_reply(&body, self.version) {
 						Ok(refused) => refused,
-						Err(err) => return err.into(),
+						Err(err) => return err,
 					};
 					let err = from_code(refused.code);
 					tracing::warn!(%err, code = refused.code, reason = %refused.reason, "auth token refused");
@@ -365,6 +364,16 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 			}
 		}
 	}
+}
+
+/// Decode a reply that must fill its whole body, as every framed message does.
+fn decode_reply<T: Message>(body: &super::Body, version: Version) -> Result<T, Error> {
+	let mut data = body.decoder(version);
+	let msg = T::decode_msg(&mut data, version)?;
+	if !data.is_empty() {
+		return Err(Error::WrongSize);
+	}
+	Ok(msg)
 }
 
 /// Read one `[type][size][body]` message, or `None` once the peer finished the stream.
@@ -670,6 +679,34 @@ mod tests {
 				Err(DecodeError::Version)
 			));
 		}
+	}
+
+	/// A reply with bytes past its message is refused, like any other framed message.
+	#[test]
+	fn replies_with_trailing_bytes_are_refused() {
+		let ok = AuthOk {
+			publish: patterns(&["room"]),
+			subscribe: Patterns::new(),
+			expires: None,
+		};
+		let refused = AuthError {
+			code: UNAUTHORIZED,
+			reason: "expired".to_string(),
+		};
+		let body = |msg: Vec<u8>, extra: &[u8]| super::super::Body(Bytes::from([&msg[..], extra].concat()));
+
+		let exact = encode_msg(&ok, VERSION).unwrap();
+		assert_eq!(decode_reply::<AuthOk>(&body(exact.clone(), &[]), VERSION).unwrap(), ok);
+		let err = decode_reply::<AuthOk>(&body(exact, &[0]), VERSION).unwrap_err();
+		assert!(matches!(err, Error::WrongSize), "{err:?}");
+
+		let exact = encode_msg(&refused, VERSION).unwrap();
+		assert_eq!(
+			decode_reply::<AuthError>(&body(exact.clone(), &[]), VERSION).unwrap(),
+			refused
+		);
+		let err = decode_reply::<AuthError>(&body(exact, &[0]), VERSION).unwrap_err();
+		assert!(matches!(err, Error::WrongSize), "{err:?}");
 	}
 
 	/// NOT_SUPPORTED is the acceptor unable to tell a grant, never a refusal.
