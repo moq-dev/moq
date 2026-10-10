@@ -659,7 +659,6 @@ mod tests {
 		}
 	}
 
-
 	// ---- Setup Parameters tests (unchanged) ----
 
 	#[test]
