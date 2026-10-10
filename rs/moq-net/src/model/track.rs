@@ -6482,6 +6482,42 @@ mod test {
 		assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
+	/// A withheld group whose stream ends with no frame, cleanly or reset, shows when it
+	/// ends, which wakes a reader parked on the end.
+	#[moq_net_sim::test]
+	async fn a_withheld_group_that_ends_empty_releases_the_end() {
+		for abort in [false, true] {
+			let mut producer = track_producer("test", None);
+			let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
+			producer.finish_at(1).unwrap();
+			let group = producer.receive_group(group::Info { sequence: 0 }).unwrap();
+			let handle = group.clone();
+
+			let first = {
+				let mut next = std::pin::pin!(subscriber.recv_group());
+				assert!(futures::poll!(next.as_mut()).is_pending(), "the end waits for the group");
+				match abort {
+					true => group.abort(Error::Cancel).unwrap(),
+					false => group.finish().unwrap(),
+				}
+				producer.reveal_group(&handle);
+				moq_net_sim::timeout(Duration::from_secs(1), next)
+					.await
+					.expect("the reveal wakes the reader")
+					.unwrap()
+			};
+
+			match abort {
+				// A reset group shows nothing, so the reader ends.
+				true => assert!(first.is_none()),
+				false => {
+					assert_eq!(first.expect("the empty group").sequence, 0);
+					assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
+				}
+			}
+		}
+	}
+
 	/// The ordinary live case, at the default real-time budget: 2s GOPs produced one at
 	/// a time and read as they arrive. The budget must take the live edge without
 	/// shortening the group the reader is already on, so every frame of every group is
