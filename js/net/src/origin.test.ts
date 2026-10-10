@@ -445,6 +445,33 @@ test("follow keeps a gap between routes of one epoch", async () => {
 	expect(await follow.next()).toMatchObject({ kind: "end", prefix: Path.from("pool/job") });
 	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool") });
 
+	// A prefix standing while the path's route goes takes over in place.
+	const again = origin.createBroadcast(Path.from("pool/job"));
+	again.announce({ epoch });
+	expect(await follow.next()).toMatchObject({ kind: "update", prefix: Path.from("pool/job") });
+	again.close();
+	expect(await follow.next()).toMatchObject({ kind: "update", prefix: Path.from("pool") });
+
+	follow.close();
+	pool.close();
+	origin.close();
+});
+
+test("follow hands over to a prefix that started before the last change", async () => {
+	const origin = new Producer();
+	const exact = origin.createBroadcast(Path.from("pool/job"));
+	exact.announce({ epoch: Epoch.mint() });
+	const follow = origin.consume().follow(Path.from("pool/job"));
+	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool/job") });
+
+	const epoch = Epoch.mint();
+	const pool = origin.dynamic(Path.from("pool"), { epoch });
+	exact.announce({ epoch });
+	expect(await follow.next()).toMatchObject({ kind: "restart", prefix: Path.from("pool/job") });
+
+	exact.close();
+	expect(await follow.next()).toMatchObject({ kind: "update", prefix: Path.from("pool") });
+
 	follow.close();
 	pool.close();
 	origin.close();

@@ -5460,6 +5460,108 @@ class FfiConverterMoqTrackConsumer {
   }
 }
 
+abstract class MoqGroupDemandInterface {
+  bool isUsed();
+  int sequence();
+  Future<void> unused();
+  Future<void> used();
+}
+
+final _MoqGroupDemandFinalizer = Finalizer<Pointer<Void>>((ptr) {
+  rustCall((status) => uniffi_moq_ffi_fn_free_moqgroupdemand(ptr, status));
+});
+
+class MoqGroupDemand implements MoqGroupDemandInterface {
+  late final Pointer<Void> _ptr;
+  MoqGroupDemand._(this._ptr) {
+    _MoqGroupDemandFinalizer.attach(this, _ptr, detach: this);
+  }
+  factory MoqGroupDemand.lift(Pointer<Void> ptr) {
+    return MoqGroupDemand._(ptr);
+  }
+  Pointer<Void> uniffiClonePointer() {
+    return rustCall(
+      (status) => uniffi_moq_ffi_fn_clone_moqgroupdemand(_ptr, status),
+    );
+  }
+
+  void dispose() {
+    _MoqGroupDemandFinalizer.detach(this);
+    rustCall((status) => uniffi_moq_ffi_fn_free_moqgroupdemand(_ptr, status));
+  }
+
+  bool isUsed() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqgroupdemand_is_used(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterBool.lift,
+      null,
+    );
+  }
+
+  int sequence() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqgroupdemand_sequence(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterUInt64.lift,
+      null,
+    );
+  }
+
+  Future<void> unused() {
+    return uniffiRustCallAsync(
+      () =>
+          uniffi_moq_ffi_fn_method_moqgroupdemand_unused(uniffiClonePointer()),
+      ffi_moq_ffi_rust_future_poll_void,
+      ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_free_void,
+      (_) {},
+      moqExceptionErrorHandler,
+    );
+  }
+
+  Future<void> used() {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqgroupdemand_used(uniffiClonePointer()),
+      ffi_moq_ffi_rust_future_poll_void,
+      ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_free_void,
+      (_) {},
+      moqExceptionErrorHandler,
+    );
+  }
+}
+
+class FfiConverterMoqGroupDemand {
+  static MoqGroupDemand lift(Pointer<Void> ptr) {
+    return MoqGroupDemand.lift(ptr);
+  }
+
+  static Pointer<Void> lower(MoqGroupDemand value) {
+    return value.uniffiClonePointer();
+  }
+
+  static int allocationSize(MoqGroupDemand value) {
+    return 8;
+  }
+
+  static LiftRetVal<MoqGroupDemand> read(Uint8List buf) {
+    final handle = buf.buffer.asByteData(buf.offsetInBytes).getInt64(0);
+    final pointer = Pointer<Void>.fromAddress(handle);
+    return LiftRetVal(MoqGroupDemand.lift(pointer), 8);
+  }
+
+  static int write(MoqGroupDemand value, Uint8List buf) {
+    final handle = lower(value);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
+    return 8;
+  }
+}
+
 abstract class MoqTrackDemandInterface {
   bool isUsed();
   String name();
@@ -7920,6 +8022,7 @@ class FfiConverterMoqGroupProducer {
 abstract class MoqGroupRequestInterface {
   void abort({required int errorCode});
   MoqGroupProducer accept();
+  MoqGroupDemand demand();
   int priority();
   int sequence();
 }
@@ -7964,6 +8067,17 @@ class MoqGroupRequest implements MoqGroupRequestInterface {
         status,
       ),
       FfiConverterMoqGroupProducer.lift,
+      moqExceptionErrorHandler,
+    );
+  }
+
+  MoqGroupDemand demand() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqgrouprequest_demand(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterMoqGroupDemand.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -10419,6 +10533,48 @@ external void uniffi_moq_ffi_fn_method_moqtrackconsumer_update(
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
+external Pointer<Void> uniffi_moq_ffi_fn_clone_moqgroupdemand(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_free_moqgroupdemand(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Int8 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_method_moqgroupdemand_is_used(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Uint64 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_method_moqgroupdemand_sequence(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqgroupdemand_unused(
+  Pointer<Void> ptr,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqgroupdemand_used(
+  Pointer<Void> ptr,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
 external Pointer<Void> uniffi_moq_ffi_fn_clone_moqtrackdemand(
   Pointer<Void> handle,
   Pointer<RustCallStatus> uniffiStatus,
@@ -11624,6 +11780,14 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqgrouprequest_accept(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqgrouprequest_demand(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Uint8 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -12455,6 +12619,18 @@ external int uniffi_moq_ffi_checksum_method_moqtrackconsumer_recv_group();
 external int uniffi_moq_ffi_checksum_method_moqtrackconsumer_update();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqgroupdemand_is_used();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqgroupdemand_sequence();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqgroupdemand_unused();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqgroupdemand_used();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqtrackdemand_is_used();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -12695,6 +12871,9 @@ external int uniffi_moq_ffi_checksum_method_moqgrouprequest_abort();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqgrouprequest_accept();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqgrouprequest_demand();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqgrouprequest_priority();
@@ -12945,6 +13124,18 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_update() != 24851) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqgroupdemand_is_used() != 55523) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqgroupdemand_sequence() != 34558) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqgroupdemand_unused() != 1305) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqgroupdemand_used() != 16710) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackdemand_is_used() != 62559) {
@@ -13202,6 +13393,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqgrouprequest_accept() != 48242) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqgrouprequest_demand() != 31288) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqgrouprequest_priority() != 1745) {

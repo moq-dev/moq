@@ -25,6 +25,14 @@ path never changes and every older version and moq-transport keeps working:
 their routes carry no epoch, and see a restart as an end and start at the
 same path.
 
+Decided 2026-10-10: keep epochless clients supported on updated relays, with
+unchanged paths and End+Start on replacement. The relay retains the explicit
+identity internally; fresh requests cannot join its old cached instance.
+This does not promise cache invalidation in arbitrary older IETF relays or
+clients that retain objects across broadcasts. The negotiated
+[IETF extension](/quest/m1/ietf-epochs.md) follows in m1, independently of
+this release gate; seamless JS handover stays in m1 too.
+
 Non-goals: pooling, which needs nothing here; a redundant pair shares an
 explicit epoch through `moq --epoch`.
 Also out of scope: trusting the publisher's clock (a far-future epoch wins
@@ -97,8 +105,9 @@ maintainer's pre-release merge of `release` into `main` keeps `main`'s
 
 ## Required
 
+- [JS consume identity](/quest/m0/broadcast-epoch/js-consume-identity.md) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast
+- [JS restart keeps the request](/quest/m0/broadcast-epoch/js-restart-keeps-request.md) - a resolved request remains on its old instance, matching Rust's sticky subscriptions
 - [Export ts](/quest/m0/broadcast-epoch/export-ts.md) - `export ts` and SRT egress linger only for the same epoch, and switch to a replacement only with `--stitch`, as a full program switch
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
-- [Follow gap](/quest/m0/broadcast-epoch/follow-gap.md) - a followed path reports a gap that ended its request, even onto a same-epoch covering prefix
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)

@@ -105,20 +105,28 @@ struct SessionController {
 	join: tokio::task::JoinHandle<()>,
 	/// The one-shot connection, held so [`stop`](Self::stop) can end it and wait for it to close.
 	connection: moq_tokio::Connection,
+	/// The client behind `connection`, closed by [`stop`](Self::stop) so the close reaches the
+	/// relay before `gst-launch` exits rather than leaving it to time the connection out.
+	client: moq_tokio::Client,
 }
 
 impl SessionController {
 	fn start(settings: ResolvedSettings, element: glib::WeakRef<super::MoqSrc>) -> Result<Self> {
-		let (connection, origin) = connect(&settings)?;
+		let (client, connection, origin) = connect(&settings)?;
 		let task_connection = connection.clone();
 		let task_element = element.clone();
-		Ok(Self::spawn(connection, element, move |shutdown| async move {
+		Ok(Self::spawn(client, connection, element, move |shutdown| async move {
 			run_session(&task_connection, origin, settings.broadcast, task_element, shutdown).await
 		}))
 	}
 
 	/// Run `session` as this element's session task, reporting its error on the bus.
-	fn spawn<F, Fut>(connection: moq_tokio::Connection, element: glib::WeakRef<super::MoqSrc>, session: F) -> Self
+	fn spawn<F, Fut>(
+		client: moq_tokio::Client,
+		connection: moq_tokio::Connection,
+		element: glib::WeakRef<super::MoqSrc>,
+		session: F,
+	) -> Self
 	where
 		F: FnOnce(watch::Receiver<bool>) -> Fut,
 		Fut: Future<Output = Result<()>> + Send + 'static,
@@ -143,6 +151,7 @@ impl SessionController {
 			shutdown: shutdown_tx,
 			join,
 			connection,
+			client,
 		}
 	}
 
@@ -175,7 +184,12 @@ impl SessionController {
 			);
 		}
 
-		let Self { join, connection, .. } = self;
+		let Self {
+			join,
+			connection,
+			client,
+			..
+		} = self;
 		crate::block_on(async move {
 			// The connection outlives the session so a stop never reads as a dropped connection.
 			if !own && let Err(err) = join.await {
@@ -183,12 +197,15 @@ impl SessionController {
 			}
 			connection.abort(moq_net::Error::Cancel);
 			let _ = connection.closed().await;
+			client.close().await;
 		});
 	}
 }
 
-/// Start the one-shot dial, returning it with the origin its announcements land in.
-fn connect(settings: &ResolvedSettings) -> Result<(moq_tokio::Connection, moq_net::origin::Consumer)> {
+/// Start the one-shot dial, returning it with its client and the origin its announcements land in.
+fn connect(
+	settings: &ResolvedSettings,
+) -> Result<(moq_tokio::Client, moq_tokio::Connection, moq_net::origin::Consumer)> {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(settings.tls_disable_verify);
 
@@ -197,12 +214,12 @@ fn connect(settings: &ResolvedSettings) -> Result<(moq_tokio::Connection, moq_ne
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	// One-shot: a drop ends the session with an error rather than redialing.
-	let connection = config
+	let client = config
 		.init(Default::default())?
 		.with_subscriber(origin)
-		.with_reconnect(false)
-		.connect(settings.url.clone());
-	Ok((connection, consumer))
+		.with_reconnect(false);
+	let connection = client.connect(settings.url.clone());
+	Ok((client, connection, consumer))
 }
 
 #[derive(Default)]
@@ -662,7 +679,8 @@ fn play(
 /// holds the pads for the next start. A refusal is not: no restart answers a path that names
 /// nothing or a token that doesn't grant it, so it fails the session, as a malformed catalog does.
 fn source_lost(err: &moq_net::Error) -> bool {
-	!matches!(err, moq_net::Error::NotFound | moq_net::Error::Unauthorized)}
+	!matches!(err, moq_net::Error::NotFound | moq_net::Error::Unauthorized)
+}
 
 /// [`source_lost`] for a catalog read, where anything but a transport failure is malformed.
 fn catalog_lost(err: &moq_mux::Error) -> bool {
@@ -1970,12 +1988,15 @@ mod session_tests {
 		element: &super::super::MoqSrc,
 		origin: &moq_net::origin::Producer,
 	) -> (SessionController, moq_tokio::Connection) {
-		let (connection, _) = super::connect(&unreachable()).unwrap();
+		let (client, connection, _) = super::connect(&unreachable()).unwrap();
 		let weak = element.downgrade();
 		let origin = origin.consume();
-		let session = SessionController::spawn(connection.clone(), element.downgrade(), move |shutdown| async move {
-			follow_path(&origin, "room", weak, shutdown, std::future::pending()).await
-		});
+		let session = SessionController::spawn(
+			client,
+			connection.clone(),
+			element.downgrade(),
+			move |shutdown| async move { follow_path(&origin, "room", weak, shutdown, std::future::pending()).await },
+		);
 		(session, connection)
 	}
 

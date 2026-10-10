@@ -29,6 +29,8 @@ if (role === "publish") {
 	// camera and microphone input. Audio is encoded lazily when a player asks.
 	el.setAttribute("source", "camera");
 	document.body.appendChild(el);
+	// So the driver can wait for the session to close before closing the browser.
+	watchResources();
 	// Playwright reads the shared DOM, so mirror the public source state onto the element.
 	const sample = () => {
 		type CaptureSource = { out: { source: { peek(): unknown }; error?: { peek(): Error | undefined } } };

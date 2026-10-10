@@ -35,6 +35,13 @@ publisher that stays alive holds the export on a replaced broadcast.
 - Drive both flags from announcements, as players do: `Start`, `Restart`, and
   `End` with their epochs. An export that fails while its broadcast is still
   announced exits 1 without lingering, as today.
+- Use `origin.follow(path)` for the resolved path events, shared by CLI and
+  SRT. The 2026-10-10 audit of #5147 found a second prefix watcher treating
+  any covering prefix's End or Restart as a change even while an exact
+  route still wins. Regress with a live exact route while a broader prefix
+  starts, restarts, or ends: none changes the export. Actual winner changes
+  and gaps must still drive the policy above. Coordinate with the existing
+  follower-gap fix instead of reimplementing route resolution here.
 - Same epoch within `--linger`: `follow` continues the same stream.
   It is the same content, so the existing skip handling covers the gap (late
   frames drop, and a forward leap opens a new generation). Within an epoch,

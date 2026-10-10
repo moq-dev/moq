@@ -83,10 +83,11 @@ while a higher-priority subscription preempts them and each subscription
 sheds its own old backlog. Measure the full scope of trait and adapter changes
 before publishing the API.
 
-Retransmissions follow the same hierarchy. noq already re-queues a lost
+Retransmissions follow the same hierarchy. `moq-quic` already re-queues a lost
 range through the stream's priority (`StreamsState::retransmit`), so a lost
-video range waits behind new audio at a higher priority; keep that, and add
-a test proving it, plus one proving a retransmission is never starved
+video range waits behind new audio at a higher priority; keep that
+([pinned](/quest/m1/quic/retransmit-priority.md) by a test), and add one
+proving a retransmission is never starved
 indefinitely by an equal-priority group's new data (the fair tier's byte
 credit covers retransmits too).
 
@@ -112,6 +113,8 @@ where the new implementation makes it redundant.
 
 ## Related
 
+- [Schedule datagrams by subscription priority](/quest/m1/quic/datagram-priority.md) -
+  adds a datagram queue to each send group once this lands
 - [moq#3320](https://github.com/moq-dev/moq/pull/3320) - removes the current
   dense-rank queue from the wide scalar path and records why a scalar cannot
   provide this fairness level

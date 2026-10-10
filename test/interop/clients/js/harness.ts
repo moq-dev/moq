@@ -111,7 +111,9 @@ export function pageUrl(origin: string, role: string, params: Record<string, str
  * and autoplay overrides, so those belong to the caller that needs them.
  */
 export function launch(args: string[] = []): Promise<Browser> {
-	return chromium.launch({ channel: "chromium", headless: true, args });
+	// Playwright closes the browser on SIGTERM by default, which ends its sessions without a
+	// close. The drivers close it themselves; the harness reaps whatever a signal leaves behind.
+	return chromium.launch({ channel: "chromium", headless: true, args, handleSIGTERM: false });
 }
 
 /** Contexts tracing this process, saved by {@link finishTraces} when the run fails. */
