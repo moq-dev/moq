@@ -19,11 +19,16 @@ scope; move them in follow-ups once this proves out.
 Decided in the 2026-10-09 planning session:
 
 - **Trust boundary:** same-repo branches need push access, which already
-  allows editing workflows, so only fork PRs are untrusted. Merge-queue runs
-  are trusted too: a maintainer approved their code for `main`. Routing in
-  `check.yml`:
-  `runs-on: ${{ (github.event_name == 'merge_group' || !github.event.pull_request.head.repo.fork) && vars.CI_RUNNER || 'ubuntu-24.04-arm' }}`.
+  allows editing workflows, so fork PRs are untrusted. So are Dependabot PRs:
+  Dependabot pushes its branches into this repository, but they carry
+  third-party build code, and `dependabot.yml` already treats them as
+  untrusted. Merge-queue runs are trusted: a maintainer approved their code
+  for `main`. Routing in `check.yml`:
+  `runs-on: ${{ (github.event_name == 'merge_group' || (!github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-24.04-arm' }}`.
   Guarding is by review only, with a comment at each use; no lint.
+- **Architecture:** the host is x86, while the hosted fallback is ARM. PRs on
+  the host test x86; ARM stays covered by macOS (arm64) in `platform.yml` and
+  the nightly ARM Linux jobs. The x86 and ARM caches never share entries.
 - **Kill switch:** `vars.CI_RUNNER` (the runner label, `moq-ci`) set by the
   maintainer; unset falls back to hosted. No router job and no runner-status
   token.
@@ -31,7 +36,11 @@ Decided in the 2026-10-09 planning session:
   `flake.nix` (e.g. `nixosModules.ci-runner`), which the host imports. Host
   setup instructions live in `ci/runner/README.md`.
 - **Runners:** `services.github-runners`, ephemeral, `DynamicUser` and the
-  module's default sandboxing, `noDefaultLabels`. Four `moq-ci` instances
+  module's default sandboxing, `noDefaultLabels`. Ephemeral resets each
+  runner's user and work directory, but the Nix store and daemon persist and
+  are shared by every instance, `moq-gpu` included. The GPU runner's stricter
+  trigger rule protects which code it runs, not the machine; same-repo PR code
+  shares that host by design. Four `moq-ci` instances
   (`count` exposed so the host can tune it). One `moq-gpu` instance for
   [GPU CI](/quest/m1/gpu-ci.md) with `PrivateDevices=false` and
   `DeviceAllow` for `/dev/nvidia*`; it never takes `moq-ci` work.
@@ -41,10 +50,13 @@ Decided in the 2026-10-09 planning session:
   the repository Administration permission a repo-level runner needs. Never
   reuse moq-bot or a PAT.
 - **Cache:** run `jdx/mr-boxington-cache` on the host with filesystem storage,
-  bound to loopback. Writes require a GitHub OIDC token whose
-  `job_workflow_ref` is `moq-dev/moq/.github/workflows/cache.yml@refs/heads/main`,
-  so the cache warmer (push or dispatch) stays the single writer, matching the
-  hosted design. Reads are open on loopback. Each job gets an empty
+  bound to loopback. Writes require a GitHub OIDC token whose `workflow_ref`
+  is `moq-dev/moq/.github/workflows/cache.yml@refs/heads/main`, with
+  `repository`, `repository_owner_id`, `ref: refs/heads/main`, and
+  `event_name` of `push` or `workflow_dispatch` also checked
+  (`job_workflow_ref` is only meaningful for reusable workflows). The cache
+  warmer stays the single writer, matching the hosted design. Its job needs
+  `permissions: id-token: write` to mint that token. Reads are open on loopback. Each job gets an empty
   `MBX_CACHE_DIR` and `target/`, pointed at the server in remote read-only
   mode. The server enforces the boundary; mbx's client-side mode narrowing is
   only a convenience. No static write token anywhere, since a same-repo PR can
@@ -52,16 +64,19 @@ Decided in the 2026-10-09 planning session:
 - **Warming:** add a self-hosted leg to `cache.yml` (`runs-on: moq-ci`, gated
   on `vars.CI_RUNNER` too) that runs the unscoped suite against the server. The
   existing ARM store keeps serving hosted fallbacks.
-- **Workflow steps:** skip free-disk-space, the Nix installer, and the
-  `rust-cache` action when `runner.environment == 'self-hosted'`. Put the
+- **Workflow steps:** skip free-disk-space and the Nix installer when
+  `runner.environment == 'self-hosted'`. Keep the `rust-cache` composite
+  action there, since its mbx install and `mbx setup` shim are the only route
+  from Cargo into mbx; give it a self-hosted mode that points mbx at the
+  server instead of restoring the hosted store. Put the
   kixelated cachix substituter in the module's `nix.settings`, since dynamic
   users are not `trusted-users` and cannot pass `extra-substituters`.
 
 Verify before merging what can be checked without the host: `actionlint`,
 the routing expression's three cases (fork, same-repo, merge group) with
 `CI_RUNNER` set and unset, and that the module evaluates (`nix eval` or a
-`nixosTest` that boots the cache server and rejects a write without a matching
-token). End-to-end proof happens in [CI host](/quest/m0/ci-host.md).
+`nixosTest` that boots the cache server and rejects a write without a token
+and with a token from a PR ref). End-to-end proof happens in [CI host](/quest/m0/ci-host.md).
 
 Public API: none. Wire: none.
 

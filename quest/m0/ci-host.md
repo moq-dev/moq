@@ -11,7 +11,8 @@ maintainer action: it needs admin access to the org and the host.
 Check: `gh api orgs/moq-dev/actions/runners` lists four `moq-ci` runners and
 one `moq-gpu` runner online, and `gh variable get CI_RUNNER --repo moq-dev/moq`
 prints `moq-ci`. Then a same-repo PR's Check and Test run on `moq-ci` with no
-free-disk-space, Nix install, or cache restore step, while a fork PR's run on
+free-disk-space, Nix install, or hosted cache restore step, while fork and
+Dependabot PRs run on
 `ubuntu-24.04-arm`. Record queue and run times against the 2026-10-09
 baseline (20-50 min queued, 4-18 min run) in the PR that deletes this quest.
 
