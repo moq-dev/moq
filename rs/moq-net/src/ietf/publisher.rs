@@ -37,9 +37,9 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	}
 }
 
-/// The Track Properties an answer describing the track carries: SUBSCRIBE_OK and
-/// TRACK_STATUS_OK. Empty when the requester opted out with INCLUDE_PROPERTIES=0, which
-/// keeps the block present but empty.
+/// The Track Properties an answer describing the track carries: SUBSCRIBE_OK,
+/// TRACK_STATUS_OK, and FETCH_OK. Empty when the requester opted out with
+/// INCLUDE_PROPERTIES=0, which keeps the block present but empty.
 ///
 /// Declaring the timescale is what opts the track into timestamps; every object Timestamp
 /// is in these units. We serve the newest group first, matching moq-lite. A draft without
@@ -80,8 +80,8 @@ struct FetchedGroup {
 	frames: Vec<frame::Frame>,
 	/// The group ended within the range, so every frame it will ever hold was read.
 	complete: bool,
-	/// The track's timescale, or `None` for an untimed track.
-	timescale: Option<Timescale>,
+	/// The track's info, which FETCH_OK describes and whose units stamp the objects.
+	info: track::Info,
 }
 
 impl FetchPrior {
@@ -104,7 +104,8 @@ impl FetchedGroup {
 /// Read group `sequence` of `track` for a FETCH, from object `skip` up to the exclusive
 /// `until`, or through the end of the group without one.
 ///
-/// This is a [`track::Consumer::fetch_group`], so a relay fetches a miss upstream.
+/// This is a [`track::Consumer::fetch_group`], so a relay fetches a miss upstream. The
+/// track's info resolves first, as it would for a SUBSCRIBE.
 async fn read_fetch(
 	track: &track::Consumer,
 	sequence: u64,
@@ -112,6 +113,7 @@ async fn read_fetch(
 	until: Option<u64>,
 	priority: u8,
 ) -> Result<FetchedGroup, Error> {
+	let info = track.query().await?;
 	let fetch = group::Fetch {
 		priority,
 		frame_start: skip,
@@ -123,7 +125,10 @@ async fn read_fetch(
 	let first = group.index();
 	let mut frames = Vec::new();
 	let mut complete = false;
+	// A long cached group is read a slice per poll, so the session's other tasks still run.
+	let mut budget = kio::coop::Budget::new(32);
 	while until.is_none_or(|until| first + (frames.len() as u64) < until) {
+		kio::wait(|waiter| budget.poll_yield(waiter)).await;
 		match group.read_frame().await? {
 			Some(frame) => frames.push(frame),
 			None => {
@@ -138,7 +143,7 @@ async fn read_fetch(
 		first,
 		frames,
 		complete,
-		timescale: group.timescale(),
+		info,
 	})
 }
 
@@ -373,11 +378,7 @@ enum Joined {
 	/// No objects existed when the subscription started.
 	Empty,
 	/// The prefix ending immediately after the saved Largest Object.
-	Group {
-		end: Location,
-		cache: track::Consumer,
-		timescale: Option<Timescale>,
-	},
+	Group { end: Location, cache: track::Consumer },
 }
 
 /// One subscription's entry in [`Publisher::joins`], removed when the subscription ends.
@@ -737,7 +738,6 @@ where
 							object: largest.object + 1,
 						},
 						cache: cache.clone(),
-						timescale,
 					},
 					(Filter::NextObject, None) => Joined::Empty,
 					_ => Joined::Unsupported,
@@ -1125,7 +1125,10 @@ where
 		let mut first = true;
 
 		let mut buf: frame::Buffer = frame::Buffer::new();
+		// A long cached group is written a slice per poll, so the session's other tasks still run.
+		let mut budget = kio::coop::Budget::new(32);
 		'serve: loop {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			// The cap is the Largest Object snapshot: the group may keep growing, but
 			// everything past the snapshot belongs to the subscription, not the fill.
 			if until.is_some_and(|until| index >= until) {
@@ -1412,7 +1415,7 @@ where
 			other => other,
 		};
 
-		let (track, start, end, timescale, joined) = match fetch_type {
+		let (track, start, end, joined) = match fetch_type {
 			FetchType::Standalone {
 				namespace,
 				track,
@@ -1441,8 +1444,7 @@ where
 					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 				};
 
-				// The track's timescale is only known once its group is read, below.
-				(track, start, end, None, false)
+				(track, start, end, false)
 			}
 			FetchType::RelativeJoining {
 				subscriber_request_id, ..
@@ -1450,7 +1452,7 @@ where
 			| FetchType::AbsoluteJoining {
 				subscriber_request_id, ..
 			} => {
-				let (end, cache, timescale) = match self.joined(&mut stream, subscriber_request_id).await? {
+				let (end, cache) = match self.joined(&mut stream, subscriber_request_id).await? {
 					Ok(joined) => joined,
 					Err((err, reason)) => return self.reject_fetch(stream, msg.request_id, &err, reason).await,
 				};
@@ -1475,7 +1477,6 @@ where
 						object: 0,
 					},
 					end,
-					timescale,
 					true,
 				)
 			}
@@ -1556,14 +1557,12 @@ where
 				.await;
 		}
 
-		// A standalone FETCH keeps each object's Timestamp, in the track's own units, as a
-		// subscriber learned them from SUBSCRIBE_OK. FETCH_OK doesn't declare them yet.
-		let timescale = match joined {
-			true => timescale,
-			false => group
-				.timescale
-				.filter(|_| ietf::Properties::sends_timescale(self.version)),
-		};
+		// FETCH keeps each object's Timestamp, in the units FETCH_OK declares wherever the
+		// draft can declare them. Opting out of the properties strips nothing from the objects.
+		let timescale = group
+			.info
+			.timescale
+			.filter(|_| ietf::Properties::sends_timescale(self.version));
 
 		let (end_location, end_of_track) = if joined {
 			// The subscription starts at the saved Largest Object, so the prefix of that
@@ -1628,7 +1627,7 @@ where
 				},
 				end_of_track,
 				end_location,
-				properties: Default::default(),
+				properties: track_properties(&group.info, msg.properties_wanted),
 			})
 			.await?;
 
@@ -1671,7 +1670,7 @@ where
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		subscribe_id: RequestId,
-	) -> Result<Result<(Location, track::Consumer, Option<Timescale>), (Error, &'static str)>, Error> {
+	) -> Result<Result<(Location, track::Consumer), (Error, &'static str)>, Error> {
 		// Request streams can arrive out of order. Wait on registration, while bounding
 		// the lifetime of a request whose subscription never arrives or resolves.
 		let joined = {
@@ -1708,7 +1707,7 @@ where
 		let refusal = match joined {
 			Err(Error::Timeout) => (Error::Timeout, "subscription not ready"),
 			Err(err) => return Err(err),
-			Ok(Some(Joined::Group { end, cache, timescale })) => return Ok(Ok((end, cache, timescale))),
+			Ok(Some(Joined::Group { end, cache })) => return Ok(Ok((end, cache))),
 			Ok(None) => (
 				match self.version {
 					Version::Draft14
@@ -2662,6 +2661,8 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	/// Serve the track's datagrams too, as OBJECT_DATAGRAMs. Off when the transport has no
 	/// datagrams; there is no stream fallback.
 	datagrams: bool,
+	/// A track that always has another group ready still lets the session's other tasks run.
+	budget: kio::coop::Budget,
 }
 
 impl<S: crate::transport::poll::Session> TrackServe<S> {
@@ -2700,6 +2701,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			draining: false,
 			opened: Default::default(),
 			end: None,
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -2758,6 +2760,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		let _ = self.children.poll(waiter);
 		loop {
+			// Still serves the datagrams and the groups already started below.
+			if self.budget.poll_yield(waiter).is_pending() {
+				break;
+			}
 			match self.track.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => {
 					let sequence = group.sequence;
@@ -2897,6 +2903,8 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	version: Version,
 	object_delta: u64,
 	state: GroupState<S>,
+	/// A long cached group drains a slice per poll, so its siblings still run.
+	budget: kio::coop::Budget,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -2956,6 +2964,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			version,
 			object_delta,
 			state: GroupState::Open,
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -3012,6 +3021,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					}
 					let res = 'serve: {
 						loop {
+							ready!(self.budget.poll_yield(waiter));
 							match writer.poll_flush(&mut cx) {
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
@@ -3330,6 +3340,132 @@ mod group_priority_test {
 		assert_eq!(
 			crate::coding::decode_varint(&mut buf, Version::Draft17).unwrap(),
 			b"hello".len() as u64
+		);
+	}
+
+	/// Drive `serve` beside a sibling that only counts its turns, until `done`, checking every
+	/// poll stays under `most` by `progress` and leaves the sibling its turn.
+	fn serve_beside_a_sibling(
+		mut serve: TrackServe<SinkSession>,
+		mut produce: impl FnMut() -> bool + 'static,
+		progress: impl Fn() -> usize,
+		most: usize,
+		done: usize,
+	) {
+		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			if produce() {
+				return Poll::Ready(());
+			}
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+		let turns = std::sync::Arc::new(AtomicU64::new(0));
+		let counted = turns.clone();
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			counted.fetch_add(1, Ordering::Relaxed);
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		}));
+		tasks.push(Box::new(move |waiter: &kio::Waiter| {
+			serve.poll(waiter).map(|res| res.expect("serve"))
+		}));
+
+		let owner = kio::Waiter::noop();
+		let mut polls = 0;
+		while progress() < done {
+			let before = progress();
+			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			polls += 1;
+			let made = progress() - before;
+			assert!(made <= most, "one poll made {made} progress");
+			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
+			assert!(polls <= 2 * done as u64, "the serve stalled");
+		}
+	}
+
+	/// A track that always has another group ready yields within its budget.
+	#[test]
+	fn a_busy_track_yields_to_its_siblings() {
+		/// `TrackServe`'s passes per poll; each starts at most one group.
+		const BUDGET: usize = 32;
+		const GROUPS: u64 = 10_000;
+		const BATCH: u64 = 1_000;
+
+		let session = SinkSession::new(crate::lite::test_transport::Log::default()).with_unacked_fin();
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let subscriber =
+			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
+		let serve = TrackServe::new(
+			session,
+			subscriber,
+			RequestId(0),
+			Version::Draft14,
+			ServeRange::default(),
+			None,
+		);
+		let opened = serve.opened.clone();
+
+		let producer = track.clone();
+		let mut appended = 0;
+		let produce = move || {
+			for _ in 0..BATCH.min(GROUPS - appended) {
+				let mut group = producer.create_group(group::Info { sequence: appended }).unwrap();
+				group
+					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
+					.unwrap();
+				group.finish().unwrap();
+				appended += 1;
+			}
+			appended == GROUPS
+		};
+		serve_beside_a_sibling(
+			serve,
+			produce,
+			|| opened.load(Ordering::Relaxed) as usize,
+			BUDGET,
+			GROUPS as usize,
+		);
+	}
+
+	/// A group with more objects ready than one poll's budget drains over several polls.
+	#[test]
+	fn a_long_group_drains_within_the_budget() {
+		/// `GroupServe`'s passes per poll; each writes at most one object.
+		const BUDGET: usize = 32;
+		const FRAMES: usize = 4_000;
+		const PAYLOAD: usize = 100;
+
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone()).with_unacked_fin();
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let subscriber =
+			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		for millis in 0..FRAMES as u64 {
+			group
+				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
+				.unwrap();
+		}
+		group.finish().unwrap();
+		let serve = TrackServe::new(
+			session,
+			subscriber,
+			RequestId(0),
+			Version::Draft14,
+			ServeRange::default(),
+			None,
+		);
+
+		// An object's header takes well under a payload more, and a poll may also flush what
+		// the last one buffered.
+		serve_beside_a_sibling(
+			serve,
+			|| true,
+			|| log.writes.lock().unwrap().len(),
+			2 * (BUDGET + 1) * 2 * PAYLOAD,
+			FRAMES * PAYLOAD,
 		);
 	}
 
@@ -3681,6 +3817,39 @@ mod serve_tests {
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				assert_eq!(occurrences(&h.log, b"after FIN"), 1, "{version}");
 			}
+		}
+	}
+
+	/// A reset request stream still cancels the subscription on every draft.
+	#[moq_net_sim::test]
+	async fn requester_reset_cancels_subscriptions() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let h = serve(version);
+			let mut session = ScriptedSession::per_stream_reset(vec![vec![]]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let run = h
+				.publisher
+				.run_subscription(&mut stream, &mut serving, &mut finished, async {});
+			assert!(futures::poll!(std::pin::pin!(run)).is_ready(), "{version}");
 		}
 	}
 
@@ -4942,6 +5111,11 @@ mod serve_tests {
 			if version == Version::Draft14 {
 				assert_eq!(ok.group_order, GroupOrder::Ascending);
 			}
+			let properties = match ietf::Properties::sends_timescale(version) {
+				false => ietf::Properties::default(),
+				true => track_properties(&track::Info::default(), true),
+			};
+			assert_eq!(ok.properties, properties, "{version}: wrong properties");
 			assert_eq!(
 				ok.end_location,
 				Location {
@@ -5325,9 +5499,15 @@ mod serve_tests {
 	/// `end` is spelled as drafts 14 to 19 do: the last object plus one, or 0 for the whole
 	/// End Group. From draft 20 the same range goes out as an inclusive LOCATION_FILTER.
 	async fn standalone_fetch(h: &Serve, start: Location, end: Location, group_order: GroupOrder) -> bytes::Bytes {
+		let fetch_type = fetch_range(h.publisher.version, "video", start, end);
+		run_fetch(h, fetch_type, group_order, true).await
+	}
+
+	/// A standalone FETCH of `room/<track>`, spelled as [`standalone_fetch`] describes.
+	fn fetch_range(version: Version, track: &'static str, start: Location, end: Location) -> FetchType<'static> {
 		let namespace = crate::Path::new("room");
-		let track = "video".into();
-		let fetch_type = match Filter::is_draft20(h.publisher.version) {
+		let track = track.into();
+		match Filter::is_draft20(version) {
 			true => FetchType::Filtered {
 				namespace,
 				track,
@@ -5345,12 +5525,16 @@ mod serve_tests {
 				start,
 				end,
 			},
-		};
-		run_fetch(h, fetch_type, group_order).await
+		}
 	}
 
 	/// Run a FETCH, returning what the peer reads back.
-	async fn run_fetch(h: &Serve, fetch_type: FetchType<'static>, group_order: GroupOrder) -> bytes::Bytes {
+	async fn run_fetch(
+		h: &Serve,
+		fetch_type: FetchType<'static>,
+		group_order: GroupOrder,
+		properties_wanted: bool,
+	) -> bytes::Bytes {
 		let version = h.publisher.version;
 		let mark = h.log.writes.lock().unwrap().len();
 		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
@@ -5365,7 +5549,7 @@ mod serve_tests {
 					fetch_type,
 					range_filters: false,
 					fill_timeout: false,
-					properties_wanted: true,
+					properties_wanted,
 				},
 			)
 			.await
@@ -5451,6 +5635,64 @@ mod serve_tests {
 			assert!(!ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([2]), "{version}");
 			assert!(h.log.resets().is_empty(), "{version}");
+		}
+	}
+
+	/// FETCH_OK carries the properties SUBSCRIBE_OK would, as far as each draft has room for
+	/// them, and INCLUDE_PROPERTIES=0 empties the block. Either way the objects keep their
+	/// Timestamps wherever the draft can declare their units.
+	#[moq_net_sim::test]
+	async fn fetch_ok_carries_the_track_properties() {
+		let info = track::Info {
+			max_age: Some(Duration::from_secs(5)),
+			priority: 200,
+			..Default::default()
+		};
+		let stamp = crate::Timestamp::from_millis(123_456).unwrap();
+
+		for version in FETCH_DRAFTS {
+			// Only draft-20's FETCH can carry the opt-out.
+			let opt_out = Filter::is_draft20(version).then_some(false);
+			for wanted in [Some(true), opt_out].into_iter().flatten() {
+				let h = serve(version);
+				let track = h._broadcast.create_track("timed", info.clone()).unwrap();
+				let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+				group.write_frame(stamp, b"stamped".as_slice()).unwrap();
+				group.finish().unwrap();
+				settle().await;
+
+				let range = fetch_range(
+					version,
+					"timed",
+					Location { group: 0, object: 0 },
+					Location { group: 0, object: 0 },
+				);
+				let (ok, objects) = fetch_answer(run_fetch(&h, range, GroupOrder::Ascending, wanted).await, version);
+				assert_eq!(objects.len(), 1, "{version}");
+
+				let expected = match ietf::Properties::sends_timescale(version) {
+					// Drafts 14-16 write no properties, as their SUBSCRIBE_OK does not.
+					false => ietf::Properties::default(),
+					true => track_properties(&info, wanted),
+				};
+				assert_eq!(ok.properties, expected, "{version} wanted={wanted}");
+
+				if ietf::Properties::sends_timescale(version) {
+					let mut properties = Vec::new();
+					ietf::encode_object_time(
+						&mut Encoder::new(&mut properties, version.into()),
+						stamp,
+						info.timescale.expect("a timed track"),
+						version,
+					)
+					.unwrap();
+					assert_eq!(
+						occurrences(&h.log, &properties),
+						1,
+						"{version} wanted={wanted}: object unstamped"
+					);
+				}
+			}
 		}
 	}
 
@@ -5713,7 +5955,7 @@ mod serve_tests {
 					track: "video".into(),
 					filter,
 				};
-				let buf = run_fetch(&h, fetch_type, GroupOrder::Ascending).await;
+				let buf = run_fetch(&h, fetch_type, GroupOrder::Ascending, true).await;
 				assert_eq!(fetch_refusal(buf, version), 0x3, "{version}: {filter:?}");
 			}
 		}

@@ -398,7 +398,8 @@ pub struct Route {
 	/// The publisher instance the route serves, if known: routes with the same
 	/// epoch serve the same bytes, so a subscription resumes from one to another.
 	/// Among routes at one prefix the newest epoch wins, and a route without one
-	/// ranks last and is never resumed through another route. Changing it on a
+	/// ranks last and never resumes: a track that fails through it ends with the
+	/// error, since a re-request could reach another instance. Changing it on a
 	/// standing advertisement (including dropping it) is an [`AnnounceEvent::Restart`].
 	pub epoch: Option<crate::Epoch>,
 
@@ -2356,9 +2357,10 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 /// The route a front may serve from. `resolved` is the instance the front first
 /// resolved, once it has. Routes with its epoch serve the same bytes, so any of them
 /// may take over; a front resolved without one stays on its first route, the only one
-/// known to serve its bytes. Either way the front stays until those routes go, even
-/// once another instance wins the path: its subscriptions are sticky, and new
-/// requests resolve the winner on a fresh front.
+/// known to serve its bytes, and never re-requests a failed track through it, since it
+/// may resolve that to another instance. Either way the front
+/// stays until those routes go, even once another instance wins the path: its
+/// subscriptions are sticky, and new requests resolve the winner on a fresh front.
 fn pick<'a>(
 	table: &'a OriginState,
 	path: &Path,
@@ -2450,6 +2452,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 		let best = pick(&table, &path.as_path(), horizon, front, instance).map(|entry| Candidate {
 			route: entry.id,
 			local: entry.local,
+			epoch: entry.epoch.is_some(),
 		});
 		let serving_closing = front
 			.serving()
@@ -4517,11 +4520,13 @@ impl Consumer {
 	///
 	/// When its serving source dies or a better route with the same epoch appears,
 	/// the front switches to it, invisibly to subscribers: the epoch says both serve
-	/// the same bytes. A route without an epoch is never swapped for another. Its
-	/// route retracting with no replacement ends the broadcast, and the next request
-	/// re-serves the path; tracks already in flight carry on to their own end. The
-	/// broadcast also ends once no handle holds it and none of its tracks has been read
-	/// for a linger, and the next request re-serves the path then too.
+	/// the same bytes. A route without an epoch is never swapped for another, nor
+	/// asked again after a track fails, since it may now resolve another instance:
+	/// the track ends with the error. Its route retracting with no
+	/// replacement ends the broadcast, and the next request re-serves the path;
+	/// tracks already in flight carry on to their own end. The broadcast also ends
+	/// once no handle holds it and none of its tracks has been read for a linger,
+	/// and the next request re-serves the path then too.
 	///
 	/// Another instance winning the path (a newer epoch, or another route without
 	/// one) leaves the broadcast to its readers until its routes go, while the next

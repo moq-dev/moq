@@ -48,8 +48,8 @@ publishers mint epochs. Backport patches cut from `release` don't carry
 
 Liveness: a serve loop with work always ready never yields, which starved
 an FFI publisher's QUIC driver and fails hosted Interop's go lanes (found
-2026-10-08 landing #4225). The [serve budget](/quest/m0/serve-budget.md)
-bounds every kio task's loop. The Go and Python interop cells it fails
+2026-10-08 landing #4225). The publish serve loops now yield through a
+`kio::coop::Budget`. The Go and Python interop cells it fails
 moved here from m1 the same day, because the stall masks interop on every
 wire PR and hides as slow passes; the harness now fails a cell whose
 connection idles out.
@@ -61,10 +61,8 @@ remain and no release waits on them.
 
 ## Required
 
-- [Serve budget](/quest/m0/serve-budget.md) - a kio task that always has work ready yields after a budget, so a fast publisher can't starve its own QUIC driver
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.4, before Seattle
-- [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - every Go, Python, and C++ publisher cell passes reliably once the serve budget lands, and a cell fails when a connection idles out
-- [FFI cancelled reads](/quest/m0/ffi-cancel-read.md) - cancelling a moq-ffi read in any binding leaves its data for the next read, so the C++ probe stops flaking
+- [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - every Go, Python, and C++ publisher cell passes reliably with the serve budgets, and a cell fails when a connection idles out
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [JS track takeover](/quest/m0/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does, so a re-announced `@moq/publish` catalog never restarts its groups

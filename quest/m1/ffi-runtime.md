@@ -20,13 +20,15 @@ added this quest):
   #1071) with no stated reason.
 - Use `new_multi_thread().enable_all()` with tokio's default worker count.
   No configuration knob until an embedder needs one. Rejected: a small fixed
-  pool, and keeping `current_thread` behind the
-  [serve budget](/quest/m0/serve-budget.md) alone.
-- Keep the "foreign caller's thread never drives our futures" property: work
-  still runs via `Task::run` and `detached`. Check the exported async fns that
-  await in place (`subscribe_catalog`, `subscribe_track`, `fetch_group`,
-  `request_broadcast`, `decode_audio`, `decode_video`) and the sync methods
-  that enter the runtime context (`MoqAudioProducer::write`).
+  pool, and keeping `current_thread` behind the serve budgets
+  (`kio::coop::Budget`) alone.
+- `Task::run` awaits in place on the foreign thread that polls it (#5140), so
+  a cancelled call never makes progress; only the drivers, `detached`, and
+  `Task::spawn` run on the runtime. Check that in-place polls, the exported
+  async fns that await in place (`subscribe_catalog`, `subscribe_track`,
+  `fetch_group`, `request_broadcast`, `decode_audio`, `decode_video`), and
+  the sync methods that enter the runtime context (`MoqAudioProducer::write`)
+  still work against a multi-thread handle.
 - Callbacks change contract. Today moq-c status callbacks and uniffi
   callbacks fire one at a time on the single runtime thread; on workers they
   fire on any thread, and callbacks for different handles run at once.
@@ -51,6 +53,5 @@ Public API: callbacks may fire concurrently on any runtime thread
 
 ## Related
 
-- [Serve budget](/quest/m0/serve-budget.md) - the root fix for a task hogging its thread
 - [Kotlin/JVM exit](/quest/m2/kt-jvm-exit.md) - runtime-thread shutdown
 - [Generated C bindings](/quest/m1/c/README.md) - inherits the moq-ffi runtime, so hand-written moq-c needs no change

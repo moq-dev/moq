@@ -11,9 +11,8 @@ sees the new value.
 
 ## Plan
 
-Decided 2026-10-07, for moq.pro's per-transport session stats (a customer
-measuring how often browsers fall back to WebSocket, whose native QUIC
-workers share the `quic` count today):
+Decided 2026-10-07, for per-transport session stats (how often browsers fall
+back to WebSocket, while native QUIC clients share the `quic` count today):
 
 - **A variant, not a flag.** Rejected: an additive `webtransport: bool` beside
   `transport: "quic"`. The variant states the truth. An auth server that

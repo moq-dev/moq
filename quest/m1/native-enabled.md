@@ -16,6 +16,16 @@ rendition selection for video and audio rather than repeating checks at each
 consumer. Preserve the existing quality ordering among enabled renditions.
 Test mixed and all-disabled catalogs, plus disable/re-enable transitions.
 
+A rendition disabled mid-playback must move the player to an enabled lower
+one. `moq play` picks from `snapshot.video.renditions` without checking
+`enabled` (`rs/moq-cli/src/play/media.rs`), and `Playback::wants`
+(`rs/moq-cli/src/play/playback.rs`) refuses to reselect while the current
+track is still playing, so a disabled rung that keeps its track would leave
+it on an idle subscription. Test a high-to-low disable during playback.
+
+Promoted from m2 on 2026-10-09: publishers disabling simulcast rungs
+require it.
+
 A C `moq_consume_audio_enabled` getter is added only if a C consumer needs it;
 any FFI/C API change updates all wrappers and their docs in the same PR.
 Update native consumer docs for the selection behavior.

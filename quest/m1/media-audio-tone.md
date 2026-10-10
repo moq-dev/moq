@@ -4,7 +4,8 @@
 
 The `just test media` audio-tone check passes under load, fixed at its cause.
 It failed with 66 of 75 samples audible in #4719's runs and 72 of 81 in
-the 2026-10-06 late-join loops (#4914), and passed on rerun.
+the 2026-10-06 late-join loops (#4914), 68 of 81 once in 45 late-join runs
+on 2026-10-09 under `stress-ng --cpu 20`, and passed on rerun.
 
 ## Plan
 
@@ -20,5 +21,4 @@ loaded check.
 ## Related
 
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - shares the loaded-check validation
-- [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - shares the media fixture, but tracks a separate failure
 - [Forced channel count](/quest/m1/publish-audio-channel-count.md) - another source of audio gaps on the JS publish path; rule it in or out first
