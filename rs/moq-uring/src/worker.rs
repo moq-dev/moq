@@ -751,7 +751,7 @@ mod tests {
 			.unwrap();
 		let elapsed = start.elapsed();
 		assert!(elapsed >= Duration::from_millis(50), "woke early: {elapsed:?}");
-		// A scheduler pause can delay any correct timer; nextest bounds a lost wake.
+		assert!(elapsed < Duration::from_secs(5), "woke far too late: {elapsed:?}");
 	}
 
 	#[test]
@@ -792,6 +792,7 @@ mod tests {
 		let handle = worker.handle();
 		let bind = || std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
 		let sock = handle.udp(bind(), udp::Config::default()).expect("socket");
+		let shared = sock.downgrade();
 		let to = sock.local_addr().expect("addr");
 		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
@@ -815,7 +816,7 @@ mod tests {
 		// And a late spawn is dropped rather than parked forever.
 		handle.spawn(async {});
 		drop(sock);
-		// Cancellation may exceed bounded teardown under scheduler pressure.
+		assert!(shared.upgrade().is_none(), "the worker leaked its staged receive");
 	}
 
 	#[test]

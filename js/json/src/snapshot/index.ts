@@ -1,12 +1,13 @@
 /**
  * Lossy latest-value JSON publishing over MoQ tracks.
  *
- * One JSON value updated over time, for consumers that only care about the current state (a
- * catalog, a status document). This mode is **lossy** by design: a consumer yields only the most
- * recent value. A late joiner (or a consumer that falls behind) jumps straight to the newest
- * group and collapses any buffered backlog into a single yield, and older groups are dropped
- * entirely. Intermediate updates are never replayed. For an ordered log where every record is
- * preserved, use the `Stream` module instead.
+ * One JSON value updated over time, for consumers that care about the state rather than every
+ * record (a catalog, a status document). This mode is **lossy** by design: a new group supersedes
+ * the older ones, which are dropped. {@link Consumer.next} yields every state it still receives,
+ * in order, each with its frame's timestamp, for a caller that picks the state at a playhead.
+ * {@link Consumer.latest} jumps straight to the newest group and collapses any buffered backlog
+ * into a single yield, for a caller that only wants the current value. For an ordered log where
+ * every record is preserved, use the `Stream` module instead.
  *
  * On the wire the value is a series of self-contained groups: frame 0 is a full snapshot and any
  * following frames are RFC 7396 JSON Merge Patch deltas applied in order. Interoperable with the

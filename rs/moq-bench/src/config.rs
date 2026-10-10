@@ -71,6 +71,14 @@ pub struct Config {
 	#[usage(long, env = "MOQ_BENCH_GROUP_SIZE", default = "60", setting = "group_size")]
 	pub group_size: Range,
 
+	/// How far a group may fall behind the live edge before a subscriber skips it.
+	///
+	/// Defaults to the players' automatic budget, so loss and latency describe what a
+	/// viewer would see. `0` keeps only the live edge: any group still in flight when
+	/// the next one starts is skipped, so short groups measure skip timing instead.
+	#[usage(long, env = "MOQ_BENCH_MAX_DELAY", default = "2s", setting = "max_delay")]
+	pub(crate) max_delay: crate::duration::Duration,
+
 	/// Write machine-readable stats to this file: one JSON line of cumulative
 	/// counters per report interval. Truncates on start.
 	#[usage(long, env = "MOQ_BENCH_OUTPUT", setting = "output")]
@@ -117,6 +125,7 @@ impl Default for Config {
 			fps: Range::new(30, 30),
 			frame_size: Range::new(1200, 1200),
 			group_size: Range::new(60, 60),
+			max_delay: Duration::from_secs(2).into(),
 			output: None,
 			client: Default::default(),
 			quic: Default::default(),
@@ -282,6 +291,10 @@ impl Config {
 		self.group_size
 	}
 
+	pub fn max_delay(&self) -> Duration {
+		self.max_delay.into_std()
+	}
+
 	/// Whether this configuration expects subscribers to receive media.
 	pub fn expects_delivery(&self) -> bool {
 		self.fanout.is_some() || self.subscribe().min.max(self.subscribe().max) > 0
@@ -328,6 +341,9 @@ struct Settings {
 
 	#[usage(env = "MOQ_BENCH_GROUP_SIZE", cli("--group-size"))]
 	group_size: Option<String>,
+
+	#[usage(env = "MOQ_BENCH_MAX_DELAY", cli("--max-delay"))]
+	max_delay: Option<String>,
 
 	#[usage(env = "MOQ_BENCH_OUTPUT", cli("--output"))]
 	output: Option<String>,
@@ -446,10 +462,17 @@ url = "https://example.com"
 		assert_eq!(config.fps(), Range::new(30, 30));
 		assert_eq!(config.frame_size(), Range::new(1200, 1200));
 		assert_eq!(config.group_size(), Range::new(60, 60));
+		assert_eq!(config.max_delay(), Duration::from_secs(2));
 		assert_eq!(config.name(), "bench");
 		assert_eq!(config.fanout(), None);
 		assert!(!config.expects_delivery());
 		assert!(config.publishes());
+	}
+
+	#[test]
+	fn zero_max_delay_keeps_only_the_live_edge() {
+		let config = Config::parse_and_merge(["moq-bench", "--max-delay", "0"]).unwrap();
+		assert_eq!(config.max_delay(), Duration::ZERO);
 	}
 
 	#[test]

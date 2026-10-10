@@ -56,3 +56,4 @@ Rejected: an ID plus a required `track`.
 
 - [Media stats](/quest/m1/stats/README.md) - keys stats and feedback by this
   ID
+- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - optional epoch beside broadcast across every reference-bearing section, with shared instance pinning

@@ -67,6 +67,10 @@ when it opens, and an opened request with no answer that fails with
 
 Public API: one new error. Wire: none.
 
+## Required
+
+- [@moq/time](/quest/m1/time/js.md) - the installable clock this tests on
+
 ## Related
 
 - [Rust request credit](/quest/m1/rs-request-credit.md) - the same rule in moq-net
