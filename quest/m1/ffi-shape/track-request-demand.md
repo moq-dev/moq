@@ -19,9 +19,10 @@ producer, so the handle keeps watching it and returns `Closed` only once the
 request is rejected or the track closes. A dynamic server can then stop
 producing when the last subscriber leaves.
 
-Per the cross-package table, `rs/moq-c` gains the same on its
-`moq_track_request_*` functions (following `moq_publish_media_demand`), and
-the `doc/lib` pages list it.
+Decided in the 2026-10-10 audit: preserve the
+[hand-written C freeze](/quest/m1/c/README.md). Add the feature to moq-ffi
+and its wrappers; generated C inherits it when that package lands. Do not
+extend `rs/moq-c`'s hand-written ABI. Update the applicable `doc/lib` pages.
 
 Additive in every binding. It edits the same wrappers as
 [Bindings](/quest/m0/broadcast-epoch/bindings.md) (#5146), so land it after
