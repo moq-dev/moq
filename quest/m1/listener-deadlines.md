@@ -17,7 +17,7 @@ after the handshake deadline (moq-dev/moq#4612), by applying
 - Test on the worker's timer: a stalled handshake closes at the deadline.
 
 Split on 2026-10-08: the HTTP/2 idle deadline is
-[HTTP listener deadlines](/quest/m1/listener-deadlines-http.md) and the iroh
+[HTTP listener deadlines](https://github.com/moq-dev/moq/pull/5245) and the iroh
 keep-alive is [iroh keep-alive](/quest/m1/iroh-keep-alive.md); each lands on
 its own.
 
@@ -25,5 +25,5 @@ Public API: none beyond existing settings. Wire: none.
 
 ## Related
 
-- [HTTP listener deadlines](/quest/m1/listener-deadlines-http.md) - the HTTPS and internal listeners' half
+- [HTTP listener deadlines](https://github.com/moq-dev/moq/pull/5245) - the HTTPS and internal listeners' half
 - [iroh keep-alive](/quest/m1/iroh-keep-alive.md) - the iroh backend's half
