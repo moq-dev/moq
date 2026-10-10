@@ -172,6 +172,8 @@ bench all require its crate.
 - [Encoder colour](/quest/m1/color-model.md) - every moq-video encode path signals the colour its output actually has, or refuses instead of mislabelling
 - [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the T-STD buffer model, starting with a fixed `--delay`
 - [Multi-packet PMT](/quest/m1/ts-pmt-split.md) - `export ts` splits a PMT longer than one packet instead of exiting before its first packet
+- [TS damage log](/quest/m1/ts-damage-log.md) - a burst of damaged TS units logs a first warning and a periodic summary per PID, not one warning per unit
+- [TS adaptation-only packets](/quest/m1/ts-adaptation-only.md) - an adaptation-only TS packet whose field doesn't fill the payload is refused as damage
 - [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust container consumer reports a frame after a subscribe or discontinuity as non-continuous, like JS, for the tune-in and warmup trims
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
 - [Watch decode errors](/quest/m1/watch-decode-error.md) - a WebCodecs error ends the subscription and the element reports it
@@ -195,7 +197,10 @@ bench all require its crate.
 - [#709](/quest/m1/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate through rustls-acme over TLS-ALPN-01, persisted on disk
 - [Draft 14-16 updates](/quest/m1/ietf-legacy-updates.md) - Rust and JS apply and answer moq-transport 14-16 request updates without ending or leaking the request
 - [JS session caps](/quest/m1/js-session-parity.md) - @moq/net enforces moq-net's per-session announce and subscription caps
-- [JS pending tail](/quest/m1/js-pending-tail.md) - a JS reader holds for a track's pending tail like Rust, once #4225 lands
+- [Tail arrivals](/quest/m1/tail-arrivals.md) - a track judges its pending tail from recorded arrivals, not a cache scan, and errors a reader whose tail ends short
+- [JS pending tail](/quest/m1/js-pending-tail.md) - a JS reader holds for a track's pending tail like Rust
+- [Group demand after accept](/quest/m1/group-demand-accept.md) - an accepted group request's demand ends cleanly instead of failing with NotFound
+- [Pool churn cursors](/quest/m1/pool-churn-cursors.md) - the origin pool churn benchmark sweeps announce cursors per prefix
 - [In-band CMAF follow-ups](/quest/m1/cmaf-inline-followups.md) - MSF, h264/h265 export, and gst caps handle avc3/hev1 CMAF
 - [Datagram replay bound](/quest/m1/datagram-replay-bound.md) - a new Rust datagram subscriber starts within its max delay of the newest datagram, not at a minutes-old buffer
 - [Catalog colour](/quest/m1/color-catalog.md) - the catalog describes a rendition's colour and HDR properties, which the WebGPU HDR renderer reads
