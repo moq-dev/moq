@@ -382,22 +382,24 @@ run_audio_comparison() {
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
     HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
 
-    printf '\nAudio grouping: 50 fps, 200-byte frames, 0 / 100 / 200 ms groups\n'
+    printf '\nAudio grouping: 50 / 400 fps, 200-byte frames, per-packet / 20 / 100 / 200 ms groups\n'
     printf 'shape\trecv-fps\tp99-ms\tCPU\tRSS-MiB\n'
-    local connections subscribers group_size label
-    for group_size in 0 4 9; do
+    local connections subscribers group_size label shape fps
+    for shape in 50:0 50:4 50:9 400:0 400:7; do
+        fps=${shape%:*}
+        group_size=${shape#*:}
         for connections in 16 32; do
             for subscribers in 2 8; do
-                label=room-$connections-$subscribers-$group_size
+                label=room-$fps-$connections-$subscribers-$group_size
                 run_workload "$label" "$CURRENT_TARGET/release/moq-relay" audio '' 1 \
-                    --connections "$connections" --subscribe "$subscribers" --group-size "$group_size"
+                    --connections "$connections" --subscribe "$subscribers" --fps "$fps" --group-size "$group_size"
                 print_audio_sample "$label" audio
             done
         done
         for connections in 65 201; do
-            label=fanout-$connections-$group_size
+            label=fanout-$fps-$connections-$group_size
             run_workload "$label" "$CURRENT_TARGET/release/moq-relay" audio-fanout '' 1 \
-                --connections "$connections" --group-size "$group_size"
+                --connections "$connections" --fps "$fps" --group-size "$group_size"
             print_audio_sample "$label" audio-fanout
         done
     done
