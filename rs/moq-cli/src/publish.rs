@@ -1008,14 +1008,21 @@ pub(crate) mod tests {
 				.expect("a catalog");
 			let name = catalog.m2ts.expect("the m2ts section").track;
 
+			// Subscribe and take the first group, so a read starts behind anything decoded
+			// afterwards: an IETF subscription joins the publisher's current group when its
+			// SUBSCRIBE arrives, not when it is sent.
+			let start = async |subscription: moq_net::track::Subscription| {
+				let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
+				let first = tokio::time::timeout(WAIT, track.recv_group()).await.unwrap().unwrap();
+				(track, first)
+			};
 			// Each group's sequence and frames, read until the track ends. A read cut off as
 			// stale leaves `None` for that group's frames.
-			let read = |subscription: moq_net::track::Subscription| {
-				let track = consumer.track(&name).unwrap();
+			let read = |(mut track, first): (moq_net::track::Subscriber, Option<moq_net::group::Consumer>)| {
 				tokio::spawn(tokio::time::timeout(WAIT, async move {
-					let mut track = track.subscribe(subscription).await.unwrap();
 					let mut groups = Vec::new();
-					while let Some(mut group) = track.recv_group().await.unwrap() {
+					let mut next = first;
+					while let Some(mut group) = next {
 						let mut frames = Some(Vec::new());
 						loop {
 							match group.read_frame().await {
@@ -1033,13 +1040,17 @@ pub(crate) mod tests {
 							}
 						}
 						groups.push((group.sequence, frames));
+						next = track.recv_group().await.unwrap();
 					}
 					groups.sort_by_key(|(sequence, _)| *sequence);
 					groups
 				}))
 			};
-			let recording = read(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE));
-			// About twice real time, so the recording keeps up and only staleness can cut it.
+			let recording =
+				read(start(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE)).await);
+			// About twice real time, so the recording keeps up and only staleness can cut it. A
+			// burst ends the track while the relay still pulls the older groups, and the relay
+			// drops its upstream subscription with those groups unfinished.
 			for chunk in second.chunks(8 * 1024) {
 				decoder.decode_chunk(chunk).unwrap();
 				tokio::time::sleep(Duration::from_millis(15)).await;
@@ -1080,10 +1091,11 @@ pub(crate) mod tests {
 			// the budget behind. An IETF subscription starts at the newest group, so only lite
 			// has the groups behind it to read.
 			if version.starts_with("moq-lite") {
-				let late = read(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)))
-					.await
-					.unwrap()
-					.expect("the late read ends with the track");
+				let late =
+					read(start(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))).await)
+						.await
+						.unwrap()
+						.expect("the late read ends with the track");
 				let whole: Vec<u64> = late
 					.iter()
 					.filter(|(_, frames)| frames.is_some())
