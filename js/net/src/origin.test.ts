@@ -1164,6 +1164,50 @@ test("the cheapest received route competes with the local broadcast, not the new
 	origin.close();
 });
 
+test("a preferred link wins over a cheaper one, fails over, and moves back", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const upstream = new BroadcastProducer();
+	const served: string[] = [];
+	const via = (name: string) => () => {
+		served.push(name);
+		return upstream.consume();
+	};
+	const route = (cost: bigint) => Route.normalize({ epoch: EPOCH, hops: [PEER], cost });
+	const secondary = origin.withPreference(1);
+	const backup = serve(secondary, path, via("secondary"), route(1n));
+	let primary = serve(origin, path, via("primary"), route(10n));
+
+	expect(consumer.broadcasts().peek().get(path)).toEqual(route(10n));
+	const request = consumer.request(path);
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(served).toEqual(["primary"]);
+
+	// Same epoch, so the request resumes on the secondary and back again.
+	primary();
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(served).toEqual(["primary", "secondary"]);
+	primary = serve(origin, path, via("primary"), route(10n));
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(served).toEqual(["primary", "secondary", "primary"]);
+
+	// A newer epoch outranks preference.
+	const newer = Epoch.parse("01900000-0000-7000-8000-000000000002");
+	const fresh = serve(secondary, path, via("newer"), Route.normalize({ epoch: newer, hops: [PEER], cost: 1n }));
+	expect(consumer.broadcasts().peek().get(path)?.epoch).toBe(newer);
+
+	request.close();
+	fresh();
+	primary();
+	backup();
+	upstream.close();
+	origin.close();
+});
+
 test("a handle serves a request under live", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

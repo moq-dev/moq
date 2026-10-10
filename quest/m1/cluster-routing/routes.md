@@ -73,7 +73,7 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
 - Origin selection keeps `route_order`'s shape and swaps its inputs: the
   candidates become the origin nodes announcing the path, ranked by longest
   prefix, then the newest epoch, then the link's preference
-  ([Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md)), then the
+  (`origin::Producer::with_preference`), then the
   route metric to the node, then the path-keyed rendezvous hash, with the
   origin node id breaking a full tie.
 - Down-only bit: set on a route learned on an upstream link, kept across
