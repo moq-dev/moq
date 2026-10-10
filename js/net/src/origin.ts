@@ -858,6 +858,9 @@ export interface Table {
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
+	/** The announcements of the route serving `path`, as a live stream; see {@link Consumer.follow}. */
+	follow(path: Path.Valid): announce.Consumer;
+
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
 	dynamic(
 		prefix: Path.Valid,
@@ -1220,6 +1223,11 @@ export class Producer implements Table {
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
 		return this.#reader.announced(scope, options);
+	}
+
+	/** The announcements of the route serving `path`, as a live stream; see {@link Consumer.follow}. */
+	follow(path: Path.Valid): announce.Consumer {
+		return this.#reader.follow(path);
 	}
 
 	/** Close the origin, every broadcast it still routes, and its announcement streams. Idempotent. */
@@ -1619,6 +1627,29 @@ export class Consumer {
 		return producer.consume();
 	}
 
+	/**
+	 * The announcements of the routes covering `path`, reduced to the one serving it: the most
+	 * specific, which is the one a {@link request} resolves.
+	 *
+	 * This is how a player follows a broadcast across publisher restarts: play on `start`, drop
+	 * everything and request the path afresh on `restart`, and stop on `end`. An `update` is
+	 * the same publisher instance re-priced or failed over, which subscriptions already ride
+	 * out. Another route taking over is a `restart`, or an `update` when both carry the same
+	 * epoch. Throws when the path is outside this consumer's scope, or when no pattern can spell
+	 * it (a segment containing `*`). Close it when done.
+	 */
+	follow(path: Path.Valid): announce.Consumer {
+		this.#scope.path(path);
+		const producer = new announce.Producer();
+		// Scoped to the path itself, which still sees every route whose claim covers it, so a
+		// route claiming only paths beneath it never masks the one that serves it, just as a
+		// request skips it. A path no pattern can spell (a segment containing `*`) throws here.
+		const patterns = this.#scope.patterns(Path.Pattern.literal(path));
+		// Hiding narrows discovery, not lookup, so a hidden path follows like any other.
+		void this.#runAnnounced(producer, patterns, true, announce.follower(path));
+		return producer.consume();
+	}
+
 	/** One snapshot shared by map readers and announcement-stream diffing. */
 	#listed(patterns: Path.Patterns, hidden: boolean): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
@@ -1653,7 +1684,18 @@ export class Consumer {
 		return next;
 	}
 
-	async #runAnnounced(producer: announce.Producer, patterns: Path.Patterns, hidden: boolean): Promise<void> {
+	async #runAnnounced(
+		producer: announce.Producer,
+		patterns: Path.Patterns,
+		hidden: boolean,
+		reduce: (events: announce.Event[]) => announce.Event[] = (events) => events,
+	): Promise<void> {
+		// Each pass's changes, reduced together so a follower sees one table change as one event.
+		const batch: announce.Event[] = [];
+		const append = (event: announce.Event) => {
+			batch.push(event);
+		};
+
 		// Keyed by the presented path (from the origin, not the scope), valued by identity
 		// plus route. Diffing the instance rather than mere presence means a republish emits a
 		// restart; a re-price of the same instance emits an update.
@@ -1670,7 +1712,7 @@ export class Consumer {
 
 				for (const [path, snap] of active) {
 					if (!next.has(path))
-						producer.append({
+						append({
 							prefix: path,
 							captures: snap.captures,
 							kind: "end",
@@ -1680,14 +1722,15 @@ export class Consumer {
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
 					if (!prev) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "start", route: snap.route });
+						append({ prefix: path, captures: snap.captures, kind: "start", route: snap.route });
 					} else if (!sameInstance(prev, snap)) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "restart", route: snap.route });
+						append({ prefix: path, captures: snap.captures, kind: "restart", route: snap.route });
 					} else if (!routesEqual(prev.route, snap.route)) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "update", route: snap.route });
+						append({ prefix: path, captures: snap.captures, kind: "update", route: snap.route });
 					}
 				}
 				active = next;
+				for (const event of reduce(batch.splice(0))) producer.append(event);
 
 				await Signal.race(this.#state.local, this.#state.advertisedLocal, this.#state.routes, producer.closed);
 				if (producer.closed.peek() !== undefined) return;

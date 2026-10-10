@@ -48,8 +48,7 @@ ladders.
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
-- [moq-bot may push workflow changes](/quest/m1/bot-workflows-permission.md) - condition: the maintainer grants moq-bot's GitHub App the `workflows` permission, so back-merges carrying workflow changes go through
-- [main merges through a squash queue](/quest/m1/merge-queue-settings.md) - condition: once `release` carries the new back-merge script, the maintainer enables the squash merge queue and moq-bot's pull_request bypass together
+- [main merges through a squash queue](/quest/m1/merge-queue-settings.md) - condition: the maintainer enables the squash merge queue on `main`
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [Per-frame arrivals in @moq/watch](/quest/m1/watch-arrivals.md) - the audio and video decoders expose a window of recent frame arrivals, late and skipped marks included, as a signal
 - [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - condition: moq-dev/web-transport#419 ships in a release, then moq's iroh HTTP/3 client reports a peer's close capsule
@@ -194,7 +193,7 @@ ladders.
 - [Catalog colour](/quest/m1/color-catalog.md) - the catalog describes a rendition's colour and HDR properties, which the WebGPU HDR renderer reads
 - [WebGPU HDR](/quest/m1/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [Request ID order](/quest/m1/request-id-order.md) - drafts 14 to 16 refuse a reused or lower Request ID in both languages
-- [Watch follows a covering prefix](/quest/m1/watch-follow-prefix.md) - `@moq/watch` moves to a covering prefix when the exact route ends, as `moq play` does
 - [Import catalog drop](/quest/m1/import-catalog-drop.md) - moq-cli import never drops a catalog producer without finishing it
 - [JS restart keeps the request](/quest/m1/js-restart-keeps-request.md) - a resolved `@moq/net` request survives a Restart, as in Rust
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
+- [A/V sync across a break](/quest/m1/watch-break-av-sync.md) - `@moq/watch` never plays pre-break audio out of sync with pre-break video

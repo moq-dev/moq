@@ -4452,37 +4452,44 @@ impl Consumer {
 	/// [`Self::routed_broadcast`]: pairing this with [`Self::request_broadcast`]
 	/// leaves a gap where the covering route can retract.
 	pub async fn routed(&self, path: impl AsPath) -> Option<Route> {
+		// A follower's first event is always a start.
+		match self.follow(path).ok()?.next().await? {
+			AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) | AnnounceEvent::Restart(announce) => {
+				Some(announce.route)
+			}
+			AnnounceEvent::End(_) => None,
+		}
+	}
+
+	/// Follow the announcements of the routes covering `path`, reduced to the one serving it.
+	///
+	/// This is how a player follows a broadcast across publisher restarts: play on a
+	/// [`Start`](AnnounceEvent::Start), drop everything and request the path afresh on a
+	/// [`Restart`](AnnounceEvent::Restart), and stop on an [`End`](AnnounceEvent::End). An
+	/// [`Update`](AnnounceEvent::Update) is the same publisher instance re-priced or failed
+	/// over, which subscriptions already ride out. Fails with [`Error::Unauthorized`] when
+	/// this consumer's scope can never cover the path, and with [`Error::InvalidPath`] when no
+	/// pattern can spell it (a segment containing `*`).
+	pub fn follow(&self, path: impl AsPath) -> Result<crate::announce::Follow, Error> {
 		let path = path.as_path();
 
-		// Scope a fresh consumer down to this path's subtree, so we only wake for
-		// announcements that overlap the requested path.
-		// A max-depth path cannot be spelled as `path/**` (`**` would be a 33rd
-		// segment), so watch the existing stream and match covering claims instead.
-		let consumer = match Pattern::subtree(path.as_str()) {
-			Ok(subtree) => self.scope("", &Patterns::from(subtree)).ok()?,
-			Err(InvalidPattern::TooManySegments) => self.clone(),
-			Err(_) => return None,
-		};
+		// Scope down to the path itself, which still sees every route whose claim covers it:
+		// the rest of the origin never wakes it, and a route claiming only paths beneath it
+		// (a scoped dynamic at the same prefix) never masks the one that serves it, just as a
+		// request skips it.
+		let consumer = self.scope("", &Patterns::from(Pattern::literal(path.as_str())?))?;
 
-		// `scope` keeps narrower permissions intact: if we ask for `foo` on a
-		// consumer limited to `foo/specific`, `foo` itself is unauthorized. Bail
-		// rather than loop forever.
+		// `scope` keeps narrower permissions intact: on a consumer limited to
+		// `foo/specific`, no route can ever cover `foo`.
 		if !consumer.allowed().matches(path.as_str()) {
-			return None;
+			return Err(Error::Unauthorized);
 		}
 
-		// Use an untagged stream: this is a lookup, not egress announce
-		// forwarding, so it must not drive the announce guards. Hiding narrows
-		// discovery, not lookup, so a hidden path resolves like any other.
-		let mut announced = consumer.untagged().with_hidden(true).announced();
-		loop {
-			if let AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) | AnnounceEvent::Restart(announce) =
-				announced.next().await?
-				&& path.has_prefix(&announce.prefix)
-			{
-				return Some(announce.route);
-			}
-		}
+		// Untagged: this is a lookup, not egress announce forwarding, so it must not drive
+		// the announce guards. Hiding narrows discovery, not lookup, so a hidden path
+		// follows like any other.
+		let announced = consumer.untagged().with_hidden(true).announced();
+		Ok(crate::announce::Follow::new(announced, path.to_owned()))
 	}
 
 	/// Block until `path` resolves to a broadcast: [`Self::request_broadcast`],
