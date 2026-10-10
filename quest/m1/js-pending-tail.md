@@ -10,7 +10,7 @@ instead of ending at the end with groups missing (`doc/lib/js/net.md`).
 
 Mirror the Rust hold from [Track tail interop](/quest/m1/track-tail-interop.md)
 (#4225) once it merges, and test it against the Rust behavior with mocked
-time. Split from [JS session parity](/quest/m1/js-session-parity.md) on
+time. Split from [JS session parity](https://github.com/moq-dev/moq/pull/5214) on
 2026-10-08 so the caps work stays ready.
 
 Public API: none. Wire: none.
@@ -21,4 +21,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [JS session parity](/quest/m1/js-session-parity.md) - per-session caps, the other half
+- [JS session parity](https://github.com/moq-dev/moq/pull/5214) - per-session caps, the other half
