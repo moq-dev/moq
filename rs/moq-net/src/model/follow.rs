@@ -1,4 +1,4 @@
-use std::task::{Poll, ready};
+use std::task::Poll;
 
 use super::origin_impl::{Announce, AnnounceConsumer, AnnounceEvent};
 use crate::PathOwned;
@@ -34,14 +34,45 @@ impl Follow {
 	}
 
 	/// Poll for the next change, registering `waiter` when there is none yet.
+	///
+	/// Every announcement already on hand is folded into one change, so the replay a late
+	/// follower starts with (a covering prefix, then the exact path beneath it) is one start on
+	/// the route serving the path rather than a start and a restart.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
-		loop {
-			let Some(event) = ready!(self.announced.poll_next(waiter)) else {
-				return Poll::Ready(None);
-			};
-			if let Some(event) = self.fold(event) {
-				return Poll::Ready(Some(event));
+		let before = self.serving().cloned();
+		// Whether any announcement on hand changed the serving route, and whether one changed
+		// which instance it is.
+		let (mut changed, mut replaced) = (false, false);
+		let ended = loop {
+			match self.announced.poll_next(waiter) {
+				Poll::Ready(Some(event)) => match self.fold(event) {
+					None => {}
+					Some(AnnounceEvent::Update(_)) => changed = true,
+					Some(_) => (changed, replaced) = (true, true),
+				},
+				Poll::Ready(None) => break true,
+				Poll::Pending => break false,
 			}
+		};
+
+		let change = match (before, self.serving().cloned()) {
+			(None, None) => None,
+			(None, Some(after)) => Some(AnnounceEvent::Start(after)),
+			(Some(before), None) => Some(AnnounceEvent::End(before)),
+			(Some(before), Some(after)) => {
+				// Routes with one epoch serve the same bytes, whatever happened in between.
+				let same = before.route.epoch.is_some() && before.route.epoch == after.route.epoch;
+				match (replaced && !same, changed) {
+					(true, _) => Some(AnnounceEvent::Restart(after)),
+					(false, true) => Some(AnnounceEvent::Update(after)),
+					(false, false) => None,
+				}
+			}
+		};
+		match (change, ended) {
+			(Some(change), _) => Poll::Ready(Some(change)),
+			(None, true) => Poll::Ready(None),
+			(None, false) => Poll::Pending,
 		}
 	}
 
@@ -168,6 +199,19 @@ mod tests {
 
 		drop(pool);
 		assert_eq!(followed(&mut follow).await, ("end", "pool".into()));
+	}
+
+	/// A follower that joins late starts on the route serving the path, not on whichever
+	/// covering route the replay happened to reach first.
+	#[moq_net_sim::test]
+	async fn follow_starts_on_the_serving_route_when_joining_late() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _pool = origin.dynamic("pool", Route::default()).unwrap();
+		let _exact = origin.publish("pool/job", Route::default()).unwrap();
+
+		let mut follow = origin.consume().follow("pool/job").unwrap();
+		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
+		quiet(&mut follow).await;
 	}
 
 	/// Without an epoch nothing says two routes serve the same bytes.

@@ -1688,11 +1688,12 @@ export class Consumer {
 		producer: announce.Producer,
 		patterns: Path.Patterns,
 		hidden: boolean,
-		reduce: (event: announce.Event) => announce.Event | undefined = (event) => event,
+		reduce: (events: announce.Event[]) => announce.Event[] = (events) => events,
 	): Promise<void> {
+		// Each pass's changes, reduced together so a follower sees one table change as one event.
+		const batch: announce.Event[] = [];
 		const append = (event: announce.Event) => {
-			const reduced = reduce(event);
-			if (reduced) producer.append(reduced);
+			batch.push(event);
 		};
 
 		// Keyed by the presented path (from the origin, not the scope), valued by identity
@@ -1729,6 +1730,7 @@ export class Consumer {
 					}
 				}
 				active = next;
+				for (const event of reduce(batch.splice(0))) producer.append(event);
 
 				await Signal.race(this.#state.local, this.#state.advertisedLocal, this.#state.routes, producer.closed);
 				if (producer.closed.peek() !== undefined) return;

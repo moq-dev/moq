@@ -413,6 +413,23 @@ test("follow ignores a route scoped beneath the path", async () => {
 	origin.close();
 });
 
+test("follow starts on the serving route when joining late", async () => {
+	const origin = new Producer();
+	const pool = origin.dynamic(Path.from("pool"));
+	const exact = publish(origin, Path.from("pool/job"));
+
+	const follow = origin.consume().follow(Path.from("pool/job"));
+	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool/job") });
+
+	// Nothing else is queued: the next event is the exact route ending, a restart onto the prefix.
+	exact.close();
+	expect(await follow.next()).toMatchObject({ kind: "restart", prefix: Path.from("pool") });
+
+	follow.close();
+	pool.close();
+	origin.close();
+});
+
 test("follow refuses a path no pattern can spell", () => {
 	const origin = new Producer();
 	expect(() => origin.consume().follow(Path.from("camera*main"))).toThrow();
