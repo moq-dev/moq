@@ -10,6 +10,7 @@ mod support;
 
 use std::time::Duration;
 
+use futures::channel::mpsc::TryRecvError;
 use futures::{SinkExt, StreamExt};
 
 use moq_net::track::Subscription;
@@ -94,7 +95,11 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 				Ok(None) => break Ok(()),
 				Err(err) => break Err(err),
 			};
-			let head = group.read_frame().await.unwrap().expect("head frame");
+			// A failed head ends the read with its error, which the main task reports.
+			let head = match group.read_frame().await {
+				Ok(head) => head.expect("head frame"),
+				Err(err) => break Err(err),
+			};
 			assert_eq!(&head.payload[..], b"head");
 			heads.send(group.sequence).await.unwrap();
 			tails.push(moq_net_sim::spawn(async move {
@@ -128,12 +133,13 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
 				groups.push(group);
 				// IETF requests the live edge, so observe each header before advancing it.
-				assert_eq!(
-					moq_net_sim::timeout(TIMEOUT, opened.next())
-						.await
-						.expect("head timeout"),
-					Some(sequence),
-				);
+				match moq_net_sim::timeout(TIMEOUT, opened.next())
+					.await
+					.expect("head timeout")
+				{
+					Some(head) => assert_eq!(head, sequence, "{name}"),
+					None => panic!("{name}: the reader stopped: {:?}", reader.await),
+				}
 			}
 
 			// Simulated time advances only once every task is idle: each group has reached
@@ -164,8 +170,10 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			let newest = loop {
 				let held = upstream.server_transport.release_newest_uni();
 				moq_net_sim::sleep(Duration::from_millis(10)).await;
-				if let Ok(head) = opened.try_recv() {
-					break head;
+				match opened.try_recv() {
+					Ok(head) => break head,
+					Err(TryRecvError::Closed) => panic!("{name}: the reader stopped: {:?}", reader.await),
+					Err(TryRecvError::Empty) => {}
 				}
 				assert!(held > 0, "{name}: no group reached the subscriber");
 			};

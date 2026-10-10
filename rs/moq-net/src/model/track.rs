@@ -1353,17 +1353,26 @@ impl TrackState {
 		// `sealed` also ends a locally closed receive track without a declared end.
 		// An abort still wins unless that end had already settled: a group below it was still open.
 		let reached = self.sealed
-			|| self.final_sequence.is_some_and(|fin| {
-				self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin && !self.awaits_tail(fin)
-			});
+			|| self
+				.final_sequence
+				.is_some_and(|fin| self.edge() >= fin && !self.awaits_tail(fin));
 		reached && (self.abort.is_none() || self.settled)
+	}
+
+	/// One past the highest sequence produced: where the live edge stands against the end.
+	fn edge(&self) -> u64 {
+		self.max_sequence.map_or(0, |max| max.saturating_add(1))
 	}
 
 	/// Whether a group below `fin` the wire subscription still owes has yet to arrive:
 	/// a sequence from where the feed starts up to the end with nothing cached. Only
 	/// such a hole holds readers, so a tail with nothing missing ends them at once.
+	///
+	/// Judged by the cache, so an evicted group or a datagram also reads as a hole until
+	/// the session settles the tail. That only delays the end: an abort stops the wait.
 	fn awaits_tail(&self, fin: u64) -> bool {
-		if !self.tail_pending {
+		// Nothing arrives after an abort, so a hole left then is final.
+		if !self.tail_pending || self.abort.is_some() {
 			return false;
 		}
 		// Without a declared start, the lowest group that arrived stands in for it.
@@ -1381,11 +1390,17 @@ impl TrackState {
 
 	/// Whether the declared end is reached and every cached group below it finished,
 	/// so nothing the end promised is still in flight.
+	///
+	/// Decided as an abort lands, which ends any wait for the tail: a hole the cache
+	/// cannot tell from an evicted group does not turn a delivered track into a failure.
 	fn is_settled(&self) -> bool {
 		let Some(fin) = self.final_sequence else {
 			return false;
 		};
-		self.is_complete() && self.lookup.range(..fin).all(|(_, slot)| slot.group.is_finished())
+		let reached = self.sealed || self.edge() >= fin;
+		reached
+			&& (self.abort.is_none() || self.settled)
+			&& self.lookup.range(..fin).all(|(_, slot)| slot.group.is_finished())
 	}
 
 	/// Where a replacement route should pick this track up: one past the last frame
@@ -7660,6 +7675,23 @@ mod test {
 		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(arrival.assert_group().sequence, 1);
 		drop(producer);
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// An abort ends the wait for a pending tail. Whatever reached the end finished, so
+	/// readers end cleanly: the cache cannot tell a hole from a group it already evicted.
+	#[moq_net_sim::test]
+	async fn an_abort_ends_a_pending_tail_cleanly() {
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(2).unwrap();
+		let mut high = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		high.finish().unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
+		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
+
+		producer.abort(Error::Dropped).unwrap();
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
