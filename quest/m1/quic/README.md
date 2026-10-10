@@ -44,6 +44,8 @@ byte-fair service between send groups at the same priority, then the
 subscription's chosen group order within its own bucket. On a relay-to-relay
 session with fairness enabled, the send group is the broadcast. The default
 MoQ order is newest group first; an ordered subscription keeps oldest first.
+Datagrams join their subscription's send group in its group order, ahead
+of a stream of the same group.
 This is a transport API change, not a MoQ wire change.
 
 Decided in the 2026-09-30 audit: deadlines, qmux, BBR loss parity, ECN
@@ -59,9 +61,13 @@ The BBR app-limited fixes land in `moq-quic` without waiting for the switch.
 - [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md) - partial polls count, local send caps do not, receiver credit is pinned
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
   so a reset WebTransport stream still delivers its header
+- [Pin retransmits to stream priority](/quest/m1/quic/retransmit-priority.md) - a test
+  proves a lost low-priority range waits behind higher-priority new data
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - strict
   subscription priority, fair buckets, and newest-first group order replace
   the lossy scalar; retransmits follow the same order
+- [Schedule datagrams by subscription priority](/quest/m1/quic/datagram-priority.md) -
+  datagrams join their subscription's send group instead of preempting every stream
 - [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - MAX_STREAMS
   and MAX_DATA are raised after SETUP identifies a cluster peer
 - [Shard the endpoint](/quest/m1/quic/shard.md) - the library shards a
