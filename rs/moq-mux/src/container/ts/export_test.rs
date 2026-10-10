@@ -7679,6 +7679,95 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 	assert!(matches!(end, Ok(None)), "{end:?}");
 }
 
+/// A stitch that fails to resolve while a return is still awaiting its catalog goes back to
+/// that return, so its end starts the linger over rather than the old deadline cutting it off.
+#[tokio::test(start_paused = true)]
+async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let first = publish_bare(&origin, Some(&epoch));
+	let linger = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_linger(linger).with_stitch(true);
+	let start = tokio::time::Instant::now();
+	finish(first);
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"lingering"
+	);
+
+	// Back, with a catalog yet to deliver its first snapshot.
+	let second = publish_bare(&origin, Some(&epoch));
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"awaiting the return's catalog"
+	);
+
+	// Replaced, but the replacement's catalog request is never answered before it goes.
+	let third = origin
+		.publish(
+			"live",
+			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+		)
+		.unwrap();
+	let unanswered = third.dynamic();
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"resolving the replacement"
+	);
+	drop((third, unanswered));
+
+	finish(second);
+	let end = follower.next().await;
+	assert!(matches!(end, Ok(None)), "{end:?}");
+	assert_eq!(start.elapsed(), Duration::from_secs(3) + linger);
+}
+
+/// A failure whose broadcast went and came back before the follower looked is no failure of
+/// the export's own: the return is followed instead of failing at the grace.
+#[tokio::test(start_paused = true)]
+async fn a_follower_follows_a_return_that_came_back_during_the_grace() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
+	let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"nothing to mux yet"
+	);
+
+	track.abort(moq_net::Error::Cancel);
+	assert!(
+		tokio::time::timeout(Duration::from_millis(100), follower.next())
+			.await
+			.is_err(),
+		"waiting out the grace"
+	);
+	// The end and the return both arrive before the follower looks again.
+	drop((broadcast, catalog));
+	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
+	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	assert!(
+		tokio::time::timeout(Duration::from_secs(3), follower.next())
+			.await
+			.is_err(),
+		"carried on into the return"
+	);
+
+	track.finish().unwrap();
+	finish((broadcast, catalog));
+	let end = follower.next().await;
+	assert!(matches!(end, Ok(None)), "{end:?}");
+}
+
 /// A replacement that stays announced but refuses its catalog fails a stitch loudly, rather
 /// than leaving the export on the instance it replaced.
 #[tokio::test(start_paused = true)]

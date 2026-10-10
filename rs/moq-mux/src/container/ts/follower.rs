@@ -52,8 +52,10 @@ enum State<E: catalog::Catalog> {
 	/// Resolving the instance serving the path now, to carry the export on into it.
 	Following {
 		resolving: Resolving<E>,
-		/// How the export ended and when the linger runs out, or `None` for a stitch mid-stream.
+		/// How the export ended and when the linger runs out, as in `Running` or `Settling`.
 		settling: Option<(crate::Result<()>, Instant)>,
+		/// The export is still running, a stitch mid-stream, so it carries on if the switch does not.
+		live: bool,
 	},
 	/// Nothing follows.
 	Done,
@@ -171,6 +173,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						self.state = State::Following {
 							resolving: self.resolve(),
 							settling,
+							live: true,
 						};
 						continue;
 					}
@@ -215,7 +218,8 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					deadline,
 				} => {
 					self.poll_announced(waiter);
-					if grace.is_some() && self.serving != Serving::Ours {
+					// A broadcast that went, even one already back, was no failure of the export's own.
+					if grace.is_some() && (self.serving != Serving::Ours || self.ended) {
 						grace = None;
 						self.lingering(&end);
 					}
@@ -240,6 +244,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						self.state = State::Following {
 							resolving: self.resolve(),
 							settling: Some((end, deadline)),
+							live: false,
 						};
 						continue;
 					}
@@ -253,6 +258,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				State::Following {
 					mut resolving,
 					settling,
+					live,
 				} => {
 					// Announcements wait until the export is on the instance they describe.
 					if let Poll::Ready(resolved) = waiter.poll_future(resolving.as_mut()) {
@@ -271,13 +277,13 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 								}
 								tracing::warn!(path = %self.path, %err, "broadcast went before it resolved, still waiting");
 								self.serving = Serving::Gone;
-								self.state = match settling {
-									Some((end, deadline)) => State::Settling {
+								self.state = match (live, settling) {
+									(false, Some((end, deadline))) => State::Settling {
 										end,
 										grace: None,
 										deadline,
 									},
-									None => State::Running { settling: None },
+									(_, settling) => State::Running { settling },
 								};
 								continue;
 							}
@@ -300,7 +306,11 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
 						return Poll::Ready(end.clone().map(|()| None));
 					}
-					self.state = State::Following { resolving, settling };
+					self.state = State::Following {
+						resolving,
+						settling,
+						live,
+					};
 					return Poll::Pending;
 				}
 			}
