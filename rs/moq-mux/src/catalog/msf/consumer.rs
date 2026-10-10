@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::task::{Poll, ready};
 
 use base64::Engine;
-use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig};
+use hang::catalog::{AudioCodec, AudioConfig, Container, TextConfig, TextFormat, TextRole, VideoCodec, VideoConfig};
 
 use crate::Result;
 use crate::catalog::hang::{Catalog, CatalogExt};
@@ -94,8 +94,9 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 ///
 /// Each MSF track is mapped onto a `hang::Catalog` rendition based on its [`moq_msf::Role`]:
 /// video tracks become [`VideoConfig`] entries, audio tracks become [`AudioConfig`] entries.
-/// Tracks with no role, with an unsupported role (caption, subtitle, sign language, audio
-/// description, custom roles), or with packaging other than [`moq_msf::Packaging::Loc`],
+/// Caption and subtitle tracks become text renditions; custom roles do too when their codec
+/// identifies text. Tracks with no role, sign language, audio description, other custom roles,
+/// or with packaging other than [`moq_msf::Packaging::Loc`],
 /// [`moq_msf::Packaging::Cmaf`], or [`moq_msf::Packaging::Legacy`] are skipped with a warning.
 ///
 /// [`moq_msf::Packaging::Loc`] and [`moq_msf::Packaging::Legacy`] map to their own containers:
@@ -145,6 +146,16 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Catal
 					);
 				}
 			},
+			moq_msf::Role::Caption | moq_msf::Role::Subtitle => {
+				if let Some(config) = text_config_from_msf(track)? {
+					catalog.text.renditions.insert(track.name.clone(), config);
+				}
+			}
+			moq_msf::Role::Unknown(_) if matches!(track.codec.as_deref(), Some("vtt" | "ttml" | "utf8")) => {
+				if let Some(config) = text_config_from_msf(track)? {
+					catalog.text.renditions.insert(track.name.clone(), config);
+				}
+			}
 			other => {
 				tracing::warn!(track = %track.name, role = %other, "skipping MSF track with unsupported role");
 			}
@@ -208,6 +219,25 @@ fn legacy_description(track: &moq_msf::Track) -> Result<Option<bytes::Bytes>> {
 		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => decode_init_data(track),
 		_ => Ok(None),
 	}
+}
+
+fn text_config_from_msf(track: &moq_msf::Track) -> Result<Option<TextConfig>> {
+	let Some(container) = container_from_msf(track)? else {
+		return Ok(None);
+	};
+	let codec = track
+		.codec
+		.as_deref()
+		.ok_or_else(|| Error::MissingTextCodec(track.name.clone()))?;
+	// Keep unfamiliar codecs unfamiliar: a guessed WebVTT format could make a player render garbage.
+	let mut config = TextConfig::new(TextFormat::from_str(codec)?);
+	config.role = TextRole::from_str(&track.role.as_ref().unwrap().to_string())?;
+	config.lang = track.lang.clone();
+	config.label = track.label.clone();
+	config.container = container;
+	config.jitter = track.jitter;
+	config.delay = track.delay;
+	Ok(Some(config))
 }
 
 fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> {
@@ -425,6 +455,24 @@ mod test {
 	}
 
 	#[test]
+	fn a_text_codec_is_required_and_unknown_formats_are_preserved() {
+		let mut track = moq_msf::Track::new("text", moq_msf::Packaging::Loc);
+		track.role = Some(moq_msf::Role::Caption);
+		assert!(
+			from_msf(&moq_msf::Catalog::new(vec![track.clone()]))
+				.unwrap_err()
+				.to_string()
+				.contains("missing codec")
+		);
+		track.codec = Some("future-text".into());
+		let catalog = from_msf(&moq_msf::Catalog::new(vec![track])).unwrap();
+		assert_eq!(
+			catalog.text.renditions["text"].format,
+			TextFormat::Unknown("future-text".into())
+		);
+	}
+
+	#[test]
 	fn cmaf_video_yields_cmaf_container() {
 		// "AAAYZ2Z0eXA=" decodes to a tiny ftyp-shaped stub; we just verify the bytes
 		// round-trip through base64 into Container::Cmaf.init.
@@ -607,7 +655,7 @@ mod test {
 	#[test]
 	fn unsupported_role_is_skipped() {
 		let mut track = audio_track("caption0", moq_msf::Packaging::Legacy);
-		track.role = Some(moq_msf::Role::Caption);
+		track.role = Some(moq_msf::Role::AudioDescription);
 		let msf = moq_msf::Catalog::new(vec![track]);
 
 		let catalog = from_msf::<()>(&msf).expect("unsupported role should be skipped, not error");

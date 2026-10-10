@@ -118,3 +118,24 @@ test("drops a rendition whose packaging is unknown", () => {
 
 	expect(toHang(catalog).video?.renditions.video).toBeUndefined();
 });
+
+test("converts timed text without guessing its format", () => {
+	for (const codec of ["vtt", "ttml", "utf8", "future-text"]) {
+		const track = { name: "subs", packaging: "loc", role: "caption", codec, lang: "en", label: "SDH" };
+		const text = toHang({ tracks: [track] }).text?.renditions.subs;
+		expect(text?.format).toBe(codec);
+		expect(text?.role).toBe("caption");
+		expect(text?.lang).toBe("en");
+		expect(text?.label).toBe("SDH");
+		expect(text?.container).toEqual({ kind: "loc" });
+	}
+});
+
+test("custom roles map only when the codec identifies text", () => {
+	for (const role of ["commentary", "audiodescription", "signlanguage"]) {
+		const catalog = toHang({ tracks: [{ name: "track", packaging: "legacy", role, codec: "opus" }] });
+		expect(catalog.text).toBeUndefined();
+	}
+	const text = toHang({ tracks: [{ name: "text", packaging: "legacy", role: "commentary", codec: "utf8" }] });
+	expect(text.text?.renditions.text?.role).toBe("commentary");
+});

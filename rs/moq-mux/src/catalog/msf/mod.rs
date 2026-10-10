@@ -10,6 +10,9 @@ mod consumer;
 
 pub use consumer::Consumer;
 
+#[cfg(test)]
+pub(crate) use consumer::from_msf;
+
 /// MSF catalog decoding errors.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -31,6 +34,9 @@ pub enum Error {
 
 	#[error("MSF audio track {0:?} missing codec")]
 	MissingAudioCodec(String),
+
+	#[error("MSF text track {0:?} missing codec")]
+	MissingTextCodec(String),
 
 	#[error("MSF video track {name:?} has invalid codec {codec:?}")]
 	InvalidVideoCodec { name: String, codec: String },

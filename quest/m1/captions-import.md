@@ -29,8 +29,3 @@ for a cue that may be minutes away.
 
 Cover a file with subtitles and no supported text format, a file with several
 subtitle languages, and a file whose subtitle track is empty.
-
-## Related
-
-- [MSF caption roles](/quest/m1/captions-msf.md) - the catalog half of the same
-  gap
