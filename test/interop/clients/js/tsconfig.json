@@ -8,6 +8,7 @@
 		"driver.ts",
 		"harness.ts",
 		"harness.browser.ts",
+		"buffering",
 		"media.ts",
 		"src",
 		"vite.config.ts",
