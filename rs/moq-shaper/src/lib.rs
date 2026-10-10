@@ -475,7 +475,8 @@ impl Shaper {
 	///
 	/// The way a server comes back somewhere new behind a stable address: each
 	/// client keeps its flow, so the new target sees the same source addresses,
-	/// and datagrams already on their way still land at the old target. The new
+	/// and datagrams already on their way still land at the old target, while its
+	/// late replies are dropped. The new
 	/// target must be reachable the way the first one was, loopback or not and
 	/// in the same address family, since the flows' sockets are already bound.
 	pub fn retarget(&self, target: SocketAddr) -> anyhow::Result<()> {
