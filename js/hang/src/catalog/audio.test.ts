@@ -36,3 +36,16 @@ test("audio config accepts optional enabled state", () => {
 
 	expect(config.enabled).toBe(false);
 });
+
+test("audio warmup round trips as optional integer milliseconds", () => {
+	const base = { codec: "opus", container: { kind: "legacy" }, sampleRate: 48_000, numberOfChannels: 2 };
+	expect(AudioConfigSchema.parse(base).warmup).toBeUndefined();
+	for (const warmup of [0, 80, 1_000]) {
+		const config = AudioConfigSchema.parse({ ...base, warmup });
+		expect(Number(config.warmup)).toBe(warmup);
+		expect(AudioConfigSchema.parse(JSON.parse(JSON.stringify(config)))).toEqual(config);
+	}
+	for (const warmup of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+		expect(() => AudioConfigSchema.parse({ ...base, warmup })).toThrow();
+	}
+});
