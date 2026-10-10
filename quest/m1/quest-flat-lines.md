@@ -58,12 +58,10 @@ Remaining:
 - Land each line's umbrella PR with `/quest-complete`, then delete its branch.
   Landed so far: #4403 wildcard, #4034 archive (with #4255 folded in), #4080
   obs-moq-video, #4162 audio-jitter-target, #4180 transport-upgrade, #4437
-  rs2ts (with #4438 folded in), #4640 tstd, and #4653 test-flakes-2. As of
+  rs2ts (with #4438 folded in), #4640 tstd, #4653 test-flakes-2, and #4039
+  auth (UNAUTHORIZED moved to 0x3B). As of
   2026-10-08 four lines remain, and all four conflict with `main` and need
   it merged in again.
-  - #4039 auth: its `wip-version.md` child landed on the line (#5004). The
-    line's UNAUTHORIZED stream code collides with `main`'s NOT_FETCHABLE
-    (0x3A) and moves to 0x3B before it lands.
   - #4079 cpp: `main` merged in again and the `uniffi-bindgen-cpp` pin
     bumped to `v0.11.0-kixelated.4`, whose generated files end with a newline.
   - #4519 ffi-shape: lands now (maintainer, 2026-10-09) with the C++ port
