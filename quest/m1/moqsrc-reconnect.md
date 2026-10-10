@@ -25,11 +25,15 @@ still a session error. Start after #5191 merges.
   status other than 408/429/502/503/504 (`status_retryable`), and a `NotFound`
   path or catalog arrives on a request after a successful redial. Both error
   on the bus instead of redialing forever.
+- Malformed input (a protocol violation or bad catalog) stays fatal too. The
+  reconnect loop retries every established-session error except auth, so the
+  implementation must tell a protocol violation from a dropped connection.
 - Test end to end through a loopback relay: kill the relay mid-playback, keep
   it down past the default 10s budget, restart it, and require frames on the
   same pad by name with no bus error. Publish with `moqsink`, which reconnects
   on its own, so the test exercises `moqsrc` resuming rather than a publisher
-  that never came back.
+  that never came back. A second case refuses the redial (for example a 403)
+  after playback began and requires the terminal bus error.
 - Update `doc/bin/gstreamer.md` so the `moqsrc` lifecycle covers relay loss.
 
 Public API: behavior only (no new property). Wire: none.
