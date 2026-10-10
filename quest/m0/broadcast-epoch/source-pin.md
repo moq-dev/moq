@@ -24,12 +24,21 @@ replacement won in the meantime, it serves that request even without
   happens next (`Replaced`, or a stitch).
 - Decided: pin every resolved path, not only the source's own, so a replaced
   sibling (`broadcast: ./source`) cannot splice in either.
-- `ts::Follower` / `Export::follow` build a new `Source` for the broadcast
-  they follow, so a stitch starts with an empty pin map.
+- The pin lifecycle follows the export's instance. A stitch builds a new
+  `Source` whose own-path entry is seeded with the broadcast `follow` was
+  given (sibling entries start empty), so its first track request can't
+  resolve a newer replacement. A same-epoch return replaces the own-path
+  handle with the returned broadcast, since the old one's routes are gone.
+- The guarantee starts at a path's first resolution. A sibling the catalog
+  first references after a replacement resolves whatever serves it then.
+  The export never held another instance of that path, so that isn't a
+  splice.
 - Tests, with mocked time, on an epochless route: an export resolves `live`,
   a replacement wins `live`, and then a rendition added to the old catalog
   (and an SI repoint) fails rather than reading the replacement. The same
-  for a sibling reference. Today's epoch-pin test (`source.rs`) moves to
-  the handle.
+  for a sibling reference already resolved. A stitch whose replacement is
+  itself replaced before the first track request still reads the broadcast
+  it followed. A same-epoch return reads the returned handle. Today's
+  epoch-pin test (`source.rs`) moves to the handle.
 
 Public API: none (`pinned` is crate-private). Wire: none.

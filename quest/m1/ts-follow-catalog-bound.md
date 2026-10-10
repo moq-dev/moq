@@ -12,8 +12,11 @@ it with nothing going out.
 
 Found while iterating #5147 (2026-10-10), planned the same day. `ts::Follower`
 (`rs/moq-mux/src/container/ts/follower.rs`) carries a linger deadline for a
-return, which #5147 extended to the returned catalog's first snapshot, but a
-mid-stream stitch carries none (`None` for a stitch mid-stream).
+return, which #5147 extended to the returned catalog's first snapshot. A
+stitch that starts after the old broadcast ended inherits that deadline. A
+mid-stream stitch, taken from `Running` while the old instance still serves,
+carries none (`settling: None` in `State::Following`), so its catalog wait is
+unbounded.
 
 - Decided: the linger is the one bound, from the `Restart` to the
   replacement's first catalog snapshot. With `--linger 0` a stitch only
@@ -25,6 +28,7 @@ mid-stream stitch carries none (`None` for a stitch mid-stream).
   answers ends at the linger. One whose catalog answers within it switches
   as today.
 - Docs: the `--stitch` and `--linger` text in `doc/bin/cli.md` and
-  `doc/bin/srt.md`.
+  `doc/bin/srt.md`, including that the default `--linger 0s` lets a stitch
+  follow only a replacement whose catalog is already there.
 
 Public API: none. Behavior: a stitch can now end the export. Wire: none.
