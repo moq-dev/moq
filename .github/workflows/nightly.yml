@@ -225,7 +225,7 @@ jobs:
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `gh test` exercises the release tooling, which no pull request runs.
-        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test"]
+        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test rs2ts"]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main

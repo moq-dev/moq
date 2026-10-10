@@ -1,0 +1,20 @@
+set working-directory := '../../..'
+
+# Compare the handwritten semantic mappings against a native Rust oracle.
+check:
+    mkdir -p .scratch/rs2ts
+    bun install --frozen-lockfile
+    bunx tsc --project rs/rs2ts/prototype/tsconfig.json
+    bunx biome check rs/rs2ts/prototype
+    rustfmt --edition 2024 --check rs/rs2ts/prototype/probe.rs
+    python3 rs/rs2ts/prototype/emit.test.py
+    rustc --edition 2024 -D warnings rs/rs2ts/prototype/probe.rs -o .scratch/rs2ts/probe
+    RS2TS_PROBE="$PWD/.scratch/rs2ts/probe" bun test rs/rs2ts/prototype/runtime.test.ts
+
+# Measure the exact-integer mappings without an acceptance threshold.
+bench:
+    bun rs/rs2ts/prototype/bench.ts
+
+# Regenerate with Charon 0.1.284 on PATH, using its pinned toolchain.
+extract:
+    bash rs/rs2ts/prototype/extract.sh
