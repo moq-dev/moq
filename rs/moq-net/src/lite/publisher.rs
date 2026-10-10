@@ -2786,14 +2786,19 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			None if floored && self.ctx.version.resolves_start() => Some(0),
 			None => None,
 		};
-		if let Some(start) = lowered {
-			self.track.start_at(start);
-			// The subscriber owes itself the groups it newly asks for, so the drops at the
-			// end count from there too.
-			self.start = self.start.map(|resolved| resolved.min(start));
-		}
 		if let Some(served) = &mut self.served {
 			served.set_grace(tail::grace(upd.max_delay));
+		}
+		if let Some(start) = lowered {
+			self.track.start_at(start);
+			// The subscriber owes itself the groups it newly asks for and restarts their
+			// gap ages, so the drops at the end count from there too, on the same clock.
+			if let Some(resolved) = self.start {
+				if let Some(served) = &mut self.served {
+					served.demand(start..resolved, self.ctx.runtime.now());
+				}
+				self.start = Some(resolved.min(start));
+			}
 		}
 		self.track
 			.end_at(upd.end_group.map_or(Bound::Unbounded, Bound::Included));
@@ -2948,10 +2953,13 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// skipped sequence), and groups the cursor passed over (stale, or missing their head).
 	fn drop_unserved(&mut self, writer: &mut Writer<S::SendStream, Version>) -> Result<(), Error> {
 		let (Some(served), Some(start)) = (&mut self.served, self.start) else {
-			// Nothing served, so nothing is owed.
+			// Without a SUBSCRIBE_START the subscriber owes itself no group (see
+			// `SubStream::owed`) and settles on the FIN alone, so there is nothing to drop.
 			return Ok(());
 		};
 		let Poll::Ready(Ok(fin)) = self.track.poll_finished(&kio::Waiter::noop()) else {
+			// A track closed without a final sequence sent no SUBSCRIBE_END, so the subscriber
+			// owes itself no range either.
 			return Ok(());
 		};
 		// A cap below the end bounds what the subscriber is owed, as on its side.
@@ -4006,6 +4014,43 @@ mod serve_group_test {
 		// Group 2 arrived before the subscription and the cursor has passed it, so it was
 		// never served either.
 		assert_eq!(drops(writer, &log, version).await, [(0, 4), (6, 6)]);
+	}
+
+	/// A lowered start restarts the age of the gaps it newly asks for, as the subscriber does,
+	/// so a gap below the old start isn't folded away on the time before the update.
+	#[moq_net_sim::test]
+	async fn the_end_drops_below_a_lowered_start_after_the_grace() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscription = track::Subscription::default()
+			.with_start(track::Position::group(5))
+			.with_max_delay(Duration::from_secs(1));
+		let subscriber = track.subscribe(subscription);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 5, 0);
+		while run.start.is_none() {
+			let step = run.poll_step(&mut writer, &kio::Waiter::noop());
+			assert!(step.is_ready(), "the start never resolved");
+		}
+
+		moq_net_sim::advance(Duration::from_secs(2)).await;
+		run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_delay: Duration::from_secs(1),
+			start_group: Some(0),
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		{
+			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			write_group(&mut track, 2, 0);
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			track.finish_at(6).unwrap();
+			drop(track);
+			run.await.unwrap();
+		}
+		assert_eq!(drops(writer, &log, version).await, [(0, 1), (3, 4)]);
 	}
 
 	/// A gap older than the subscriber's grace is one it no longer waits for, so the run loop
