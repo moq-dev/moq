@@ -8,17 +8,19 @@ triage that were left out of the first batch, each as its own PR onto
 
 ## Plan
 
-The first batch (#5120 through #5135, plus #5164) covered every crash, leak,
-and interop break the triage found. These children are smaller release-only
-patches; most can't cherry-pick because `main` built them on work `release`
-lacks (#4741, #4268, #4658's `request_stream.rs`). Write the release patch
-against release's own code, carry the original regression test, and confirm
-it fails on `release` first. Interop at Seattle (2026-10-12) may raise or
-drop each one's priority.
+The first batch (#5120 through #5135, plus #5164, some still landing) covers
+every crash, leak, and interop break the triage found. These children are
+smaller release-only patches; most can't cherry-pick because `main` built them
+on work `release` lacks (#4741, #4268, main's `decode_params!` syntax).
+`release` does have `rs/moq-net/src/ietf/request_stream.rs` since #5133, with
+`fin_cancels` and `poll_cancel`; extend it rather than writing around it.
+Write the release patch against release's own code, carry the original
+regression test, and confirm it fails on `release` first. Interop at Seattle
+(2026-10-12) may raise or drop each one's priority.
 
-The `release` interop matrix only negotiates moq-lite, so IETF changes need
-unit tests or `just test bare-fin`-style coverage rather than `just test
-interop`.
+The `release` interop matrix only negotiates moq-lite, so IETF changes also
+need unit tests or `just test bare-fin`-style coverage. Still run `just test
+interop --all`, as AGENTS.md requires for wire changes.
 
 ## Required
 
