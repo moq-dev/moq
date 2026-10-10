@@ -972,7 +972,15 @@ export class Subscriber {
 		priority: number,
 		group: netGroup.Producer,
 	): Promise<void> {
+		const refused = unauthorized(broadcast);
+		// Arm before checking so revocation during setup or response cannot be missed.
+		const disposeGrant = this.#grant?.subscribe(() => {
+			if (this.#denied(broadcast)) group.close(refused);
+		});
+		void group.closed.then(() => disposeGrant?.());
+
 		try {
+			if (this.#denied(broadcast)) throw refused;
 			if (!supportsTrackStream(this.version)) {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
@@ -1010,24 +1018,30 @@ export class Subscriber {
 		priority: number,
 		group: netGroup.Producer,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
-		const answered = this.#trackInfo(broadcast, epoch, track);
+		const cancel = new AbortController();
+		void group.closed.then((err) => cancel.abort(err ?? new StreamError(StreamCode.Cancel)));
+		const answered = this.#trackInfo(broadcast, epoch, track, cancel.signal);
 		// Only the properties are needed, so the TRACK stream closes however the wait ends.
 		answered.then(
 			({ stream }) => stream.close(),
 			() => {},
 		);
 		const { info } = await untilClosed(group, answered);
-		return this.#exchange({ sendOrder: sendOrder({ priority }), version: this.version }, async (stream) => {
-			await stream.writer.u53(StreamId.Fetch);
-			await new FetchMessage({ broadcast, epoch, track, priority, group: sequence }).encode(
-				stream.writer,
-				this.version,
-			);
-			// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
-			// done() buffers that byte so the response pump can decode it normally.
-			await untilClosed(group, stream.reader.done());
-			return { stream, info };
-		});
+		return this.#exchange(
+			{ sendOrder: sendOrder({ priority }), version: this.version },
+			async (stream) => {
+				await stream.writer.u53(StreamId.Fetch);
+				await new FetchMessage({ broadcast, epoch, track, priority, group: sequence }).encode(
+					stream.writer,
+					this.version,
+				);
+				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
+				// done() buffers that byte so the response pump can decode it normally.
+				await untilClosed(group, stream.reader.done());
+				return { stream, info };
+			},
+			cancel.signal,
+		);
 	}
 
 	// Read the FETCH response (bare zigzag-delta-timestamped frames) into the group, then
