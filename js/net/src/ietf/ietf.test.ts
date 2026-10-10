@@ -1945,3 +1945,56 @@ test("Subscribe v16: rejects INCLUDE_PROPERTIES", async () => {
 	const body = framed([...TRACK_HEAD, 0x01, 0x35, 0x01, 0x00]);
 	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow();
 });
+
+for (const version of [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	for (const kind of [0x20n, 0x21n, 0x9dn, 0x11cn]) {
+		test(`SETUP ${version}: repeated unknown option ${kind}`, async () => {
+			const { stream, written } = createTestWritableStream();
+			const writer = new Writer(stream, version);
+			if (version <= Version.DRAFT_16) await writer.u53(2);
+			await writer.u62(kind);
+			for (let i = 0; i < 2; i++) {
+				if (i > 0) await writer.u62(version <= Version.DRAFT_15 ? kind : 0n);
+				if (kind % 2n === 0n) await writer.u62(1n);
+				else {
+					await writer.u53(1);
+					await writer.u8(1);
+				}
+			}
+			await writer.close();
+			await writer.closed;
+			await SetupOptions.decode(new Reader(undefined, concatChunks(written), version), version);
+		});
+	}
+}
+
+for (const version of [
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	test(`SETUP ${version}: known options cannot repeat`, async () => {
+		for (const bytes of [new Uint8Array([4, 1, 0, 2]), new Uint8Array([7, 1, 97, 0, 1, 98])]) {
+			await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(
+				/duplicate/,
+			);
+		}
+	});
+	test(`SETUP ${version}: repeated unknown options still require complete values`, async () => {
+		const bytes = new Uint8Array([0x21, 1, 97, 0, 2, 98]);
+		await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow();
+	});
+}

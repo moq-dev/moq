@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map};
+use std::collections::HashMap;
 
 use bytes::Buf;
 use num_enum::{FromPrimitive, IntoPrimitive};
@@ -82,20 +82,21 @@ impl Decode<Version> for Parameters {
 
 					if kind % 2 == 0 {
 						let kind = ParameterVarInt::from(kind);
-						match vars.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
-						};
+						// Unknown SETUP options may repeat, but their values must still decode.
+						if !matches!(kind, ParameterVarInt::Unknown(_)) && vars.contains_key(&kind) {
+							return Err(DecodeError::Duplicate);
+						}
+						vars.insert(kind, u64::decode(&mut r, version)?);
 					} else {
 						let kind = ParameterBytes::from(kind);
 						let val = Vec::<u8>::decode(&mut r, version)?;
 						if val.len() > MAX_KVP_VALUE_LEN {
 							return Err(DecodeError::BoundsExceeded);
 						}
-						match bytes.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(val),
-						};
+						if !matches!(kind, ParameterBytes::Unknown(_)) && bytes.contains_key(&kind) {
+							return Err(DecodeError::Duplicate);
+						}
+						bytes.insert(kind, val);
 					}
 				}
 			}
@@ -119,20 +120,21 @@ impl Decode<Version> for Parameters {
 
 					if abs % 2 == 0 {
 						let kind = ParameterVarInt::from(abs);
-						match vars.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
-						};
+						// Unknown SETUP options may repeat, but their values must still decode.
+						if !matches!(kind, ParameterVarInt::Unknown(_)) && vars.contains_key(&kind) {
+							return Err(DecodeError::Duplicate);
+						}
+						vars.insert(kind, u64::decode(&mut r, version)?);
 					} else {
 						let kind = ParameterBytes::from(abs);
 						let val = Vec::<u8>::decode(&mut r, version)?;
 						if val.len() > MAX_KVP_VALUE_LEN {
 							return Err(DecodeError::BoundsExceeded);
 						}
-						match bytes.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(val),
-						};
+						if !matches!(kind, ParameterBytes::Unknown(_)) && bytes.contains_key(&kind) {
+							return Err(DecodeError::Duplicate);
+						}
+						bytes.insert(kind, val);
 					}
 				}
 			}
@@ -597,6 +599,66 @@ mod tests {
 	use super::super::Filter;
 	use super::*;
 	use bytes::{Buf, Bytes, BytesMut};
+
+	#[test]
+	fn setup_allows_repeated_unknown_options() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for kind in [0x20u64, 0x21, 0x9d, 0x11c] {
+				let mut buf = Vec::new();
+				if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+					2u64.encode(&mut buf, version).unwrap();
+				}
+				kind.encode(&mut buf, version).unwrap();
+				for i in 0..2 {
+					if i > 0 {
+						let next = if matches!(version, Version::Draft14 | Version::Draft15) {
+							kind
+						} else {
+							0
+						};
+						next.encode(&mut buf, version).unwrap();
+					}
+					if kind % 2 == 0 {
+						1u64.encode(&mut buf, version).unwrap();
+					} else {
+						vec![1u8].encode(&mut buf, version).unwrap();
+					}
+				}
+				Parameters::decode(&mut buf.as_slice(), version).expect("unknown SETUP options may repeat");
+			}
+		}
+	}
+
+	#[test]
+	fn setup_repeated_options_require_valid_values() {
+		for version in [
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for bytes in [&[4, 1, 0, 2][..], &[7, 1, b'a', 0, 1, b'b'][..]] {
+				assert!(matches!(
+					Parameters::decode(&mut &bytes[..], version),
+					Err(DecodeError::Duplicate)
+				));
+			}
+			assert!(Parameters::decode(&mut &[0x21, 1, b'a', 0, 2, b'b'][..], version).is_err());
+		}
+	}
+
 
 	// ---- Setup Parameters tests (unchanged) ----
 
