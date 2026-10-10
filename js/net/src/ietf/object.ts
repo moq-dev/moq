@@ -25,7 +25,8 @@ const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 // object 0 is still the head, and any other first ID is dropped.
 const FIRST_OBJECT_BIT = 0x40;
 
-function hasFirstObjectBit(version: IetfVersion): boolean {
+/** Whether the subgroup header carries FIRST_OBJECT: draft-18 and later, not drafts 14-17. */
+export function hasFirstObjectBit(version: IetfVersion): boolean {
 	switch (version) {
 		case Version.DRAFT_14:
 		case Version.DRAFT_15:
@@ -343,11 +344,14 @@ export class Frame {
 
 		// Defined on every implemented draft, whether or not the header marks the group's end.
 		if (status === END_OF_TRACK) return new Frame({ endOfTrack: true });
+		// Allowed even when the header marks the group's end: that bit only lets a FIN imply it,
+		// and imquic sends both.
+		if (status === GROUP_END) return new Frame();
 
 		if (flags.hasEnd) {
 			// Empty frame
 			if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
-		} else if (status === 0 || status === GROUP_END) {
+		} else if (status === 0) {
 			// TODO status === 0 should be an empty frame, but moq-rs seems to be sending it incorrectly on group end.
 			return new Frame();
 		}

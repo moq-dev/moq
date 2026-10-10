@@ -26,6 +26,13 @@ maps everything else to "not supported" or a harmless equivalent. The
 [moq-lite page](/concept/moq-lite#what-moq-lite-leaves-out) lists the
 differences.
 
+On draft 19 and later, a requester can FIN its request stream while a Rust
+publisher keeps its `SUBSCRIBE` or `SUBSCRIBE_NAMESPACE` active; cancellation
+uses `RESET_STREAM` or `STOP_SENDING`. From draft 17, a subscription
+`REQUEST_UPDATE` can change subscriber priority; other changes are refused with
+`NOT_SUPPORTED` and end the subscription with `UPDATE_FAILED`. Drafts 14 to 18
+retain FIN cancellation.
+
 Rust and JavaScript subscribers accept object extension blocks up to 64 KiB.
 This is an implementation limit, not a limit in the IETF draft. A larger
 declared block stops its subgroup stream with `MALFORMED_TRACK` before reading

@@ -15,7 +15,7 @@ import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
-import { ALPN, Version } from "./version.ts";
+import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_19;
 
@@ -860,20 +860,24 @@ function encodeObjects(deltas: number[]): Uint8Array {
  * A subscriber with one track subscribed and answered, which is what registers {@link ALIAS}
  * and lets a group stream naming it be handled.
  */
-async function subscribeTrack(): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const session = new NativeSession(pair.server, VERSION, true);
+async function subscribeTrack(
+	version: IetfVersion = VERSION,
+): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
+	const pair = createMockTransportPair(version === Version.DRAFT_16 ? ALPN.DRAFT_16 : ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
+	peer.reader.version = version;
+	peer.writer.version = version;
 
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, VERSION);
+	const request = await Subscribe.decode(peer.reader, version);
 	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
 
 	return { subscriber, track };
 }
@@ -1006,6 +1010,34 @@ test("a clear FIRST_OBJECT at object 0 is the whole group", async () => {
 });
 
 /**
+ * The END_OF_GROUP header bit only lets a FIN imply the group's end, so an explicit
+ * END_OF_GROUP status on the same stream ends the group there rather than failing it.
+ */
+test("an END_OF_GROUP status on a marked stream finishes the group", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	const flags = groupFlags(true);
+	expect(flags.hasEnd).toBe(true);
+	// Objects 0..4, then object 5 as a zero-length END_OF_GROUP (0x3) status.
+	const objects = new Uint8Array([...encodeObjects([0, 0, 0, 0, 0]), 0, 0, 0x3]);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags }),
+		new Reader(undefined, objects, VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	expect(group?.sequence).toBe(3);
+	if (!group) return;
+	for (let i = 0; i < 5; i++) {
+		expect(await group.readString()).toBe("object 0");
+	}
+	expect(await group.readFrame()).toBeUndefined();
+	expect(await group.closed).toBeNull();
+
+	track.close();
+});
+
+/**
  * A clear FIRST_OBJECT whose first ID is not 0 still has a hole at the front, so the
  * stream is dropped and the track resumes at the next group.
  */
@@ -1027,6 +1059,49 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
 	const group = await track.ordered().nextGroup();
 	expect(group?.sequence).toBe(4);
 
+	track.close();
+});
+
+/**
+ * Drafts 14-17 have no FIRST_OBJECT bit, so a subgroup that starts at the live edge
+ * arrives with `firstObject` forced on and a non-zero first delta. That stream is the
+ * in-progress group: drop it, keep the subscription, and deliver the next group, which
+ * starts at object 0. A gap after an object was delivered still fails that group.
+ */
+test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", async () => {
+	const version = Version.DRAFT_16;
+	const { subscriber, track } = await subscribeTrack(version);
+
+	// The header cannot say otherwise on this draft: decode reports firstObject.
+	const whole = groupFlags(true);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([2, 0]), version),
+	);
+	expect(track.latest()).toBeUndefined();
+	expect(track.closed.peek()).toBeUndefined();
+
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([0, 0]), version),
+	);
+
+	const ordered = track.ordered();
+	const group = await ordered.nextGroup();
+	expect(group?.sequence).toBe(4);
+	expect(await group?.readString()).toBe("object 0");
+
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 5, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([0, 5]), version),
+	);
+	const gapped = await ordered.nextGroup();
+	expect(gapped?.sequence).toBe(5);
+	expect(await gapped?.readString()).toBe("object 0");
+	await expect(gapped?.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
+	expect(track.closed.peek()).toBeUndefined();
+
+	ordered.close();
 	track.close();
 });
 

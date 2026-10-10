@@ -467,12 +467,12 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// The origin naming this link for split-horizon (`Route.via`) when the peer
 	// declares none of its own (see `session_route`). Base moq-transport carries no
 	// hop ids, so a peer only has an identity if it negotiated the MoQ Cluster
-	// extension or the caller assigned it one (`Client::with_peer_hop`).
+	// extension; otherwise this is the one the session assigned it (a fresh id per
+	// dialed or accepted session, unless the caller pinned one with `with_peer_hop`),
+	// or `Hop::UNKNOWN` (0) when none was assigned.
 	//
-	// Otherwise this is `Hop::UNKNOWN` (0), the reserved "no identity" value.
 	// The assigned id stays local: it is never written into a hop chain, so a peer
-	// that withheld an identity is not named on the wire. A server answers it per
-	// accepted session; a client only when it knows the peer.
+	// that withheld an identity is not named on the wire.
 	session_origin: crate::Hop,
 	// A random Hop ID of this connection's own, written as the first hop of any path
 	// that arrives naming no publisher, so a publisher that reconnects reads downstream
@@ -2647,7 +2647,6 @@ where
 struct GroupIngest {
 	runtime: crate::time::Clock,
 	has_extensions: bool,
-	has_end: bool,
 	timescale: Option<Timescale>,
 	version: Version,
 	prior_object: Option<u64>,
@@ -2683,7 +2682,6 @@ impl GroupIngest {
 		Self {
 			runtime: subscriber.runtime.clone(),
 			has_extensions: group.flags.has_extensions,
-			has_end: group.flags.has_end,
 			timescale,
 			version: subscriber.version,
 			prior_object: None,
@@ -3505,7 +3503,9 @@ impl GroupIngest {
 						let frame = group.create_frame_owned(frame::Info { size: 0, timestamp }, &self.budget)?;
 						frame.finish()?;
 						self.phase = IngestPhase::Delta;
-					} else if status == END_OF_GROUP && !self.has_end {
+					} else if status == END_OF_GROUP {
+						// Allowed even when the header marks the group's end: that bit only
+						// lets a FIN imply it, and imquic sends both.
 						self.phase = IngestPhase::Finished(Ended::Group);
 					} else if status == END_OF_TRACK {
 						// Defined on every implemented draft, whether or not the header marks
@@ -7048,6 +7048,39 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].1, b"whole");
 		assert_eq!(frames[1].1, b"next");
+	}
+
+	/// The END_OF_GROUP header bit only lets a FIN imply the group's end, so an explicit
+	/// END_OF_GROUP status on the same stream ends the group there rather than failing it.
+	#[tokio::test]
+	async fn an_end_of_group_status_on_a_marked_stream_finishes_the_group() {
+		use futures::FutureExt;
+
+		let payloads: [&[u8]; 5] = [b"o0", b"o1", b"o2", b"o3", b"o4"];
+		let mut bytes = draft18_subgroup(SEQUENCE, true, 0, &payloads);
+		// Object 5: the id delta, an empty extension block, a zero size, and the status.
+		for value in [0u64, 0, 0, END_OF_GROUP] {
+			value.encode(&mut bytes, Version::Draft18).unwrap();
+		}
+		let flags = ietf::GroupFlags::decode(u64::from(bytes[0]), Version::Draft18).unwrap();
+		assert!(flags.has_end, "the header marks the group's end");
+
+		let mut h = Harness::new(Fill::Done, vec![bytes]);
+		h.subscriber.version = Version::Draft18;
+		let mut consumer = h.track.subscribe(None);
+		let mut stream = read_draft18(&h.session).await;
+
+		h.subscriber.clone().recv_group(&mut stream).await.expect("the group");
+
+		// The stream was read to its end, so everything is already delivered.
+		let mut group = consumer.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(group.sequence, SEQUENCE);
+		for payload in payloads {
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(frame.payload.as_ref(), payload);
+		}
+		let end = group.read_frame().now_or_never().expect("the group is closed");
+		assert!(matches!(end, Ok(None)), "the group is finished, not aborted: {end:?}");
 	}
 
 	/// A clear FIRST_OBJECT whose first ID is not 0 still has a hole at the front, so
