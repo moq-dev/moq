@@ -470,6 +470,10 @@ struct State {
 	/// The loop's [`Draining`] predecessor and its handover deadline, so
 	/// [`Connection::close`] drains it too without overstaying that window.
 	predecessor: Option<(moq_net::Session, tokio::time::Instant)>,
+	/// A QUIC upgrade's session, from our SETUP until it takes over or is dropped, so
+	/// [`Connection::close`] and [`Connection::abort`] end it too. The peer already holds
+	/// it open, and the loop's teardown would only drop it after they return.
+	upgrade: Option<moq_net::Session>,
 }
 
 /// The producer side of everything a [`Connection`] handle can observe.
@@ -508,6 +512,21 @@ impl Shared {
 			state.version = Some(session.version());
 			state.transport = Some(transport);
 			state.session = Some(session.clone());
+			// Whatever upgrade was coming up has taken over or is superseded.
+			state.upgrade = None;
+		}
+	}
+
+	/// A QUIC upgrade's session exists, or (`None`) no longer needs ending on its own.
+	fn upgrading(&self, session: Option<&moq_net::Session>) {
+		// Held across the publish, as in `connected`.
+		let closed = self.closed.lock().unwrap();
+		if let (Some(err), Some(session)) = (closed.as_ref(), session) {
+			session.abort(err.clone());
+			return;
+		}
+		if let Ok(mut state) = self.state.write() {
+			state.upgrade = session.cloned();
 		}
 	}
 
@@ -543,6 +562,7 @@ impl Shared {
 			state.version = None;
 			state.transport = None;
 			state.session = None;
+			state.upgrade = None;
 		}
 		let _ = self.send_bw.set(None);
 		let _ = self.recv_bw.set(None);
@@ -738,11 +758,15 @@ impl Connection {
 	pub fn abort(&self, err: moq_net::Error) {
 		// Record the close and take the session under one lock, so a redial landing
 		// in the abort window is refused rather than parked: see [`CloseGuard`].
-		let session = {
+		let (session, upgrade) = {
 			let mut closed = self.task.closed.lock().unwrap();
 			*closed = Some(err.clone());
-			self.state.read().session.clone()
+			let state = self.state.read();
+			(state.session.clone(), state.upgrade.clone())
 		};
+		if let Some(upgrade) = upgrade {
+			upgrade.abort(err.clone());
+		}
 		if let Some(session) = session {
 			session.abort(err);
 		}
@@ -751,6 +775,7 @@ impl Connection {
 
 	/// Stop the loop for every clone, closing the live session (and any predecessor
 	/// still finishing after a GOAWAY) once the data it queued has been delivered.
+	/// A QUIC upgrade still in its handshake has served nothing, so it closes at once.
 	///
 	/// See [`moq_net::Session::close`]: finished tracks deliver their last groups and
 	/// FIN and announcements are withdrawn first, bounded by a one second deadline
@@ -759,11 +784,11 @@ impl Connection {
 	/// when nothing was live, and a session's error if it did not drain.
 	pub async fn close(self) -> crate::Result<()> {
 		// Refuse redials and take the sessions under one lock: see [`CloseGuard`].
-		let (session, predecessor) = {
+		let (session, predecessor, upgrade) = {
 			let mut closed = self.task.closed.lock().unwrap();
 			*closed = Some(moq_net::Error::Cancel);
 			let state = self.state.read();
-			(state.session.clone(), state.predecessor.clone())
+			(state.session.clone(), state.predecessor.clone(), state.upgrade.clone())
 		};
 		self.task.handle.abort();
 		let session = async move {
@@ -786,7 +811,13 @@ impl Connection {
 				}
 			}
 		};
-		let (session, predecessor) = tokio::join!(session, predecessor);
+		let upgrade = async move {
+			if let Some(upgrade) = upgrade {
+				upgrade.abort(moq_net::Error::Cancel);
+				upgrade.closed().await;
+			}
+		};
+		let (session, predecessor, ()) = tokio::join!(session, predecessor, upgrade);
 		Ok(session.and(predecessor)?)
 	}
 
@@ -856,6 +887,8 @@ impl Connection {
 							}
 						}
 					};
+					// Any upgrade still coming up is dropped with the session it was replacing.
+					shared.upgrading(None);
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
@@ -1474,6 +1507,7 @@ fn poll_upgrade(
 	while let Some(pending) = upgrade.as_mut() {
 		match ready!(pending.poll(waiter)) {
 			Ok(crate::client::Step::Handshaking) => shared.migrating(),
+			Ok(crate::client::Step::Session(session)) => shared.upgrading(Some(&session)),
 			Ok(crate::client::Step::Done(session, transport)) => {
 				*upgrade = None;
 				return Poll::Ready((session, transport));
@@ -1483,6 +1517,7 @@ fn poll_upgrade(
 				// either way: this session was serving throughout.
 				tracing::debug!(%err, "QUIC upgrade failed; staying on WebSocket");
 				shared.stayed();
+				shared.upgrading(None);
 				*upgrade = None;
 			}
 		}
@@ -2644,6 +2679,56 @@ mod tests {
 
 		write(b"g1");
 		assert_eq!(next_group(&mut sub).await, 1);
+	}
+
+	/// Aborting while a QUIC upgrade is still in its MoQ handshake ends the upgrade's
+	/// session too, with the caller's error, before `abort` returns.
+	///
+	/// Left to the loop's teardown, the session would only be dropped once the aborted
+	/// task unwound, with a bare cancel. A process that exits in between, as an embedder
+	/// does right after `abort` or `close`, leaves the server to time the connection out.
+	/// The error the server reads is what tells the two paths apart.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[tokio::test]
+	async fn abort_ends_an_upgrade_in_flight() {
+		let origin = crate::origin::spawn();
+		let mut fallback = Fallback::start(&origin, Quic::Refused).await;
+
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(crate::origin::spawn());
+		let mut connection = tokio::time::timeout(UPGRADE_WAIT, client.connect(fallback.url.clone()).established())
+			.await
+			.expect("never connected")
+			.unwrap();
+		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+		let _websocket = fallback.accept().await;
+
+		// The QUIC transport comes up and its handshake waits on the server's answer.
+		fallback.forwarder.open();
+		let request = fallback.held().await;
+		let status = tokio::time::timeout(UPGRADE_WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Migrating);
+
+		connection.abort(moq_net::Error::GoawayTimeout);
+		let closed = async {
+			match request.ok().await {
+				Ok(session) => session.closed().await,
+				Err(err) => panic!("the server could not answer the upgrade: {err}"),
+			}
+		};
+		let err = tokio::time::timeout(UPGRADE_WAIT, closed)
+			.await
+			.expect("the upgrade's connection was left open");
+		let code = |err: &moq_net::Error| moq_net::SessionError::from(err).to_code();
+		assert_eq!(
+			code(&err),
+			code(&moq_net::Error::GoawayTimeout),
+			"the upgrade ended without the abort's error: {err}"
+		);
 	}
 
 	/// When WebSocket wins the race but its MoQ handshake fails, the attempt falls back
