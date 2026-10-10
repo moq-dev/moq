@@ -2673,6 +2673,34 @@ impl Consumer {
 		}
 	}
 
+	/// Poll for group `sequence` the way the live feed delivers it: `Some` once it is
+	/// cached, `None` once the feed will not deliver it (it went past it, starts past it,
+	/// or ended), and pending while it still may. A spliced copy has no feed of its own.
+	pub(crate) fn poll_group(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			return Poll::Ready(None);
+		};
+		let res = state.poll(waiter, |state| {
+			if let Some(slot) = state.lookup.get(&sequence)
+				&& !slot.group.is_aborted()
+			{
+				return Poll::Ready(Some(slot.group.consume()));
+			}
+			let passed = state.max_sequence.is_some_and(|newest| newest > sequence)
+				|| state.start_sequence.is_some_and(|start| start > sequence)
+				|| state.final_sequence.is_some_and(|fin| fin <= sequence);
+			match passed {
+				true => Poll::Ready(None),
+				false => Poll::Pending,
+			}
+		});
+		match res {
+			Poll::Ready(Ok(group)) => Poll::Ready(group),
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
 	/// A cached group by sequence, under the same terms as [`Self::peek_latest`]. Unlike a
 	/// fetch, a peek does not refresh the group's cache standing, so it never keeps a
 	/// group alive over one a subscriber actually read; an aborted (evicted) group is a
