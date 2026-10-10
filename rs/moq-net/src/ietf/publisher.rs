@@ -2719,6 +2719,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		let mut subscription = self.track.subscription();
 		subscription.priority = priority;
 		self.track.update(subscription)?;
+		// Only a closed channel refuses the write, and this is the producer, which never closes it.
 		if let Ok(mut current) = self.priority.write() {
 			*current = priority;
 		}
@@ -3002,6 +3003,8 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 		// A REQUEST_UPDATE can move the subscriber priority while this stream is open.
+		// Serve and Closed, the only states holding a writer, apply the change; Open
+		// reads the current value once it gets its stream.
 		let applied = self.applied;
 		let mut moved = match self.priority.poll(waiter, |priority| match **priority == applied {
 			true => Poll::Pending,
@@ -3665,6 +3668,49 @@ mod group_priority_test {
 
 		assert!(matches!(futures::poll!(serving.as_mut()), Poll::Ready(Err(Error::Old))));
 		assert_eq!(log.resets(), vec![crate::StreamError::Cancel.to_code()]);
+	}
+
+	/// A stream parked on its FIN acknowledgement still follows each priority update.
+	#[moq_net_sim::test]
+	async fn unacknowledged_fin_follows_priority_updates() {
+		let session = SinkSession::new(Default::default()).with_unacked_fin();
+		let log = session.log.clone();
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"done".as_slice()).unwrap();
+		let consumer = group.consume();
+		group.finish().unwrap();
+
+		let priority = kio::Producer::new(200);
+		let mut serve = GroupServe::new(
+			session,
+			ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			},
+			priority.consume(),
+			consumer,
+			Some(Timescale::default()),
+			Version::Draft19,
+			GroupSlice::default(),
+		);
+		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"the FIN is unacknowledged"
+		);
+		assert_eq!(log.priorities(), vec![200]);
+
+		*priority.write().ok().unwrap() = 100;
+		assert!(futures::poll!(serving.as_mut()).is_pending());
+		assert_eq!(log.priorities(), vec![200, 100]);
+
+		*priority.write().ok().unwrap() = 50;
+		assert!(futures::poll!(serving.as_mut()).is_pending());
+		assert_eq!(log.priorities(), vec![200, 100, 50]);
 	}
 
 	/// The final payload remains guarded after its frame has advanced the group cursor.
