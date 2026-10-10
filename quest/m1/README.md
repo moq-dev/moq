@@ -127,7 +127,6 @@ ladders.
 - [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every listener on both runtimes shares one reloadable served identity, so rotation is atomic and generate works with workers
 - [Benchmark regressions in CI](/quest/m1/bench-ci.md) - PRs get a non-blocking comparison of the Criterion benches they affect, and a nightly trend on main alerts on regressions
-- [Parked-read bench budget](/quest/m1/parked-read-bench-budget.md) - `track_parked_read` completes at default settings instead of expiring its parked reads mid-warm-up
 - [Mergeable bench buckets](/quest/m1/bench-buckets.md) - moq-bench emits per-interval latency buckets that sum across processes and hosts
 - [Relay session bench](/quest/m1/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Session burst hang](/quest/m1/session-burst-hang.md) - the burst sweep completes at 16 subscriptions and 16+ groups per round
