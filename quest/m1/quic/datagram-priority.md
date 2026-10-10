@@ -61,8 +61,8 @@ Decided 2026-10-10 with the maintainer:
   domain. Decided 2026-10-10 after review: a connection-wide comparison let
   one busy high-priority broadcast evict every datagram of another. Sending
   never blocks, so the poll-shaped `poll_send_datagram` becomes a
-  synchronous `send_datagram` that can't represent Pending, and moq-tokio (drop oldest today) and moq-uring (drop newest today) behave the
-  same. Each runtime keeps its current budget size. Rejected: RTT-based
+  synchronous `send_datagram` that can't represent Pending, and moq-tokio
+  (drop oldest today) and moq-uring (drop newest today) behave the same. Each runtime keeps its current budget size. Rejected: RTT-based
   expiry (a timer path and a tuning constant) and per-group budgets (memory
   grows with subscriptions).
 - **Draft:** add a sentence to the Prioritization section of
