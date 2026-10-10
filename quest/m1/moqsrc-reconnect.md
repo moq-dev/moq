@@ -5,7 +5,7 @@
 `moqsrc` survives losing its relay connection: it redials with moq-tokio's
 reconnect loop, keeps its pads, and resumes on the next `Start`, as it
 already does for a publisher restart. Only a refusal (`NotFound`,
-`Unauthorized`) is fatal.
+`Unauthorized`, `Forbidden`) is fatal.
 
 ## Plan
 
