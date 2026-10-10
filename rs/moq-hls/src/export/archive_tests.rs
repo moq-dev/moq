@@ -371,7 +371,25 @@ async fn three_segments() -> Recording {
 
 /// `count` 2s segments, laid out like [`three_segments`].
 async fn segments(count: u64) -> Recording {
+	segments_with(count, None).await
+}
+
+async fn bounded_segments(count: u64) -> Recording {
+	segments_with(count, Some(4)).await
+}
+
+async fn segments_with(count: u64, checkpoint: Option<usize>) -> Recording {
 	let mut recording = Recording::new(&["360p", "1080p", "audio"]).await;
+	if let Some(limit) = checkpoint {
+		for encoder in recording.encoders.values_mut() {
+			encoder.encoder = window::Encoder::new(
+				window::ProducerConfig::default()
+					.with_compression(true)
+					.with_checkpoint_records(limit)
+					.with_op_ratio(0),
+			);
+		}
+	}
 	for segment in 0..count {
 		let pts = segment * 2_000_000;
 		for video in ["360p", "1080p"] {
@@ -589,7 +607,7 @@ async fn a_durable_timeline_lists_the_window() {
 /// broadcast, keeps the window even then.
 #[tokio::test]
 async fn history_mode_lists_a_durable_timeline_past_the_window() {
-	let recording = segments(12).await;
+	let recording = bounded_segments(12).await;
 	let config = Config {
 		history: true,
 		..Config::default()

@@ -701,11 +701,16 @@ impl<E: RecordExt> Consumer<E> {
 		let timescale =
 			Timescale::new(section.timescale as u64).map_err(|_| crate::Error::InvalidTimescale(section.timescale))?;
 		let track = broadcast.track(name)?.subscribe(None).await?;
+		Ok(Self::new(track, timescale))
+	}
+
+	/// Read a configured timeline subscription using its catalog's validated timescale.
+	pub fn new(track: moq_net::track::Subscriber, timescale: Timescale) -> Self {
 		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
-		Ok(Self {
+		Self {
 			inner: moq_json::window::Consumer::new(track, config),
 			timescale,
-		})
+		}
 	}
 
 	/// Decode a record into an entry, converting its timing out of the wire timescale.

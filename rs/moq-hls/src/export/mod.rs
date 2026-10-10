@@ -88,11 +88,8 @@ pub struct Config {
 	/// path, so every range it lists stays FETCHable from this broadcast. Other timelines keep
 	/// the window, since their segments leave the relay cache.
 	///
-	/// The listing starts at the records the timeline restates when this exporter joins (a
-	/// `moq-mux` publisher restates at most 256), so it reaches the start of a longer recording
-	/// only if the exporter followed it from there. For the same reason, edges that joined at
-	/// different times can list different `EXT-X-MEDIA-SEQUENCE` values: only the window keeps
-	/// every edge agreeing.
+	/// Durable history reads retained timeline groups from the beginning, including records older
+	/// than the checkpoint a live join receives. Live playlists keep their bounded join.
 	pub history: bool,
 }
 
@@ -409,6 +406,7 @@ async fn watch_catalog(
 							archive,
 							next.clone(),
 							renditions.fanout(),
+							unbound,
 						));
 						*timeline_watcher.lock().unwrap() = Some(watcher);
 					}
@@ -480,11 +478,12 @@ async fn watch_timeline(
 	section: hang::catalog::Archive,
 	reference: Reference,
 	renditions: renditions::Fanout,
+	history: bool,
 ) {
 	// A failed timeline is never retried: the origin already rides out transient source
 	// failures, so an error here is final. It ends every playlist like a clean finish
 	// (`EXT-X-ENDLIST`), since a window left live would freeze players with no signal.
-	if let Err(err) = watch(&broadcast, &section, &reference, &renditions).await {
+	if let Err(err) = watch(&broadcast, &section, &reference, &renditions, history).await {
 		tracing::error!(track = %reference.1, %err, "timeline failed; ending every playlist");
 	}
 	// Recording cursors drain what is listed and end instead of parking.
@@ -497,8 +496,24 @@ async fn watch(
 	section: &hang::catalog::Archive,
 	reference: &Reference,
 	renditions: &renditions::Fanout,
+	history: bool,
 ) -> crate::Result<()> {
-	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section, &reference.1).await?;
+	let mut timeline = if history {
+		let name = section
+			.timelines
+			.get(&reference.1)
+			.ok_or_else(|| moq_mux::Error::TimelineMissing(reference.1.clone()))?;
+		let scale = moq_net::Timescale::new(section.timescale as u64)
+			.map_err(|_| moq_mux::Error::InvalidTimescale(section.timescale))?;
+		let subscription = moq_net::track::Subscription::default()
+			.with_start(moq_net::track::Position::group(0))
+			// The full representable wire budget keeps historical timed groups eligible.
+			.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
+		let track = broadcast.track(name)?.subscribe(subscription).await?;
+		moq_mux::timeline::Consumer::<()>::new(track, scale)
+	} else {
+		moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section, &reference.1).await?
+	};
 	while let Some(event) = timeline.next().await? {
 		match event {
 			moq_mux::timeline::Event::Push { index, entry } => renditions.push(index, entry, reference),
@@ -2113,6 +2128,7 @@ mod tests {
 			archive,
 			reference,
 			renditions.fanout(),
+			false,
 		));
 		let rendition = renditions.get(Kind::Video, "video0").expect("rendition synced");
 		(rendition, watcher)
@@ -2433,6 +2449,7 @@ mod tests {
 			archive,
 			reference,
 			fanout.clone(),
+			false,
 		));
 		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		accept_sibling(&old_server, &old_media).await;
@@ -2563,6 +2580,7 @@ mod tests {
 			archive,
 			reference,
 			fanout.clone(),
+			false,
 		));
 		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
@@ -2961,6 +2979,7 @@ mod tests {
 				catalog.archive.clone().unwrap(),
 				reference(catalog, None).unwrap(),
 				renditions.fanout(),
+				false,
 			));
 			(renditions, watcher)
 		}
@@ -3334,6 +3353,7 @@ mod tests {
 			archive(&["video0", "video1"]),
 			Arc::new((Kind::Video, "video1".to_string())),
 			test.renditions.fanout(),
+			false,
 		));
 		let after = test.listed("video1", 2).await;
 		let new = segments::tag(&(Kind::Video, "video1".to_string()));
