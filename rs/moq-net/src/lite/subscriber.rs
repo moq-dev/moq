@@ -4579,11 +4579,10 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							if self.supports_fetch {
 								self.fetches
 									.push(FetchServeRun::new(serve.clone(), req, self.timescale));
-							} else if matches!(self.sub, Sub::Active(_)) {
-								self.feed_fetches.push((req, self.serving.consume()));
 							} else {
-								// No FETCH on the wire and no feed to wait on: a cache miss.
-								req.reject(Error::NotFound);
+								// No FETCH on the wire: wait for the live feed, which a
+								// subscription arriving alongside may still be opening.
+								self.feed_fetches.push((req, self.serving.consume()));
 							}
 							continue;
 						}
@@ -4601,14 +4600,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								self.timescale,
 							) {
 								Ok(Begin::Establish(est)) => self.mode = ServeMode::Establish(est),
-								Ok(Begin::None) => {
-									// The last subscriber left, so no feed will deliver a held fetch.
-									if matches!(self.sub, Sub::None) {
-										for (req, _) in self.feed_fetches.drain(..) {
-											req.reject(Error::NotFound);
-										}
-									}
-								}
+								Ok(Begin::None) => {}
 								// Updating the upstream failed: hand the track back for
 								// another route to resume.
 								Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
@@ -4619,8 +4611,14 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						Poll::Pending => {}
 					}
 
-					// (2) In-flight fetches; completions just retire.
+					// (2) In-flight fetches; completions just retire. With the demand
+					// settled and no feed open, none will deliver a held fetch: a miss.
 					let _ = self.fetches.poll(waiter);
+					if matches!(self.sub, Sub::None) {
+						for (req, _) in self.feed_fetches.drain(..) {
+							req.reject(Error::NotFound);
+						}
+					}
 					Self::poll_feed_fetches(&mut self.feed_fetches, waiter);
 
 					// (3) Nobody holds this copy anymore. Its upstream subscription already

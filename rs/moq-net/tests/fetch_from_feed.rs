@@ -107,6 +107,36 @@ async fn a_fetch_is_served_from_the_live_feed() {
 	}
 }
 
+/// A fetch that reaches the relay alongside the subscription that will carry it, as a
+/// recorder starting on an uncached group sends them, waits for that feed. The relay
+/// already serves the track, with no feed, for an earlier fetch.
+#[moq_net_sim::test]
+async fn a_fetch_waits_for_a_feed_opened_with_it() {
+	for version in VERSIONS {
+		let mut relay = relay(version).await;
+		let err = fetch_err(&relay, 0).await;
+		assert!(matches!(err, moq_net::Error::NotFound), "{version}: no feed: {err}");
+
+		let track = relay.remote.track("video").unwrap();
+		let subscribing = track.subscribe(None);
+		let fetching = track.fetch_group(1, None);
+		let _subscriber = moq_net_sim::timeout(TIMEOUT, subscribing)
+			.await
+			.expect("subscribe timeout")
+			.expect("subscribe");
+
+		relay.track.write_frame(None, &b"1"[..]).unwrap();
+		let mut group = moq_net_sim::timeout(TIMEOUT, fetching)
+			.await
+			.expect("fetch timed out")
+			.unwrap_or_else(|err| panic!("{version}: {err}"));
+		let frame = moq_net_sim::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("read timed out");
+		assert_eq!(&frame.unwrap().expect("a frame").payload[..], b"1", "{version}");
+	}
+}
+
 /// A group with no feed at all, or one the feed went past, is a miss rather than a version
 /// error.
 #[moq_net_sim::test]
