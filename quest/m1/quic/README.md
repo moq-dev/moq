@@ -9,8 +9,9 @@ quinn and not noq). One core serves the tokio backend, the thread-per-core
 BBR correctness, reliable stream resets, hierarchical stream scheduling with
 per-broadcast fairness, wider limits for relay peers, and endpoint sharding.
 Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
-stream state machine, and the experiments (the egress profile, media probing,
-ECN measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); L4S,
+stream state machine, and the experiments (the egress profile, ECN
+measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); media
+probing is its own [m1 quest](/quest/m1/quic-probe.md); L4S,
 careful resume, and a receive-timestamps spike toward GCC live in
 [m3](/quest/m3/README.md). None of them gate this line.
 
@@ -71,7 +72,7 @@ The BBR app-limited fixes land in `moq-quic` without waiting for the switch.
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
-- [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
+- [Discover media headroom](/quest/m1/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
