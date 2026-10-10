@@ -4,10 +4,10 @@
 
 `moq_mux::Source` is built from the catalog broadcast its caller resolved,
 keeps the first `broadcast::Consumer` it resolves for each cross-broadcast
-reference, and serves every later request for a path from that handle. A late rendition subscribe or SI
-repoint never lands on a replacement, epoch or not. On a replaced instance
-it fails loudly instead of splicing the new publisher's data into the old
-program.
+reference, and serves every later request for a path from that handle. A
+late rendition subscribe or SI repoint never lands on a replacement, epoch
+or not. On a replaced instance it fails loudly instead of splicing the new
+publisher's data into the old program.
 
 ## Plan
 
@@ -26,13 +26,15 @@ replacement won in the meantime, it serves that request even without
   sibling (`broadcast: ./source`) cannot splice in either.
 - Decided (2026-10-10, amending the lazy own-path cache): `Source` is built
   from the resolved catalog broadcast, which seeds its own-path handle. Most
-  callers (moq-cli, moq-ffi, moq-c, moq-hls, the fmp4, flv, and codec
-  exporters) subscribe the catalog outside `Source`, so a lazy first resolve
-  could still land on a replacement. Construction closes that for every
-  exporter. moq-hls's own catalog hold (`export/upstream.rs`) should then be
-  redundant; delete it if so. Callers that let the export resolve today (the
-  TS export from `moq publish`) resolve first, or the export seeds the
-  handle; pick whichever reads simpler.
+  callers (e.g. moq-cli, moq-ffi, moq-c, moq-hls, moq-rtc, moq-rtmp, and the
+  fmp4, flv, and codec exporters) subscribe the catalog outside `Source`, so
+  a lazy first resolve could still land on a replacement. Construction closes
+  that for every exporter. moq-hls's own catalog hold (`export/upstream.rs`)
+  should then be redundant, once `Source` returns the seeded handle for every
+  self-reference; delete it if so. Callers that let the export resolve today
+  (the TS export from `moq publish`) resolve first, or the export seeds the
+  handle from the exact broadcast it resolved, never a second resolve; pick
+  whichever reads simpler.
 - The pin lifecycle follows the export's instance. A stitch builds a new
   `Source` whose own-path entry is seeded with the broadcast `follow` was
   given (sibling entries start empty), so its first track request can't
@@ -45,7 +47,9 @@ replacement won in the meantime, it serves that request even without
 - Tests, with mocked time, on an epochless route: an export resolves `live`,
   a replacement wins `live`, and then a rendition added to the old catalog
   (and an SI repoint) fails rather than reading the replacement. The same
-  for a sibling reference already resolved. A stitch whose replacement is
+  for a sibling reference already resolved. A `Source` built from `live`
+  after a replacement already won still reads the broadcast it was given on
+  its first track request. A stitch whose replacement is
   itself replaced before the first track request still reads the broadcast
   it followed. A same-epoch return reads the returned handle. Today's
   epoch-pin test (`source.rs`) moves to the handle.
