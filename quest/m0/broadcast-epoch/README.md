@@ -101,4 +101,5 @@ maintainer's pre-release merge of `release` into `main` keeps `main`'s
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) - moqsrc switches to the new broadcast on a `Restart`, keeping its pads by rendition name
+- [Follow gap](/quest/m0/broadcast-epoch/follow-gap.md) - a followed path reports a gap that ended its request, even onto a same-epoch covering prefix
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
