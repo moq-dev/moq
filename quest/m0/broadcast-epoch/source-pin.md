@@ -59,5 +59,7 @@ and every caller in the repo moves with it (follow the Cross-Package Sync
 table for moq-ffi and moq-c). A `Source` reused across a route replacement
 returns its pinned handle for a path it already holds (`broadcast`,
 `catalog`, and track requests), or fails on the replaced instance, instead
-of resolving the current route. Document it on `Source`, and fix stale
-comments inline; no new doc page (decided 2026-10-10). Wire: none.
+of resolving the current route. Document it on `Source`, fix stale
+comments inline, and add a line for the `Source::new` break to the
+Unreleased section of `doc/setup/upgrade.md`; no new doc page (decided
+2026-10-10). Wire: none.
