@@ -2142,7 +2142,8 @@ pub unsafe extern "C" fn moq_publish_media_demand(
 }
 
 /// Stop a demand watcher from [moq_publish_track_demand], [moq_publish_media_demand],
-/// [`crate::moq_encode_video_demand`], or [`crate::moq_encode_audio_demand`].
+/// [moq_group_request_demand], [`crate::moq_encode_video_demand`], or
+/// [`crate::moq_encode_audio_demand`].
 ///
 /// Returns immediately: zero on success, or a negative code if already closed. The
 /// watcher's `on_demand` callback still fires once more with a terminal `0`, and
@@ -2887,6 +2888,34 @@ pub unsafe extern "C" fn moq_group_request_frame_start(request: u32, dst: *mut u
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		*dst = State::lock().publish.group_request_info(request)?.2;
 		Ok(())
+	})
+}
+
+/// Watch whether any fetch still waits on a group request. See [moq_publish_media_demand]
+/// for the callback contract.
+///
+/// The last fetch to leave withdraws the request and a later fetch of the group starts a
+/// fresh one, so once `MOQ_DEMAND_UNUSED` fires, demand never returns: free the request.
+/// The watcher does not keep the request alive. It ends with `0` once the request is
+/// freed, or negative once it is accepted or rejected.
+///
+/// Returns a non-zero watcher handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - `on_demand` must be non-NULL.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_demand` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_group_request_demand(
+	request: u32,
+	on_demand: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let on_demand = unsafe { ffi::OnStatus::new(user_data, on_demand)? };
+		let mut state = State::lock();
+		let demand = state.publish.group_request_demand(request)?;
+		state.publish.demand(demand, on_demand)
 	})
 }
 
