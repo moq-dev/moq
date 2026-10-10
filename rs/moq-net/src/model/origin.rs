@@ -908,8 +908,9 @@ struct ServeState {
 	served: WeakCache<PathOwned, broadcast::WeakConsumer>,
 
 	// How many times the route changed instance: a front compares it to the count when
-	// it asked to tell a released request from an answered one.
-	renewals: u64,
+	// it asked to tell a released request from an answered one. Shared outside the lock,
+	// since the release wakes the front while the updater still holds it.
+	renewals: Arc<AtomicU64>,
 
 	// Set when the announcement is retracted or the origin tears down: new requests
 	// fail immediately and the handler observes the end instead of parking forever.
@@ -2429,10 +2430,10 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 		/// The route's instance when asked.
 		asked: Instance,
 		pending: kio::Consumer<PendingBroadcast>,
-		/// The queue asked, and its [`ServeState::renewals`] then: a renewal since
-		/// released the request, whatever it resolved to and whenever.
-		server: kio::Shared<ServeState>,
-		renewals: u64,
+		/// The queue's [`ServeState::renewals`], and its count when asked: a renewal
+		/// since released the request, whatever it resolved to and whenever.
+		renewals: Arc<AtomicU64>,
+		asked_renewals: u64,
 	}
 	let mut upstream: Option<Upstream> = None;
 	let mut tracks: HashMap<Arc<str>, TrackIo> = HashMap::new();
@@ -2613,14 +2614,12 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 								}
 							}
 						};
-						let renewals = serve.renewals;
-						drop(serve);
 						upstream = Some(Upstream {
 							route,
 							asked: instance,
 							pending,
-							server,
-							renewals,
+							renewals: serve.renewals.clone(),
+							asked_renewals: serve.renewals.load(Ordering::Acquire),
 						});
 					}
 					Action::Detach { source } => {
@@ -2924,8 +2923,8 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 				let Some(Upstream {
 					route,
 					asked,
-					server,
 					renewals,
+					asked_renewals,
 					..
 				}) = upstream.take()
 				else {
@@ -2934,7 +2933,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 				// Counted rather than read off the request, which an answer just before
 				// the change already took out of the queue, and rather than compared by
 				// epoch, which may have come back since.
-				let released = server.lock().renewals != renewals;
+				let released = renewals.load(Ordering::Acquire) != asked_renewals;
 				match result {
 					// An epoch change released the request, the route moved to another
 					// instance, or another won the path, while the request was in flight:
@@ -3885,13 +3884,14 @@ impl ServeState {
 	/// because the route now names another publisher instance. The fronts waiting on a
 	/// released request ask again under the new one; the handler's answer to it is dropped.
 	fn renew(&mut self) {
+		// Counted before any release wakes a front, which reads the count without the lock.
+		self.renewals.fetch_add(1, Ordering::Release);
 		for producer in self.requests.drain_all() {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
 			}
 		}
 		self.served = WeakCache::default();
-		self.renewals += 1;
 	}
 
 	/// Drop the still-pending entry, if it is still ours.
