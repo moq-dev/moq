@@ -40,6 +40,13 @@ pub struct Split {
 	pending: Vec<crate::container::Frame>,
 }
 
+/// A snapshot of [`Split`]'s retained parameter sets.
+pub(crate) struct Params {
+	vps: Vec<Bytes>,
+	sps: Vec<Bytes>,
+	pps: Vec<Bytes>,
+}
+
 #[derive(Default)]
 struct Au {
 	chunks: BytesMut,
@@ -228,14 +235,33 @@ impl Split {
 		Ok(())
 	}
 
-	/// Drop any in-flight access unit.
+	/// Drop any in-flight access unit, and any frame completed but not yet returned.
 	///
 	/// Pre-reset NALs would otherwise leak into a later frame with the wrong
-	/// timestamp. The parameter-set cache is kept so subsequent keyframes stay
-	/// self-contained.
+	/// timestamp, and a frame queued before a failed [`decode`](Self::decode) would
+	/// surface on the next call. The parameter-set cache is kept so subsequent
+	/// keyframes stay self-contained.
 	pub fn reset(&mut self) {
 		self.current = Au::default();
 		self.tail.clear();
+		self.pending.clear();
+	}
+
+	/// The retained parameter sets, for [`restore`](Self::restore) to put back.
+	pub(crate) fn params(&self) -> Params {
+		Params {
+			vps: self.vps.clone(),
+			sps: self.sps.clone(),
+			pps: self.pps.clone(),
+		}
+	}
+
+	/// Put back parameter sets a refused access unit replaced, so a later bare keyframe
+	/// re-injects the last good ones rather than the refused unit's.
+	pub(crate) fn restore(&mut self, params: Params) {
+		self.vps = params.vps;
+		self.sps = params.sps;
+		self.pps = params.pps;
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
