@@ -157,6 +157,14 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # The same video beside four audio PIDs in a multiplex faster than its Rx: each slot
+      # has to interleave the video with the rest, or its transport buffer overflows.
+      - name: TS multiplex above the video's Rx
+        run: nix develop --command just test ts --headroom
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       # The same round-trip over an open-GOP clip: every leading picture after a
       # recovery point must come back, in decode order.
       - name: TS open GOP

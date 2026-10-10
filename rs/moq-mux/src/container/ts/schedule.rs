@@ -78,8 +78,9 @@ impl Buffer {
 		size: None,
 	};
 
-	/// The packets one slot may carry on the PID: what its transport buffer passes on within
-	/// the slot, less one, since the layout spreads them across it.
+	/// The packets one slot may carry on the PID, a clock packet on it included: what its
+	/// transport buffer passes on within the slot, less one. Even laid out evenly, the packets
+	/// bunch a little where one slot meets the next, and the slack drains that off.
 	fn per_slot(&self) -> usize {
 		let bits = u128::from(self.rate) * PCR_INTERVAL.as_nanos() / 1_000_000_000;
 		(bits / (TsPacket::SIZE as u128 * 8)).saturating_sub(1).max(1) as usize
@@ -144,66 +145,73 @@ pub(super) struct Slot {
 }
 
 impl Slot {
-	/// The slot's packets after its clock packet: the media spread evenly among the null
-	/// packets, and each PID's packets spread evenly among the others, every PID keeping its
+	/// The whole slot, opening with its `clock` packet, interleaved by smooth weighted
+	/// round-robin: each PID (the clock packet counted on its own) and the null packets take
+	/// positions in proportion to their count, as evenly as they can, every PID keeping its
 	/// own order.
 	///
-	/// A low-rate stream muxed whole, like an audio frame's few packets or two frames back to
-	/// back, would otherwise arrive at the multiplex's full rate and overflow its 512-byte
-	/// transport buffer, which drains at 2 Mb/s (ISO 13818-1 2.4.2.3). The program tables (PAT
-	/// and the PMT on `pmt_pid`) move ahead of every packet muxed after them, so they still
-	/// lead the keyframe they were written for and a reader knows each PID before its first
-	/// packet.
-	pub fn layout(&self, pmt_pid: u16, null: &[u8]) -> Vec<u8> {
-		let packets: Vec<&[u8]> = self
-			.packets
-			.as_chunks::<{ TsPacket::SIZE }>()
-			.0
-			.iter()
-			.map(|p| p.as_slice())
-			.collect();
-		let mut counts: HashMap<u16, u64> = HashMap::new();
-		for packet in &packets {
-			*counts.entry(pid(packet)).or_default() += 1;
-		}
-
-		// The k-th of a PID's n packets sits at (2k + 1) / 2n of the way through.
-		let mut seen: HashMap<u16, u64> = HashMap::new();
-		let mut keys: Vec<(u64, u64)> = packets
-			.iter()
-			.map(|packet| {
-				let pid = pid(packet);
-				let k = seen.entry(pid).or_default();
-				*k += 1;
-				(2 * *k - 1, 2 * counts[&pid])
-			})
-			.collect();
-		let cmp = |(an, ad): (u64, u64), (bn, bd): (u64, u64)| {
-			(u128::from(an) * u128::from(bd)).cmp(&(u128::from(bn) * u128::from(ad)))
-		};
-		let mut after = (1, 1);
-		for (packet, key) in packets.iter().zip(keys.iter_mut()).rev() {
+	/// A PID's packets in a run would arrive at the multiplex's full rate and overflow its
+	/// 512-byte transport buffer, which drains only at its Rx (ISO 13818-1 2.4.2.3): an audio
+	/// frame's few packets muxed whole, or a video PID taking most of the slot. The program
+	/// tables (PAT and the PMT on `pmt_pid`) go just ahead of the first packet muxed after
+	/// them, so they still lead the keyframe they were written for and a reader knows each PID
+	/// before its first packet.
+	pub fn layout(&self, clock: &[u8], pmt_pid: u16, null: &[u8]) -> Vec<u8> {
+		let packets = self.packets.as_chunks::<{ TsPacket::SIZE }>().0;
+		let mut tables = Vec::new();
+		// Each PID's packets in mux order: the clock's PID first, then the rest as they appear.
+		let mut lanes: Vec<(u16, VecDeque<usize>)> = vec![(pid(clock), VecDeque::new())];
+		for (i, packet) in packets.iter().enumerate() {
 			let pid = pid(packet);
 			if pid == 0 || pid == pmt_pid {
-				*key = after;
-			} else if cmp(*key, after).is_lt() {
-				after = *key;
+				tables.push(i);
+			} else if let Some((_, lane)) = lanes.iter_mut().find(|(p, _)| *p == pid) {
+				lane.push_back(i);
+			} else {
+				lanes.push((pid, VecDeque::from([i])));
 			}
 		}
-		let mut order: Vec<usize> = (0..packets.len()).collect();
-		order.sort_by(|&a, &b| cmp(keys[a], keys[b]));
 
-		// Media packet i of k lands at (2i + 1) / 2k of the way through, nulls in between.
-		let (k, total) = (order.len(), order.len() + self.nulls);
-		let mut out = Vec::with_capacity(total * TsPacket::SIZE);
-		let mut next = 0;
-		for at in 0..total {
-			if next < k && at == (2 * next + 1) * total / (2 * k) {
-				out.extend_from_slice(packets[order[next]]);
-				next += 1;
-			} else {
-				out.extend_from_slice(null);
+		// Every position, each lane (the nulls last) gains its weight and the one furthest
+		// ahead takes it, paying back the total: over the slot each takes exactly its weight.
+		// The clock takes the first.
+		let mut weights: Vec<i64> = lanes
+			.iter()
+			.map(|(_, lane)| lane.len() as i64)
+			.chain([self.nulls as i64])
+			.collect();
+		weights[0] += 1;
+		let total: i64 = weights.iter().sum();
+		let mut credit = weights.clone();
+		credit[0] -= total;
+		let mut tables = tables.into_iter().peekable();
+		let mut out = Vec::with_capacity((1 + packets.len() + self.nulls) * TsPacket::SIZE);
+		out.extend_from_slice(clock);
+		for _ in 1..total {
+			for (credit, weight) in credit.iter_mut().zip(&weights) {
+				*credit += weight;
 			}
+			let mut pick = 0;
+			for lane in 1..credit.len() {
+				if credit[lane] > credit[pick] {
+					pick = lane;
+				}
+			}
+			credit[pick] -= total;
+			let Some((_, lane)) = lanes.get_mut(pick) else {
+				out.extend_from_slice(null);
+				continue;
+			};
+			let i = lane
+				.pop_front()
+				.expect("a lane takes no more positions than its weight");
+			while let Some(table) = tables.next_if(|&table| table < i) {
+				out.extend_from_slice(&packets[table]);
+			}
+			out.extend_from_slice(&packets[i]);
+		}
+		for table in tables {
+			out.extend_from_slice(&packets[table]);
 		}
 		out
 	}
@@ -240,6 +248,8 @@ pub(super) struct Schedule {
 	last: Option<u128>,
 	/// Each PID's buffers, from [`Self::set_buffer`].
 	buffers: HashMap<u16, Buffer>,
+	/// The PID every slot's clock packet rides on, from [`Self::set_clock`].
+	clock: Option<u16>,
 	/// Units sent into a decoder buffer: their PID, due slot and bytes held.
 	decoding: VecDeque<(u16, u128, usize)>,
 	/// Every source has ended, so a unit that misses its deadline is the tail going out late
@@ -257,6 +267,7 @@ impl Schedule {
 			horizon: None,
 			last: None,
 			buffers: HashMap::new(),
+			clock: None,
 			decoding: VecDeque::new(),
 			ended: false,
 		}
@@ -275,6 +286,11 @@ impl Schedule {
 	/// Hold the packets on `pid` to `buffer`.
 	pub fn set_buffer(&mut self, pid: u16, buffer: Buffer) {
 		self.buffers.insert(pid, buffer);
+	}
+
+	/// Count every slot's clock packet, which rides on `pid`, against that PID's buffers.
+	pub fn set_clock(&mut self, pid: u16) {
+		self.clock = Some(pid);
 	}
 
 	/// Queue an access unit on `pid` (whole TS packets, the tables muxed ahead of it first)
@@ -451,7 +467,7 @@ impl Schedule {
 		let mut order: Vec<usize> = (0..self.units.len()).collect();
 		order.sort_by_key(|&i| self.units[i].due);
 		let mut take = vec![0; self.units.len()];
-		let mut carried: HashMap<u16, usize> = HashMap::new();
+		let mut carried: HashMap<u16, usize> = self.clock.map(|pid| (pid, 1)).into_iter().collect();
 		let mut stopped: Vec<u16> = Vec::new();
 		for i in order {
 			let unit = &self.units[i];
@@ -674,6 +690,29 @@ mod tests {
 		}
 	}
 
+	/// The clock packet opening every slot rides its PID's transport buffer too, so that PID
+	/// takes one packet fewer of its own.
+	#[test]
+	fn the_clock_packet_counts_against_its_pid() {
+		let mut schedule = Schedule::new(Duration::from_millis(100));
+		schedule.set_rate(Some(RATE));
+		// 2 Mb/s: 33 packets a slot, less one, the clock packet among them.
+		let audio = Buffer {
+			rate: 2_000_000,
+			size: Some(100_000),
+		};
+		schedule.set_buffer(1, audio);
+		schedule.set_clock(1);
+		for at in 0..20 {
+			schedule.push(1, ms(1_000 + at), unit(1, 4), false);
+		}
+		let most = drain(&mut schedule)
+			.into_iter()
+			.map(|(_, per_pid, _)| per_pid.get(&1).copied().unwrap_or(0))
+			.max();
+		assert_eq!(most, Some(31));
+	}
+
 	/// A PID never holds more in its decoder buffer than it has: the next unit waits for the
 	/// one before it to decode.
 	#[test]
@@ -783,5 +822,68 @@ mod tests {
 			.map(|(index, per_pid, nulls)| (index, per_pid.get(&1).copied().unwrap_or(0), nulls))
 			.collect();
 		assert_eq!(sent, [(40, 50, 0), (41, 4, 0), (42, 0, 0), (43, 0, 0), (44, 0, 0)]);
+	}
+
+	/// A slot of a 25 Mb/s CBR feed whose video takes 86 % of it still keeps the video within
+	/// its 512-byte transport buffer, which drains at Rx (moq-dev/moq#5142).
+	#[test]
+	fn a_full_slot_keeps_video_within_its_transport_buffer() {
+		// 416 packets a slot at 25 Mb/s: the clock packet on the video PID, 358 video packets, 9 AC-3,
+		// three MPEG audio PIDs of 5, 1 teletext, and nulls.
+		let mut packets = unit(111, 358);
+		packets.extend(unit(122, 9));
+		for pid in [121, 123, 124] {
+			packets.extend(unit(pid, 5));
+		}
+		packets.extend(unit(131, 1));
+		let media = packets.len() / TsPacket::SIZE;
+		let slot = Slot {
+			index: 0,
+			pcr: 0,
+			packets,
+			nulls: 416 - 1 - media,
+			keyframe: false,
+			units: vec![],
+		};
+		let mut null = unit(0, 1);
+		(null[1], null[2]) = (0x1f, 0xff);
+		let laid = slot.layout(&unit(111, 1), 100, &null);
+
+		// TB: 188 B in per packet on the PID, drained at Rx = 1.2 x 17,999,872 b/s.
+		let drain = 21_599_846.0 / 8.0 * (188.0 * 8.0 / 25_000_000.0);
+		let (mut tb, mut peak) = (0.0f64, 0.0f64);
+		for _ in 0..4 {
+			for packet in laid.chunks(188) {
+				tb = (tb - drain).max(0.0);
+				if pid(packet) == 111 {
+					tb += 188.0;
+					peak = peak.max(tb);
+				}
+			}
+		}
+		assert!(peak <= 512.0, "TB peak {peak:.0} B");
+	}
+
+	/// The program tables go just ahead of the first packet muxed after them, on whichever PID
+	/// the round-robin lays out first, so they still lead the keyframe they were written for.
+	#[test]
+	fn the_tables_lead_every_packet_muxed_after_them() {
+		// The PAT and PMT, a keyframe of one packet on PID 1, then four packets on PID 3.
+		let mut packets = unit(0, 1);
+		packets.extend(unit(100, 1));
+		packets.extend(unit(1, 1));
+		packets.extend(unit(3, 4));
+		let slot = Slot {
+			index: 0,
+			pcr: 0,
+			packets,
+			nulls: 2,
+			keyframe: true,
+			units: vec![1, 3],
+		};
+		let mut null = unit(0, 1);
+		(null[1], null[2]) = (0x1f, 0xff);
+		let laid: Vec<u16> = slot.layout(&unit(1, 1), 100, &null).chunks(188).map(pid).collect();
+		assert_eq!(laid, [1, 0, 100, 3, 0x1fff, 3, 3, 1, 0x1fff, 3]);
 	}
 }

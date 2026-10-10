@@ -20,6 +20,7 @@
 #   ./run.sh --pair                # two exporters of one broadcast, grade table anchoring
 #   ./run.sh --open-gop            # open-GOP clip; its leading pictures must survive
 #   ./run.sh --hrd                 # 1080p video filling a broadcast-sized 9 Mbit CPB
+#   ./run.sh --headroom            # the same with four audio PIDs, muxed above the video's Rx
 #   ./run.sh --delay 1s            # pass the exporter's --delay
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
@@ -65,6 +66,7 @@ LIVE=""     # grade the exporter's stdout as it arrives, rather than a capture
 PAIR=""     # subscribe twice and grade the two captures against each other
 OPEN_GOP="" # publish open GOP with leading pictures, and grade them through the round-trip
 HRD=""      # publish video that fills a broadcast-sized CPB, as a contribution encoder does
+HEADROOM="" # the same plus four audio PIDs, in a multiplex faster than the video's Rx
 EXPORT=()   # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
@@ -74,6 +76,7 @@ PAIR_JOIN="${TSC_PAIR_JOIN:-5}"
 # the analyzer's emission floor and go report-only, which reads as a pass.
 PAIR_MIN_OVERLAP="${TSC_PAIR_MIN_OVERLAP:-25}"
 DURATION_SET="" # so pair mode can raise the default without overriding an explicit --duration
+BITRATE_SET=""  # so headroom mode can raise the default without overriding an explicit --bitrate
 PASSTHRU=()     # forwarded to compliance.py (thresholds, --report-json, ...)
 
 while [[ $# -gt 0 ]]; do
@@ -93,6 +96,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --bitrate)
             BITRATE="$2"
+            BITRATE_SET=1
             shift 2
             ;;
         --port)
@@ -131,6 +135,10 @@ while [[ $# -gt 0 ]]; do
             HRD=1
             shift
             ;;
+        --headroom)
+            HEADROOM=1
+            shift
+            ;;
         --delay)
             EXPORT=(--delay "$2")
             shift 2
@@ -166,6 +174,12 @@ if [[ -n "$HRD" && -n "$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
     echo "error: --hrd generates its own clip and cannot be combined with --open-gop, --source, or --analyze-only" >&2
     exit 1
 fi
+if [[ -n "$HEADROOM" && -n "$HRD$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
+    echo "error: --headroom generates its own clip and cannot be combined with --hrd, --open-gop, --source, or --analyze-only" >&2
+    exit 1
+fi
+# Room for the audio, with the video still taking up to 86 % of the multiplex.
+[[ -n "$HEADROOM" && -z "$BITRATE_SET" ]] && BITRATE=12500000
 if [[ -n "$OPEN_GOP" && -n "$ANALYZE_ONLY$LIVE$PAIR" ]]; then
     echo "error: --open-gop cannot be combined with --analyze-only, --live, or --pair" >&2
     exit 1
@@ -254,14 +268,29 @@ if [[ -n "$SOURCE" ]]; then
         sed 's/^/  tsp: /' "$HARNESS_RUN/tsp-cut.log" >&2 || true
         exit 1
     }
-elif [[ -n "$HRD" ]]; then
-    echo "### generating ~${DURATION}s 1080p clip filling a 9 Mbit CPB with ffmpeg"
+elif [[ -n "$HRD$HEADROOM" ]]; then
+    echo "### generating ~${DURATION}s 1080p clip filling a 9 Mbit CPB${HEADROOM:+, with four audio PIDs,} with ffmpeg"
     # A contribution encoder's shape: CBR video whose HRD declares the whole buffer, kept
     # near full by noise, so the source sends pictures most of a second ahead of their
     # decode time and the export has to as well (moq-dev/moq#4645).
+    INPUTS=(-f lavfi -i "testsrc2=size=1920x1080:rate=25,noise=alls=12:allf=t")
+    AUDIO=(-an)
+    if [[ -n "$HEADROOM" ]]; then
+        # A broadcast feed's audio beside it: three MPEG-1 Layer II PIDs and an AC-3 one, in a
+        # multiplex faster than the video's Rx (10.8 Mb/s). Only then can video packets arrive
+        # faster than its transport buffer drains, so each slot has to interleave them with
+        # the audio and the nulls (moq-dev/moq#5142). At 192 kb/s an AC-3 frame stays within
+        # a third of the 2,592-byte buffer ffmpeg's ATSC carriage gives it.
+        AUDIO=(-map 0:v)
+        for k in 1 2 3 4; do
+            INPUTS+=(-f lavfi -i "sine=frequency=$((330 * k)):sample_rate=48000")
+            AUDIO+=(-map "$k:a")
+        done
+        AUDIO+=(-ac 2 -c:a mp2 -b:a 192k -c:a:3 ac3)
+    fi
     ffmpeg -y -hide_banner -loglevel error \
-        -f lavfi -i "testsrc2=size=1920x1080:rate=25,noise=alls=12:allf=t" \
-        -t "$DURATION" -an \
+        "${INPUTS[@]}" \
+        -t "$DURATION" "${AUDIO[@]}" \
         -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
         -x264-params "keyint=25:min-keyint=25:scenecut=0:nal-hrd=cbr" -b:v 9M -maxrate 9M -bufsize 9M \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
