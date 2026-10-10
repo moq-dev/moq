@@ -65,8 +65,13 @@ Decided:
   lite-07 claim's answer carries the served broadcast's own epoch, no longer
   gates this line (decided 2026-10-08): it is a lite-07 opt-in, so it moved
   to m1.
-- A catalog `broadcast` reference by name follows the newest epoch, since a
-  path cannot name one.
+- Decided in the 2026-10-10 resume audit: a catalog reference pins its first
+  resolved sibling for the catalog instance's lifetime in players and
+  exporters. Optional reference epochs constrain the first resolution on
+  epoch-aware transports; on epochless transports they remain best effort.
+  This supersedes following the newest sibling by name. The
+  [catalog references quest](/quest/m0/broadcast-epoch/catalog-references.md)
+  owns the schemas, readers, and compatibility documentation.
 - Every first-party publisher that can restart mints its own: the apps,
   moq-boy, the ingest gateways, moqsink, and the bindings below. Players
   (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
@@ -103,11 +108,27 @@ its `doc/concept/stats.md` sentence from `release`; until then, the
 maintainer's pre-release merge of `release` into `main` keeps `main`'s
 `rs/moq-stats` and `doc/concept/stats.md`. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 
+The 2026-10-10 resume audit adds release gates for newly issued requests
+through retired handles and for late duplicate delivery after same-epoch
+handover. Keep existing reads sticky; stopping new unpinned wire work is a
+separate boundary. The catalog-reference work applies the same pinning
+policy to players and exporters. Wall-clock expiry, live DROP dispositions,
+FETCH budgets, seamless JS handover, and the IETF extension remain m1.
+
+Extend the line's relay/media tests to hold catalog and media from A while B
+replaces it, exercise later metadata/subscription/FETCH operations, and prove
+that following the replacement starts a fresh catalog with fresh pins. Check
+exact and covering routes, matching/different/absent epochs, and legacy
+End+Start. The child quests own their focused regressions.
+
 ## Required
 
+- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - a held broadcast or track cannot open unpinned wire work against its replacement
+- [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - a delayed group is delivered once even beyond the old 1024-entry history
 - [JS consume identity](/quest/m0/broadcast-epoch/js-consume-identity.md) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast
 - [JS restart keeps the request](/quest/m0/broadcast-epoch/js-restart-keeps-request.md) - a resolved request remains on its old instance, matching Rust's sticky subscriptions
 - [Source pin](/quest/m0/broadcast-epoch/source-pin.md) - `Source` is built from the resolved catalog broadcast and every later request stays on it, so an epochless replacement never splices into the old program
+- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
