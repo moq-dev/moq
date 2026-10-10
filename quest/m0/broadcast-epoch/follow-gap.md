@@ -30,5 +30,9 @@ follower unpolled until the replacement is announced, since awaiting its
 `End` first avoids the bug and passes on the broken code, as
 `follow_keeps_a_gap_between_routes_of_one_epoch` does today.
 
+Once `follow` reports the gap itself, delete `moq_mux::container::ts::Follower`'s
+same-epoch `Update` handling (#5147, maintainer 2026-10-10); its test,
+`a_follower_continues_through_a_same_epoch_handoff_after_a_gap`, keeps its expectation.
+
 Public API: no new items, but `follow` reports a gap where it reported an
 `Update`, a behavior change to call out in the PR. Wire: none.

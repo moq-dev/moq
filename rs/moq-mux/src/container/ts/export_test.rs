@@ -7584,31 +7584,86 @@ async fn a_follower_continues_on_the_same_instance_returning() {
 	assert_eq!(start.elapsed(), Duration::from_secs(3) + linger);
 }
 
+/// Pull frames from `follower` until it ends, or until nothing more comes within the drain.
+async fn drain_follower(follower: &mut super::Follower) -> (Vec<Frame>, Option<crate::Result<()>>) {
+	let mut out = Vec::new();
+	loop {
+		match tokio::time::timeout(DRAIN, follower.next()).await {
+			Ok(Ok(Some(frame))) => out.push(frame),
+			Ok(Ok(None)) => return (out, Some(Ok(()))),
+			Ok(Err(err)) => return (out, Some(Err(err))),
+			Err(_) => return (out, None),
+		}
+	}
+}
+
 /// The exact route going and a covering prefix of the same epoch taking over after the gap
 /// reaches the follower as an update rather than an end and a start
-/// (`quest/m0/broadcast-epoch/follow-gap.md`), so the export sees its broadcast end while its
-/// own instance still serves the path. It must never take that for a replacement: the export
-/// ends rather than splicing, and once the follower reports the gap it carries on.
+/// (`quest/m0/broadcast-epoch/follow-gap.md`), while the export sees its request end. The
+/// follower takes that for its own instance returning: the export carries on through the
+/// prefix under the program already announced, with no break flagged.
 #[tokio::test(start_paused = true)]
-async fn a_follower_takes_a_same_epoch_handoff_after_a_gap_for_no_replacement() {
+async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	let origin = crate::source::produce_origin();
-	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let epoch = moq_net::Epoch::mint();
+	let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
 	let mut exact = origin.publish("pool/job", route.clone()).unwrap();
-	let catalog = crate::catalog::Producer::<()>::new(&mut exact, Default::default()).unwrap();
+	let mut catalog = crate::catalog::Producer::<()>::new(&mut exact, Default::default()).unwrap();
+	let mut track = aac_rendition(&mut exact, &mut catalog, "a.aac");
 	let source = crate::Source::new(origin.consume(), "pool/job");
-	let linger = Duration::from_secs(10);
-	let mut follower = super::Follower::new(Export::new(source).await.unwrap())
+	let export = Export::new(source)
+		.await
 		.unwrap()
-		.with_linger(linger);
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	let mut follower = super::Follower::new(export)
+		.unwrap()
+		.with_linger(Duration::from_secs(10));
+	let start = tokio::time::Instant::now();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut track, ms);
+	}
+	let (mut frames, end) = drain_follower(&mut follower).await;
+	assert!(end.is_none(), "still exporting: {end:?}");
 
 	// Left unpolled across the handoff, and long enough for the exact route's retraction to
 	// end the export's request before the prefix arrives.
-	drop((exact, catalog));
+	drop((exact, catalog, track));
 	tokio::time::sleep(Duration::from_secs(1)).await;
-	let _pool = origin.dynamic("pool", route).unwrap();
+	let mut info = moq_net::broadcast::Info::new();
+	info.epoch = Some(epoch);
+	let mut served = info.produce();
+	let mut catalog = crate::catalog::Producer::<()>::new(&mut served, Default::default()).unwrap();
+	let mut track = aac_rendition(&mut served, &mut catalog, "a.aac");
+	let pool = origin.dynamic("pool", route).unwrap();
+	let consumer = served.consume();
+	tokio::spawn(async move {
+		while let Ok(request) = pool.requested_broadcast().await {
+			request.accept(consumer.clone());
+		}
+	});
+	let resumed = start.elapsed().as_millis() as u64;
+	for ms in (resumed..resumed + 200).step_by(20) {
+		write_aac(&mut track, ms);
+	}
+	track.finish().unwrap();
+	catalog.finish().unwrap();
+	let (rest, end) = drain_follower(&mut follower).await;
+	frames.extend(rest);
+	assert!(
+		matches!(end, Some(Ok(()))),
+		"the prefix's broadcast ends the export: {end:?}"
+	);
 
-	let end = tokio::time::timeout(linger * 2, follower.next())
-		.await
-		.expect("the export settles within the linger");
-	assert!(!matches!(end, Err(crate::Error::Replaced(_))), "{end:?}");
+	assert_eq!(pes_count(&frames), 20, "every frame of both routes went out");
+	assert_eq!(count_discontinuity(&frames), 0, "the same instance is no break");
+	assert_eq!(follower.export().discontinuity(), 0);
+	assert!(
+		pats(&frames).iter().all(|&(version, _)| version == 0),
+		"the PAT keeps its version"
+	);
+	assert!(
+		pmts(&frames).iter().all(|(version, _)| *version == 0),
+		"the PMT keeps its version"
+	);
 }
