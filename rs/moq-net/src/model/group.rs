@@ -1024,12 +1024,13 @@ impl Producer {
 		}
 	}
 
-	/// Block until the group is closed or aborted.
+	/// Block until the group is aborted, including by eviction. Finishing does not close it.
 	pub async fn closed(&self) -> Error {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// Poll until the group is closed or aborted; ready with the cause.
+	/// Poll until the group is aborted, including by eviction; ready with the cause.
+	/// Finishing does not close it.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
@@ -1484,9 +1485,10 @@ impl Consumer {
 		self.keep_alive();
 	}
 
-	/// Park `waiter` until the group closes (finish, abort, or eviction). Subscribers
-	/// register on parked groups so an eviction wakes them; a group that already closed
-	/// cleanly can never abort, so no waiter is needed.
+	/// Park `waiter` until the group closes: an abort (including eviction), or its last
+	/// producer dropping. Finishing does not close it, since a finished group can still be
+	/// evicted. Subscribers register on parked groups so an eviction wakes them; a group
+	/// that closed without an abort can never abort, so no waiter is needed.
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.cursor.state.poll_closed(waiter)
 	}

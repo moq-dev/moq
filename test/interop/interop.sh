@@ -38,6 +38,14 @@ RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTER
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
+# The idle-out check guards this checkout's relay and clients. A run that swaps in other
+# binaries or JS clients (the wire-compat lanes run released ones) can't be held to it: a
+# released client may not close cleanly, and a released relay names no connection when one
+# closes.
+IDLE_CHECK=1
+if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
+    IDLE_CHECK=0
+fi
 TIMEOUT="${INTEROP_TIMEOUT:-20}"
 FPS="${INTEROP_FPS:-30}"
 SIZE="${INTEROP_SIZE:-320x240}"
@@ -615,12 +623,14 @@ run_publisher() {
             ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast"
             ;;
         js-native)
-            bun "$INTEROP_JS_PUBLISH_CLIENT/client.ts" publish "$url" "$broadcast"
+            # exec, so the client leads the group and `stop_publisher` waits for its own close.
+            exec bun "$INTEROP_JS_PUBLISH_CLIENT/client.ts" publish "$url" "$broadcast"
             ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
-            # WebCodecs (lazily, once a subscriber creates demand).
-            cd "$CLIENTS/js" && bun driver.ts publish \
+            # WebCodecs (lazily, once a subscriber creates demand). exec, so the
+            # driver leads the group and `stop_publisher` waits for its own close.
+            cd "$CLIENTS/js" && exec bun driver.ts publish \
                 --url "$url" --broadcast "$broadcast"
             ;;
         *)
@@ -637,6 +647,84 @@ start_publisher() {
     local round="$1" lang="$2" broadcast="$3" url="$4"
     harness_spawn "pub-$round" "$HARNESS_RUN/pub-$round.log" run_publisher "$lang" "$broadcast" "$url"
     PUB_PID="$HARNESS_PID"
+}
+
+# Stop a publisher the way a real one ends, so it closes its session and the idle-out check
+# below counts only real stalls. A stdin-fed client finishes once ffmpeg exits and its input
+# ends; the browser driver and the native JS client close on SIGTERM. Whatever is still
+# running after the wait is killed, and its connection then fails the round as an idle-out.
+stop_publisher() {
+    local pid="$1" lang="$2" deadline=$((SECONDS + 10))
+    case "$lang" in
+        # The leader alone: a SIGTERM to the group would reach Chromium too, which then exits
+        # without closing its sessions.
+        js | js-native) kill -TERM "$pid" 2>/dev/null || true ;;
+        *) pkill -TERM -g "$pid" -x ffmpeg 2>/dev/null || true ;;
+    esac
+    while ! harness_exited "$pid" && ((SECONDS < deadline)); do
+        sleep 0.1
+    done
+    if ! harness_exited "$pid"; then
+        echo "  WARN  publisher '$lang' was still running 10 s after it was stopped; killing it"
+    fi
+    harness_reap "$pid"
+}
+
+# The relay log line the next connection starts on.
+relay_next_line() {
+    echo $(($(wc -l <"$HARNESS_RUN/relay.log") + 1))
+}
+
+# The relay log from line FROM on, without its ANSI colors.
+relay_log_since() {
+    tail -n +"$1" "$HARNESS_RUN/relay.log" | sed 's/\x1b\[[0-9;]*m//g'
+}
+
+# Print each relay connection that appears from log line FROM on, with how it closed: the
+# relay's close error, "ended" for a close without one, or "open" while it hasn't closed yet.
+# The patterns follow the relay's `conn{id=...}` span and its `connection closed` log
+# (`rs/moq-relay/src/relay.rs`). Only connections opened in the window count, so a straggler
+# from an earlier round closing here isn't blamed on this one.
+relay_connections() {
+    relay_log_since "$1" | awk '
+        match($0, /conn\{id=[0-9]+ /) {
+            id = substr($0, RSTART + 8, RLENGTH - 9)
+            if (!(id in state)) { state[id] = "open"; order[++n] = id }
+        }
+        match($0, /connection closed id=[0-9]+/) {
+            id = substr($0, RSTART + 21, RLENGTH - 21)
+            if (id in state) {
+                rest = substr($0, RSTART + RLENGTH)
+                state[id] = sub(/^ err=/, "", rest) ? rest : "ended"
+            }
+        }
+        END { for (i = 1; i <= n; i++) print order[i], state[order[i]] }
+    '
+}
+
+# Fail the round for every relay connection it opened that idled out rather than closed.
+#
+# The relay times a silent peer out after its 10 s QUIC idle timeout, which can land long
+# after the cell that stalled finished. Every client closes its session on the way out, so
+# each close shows up at once, and an idle-out is a real stall that a reconnect would
+# otherwise hide behind a slow cell. A connection still open after the idle timeout is about
+# to idle out, so it fails the same way.
+check_idle_outs() {
+    local pub="$1" from="$2" deadline=$((SECONDS + 15)) id reason role failed=0
+    # Plain grep, not -q: under pipefail an early exit fails the pipeline on SIGPIPE.
+    while relay_connections "$from" | grep ' open$' >/dev/null && ((SECONDS < deadline)); do
+        sleep 0.2
+    done
+    while read -r id reason; do
+        [[ "$reason" == "open" || "$reason" == *"timed out"* ]] || continue
+        # The relay subscribes upstream only on the publisher's connection.
+        role=subscriber
+        relay_log_since "$from" | grep "conn{id=$id .*::subscriber: subscribe started" >/dev/null && role=publisher
+        echo "  FAIL  $pub round: relay connection $id ($role) idled out instead of closing ($reason)"
+        relay_log_since "$from" | grep -E "conn\{id=$id |connection closed id=$id " | sed 's/^/        /'
+        failed=1
+    done < <(relay_connections "$from")
+    ((failed == 0)) || overall=1
 }
 
 # Run a native-JS subscriber and judge it by the "received N bytes" marker it
@@ -742,18 +830,22 @@ PYCODE
             # video_0 by name: a bare `moqsrc ! filesink` would take whichever pad
             # appears first, so a publisher with audio (every one but the Rust CLI)
             # could pass this cell on audio bytes without video ever flowing. We grab one byte, the
-            # same "bytes moved" bar as the rust subscriber (no decode). head closing
-            # the pipe SIGPIPEs gst-launch, so success returns at once; no data just
-            # runs out the timeout. Our plugin dir rides on top of the system path
+            # same "bytes moved" bar as the rust subscriber (no decode). SIGPIPE is ignored, so
+            # head closing the pipe fails filesink's next write and gst-launch stops the pipeline,
+            # closing its session, rather than dying with it open; no data just runs out the
+            # timeout. Our plugin dir rides on top of the system path
             # (which provides filesink); a private registry keeps the scan off the
             # user's cache. buffer-mode=2 makes filesink unbuffered so the first frame
             # reaches head immediately.
             local n
-            n=$(GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-                timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
-                moqsrc name=s url="$url" broadcast="$broadcast" \
-                s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
-                2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true)
+            n=$(
+                trap '' PIPE
+                GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
+                    timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
+                    moqsrc name=s url="$url" broadcast="$broadcast" \
+                    s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
+                    2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true
+            )
             [[ "${n:-0}" -ge 1 ]]
             ;;
         js)
@@ -807,13 +899,14 @@ run_cell() {
     return "$status"
 }
 
-# run_round <round> <broadcast> <pub_pid> <want_pass>: every subscriber dials with a
+# run_round <round> <broadcast> <pub_pid> <want_pass> <from>: every subscriber dials with a
 # token for <broadcast> alone, and must see data (want_pass=1) or time out (0). The
 # leading `**` matches zero segments, so the grant reaches every client as a pattern
 # no prefix could carry.
-# <round> names the publisher in the output and the logs.
+# <round> names the publisher in the output and the logs, and <from> is the relay log
+# line the round's connections start on.
 run_round() {
-    local pub="$1" broadcast="$2" pub_pid="$3" want_pass="$4"
+    local pub="$1" broadcast="$2" pub_pid="$3" want_pass="$4" from="$5"
     local pids=() names=() i sub sub_url sub_grant why
     sub_url=$(token_url --subscribe "**/$broadcast")
     sub_grant=$(grant_line "" "**/$broadcast")
@@ -855,11 +948,14 @@ run_round() {
         echo "  INFO  publisher '$pub' log:"
         sed 's/^/        /' "$HARNESS_RUN/pub-$pub.log" 2>/dev/null || true
     fi
-    # `harness_reap` retires the entry, so teardown never signals this now-reaped
-    # (possibly recycled) PID again.
+    # `stop_publisher` reaps it, retiring the entry, so teardown never signals this
+    # now-reaped (possibly recycled) PID again.
     if [[ -n "$pub_pid" ]]; then
-        harness_reap "$pub_pid"
+        # A round is named after its publisher's language, plus `-denied` for the refused one.
+        stop_publisher "$pub_pid" "${pub%-denied}"
     fi
+    # A round that expects no data ends its subscribers by timing out, which is its point.
+    [[ "$want_pass" -eq 0 || "$IDLE_CHECK" -eq 0 ]] || check_idle_outs "$pub" "$from"
     return 0
 }
 
@@ -923,7 +1019,7 @@ elif [[ "$NEGATIVE" -eq 1 ]]; then
     # Negative control: no publisher. Every subscriber must FAIL (time out with
     # no data), proving the harness can actually report failure.
     echo "=== negative control: subscribers expect NO data ==="
-    run_round "none" "interop-missing-$$-$RANDOM.hang" "" 0
+    run_round "none" "interop-missing-$$-$RANDOM.hang" "" 0 "$(relay_next_line)"
 else
     for pub in "${PUB_LIST[@]}"; do
         broadcast="interop-${pub}-$$-${RANDOM}.hang"
@@ -936,8 +1032,9 @@ else
             continue
         fi
         # The exact broadcast, not its subtree.
+        from=$(relay_next_line)
         start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$broadcast")"
-        run_round "$pub" "$broadcast" "$PUB_PID" 1
+        run_round "$pub" "$broadcast" "$PUB_PID" 1 "$from"
         if why=$(check_grant "$pub" "$HARNESS_RUN/pub-$pub.log" "$(grant_line "$broadcast" "")"); then
             prints_grant "$pub" && echo "  PASS  $pub grant"
         else
@@ -953,8 +1050,9 @@ else
         broadcast="interop-denied-${pub}-$$-${RANDOM}.hang"
         allowed="interop-allowed-*.hang"
         echo "=== publisher: $pub  broadcast: $broadcast (token grants only $allowed) ==="
+        from=$(relay_next_line)
         start_publisher "$pub-denied" "$pub" "$broadcast" "$(token_url --publish "$allowed")"
-        run_round "$pub-denied" "$broadcast" "$PUB_PID" 0
+        run_round "$pub-denied" "$broadcast" "$PUB_PID" 0 "$from"
         log="$HARNESS_RUN/pub-$pub-denied.log"
         if ! check_denied "$log" "$broadcast"; then
             echo "  FAIL  $pub publisher did not fail with Unauthorized naming $broadcast:"
