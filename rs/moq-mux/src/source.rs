@@ -68,6 +68,36 @@ impl Source {
 		Ok(self.origin.routed_broadcast(&self.path).await?)
 	}
 
+	/// Follow the announcements of the routes covering this source's path.
+	///
+	/// This is how a player follows a broadcast across publisher restarts: play on a
+	/// [`Start`](moq_net::announce::Event::Start), drop everything and resolve the path afresh
+	/// on a [`Restart`](moq_net::announce::Event::Restart), and stop on an
+	/// [`End`](moq_net::announce::Event::End). An
+	/// [`Update`](moq_net::announce::Event::Update) is the same publisher instance re-priced or
+	/// failed over, which subscriptions already ride out.
+	///
+	/// Fails with [`Unauthorized`](moq_net::Error::Unauthorized) when the origin's scope can
+	/// never cover the path.
+	pub fn follow(&self) -> crate::Result<Follow> {
+		// Scoped to the path's subtree so the rest of the origin never wakes it. A path at the
+		// depth limit cannot be spelled as a subtree, so that one watches everything.
+		let origin = match moq_net::Pattern::subtree(self.path.as_str()) {
+			Ok(subtree) => self.origin.scope("", &subtree.into())?,
+			Err(_) => self.origin.clone(),
+		};
+		// A narrower scope than the whole path would never see a route covering it.
+		if !origin.allowed().matches(self.path.as_str()) {
+			return Err(moq_net::Error::Unauthorized.into());
+		}
+		Ok(Follow {
+			// Hiding narrows discovery, not lookup: a hidden path plays like any other.
+			announced: origin.with_hidden(true).announced(),
+			path: self.path.clone(),
+			covering: Vec::new(),
+		})
+	}
+
 	/// Begin resolving the catalog broadcast (the one at this source's path).
 	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Requesting> {
 		self.origin.request_broadcast(&self.path, None)
@@ -218,6 +248,93 @@ impl Source {
 	}
 }
 
+/// The announcements covering a [`Source`]'s path, as one broadcast coming online, being
+/// replaced, and going offline. Build one with [`Source::follow`].
+///
+/// Several routes can cover the path at once, such as the path itself and a prefix above it,
+/// and a request resolves through the most specific one, so only that route's events come
+/// through. Another route taking over is a [`Restart`](moq_net::announce::Event::Restart),
+/// unless both carry the same epoch: those serve the same bytes, so it is an
+/// [`Update`](moq_net::announce::Event::Update).
+pub struct Follow {
+	announced: moq_net::announce::Consumer,
+	path: moq_net::PathOwned,
+	/// Every route standing over the path.
+	covering: Vec<moq_net::announce::Announce>,
+}
+
+impl Follow {
+	/// The next change to the route serving the path, or `None` once the origin closes.
+	pub async fn next(&mut self) -> Option<moq_net::announce::Event> {
+		kio::wait(|waiter| self.poll_next(waiter)).await
+	}
+
+	/// Poll for the next change, registering `waiter` when there is none yet.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<moq_net::announce::Event>> {
+		loop {
+			let Some(event) = ready!(self.announced.poll_next(waiter)) else {
+				return Poll::Ready(None);
+			};
+			if let Some(event) = self.fold(event) {
+				return Poll::Ready(Some(event));
+			}
+		}
+	}
+
+	/// The most specific route covering the path, which is the one a request resolves.
+	fn serving(&self) -> Option<&moq_net::announce::Announce> {
+		self.covering
+			.iter()
+			.max_by_key(|announce| announce.prefix.as_str().len())
+	}
+
+	/// Apply one route's event, returning what it means for the path, if anything.
+	fn fold(&mut self, event: moq_net::announce::Event) -> Option<moq_net::announce::Event> {
+		use moq_net::announce::Event;
+
+		let (Event::Start(announce) | Event::Update(announce) | Event::Restart(announce) | Event::End(announce)) =
+			&event;
+		// The subtree also carries the routes beneath the path, which serve other broadcasts.
+		if !self.path.has_prefix(&announce.prefix) {
+			return None;
+		}
+		let prefix = announce.prefix.clone();
+		let before = self.serving().cloned();
+
+		self.covering.retain(|standing| standing.prefix != prefix);
+		let restart = match event {
+			Event::End(_) => false,
+			Event::Start(announce) | Event::Update(announce) => {
+				self.covering.push(announce);
+				false
+			}
+			Event::Restart(announce) => {
+				self.covering.push(announce);
+				true
+			}
+		};
+
+		let after = self.serving().cloned();
+		match (before, after) {
+			(None, None) => None,
+			(None, Some(after)) => Some(Event::Start(after)),
+			(Some(before), None) => Some(Event::End(before)),
+			(Some(before), Some(after)) if before.prefix != after.prefix => {
+				let same = before.route.epoch.is_some() && before.route.epoch == after.route.epoch;
+				Some(if same {
+					Event::Update(after)
+				} else {
+					Event::Restart(after)
+				})
+			}
+			// A route less specific than the serving one changed, which no request sees.
+			(Some(_), Some(after)) if after.prefix != prefix => None,
+			(Some(_), Some(after)) if restart => Some(Event::Restart(after)),
+			(Some(_), Some(after)) => Some(Event::Update(after)),
+		}
+	}
+}
+
 /// A held broadcast or the retained result of one eagerly issued broadcast request.
 ///
 /// Reading the binding never looks up its path again, even after a failure or publisher
@@ -337,6 +454,81 @@ mod tests {
 		for _ in 0..10 {
 			tokio::task::yield_now().await;
 		}
+	}
+
+	/// The follower's next event, which must arrive within the origin's update hold.
+	async fn followed(follow: &mut Follow) -> (&'static str, String) {
+		use moq_net::announce::Event;
+		let event = tokio::time::timeout(std::time::Duration::from_secs(1), follow.next())
+			.await
+			.expect("no event")
+			.expect("the origin closed");
+		match event {
+			Event::Start(announce) => ("start", announce.prefix.to_string()),
+			Event::Update(announce) => ("update", announce.prefix.to_string()),
+			Event::Restart(announce) => ("restart", announce.prefix.to_string()),
+			Event::End(announce) => ("end", announce.prefix.to_string()),
+		}
+	}
+
+	/// The follower stays quiet past the origin's update hold.
+	async fn quiet(follow: &mut Follow) {
+		if let Ok(event) = tokio::time::timeout(std::time::Duration::from_secs(1), follow.next()).await {
+			panic!("expected nothing, got {event:?}");
+		}
+	}
+
+	#[tokio::test]
+	async fn follow_reports_the_route_serving_the_path() {
+		tokio::time::pause();
+		let origin = produce_origin();
+		let mut follow = Source::new(origin.consume(), "pool/job").follow().unwrap();
+		let epoch = moq_net::Epoch::mint();
+		let route = |epoch: &moq_net::Epoch| moq_net::origin::Route::default().with_epoch(epoch.clone());
+
+		// A prefix above the path covers it.
+		let pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
+
+		// A route beneath the path serves another broadcast.
+		let _beneath = origin.publish("pool/job/thumbnail", Default::default()).unwrap();
+		quiet(&mut follow).await;
+
+		// The path itself, from the same instance, takes over without a restart.
+		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
+
+		// The covering prefix no longer serves the path, so its changes are not seen.
+		pool.update(pool.route().with_cost(5)).unwrap();
+		quiet(&mut follow).await;
+
+		// Another instance at the path.
+		exact.announce(route(&moq_net::Epoch::mint())).unwrap();
+		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
+
+		// It goes, so the prefix serves the path again: another instance.
+		drop(exact);
+		assert_eq!(followed(&mut follow).await, ("restart", "pool".into()));
+
+		pool.update(pool.route().with_cost(9)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
+
+		drop(pool);
+		assert_eq!(followed(&mut follow).await, ("end", "pool".into()));
+	}
+
+	/// Without an epoch nothing says two routes serve the same bytes.
+	#[tokio::test]
+	async fn follow_restarts_onto_a_more_specific_route_without_an_epoch() {
+		tokio::time::pause();
+		let origin = produce_origin();
+		let mut follow = Source::new(origin.consume(), "pool/job").follow().unwrap();
+
+		let _pool = origin.dynamic("pool", Default::default()).unwrap();
+		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
+
+		let _exact = origin.publish("pool/job", Default::default()).unwrap();
+		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 	}
 
 	#[tokio::test]

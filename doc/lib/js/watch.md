@@ -46,6 +46,12 @@ buffering indicator, and a stats panel.
 `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
 and the player does not ask again until it is pointed elsewhere or re-enabled.
 
+The broadcast's announcement is its online signal: the player starts when the
+name is announced, goes `offline` when it ends, and waits for it to return for
+as long as it is mounted. A restarted publisher at the same name is followed at
+once, with a fresh catalog, and video, audio, and the clock start over on its
+timeline instead of waiting for it to catch up to the old one.
+
 ## Binding from a framework
 
 `import "@moq/watch/element"` registers `<moq-watch>` when the module
