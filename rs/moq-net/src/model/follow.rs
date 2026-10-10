@@ -1,4 +1,4 @@
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use super::origin_impl::{Announce, AnnounceConsumer, AnnounceEvent};
 use crate::PathOwned;
@@ -35,44 +35,37 @@ impl Follow {
 
 	/// Poll for the next change, registering `waiter` when there is none yet.
 	///
-	/// Every announcement already on hand is folded into one change, so the replay a late
-	/// follower starts with (a covering prefix, then the exact path beneath it) is one start on
-	/// the route serving the path rather than a start and a restart.
+	/// While nothing serves the path, every announcement already on hand is folded into one
+	/// start, so the replay a late follower begins with (a covering prefix, then the exact path
+	/// beneath it) starts on the route serving the path rather than starting and restarting.
+	/// Once something serves it, each change comes through on its own: an end followed by a
+	/// start is a gap that ended any request on the old route, even when both routes carry one
+	/// epoch.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
-		let before = self.serving().cloned();
-		// Whether any announcement on hand changed the serving route, and whether one changed
-		// which instance it is.
-		let (mut changed, mut replaced) = (false, false);
-		let ended = loop {
-			match self.announced.poll_next(waiter) {
-				Poll::Ready(Some(event)) => match self.fold(event) {
-					None => {}
-					Some(AnnounceEvent::Update(_)) => changed = true,
-					Some(_) => (changed, replaced) = (true, true),
-				},
-				Poll::Ready(None) => break true,
-				Poll::Pending => break false,
-			}
-		};
-
-		let change = match (before, self.serving().cloned()) {
-			(None, None) => None,
-			(None, Some(after)) => Some(AnnounceEvent::Start(after)),
-			(Some(before), None) => Some(AnnounceEvent::End(before)),
-			(Some(before), Some(after)) => {
-				// Routes with one epoch serve the same bytes, whatever happened in between.
-				let same = before.route.epoch.is_some() && before.route.epoch == after.route.epoch;
-				match (replaced && !same, changed) {
-					(true, _) => Some(AnnounceEvent::Restart(after)),
-					(false, true) => Some(AnnounceEvent::Update(after)),
-					(false, false) => None,
+		if self.serving().is_none() {
+			let ended = loop {
+				match self.announced.poll_next(waiter) {
+					Poll::Ready(Some(event)) => {
+						self.fold(event);
+					}
+					Poll::Ready(None) => break true,
+					Poll::Pending => break false,
 				}
+			};
+			return match (self.serving().cloned(), ended) {
+				(Some(serving), _) => Poll::Ready(Some(AnnounceEvent::Start(serving))),
+				(None, true) => Poll::Ready(None),
+				(None, false) => Poll::Pending,
+			};
+		}
+
+		loop {
+			let Some(event) = ready!(self.announced.poll_next(waiter)) else {
+				return Poll::Ready(None);
+			};
+			if let Some(event) = self.fold(event) {
+				return Poll::Ready(Some(event));
 			}
-		};
-		match (change, ended) {
-			(Some(change), _) => Poll::Ready(Some(change)),
-			(None, true) => Poll::Ready(None),
-			(None, false) => Poll::Pending,
 		}
 	}
 
@@ -212,6 +205,22 @@ mod tests {
 		let mut follow = origin.consume().follow("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 		quiet(&mut follow).await;
+	}
+
+	/// A gap with nothing serving the path ends any request on it, so a covering route that
+	/// arrives after it is a start of its own, even under the same epoch.
+	#[moq_net_sim::test]
+	async fn follow_keeps_a_gap_between_routes_of_one_epoch() {
+		let origin = Hop::new(1).unwrap().produce();
+		let epoch = Epoch::mint();
+		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		let mut follow = origin.consume().follow("pool/job").unwrap();
+		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
+
+		drop(exact);
+		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
+		let _pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 	}
 
 	/// Without an epoch nothing says two routes serve the same bytes.

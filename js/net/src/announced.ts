@@ -170,10 +170,13 @@ export class Consumer {
  * both carry the same epoch, since those serve the same bytes. Routes beneath `path` serve
  * other broadcasts and are skipped, as is any change no request sees.
  *
- * Each batch (one change to the table) reduces to at most one event, so the replay a late
- * follower starts with (a covering prefix, then the exact path beneath it) is one `start` on
- * the route serving the path rather than a `start` and a `restart`. Synchronous, so a followed
- * stream delivers in step with an announced one. Mirrors `announce::Follow` in rs/moq-net.
+ * While nothing serves the path, the rest of a batch (one change to the table) folds into one
+ * `start`, so the replay a late follower begins with (a covering prefix, then the exact path
+ * beneath it) starts on the route serving the path rather than starting and restarting. Once
+ * something serves it, each change comes through on its own: an `end` followed by a `start` is
+ * a gap that ended any request on the old route, even when both routes carry one epoch.
+ * Synchronous, so a followed stream delivers in step with an announced one. Mirrors
+ * `announce::Follow` in rs/moq-net.
  *
  * @internal
  */
@@ -189,41 +192,35 @@ export function follower(path: Path.Valid): (events: Event[]) => Event[] {
 	};
 
 	// Apply one route's event, returning what it means for the path alone.
-	const fold = ({ kind, ...announce }: Event): Event["kind"] | undefined => {
+	const fold = ({ kind, ...announce }: Event): Event | undefined => {
 		if (!Path.hasPrefix(announce.prefix, path)) return undefined;
 		const before = serving();
 		if (kind === "end") covering.delete(announce.prefix);
 		else covering.set(announce.prefix, announce);
 		const after = serving();
 
-		if (!before) return after && "start";
-		if (!after) return "end";
+		if (!before) return after && { kind: "start", ...after };
+		if (!after) return { kind: "end", ...before };
 		if (before.prefix !== after.prefix) {
 			const same = before.route.epoch !== undefined && before.route.epoch === after.route.epoch;
-			return same ? "update" : "restart";
+			return { kind: same ? "update" : "restart", ...after };
 		}
 		// A route less specific than the serving one changing is skipped: no request sees it.
 		if (after.prefix !== announce.prefix) return undefined;
-		return kind === "restart" ? "restart" : "update";
+		return { kind: kind === "restart" ? "restart" : "update", ...after };
 	};
 
 	return (events) => {
-		const before = serving();
-		// Whether any event changed the serving route, and whether one changed its instance.
-		let changed = false;
-		let replaced = false;
+		const reduced: Event[] = [];
+		let idle = !serving();
 		for (const event of events) {
-			const kind = fold(event);
-			if (kind) changed = true;
-			if (kind && kind !== "update") replaced = true;
+			const change = fold(event);
+			if (idle || !change) continue;
+			reduced.push(change);
+			idle = change.kind === "end";
 		}
-
 		const after = serving();
-		if (!before) return after ? [{ kind: "start", ...after }] : [];
-		if (!after) return [{ kind: "end", ...before }];
-		// Routes with one epoch serve the same bytes, whatever happened in between.
-		const same = before.route.epoch !== undefined && before.route.epoch === after.route.epoch;
-		if (replaced && !same) return [{ kind: "restart", ...after }];
-		return changed ? [{ kind: "update", ...after }] : [];
+		if (idle && after) reduced.push({ kind: "start", ...after });
+		return reduced;
 	};
 }

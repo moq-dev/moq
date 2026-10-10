@@ -430,6 +430,26 @@ test("follow starts on the serving route when joining late", async () => {
 	origin.close();
 });
 
+test("follow keeps a gap between routes of one epoch", async () => {
+	const origin = new Producer();
+	const epoch = Epoch.mint();
+	const exact = origin.createBroadcast(Path.from("pool/job"));
+	exact.announce({ epoch });
+	const follow = origin.consume().follow(Path.from("pool/job"));
+	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool/job") });
+
+	// Both changes land before the table is read again, but the path went unserved in between,
+	// which ended any request on it: a start of its own, not an update.
+	exact.close();
+	const pool = origin.dynamic(Path.from("pool"), { epoch });
+	expect(await follow.next()).toMatchObject({ kind: "end", prefix: Path.from("pool/job") });
+	expect(await follow.next()).toMatchObject({ kind: "start", prefix: Path.from("pool") });
+
+	follow.close();
+	pool.close();
+	origin.close();
+});
+
 test("follow refuses a path no pattern can spell", () => {
 	const origin = new Producer();
 	expect(() => origin.consume().follow(Path.from("camera*main"))).toThrow();

@@ -334,6 +334,39 @@ describe("restart", () => {
 		await settle();
 	});
 
+	it("resumes on a covering prefix of the same epoch after a gap", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("pool/job.hang");
+		const epoch = Moq.Epoch.mint();
+		const exact = owner.createBroadcast(name);
+		exact.announce({ epoch });
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		await settle();
+		const old = source.out.active.peek();
+		expect(old).toBeDefined();
+
+		// The exact route goes, which ends the request on it, and the prefix arrives under the same
+		// epoch before the table is read again. The player still has to ask again.
+		exact.close();
+		const pool = owner.dynamic(Path.from("pool"), { epoch });
+		const requests = pool.requested();
+		const upstream = new Moq.Broadcast.Producer();
+		void (async () => {
+			for await (const request of requests) request.accept(upstream);
+		})();
+		await settle();
+		const resumed = source.out.active.peek();
+		expect(resumed).toBeDefined();
+		expect(resumed).not.toBe(old);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		upstream.close();
+		pool.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+
 	it("falls back to a covering prefix when the exact route ends", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
