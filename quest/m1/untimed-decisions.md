@@ -37,4 +37,3 @@ malformed rule can't reach them, and nothing is left to decide there.
 ## Related
 
 - [One max_age meaning](/quest/m1/cache-max-age.md) - the other untimed follow-up, already planned
-- [FETCH_OK carries the track's properties](/quest/m1/fetch-ok-properties.md) - also touches how a FETCH learns timedness
