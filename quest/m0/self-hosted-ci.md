@@ -21,9 +21,12 @@ Decided in the 2026-10-09 planning session:
 - **Trust boundary:** same-repo branches need push access, which already
   allows editing workflows, so fork PRs are untrusted. So are Dependabot PRs:
   Dependabot pushes its branches into this repository, but they carry
-  third-party build code, and `dependabot.yml` already treats them as
-  untrusted. Merge-queue runs are trusted because a maintainer enqueues every
-  entry. To keep that true, delete `.github/workflows/dependabot.yml` (its
+  third-party build code nobody has reviewed yet, and `dependabot.yml`
+  already treats them as untrusted. `pull_request.user.login` names the PR's
+  opener, so a Dependabot PR stays hosted even after a maintainer pushes to its
+  branch. Merge-queue runs are trusted because a maintainer enqueues every
+  entry; a reviewed Dependabot bump is then no different from a human-authored
+  dependency bump, which every job already builds. To keep that true, delete `.github/workflows/dependabot.yml` (its
   only job enables auto-merge on Dependabot PRs) and drop the Dependabot check
   from [Merge queue](/quest/m1/merge-queue-settings.md); a maintainer enqueues
   Dependabot PRs by hand (decided on review: the
@@ -48,22 +51,32 @@ Decided in the 2026-10-09 planning session:
   shares that host by design. Four `moq-ci` instances
   (`count` exposed so the host can tune it). One `moq-gpu` instance for
   [GPU CI](/quest/m1/gpu-ci.md) with `PrivateDevices=false` and
-  `DeviceAllow` for `/dev/nvidia*`; it never takes `moq-ci` work.
+  `DeviceAllow` for `/dev/nvidia*`; it never takes `moq-ci` work. Put the
+  kixelated cachix substituter in the module's `nix.settings`, since dynamic
+  users are not `trusted-users` and cannot pass `extra-substituters`.
 - **Registration:** a dedicated GitHub App holding only the org
   "Self-hosted runners" permission, its key on the host. Register as org
   runners in a runner group restricted to `moq-dev/moq`; that is narrower than
   the repository Administration permission a repo-level runner needs. Never
-  reuse moq-bot or a PAT.
+  reuse moq-bot or a PAT. `services.github-runners` takes a token file, not an
+  App key, and an ephemeral runner re-registers on every restart, so a
+  pre-start step mints a fresh installation token from the key into that file
+  each time.
 - **Cache:** run `jdx/mr-boxington-cache` on the host with filesystem blob
   storage and a durable metadata database (the default `memory://` loses the
   index on restart, orphaning the blobs; PostgreSQL via `services.postgresql`
-  unless a persistent embedded backend is supported), bound to loopback. Writes require a GitHub OIDC token whose `workflow_ref`
+  unless a persistent embedded backend is supported), bound to loopback. The
+  server has no blob expiry on the filesystem backend, so a timer wipes blobs
+  and metadata together once the store passes a size cap (or the flake hash
+  changes); the next warmer run refills it. Writes require a GitHub OIDC
+  token whose `workflow_ref`
   is `moq-dev/moq/.github/workflows/cache.yml@refs/heads/main`, with
   `repository`, `repository_owner_id`, `ref: refs/heads/main`, and
   `event_name` of `push` or `workflow_dispatch` also checked
   (`job_workflow_ref` is only meaningful for reusable workflows). The cache
   warmer stays the single writer, matching the hosted design. Its job needs
-  `permissions: id-token: write` to mint that token. Reads are open on loopback. Each job gets an empty
+  `permissions: id-token: write` to mint that token. Reads are open on
+  loopback. Each job gets an empty
   `MBX_CACHE_DIR` and `target/`, pointed at the server in remote read-only
   mode. The server enforces the boundary; mbx's client-side mode narrowing is
   only a convenience. No static write token anywhere, since a same-repo PR can
@@ -75,15 +88,14 @@ Decided in the 2026-10-09 planning session:
   `runner.environment == 'self-hosted'`. Keep the `rust-cache` composite
   action there, since its mbx install and `mbx setup` shim are the only route
   from Cargo into mbx; give it a self-hosted mode that points mbx at the
-  server instead of restoring the hosted store. Put the
-  kixelated cachix substituter in the module's `nix.settings`, since dynamic
-  users are not `trusted-users` and cannot pass `extra-substituters`.
+  server instead of restoring the hosted store.
 
 Verify before merging what can be checked without the host: `actionlint`,
-the routing expression's three cases (fork, same-repo, merge group) with
-`CI_RUNNER` set and unset, and that the module evaluates (`nix eval` or a
+the routing expression's four cases (fork, Dependabot, same-repo, merge
+group) with `CI_RUNNER` set and unset, and that the module evaluates (`nix eval` or a
 `nixosTest` that boots the cache server and rejects a write without a token
-and with a token from a PR ref). End-to-end proof happens in [CI host](/quest/m0/ci-host.md).
+and with a token from a PR ref). End-to-end proof happens in
+[CI host](/quest/m0/ci-host.md).
 
 Public API: none. Wire: none.
 
