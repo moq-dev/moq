@@ -294,6 +294,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x15  | VERSION_NEGOTIATION_FAILED | No version could be negotiated. |
 | ------- | ------------- | ----------- |
+|  0x30  | NOT_SUPPORTED | The requested feature, token, or grant is unsupported. |
+| ------- | ------------- | ----------- |
 
 ### Stream Error Codes
 Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (STOP_SENDING).
@@ -544,7 +546,9 @@ When the union shrinks, an endpoint SHOULD withdraw its announcements and cancel
 An endpoint that cancels a subscription, or refuses or stops serving a request, because the union does not cover it resets the stream with UNAUTHORIZED.
 An endpoint that announces a broadcast outside the union once its own setup tokens are answered SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
 
-An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, resets the stream, the same as a peer that does not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
+An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, MUST send AUTH_ERROR with NOT_SUPPORTED and close its side of the stream.
+This applies before or after an AUTH_OK, including when a grant exceeds the message size limit.
+A presenter receiving a stream reset before any reply treats it as unsupported, for compatibility with peers that do not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
 An opener that sees the stream reset before any reply treats the token as unsupported rather than refused.
 
 ### Goaway
@@ -1549,6 +1553,7 @@ The `Message Length` describes the payload size on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
+- Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 
 ## moq-lite-06

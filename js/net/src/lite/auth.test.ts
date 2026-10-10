@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { SessionCode } from "../error.ts";
 import * as Path from "../path.ts";
-import { Reader, Writer } from "../stream.ts";
-import { AuthError, AuthMessage, AuthOk, decodeAuthReplyMaybe } from "./auth.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
+import { AuthError, AuthMessage, AuthOk, decodeAuthReplyMaybe, LiteAuthWire } from "./auth.ts";
 import * as Lite from "./index.ts";
 import * as Message from "./message.ts";
 
@@ -117,4 +117,27 @@ test.each([
 	["lite-06", Lite.Version.DRAFT_06],
 ])("%s carries no AUTH", async (_, version) => {
 	await expect(roundTrip((w) => new AuthMessage(new Uint8Array()).encode(w, version))).rejects.toThrow();
+});
+
+test("unsupported after AUTH_OK is an AUTH_ERROR on the wire", async () => {
+	const chunks: Uint8Array[] = [];
+	const stream = new Stream({
+		readable: new ReadableStream(),
+		writable: new WritableStream<Uint8Array>({
+			write: (chunk) => {
+				chunks.push(new Uint8Array(chunk));
+			},
+		}),
+		version: Lite.Version.DRAFT_07,
+	});
+	const wire = new LiteAuthWire({} as WebTransport, Lite.Version.DRAFT_07);
+	await wire.grant(stream, { publish: patterns("room/**"), subscribe: patterns() });
+	await wire.unsupported(stream, "grant cannot be encoded");
+	stream.close();
+	await stream.writer.closed;
+	const reader = new Reader(undefined, new Uint8Array(Buffer.concat(chunks)), Lite.Version.DRAFT_07);
+	expect(await decodeAuthReplyMaybe(reader, Lite.Version.DRAFT_07)).toBeInstanceOf(AuthOk);
+	const reply = await decodeAuthReplyMaybe(reader, Lite.Version.DRAFT_07);
+	expect(reply).toBeInstanceOf(AuthError);
+	expect((reply as AuthError).code).toBe(0x30);
 });

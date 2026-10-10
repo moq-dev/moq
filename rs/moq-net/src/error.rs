@@ -57,6 +57,10 @@ pub enum SessionError {
 	/// A code this version does not recognize, kept verbatim.
 	#[error("unknown code={0}")]
 	Unknown(u32),
+
+	/// The peer cannot support the requested feature; moq-lite only.
+	#[error("not supported")]
+	Unsupported,
 }
 
 impl SessionError {
@@ -72,6 +76,7 @@ impl SessionError {
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
 			Self::Version => 0x15,
+			Self::Unsupported => 0x30,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -93,6 +98,7 @@ impl SessionError {
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
 			0x15 => Self::Version,
+			0x30 => Self::Unsupported,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -556,6 +562,7 @@ impl From<&Error> for SessionError {
 			Error::Stream(_) => Self::Internal,
 			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
+			Error::Unsupported => Self::Unsupported,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::TooManyParameters => Self::KeyValueFormatting,
 			Error::TooManyRequests => Self::TooManyRequests,
@@ -648,6 +655,12 @@ mod tests {
 	// Both registries are wire contracts now (draft-lcurley-moq-lite, Error Codes), so
 	// every code we send must decode back to what we meant.
 	#[test]
+	fn unsupported_has_a_lite_session_code() {
+		assert_eq!(SessionError::from(&Error::Unsupported).to_code(), 0x30);
+		assert_eq!(SessionError::from_code(0x30), SessionError::Unsupported);
+	}
+
+	#[test]
 	fn session_codes_round_trip() {
 		// Only the registered codes are a wire contract, so only they round trip.
 		let registered = [
@@ -660,6 +673,7 @@ mod tests {
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,
 			SessionError::Version,
+			SessionError::Unsupported,
 			SessionError::App(0),
 			SessionError::App(404),
 		];

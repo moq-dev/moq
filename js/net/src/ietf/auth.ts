@@ -263,7 +263,7 @@ export class IetfAuthWire implements AuthWire {
 
 	async refuse(stream: Stream, code: SessionCode, reason: string): Promise<void> {
 		// The public API speaks session codes; this registry distinguishes only a version mismatch.
-		const wire = code === SessionCode.Version ? NOT_SUPPORTED : UNAUTHORIZED;
+		const wire = code === SessionCode.Version || code === SessionCode.Unsupported ? NOT_SUPPORTED : UNAUTHORIZED;
 		await new AuthError(wire, reason).encode(stream.writer, this.#version);
 	}
 

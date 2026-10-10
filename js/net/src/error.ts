@@ -46,6 +46,8 @@ export const SessionCode = Object.freeze(
 		Timeout: 0x11 as SessionCode,
 		/** No version could be negotiated. */
 		Version: 0x15 as SessionCode,
+		/** The peer cannot support the requested feature; moq-lite only. */
+		Unsupported: 0x30 as SessionCode,
 	} as const),
 );
 
