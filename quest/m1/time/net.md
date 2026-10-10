@@ -8,7 +8,11 @@ arm timers only through `moq-time`:
 - `moq_net::time::Instant` is `moq_time::Instant`, and moq-net's private
   `Clock`/`Deadline` are gone in favor of moq-time's deadline queue.
 - `model/clock.rs` reads wall time through moq-time, so `Timestamp::now`
-  follows a test's `Manual` or sim clock.
+  follows a test's `Manual` or sim clock. Its anchor (today a process-wide
+  `LazyLock` of instant and wall offset) moves into the ambient clock, so each
+  clock gets its own and the first test cannot fix it for later ones; a
+  `step_wall()` within one clock keeps it. Test sequential clocks that start
+  at different wall times.
 - `rs/moq-net/sim` is deleted; moq-net's tests run on `#[moq_time::test]`.
 - `moq_mux::Clock` stays a media mapping (monotonic instant to PTS, plus the
   wall time of PTS zero) and consumes moq-time; `arrival()` and `placed()`

@@ -26,7 +26,9 @@ flavors, and relay CPU via `just bench BASE` on Linux. The existing keep-alive
 and idle-timeout tests stay unchanged. Ban direct clock reads in moq-uring
 outside its backend (the ratchet).
 
-Public API: none expected. Wire: none.
+Public API: breaking. `moq_uring::Timer` is re-exported, and `Timer::set`
+takes `Option<moq_time::Instant>` instead of std's; no conversion shim.
+Wire: none.
 
 ## Required
 
