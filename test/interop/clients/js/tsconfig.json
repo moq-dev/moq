@@ -8,6 +8,7 @@
 		"driver.ts",
 		"harness.ts",
 		"harness.browser.ts",
+		"capture-channel-count.browser.ts",
 		"media.ts",
 		"src",
 		"vite.config.ts",

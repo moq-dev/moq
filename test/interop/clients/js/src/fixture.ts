@@ -108,11 +108,8 @@ export class Fixture {
 		// then requires an audio catalog after the click, which covers the capture resuming its own
 		// suspended graph.
 		//
-		// No sampleRate or channelCount override: the graph already runs at SAMPLE_RATE, and asking
-		// the capture for one channel puts the AudioWorklet behind an explicit Web Audio downmix
-		// whose output drops PCM under load, which reaches the player as gaps of silence. Publishing
-		// the destination node's own format costs nothing here, since the tone is the same in both
-		// channels.
+		// Keep both overrides absent until the macOS silence report is isolated. Removing both
+		// improved that run, but it did not establish which override caused the loss or why.
 		const audioCapture = new Publish.Audio.Capture({
 			source: { track: audioTrack, kind: "music" },
 		});

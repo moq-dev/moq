@@ -59,6 +59,23 @@ The `just test media` audio-tone misses under load were not this: the fixture
 takes the `"max"` path, and every miss was the player's own buffering silence
 with audio still arriving.
 
+### Investigation on Linux
+
+The isolated real-worklet matrix is available in
+`test/interop/clients/js/capture-channel-count.browser.ts` and runs in
+`just test harness`. Chromium 153 on Linux delivered 512 quanta in every
+none/rate/channels/both case, with zero timestamp gaps and the requested output
+formats. The diagnostic counted brief silence near startup in the baseline,
+rate-only, and channels-only cases, not a channel-specific failure. The
+destination-node track refused a channelCount constraint with
+OverconstrainedError, so this does not cover the applied microphone constraint
+path.
+
+This is evidence against attributing the macOS report to channelCount from
+the existing combined-override experiment. It is not evidence that the macOS
+issue is fixed. Run the same matrix on macOS, then the full media fixture and
+a real constrained microphone before changing the capture graph.
+
 ## Related
 
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - the other place browser-side capture and encode costs get measured
