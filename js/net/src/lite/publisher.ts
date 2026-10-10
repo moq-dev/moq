@@ -459,7 +459,7 @@ export class Publisher {
 		const onWire = (route: Route): Route => (hasRouteCost(this.version) ? route : { ...route, cost: Cost.zero });
 
 		const announce = async (suffix: Path.Valid, route: Route) => {
-			console.debug(`announce: broadcast=${suffix} active=true`);
+			console.debug(`announce: broadcast=${suffix} active=true epoch=${route.epoch}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
@@ -495,7 +495,7 @@ export class Publisher {
 				await announce(suffix, route);
 				return;
 			}
-			console.debug(`announce: broadcast=${suffix} restart=true`);
+			console.debug(`announce: broadcast=${suffix} restart=true epoch=${route.epoch}`);
 			await encodeAnnounceBroadcast(
 				stream.writer,
 				{ status: "restart", id, epoch: route.epoch, hops: wireHops(route), cost: route.cost },

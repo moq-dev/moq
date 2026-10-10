@@ -511,7 +511,7 @@ export class Subscriber {
 					advertised.set(path, { live: true, route, captures });
 					if (epoch) this.#epochs.set(path, epoch);
 					else this.#epochs.delete(path);
-					console.debug(`announced: broadcast=${path} restart=true`);
+					console.debug(`announced: broadcast=${path} restart=true epoch=${epoch}`);
 					announced.append({ prefix: path, captures, kind: "restart", route });
 					continue;
 				}
@@ -534,7 +534,7 @@ export class Subscriber {
 				if (epoch) this.#epochs.set(path, epoch);
 				else this.#epochs.delete(path);
 
-				console.debug(`announced: broadcast=${path} active=true`);
+				console.debug(`announced: broadcast=${path} active=true epoch=${epoch}`);
 				announced.append({ prefix: path, captures, kind: "start", route });
 			}
 

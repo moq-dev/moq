@@ -12,6 +12,9 @@
 //! [`Queue`] is a poll-native FIFO queue built in the same style: role-less
 //! clone-able handles, bounded or unbounded, with separate wake lists for the
 //! push and pop sides.
+//!
+//! [`coop`] bounds the passes a loop makes per poll, so one that always finds
+//! work ready still yields.
 
 use std::{
 	fmt,
@@ -23,6 +26,8 @@ use crate::sync::AtomicUsize;
 mod lock;
 mod sync;
 mod waiter;
+
+pub mod coop;
 
 mod consumer;
 mod pending;

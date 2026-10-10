@@ -236,9 +236,11 @@ async fn run(config: &Config) -> Result<()> {
 	let mut broadcast = publish_origin
 		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
+	let epoch = moq_net::Epoch::mint();
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 		.context("failed to announce broadcast")?;
+	tracing::info!(broadcast = %broadcast_path, %epoch, "announced");
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
@@ -340,8 +342,7 @@ fn run_emulator(
 			// long the pause was into the future. Published as a marker group that gap
 			// reads as a discontinuity rather than one enormous frame duration, and the
 			// marker becomes the live edge -- so a viewer arriving mid-pause waits for real
-			// media instead of being served the pre-pause group as if it were live
-			// (moq-dev/moq.pro#814).
+			// media instead of being served the pre-pause group as if it were live.
 			session.video_encoder.discontinuity();
 			audio_encoder.discontinuity()?;
 

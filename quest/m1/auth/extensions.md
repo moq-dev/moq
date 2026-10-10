@@ -11,7 +11,8 @@ extensions join the same struct.
 ## Plan
 
 Decided 2026-10-01 (Q2 on [#4675](https://github.com/moq-dev/moq/pull/4675)),
-which built it; carve it out so it lands before
+which built it. [#5106](https://github.com/moq-dev/moq/pull/5106) carves it
+out so it lands before
 [Request tokens](/quest/m1/auth/request-token.md).
 
 - `setup::Extensions` in `rs/moq-net/src/setup.rs`, set through
