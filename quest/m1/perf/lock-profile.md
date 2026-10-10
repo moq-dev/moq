@@ -17,6 +17,13 @@ Profiling is opt-in and costs nothing when disabled.
 
 ## Plan
 
+Draft foundation adds fail-closed Linux tool/permission probes and a tested
+worker mutex-wait/CPU reducer. This host has perf_event_paranoid=4 and
+unprivileged_bpf_disabled=2. Actual capture/lifecycle integration, normalized
+bpftrace input, control overhead, symbolized MoQ stacks, heap snapshots/churn
+and macOS validation remain. Keep this quest; probes are not smoke captures.
+
+
 Decided 2026-10-08: the reproducible CPU and allocation profile quest merged
 here, so the relay has one profiling recipe with capture modes rather than
 two launchers. The lock-wait mode lands first, since

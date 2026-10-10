@@ -56,6 +56,10 @@ bench-audio:
 bench-runtime $ROUNDS="3" $WORKERS="":
     MOQ_BENCH_RUNTIME_ROUNDS="$ROUNDS" MOQ_BENCH_RUNTIME_WORKERS="$WORKERS" bench/run.sh --runtime
 
+# Probe capture permissions without starting a relay or reporting a profile.
+bench-profile-probe MODE="lock" OUTPUT="target/profile-probe":
+    python3 bench/profile.py probe {{quote(MODE)}} {{quote(OUTPUT)}}
+
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install

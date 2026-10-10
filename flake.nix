@@ -562,7 +562,11 @@
             ++ cppDeps
             ++ dartDeps
             ++ devTools
-            ++ [ quest-cli ];
+            ++ [ quest-cli ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.bpftrace
+              pkgs.perf
+            ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

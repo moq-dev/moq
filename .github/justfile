@@ -8,6 +8,7 @@ check:
 
 # Tests of the release tooling itself; nightly, not on every pull request.
 test:
+    python3 bench/profile.test.py
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/rs/package-rename.test.py
