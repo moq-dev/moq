@@ -10,9 +10,9 @@ then roll lite-07 out without a wip wire changing under it.
 
 ## Plan
 
-Decided 2026-10-05 in moq.pro's quest audit: finalizing lite-07 is upstream
-work with its own quest. Until now nothing upstream owned it, while moq.pro's
-mesh and customer rollouts waited on it and the
+Decided 2026-10-05 by the maintainer: finalizing lite-07 is upstream work
+with its own quest. Until now nothing upstream owned it, while downstream
+rollouts waited on it and the
 [mesh condition](/quest/m3/lite07-mesh.md) here waited on moq.pro. This quest
 waits on nothing outside the repository; the rollouts and the mesh condition
 follow it.
@@ -28,7 +28,7 @@ The route layer of [Cluster routing](/quest/m1/cluster-routing/README.md)
 (ROUTE_START/UPDATE/END, path-less ANNOUNCE, the hop list dropped) lands in
 lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
-(under Related) has to plan for a lite-07 without hop lists. Only
+has to plan for a lite-07 without hop lists. Only
 [Routes and announces](/quest/m1/cluster-routing/routes.md) gates the cut,
 not the rest of the cluster-routing line (decided 2026-10-08).
 
@@ -83,4 +83,3 @@ is published; older versions are unchanged.
 ## Related
 
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment condition that follows this
-- [moq.pro: lite-07 on cluster dials](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/lite07.md) - the mesh rollout that adopts the finalized version, and the customer rollout after it; moq.pro holds it in m2 until the cut is called

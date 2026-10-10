@@ -13,8 +13,8 @@ attributes a refusal to the root and tier the auth server resolved.
 
 ## Plan
 
-Decided 2026-10-07, for moq.pro's per-project error counts (a customer
-rolling out browser playback wants an error rate it cannot see client-side):
+Decided 2026-10-07, for per-project error counts downstream (browser
+playback needs an error rate it cannot see client-side):
 
 - **Refusals reuse moq#4825's reasons** (`refusals.rs`: refused, unavailable,
   request, forbidden, lan), so `/metrics` and the stats track share one
@@ -41,7 +41,7 @@ rolling out browser playback wants an error rate it cannot see client-side):
   browser close as failed. A lease ending `expired` is the expired kind.
 - **Wire shape:** `Presence` gains `sessions_refused` and `sessions_failed`,
   fixed named counters per reason and per kind, so `Presence` stays `Copy`
-  (what moq.pro#2267 plans against). `sessions_ended` stays
+  (what downstream aggregators plan against). `sessions_ended` stays
   the total, so the live count (`sessions_started - sessions_ended`) is
   unchanged. They ride stats-split's totals and per-root track, not
   `sessions.json`, which stats-split retires (quest audit, 2026-10-08).
