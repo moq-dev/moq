@@ -19,8 +19,14 @@ and documenting the difference.
 
 Find where `js/net/src/origin.ts` ends the resolved handle on a server reset
 and keep it, without letting it serve anything new under the old epoch
-(never-stitch still holds). Mirror Rust's
-`a_newer_epoch_leaves_the_broadcast_in_flight` (`rs/moq-net/src/model/origin.rs`)
-in `js/net/src/origin.test.ts`, failing before the fix.
+(never-stitch still holds). Reproduce with `Dynamic.update` changing the
+epoch in place, the case #5141's `Dynamic::update` doc and `dynamic_epoch_*`
+relay tests pin down; a second publish at the path is a different case that
+both languages already cover (`a_newer_epoch_leaves_the_broadcast_in_flight`).
+Add the test to `js/net/src/origin.test.ts`, failing before the fix.
 
 Public API: behavior only. Wire: none.
+
+## Required
+
+- [Dynamic epoch](/quest/m0/broadcast-epoch/dynamic-epoch.md) - #5141, which corrects the Rust `Dynamic::update` doc this quest aligns JS to
