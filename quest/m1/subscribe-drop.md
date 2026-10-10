@@ -17,8 +17,7 @@ publisher on lite-05 and lite-06 names every sequence from its
 SUBSCRIBE_START to the end that the subscription never got (skipped,
 stale, or missing its head), just before its FIN. Still missing: JS
 publishers, drops sent as soon as a group is given up rather than at the end,
-groups reset before their header, and lite-03/04, which declare no end, so no
-subscriber can settle on a drop there yet. lite-07 (still `moq-lite-07-wip`,
+and groups reset before their header. lite-07 (still `moq-lite-07-wip`,
 unpublished) removed SUBSCRIBE_DROP for a `Stream Count` on SUBSCRIBE_END
 (#4224).
 
@@ -30,11 +29,14 @@ Decided:
 - A reliable reset ([Reliable stream reset](/quest/m1/quic/reliable-reset.md))
   that keeps the stream header acts as a one-group drop, an optimization over
   sending the DROP.
-- Publishers send SUBSCRIBE_DROP on lite-03 through lite-06 too: for every group
+- Publishers send SUBSCRIBE_DROP on lite-05 and lite-06 too: for every group
   in range they won't deliver (expired, deprioritized, or reset without its
   header delivered) and for every explicit gap. Publishers that skip sequences
   (`cut` and group discontinuities in the media layers) must mark the gap so
   the net layer can drop it.
+- Not on lite-03 or lite-04 (maintainer, 2026-10-09): they declare no
+  SUBSCRIBE_END, so no subscriber has an owed range to settle against, and a
+  drop would only add traffic to legacy peers.
 - Datagram groups stay best effort. A publisher counts a datagram as
   delivered, so a lost one leaves an uncovered hole that waits out the tail
   grace, as today.
