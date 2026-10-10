@@ -2360,6 +2360,10 @@ impl Connection {
         for packet in sent_packets.into_values() {
             self.remove_in_flight(&packet);
         }
+        // Discarding keys is progress, so the backoff from probing the old space
+        // must not delay the next one (RFC 9002 A.11). A client never resets it on
+        // an Initial ACK, so this is where its handshake backoff ends.
+        self.pto_count = 0;
         self.set_loss_detection_timer(now)
     }
 

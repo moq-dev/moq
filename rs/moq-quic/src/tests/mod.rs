@@ -3225,6 +3225,45 @@ fn handshake_anti_deadlock_probe() {
     );
 }
 
+/// A client's lost Finished is probed at the Handshake space's own PTO, not one
+/// still backed off from Initials lost before it (RFC 9002 A.11).
+#[test]
+fn lost_finished_after_initial_backoff() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    // Without latency the RTT is zero and every PTO is the timer granularity.
+    pair.latency = Duration::from_millis(50);
+
+    let client_ch = pair.begin_connect(client_config());
+    // The client's first Initial and two probes are lost, backing its PTO off three times.
+    for _ in 0..3 {
+        pair.drive_client();
+        pair.server.inbound.clear();
+        pair.time = pair.client.next_wakeup().unwrap();
+    }
+
+    // The next probe gets through, until the client's Finished, which is lost.
+    loop {
+        pair.drive_client();
+        if !pair.client_conn_mut(client_ch).is_handshaking() {
+            break;
+        }
+        pair.drive_server();
+        pair.time = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()).unwrap();
+    }
+    pair.server.inbound.clear();
+    let lost = pair.time;
+
+    let server_ch = pair.server.assert_accept();
+    while pair.server_conn_mut(server_ch).is_handshaking() {
+        assert!(pair.step());
+    }
+    // One RTT is 100ms, so a retransmitted Finished arrives within about 400ms;
+    // still backed off, it takes 2.5s.
+    let elapsed = pair.time - lost;
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+}
+
 /// Ensures that the server can respond with 3 initial packets during the handshake
 /// before the anti-amplification limit kicks in when MTUs are similar.
 #[test]

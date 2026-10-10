@@ -48,6 +48,7 @@ Changes on top of the upstream commit, besides the renames:
   A `WouldBlock` partway through the resend makes the caller retry the whole batch, duplicating the datagrams already sent; QUIC drops the duplicates.
   Drop it if upstream lands [quinn#2748](https://github.com/quinn-rs/quinn/pull/2748) and we cherry-pick that.
 - Apple fast-path fallback preserves the segmentation of batches prepared before the fast path was disabled, including when a private symbol is unavailable.
+- Discarding Initial or Handshake keys resets the PTO backoff, as RFC 9002 A.11 does, so a client's Initial backoff no longer delays the retransmission of a lost Finished. Also [moq-dev/noq#32](https://github.com/moq-dev/noq/pull/32); not offered upstream yet.
 
 Recheck the BBR3 changes when cherry-picking quinn#2481 updates, or if it merges.
 
