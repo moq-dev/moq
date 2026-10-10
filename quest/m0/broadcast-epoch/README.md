@@ -107,7 +107,6 @@ maintainer's pre-release merge of `release` into `main` keeps `main`'s
 
 - [JS consume identity](/quest/m0/broadcast-epoch/js-consume-identity.md) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast
 - [JS restart keeps the request](/quest/m0/broadcast-epoch/js-restart-keeps-request.md) - a resolved request remains on its old instance, matching Rust's sticky subscriptions
-- [Export ts](/quest/m0/broadcast-epoch/export-ts.md) - `export ts` and SRT egress linger only for the same epoch, and switch to a replacement only with `--stitch`, as a full program switch
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) - moqsrc switches to the new broadcast on a `Restart`, keeping its pads by rendition name

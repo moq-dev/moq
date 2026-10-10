@@ -8,7 +8,7 @@ skips and source drift, continuity counters included, within one epoch. A ST 202
 can then switch between them hitlessly.
 
 Non-goal: identity across a replaced broadcast. A leg ends on a replacement, or
-starts a fresh stream with `--stitch` ([Export ts](/quest/m0/broadcast-epoch/export-ts.md)),
+starts a fresh stream with `--stitch`,
 so legs may differ after one (#5101, maintainer 2026-10-09: byte-identical
 output across restarts is not supported).
 

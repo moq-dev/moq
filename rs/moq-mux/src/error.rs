@@ -252,6 +252,10 @@ pub enum Error {
 	/// A capture instant is ahead of the broadcast clock's now, or before its epoch.
 	#[error("capture time is outside the broadcast clock")]
 	InvalidCapture,
+
+	/// Another publisher instance replaced a followed broadcast, and stitching was off.
+	#[error("another publisher instance replaced broadcast `{0}`; enable stitch to follow it as a program switch")]
+	Replaced(String),
 }
 
 impl Error {
