@@ -31,6 +31,15 @@ shutdown. No sleep stands in for drain completion. A missing group, error, or
 stall fails the lane; the timeout only bounds failure. QUIC on localhost rarely
 reorders, so the ordering race remains covered by transport unit tests.
 
+Every client closes its session on the way out: publishers stop when their input
+ends (the browser on SIGTERM), and subscribers close once they have their frame.
+After each publisher's round, the harness waits for the relay to log the close of
+every connection the round opened, and fails the round for any connection the relay
+timed out instead. A client that stalls and reconnects therefore fails, rather than
+passing as a slow cell, even when the idle-out lands after its cell finished. The
+check covers runs built from this checkout; the wire-compat lanes, which swap in
+released relays and clients, skip it.
+
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
 `WebTransport.closed` must carry the relay's code and reason. Chromium treats a

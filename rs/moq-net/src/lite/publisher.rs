@@ -1,4 +1,8 @@
-use crate::{SessionError, announce, frame, group, origin, track};
+use crate::{
+	SessionError, announce, frame, group, origin,
+	tail::{self, Tail},
+	track,
+};
 use std::{
 	collections::{BTreeSet, HashMap},
 	ops::{Bound, ControlFlow},
@@ -2623,11 +2627,12 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	///
 	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
-	fn serve_datagram(&mut self, datagram: crate::Datagram) {
+	/// Returns whether it was handed to the transport.
+	fn serve_datagram(&mut self, datagram: crate::Datagram) -> bool {
 		// Datagrams are lite-05+, which always declares a timescale in TRACK_INFO.
 		let Ok(timestamp) = wire_timestamp(datagram.timestamp, self.timescale.unwrap_or_default(), &self.runtime)
 		else {
-			return;
+			return false;
 		};
 		let body = lite::Datagram {
 			subscribe: self.id,
@@ -2637,7 +2642,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		};
 		// has_datagrams is checked before this runs, so encoding never hits the version guard.
 		let Ok(body) = body.encode_bytes(self.version) else {
-			return;
+			return false;
 		};
 
 		let max = self.session.max_datagram_size();
@@ -2648,10 +2653,11 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 				max,
 				"dropping datagram larger than the transport limit"
 			);
-			return;
+			return false;
 		}
 
 		let _ = self.session.send_datagram(&body);
+		true
 	}
 
 	/// Read the latest SUBSCRIBE_UPDATE track priority, marking it seen.
@@ -2705,7 +2711,8 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	// once the first group is known, SUBSCRIBE_END as soon as the track declares its
 	// exclusive final sequence (which may be ahead of the live edge).
 	emit_range: bool,
-	start_sent: bool,
+	// Where SUBSCRIBE_START resolved the feed, once sent.
+	start: Option<u64>,
 	// The first servable group, held until the source resolves where its feed starts.
 	first: Option<group::Consumer>,
 	// Groups skipped for a missing head before the start resolved, which it must not name.
@@ -2714,6 +2721,13 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	// Lite07+ sends SUBSCRIBE_END with the stream count instead of as soon as the
 	// boundary is known, once every group below it has opened its stream.
 	count_streams: bool,
+	// Lite05 and Lite06 name every sequence below the end that this subscription never
+	// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
+	// for a group that will not come. The sequences served or sent as a datagram, with
+	// the subscriber's grace: a gap older than that it no longer waits for, so it is
+	// folded away here too, which bounds this by the gaps opened within the grace.
+	// `None` on other versions.
+	served: Option<Tail>,
 	// Serve datagrams off this same subscriber, but only on lite-05+ over a
 	// datagram-capable transport (qmux/WebSocket/TCP/UDS report size 0). No group
 	// fallback: otherwise off.
@@ -2735,6 +2749,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let emit_range = ctx.version.has_track_stream();
 		let count_streams = ctx.version.has_stream_count();
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
+		// Lite03 and Lite04 declare no end, so neither side could settle on a drop.
+		let served = (emit_range && !count_streams).then(|| Tail::new(tail::grace(track.subscription().max_delay)));
 
 		Self {
 			start_frame: bounds.start_frame(),
@@ -2743,11 +2759,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			track,
 			track_priority_tx,
 			emit_range,
-			start_sent: false,
+			start: None,
 			first: None,
 			skipped: BTreeSet::new(),
 			end_sent: false,
 			count_streams,
+			served,
 			datagrams,
 			children: kio::Tasks::new(),
 		}
@@ -2767,7 +2784,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
 		// Read first: `update` replaces these preferences.
-		let floored = self.track.subscription().start.is_some_and(|start| start.group > 0);
+		let requested = self.track.subscription().start.map(|start| start.group);
+		let floored = requested.is_some_and(|group| group > 0);
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
@@ -2783,10 +2801,26 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// floor on the same update, so both sides have to change together.
 		// Pre-06 an absent start means the latest group, which `position_cursor`
 		// already applied.
-		match upd.start_group {
-			Some(start_group) => self.track.start_at(start_group),
-			None if floored && self.ctx.version.resolves_start() => self.track.start_at(0),
-			None => {}
+		let lowered = match upd.start_group {
+			Some(start_group) => Some(start_group),
+			None if floored && self.ctx.version.resolves_start() => Some(0),
+			None => None,
+		};
+		if let Some(served) = &mut self.served {
+			served.set_grace(tail::grace(upd.max_delay));
+		}
+		if let Some(start) = lowered {
+			self.track.start_at(start);
+			// The subscriber owes itself the groups it newly asks for, below the floor it
+			// asked for last, and restarts their gap ages, so the drops at the end count
+			// from there too, on the same clock.
+			if let Some(resolved) = self.start {
+				if let Some(served) = &mut self.served {
+					let floor = requested.unwrap_or(resolved);
+					served.demand(start..floor, self.ctx.runtime.now());
+				}
+				self.start = Some(resolved.min(start));
+			}
 		}
 		self.track
 			.end_at(upd.end_group.map_or(Bound::Unbounded, Bound::Included));
@@ -2835,7 +2869,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					if self.datagrams
 						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_datagram(waiter)?
 					{
-						self.ctx.serve_datagram(datagram);
+						self.serve_datagram(datagram);
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
 					return Poll::Pending;
@@ -2848,13 +2882,13 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// a quiet track may not reach that start for a while, and the subscriber judges
 		// what it holds against the answer.
 		if self.emit_range
-			&& !self.start_sent
+			&& self.start.is_none()
 			&& self.ctx.version.has_largest()
 			&& let Some(start) = self.track.subscription().start
 			&& let Poll::Ready(Some(largest)) = self.track.poll_live(waiter)
 			&& start > largest
 		{
-			self.start_sent = true;
+			self.start = Some(start.group);
 			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
 				group: start.group,
 				largest: Some(largest),
@@ -2876,17 +2910,17 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						// partial group. Skip it rather than open a stream that can
 						// only be reset; the next servable group resolves the start.
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
-						if self.emit_range && !self.start_sent {
+						if self.emit_range && self.start.is_none() {
 							self.skipped.insert(group.sequence);
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
-					match self.emit_range && !self.start_sent {
+					match self.emit_range && self.start.is_none() {
 						true => self.first = Some(group),
 						false => self.serve(group),
 					}
 				}
-				Recv::Datagram(datagram) => self.ctx.serve_datagram(datagram),
+				Recv::Datagram(datagram) => self.serve_datagram(datagram),
 				Recv::Boundary(group) => {
 					// The track declared its exclusive final sequence. Forward it now,
 					// even if trailing groups (below `group`) are still in flight, then
@@ -2907,12 +2941,64 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					self.end_sent = true;
 					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams }))?;
 				}
-				Recv::Finished => return Poll::Ready(Ok(ControlFlow::Break(()))),
+				Recv::Finished => {
+					self.drop_unserved(writer)?;
+					return Poll::Ready(Ok(ControlFlow::Break(())));
+				}
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
 		Poll::Pending
+	}
+
+	/// Send a datagram, recording its sequence once it went out.
+	fn serve_datagram(&mut self, datagram: crate::Datagram) {
+		let sequence = datagram.sequence;
+		if self.ctx.serve_datagram(datagram) {
+			self.mark_served(sequence);
+		}
+	}
+
+	/// Record `sequence` as served, for [`Self::drop_unserved`].
+	fn mark_served(&mut self, sequence: u64) {
+		let Some(served) = &mut self.served else {
+			return;
+		};
+		if let Some(next) = sequence.checked_add(1) {
+			served.account(sequence..next, self.ctx.runtime.now());
+		}
+	}
+
+	/// Name every sequence from the start to the end that this subscription never got. The
+	/// track has ended, so none of them will be served now: groups it never produced (a
+	/// skipped sequence), and groups the cursor passed over (stale, or missing their head).
+	fn drop_unserved(&mut self, writer: &mut Writer<S::SendStream, Version>) -> Result<(), Error> {
+		let (Some(served), Some(start)) = (&mut self.served, self.start) else {
+			// Without a SUBSCRIBE_START the subscriber owes itself no group (see
+			// `SubStream::owed`) and settles on the FIN alone, so there is nothing to drop.
+			return Ok(());
+		};
+		let Poll::Ready(Ok(fin)) = self.track.poll_finished(&kio::Waiter::noop()) else {
+			// A track closed without a final sequence sent no SUBSCRIBE_END, so the subscriber
+			// owes itself no range either.
+			return Ok(());
+		};
+		// A cap below the end bounds what the subscriber is owed, as on its side.
+		let end = match self.track.subscription().end {
+			Some(end) if end.frame == 0 => end.group.min(fin),
+			Some(end) => end.group.saturating_add(1).min(fin),
+			None => fin,
+		};
+		served.expire(self.ctx.runtime.now());
+		for gap in served.gaps(start..end) {
+			writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+				start: gap.start,
+				end: gap.end - 1,
+				error: 0,
+			}))?;
+		}
+		Ok(())
 	}
 }
 
@@ -2937,7 +3023,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			start += 1;
 		}
 		self.skipped.clear();
-		self.start_sent = true;
+		self.start = Some(start);
 		// Only the group: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`). The track is live by now, since its first group
 		// was readable.
@@ -2963,6 +3049,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	fn serve(&mut self, group: group::Consumer) {
 		let sequence = group.sequence;
 		let frame_start = group.index();
+		self.mark_served(sequence);
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
 
 		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
@@ -3758,8 +3845,17 @@ mod serve_group_test {
 		session: SinkSession,
 		track: track::Subscriber,
 	) -> (TrackRun<SinkSession>, Writer<SinkSend, Version>, Log) {
+		lite_run(Version::Lite07, session, track)
+	}
+
+	/// A subscription's run loop on `version`, from group 0, and the log of its subscribe stream.
+	fn lite_run(
+		version: Version,
+		session: SinkSession,
+		track: track::Subscriber,
+	) -> (TrackRun<SinkSession>, Writer<SinkSend, Version>, Log) {
 		let log = Log::default();
-		let writer = Writer::new(SinkSend::new(log.clone()), Version::Lite07);
+		let writer = Writer::new(SinkSend::new(log.clone()), version);
 		let track_priority = kio::Producer::new(0u8);
 		let ctx = Subscription {
 			session,
@@ -3768,7 +3864,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
-			version: Version::Lite07,
+			version,
 			timescale: Some(crate::Timescale::default()),
 			runtime: crate::time::Clock::sim(),
 			opens: Default::default(),
@@ -3859,6 +3955,190 @@ mod serve_group_test {
 
 		// SUBSCRIBE_START at 0 (largest 0.0), then SUBSCRIBE_END at 3 with 2 streams.
 		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 2, 3, 2]);
+	}
+
+	/// The SUBSCRIBE_DROP ranges a run loop's subscribe stream carried, once flushed.
+	async fn drops(mut writer: Writer<SinkSend, Version>, log: &Log, version: Version) -> Vec<(u64, u64)> {
+		// The serve flushes what the run loop buffered before its FIN.
+		kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
+			.await
+			.unwrap();
+		let writes = log.writes.lock().unwrap().clone();
+		let mut buf = writes.as_slice();
+		let mut drops = Vec::new();
+		while !buf.is_empty() {
+			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
+			buf = &buf[size..];
+			if let lite::SubscribeResponse::Drop(drop) = msg {
+				drops.push((drop.start, drop.end));
+			}
+		}
+		drops
+	}
+
+	/// Lite-05 and lite-06 name every sequence below the end that the subscription never
+	/// got once the track ends: one skipped between groups, and one past the last.
+	#[moq_net_sim::test]
+	async fn the_end_drops_the_sequences_never_served() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+			let subscriber = track.subscribe(None);
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			{
+				let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+				track.finish_at(4).unwrap();
+				write_group(&mut track, 0, 0);
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				write_group(&mut track, 2, 2);
+				// The last producer going ends the track with group 3 never produced.
+				drop(track);
+				run.await.unwrap();
+			}
+			assert_eq!(drops(writer, &log, version).await, [(1, 1), (3, 3)], "{version:?}");
+		}
+	}
+
+	/// A SUBSCRIBE_UPDATE that lowers the start below SUBSCRIBE_START asks for those groups
+	/// too, so the drops at the end count from there.
+	#[moq_net_sim::test]
+	async fn the_end_drops_below_a_lowered_start() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscription = track::Subscription::default()
+			.with_start(track::Position::group(5))
+			.with_max_delay(Duration::from_secs(60));
+		let subscriber = track.subscribe(subscription);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 2, 2);
+		write_group(&mut track, 5, 5);
+		track.finish_at(7).unwrap();
+		// Serve group 5, which resolves SUBSCRIBE_START.
+		while run.start.is_none() {
+			let step = run.poll_step(&mut writer, &kio::Waiter::noop());
+			assert!(step.is_ready(), "the start never resolved");
+		}
+		assert_eq!(run.start, Some(5));
+
+		run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_delay: Duration::from_secs(60),
+			start_group: Some(0),
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		{
+			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			drop(track);
+			run.await.unwrap();
+		}
+		// Group 2 arrived before the subscription and the cursor has passed it, so it was
+		// never served either.
+		assert_eq!(drops(writer, &log, version).await, [(0, 4), (6, 6)]);
+	}
+
+	/// A lowered start restarts the age of the gaps it newly asks for, as the subscriber does,
+	/// so a gap below the old start isn't folded away on the time before the update.
+	#[moq_net_sim::test]
+	async fn the_end_drops_below_a_lowered_start_after_the_grace() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscription = track::Subscription::default()
+			.with_start(track::Position::group(5))
+			.with_max_delay(Duration::from_secs(1));
+		let subscriber = track.subscribe(subscription);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 5, 0);
+		while run.start.is_none() {
+			let step = run.poll_step(&mut writer, &kio::Waiter::noop());
+			assert!(step.is_ready(), "the start never resolved");
+		}
+
+		moq_net_sim::advance(Duration::from_secs(2)).await;
+		run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_delay: Duration::from_secs(1),
+			start_group: Some(0),
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		{
+			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			write_group(&mut track, 2, 0);
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			track.finish_at(6).unwrap();
+			drop(track);
+			run.await.unwrap();
+		}
+		assert_eq!(drops(writer, &log, version).await, [(0, 1), (3, 4)]);
+	}
+
+	/// After a raised start, lowering it again restarts the gaps below the raised floor, not
+	/// only those below the lowest start ever asked for.
+	#[moq_net_sim::test]
+	async fn the_end_drops_below_a_start_raised_then_lowered() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscription = track::Subscription::default()
+			.with_start(track::Position::group(0))
+			.with_max_delay(Duration::from_secs(1));
+		let subscriber = track.subscribe(subscription);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.start.is_none() {
+			let step = run.poll_step(&mut writer, &kio::Waiter::noop());
+			assert!(step.is_ready(), "the start never resolved");
+		}
+
+		let update = |start_group| lite::SubscribeUpdate {
+			priority: 0,
+			max_delay: Duration::from_secs(1),
+			start_group: Some(start_group),
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		};
+		run.update(update(5));
+		{
+			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			write_group(&mut track, 5, 0);
+			assert!(futures::poll!(run.as_mut()).is_pending());
+		}
+
+		moq_net_sim::advance(Duration::from_millis(900)).await;
+		run.update(update(2));
+		moq_net_sim::advance(Duration::from_millis(200)).await;
+		track.finish_at(6).unwrap();
+		drop(track);
+		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
+		assert_eq!(drops(writer, &log, version).await, [(1, 4)]);
+	}
+
+	/// A gap older than the subscriber's grace is one it no longer waits for, so the run loop
+	/// forgets it rather than holding every gap of a long track until the end.
+	#[moq_net_sim::test]
+	async fn the_end_drops_only_gaps_within_the_grace() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		{
+			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			write_group(&mut track, 0, 0);
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			write_group(&mut track, 2, 0);
+			assert!(futures::poll!(run.as_mut()).is_pending());
+
+			moq_net_sim::advance(Duration::from_secs(2)).await;
+			write_group(&mut track, 4, 0);
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			track.finish_at(5).unwrap();
+			drop(track);
+			run.await.unwrap();
+		}
+		assert_eq!(drops(writer, &log, version).await, [(3, 3)]);
 	}
 
 	/// A lite-07 run over a relay's track, whose upstream subscription still waits on the
