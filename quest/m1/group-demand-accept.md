@@ -17,9 +17,11 @@ joined-fetch refusal in its own field and let the demand read only an actual
 reject.
 
 Decided 2026-10-10 (found in #5139): clean close after accept, reject keeps
-its error. Flip moq-ffi's `group_request_demand_fails_after_accept` and the
-`MoqGroupDemand` docs in Rust, Go, Python, and Swift. Hand-written moq-c is
-frozen, so it gets no change.
+its error. Add a moq-net test that both outcomes hold for `used()`,
+`unused()`, and `closed()`, flip moq-ffi's
+`group_request_demand_fails_after_accept`, and update the `MoqGroupDemand`
+docs in Rust, Go, Python, and Swift. Hand-written moq-c is frozen, so it gets
+no change.
 
 Public API: behavior only (the error a demand wait returns). Wire: none.
 

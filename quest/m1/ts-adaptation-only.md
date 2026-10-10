@@ -6,8 +6,8 @@
 adaptation-only packet (`adaptation_field_control == 0b10`) whose adaptation
 field length is not 183, and a packet with both (`0b11`) whose field is longer
 than 182, as ISO 13818-1 requires, so either is treated as damage like any
-other malformed adaptation field. Landed on `main`, then cherry-picked to
-`release`.
+other malformed adaptation field. Lands on `main` first, then is
+cherry-picked to `release`.
 
 ## Plan
 

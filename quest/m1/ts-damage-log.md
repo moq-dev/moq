@@ -4,7 +4,7 @@
 
 When MPEG-TS ingest refuses damaged units, it warns on the first damaged unit
 of a burst per PID, then logs one summary with the count per interval, instead
-of one warning per unit for the whole session. Landed on `main`, then
+of one warning per unit for the whole session. Lands on `main` first, then is
 cherry-picked to `release`.
 
 ## Plan
