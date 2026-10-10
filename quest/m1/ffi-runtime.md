@@ -24,7 +24,7 @@ added this quest):
   (`kio::coop::Budget`) alone.
 - `Task::run` awaits in place on the foreign thread that polls it (#5140), so
   a cancelled call never makes progress; only the drivers, `detached`, and
-  `Task::spawn` run on the runtime. Check that in-place polls, the exported
+  the server's accept loop run on the runtime. Check that in-place polls, the exported
   async fns that await in place (`subscribe_catalog`, `subscribe_track`,
   `fetch_group`, `request_broadcast`, `decode_audio`, `decode_video`), and
   the sync methods that enter the runtime context (`MoqAudioProducer::write`)
