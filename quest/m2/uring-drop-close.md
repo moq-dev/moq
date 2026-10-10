@@ -26,4 +26,3 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [moq-uring tests under load](/quest/m1/uring-tests-under-load.md) - the same crate's test isolation
