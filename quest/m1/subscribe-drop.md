@@ -11,10 +11,16 @@ brings it back in place of `Stream Count`.
 
 ## Plan
 
-Today SUBSCRIBE_DROP is on the wire for lite-03 through lite-06 and the Rust
-subscriber accounts for it, but no publisher sends it. lite-07 (still
-`moq-lite-07-wip`, unpublished) removed it for a `Stream Count` on
-SUBSCRIBE_END (#4224).
+Today SUBSCRIBE_DROP is on the wire for lite-03 through lite-06, and the Rust
+and `@moq/net` subscribers account for it. Once a track ends, the Rust
+publisher on lite-05 and lite-06 names every sequence from its
+SUBSCRIBE_START to the end that the subscription never got (skipped,
+stale, or missing its head), just before its FIN. Still missing: JS
+publishers, drops sent as soon as a group is given up rather than at the end,
+groups reset before their header, and lite-03/04, which declare no end, so no
+subscriber can settle on a drop there yet. lite-07 (still `moq-lite-07-wip`,
+unpublished) removed SUBSCRIBE_DROP for a `Stream Count` on SUBSCRIBE_END
+(#4224).
 
 Decided:
 
@@ -65,9 +71,10 @@ lite-07 changelog), `doc/concept/moq-lite.md`, and the Rust and JS lite
 publishers, subscribers, and tail accounting. Run `just drafts check` and
 `just test interop --all`.
 
-Regression tests: a publisher that expires a group, skips a sequence, and
-resets a stream before its header; on each version the subscriber settles
-without waiting out the grace.
+Regression tests: a publisher that expires a group or resets a stream before
+its header; on each version the subscriber settles without waiting out the
+grace. A skipped sequence at the end is covered on lite-05 through lite-07
+(`track_tail::skipped_groups_end_without_the_grace`).
 
 Add the lite-07 drop case to the tail interop harness from
 [track tail interop](/quest/m1/track-tail-interop.md): Rust and JS
