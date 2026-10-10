@@ -756,12 +756,12 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	async fn build(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		let broadcast = source.broadcast().await?;
+		let broadcast = source.broadcast();
 		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
 		Ok(Self::build_with(source, &broadcast, catalog_format, catalog))
 	}
 
-	/// Export `broadcast`, the one `source` has pinned to its path, from its subscribed `catalog`.
+	/// Export `broadcast`, the one `source` holds at its path, from its subscribed `catalog`.
 	fn build_with(
 		source: crate::Source,
 		broadcast: &moq_net::broadcast::Consumer,

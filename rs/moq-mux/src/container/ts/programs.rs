@@ -229,10 +229,7 @@ mod test {
 		programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 50);
 
-		let consumer = crate::Source::new(origin.consume(), "event/50.hang")
-			.broadcast()
-			.await
-			.unwrap();
+		let consumer = origin.consume().request_broadcast("event/50.hang", None).await.unwrap();
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
 			.await
 			.unwrap()
@@ -268,7 +265,7 @@ mod test {
 
 	/// How many audio renditions the catalog `path` publishes lists.
 	async fn renditions(origin: &moq_net::origin::Producer, path: &str) -> usize {
-		let consumer = crate::Source::new(origin.consume(), path).broadcast().await.unwrap();
+		let consumer = origin.consume().request_broadcast(path, None).await.unwrap();
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
 			.await
 			.unwrap()
@@ -366,7 +363,7 @@ mod test {
 		let after = std::time::SystemTime::now();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {
-			let consumer = crate::Source::new(origin.consume(), path).broadcast().await.unwrap();
+			let consumer = origin.consume().request_broadcast(path, None).await.unwrap();
 			let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
 				.await
 				.unwrap()

@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 
 use super::playlist::{Segment, Snapshot};
 use super::spans::{Content, Spans};
-use super::upstream::Upstream;
 use super::{mpd, segments};
 use crate::Result;
 
@@ -119,13 +118,13 @@ struct Handle {
 }
 
 impl Media {
-	fn bind(upstream: &Upstream, rel: Option<&moq_net::path::RelativeOwned>) -> moq_mux::Result<Self> {
+	fn bind(source: &moq_mux::Source, rel: Option<&moq_net::path::RelativeOwned>) -> moq_mux::Result<Self> {
 		Ok(Self {
 			handle: Mutex::new(Handle {
-				binding: Arc::new(upstream.bind(rel)?),
+				binding: Arc::new(source.bind(rel)?),
 				ended: false,
 			}),
-			sibling: sibling(upstream, rel),
+			sibling: sibling(source, rel),
 		})
 	}
 
@@ -168,15 +167,15 @@ impl Media {
 
 /// A catalog `broadcast` reference that names a different path than the catalog itself.
 fn sibling(
-	upstream: &Upstream,
+	source: &moq_mux::Source,
 	rel: Option<&moq_net::path::RelativeOwned>,
 ) -> Option<(moq_mux::Source, moq_net::path::RelativeOwned)> {
-	let target = upstream.source.resolve_reference(rel)?;
-	if upstream.source.resolve_reference(None).as_ref() == Some(&target) {
+	let target = source.resolve_reference(rel)?;
+	if source.resolve_reference(None).as_ref() == Some(&target) {
 		return None;
 	}
 	Some((
-		upstream.source.clone(),
+		source.clone(),
 		rel.cloned().unwrap_or_else(moq_net::path::Relative::empty),
 	))
 }
@@ -247,7 +246,7 @@ pub struct Rendition {
 	/// Feeds [`spans`](Self::spans); aborted when the rendition drops.
 	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
 	/// The broadcast serving this rendition's media. A sibling is bound when the rendition is
-	/// created (see [`Upstream::bind`]), and ends the rendition when it ends.
+	/// created, and ends the rendition when it ends.
 	media: Media,
 	/// The current publisher run: the embedder's label every segment URL carries (see
 	/// [`Broadcaster::set_generation`](super::Broadcaster::set_generation)) and the init, built
@@ -314,7 +313,7 @@ impl Rendition {
 	pub(crate) fn video(
 		name: String,
 		config: &VideoConfig,
-		upstream: &Upstream,
+		source: &moq_mux::Source,
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
@@ -331,9 +330,9 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new()),
 			spans: Arc::new(Spans::new()),
-			catalog: upstream.broadcast.clone(),
+			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media: Media::bind(upstream, config.broadcast.as_ref())?,
+			media: Media::bind(source, config.broadcast.as_ref())?,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
 		})
@@ -344,7 +343,7 @@ impl Rendition {
 	pub(crate) fn audio(
 		name: String,
 		config: &AudioConfig,
-		upstream: &Upstream,
+		source: &moq_mux::Source,
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
@@ -361,9 +360,9 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new()),
 			spans: Arc::new(Spans::new()),
-			catalog: upstream.broadcast.clone(),
+			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media: Media::bind(upstream, config.broadcast.as_ref())?,
+			media: Media::bind(source, config.broadcast.as_ref())?,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
 		})

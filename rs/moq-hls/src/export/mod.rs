@@ -34,7 +34,6 @@ mod mpd;
 mod playlist;
 mod rendition;
 mod spans;
-mod upstream;
 
 pub mod renditions;
 pub mod segments;
@@ -48,7 +47,6 @@ use rand::RngExt;
 pub(crate) use playlist::render_media;
 pub use rendition::{Kind, Rendition};
 use segments::Reference;
-pub(crate) use upstream::Upstream;
 
 /// Backoff bounds for the initial catalog subscription.
 ///
@@ -124,13 +122,9 @@ pub struct Broadcaster {
 }
 
 impl Broadcaster {
-	/// Resolve `source`'s catalog broadcast and start tracking its renditions.
-	pub async fn new(source: moq_mux::Source, config: Config) -> crate::Result<Arc<Self>> {
-		let broadcast = source.broadcast().await?;
-		let upstream = Upstream {
-			source,
-			broadcast: broadcast.clone(),
-		};
+	/// Start tracking the renditions of `source`'s catalog broadcast.
+	pub fn new(source: moq_mux::Source, config: Config) -> Arc<Self> {
+		let broadcast = source.broadcast();
 		let renditions = renditions::Producer::new(config.window);
 		let timeline_watcher = Arc::new(Mutex::new(None));
 		let broadcaster = Arc::new(Self {
@@ -141,9 +135,9 @@ impl Broadcaster {
 		});
 		// The watcher owns its own producer clone; the `Broadcaster`'s `Drop` aborts it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
-		let watcher = tokio::spawn(watch_catalog(upstream, renditions, timeline_watcher, config.history));
+		let watcher = tokio::spawn(watch_catalog(source, renditions, timeline_watcher, config.history));
 		*broadcaster.watcher.lock().unwrap() = Some(watcher);
-		Ok(broadcaster)
+		broadcaster
 	}
 
 	/// Whether the source broadcast has closed (ended or dropped).
@@ -356,15 +350,14 @@ impl Drop for Broadcaster {
 }
 
 async fn watch_catalog(
-	upstream: Upstream,
+	source: moq_mux::Source,
 	renditions: renditions::Producer,
 	timeline_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 	history: bool,
 ) {
-	// The already-resolved handle rather than a fresh lookup through `source`, so the catalog,
-	// the timeline subscription, and the closed check below all refer to the same resolution. A
-	// same-name replacement between two lookups would otherwise split them.
-	let broadcast = &upstream.broadcast;
+	// The source's catalog broadcast, so the catalog, the timeline subscription, and the closed
+	// check below all refer to the one broadcast it was built from.
+	let broadcast = &source.broadcast();
 	let mut delay = CATALOG_RETRY_MIN;
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(broadcast, CatalogFormat::Hang).await {
@@ -394,7 +387,7 @@ async fn watch_catalog(
 					unbound = true;
 					renditions.fanout().unbound();
 				}
-				renditions.sync(&upstream, &catalog);
+				renditions.sync(&source, &catalog);
 
 				// Keep the reference while it stays. Replacing it renumbers every segment.
 				let next = self::reference(&catalog, reference.as_ref());
@@ -703,11 +696,7 @@ mod tests {
 		let _broadcast = origin.create_broadcast("a/pub").expect("publish allowed");
 		_broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let source = moq_mux::Source::new(origin.consume(), "a/pub");
-		let upstream = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let upstream = crate::resolved(&origin, "a/pub").await;
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::path::Relative::new("../../source").to_owned());
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
@@ -719,13 +708,9 @@ mod tests {
 		assert!(renditions.get(Kind::Video, "video").is_none());
 	}
 
-	/// An upstream over an empty published broadcast, for the `sync` reconciliation tests.
-	async fn empty_upstream(origin: &moq_net::origin::Producer, path: &str) -> Upstream {
-		let source = moq_mux::Source::new(origin.consume(), path);
-		Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		}
+	/// A source over an empty published broadcast, for the `sync` reconciliation tests.
+	async fn empty_upstream(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
+		crate::resolved(origin, path).await
 	}
 
 	/// A catalog with one video and one audio rendition, both servable.
@@ -994,8 +979,7 @@ mod tests {
 			)
 			.unwrap();
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let rendition = tokio::time::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0") {
@@ -1082,8 +1066,7 @@ mod tests {
 			.unwrap();
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
 		settle().await;
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.ready().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let mut cursor = rendition.segments();
@@ -1114,8 +1097,7 @@ mod tests {
 			.unwrap();
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
 		settle().await;
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.ready().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 
@@ -1150,8 +1132,7 @@ mod tests {
 		settle().await;
 		let (_catalog, mut registration, _media) = publish_vp8(&mut broadcast);
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let old = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let old_playlist = old
@@ -1195,8 +1176,7 @@ mod tests {
 		settle().await;
 		let (_catalog, _registration, mut media) = publish_vp8(&mut broadcast);
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let unversioned = rendition.media_playlist(None).expect("playable");
@@ -1268,8 +1248,7 @@ mod tests {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1325,8 +1304,7 @@ mod tests {
 		media.write(vp8_frame(3_000_000, false)).unwrap();
 		media.write(vp8_frame(4_000_000, true)).unwrap();
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
@@ -1406,8 +1384,7 @@ mod tests {
 		media.write(vp8_frame(2_000_000, true)).unwrap();
 		media.finish().unwrap();
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
@@ -1470,8 +1447,7 @@ mod tests {
 		video.write(frame(4_000_000, true)).unwrap(); // live edge
 		audio_write(4_000_000);
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.playable()).await;
 		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
@@ -1551,8 +1527,7 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap(); // live edge
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1608,8 +1583,7 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap(); // live edge
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1651,8 +1625,7 @@ mod tests {
 
 		// Watch before the first fragment, as a live viewer would, so a catalog the moov
 		// published on a provisional clock would stick.
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		assert!(
 			next_event(&mut broadcaster.renditions()).await.is_none(),
 			"the moov alone lists no rendition"
@@ -1711,8 +1684,7 @@ mod tests {
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.playable()).await;
 
@@ -1788,8 +1760,7 @@ mod tests {
 			producers.push(media);
 		}
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let listed = |name: &'static str, count: usize| {
 			let broadcaster = broadcaster.clone();
 			async move {
@@ -1874,8 +1845,7 @@ mod tests {
 			audio.cut(None).unwrap();
 		}
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1922,8 +1892,7 @@ mod tests {
 		media.write(frame(3_000_000, true)).unwrap();
 		media.write(frame(6_000_000, true)).unwrap();
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1985,8 +1954,7 @@ mod tests {
 		video.write(frame(4_000_000, true)).unwrap(); // segment 2 (live edge)
 		audio_write(4_000_000); // audio group 8 opens its slice of segment 2
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let audio_rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
@@ -2056,8 +2024,7 @@ mod tests {
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
@@ -2097,7 +2064,7 @@ mod tests {
 	/// Reconcile a one-video-rendition catalog snapshot by hand and drive the timeline, which is
 	/// what `watch_catalog` does with each snapshot.
 	fn export(
-		upstream: &Upstream,
+		upstream: &moq_mux::Source,
 		config: &hang::catalog::VideoConfig,
 	) -> (Arc<Rendition>, tokio::task::JoinHandle<()>) {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
@@ -2109,7 +2076,7 @@ mod tests {
 		renditions.sync(upstream, &catalog);
 		let reference = Arc::new((Kind::Video, "video0".to_string()));
 		let watcher = tokio::spawn(watch_timeline(
-			upstream.broadcast.clone(),
+			upstream.broadcast(),
 			archive,
 			reference,
 			renditions.fanout(),
@@ -2163,11 +2130,7 @@ mod tests {
 		settle().await;
 
 		// The export binds to the broadcast it reads the catalog from.
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let upstream = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let upstream = crate::resolved(&origin, "live").await;
 
 		// The publisher goes away and comes back before the catalog snapshot is reconciled. That
 		// gap is wide in practice: `watch_catalog` retries a not-yet-written catalog track with
@@ -2197,11 +2160,7 @@ mod tests {
 		// Control: an export started after the takeover does serve the new publisher's media, so
 		// the assertion above is about which epoch a rendition is bound to, not about a broadcast
 		// that happens to be unreadable.
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let fresh = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let fresh = crate::resolved(&origin, "live").await;
 		let (rendition, watcher) = export(&fresh, &config);
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
@@ -2268,11 +2227,7 @@ mod tests {
 		let old_media = publish_media(&origin, OLD, Some(recorder));
 		settle().await;
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let upstream = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let upstream = crate::resolved(&origin, "live").await;
 
 		// A relative reference replaces the base's last segment, so "media" is a sibling of the
 		// catalog broadcast "live".
@@ -2310,11 +2265,7 @@ mod tests {
 		// Control: an export started after the takeover does serve the new publisher's media, so
 		// the assertion above is about which epoch the rendition is bound to, not about a
 		// broadcast that happens to be unreadable.
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let fresh = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let fresh = crate::resolved(&origin, "live").await;
 		let (rendition, watcher) = export(&fresh, &config);
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
@@ -2411,11 +2362,7 @@ mod tests {
 		let old_server = origin.dynamic("media", sibling_route(10)).unwrap();
 		settle().await;
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let upstream = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let upstream = crate::resolved(&origin, "live").await;
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
@@ -2427,12 +2374,7 @@ mod tests {
 		renditions.sync(&upstream, &snapshot);
 		let fanout = renditions.fanout();
 		let reference = Arc::new((Kind::Video, "video0".to_string()));
-		let watcher = tokio::spawn(watch_timeline(
-			upstream.broadcast.clone(),
-			archive,
-			reference,
-			fanout.clone(),
-		));
+		let watcher = tokio::spawn(watch_timeline(upstream.broadcast(), archive, reference, fanout.clone()));
 		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		accept_sibling(&old_server, &old_media).await;
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
@@ -2497,11 +2439,7 @@ mod tests {
 		let server = origin.dynamic("media", sibling_route(10)).unwrap();
 		settle().await;
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let upstream = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let upstream = crate::resolved(&origin, "live").await;
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
@@ -2513,12 +2451,7 @@ mod tests {
 		renditions.sync(&upstream, &snapshot);
 		let fanout = renditions.fanout();
 		let reference = Arc::new((Kind::Video, "video0".to_string()));
-		let watcher = tokio::spawn(watch_timeline(
-			upstream.broadcast.clone(),
-			archive,
-			reference,
-			fanout.clone(),
-		));
+		let watcher = tokio::spawn(watch_timeline(upstream.broadcast(), archive, reference, fanout.clone()));
 		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
@@ -2563,11 +2496,7 @@ mod tests {
 		let server = origin.dynamic("media", sibling_route(11)).unwrap();
 		settle().await;
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let upstream = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let upstream = crate::resolved(&origin, "live").await;
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
@@ -2606,11 +2535,7 @@ mod tests {
 		let old_server = origin.dynamic("media", sibling_route(10)).unwrap();
 		settle().await;
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let upstream = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let upstream = crate::resolved(&origin, "live").await;
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
@@ -2662,11 +2587,7 @@ mod tests {
 		let _track = write_routed_media(&mut media, OLD, recorder, 0);
 		settle().await;
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let upstream = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let upstream = crate::resolved(&origin, "live").await;
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
@@ -2696,12 +2617,8 @@ mod tests {
 		let origin = produce_origin();
 		let broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
-		let source = moq_mux::Source::new(origin.consume(), "live");
 		settle().await;
-		let upstream = Upstream {
-			broadcast: source.broadcast().await.unwrap(),
-			source,
-		};
+		let upstream = crate::resolved(&origin, "live").await;
 
 		// Drive the producer directly so the catalog can be reconciled synchronously.
 		let renditions = renditions::Producer::new(Config::default().window);
@@ -2755,8 +2672,7 @@ mod tests {
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 
 		let mut renditions = broadcaster.renditions();
 		let added = tokio::time::timeout(Duration::from_secs(5), renditions.next())
@@ -2816,8 +2732,7 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap();
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 
 		let mut renditions = broadcaster.renditions();
 		let rendition = match tokio::time::timeout(Duration::from_secs(5), renditions.next())
@@ -2924,14 +2839,11 @@ mod tests {
 			broadcast: &moq_net::broadcast::Producer,
 			catalog: &moq_mux::catalog::hang::Catalog,
 		) -> (renditions::Producer, tokio::task::JoinHandle<()>) {
-			let upstream = Upstream {
-				source: moq_mux::Source::new(produce_origin().consume(), "live"),
-				broadcast: broadcast.consume(),
-			};
+			let upstream = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
 			let renditions = renditions::Producer::new(Config::default().window);
 			renditions.sync(&upstream, catalog);
 			let watcher = tokio::spawn(watch_timeline(
-				upstream.broadcast.clone(),
+				upstream.broadcast(),
 				catalog.archive.clone().unwrap(),
 				reference(catalog, None).unwrap(),
 				renditions.fanout(),
@@ -3130,12 +3042,11 @@ mod tests {
 			media.write(payload_frame(micros, true, OLD)).unwrap();
 		}
 
-		let source = moq_mux::Source::new(origin.consume(), "live");
 		let config = Config {
 			window: Duration::from_secs(6),
 			..Config::default()
 		};
-		let broadcaster = Broadcaster::new(source, config).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, config);
 		let sequence_of = |playlist: &str| -> u64 {
 			between(playlist, "#EXT-X-MEDIA-SEQUENCE:", "\n")
 				.parse()

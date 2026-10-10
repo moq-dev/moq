@@ -96,9 +96,7 @@ impl<O: Output> Media<O> {
 					self.video.lock().unwrap().clear();
 					self.drained.notify_one();
 					self.output.send(Event::Wake);
-					// A fresh source, since one keeps the instance it first resolved.
-					let source = moq_mux::Source::new(self.origin.clone(), &self.broadcast);
-					playing = Some(Box::pin(self.play_broadcast(source)));
+					playing = Some(Box::pin(self.play_broadcast()));
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
@@ -112,13 +110,15 @@ impl<O: Output> Media<O> {
 		}
 	}
 
-	/// Play the broadcast at the path until its catalog and every track it
+	/// Play the broadcast now at the path until its catalog and every track it
 	/// started end.
-	async fn play_broadcast(&self, source: moq_mux::Source) -> anyhow::Result<()> {
-		let broadcast = source
-			.broadcast()
+	async fn play_broadcast(&self) -> anyhow::Result<()> {
+		let broadcast = self
+			.origin
+			.request_broadcast(&self.broadcast, None)
 			.await
 			.context("failed to subscribe to the broadcast")?;
+		let source = moq_mux::Source::new(self.origin.clone(), broadcast.clone());
 		let catalog = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
 			.await
 			.context("failed to subscribe to the catalog")?;
