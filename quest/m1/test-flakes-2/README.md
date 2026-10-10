@@ -34,5 +34,7 @@ Public API: none. Wire: none.
 
 - [Relay restart rebind](/quest/m1/test-flakes-2/relay-restart-rebind.md) - the crash drill restarts on its original UDP address under concurrent load
 - [Impaired handshake](/quest/m1/test-flakes-2/impaired-handshake.md) - the impaired cluster drills' clients never time out while connecting
+- [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - the browser close-code test reliably sees `unauthorized` for a refused session
+- [TS duration fidelity](/quest/m1/test-flakes-2/ts-duration-fidelity.md) - TS compliance captures the whole round-tripped stream
 - [Cluster burst overrun](/quest/m1/test-flakes-2/cluster-burst-overrun.md) - the impaired cluster burst drill always overruns its bottleneck, so it always exercises it
 - [Media audio tone](/quest/m1/media-audio-tone.md) - the `just test media` audio-tone check passes under load, fixed at its cause
