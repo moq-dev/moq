@@ -34,8 +34,11 @@ and the hang draft specs both. Nothing produces them yet.
   rendition that references another broadcast under its ID in the catalog
   that lists it; the publisher snapshot omits referenced renditions (decided
   in the [README](/quest/m1/stats/README.md)).
-- `Transport` is shared: rtt, estimated rate, bytes and packets lost, and
-  sample age. Every field is optional, because a browser has only PROBE rtt.
+- `Transport` is shared: rtt, estimated rate, cumulative bytes and packets
+  lost, and sample age. Decided in the 2026-10-10 audit: loss is cumulative
+  counters, not a reported gauge, so health derives loss over the same
+  interval as rendition rates and handles resets. RTT and estimated rate
+  remain gauges. Every field is optional, because a browser has only PROBE rtt.
 - Every field is defaulted, zero and `None` are omitted, unknown fields are
   ignored, and each type is `#[non_exhaustive]`. Durations are milliseconds
   and rates bits per second, as in `moq-stats`.
