@@ -284,6 +284,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x3   | PROTOCOL_VIOLATION | The peer violated this specification. |
 | ------- | ------------- | ----------- |
+|  0x4   | INVALID_REQUEST_ID | A moq-transport request ID was reused, decreased, or had the wrong parity; moq-lite has no request IDs. |
+| ------- | ------------- | ----------- |
 |  0x6   | KEY_VALUE_FORMATTING_ERROR | A key-value pair was malformed, or repeated more than allowed. |
 | ------- | ------------- | ----------- |
 |  0x7   | TOO_MANY_REQUESTS | The peer held more announcements or subscriptions than the endpoint allows. |
@@ -1422,6 +1424,8 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-07
+
+- Listed the shared INVALID_REQUEST_ID (0x4) session code used by moq-transport drafts 14 through 16.
 
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.

@@ -376,7 +376,7 @@ test("a second use of an open request id closes the session", async () => {
 		const { pair, peer, running } = await windowed(version, alpn, 2n, false);
 		await trackStatus(peer, version, 0n);
 		await trackStatus(peer, version, 0n);
-		await expect(running).rejects.toThrow("duplicate request id");
+		await expect(running).rejects.toThrow("request id was already spent");
 		expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 	}
 });
@@ -470,24 +470,43 @@ test("an update spending an open request id closes the session", async () => {
 			await trackStatus(peer, version, heldId);
 			if (!(await adapter.acceptBi())) throw new Error("no stream");
 			await update(peer, version, heldId, heldId);
-			await expect(running).rejects.toThrow("duplicate request id");
+			await expect(running).rejects.toThrow("request id was already spent");
 			expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 		}
 	}
 });
 
-/** Repeated updates raise the maximum, but the peer still cannot hold more than the window open. */
-test("reused update ids cannot hold more than the window", async () => {
+/** Request IDs stay spent after their stream or update retires. */
+test("retired and lower request ids close the session", async () => {
 	for (const [version, alpn] of WINDOW_DRAFTS) {
-		const { pair, adapter, peer, running } = await windowed(version, alpn, 2n, false);
+		for (const client of [false, true]) {
+			const parity = client ? 1n : 0n;
+			for (const [first, later] of [
+				[parity, parity],
+				[parity + 4n, parity + 2n],
+			] as const) {
+				const { pair, adapter, peer, running } = await windowed(version, alpn, 8n, client);
+				await trackStatus(peer, version, first);
+				const stream = await adapter.acceptBi();
+				if (!stream) throw new Error("no stream");
+				stream.close();
+				await trackStatus(peer, version, later);
+				await expect(running).rejects.toThrow("request id was already spent");
+				expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
+			}
+		}
+	}
+});
+
+test("an update id stays spent after the update retires", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		const { pair, adapter, peer, running } = await windowed(version, alpn, 4n, false);
 		await trackStatus(peer, version, 0n);
 		if (!(await adapter.acceptBi())) throw new Error("no stream");
-		for (let i = 0; i < 8; i++) await update(peer, version, 2n, 0n);
-		await trackStatus(peer, version, 4n);
-		if (!(await adapter.acceptBi())) throw new Error("no stream");
-		await trackStatus(peer, version, 6n);
-		await expect(running).rejects.toThrow("too many open requests");
-		expect((await pair.client.closed).closeCode).toBe(SessionCode.TooManyRequests);
+		await update(peer, version, 2n, 0n);
+		await update(peer, version, 2n, 0n);
+		await expect(running).rejects.toThrow("request id was already spent");
+		expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 	}
 });
 

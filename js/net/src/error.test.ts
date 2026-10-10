@@ -93,6 +93,11 @@ test("the error type names the registry the code came from", () => {
 	expect(Number(stream.code)).toBe(Number(session?.code));
 });
 
+test("invalid request IDs keep their session registry code", () => {
+	expect(Number(SessionCode.InvalidRequestId)).toBe(0x4);
+	expect(fromClose({ closeCode: 0x4 })?.code).toBe(SessionCode.InvalidRequestId);
+});
+
 test("the code types reject the other registry", () => {
 	new StreamError(StreamCode.DeliveryTimeout);
 	new SessionError(SessionCode.Unauthorized);

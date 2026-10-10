@@ -30,6 +30,8 @@ struct Incoming {
 	live: u64,
 	/// Requests retired since the last grant.
 	retired: u64,
+	/// The highest accepted ID, including requests that already retired.
+	last: Option<RequestId>,
 }
 
 #[derive(Clone)]
@@ -60,6 +62,7 @@ impl Control {
 			sent: max,
 			live: 0,
 			retired: 0,
+			last: None,
 		});
 		self
 	}
@@ -72,17 +75,22 @@ impl Control {
 	/// Admit a request the peer opened, held open until the returned permit drops.
 	///
 	/// Closes the session with TOO_MANY_REQUESTS when the ID is at or past the
-	/// MAX_REQUEST_ID we advertised, or the peer reused IDs to hold more than the window.
+	/// MAX_REQUEST_ID we advertised, or its live requests exceed the window.
+	/// Reused or decreasing IDs close with INVALID_REQUEST_ID even after retirement.
 	/// `None` when the peer's requests are not flow controlled.
 	pub fn accept(&self, id: RequestId) -> Result<Option<RequestPermit>, Error> {
 		let mut state = self.state.lock();
 		let Some(incoming) = &mut state.incoming else {
 			return Ok(None);
 		};
+		if incoming.last.is_some_and(|last| id <= last) {
+			return Err(SessionError::InvalidRequestId.into());
+		}
 		if id.0 >= incoming.max || incoming.live >= incoming.window {
 			tracing::warn!(id = %id, max = incoming.max, live = incoming.live, "peer exceeded MAX_REQUEST_ID");
 			return Err(SessionError::TooManyRequests.into());
 		}
+		incoming.last = Some(id);
 		incoming.live += 1;
 		Ok(Some(RequestPermit(self.clone())))
 	}
@@ -200,13 +208,15 @@ mod tests {
 		assert!(control.accept(RequestId(12)).is_err());
 	}
 
-	/// A peer reusing request IDs below the window still cannot hold more than it.
+	/// An ID remains spent after its request ends, across every request type.
 	#[test]
-	fn reused_ids_cannot_exceed_the_window() {
-		let control = Control::new(None, false).with_window(2, false);
-		let _a = control.accept(RequestId(0)).unwrap();
-		let _b = control.accept(RequestId(0)).unwrap();
-		assert!(control.accept(RequestId(2)).is_err());
+	fn retired_or_lower_request_ids_are_refused() {
+		for (first, later) in [(0, 0), (4, 2)] {
+			let control = Control::new(None, false).with_window(8, false);
+			drop(control.accept(RequestId(first)).unwrap());
+			let err = control.accept(RequestId(later)).err().expect("spent ID refused");
+			assert_eq!(SessionError::from(&err).to_code(), 0x4);
+		}
 	}
 
 	/// Draft-17+ has no MAX_REQUEST_ID: nothing is tracked or granted.

@@ -9,9 +9,6 @@ import * as Namespace from "./namespace.ts";
 import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-/** Draft-14 to -16: the request ID is not valid for this peer (wrong parity or a duplicate). */
-const INVALID_REQUEST_ID = 0x4;
-
 /** The peer used a request ID the draft closes the session for. */
 export class RequestWindowError extends Error {
 	readonly code: number;
@@ -149,6 +146,7 @@ export class ControlStreamAdapter implements Session {
 	// by the IDs they spent and goes out as one MAX_REQUEST_ID.
 	#peerWindow: bigint;
 	#peerMax: bigint;
+	#peerLast: bigint | undefined;
 	#open = new Set<bigint>();
 	#retired = 0n;
 	#granting = false;
@@ -482,16 +480,17 @@ export class ControlStreamAdapter implements Session {
 		// Even IDs are the client's. `#client` is this side, so the peer's IDs are the other parity.
 		const even = (requestId & 1n) === 0n;
 		if (even === this.#client) {
-			this.#refuse(INVALID_REQUEST_ID, "request id has the wrong parity");
+			this.#refuse(SessionCode.InvalidRequestId, "request id has the wrong parity");
 		}
 	}
 
 	#admitHeld(requestId: bigint): void {
 		this.#checkPeer(requestId);
-		if (this.#open.has(requestId)) {
-			this.#refuse(INVALID_REQUEST_ID, "duplicate request id");
+		if (this.#peerLast !== undefined && requestId <= this.#peerLast) {
+			this.#refuse(SessionCode.InvalidRequestId, "request id was already spent");
 		}
 		this.#checkLive();
+		this.#peerLast = requestId;
 		this.#open.add(requestId);
 	}
 
@@ -505,7 +504,7 @@ export class ControlStreamAdapter implements Session {
 		this.#retire();
 	}
 
-	/** A peer reusing IDs below the bound still cannot hold more than the window open. */
+	/** Enforce the live-request cap independently of the ID bound. */
 	#checkLive(): void {
 		if (BigInt(this.#open.size) >= this.#peerWindow) {
 			this.#refuse(SessionCode.TooManyRequests, "too many open requests");
