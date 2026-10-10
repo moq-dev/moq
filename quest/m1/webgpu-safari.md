@@ -27,10 +27,6 @@ instead of guessing.
 
 Public API: possibly a new `RendererError` value. Wire: none.
 
-## Required
-
-- [WebGPU renderer](/quest/m1/webgpu-renderer.md) - the renderer and `@moq/video` package (#5138) this verifies
-
 ## Related
 
 - [WebGPU HDR](/quest/m1/webgpu-hdr.md) - builds on the same renderer
