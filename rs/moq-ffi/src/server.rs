@@ -88,19 +88,41 @@ impl Listening {
 	}
 }
 
-/// Move requests from `listener` into `queue`, then close the listener once `stop` fires
-/// or nothing more can arrive.
+/// Start `server`, report its address to `bound`, and move requests into `queue`, then close
+/// the listener once `stop` fires or nothing more can arrive.
 ///
 /// Runs on the FFI runtime so `MoqServer::cancel` can close the listener while an `accept`
-/// is parked. A request waits in `queue` until an `accept` is polled for it, so one cancelled
+/// is parked, and so a cancelled `listen` never drops a half-started server instead of
+/// closing it. A request waits in `queue` until an `accept` is polled for it, so one cancelled
 /// but not yet freed never takes it. A slot is reserved before accepting, so at most one
 /// request waits unclaimed.
 async fn serve(
-	mut listener: moq_tokio::Listener,
+	server: moq_tokio::Server,
+	bound: tokio::sync::oneshot::Sender<Result<String, MoqError>>,
 	queue: tokio::sync::mpsc::Sender<moq_tokio::server::Request>,
 	mut stop: tokio::sync::oneshot::Receiver<()>,
 	closed: std::sync::mpsc::Sender<()>,
 ) {
+	// Not raced against `stop`: `Listener::close` is the only synchronous release, so a
+	// cancel waits out the bind rather than dropping it.
+	let mut listener = match server.listen().await {
+		Ok(listener) => listener,
+		Err(err) => {
+			let _ = bound.send(Err(MoqError::Bind(format!("{err}"))));
+			return;
+		}
+	};
+	match listener.local_addr() {
+		Ok(addr) => {
+			let _ = bound.send(Ok(addr.to_string()));
+		}
+		Err(err) => {
+			let _ = bound.send(Err(MoqError::Bind(format!("{err}"))));
+			listener.close().await;
+			return;
+		}
+	}
+
 	loop {
 		let slot = tokio::select! {
 			_ = &mut stop => break,
@@ -158,34 +180,31 @@ impl ServerState {
 		if self.requests.is_some() {
 			return Err(MoqError::Bind("already listening".into()));
 		}
-		let server = self
-			.config
-			.clone()
-			.init(self.quic.clone())
-			.map_err(|err| MoqError::Bind(format!("{err}")))?
-			.listen()
-			.await
-			.map_err(|err| MoqError::Bind(format!("{err}")))?;
-		let addr = server
-			.local_addr()
-			.map_err(|err| MoqError::Bind(format!("{err}")))?
-			.to_string();
-		let certificates = server.certificates();
-
-		// `cancel` flags the task before it takes `listening`, so checking the flag under that
-		// lock means either `cancel` finds the loop or this finds the cancel.
-		let mut slot = listening.lock().unwrap();
-		if task.is_cancelled() {
-			drop(slot);
-			server.close().await;
-			return Err(MoqError::Cancelled);
-		}
+		let (bound, addr) = tokio::sync::oneshot::channel();
 		let (queue, requests) = tokio::sync::mpsc::channel(1);
-		let (stop, stopped) = tokio::sync::oneshot::channel();
-		let (closed, wait) = std::sync::mpsc::channel();
-		crate::ffi::spawn(serve(server, queue, stopped, closed));
-		*slot = Some(Listening { stop, closed: wait });
+		let certificates = {
+			// `cancel` flags the task before it takes `listening`, so checking the flag under
+			// that lock means either `cancel` finds the loop or this finds the cancel. `init`
+			// binds the QUIC socket, so it goes after the check and straight to the loop.
+			let mut slot = listening.lock().unwrap();
+			if task.is_cancelled() {
+				return Err(MoqError::Cancelled);
+			}
+			let server = self
+				.config
+				.clone()
+				.init(self.quic.clone())
+				.map_err(|err| MoqError::Bind(format!("{err}")))?;
+			let certificates = server.certificates();
+			let (stop, stopped) = tokio::sync::oneshot::channel();
+			let (closed, wait) = std::sync::mpsc::channel();
+			crate::ffi::spawn(serve(server, bound, queue, stopped, closed));
+			*slot = Some(Listening { stop, closed: wait });
+			certificates
+		};
 
+		// Dropped only when the runtime is gone.
+		let addr = addr.await.map_err(|_| MoqError::Cancelled)??;
 		self.requests = Some(Requests {
 			queue: requests,
 			certificates,
@@ -268,8 +287,9 @@ impl MoqServer {
 	/// `cert_fingerprints()` returns `Cancelled` afterwards.
 	pub fn cancel(&self) {
 		self.task.cancel();
-		let listening = self.listening.lock().unwrap().take();
-		if let Some(listening) = listening {
+		// Closed under the lock, so a concurrent `cancel` returns only once the socket is released.
+		let mut listening = self.listening.lock().unwrap();
+		if let Some(listening) = listening.take() {
 			listening.close();
 		}
 	}

@@ -3924,6 +3924,27 @@ async fn server_cancel_releases_the_bound_port() {
 	rebound.cancel();
 }
 
+/// A cancel racing an in-flight listen still releases the port before it returns. The listen is
+/// polled once and then left unpolled, as a foreign cancel leaves it until `rust_future_free`.
+#[tokio::test]
+async fn server_cancel_during_listen_releases_the_port() {
+	let addr = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some(addr.to_string()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+
+	let waker = std::task::Waker::noop();
+	let mut listen = Box::pin(server.listen());
+	let _ = listen.as_mut().poll(&mut std::task::Context::from_waker(waker));
+
+	server.cancel();
+	std::net::UdpSocket::bind(addr).expect("cancel should release the socket before it returns");
+	drop(listen);
+}
+
 /// A foreign cancel only stops polling an accept; uniffi drops it later, at `rust_future_free`.
 /// Until then the cancelled accept must not take the session the next accept is waiting for.
 #[tokio::test]
