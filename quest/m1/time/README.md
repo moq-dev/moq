@@ -55,8 +55,11 @@ reasons, so later sessions don't reopen them:
   backend of the ambient clock, starts at zero, keeps deadlock detection, and
   seeds the later runtime trait. `#[moq_time::test]` replaces
   `#[moq_net_sim::test]`.
-- **Tests move onto the sim wherever possible.** Real-I/O tests that cannot
-  stay on paused tokio, whose backend `moq-time` reads, or sync on events.
+- **Tests move onto the sim wherever possible.** A test with no real I/O
+  that cannot run on the sim yet uses paused tokio, whose clock `moq-time`
+  reads. A real-I/O test never uses paused tokio, which auto-advances to the
+  next timer while the OS event is still in flight; it syncs on events, with
+  wall time only for its watchdog.
 - **Landing.** Everything lands on `main`, the trunk. The crate and the JS
   package land first and additively; the migrations that change a published
   type (moq-net's `time::Instant`, moq-mux's `Clock`, `@moq/net`'s time
@@ -88,7 +91,7 @@ state the real-I/O rule and the `moq-time` testing rule in `AGENTS.md`,
 - [@moq/time](/quest/m1/time/js.md) - the same model in JS, with an installable clock
 - [moq-net on moq-time](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-time and moq-net-sim is gone
 - [JS on @moq/time](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/time`
-- [Every crate on moq-time](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-time, and its tests run on the sim or paused tokio
+- [Every crate on moq-time](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-time, and its tests run on the sim, paused tokio, or events
 - [moq-uring on moq-time](/quest/m1/time/uring.md) - one clock read per worker turn and moq-time's deadline queue replace the private timer heap
 - [The relay seam](/quest/m1/time/relay-seam.md) - one in-memory session and a generic `moq_relay::Connection`, so relay tests run on the sim
 

@@ -34,7 +34,7 @@ Decided 2026-10-09 while reworking #5088:
 
 ## Required
 
-- [The moq-time crate](/quest/m1/time/crate.md) - the sim, which hosts the poll counter, moves into moq-time
+- [moq-net on moq-time](/quest/m1/time/net.md) - moq-net's tests reach the moq-time sim, which hosts the poll counter
 
 ## Related
 
