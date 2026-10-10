@@ -68,3 +68,22 @@ work.
 
 Benchmark output is informational and machine-specific. Crashes, zero delivery,
 and invalid samples still fail the command.
+
+
+BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
+alternating base/current order. Startup remains outside the final five-second
+throughput window. `MOQ_BENCH_ARTIFACTS` chooses the evidence parent (default
+`target/bench/runs`); each invocation retains a new run directory even on failure.
+It contains raw load/host JSONL, process diagnostics, Criterion statistics,
+execution order, source revision and tracked dirty patch, tool/build/machine
+metadata, and workload files. Untracked files are not part of the recorded patch.
+
+Each comparison reports the median of the paired percentage deltas, their median
+absolute deviation and range, and flags fewer than three observations or a sign
+that varies across pairs. MAD is descriptive dispersion, not a confidence
+interval; three rounds cannot establish a small improvement. Timing remains
+informational. Loss and latency are explicitly lifetime statistics; throughput
+and host CPU carry their own observed window bounds. CPU efficiency is withheld
+until offered load, delivery/loss and those window bounds are comparable. The
+load generator shares the loopback host, so generator saturation can hide a relay
+improvement; these reports do not yet quantify generator CPU or worker metrics.

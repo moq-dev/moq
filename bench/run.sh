@@ -46,7 +46,18 @@ fi
 BASE_TARGET=$TARGET/base
 CURRENT_TARGET=$TARGET/current
 
-RUN=$(mktemp -d "${TMPDIR:-/tmp}/moq-bench.XXXXXX")
+ARTIFACTS=${MOQ_BENCH_ARTIFACTS:-$TARGET/runs}
+mkdir -p "$ARTIFACTS"
+RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
+printf 'Benchmark evidence: %s\n' "$RUN"
+python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "${RUNTIME_ROUNDS:-}"
+cp -R "$ROOT/bench/workloads" "$RUN/workloads"
+cp -R "$ROOT/bench" "$RUN/harness"
+ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
+if [[ ! $ROUNDS =~ ^[1-9][0-9]*$ ]]; then
+    echo 'MOQ_BENCH_RUNTIME_ROUNDS must be a positive integer' >&2
+    exit 1
+fi
 WORKTREE=
 RELAY_PID=
 HOST_PID=
@@ -63,7 +74,7 @@ cleanup() {
     if [[ -n $WORKTREE ]]; then
         git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
     fi
-    rm -rf -- "$RUN"
+    printf 'Benchmark evidence retained: %s\n' "$RUN"
 }
 trap cleanup EXIT INT TERM
 
@@ -247,37 +258,6 @@ print_current_relay() {
             while IFS=$'\t' read -r name send recv send_fps recv_fps loss p99 cpu rss; do
                 printf '%-10s %11.3f %11.3f %10.1f %10.1f %9.3f %9s %10s %10s\n' \
                     "$name" "$send" "$recv" "$send_fps" "$recv_fps" "$loss" "$p99" "$cpu" "$rss"
-            done
-    done
-}
-
-print_relay_comparison() {
-    printf '\nRelay comparison (change is current versus base)\n'
-    printf '%-10s %-16s %12s %12s %10s\n' workload metric base current change
-    for workload in video fanout; do
-        jq -r -s '
-			.[0] as $base | .[1] as $current
-			| def change($a; $b): if $a == null or $a == 0 or $b == null then "n/a" else
-				((($b / $a - 1) * 10000 | round) / 100 | tostring) + "%"
-			end;
-			[
-				["send Mbps", $base.send_mbps, $current.send_mbps],
-				["recv Mbps", $base.recv_mbps, $current.recv_mbps],
-				["send fps", $base.send_fps, $current.send_fps],
-				["recv fps", $base.recv_fps, $current.recv_fps],
-				["loss %", $base.loss_pct, $current.loss_pct],
-				["latency p50 ms", $base.latency_p50_ms, $current.latency_p50_ms],
-				["latency p99 ms", $base.latency_p99_ms, $current.latency_p99_ms],
-				["CPU cores", $base.cpu_cores, $current.cpu_cores],
-				["RSS MiB", (($base.rss_bytes // null) | if . then . / 1048576 else null end),
-					(($current.rss_bytes // null) | if . then . / 1048576 else null end)]
-			]
-			| .[]
-			| [.[0], (.[1] // "n/a" | tostring), (.[2] // "n/a" | tostring), change(.[1]; .[2])]
-			| @tsv
-		' "$RUN/relay/base/$workload/summary.json" "$RUN/relay/current/$workload/summary.json" |
-            while IFS=$'\t' read -r metric base current change; do
-                printf '%-10s %-16s %12s %12s %10s\n' "$workload" "$metric" "$base" "$current" "$change"
             done
     done
 }
@@ -478,6 +458,11 @@ elif [[ -n $BASE ]]; then
     BASE_COMMIT=$(git rev-parse --verify "$BASE^{commit}")
     WORKTREE=$RUN/base
     git worktree add --detach "$WORKTREE" "$BASE_COMMIT" >/dev/null
+    mkdir -p "$RUN/base-context"
+    (
+        cd "$WORKTREE"
+        python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE_COMMIT" comparison-base
+    )
 
     printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
     compare_criterion "$WORKTREE" "$ROOT"
@@ -502,16 +487,22 @@ HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
 
 if [[ -n $BASE ]]; then
     printf '\nRelay workloads: paired base/current\n'
-    for workload in video fanout; do
-        run_workload base "$RUN/moq-relay-base" "$workload"
-        run_workload current "$CURRENT_TARGET/release/moq-relay" "$workload"
+    for ((round = 1; round <= ROUNDS; round++)); do
+        if ((round % 2)); then order=(base current); else order=(current base); fi
+        printf '%s\t%s\n' "$round" "${order[*]}" >> "$RUN/execution-order.tsv"
+        for workload in video fanout; do
+            for label in "${order[@]}"; do
+                if [[ $label == base ]]; then relay=$RUN/moq-relay-base; else relay=$CURRENT_TARGET/release/moq-relay; fi
+                run_workload "$label/round-$round" "$relay" "$workload"
+            done
+        done
     done
 else
     run_relay_suite current "$CURRENT_TARGET/release/moq-relay"
 fi
 
 if [[ -n $BASE ]]; then
-    print_relay_comparison
+    python3 "$ROOT/bench/compare.py" "$RUN"
 else
     print_current_relay
 fi

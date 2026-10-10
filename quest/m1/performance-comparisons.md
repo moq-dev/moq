@@ -39,6 +39,12 @@ rather than creating another benchmark runner.
   samples. Validate an unchanged-revision A/A run and a deliberately degraded
   fixture; keep normal machine timing informational rather than a flaky CI gate.
 
+**Draft remaining proof:** the first draft implements retained evidence, alternating
+paired rounds, a tested median/MAD reducer and explicit counter scopes. It still
+needs generator CPU and worker metrics, aligned host/load windows, full command stdout/stderr, and
+controlled real A/A and degraded runs. Keep this quest until that evidence exists;
+synthetic reducer tests are not a throughput result.
+
 ## Related
 
 - [Mergeable bench buckets](/quest/m1/bench-buckets.md) - owns histogram/window semantics

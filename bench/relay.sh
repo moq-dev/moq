@@ -165,6 +165,10 @@ summarize_load() {
 			then error("load benchmark latency sample is invalid")
 		else {
 			workload: $workload,
+			throughput_window_start_ms: $first.timestamp_ms,
+			throughput_window_end_ms: $last.timestamp_ms,
+			latency_scope: "cumulative lifetime",
+			loss_scope: "cumulative lifetime",
 			send_mbps: (($last.bytes_sent - $first.bytes_sent) * 8 / $seconds / 1000000),
 			recv_mbps: (($last.bytes_recv - $first.bytes_recv) * 8 / $seconds / 1000000),
 			send_fps: (($last.frames_sent - $first.frames_sent) / $seconds),
@@ -198,6 +202,8 @@ add_host_summary() {
 			or $last.ctx_involuntary < $first.ctx_involuntary
 			then error("host benchmark counters moved backwards")
 		else {
+			host_window_start_ms: $first.timestamp_ms,
+			host_window_end_ms: $last.timestamp_ms,
 			cpu_user_cores: (($last.cpu_user - $first.cpu_user) / $seconds),
 			cpu_system_cores: (($last.cpu_system - $first.cpu_system) / $seconds),
 			cpu_cores: ((($last.cpu_user + $last.cpu_system) - ($first.cpu_user + $first.cpu_system)) / $seconds),
