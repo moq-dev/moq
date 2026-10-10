@@ -17,4 +17,19 @@ or the client reads the connection's state before the close arrives. Fix
 that at its source, with a regression that fails without it. No retry and no
 accepting either message.
 
+Investigation (2026-10-10): five independent Chromium refusals through an
+isolated relay all resolved `WebTransport.closed` with code 2 and reason
+`unauthorized`. The browser logged the same remote session error during SETUP.
+The full Rust/Python/Go/C++/JS/C/GStreamer interop matrices for catalog warmup
+and captions also passed the existing exact refusal assertion. No failing
+observation was retried or accepted as an alternate result.
+
+The harness reads the raw WebTransport close result rather than the client
+library's error translation. `Connection.connectTransport` still has a
+100 ms SETUP-error close grace, after which it locally closes the transport.
+Whether that competes with a delayed remote capsule under load is unproven;
+the server HTTP/3 control-stream lifetime is another candidate. A failing
+browser trace paired with relay logs is needed before altering either
+lifetime. No timeout, retry, or accepted error was changed.
+
 Public API: none expected. Wire: none expected.
