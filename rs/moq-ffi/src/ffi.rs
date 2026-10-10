@@ -325,34 +325,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		.await
 	}
 
-	/// [Self::run] on the runtime thread rather than in place.
-	///
-	/// Only for a state shut down by [Self::cancel_and_wait], which blocks its caller until an
-	/// in-flight call unwinds: a call awaited in place on that same thread never would. The cost
-	/// is the race [Self::run] avoids, since a foreign cancel leaves this running until freed.
-	#[cfg(not(target_arch = "wasm32"))]
-	pub async fn spawn<R, F, Fut>(&self, f: F) -> Result<R, MoqError>
-	where
-		R: Send + 'static,
-		F: FnOnce(Guard<T>) -> Fut + Send + 'static,
-		Fut: Future<Output = Result<R, MoqError>> + Send + 'static,
-	{
-		let cancel = self.cancel.subscribe();
-		let state = self.state.clone();
-
-		let handle = runtime().spawn(async move { Self::drive(cancel, state, f).await });
-
-		// Dropping a JoinHandle detaches its task rather than stopping it, so a caller that
-		// gives up would leave the closure running with the state lock held.
-		let _abort = AbortOnDrop(handle.abort_handle());
-
-		match handle.await {
-			Ok(result) => result,
-			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
-			Err(e) => Err(e.into()),
-		}
-	}
-
 	/// Wait for the lock, then run `f`, with [Self::cancel] able to interrupt either.
 	async fn drive<R, F, Fut>(
 		mut cancel: tokio::sync::watch::Receiver<bool>,
@@ -400,43 +372,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		spawn(async move {
 			state.lock().await.take();
 		});
-	}
-
-	/// [Self::cancel], then block until `shutdown` has run on the state.
-	///
-	/// A synchronous caller uses this to make the release of what the state owns
-	/// observable: the listening socket is gone, not merely scheduled to close.
-	/// `shutdown` runs on the runtime thread, after any in-flight [Self::spawn] has
-	/// unwound, and the lock is held across it so a second cancel waits too.
-	///
-	/// It waits on a channel rather than [tokio::sync::Mutex::blocking_lock] so it
-	/// works from inside another runtime, as the tests do; it must not run on the
-	/// runtime thread itself, which would deadlock. Neither may the state's calls use
-	/// [Self::run]: one awaited in place on the blocked thread would never unwind.
-	#[cfg(not(target_arch = "wasm32"))]
-	pub fn cancel_and_wait<F, Fut>(&self, shutdown: F)
-	where
-		F: FnOnce(T) -> Fut + Send + 'static,
-		Fut: Future<Output = ()> + Send + 'static,
-	{
-		// Publish the flag before waiting: an in-flight [Self::run] only releases
-		// the lock once it observes it.
-		self.cancel.send_replace(true);
-
-		let state = self.state.clone();
-		let (done, wait) = std::sync::mpsc::channel();
-		spawn(async move {
-			let mut state = state.lock().await;
-			if let Some(inner) = state.take() {
-				shutdown(inner).await;
-			}
-			// A dropped receiver just means the caller is gone; the shutdown above
-			// still ran, which is what releases the state.
-			let _ = done.send(());
-		});
-		// A dropped sender means the runtime is gone, so nothing is left holding
-		// the state to wait for.
-		let _ = wait.recv();
 	}
 }
 
