@@ -7952,3 +7952,152 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let end = follower.next().await;
 	assert!(matches!(end, Ok(None)), "no replacement: {end:?}");
 }
+
+/// The audio PTS in `frames`.
+fn audio_pts(frames: &[Frame]) -> Vec<u64> {
+	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	collect_pes_pts(&bytes).1
+}
+
+/// A rendition the catalog lists only after another instance took the path reads the instance
+/// the export resolved, never the replacement, even on an epochless route.
+#[tokio::test(start_paused = true)]
+async fn a_late_rendition_never_reads_a_replacement() {
+	let origin = crate::source::produce_origin();
+	let (mut old, mut old_catalog) = publish_live::<()>(&origin, Default::default());
+	let mut export = Export::new(crate::Source::new(origin.consume(), "live"))
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	assert!(drain_frames(&mut export).await.is_empty(), "nothing listed yet");
+
+	// Another instance takes the path, its audio ten seconds ahead.
+	let (mut new, mut new_catalog) = publish_live::<()>(&origin, Default::default());
+	let mut new_audio = aac_rendition(&mut new, &mut new_catalog, "a.aac");
+	for ms in (10_000..10_200).step_by(20) {
+		write_aac(&mut new_audio, ms);
+	}
+
+	let mut old_audio = aac_rendition(&mut old, &mut old_catalog, "a.aac");
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut old_audio, ms);
+	}
+	let pts = audio_pts(&drain_frames(&mut export).await);
+	assert_eq!(pts.len(), 10, "the old instance's audio went out: {pts:?}");
+	assert!(
+		pts.iter().all(|&pts| pts < 60_200 * 90),
+		"nothing of the replacement: {pts:?}"
+	);
+}
+
+/// An SI entry repointed after another instance took the path reads the instance the export
+/// resolved, never the replacement, even on an epochless route.
+#[tokio::test(start_paused = true)]
+async fn a_repointed_si_entry_never_reads_a_replacement() {
+	let sdt_a = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
+	let sdt_b = make_long_section(0x42, 1, 1, 0, 0, &[0xbb; 8]);
+	let sdt_new = make_long_section(0x42, 1, 2, 0, 0, &[0xcc; 8]);
+	let entry = |track: &str| tscat::SiEntry {
+		track: track.to_string(),
+		interval: Some(Duration::from_secs(1)),
+		..Default::default()
+	};
+	let si_track = |broadcast: &mut moq_net::broadcast::Producer, name: &str, sdt: &[u8]| {
+		let mut track = broadcast.create_track(name, None).unwrap();
+		track.write_frame(Timestamp::ZERO, Bytes::copy_from_slice(sdt)).unwrap();
+		track
+	};
+
+	let origin = crate::source::produce_origin();
+	let (mut old, mut catalog) = publish_live::<tscat::Ext>(&origin, Default::default());
+	let mut video = h264_rendition(&mut old, &mut catalog, "video.avc1");
+	let _a = si_track(&mut old, "a.si", &sdt_a);
+	let _b = si_track(&mut old, "b.si", &sdt_b);
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.si
+		.entry(0x0011)
+		.or_default()
+		.insert(0x42, entry("a.si"));
+	let mut export = Export::with_ts(
+		crate::Source::new(origin.consume(), "live"),
+		crate::catalog::CatalogFormat::Hang,
+	)
+	.await
+	.unwrap()
+	.with_delay(RECORDING_MAX_AGE)
+	.with_replay();
+	for ms in (0..1_000).step_by(40) {
+		write_h264(&mut video, ms);
+	}
+	let before: Vec<u8> = drain_frames(&mut export)
+		.await
+		.iter()
+		.flat_map(|f| f.payload.iter().copied())
+		.collect();
+
+	// Another instance takes the path with its own `b.si`, and only then is the entry repointed.
+	let mut new = origin.publish("live", Default::default()).unwrap();
+	let _new_b = si_track(&mut new, "b.si", &sdt_new);
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.si
+		.get_mut(&0x0011)
+		.unwrap()
+		.insert(0x42, entry("b.si"));
+	for ms in (1_000..3_000).step_by(40) {
+		write_h264(&mut video, ms);
+	}
+	let after: Vec<u8> = drain_frames(&mut export)
+		.await
+		.iter()
+		.flat_map(|f| f.payload.iter().copied())
+		.collect();
+
+	let contains = |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+	assert!(contains(&before, &sdt_a), "the original entry went out (control)");
+	assert!(contains(&after, &sdt_b), "the repointed entry reads the old instance");
+	assert!(!contains(&after, &sdt_new), "nothing of the replacement");
+}
+
+/// A switch onto an instance that is itself replaced before the switched export requests a
+/// track still reads the instance it switched to.
+#[tokio::test(start_paused = true)]
+async fn a_switch_reads_the_instance_it_followed() {
+	let origin = crate::source::produce_origin();
+	let (_old, _old_catalog) = publish_live::<()>(&origin, Default::default());
+	let export = Export::new(crate::Source::new(origin.consume(), "live"))
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+
+	let (mut followed, mut followed_catalog) = publish_live::<()>(&origin, Default::default());
+	let mut followed_audio = aac_rendition(&mut followed, &mut followed_catalog, "a.aac");
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut followed_audio, ms);
+	}
+	let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
+
+	// Replaced again, ten seconds ahead, before the switched export requests its track.
+	let (mut newer, mut newer_catalog) = publish_live::<()>(&origin, Default::default());
+	let mut newer_audio = aac_rendition(&mut newer, &mut newer_catalog, "a.aac");
+	for ms in (10_000..10_200).step_by(20) {
+		write_aac(&mut newer_audio, ms);
+	}
+
+	let mut export = export.follow(broadcast).await.unwrap();
+	let pts = audio_pts(&drain_frames(&mut export).await);
+	assert_eq!(pts.len(), 10, "the followed instance's audio went out: {pts:?}");
+	assert!(
+		pts.iter().all(|&pts| pts < 60_200 * 90),
+		"nothing of the newer instance: {pts:?}"
+	);
+}

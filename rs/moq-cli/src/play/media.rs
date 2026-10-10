@@ -69,7 +69,6 @@ impl<O: Output> Media<O> {
 	/// update is the same instance, which its subscriptions already ride out.
 	async fn play(self) -> anyhow::Result<()> {
 		let mut follow = self.origin.follow(&self.broadcast)?;
-		let source = moq_mux::Source::new(self.origin.clone(), &self.broadcast);
 		let mut playing = None;
 
 		loop {
@@ -97,7 +96,9 @@ impl<O: Output> Media<O> {
 					self.video.lock().unwrap().clear();
 					self.drained.notify_one();
 					self.output.send(Event::Wake);
-					playing = Some(Box::pin(self.play_broadcast(source.clone())));
+					// A fresh source, since one keeps the instance it first resolved.
+					let source = moq_mux::Source::new(self.origin.clone(), &self.broadcast);
+					playing = Some(Box::pin(self.play_broadcast(source)));
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;

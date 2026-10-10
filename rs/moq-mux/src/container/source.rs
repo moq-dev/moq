@@ -56,7 +56,7 @@ impl VideoTransform {
 enum SourceState {
 	/// Waiting for the target broadcast (the catalog broadcast, or a cross-broadcast
 	/// reference) to resolve; the track (by name) is subscribed once it does.
-	Requesting(kio::Pending<moq_net::origin::Requesting>, String),
+	Requesting(crate::Binding, String),
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
@@ -329,7 +329,7 @@ impl ExportSource {
 				let SourceState::Requesting(pending, name) = &self.state else {
 					unreachable!("just matched Requesting");
 				};
-				(ready!(pending.poll_ok(waiter))?, name.clone())
+				(ready!(pending.poll_broadcast(waiter))?, name.clone())
 			};
 			// A zero budget asks only for the newest group.
 			let max_delay = match self.live {
