@@ -2921,11 +2921,13 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 						instances.insert(id, asked);
 						Event::Resolved { route, result: Ok(id) }
 					}
+					// A refusal for an instance the route has since left, such as a request
+					// released by an epoch change, is not the new one's answer either: ask again.
 					Err(err) => Event::Resolved {
 						route,
 						result: Err(Refusal {
 							err,
-							standing: standing(&front, route, &resolved),
+							standing: !stale(&front, route, &asked, &resolved) && standing(&front, route, &resolved),
 						}),
 					},
 				}
@@ -3727,11 +3729,15 @@ impl Dynamic {
 	/// At the same [`Route::epoch`] this re-prices: consumers observe an update and
 	/// every handle survives. Another epoch, or none, names another publisher
 	/// instance: consumers see an [`AnnounceEvent::Restart`], and a re-request never
-	/// joins what was resolved under the old one. Requests this handle still holds
-	/// are refused with [`Error::Unroutable`], and the next request for a path it
-	/// served asks the handler again. The broadcasts it served keep running for the
-	/// subscriptions already on them; close them to end those too. Route selection
-	/// still applies: another route still at the old epoch outranks one without.
+	/// joins what was resolved under the old one. Requests still waiting on this
+	/// handle carry over: the handler is asked again under the new epoch, and its
+	/// answer to a request asked before the change is dropped, never served under the
+	/// new epoch. A request pinned to the old epoch is refused with
+	/// [`Error::Unroutable`]. The answers already served are forgotten, so the next
+	/// request for one of those paths asks the handler again too. The broadcasts it
+	/// served keep running for the subscriptions already on them; close them to end
+	/// those too. Route selection still applies: another route still at the old epoch
+	/// outranks one without.
 	/// To re-price, start from the current route:
 	/// `dynamic.update(dynamic.route().with_cost(cost))`.
 	///
@@ -3805,8 +3811,8 @@ impl ServeState {
 		if state.closed {
 			return;
 		}
-		// Refused already (the route changed instance): that answer stands and nothing
-		// is cached for the next request.
+		// Released already (the route changed instance): the answer was for the old one,
+		// so nothing resolves or caches it.
 		if state.requests.remove_if(path, |p| p.same_channel(producer)).is_none() {
 			return;
 		}
@@ -3837,8 +3843,9 @@ impl ServeState {
 		}
 	}
 
-	/// Refuse every request, queued or handed to a handler, and forget the answers served,
-	/// because the route now names another publisher instance.
+	/// Release every request, queued or handed to a handler, and forget the answers served,
+	/// because the route now names another publisher instance. The fronts waiting on a
+	/// released request ask again under the new one; the handler's answer to it is dropped.
 	fn renew(&mut self) {
 		for producer in self.requests.drain_all() {
 			if let Ok(mut request) = producer.write() {
@@ -8200,67 +8207,60 @@ mod tests {
 		deliver(&new_track, &mut subscription, b"new").await;
 	}
 
-	/// A handler asked under one publisher instance does not answer for the next: the
-	/// route's epoch changing while the request waits refuses it, and its late answer
-	/// is neither handed out under the new epoch nor cached for the next request.
-	#[moq_net_sim::test]
-	async fn a_pending_answer_does_not_outlive_its_epoch() {
+	/// A request held when its route changes epoch carries over: the handler is asked
+	/// again under the new epoch rather than the requester failing. The old answer is
+	/// neither served under the new epoch nor cached for the next request, and a request
+	/// pinned to the old epoch is refused. `answer_first` lands the old answer just
+	/// before the change instead of after, before the front takes it.
+	async fn held_request_across_an_epoch_change(answer_first: bool) {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
+		let old = crate::Epoch::mint();
 		let dynamic = producer
-			.dynamic("room", Route::default().with_epoch(crate::Epoch::mint()))
+			.dynamic("room", Route::default().with_epoch(old.clone()))
 			.unwrap();
 		let pending = consumer.request_broadcast("room/alice", None);
+		let pinned = consumer.request_broadcast("room/alice", old);
 		let request = queued(&dynamic).await;
 
-		let epoch = crate::Epoch::mint();
-		dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
 		let stale = broadcast::Info::new().produce();
 		let _stale_track = stale.create_track("video", None).unwrap();
-		request.accept(&stale);
-		assert!(
-			matches!(pending.await, Err(Error::Unroutable)),
-			"an answer for the old instance resolved"
-		);
+		let epoch = crate::Epoch::mint();
+		if answer_first {
+			request.accept(&stale);
+			dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
+		} else {
+			dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
+			request.accept(&stale);
+		}
 
-		let retry = consumer.request_broadcast("room/alice", None);
 		let request = queued(&dynamic).await;
 		let fresh = broadcast::Info::new().produce();
 		let fresh_track = fresh.create_track("video", None).unwrap();
 		request.accept(&fresh);
-		let resolved = retry.await.expect("the new instance resolves");
+		let resolved = pending.await.expect("the request carries over to the new instance");
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
+		assert!(
+			matches!(pinned.await, Err(Error::Unroutable)),
+			"a request pinned to the old epoch resolved"
+		);
+		let cached = dynamic.state.lock().served.get(&Path::new("room/alice").to_owned());
+		assert!(
+			cached.is_some_and(|cached| cached.consume().is_clone(&fresh.consume())),
+			"the old answer was cached"
+		);
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&fresh_track, &mut subscription, b"new").await;
 	}
 
-	/// An answer that lands just before its route changes instance, but that the front
-	/// has not taken yet, is not stamped with the new epoch: the front asks again.
+	#[moq_net_sim::test]
+	async fn a_request_held_across_an_epoch_change_is_asked_again() {
+		held_request_across_an_epoch_change(false).await;
+	}
+
 	#[moq_net_sim::test]
 	async fn an_answer_before_an_epoch_change_is_asked_again() {
-		let producer = origin(1).produce();
-		let consumer = producer.consume();
-		let dynamic = producer
-			.dynamic("room", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		let pending = consumer.request_broadcast("room/alice", None);
-		let request = queued(&dynamic).await;
-
-		// The answer and the change land in the same tick.
-		let stale = broadcast::Info::new().produce();
-		let _stale_track = stale.create_track("video", None).unwrap();
-		request.accept(&stale);
-		let epoch = crate::Epoch::mint();
-		dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
-
-		let request = queued(&dynamic).await;
-		let fresh = broadcast::Info::new().produce();
-		let fresh_track = fresh.create_track("video", None).unwrap();
-		request.accept(&fresh);
-		let resolved = pending.await.expect("the new instance resolves");
-		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
-		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		deliver(&fresh_track, &mut subscription, b"new").await;
+		held_request_across_an_epoch_change(true).await;
 	}
 
 	/// A route that gains an epoch and then drops it serves a third instance, not the

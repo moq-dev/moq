@@ -2150,19 +2150,33 @@ test("the newest epoch wins the path over a cheaper one and arrives as a new bro
 	origin.close();
 });
 
-test("demand naming an epoch is refused when the route changes instance while it waits", async () => {
+const NEWER = Epoch.parse("01900000-0000-7000-8000-000000000002");
+
+test("demand held across an epoch change asks again, unless it named the old epoch", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
+	const path = Path.from("live/cam");
 	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH });
 	const it = handle.requested();
-	const pending = wireOf(consumer).demand(Path.from("live/cam"), EPOCH);
+	const pinned = wireOf(consumer).demand(path, EPOCH);
+	const unpinned = wireOf(consumer).demand(path);
 	const { value: req } = await it.next();
 
-	// Another instance now serves the route; its answer is not the one the peer named.
-	handle.update({ ...handle.route, epoch: Epoch.mint() });
+	// Another instance now serves the route: the old handler's answer is for the old one.
+	handle.update({ ...handle.route, epoch: NEWER });
 	req?.accept(new BroadcastProducer().consume());
-	await expect(pending).rejects.toThrow("unroutable");
+	await expect(pinned).rejects.toThrow("unroutable");
 
+	const next = new BroadcastProducer();
+	const track = next.createTrack("video");
+	(await it.next()).value?.accept(next);
+	const subscription = (await unpinned)?.track("video").subscribe();
+	track.writeGroup(new GroupProducer(7));
+	expect((await subscription?.recvGroup())?.sequence).toBe(7);
+
+	subscription?.close();
+	await it.return?.();
+	next.close();
 	handle.close();
 	origin.close();
 });
@@ -2233,33 +2247,36 @@ test("a newer epoch ends pinned and unpinned requests on the replaced publisher 
 	origin.close();
 });
 
-test("request never accepts an old handler after its epoch changes asynchronously", async () => {
+test("a request held across an epoch change asks again and never takes the old handler's answer", async () => {
 	const origin = new Producer();
 	const prefix = Path.from("room");
 	const path = Path.from("room/cam");
 	const dynamic = origin.dynamic(prefix, { epoch: EPOCH });
-	const pending = origin.consume().request(path, { epoch: EPOCH });
+	const unpinned = origin.consume().request(path);
+	const pinned = origin.consume().request(path, { epoch: EPOCH });
 	const requests = dynamic.requested();
 	const old = (await requests.next()).value;
-	const epoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
-	dynamic.update({ ...dynamic.route, epoch });
-	const current = origin.consume().request(path, { epoch });
+	dynamic.update({ ...dynamic.route, epoch: NEWER });
+	const current = origin.consume().request(path, { epoch: NEWER });
 	old?.accept(new BroadcastProducer().consume());
-	expect(pending.active.peek()).toBeUndefined();
-	expect(pending.unroutable.peek()).toBe(true);
+	await settle();
+	expect(pinned.active.peek()).toBeUndefined();
+	expect(pinned.unroutable.peek()).toBe(true);
+	expect(unpinned.active.peek()).toBeUndefined();
 	expect(current.active.peek()).toBeUndefined();
 	const next = (await requests.next()).value;
 	next?.accept(new BroadcastProducer().consume());
-	expect(current.active.peek()?.epoch).toBe(epoch);
-	expect(pending.active.peek()).toBeUndefined();
+	await settle();
+	expect(unpinned.active.peek()?.epoch).toBe(NEWER);
+	expect(current.active.peek()?.epoch).toBe(NEWER);
+	expect(pinned.active.peek()).toBeUndefined();
 	await requests.return?.();
-	pending.close();
+	unpinned.close();
+	pinned.close();
 	current.close();
 	dynamic.close();
 	origin.close();
 });
-
-const NEWER = Epoch.parse("01900000-0000-7000-8000-000000000002");
 
 test.each([
 	["A to B", EPOCH, NEWER],

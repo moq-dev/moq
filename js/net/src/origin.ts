@@ -367,7 +367,10 @@ class ServeState {
 		this.reset(err);
 	}
 
-	/** Release answers and invalidate pending handlers when the publisher instance changes. */
+	/**
+	 * Release answers and the requests handlers hold when the publisher instance changes: a
+	 * handler's late answer is for the old one, and the requesters ask the new one again.
+	 */
 	reset(err: Error = unroutable()): void {
 		const queued = [...this.pending.values()];
 		this.pending.clear();
@@ -1740,6 +1743,7 @@ export class Consumer {
 		const live = server.served.get(path);
 		if (live && live.closed.peek() === undefined) return live;
 
+		const asked = entry.route.peek().epoch;
 		server.enqueue(path);
 		server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
 		try {
@@ -1759,7 +1763,11 @@ export class Consumer {
 					if (closed) throw closed;
 					return undefined;
 				}
-				if (!server.pending.has(path)) return undefined;
+				if (!server.pending.has(path)) {
+					// Released by an epoch change: its answer belongs to the old instance, so ask the new one.
+					if (entry.route.peek().epoch !== asked) return await this.#demand(path, epoch);
+					return undefined;
+				}
 				await Signal.race(server.settled, server.closed);
 			}
 		} finally {
@@ -1810,9 +1818,12 @@ export class Dynamic {
 	 * The route is taken as given. At the same epoch this re-prices: consumers see an update
 	 * and every handle survives. Another epoch, or none, names another publisher instance:
 	 * consumers see a restart, the requests resolved through the old one end, and a
-	 * re-request never joins it. Requests this handle still holds are refused as unroutable,
-	 * and the next request for a path it served asks the handler again. The broadcasts it
-	 * served keep running for the subscriptions already on them; close them to end those too.
+	 * re-request never joins it. Requests still waiting on this handle carry over: the handler
+	 * is asked again under the new epoch, and its answer to a request asked before the change
+	 * is dropped, never served under the new epoch. A request pinned to the old epoch is
+	 * refused as unroutable. The answers already served are forgotten, so the next request
+	 * for one of those paths asks the handler again too. The broadcasts it served keep
+	 * running for the subscriptions already on them; close them to end those too.
 	 * Route selection still applies: another route still at the old epoch outranks one
 	 * without. To re-price, start from the current route, `update({ ...dynamic.route, cost })`.
 	 */
