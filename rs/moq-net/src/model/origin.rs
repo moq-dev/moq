@@ -4472,11 +4472,13 @@ impl Consumer {
 	pub fn follow(&self, path: impl AsPath) -> Result<crate::announce::Follow, Error> {
 		let path = path.as_path();
 
-		// Scope down to the path's subtree, so the rest of the origin never wakes it. A path
-		// no pattern can spell (a segment containing `*`) watches everything instead, and the
-		// follower skips the routes that do not cover it.
-		let consumer = match Pattern::subtree(path.as_str()) {
-			Ok(subtree) => self.scope("", &Patterns::from(subtree))?,
+		// Scope down to the path itself, which still sees every route whose claim covers it:
+		// the rest of the origin never wakes it, and a route claiming only paths beneath it
+		// (a scoped dynamic at the same prefix) never masks the one that serves it, just as a
+		// request skips it. A path no pattern can spell (a segment containing `*`) watches
+		// everything instead, and the follower skips the routes that do not cover it.
+		let consumer = match Pattern::literal(path.as_str()) {
+			Ok(literal) => self.scope("", &Patterns::from(literal))?,
 			Err(_) => self.clone(),
 		};
 

@@ -103,7 +103,10 @@ mod tests {
 
 	use super::super::ProduceTest;
 	use super::*;
-	use crate::{Epoch, Error, Hop, Pattern, Patterns, origin::Route};
+	use crate::{
+		Epoch, Error, Hop, Pattern, Patterns,
+		origin::{Cost, Route},
+	};
 
 	/// The follower's next event, which must arrive within the origin's update hold.
 	async fn followed(follow: &mut Follow) -> (&'static str, String) {
@@ -178,6 +181,42 @@ mod tests {
 
 		let _exact = origin.publish("pool/job", Route::default()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
+	}
+
+	/// A route whose claim covers only paths beneath the followed one never serves it, so it
+	/// cannot mask the route that does, even when it would win the prefix on cost.
+	#[moq_net_sim::test]
+	async fn follow_ignores_a_route_scoped_beneath_the_path() {
+		let origin = Hop::new(1).unwrap().produce();
+		let chat = Patterns::from("room/*/chat".parse::<Pattern>().unwrap());
+		let _chat = origin
+			.scope("", &chat)
+			.unwrap()
+			.dynamic("room/alice", Route::default())
+			.unwrap();
+		let mut follow = origin.consume().follow("room/alice").unwrap();
+
+		let first = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
+		let event = moq_net_sim::timeout(Duration::from_secs(1), follow.next())
+			.await
+			.unwrap()
+			.unwrap();
+		assert!(
+			matches!(&event, AnnounceEvent::Start(announce) if announce.route.cost == Cost::new(5)),
+			"{event:?}"
+		);
+
+		// A republish is another instance of the route that serves the path.
+		let _second = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
+		drop(first);
+		let event = moq_net_sim::timeout(Duration::from_secs(1), follow.next())
+			.await
+			.unwrap()
+			.unwrap();
+		assert!(
+			matches!(&event, AnnounceEvent::Restart(announce) if announce.route.cost == Cost::new(5)),
+			"{event:?}"
+		);
 	}
 
 	/// A path the consumer's scope can never cover fails at once instead of waiting forever.

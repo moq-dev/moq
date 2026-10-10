@@ -83,9 +83,18 @@ export function scopeOverlaps(scope: Path.Pattern, prefix: Path.Valid): boolean 
 	return scope.overlaps(Path.Pattern.subtree(prefix));
 }
 
-/** What `scope` captures from an exact announced prefix, if it pins every wildcard. */
+/**
+ * What `scope` captures from an exact announced prefix, if it pins every wildcard. A prefix no
+ * pattern can spell (a segment containing `*`) captures nothing, as in Rust.
+ */
 export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pattern[] | undefined {
-	return scope.captures(Path.Pattern.literal(prefix));
+	let literal: Path.Pattern;
+	try {
+		literal = Path.Pattern.literal(prefix);
+	} catch {
+		return undefined;
+	}
+	return scope.captures(literal);
 }
 
 /**

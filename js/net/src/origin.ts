@@ -1640,7 +1640,17 @@ export class Consumer {
 	follow(path: Path.Valid): announce.Consumer {
 		this.#scope.path(path);
 		const producer = new announce.Producer();
-		const patterns = this.#scope.patterns(Path.Pattern.subtree(path));
+		// Scoped to the path itself, which still sees every route whose claim covers it, so a
+		// route claiming only paths beneath it never masks the one that serves it, just as a
+		// request skips it. A path no pattern can spell (a segment containing `*`) watches the
+		// whole scope instead, and the follower skips what does not cover it.
+		let scope: Path.Pattern;
+		try {
+			scope = Path.Pattern.literal(path);
+		} catch {
+			scope = Path.Pattern.all();
+		}
+		const patterns = this.#scope.patterns(scope);
 		// Hiding narrows discovery, not lookup, so a hidden path follows like any other.
 		void this.#runAnnounced(producer, patterns, true, announce.follower(path));
 		return producer.consume();

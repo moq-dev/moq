@@ -390,6 +390,42 @@ test("follow restarts onto a more specific route without an epoch", async () => 
 	origin.close();
 });
 
+test("follow ignores a route scoped beneath the path", async () => {
+	const origin = new Producer();
+	// A cheaper dynamic at the same prefix that claims only `room/*/chat`, so it never serves the path.
+	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const dynamic = chat.dynamic(Path.from("room/alice"));
+	const follow = origin.consume().follow(Path.from("room/alice"));
+
+	const first = origin.createBroadcast(Path.from("room/alice"));
+	first.announce({ cost: 5n });
+	expect(await follow.next()).toMatchObject({ kind: "start", route: { cost: 5n } });
+
+	// A republish is another instance of the route that serves the path.
+	const second = origin.createBroadcast(Path.from("room/alice"));
+	second.announce({ cost: 5n });
+	first.close();
+	expect(await follow.next()).toMatchObject({ kind: "restart", route: { cost: 5n } });
+
+	follow.close();
+	second.close();
+	dynamic.close();
+	origin.close();
+});
+
+test("follow accepts a path no pattern can spell", async () => {
+	const origin = new Producer();
+	const path = Path.from("camera*main");
+	const follow = origin.consume().follow(path);
+
+	const broadcast = publish(origin, path);
+	expect(await follow.next()).toMatchObject({ kind: "start", prefix: path });
+
+	follow.close();
+	broadcast.close();
+	origin.close();
+});
+
 test("follow refuses a path outside the scope", () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("pool/job/cam"))]));
