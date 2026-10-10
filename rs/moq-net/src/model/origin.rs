@@ -5,8 +5,8 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
 	sync::Arc,
-	sync::atomic::{AtomicU64, Ordering},
-	task::{Poll, ready},
+	sync::atomic::{AtomicBool, AtomicU64, Ordering},
+	task::{Context, Poll, Wake, Waker, ready},
 	time::Duration,
 };
 
@@ -2280,9 +2280,30 @@ struct Asked {
 	sub: Option<kio::Pending<track::Subscribing>>,
 }
 
+/// Queues just the logical track whose watched resource changed.
+struct TrackReady {
+	name: Arc<str>,
+	queue: kio::Queue<Arc<str>>,
+	queued: AtomicBool,
+}
+
+impl Wake for TrackReady {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		if !self.queued.swap(true, Ordering::AcqRel) {
+			let _ = self.queue.try_push(self.name.clone());
+		}
+	}
+}
+
 /// The driver's side of one logical track: the handles behind the names the
 /// machine uses.
 struct TrackIo {
+	ready: Arc<TrackReady>,
+	park: kio::Park,
 	/// The logical track, until the first copy says what it is.
 	request: Option<track::Request>,
 	/// The logical track once accepted. Nothing writes it: its readers read the
@@ -2309,6 +2330,7 @@ struct TrackIo {
 impl TrackIo {
 	/// Serve the track from `asked`'s copy, accepting it with that copy's info first.
 	fn splice(&mut self, asked: Asked) {
+		self.ready.wake_by_ref();
 		if let Some(request) = self.request.take() {
 			let info = asked.info.clone().unwrap_or_default();
 			self.accepted = Some(request.routes(self.routes.consume()).accept(info));
@@ -2321,6 +2343,7 @@ impl TrackIo {
 	/// End the track: cleanly with `Ok`, or failed for good. Readers drain what the
 	/// serving copy still holds.
 	fn end(&mut self, result: Result<(), Error>) {
+		self.ready.wake_by_ref();
 		self.query = None;
 		self.staged = None;
 		self.copy = None;
@@ -2448,6 +2471,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 	}
 	let mut upstream: Option<Upstream> = None;
 	let mut tracks: HashMap<Arc<str>, TrackIo> = HashMap::new();
+	let ready: kio::Queue<Arc<str>> = kio::Queue::new();
 	let mut deadline = crate::time::Deadline::new(&timers);
 	// The watch generation the last selection saw.
 	let mut seen = 0;
@@ -2680,6 +2704,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					}
 					Action::Query { track: name, source } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
+						io.ready.wake_by_ref();
 						let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 						match sources.get(&source).map(|s| s.track(&name)) {
 							Some(Ok(copy)) => {
@@ -2718,6 +2743,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 					}
 					Action::Park { track: name } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
+						io.ready.wake_by_ref();
 						// Drop the copy so its source goes idle at once. A returning
 						// reader gets a fresh one, so nothing cached can be stale.
 						io.routes.park();
@@ -2851,43 +2877,56 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 			{
 				return Poll::Ready(Step::SourceClosed(id));
 			}
-			for (name, io) in &mut tracks {
-				if let Some((asked, query)) = &mut io.query
-					&& let Poll::Ready(result) = query.poll(waiter)
-				{
-					return Poll::Ready(Step::Info(name.clone(), asked.source, result));
-				}
-				// The query's subscription goes with the last reader.
-				if io.held.is_some()
-					&& let Some(accepted) = &mut io.accepted
-				{
-					while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
-					if accepted.subscription().is_none() {
-						io.held = None;
+			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
+				let Some(io) = tracks.get_mut(&name) else { continue };
+				io.ready.queued.store(false, Ordering::Release);
+				let waker = Waker::from(io.ready.clone());
+				let waiter = io.park.hold(&Context::from_waker(&waker));
+				let step = (|| {
+					if let Some((asked, query)) = &mut io.query
+						&& let Poll::Ready(result) = query.poll(waiter)
+					{
+						return Some(Step::Info(name.clone(), asked.source, result));
 					}
-				}
-				// Settled once the copy closes: a group still open below a declared end is
-				// owed until then, and a session closing first means it never came.
-				if let Some((source, copy)) = &io.copy
-					&& copy.poll_closed(waiter).is_ready()
-				{
-					let result = match copy.poll_complete(&kio::Waiter::noop()) {
-						Poll::Ready(result) => result,
-						Poll::Pending => Err(Error::Dropped),
+					// The query's subscription goes with the last reader.
+					if io.held.is_some()
+						&& let Some(accepted) = &mut io.accepted
+					{
+						while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
+						if accepted.subscription().is_none() {
+							io.held = None;
+						}
+					}
+					// Settled once the copy closes: a group still open below a declared end is
+					// owed until then, and a session closing first means it never came.
+					if let Some((source, copy)) = &io.copy
+						&& copy.poll_closed(waiter).is_ready()
+					{
+						let result = match copy.poll_complete(&kio::Waiter::noop()) {
+							Poll::Ready(result) => result,
+							Poll::Pending => Err(Error::Dropped),
+						};
+						let delivered = copy.latest().is_some();
+						return Some(Step::Ended(name.clone(), *source, result, delivered));
+					}
+					// Watch the demand edge in whichever direction is unmet. Only `Pending`
+					// parks, so an answer steps and the handler looks again, polling anew when
+					// nothing changed. A closed track is unread: it owes one `Unused` if
+					// recorded read, and is no edge after.
+					let edge = match io.used {
+						true => io.weak.poll_unused(waiter).is_ready(),
+						false => matches!(io.weak.poll_used(waiter), Poll::Ready(Ok(()))),
 					};
-					let delivered = copy.latest().is_some();
-					return Poll::Ready(Step::Ended(name.clone(), *source, result, delivered));
-				}
-				// Watch the demand edge in whichever direction is unmet. Only `Pending`
-				// parks, so an answer steps and the handler looks again, polling anew when
-				// nothing changed. A closed track is unread: it owes one `Unused` if
-				// recorded read, and is no edge after.
-				let edge = match io.used {
-					true => io.weak.poll_unused(waiter).is_ready(),
-					false => matches!(io.weak.poll_used(waiter), Poll::Ready(Ok(()))),
-				};
-				if edge {
-					return Poll::Ready(Step::Demand(name.clone()));
+					if edge {
+						return Some(Step::Demand(name.clone()));
+					}
+					None
+				})();
+				if let Some(step) = step {
+					// A ready answer did not park on its next edge. Revisit this track
+					// once the machine has consumed the event and applied its actions.
+					io.ready.wake_by_ref();
+					return Poll::Ready(step);
 				}
 			}
 			// The same for whoever holds the broadcast itself.
@@ -2911,9 +2950,17 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 		let event = match step {
 			Step::Assigned(request) => {
 				let name: Arc<str> = request.name().into();
+				let track_ready = Arc::new(TrackReady {
+					name: name.clone(),
+					queue: ready.clone(),
+					queued: AtomicBool::new(false),
+				});
+				track_ready.wake_by_ref();
 				tracks.insert(
 					name.clone(),
 					TrackIo {
+						ready: track_ready,
+						park: Default::default(),
 						weak: request.weak(),
 						request: Some(request),
 						accepted: None,
