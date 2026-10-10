@@ -84,6 +84,10 @@ epoch while the old publisher's session stays open. A lite-07 viewer and a lite-
 that follow the announce `Restart` (or END then START) both reach the new
 epoch within one RTT-scale bound rather than the idle timeout, and killing the
 newest epoch falls back to a still-live older one.
+The same test drives the real players (decided 2026-10-09, from #5154):
+`moq play` and a browser `@moq/watch`, the latter through the `just test
+media` lane, both show the new run within that bound, without a manual
+republish against a live relay.
 
 When the release cut carries stats epochs, drop
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and

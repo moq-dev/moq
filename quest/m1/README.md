@@ -199,3 +199,4 @@ ladders.
 - [Catalog colour](/quest/m1/color-catalog.md) - the catalog describes a rendition's colour and HDR properties, which the WebGPU HDR renderer reads
 - [WebGPU HDR](/quest/m1/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [Request ID order](/quest/m1/request-id-order.md) - drafts 14 to 16 refuse a reused or lower Request ID in both languages
+- [Watch follows a covering prefix](/quest/m1/watch-follow-prefix.md) - `@moq/watch` moves to a covering prefix when the exact route ends, as `moq play` does
