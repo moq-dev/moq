@@ -15,8 +15,8 @@ round.
 
 Decided 2026-10-10: pin the harness's relay log filter for the close-log
 target to info in `test/interop/interop.sh`, so the product keeps warn for
-error closes. Rejected: logging both at one level in moq-relay. Add a check
-that fails loudly if the relay emits no close line for a connection the
-harness saw open.
+error closes. Rejected: logging both at one level in moq-relay. Also fail
+the round loudly when the relay log shows no connection for it, so a filter
+that hides the `conn{id=...}` and close lines can't pass as nothing open.
 
 Public API: none. Wire: none.
