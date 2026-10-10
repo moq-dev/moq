@@ -1,7 +1,7 @@
 import * as Moq from "@moq/net";
 
 /** Pin the transport to one wire version, including drafts omitted from defaults. */
-export async function connect(props: Moq.Connection.ConnectProps) {
+export async function connect(props: Moq.Connection.ConnectProps): Promise<Moq.Connection.Established> {
 	const version = process.env.INTEROP_VERSION;
 	if (!version) return Moq.Connection.connect(props);
 	const url = new URL(props.url);
