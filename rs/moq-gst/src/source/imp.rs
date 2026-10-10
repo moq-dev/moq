@@ -904,14 +904,14 @@ fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
 	use hang::catalog::VideoCodec;
 
 	let caps = match &config.codec {
-		VideoCodec::H264(_) => {
+		VideoCodec::H264(h264) => {
 			let mut builder = gst::Caps::builder("video/x-h264").field("alignment", "au");
 			if let Some(description) = &config.description {
 				builder = builder
-					.field("stream-format", "avc")
+					.field("stream-format", if h264.inline { "avc3" } else { "avc" })
 					.field("codec_data", gst::Buffer::from_slice(description.clone()));
 			} else {
-				builder = builder.field("stream-format", "annexb");
+				builder = builder.field("stream-format", "byte-stream");
 			}
 			builder.build()
 		}
@@ -925,8 +925,7 @@ fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
 						.field("codec_data", gst::Buffer::from_slice(description.clone()));
 				}
 				None => {
-					let format = if h265.in_band { "hev1" } else { "byte-stream" };
-					builder = builder.field("stream-format", format);
+					builder = builder.field("stream-format", "byte-stream");
 				}
 			}
 			builder.build()
@@ -990,6 +989,29 @@ mod tests {
 	use super::{PumpState, plan_reconcile, relative_pts};
 	use moq_net::Timestamp;
 	use std::collections::HashMap;
+
+	#[test]
+	fn video_caps_preserve_nal_framing() {
+		gst::init().unwrap();
+		for (codec, format) in [
+			("avc1.42001f", "avc"),
+			("avc3.42001f", "avc3"),
+			("hvc1.1.0.L93.00", "hvc1"),
+			("hev1.1.0.L93.00", "hev1"),
+		] {
+			for description in [None, Some(bytes::Bytes::from_static(b"config"))] {
+				let mut config = hang::catalog::VideoConfig::new(codec.parse::<hang::catalog::VideoCodec>().unwrap());
+				config.description = description.clone();
+				let caps = super::video_caps(&config).unwrap();
+				let structure = caps.structure(0).unwrap();
+				assert_eq!(
+					structure.get::<String>("stream-format").unwrap(),
+					if description.is_some() { format } else { "byte-stream" }
+				);
+				assert_eq!(structure.has_field("codec_data"), description.is_some());
+			}
+		}
+	}
 
 	// The shape type is generic, so the set math can be exercised with a plain integer standing
 	// in for (caps, container): equal value == unchanged rendition, different value == reshape.
