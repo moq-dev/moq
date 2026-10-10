@@ -1080,7 +1080,7 @@ impl Pump {
 							);
 							gst::event::Segment::new(&segment)
 						});
-						let buffer = build_buffer(frame, &mut reference_ts, kind);
+						let buffer = build_buffer(frame.frame, &mut reference_ts, kind);
 						// pad.push() blocks until downstream accepts the buffer (full queues, a
 						// clock-synced sink). block_in_place hands our sibling tasks to another
 						// worker so a stalled downstream can't pin a runtime thread and starve

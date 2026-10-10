@@ -234,13 +234,13 @@ impl Track {
 				return Ok(None);
 			};
 			let payload = match &self.convert {
-				TrackConvert::Passthrough => frame.payload,
+				TrackConvert::Passthrough => frame.frame.payload,
 				TrackConvert::LengthPrefixed {
 					length_size,
 					keyframe_prefix,
 				} => {
-					let prefix = frame.keyframe.then(|| keyframe_prefix.as_ref());
-					moq_mux::codec::annexb::from_length_prefixed(&frame.payload, *length_size, prefix)
+					let prefix = frame.frame.keyframe.then(|| keyframe_prefix.as_ref());
+					moq_mux::codec::annexb::from_length_prefixed(&frame.frame.payload, *length_size, prefix)
 						.map_err(moq_mux::Error::from)?
 				}
 			};
@@ -248,7 +248,7 @@ impl Track {
 				continue;
 			}
 			return Ok(Some(PacketizedFrame {
-				timestamp_us: frame.timestamp.as_micros() as u64,
+				timestamp_us: frame.frame.timestamp.as_micros() as u64,
 				payload,
 			}));
 		}

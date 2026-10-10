@@ -44,6 +44,15 @@ pub enum Kind {
 	Data,
 }
 
+/// A delivered frame and whether it continues the previous delivery.
+#[derive(Clone, Debug)]
+pub struct Sample<T = Frame> {
+	/// The encoded or decoded media frame.
+	pub frame: T,
+	/// False on the first frame and after a playhead discontinuity.
+	pub continuous: bool,
+}
+
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.
 ///
 /// `payload` is the raw codec bitstream that gets handed to the decoder.

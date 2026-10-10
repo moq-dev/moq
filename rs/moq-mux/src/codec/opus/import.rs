@@ -178,8 +178,8 @@ mod tests {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(frame.payload.as_ref(), payload);
-		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
+		assert_eq!(frame.frame.payload.as_ref(), payload);
+		assert_eq!(frame.frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
 		import.finish().unwrap();
 	}

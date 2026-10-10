@@ -1299,7 +1299,7 @@ async fn export_scte35_roundtrip() {
 		.unwrap()
 		.expect("no SCTE-35 frame after round-trip");
 	assert_eq!(
-		frame.payload.as_ref(),
+		frame.frame.payload.as_ref(),
 		CUE,
 		"SCTE-35 section did not round-trip byte-for-byte"
 	);
@@ -1415,7 +1415,7 @@ async fn export_pes_verbatim_roundtrip() {
 		.unwrap()
 		.expect("no verbatim PES frame after round-trip");
 	assert_eq!(
-		frame.payload.as_ref(),
+		frame.frame.payload.as_ref(),
 		PAYLOAD,
 		"verbatim PES payload round-trips byte-for-byte"
 	);
@@ -1487,7 +1487,7 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: 
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
-		frames.push(frame.payload.to_vec());
+		frames.push(frame.frame.payload.to_vec());
 	}
 	frames
 }
@@ -2068,7 +2068,7 @@ async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 	let mut cues = Vec::new();
 	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
-		cues.push((frame.payload.to_vec(), frame.timestamp));
+		cues.push((frame.frame.payload.to_vec(), frame.frame.timestamp));
 	}
 	cues
 }

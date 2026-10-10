@@ -3729,7 +3729,7 @@ pub(super) mod test {
 			.unwrap()
 			.expect("a published cue frame");
 		assert_eq!(
-			&frame.payload[..],
+			&frame.frame.payload[..],
 			&CUE[..],
 			"verbatim splice_info_section after upgrade"
 		);
@@ -4393,7 +4393,7 @@ pub(super) mod test {
 		);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
-			frames.push(frame);
+			frames.push(frame.frame);
 		}
 		frames
 	}
@@ -4447,7 +4447,7 @@ pub(super) mod test {
 		);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
-			frames.push(frame);
+			frames.push(frame.frame);
 		}
 		frames
 	}
@@ -5666,12 +5666,12 @@ pub(super) mod test {
 			.unwrap()
 			.expect("a published cue frame");
 
-		assert_eq!(&frame.payload[..], &CUE[..], "verbatim splice_info_section");
-		assert_ne!(frame.timestamp, Timestamp::ZERO, "cue must not stamp zero");
+		assert_eq!(&frame.frame.payload[..], &CUE[..], "verbatim splice_info_section");
+		assert_ne!(frame.frame.timestamp, Timestamp::ZERO, "cue must not stamp zero");
 		// The legacy container normalizes the wire timestamp to microseconds, so compare the
 		// instant (not the raw scale) against the 90 kHz media clock the cue was stamped with.
 		assert_eq!(
-			Duration::from(frame.timestamp),
+			Duration::from(frame.frame.timestamp),
 			Duration::from(clock),
 			"cue stamped with the video media clock"
 		);
@@ -5851,7 +5851,11 @@ pub(super) mod test {
 			.expect("verbatim read timed out")
 			.unwrap()
 			.expect("a published verbatim frame");
-		assert_eq!(&frame.payload[..], &payload[..], "verbatim PES payload round-trips");
+		assert_eq!(
+			&frame.frame.payload[..],
+			&payload[..],
+			"verbatim PES payload round-trips"
+		);
 	}
 
 	/// A program of only verbatim PIDs reserves no rendition, so the held reservation alone keeps
@@ -5941,7 +5945,7 @@ pub(super) mod test {
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
 		{
-			frames.push(frame);
+			frames.push(frame.frame);
 		}
 		(frames, reader.discontinuity())
 	}
@@ -6548,8 +6552,8 @@ pub(super) mod test {
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
-			if !frame.payload.is_empty() {
-				frames.push(frame);
+			if !frame.frame.payload.is_empty() {
+				frames.push(frame.frame);
 			}
 		}
 		frames

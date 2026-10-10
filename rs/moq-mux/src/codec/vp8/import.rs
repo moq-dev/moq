@@ -211,8 +211,8 @@ mod tests {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(frame.payload, keyframe);
-		assert_eq!(frame.timestamp, Timestamp::from_micros(0).unwrap());
+		assert_eq!(frame.frame.payload, keyframe);
+		assert_eq!(frame.frame.timestamp, Timestamp::from_micros(0).unwrap());
 
 		import.finish().unwrap();
 	}

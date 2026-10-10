@@ -117,9 +117,9 @@ async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::
 	// Read frames in latency-bounded presentation order.
 	while let Some(frame) = ordered.read().await? {
 		tracing::info!(
-			timestamp = ?frame.timestamp,
-			keyframe = frame.keyframe,
-			bytes = frame.payload.len(),
+			timestamp = ?frame.frame.timestamp,
+			keyframe = frame.frame.keyframe,
+			bytes = frame.frame.payload.len(),
 			"received frame"
 		);
 	}

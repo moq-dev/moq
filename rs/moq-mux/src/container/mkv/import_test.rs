@@ -268,7 +268,7 @@ async fn public_container_preserves_loc_for_mkv() {
 		.unwrap()
 		.unwrap()
 		.unwrap();
-	assert_eq!(frame.payload.as_ref(), payload);
+	assert_eq!(frame.frame.payload.as_ref(), payload);
 }
 
 #[test]

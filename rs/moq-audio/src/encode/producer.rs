@@ -648,7 +648,7 @@ mod tests {
 
 			let mut decoded = Vec::new();
 			while let Some(frame) = audio.read().await.unwrap() {
-				let pcm = Format::F32.as_interleaved_f32(&frame.data, 1).unwrap();
+				let pcm = Format::F32.as_interleaved_f32(&frame.frame.data, 1).unwrap();
 				decoded.extend_from_slice(&pcm);
 			}
 			assert_eq!(decoded.len(), frames, "terminal padding extended the source");
@@ -819,7 +819,7 @@ mod tests {
 
 		producer.write(&full_frame(0)).unwrap();
 		let first = audio.read().await.unwrap().expect("first epoch packet");
-		assert_eq!(first.data.len() / size_of::<f32>(), 960 - 312);
+		assert_eq!(first.frame.data.len() / size_of::<f32>(), 960 - 312);
 
 		producer.reset_epoch();
 		producer.write(&full_frame(1_000_000)).unwrap();
@@ -827,8 +827,8 @@ mod tests {
 
 		let mut resumed_frames = 0;
 		while let Some(frame) = audio.read().await.unwrap() {
-			if frame.timestamp.as_micros() >= 1_000_000 {
-				resumed_frames += frame.data.len() / size_of::<f32>();
+			if frame.frame.timestamp.as_micros() >= 1_000_000 {
+				resumed_frames += frame.frame.data.len() / size_of::<f32>();
 			}
 		}
 		assert!(resumed_frames > 0, "the resumed epoch still decodes");
@@ -866,8 +866,8 @@ mod tests {
 		for index in 0..100 {
 			producer.write(&pcm_frame(&silence, index * 20_000)).unwrap();
 			let consumed = consumer.read().await.unwrap().expect("one decoded frame");
-			assert_eq!(producer.activity(), consumed.activity);
-			if consumed.activity.is_dtx() {
+			assert_eq!(producer.activity(), consumed.frame.activity);
+			if consumed.frame.activity.is_dtx() {
 				entered_dtx = true;
 				break;
 			}
@@ -883,7 +883,7 @@ mod tests {
 		producer.write(&pcm_frame(&active, 2_000_000)).unwrap();
 		let consumed = consumer.read().await.unwrap().expect("one decoded frame");
 		assert_eq!(producer.activity(), Activity::Active);
-		assert_eq!(consumed.activity, Activity::Active);
+		assert_eq!(consumed.frame.activity, Activity::Active);
 	}
 
 	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each
@@ -929,7 +929,7 @@ mod tests {
 			}
 			producer.write(frame).unwrap();
 			let read = reader.read().await.unwrap().expect("a packet per full frame");
-			pts.push(read.timestamp.as_micros());
+			pts.push(read.frame.timestamp.as_micros());
 		}
 		pts
 	}
@@ -1074,7 +1074,16 @@ mod tests {
 			producer.write(&pcm_frame(&[0.1; 4 * 1024], epoch_us)).unwrap();
 			let mut pts = Vec::new();
 			for _ in 0..4 {
-				pts.push(reader.read().await.unwrap().expect("a packet").timestamp.as_micros());
+				pts.push(
+					reader
+						.read()
+						.await
+						.unwrap()
+						.expect("a packet")
+						.frame
+						.timestamp
+						.as_micros(),
+				);
 			}
 			pts
 		}
@@ -1124,7 +1133,7 @@ mod tests {
 		producer.write(&pcm_frame(&vec![0.1; 44_100], 1_000_000)).unwrap();
 
 		let first = reader.read().await.unwrap().expect("a packet");
-		assert_eq!(first.timestamp.as_micros(), 1_000_000);
+		assert_eq!(first.frame.timestamp.as_micros(), 1_000_000);
 	}
 
 	#[tokio::test]

@@ -76,6 +76,7 @@ async fn opus_round_trip_48k_stereo() {
 		.unwrap()
 	{
 		let pcm: Vec<f32> = frame
+			.frame
 			.data
 			.as_chunks::<4>()
 			.0
@@ -151,7 +152,7 @@ async fn opus_round_trip_44100_s16_resampled() {
 		.expect("decoded frame timed out")
 		.unwrap()
 	{
-		total_bytes += frame.data.len() as u64;
+		total_bytes += frame.frame.data.len() as u64;
 	}
 	assert!(
 		total_bytes > 10_000,
@@ -192,8 +193,9 @@ async fn pcm_round_trip_is_lossless() {
 	producer.finish().unwrap();
 
 	let frame = consumer.read().await.unwrap().unwrap();
-	assert_eq!(frame.timestamp, Timestamp::from_micros(123_000).unwrap());
+	assert_eq!(frame.frame.timestamp, Timestamp::from_micros(123_000).unwrap());
 	let decoded: Vec<f32> = frame
+		.frame
 		.data
 		.as_chunks::<4>()
 		.0
@@ -259,6 +261,7 @@ async fn pcm_five_one_reads_back_at_any_layout() {
 		assert_eq!(consumer.layout(), layout);
 		let decoded = consumer.read().await.unwrap().unwrap();
 		let samples: Vec<f32> = decoded
+			.frame
 			.data
 			.as_chunks::<4>()
 			.0

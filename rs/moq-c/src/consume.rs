@@ -540,7 +540,7 @@ impl Consume {
 			};
 
 			// Hold the lock only to buffer the frame; release it before the callback.
-			let frame_id = State::lock().consume.frame.insert(frame)?;
+			let frame_id = State::lock().consume.frame.insert(frame.frame)?;
 			callback.call(Ok(frame_id));
 		}
 	}

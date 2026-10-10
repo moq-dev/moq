@@ -1683,7 +1683,7 @@ mod tests {
 			crate::container::Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Video));
 		let mut timestamps = Vec::new();
 		while let Some(frame) = consumer.read().await.unwrap() {
-			timestamps.push(frame.timestamp.as_micros());
+			timestamps.push(frame.frame.timestamp.as_micros());
 		}
 		assert_eq!(timestamps, [1_000_000, 1_040_000, 1_050_000]);
 	}

@@ -39,7 +39,7 @@ async fn ts_surround_opus_decodes() {
 		.expect("decoded frame timed out")
 		.unwrap()
 	{
-		let (samples, rest) = frame.data.as_chunks::<4>();
+		let (samples, rest) = frame.frame.data.as_chunks::<4>();
 		assert!(rest.is_empty());
 		for chunk in samples.as_chunks::<6>().0 {
 			for (channel, sample) in energy.iter_mut().zip(chunk) {

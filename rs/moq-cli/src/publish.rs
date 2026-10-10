@@ -1133,6 +1133,7 @@ pub(crate) mod tests {
 			.await
 			.unwrap()
 			.expect("a video frame")
+			.frame
 			.timestamp;
 		assert!(
 			first.as_micros() < Duration::from_secs(5).as_micros(),
@@ -1294,6 +1295,6 @@ pub(crate) mod tests {
 			.expect("verbatim read timed out")
 			.unwrap()
 			.expect("a published verbatim frame");
-		frame.payload.to_vec()
+		frame.frame.payload.to_vec()
 	}
 }

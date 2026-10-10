@@ -194,7 +194,11 @@ impl Consumer {
 
 			self.pending.extend(
 				self.decoder
-					.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
+					.decode(
+						mux_frame.frame.payload,
+						mux_frame.frame.timestamp,
+						mux_frame.frame.keyframe,
+					)
 					.await?,
 			);
 		}

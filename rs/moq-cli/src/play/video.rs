@@ -84,7 +84,8 @@ impl<O: Output> Video<O> {
 					self.presentation.lock().unwrap().video_restarted();
 				}
 				let ended = frame.is_none();
-				if let Some(frame) = frame {
+				if let Some(sample) = frame {
+					let frame = sample.frame;
 					if self
 						.presentation
 						.lock()

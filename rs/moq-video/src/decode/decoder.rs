@@ -597,13 +597,13 @@ mod tests {
 		let mut track =
 			moq_mux::container::Consumer::new(track, moq_mux::catalog::hang::Container::try_from(config).unwrap());
 		let sample = track.read().await.unwrap().expect("an imported sample");
-		assert!(sample.keyframe);
+		assert!(sample.frame.keyframe);
 
 		let decoder =
 			super::Decoder::new(config, &decode_config(super::Kind::Named(probe::BUFFERED_NAME.into()))).unwrap();
 		let access_unit = decoder
 			.conversion
-			.access_unit(&sample.payload, sample.keyframe)
+			.access_unit(&sample.frame.payload, sample.frame.keyframe)
 			.unwrap();
 		let mut buf = access_unit.clone();
 		let mut nals = moq_mux::codec::annexb::NalIterator::new(&mut buf);

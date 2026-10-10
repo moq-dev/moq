@@ -1055,8 +1055,8 @@ mod tests {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(frame.payload, payload);
-		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
+		assert_eq!(frame.frame.payload, payload);
+		assert_eq!(frame.frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
 		import.finish().unwrap();
 	}
@@ -1383,9 +1383,9 @@ mod tests {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert!(frame.keyframe, "an IDR access unit must open a group");
-		assert_eq!(frame.payload, au, "the payload must pass through verbatim");
-		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
+		assert!(frame.frame.keyframe, "an IDR access unit must open a group");
+		assert_eq!(frame.frame.payload, au, "the payload must pass through verbatim");
+		assert_eq!(frame.frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
 		import.finish().unwrap();
 	}

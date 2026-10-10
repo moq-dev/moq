@@ -28,6 +28,21 @@ continuous.
 Public API: breaking in moq-mux (the consumer's read result changes). Wire:
 none.
 
+### Draft progress and remaining video propagation
+
+The draft adds a shared Sample envelope to container and audio reads, with
+regressions for subscribe, markers, holes, skips, and audio decode. Existing
+consumers explicitly unwrap the frame; binding surfaces stay unchanged.
+
+Video still returns its existing decoded Frame. A decoder can return a picture
+from before a marker while processing the access unit after it, or return it
+only on flush. A single pending boolean attaches the new boundary to the old
+picture and loses the new picture boundary, so that approach is not included.
+Carry input continuity through codec output association before extending the
+video read result. Prefer private decoder metadata association over a
+timestamp heuristic, and cover delayed output on both sides of a marker.
+The video propagation goal remains open here.
+
 ## Related
 
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - withholds frames after the same signal

@@ -407,7 +407,7 @@ async fn play_audio<O: Output>(
 
 	loop {
 		let frame = match consumer.read().await {
-			Ok(Some(frame)) => frame,
+			Ok(Some(sample)) => sample.frame,
 			Ok(None) => break,
 			// One bad packet is that packet's problem: the decoder stays usable, so
 			// skip it rather than ending playback and taking the video window down

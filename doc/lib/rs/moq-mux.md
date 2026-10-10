@@ -30,6 +30,10 @@ set at the init segment, so a new rendition or a changed configuration ends the
 export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:
 one program per broadcast, damaged packets, and feed checks.
 
+Container and audio reads return a frame with its delivery continuity: the first
+frame and the first after a skip, hole, or declared break start a new span.
+Video decoders return bare frames.
+
 Data tracks are catalog entries too. The [hang page](/concept/hang#data-tracks)
 describes the modes. A capture time converts onto the broadcast clock; a
 timestamp taken from the source is published as given and lines up with media

@@ -1096,7 +1096,11 @@ struct Media {
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.inner.read().await?.map(media_frame).transpose()
+		self.inner
+			.read()
+			.await?
+			.map(|sample| media_frame(sample.frame))
+			.transpose()
 	}
 }
 

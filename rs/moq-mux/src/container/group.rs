@@ -140,9 +140,9 @@ mod tests {
 				Hang::new(&config, crate::container::Kind::Data).unwrap(),
 			);
 			let first = live.read().await.unwrap().unwrap();
-			assert!(first.payload.is_empty());
-			assert!(first.keyframe);
-			assert_eq!(live.read().await.unwrap().unwrap().payload, b"data".as_slice());
+			assert!(first.frame.payload.is_empty());
+			assert!(first.frame.keyframe);
+			assert_eq!(live.read().await.unwrap().unwrap().frame.payload, b"data".as_slice());
 			assert!(live.read().await.unwrap().is_none());
 			let group = consumer.track("data").unwrap().fetch_group(0, None).await.unwrap();
 			let mut fetched = GroupConsumer::new(group, Hang::new(&config, crate::container::Kind::Data).unwrap());

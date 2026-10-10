@@ -3,7 +3,7 @@ use std::task::{Poll, ready};
 
 use moq_net::Timestamp;
 
-use super::{Container, Frame, TimestampRewind};
+use super::{Container, Frame, Sample, TimestampRewind};
 
 /// Media and clean group boundaries in delivery order.
 pub(crate) enum Event {
@@ -94,6 +94,7 @@ pub struct Consumer<F: Container> {
 
 	// Increments on a declared marker, an unproven delivered hole, and a latency skip.
 	discontinuity: u64,
+	delivered: Option<u64>,
 
 	// Increments on a declared marker only: the publisher paused or broke its timeline forward.
 	markers: u64,
@@ -143,6 +144,7 @@ impl<F: Container> Consumer<F> {
 			floor: None,
 			presented_end: None,
 			discontinuity: 0,
+			delivered: None,
 			markers: 0,
 			end: None,
 		}
@@ -177,7 +179,9 @@ impl<F: Container> Consumer<F> {
 	/// configured max delay.
 	///
 	/// Returns `None` when the track has ended.
-	pub async fn read(&mut self) -> Result<Option<Frame>, F::Error> {
+	/// The first sample and the first one after a playhead event have `continuous: false`.
+	/// An undeclared forward timestamp jump alone does not change the flag.
+	pub async fn read(&mut self) -> Result<Option<Sample>, F::Error> {
 		kio::wait(|waiter| self.poll_read(waiter)).await
 	}
 
@@ -185,10 +189,14 @@ impl<F: Container> Consumer<F> {
 	///
 	/// Uses a single waiter that gets registered on all relevant kio channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
+	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Sample>, F::Error>> {
 		loop {
 			match ready!(self.poll_event(waiter))? {
-				Some(Event::Frame(frame)) => return Poll::Ready(Ok(Some(frame))),
+				Some(Event::Frame(frame)) => {
+					let continuous = self.delivered == Some(self.discontinuity);
+					self.delivered = Some(self.discontinuity);
+					return Poll::Ready(Ok(Some(Sample { frame, continuous })));
+				}
 				Some(Event::FrameEnd(end)) => {
 					if self.format.kind() == super::Kind::Audio {
 						self.end = Some(end);
@@ -822,7 +830,7 @@ mod tests {
 		let mut frames = Vec::new();
 		loop {
 			match tokio::time::timeout(Duration::from_millis(200), consumer.read()).await {
-				Ok(Ok(Some(frame))) => frames.push(frame),
+				Ok(Ok(Some(frame))) => frames.push(frame.frame),
 				Ok(Ok(None)) => break,
 				Ok(Err(e)) => return Err(e),
 				Err(_) => panic!(
@@ -904,6 +912,38 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn continuity_marks_subscribe_holes_and_markers() {
+		let mut track = track_producer("continuity", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription =
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)));
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
+		write_group(&mut track, 0, &[ts(0), ts(10_000)]);
+		write_group(&mut track, 2, &[ts(1_000_000), ts(1_010_000)]);
+		write_marker_group(&mut track, 3, ts(1_010_000));
+		write_group(&mut track, 4, &[ts(2_000_000), ts(2_010_000)]);
+		track.finish().unwrap();
+		let mut flags = Vec::new();
+		while let Some(sample) = reader.read().await.unwrap() {
+			flags.push(sample.continuous);
+		}
+		assert_eq!(flags, [false, true, false, true, false, true]);
+	}
+
+	#[tokio::test]
+	async fn continuity_marks_a_latency_skip() {
+		let mut track = track_producer("continuity", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription =
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)));
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
+		reader.max_delay = Duration::ZERO;
+		write_group(&mut track, 0, &[ts(0)]);
+		write_group(&mut track, 3, &[ts(1_000_000)]);
+		track.finish().unwrap();
+		assert!(!reader.read().await.unwrap().unwrap().continuous);
+		assert!(!reader.read().await.unwrap().unwrap().continuous);
+	}
+
+	#[tokio::test]
 	async fn empty_group_declares_a_discontinuity() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track =
@@ -915,9 +955,9 @@ mod tests {
 		write_group(&mut track, 2, &[ts(1_000_000)]);
 		track.finish().unwrap();
 
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(0));
 		assert_eq!(consumer.discontinuity(), 0);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(1_000_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(1_000_000));
 		assert_eq!(consumer.discontinuity(), 1);
 	}
 
@@ -937,11 +977,11 @@ mod tests {
 		write_group(&mut track, 4, &[ts(2_000_000)]);
 		track.finish().unwrap();
 
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(1_000_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(0));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(1_000_000));
 		assert_eq!(consumer.discontinuity(), 1, "the hole moves the playhead");
 		assert_eq!(consumer.markers(), 0, "but the timeline carried on");
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(2_000_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(2_000_000));
 		assert_eq!(consumer.discontinuity(), 2);
 		assert_eq!(consumer.markers(), 1, "the marker declares a break");
 	}
@@ -962,8 +1002,8 @@ mod tests {
 		write_group(&mut track, 2, &[ts(1_000)]);
 		track.finish().unwrap();
 
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(1_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(0));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(1_000));
 		assert_eq!(consumer.discontinuity(), 0, "an empty group is not a marker");
 	}
 
@@ -980,9 +1020,9 @@ mod tests {
 		write_group(&mut track, 3, &[ts(1_000_000)]);
 		track.finish().unwrap();
 
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(0));
 		assert_eq!(consumer.discontinuity(), 0);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(1_000_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(1_000_000));
 		assert_eq!(
 			consumer.discontinuity(),
 			1,
@@ -1172,11 +1212,11 @@ mod tests {
 				.unwrap();
 		};
 		let read = |consumer: &mut Consumer<Container>| match consumer.poll_read(&waiter) {
-			Poll::Ready(Ok(Some(frame))) => Some(frame.timestamp),
+			Poll::Ready(Ok(Some(frame))) => Some(frame.frame.timestamp),
 			Poll::Pending => None,
 			other => panic!(
 				"unexpected read: {:?}",
-				other.map(|r| r.map(|f| f.map(|f| f.timestamp)))
+				other.map(|r| r.map(|f| f.map(|f| f.frame.timestamp)))
 			),
 		};
 
@@ -1214,7 +1254,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut track, 0, &[ts(100_000)]);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(100_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(100_000));
 		write_group(&mut track, 1, &[ts(0)]);
 		track.finish().unwrap();
 		let err = consumer.read().await.unwrap_err();
@@ -1248,10 +1288,10 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut track, 0, &[ts(100_000)]);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(100_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(100_000));
 		write_group(&mut track, 1, &[ts(100_000)]);
 		track.finish().unwrap();
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(100_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(100_000));
 	}
 
 	/// A keyframe one frame below the previous group's last frame, but above its start, is an
@@ -1264,7 +1304,7 @@ mod tests {
 		// Read the first group before the second arrives: a blocked group that the next one
 		// already covers is skipped for latency, which is not what this checks.
 		for expected in [0, 33_000, 66_000] {
-			assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(expected));
+			assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(expected));
 		}
 		write_group(&mut track, 1, &[ts(50_000), ts(83_000)]);
 		track.finish().unwrap();
@@ -1301,9 +1341,9 @@ mod tests {
 		write_marker_group(&mut track, 1, ts(0));
 		write_group(&mut track, 2, &[ts(1_000_000)]);
 		track.finish().unwrap();
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(0));
 		assert_eq!(consumer.discontinuity(), 0);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(1_000_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(1_000_000));
 		assert_eq!(consumer.discontinuity(), 1);
 	}
 
@@ -1313,11 +1353,11 @@ mod tests {
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Audio));
 		consumer.max_delay = Duration::ZERO;
 		write_group(&mut track, 0, &[ts(0)]);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(0));
 		write_marker_group(&mut track, 1, ts(0));
 		write_group(&mut track, 2, &[ts(1_000_000)]);
 		track.finish().unwrap();
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(1_000_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(1_000_000));
 		assert_eq!(
 			consumer.discontinuity(),
 			1,
@@ -1343,12 +1383,12 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(0));
 
 		write_marker_group(&mut track, 1, ts(10_000));
 		write_group(&mut track, 2, &[ts(10_000)]);
 
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(10_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(10_000));
 		assert_eq!(
 			consumer.discontinuity(),
 			1,
@@ -1362,10 +1402,10 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut track, 0, &[ts(100_000)]);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(100_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(100_000));
 		write_group(&mut track, 1, &[ts(200_000), ts(50_000)]);
 		track.finish().unwrap();
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(200_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(200_000));
 		let err = consumer.read().await.unwrap_err();
 		assert!(matches!(
 			err,
@@ -1451,7 +1491,7 @@ mod tests {
 		group.finish().unwrap();
 		track.finish().unwrap();
 
-		let frame = consumer.read().await.unwrap().unwrap();
+		let frame = consumer.read().await.unwrap().unwrap().frame;
 		assert!(frame.keyframe, "the marker does not consume the first-media slot");
 		assert!(frame.duration.is_none(), "a leading marker has no previous frame");
 	}
@@ -1638,7 +1678,7 @@ mod tests {
 		let result = tokio::time::timeout(Duration::from_millis(500), async {
 			let mut frames = Vec::new();
 			while let Ok(Some(frame)) = consumer.read().await {
-				frames.push(frame);
+				frames.push(frame.frame);
 			}
 			frames
 		})
@@ -1749,7 +1789,7 @@ mod tests {
 			route.requested_broadcast().await.unwrap().accept(&source);
 			track.demand().used().await.unwrap();
 			if sequence == 1 {
-				assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+				assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(0));
 			}
 			for sequence in 1..=sequence {
 				write_group(&mut track, sequence, &[ts(sequence * 1_000_000)]);
@@ -1777,7 +1817,7 @@ mod tests {
 			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::GroupEnd)))),
 			"the complete successor still emits its clean boundary"
 		);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(2_000_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().frame.timestamp, ts(2_000_000));
 	}
 
 	// ---- Eviction recovery (pause/resume) ----
@@ -1807,7 +1847,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		let first = consumer.read().await.unwrap().unwrap();
+		let first = consumer.read().await.unwrap().unwrap().frame;
 		assert_eq!(first.timestamp, ts(0));
 
 		// A live group arrives far ahead -- sequences 1..4 never come (evicted). The
@@ -1824,7 +1864,11 @@ mod tests {
 			.expect("consumer hung on an evicted group / gap")
 			.unwrap()
 			.unwrap();
-		assert_eq!(next.timestamp, ts(150_000), "skipped the evicted gap to the live group");
+		assert_eq!(
+			next.frame.timestamp,
+			ts(150_000),
+			"skipped the evicted gap to the live group"
+		);
 	}
 
 	/// A missing (evicted) sequence with a newer group buffered must be skipped once the
@@ -1850,7 +1894,7 @@ mod tests {
 		// Reading must reach group 2 across the gap instead of waiting forever for 1.
 		let reached = tokio::time::timeout(Duration::from_secs(1), async {
 			loop {
-				let frame = consumer.read().await.unwrap().unwrap();
+				let frame = consumer.read().await.unwrap().unwrap().frame;
 				if frame.timestamp == ts(200_000) {
 					return;
 				}
@@ -1877,7 +1921,7 @@ mod tests {
 		write_group(&mut track, 2, &[ts(200_000)]);
 
 		let first = consumer.read().await.unwrap().expect("group 0 frame");
-		assert_eq!(first.timestamp, ts(0));
+		assert_eq!(first.frame.timestamp, ts(0));
 
 		// Group 0 is done; group 1's stream is still racing. Within the budget the
 		// consumer waits at the gap rather than skipping to group 2.
@@ -2139,7 +2183,7 @@ mod tests {
 		let frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
-				frames.push(frame);
+				frames.push(frame.frame);
 			}
 			frames
 		})
@@ -2179,7 +2223,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0)]);
 		track.finish().unwrap();
 
-		let frame = consumer.read().await.unwrap().unwrap();
+		let frame = consumer.read().await.unwrap().unwrap().frame;
 		assert_eq!(frame.timestamp, ts(0));
 
 		consumer.set_max_delay(Duration::from_millis(100));
@@ -2223,7 +2267,7 @@ mod tests {
 		let frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
-				frames.push(frame);
+				frames.push(frame.frame);
 			}
 			frames
 		})
@@ -2284,7 +2328,7 @@ mod tests {
 		let _frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
-				frames.push(frame);
+				frames.push(frame.frame);
 			}
 			frames
 		})
@@ -2434,7 +2478,7 @@ mod tests {
 			.expect("an unfloored join must not wait out a gap below the served start")
 			.unwrap()
 			.expect("track still live");
-		assert_eq!(frame.timestamp, ts(3_000_000));
+		assert_eq!(frame.frame.timestamp, ts(3_000_000));
 	}
 
 	#[tokio::test]
@@ -2613,7 +2657,7 @@ mod tests {
 		track.finish().unwrap();
 
 		// Take the first frame only, leaving the second unread.
-		let first = consumer.read().await.unwrap().unwrap();
+		let first = consumer.read().await.unwrap().unwrap().frame;
 		assert_eq!(first.timestamp, ts(0));
 
 		// Expiry aborts the finished group while the reader is still inside it.
@@ -2689,7 +2733,7 @@ mod tests {
 		let frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
-				frames.push(frame);
+				frames.push(frame.frame);
 			}
 			frames
 		})
@@ -2746,7 +2790,7 @@ mod tests {
 
 		let mut frames = Vec::new();
 		while let Some(frame) = consumer.read().await.unwrap() {
-			frames.push(frame);
+			frames.push(frame.frame);
 		}
 
 		assert_eq!(frames.len(), 3);
@@ -2788,7 +2832,7 @@ mod tests {
 		let frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
-				frames.push(frame);
+				frames.push(frame.frame);
 			}
 			frames
 		})
@@ -2824,7 +2868,7 @@ mod tests {
 		track.finish().unwrap();
 		let mut frames = Vec::new();
 		while let Some(frame) = consumer.read().await.unwrap() {
-			frames.push(frame);
+			frames.push(frame.frame);
 		}
 		assert_eq!(frames.len(), 2);
 		assert_eq!(consumer.discontinuity(), 0);
@@ -2863,7 +2907,7 @@ mod tests {
 		let frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
-				frames.push(frame);
+				frames.push(frame.frame);
 			}
 			frames
 		})
@@ -2898,7 +2942,7 @@ mod tests {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(frame.timestamp, ts(0));
+		assert_eq!(frame.frame.timestamp, ts(0));
 		write_marker(&mut group, ts(15_000));
 		let event = kio::wait(|waiter| consumer.poll_event(waiter)).await.unwrap();
 		assert!(matches!(event, Some(Event::FrameEnd(end)) if end == ts(15_000)));
