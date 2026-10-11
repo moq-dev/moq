@@ -1382,4 +1382,83 @@ uid = [1001]
 			"TOML's cluster.lan.app must not be clobbered by the CLI re-parse"
 		);
 	}
+
+	/// A QUIC-LB nonce with no server id stops startup from TOML and the
+	/// environment, and `lb_id` no longer hides `load_balancer`.
+	///
+	/// The CLI flag pair already requires `--listen-quic-lb-id`, so this does not
+	/// add a second command-line error for that spelling.
+	#[test]
+	fn quic_lb_nonce_and_conflicts_refuse_to_start() {
+		let _env = EnvGuard::clear(&["MOQ_LISTEN_QUIC_LB_ID", "MOQ_LISTEN_QUIC_LB_NONCE"]);
+
+		let err = Config::parse_and_merge(["moq-relay", "--listen-quic-lb-nonce", "8"])
+			.expect_err("the flag pair is already required");
+		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
+
+		unsafe { std::env::set_var("MOQ_LISTEN_QUIC_LB_NONCE", "8") };
+		let err = Config::parse_and_merge(["moq-relay"]).expect_err("env nonce without id");
+		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
+		unsafe { std::env::remove_var("MOQ_LISTEN_QUIC_LB_NONCE") };
+
+		let dir = std::env::temp_dir().join("moq-relay-lb-refusals");
+		std::fs::create_dir_all(&dir).unwrap();
+		let refuse = |name: &str, body: &str, env: &[(&str, &str)], cli: &[&str], needle: &str| {
+			for (key, value) in env {
+				// SAFETY: EnvGuard serializes env mutation across these tests.
+				unsafe { std::env::set_var(key, value) };
+			}
+			let path = dir.join(name);
+			std::fs::write(&path, body).unwrap();
+			let mut args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+			args.extend(cli.iter().copied().map(std::ffi::OsString::from));
+			let config = Config::parse_and_merge(args).unwrap_or_else(|err| panic!("{name} parsed: {err}"));
+			match config.listen.init(Default::default()) {
+				Err(err) => assert!(err.to_string().contains(needle), "{name}: {err}"),
+				Ok(_) => panic!("{name} started"),
+			}
+			for (key, _) in env {
+				unsafe { std::env::remove_var(key) };
+			}
+		};
+
+		refuse(
+			"nonce.toml",
+			"[listen]\nlb_nonce = 8\n",
+			&[],
+			&[],
+			"requires --listen-quic-lb-id",
+		);
+		refuse(
+			"both.toml",
+			"[listen]\nlb_id = \"ab\"\nload_balancer = { id = \"cd\", nonce = 4 }\n",
+			&[],
+			&[],
+			"cannot be combined",
+		);
+		refuse(
+			"env-id.toml",
+			"[listen]\nload_balancer = { id = \"cd\", nonce = 4 }\n",
+			&[("MOQ_LISTEN_QUIC_LB_ID", "ab")],
+			&[],
+			"cannot be combined",
+		);
+		refuse(
+			"cli-id.toml",
+			"[listen]\nload_balancer = { id = \"cd\", nonce = 4 }\n",
+			&[],
+			&["--listen-quic-lb-id", "ee"],
+			"cannot be combined",
+		);
+
+		#[cfg(feature = "noq")]
+		{
+			let path = dir.join("typed.toml");
+			std::fs::write(&path, "[listen]\nload_balancer = { id = \"ab\", nonce = 8 }\n").unwrap();
+			let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).expect("typed");
+			let load_balancer = config.listen.load_balancer().expect("typed load_balancer");
+			assert_eq!(load_balancer.id, "ab".parse().unwrap());
+			assert_eq!(load_balancer.nonce, 8);
+		}
+	}
 }
