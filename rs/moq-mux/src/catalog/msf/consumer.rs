@@ -378,13 +378,13 @@ fn cmaf_video_description(track: &moq_msf::Track, init: &[u8], codec: &VideoCode
 		let mut description = bytes::BytesMut::new();
 		match (codec, sample) {
 			(
-				VideoCodec::H264(_),
+				VideoCodec::H264(codec),
 				Codec::Avc1(mp4_atom::Avc1 { avcc, .. }) | Codec::Avc3(mp4_atom::Avc3 { avcc, .. }),
-			) => avcc.encode_body(&mut description)?,
+			) if codec.inline == matches!(sample, Codec::Avc3(_)) => avcc.encode_body(&mut description)?,
 			(
-				VideoCodec::H265(_),
+				VideoCodec::H265(codec),
 				Codec::Hvc1(mp4_atom::Hvc1 { hvcc, .. }) | Codec::Hev1(mp4_atom::Hev1 { hvcc, .. }),
-			) => hvcc.encode_body(&mut description)?,
+			) if codec.in_band == matches!(sample, Codec::Hev1(_)) => hvcc.encode_body(&mut description)?,
 			(VideoCodec::AV1(_), Codec::Av01(av01)) => av01.av1c.encode_body(&mut description)?,
 			(VideoCodec::VP9(_), Codec::Vp09(vp09)) => vp09.vpcc.encode_body(&mut description)?,
 			(VideoCodec::VP8, Codec::Vp08(_)) => return Ok(None),
@@ -567,17 +567,27 @@ mod test {
 		hvcc.length_size_minus_one = 3;
 		let mut hevc_description = Vec::new();
 		hvcc.encode_body(&mut hevc_description).unwrap();
-		for (codec, description) in [
-			("avc3.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0][..]),
-			("hev1.1.0.L93.00", hevc_description.as_slice()),
+		for (codec, opposite, description) in [
+			("avc1.42001f", "avc3.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0][..]),
+			("avc3.42001f", "avc1.42001f", &[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0][..]),
+			("hvc1.1.0.L93.00", "hev1.1.0.L93.00", hevc_description.as_slice()),
+			("hev1.1.0.L93.00", "hvc1.1.0.L93.00", hevc_description.as_slice()),
 		] {
 			let init = video_init(codec, description);
 			let mut track = video_track("video0", moq_msf::Packaging::Cmaf, Some(&init));
 			track.codec = Some(codec.to_string());
-			let catalog = from_msf::<()>(&moq_msf::Catalog::new(vec![track])).unwrap();
+			let catalog = from_msf::<()>(&moq_msf::Catalog::new(vec![track.clone()])).unwrap();
 			assert_eq!(
 				catalog.video.renditions["video0"].description.as_deref(),
 				Some(description)
+			);
+			track.codec = Some(opposite.to_string());
+			assert!(
+				matches!(
+					from_msf::<()>(&moq_msf::Catalog::new(vec![track])),
+					Err(crate::Error::Cmaf(crate::container::fmp4::Error::MissingCodec))
+				),
+				"{codec} init must not match {opposite}"
 			);
 		}
 	}
