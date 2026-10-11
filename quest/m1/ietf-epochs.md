@@ -79,4 +79,6 @@ extension; no changes to unnegotiated published versions or broadcast paths.
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - current lite-07 identity and legacy restart behavior
 - [Claim epochs](/quest/m1/claim-epochs.md) - shared broadcast identity and lite-07 response identity
 - [IETF claim epochs](/quest/m1/ietf-claim-epochs.md) - learn per-output identity from an IETF claim response
-- [JS track handover](/quest/m1/js-group-handover.md) - a stable JS track pump for same-epoch route changes
+- [JS track handover](/quest/m1/js-group-handover.md) - stable JS readers across same-epoch route changes
+- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - optional requested epochs become verifiable on this negotiated transport; epochless fallback remains best effort
+- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native wait-budget support is separate from epoch negotiation and adds no age extension

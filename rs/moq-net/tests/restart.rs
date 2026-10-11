@@ -60,6 +60,13 @@ async fn expect_restart(version: Version, announced: &mut announce::Consumer, pr
 	}
 }
 
+/// Nothing more arrives, past the update hold.
+async fn quiet(version: Version, announced: &mut announce::Consumer) {
+	if let Ok(event) = moq_net_sim::timeout(Duration::from_secs(1), announced.next()).await {
+		panic!("{version}: expected nothing more, got {event:?}");
+	}
+}
+
 /// Write one group of one frame tagged `tag`.
 fn write(track: &track::Producer, tag: &str) {
 	let mut group = track.append_group().unwrap();
@@ -324,6 +331,10 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	}
 	claim.write(1, "new:0");
 	assert_eq!(read(&mut subscription).await, "new:0", "{version}");
+
+	// The sticky subscription's path resolving through the new route is the restart
+	// already delivered, not another.
+	quiet(version, &mut announced).await;
 }
 
 /// The epoch the claim starts at, and a newer one it moves to.
