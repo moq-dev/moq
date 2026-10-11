@@ -102,8 +102,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md) - a lite acceptor answers AUTH_ERROR NOT_SUPPORTED after a grant too, with a lite session code for `Error::Unsupported`
 - [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
 - [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
-- [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
-  refused up front and held to the grant through a gate its dispatcher owns
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Request-token decode](/quest/m1/auth/request-token-decode.md) - an
@@ -113,13 +111,12 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   Setup extensions it offers with one `Extensions` struct
 - [Request tokens](/quest/m1/auth/request-token.md) - a token on a
   moq-transport request authorizes that request and renews it in band
+- [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
+  refused up front and held to the grant through a gate its dispatcher owns
 - [Request leases](/quest/m1/auth/request-lease.md) - moq-relay honors a
   request token with a lease of its own
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
-- [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - an
-  auth decider sees `webtransport` for a WebTransport session and `quic` only
-  for native QUIC
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave

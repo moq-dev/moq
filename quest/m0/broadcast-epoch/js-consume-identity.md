@@ -45,3 +45,4 @@ no framing change, and older versions stay epochless.
 ## Related
 
 - [JS track handover](/quest/m1/js-group-handover.md) - preserves open tracks across routes of the same explicit identity
+- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - separately prevents old callable handles from opening wire work against replacements; this quest owns fresh-consumer selection and cache reuse
