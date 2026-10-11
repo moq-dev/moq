@@ -1745,7 +1745,7 @@ test("a more specific epochless announcement replaces the consumed source", asyn
 	await specific;
 	await announced.next();
 	const fallback = subscriber.consume(job);
-	expect(fallback.closed).not.toBe(fresh.closed);
+	expect(fallback.closed).toBe(held.closed);
 	broadPeer.close();
 	await broad;
 	for (const consumer of [held, fresh, fallback]) consumer.close();

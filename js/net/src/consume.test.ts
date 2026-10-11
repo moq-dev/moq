@@ -59,3 +59,43 @@ test("withdrawing one interest keeps another interest's explicit identity", () =
 	same?.close();
 	source.close();
 });
+
+test("an announcement lifecycle retires a blind cache without disturbing unrelated paths", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("pool/job");
+	const other = Path.from("other/job");
+	const source = new Producer();
+	const unrelated = new Producer();
+	const held = cache.insert(path, cache.instance(path), source.consume());
+	const otherHeld = cache.insert(other, cache.instance(other), unrelated.consume());
+	const owner = {};
+	cache.announce(Path.from("pool"), owner, Route.default);
+	cache.withdraw(Path.from("pool"), owner);
+	expect(cache.get(path, cache.instance(path))).toBeUndefined();
+	const same = cache.get(other, cache.instance(other));
+	expect(same?.closed).toBe(otherHeld.closed);
+	expect(held.closed.peek()).toBeUndefined();
+	for (const consumer of [held, otherHeld, same]) consumer?.close();
+	source.close();
+	unrelated.close();
+});
+
+test.each([false, true])("route alternation reuses every held instance (epoch: %s)", (explicit) => {
+	const cache = new BroadcastCache();
+	const path = Path.from("pool/job");
+	const broad = Path.from("pool");
+	const ownerA = {};
+	const ownerB = {};
+	cache.announce(broad, ownerA, { ...Route.default, epoch: explicit ? Epoch.mint() : undefined });
+	const a = new Producer();
+	const heldA = cache.insert(path, cache.instance(path), a.consume());
+	cache.announce(path, ownerB, { ...Route.default, epoch: explicit ? Epoch.mint() : undefined });
+	const b = new Producer();
+	const heldB = cache.insert(path, cache.instance(path), b.consume());
+	cache.withdraw(path, ownerB);
+	const again = cache.get(path, cache.instance(path));
+	expect(again?.closed).toBe(heldA.closed);
+	for (const consumer of [heldA, heldB, again]) consumer?.close();
+	a.close();
+	b.close();
+});

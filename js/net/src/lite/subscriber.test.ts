@@ -1331,7 +1331,7 @@ test("consumes resolve the serving prefix and pin its epoch", async () => {
 	await encodeAnnounceBroadcast(peer, { status: "endedId", id: 1n }, version);
 	await announced.next();
 	const fallback = subscriber.consume(job);
-	expect(fallback.closed).not.toBe(fresh.closed);
+	expect(fallback.closed).toBe(held.closed);
 	expect(subscriber.consume(pool).closed).toBe(subscriber.consume(pool).closed);
 	fresh.close();
 	held.close();
