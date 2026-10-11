@@ -468,8 +468,10 @@ class DecoderTrack {
 					}
 
 					// Returns immediately when the latency is "instant". Closing the track releases it.
-					await this.sync.wait(timestamp, effect.abort);
-					if (effect.abort.aborted) return;
+					// Capture the signal: a rerun replaces `effect.abort` before this continuation runs.
+					const signal = effect.abort;
+					await this.sync.wait(timestamp, signal);
+					if (signal.aborted) return;
 					if (epoch !== this.sync.epoch) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
