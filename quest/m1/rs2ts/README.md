@@ -85,3 +85,4 @@ children land; the later report does not block them.
 
 - [Generated lite browser report](/quest/m2/rs2ts-browser-report.md) - the final bundle, CPU, and first-frame latency comparison after generated lite ships
 - [Generated IETF](/quest/m2/rs2ts-ietf.md) - the IETF half, deferred to m2 until the lite go/no-go
+- [Controlled time](/quest/m1/time/README.md) - `@moq/time` is the hand-written timer glue; `moq_time::Instant` maps to it

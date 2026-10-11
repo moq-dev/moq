@@ -768,7 +768,7 @@ mod test {
 	async fn an_entry_subscribes_and_reads() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let source = crate::source::announced(&broadcast.consume());
+		let source = crate::source::announced(&broadcast.consume()).await;
 
 		let mut chat = catalog
 			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())

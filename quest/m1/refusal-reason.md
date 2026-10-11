@@ -39,7 +39,9 @@ Decided 2026-10-08 (split from [Session outcomes](/quest/m1/session-outcomes.md)
   `auth::Error` has no `expired` and carries no root or tier. Give the HTTP
   path and `Admission::refuse` one refusal shape (reason, optional root and
   tier), under the same bound, and update `From<moq_auth::Error>`, which sends
-  anything but `Refused` to `Unavailable` today.
+  anything but `Refused` to `Unavailable` today. A refusal an embedder
+  records on its stats handle ([Session outcomes](/quest/m1/session-outcomes.md))
+  takes `expired` too.
 - **Relay.** Map the typed error to a `Refusal` reason (adding `expired`) in
   `/metrics`, and count it in the root's `Presence` on that tier, or the
   default tier when the body names none. A refusal without a root stays

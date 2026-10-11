@@ -742,6 +742,7 @@ fn spawn_export(
 			format: stdout.format,
 			max_delay: stdout.max_delay,
 			linger: stdout.linger,
+			stitch: stdout.stitch,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			catalog: export.catalog_format,
@@ -765,11 +766,11 @@ fn spawn_export(
 				}
 			}
 			ExportSink::Srt(srt) => {
-				if let Some(addr) = srt.listen {
+				if let Some(addr) = srt.endpoint.listen {
 					let name = require_broadcast(name, "export srt --listen")?;
-					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt.latency.into_std()));
-				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt.latency.into_std()));
+					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt));
+				} else if let Some(url) = srt.endpoint.connect.clone() {
+					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt));
 				}
 			}
 			ExportSink::Rtc(rtc) => {
@@ -809,15 +810,14 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 	let catalog = args.catalog_format(&name);
 
 	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
-	// resolves it (and any sibling broadcast a rendition's `broadcast` field references,
-	// e.g. "./source") through the origin.
+	// resolves it, and any sibling broadcast a rendition's `broadcast` field references
+	// (e.g. "./source") through the same origin.
 	consumer
 		.routed(&name)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
-	let source = moq_mux::Source::new(consumer, &name);
-	Subscribe::new(source, catalog, args).run().await
+	Subscribe::new(consumer, &name, catalog, args).await?.run().await
 }
 
 /// Run every endpoint until the first finishes (stdin EOF, SIGINT, SIGTERM, or an
