@@ -220,6 +220,7 @@ struct Cluster {
 	_origins: Vec<origin::Producer>,
 	_pairs: Vec<MockPair>,
 	next_hop: u64,
+	/// The relay and publisher caches; each viewer owns its own.
 	pools: Vec<cache::Pool>,
 }
 
@@ -237,8 +238,9 @@ impl Cluster {
 		};
 
 		for _ in 0..shape.relays {
-			let relay = this.origin(RELAY_CACHE);
+			let (relay, pool) = this.origin(RELAY_CACHE);
 			this.relays.push(relay);
+			this.pools.push(pool);
 		}
 
 		// Peer every pair the way a cluster dial does: each side publishes its
@@ -257,7 +259,8 @@ impl Cluster {
 		}
 
 		for publisher in 0..shape.publishers {
-			let origin = this.origin(CLIENT_CACHE);
+			let (origin, pool) = this.origin(CLIENT_CACHE);
+			this.pools.push(pool);
 			for index in 0..shape.broadcasts {
 				let broadcast = origin
 					.publish(path(publisher * shape.broadcasts + index), Default::default())
@@ -276,19 +279,19 @@ impl Cluster {
 		this
 	}
 
-	fn origin(&mut self, capacity: u64) -> origin::Producer {
+	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
 		let mut config = origin::Config::new(Hop::new(self.next_hop).unwrap());
-		config.pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
-		self.pools.push(config.pool.clone());
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		config.pool = pool.clone();
 		let (producer, driver) = origin::Producer::new(config);
 		support::harness::spawn(driver);
-		producer
+		(producer, pool)
 	}
 
 	/// Connect a viewer session to `relay`.
 	async fn join(&mut self, relay: usize) -> Viewer {
-		let origin = self.origin(CLIENT_CACHE);
+		let (origin, pool) = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(self.relays[relay].consume().with_hidden(true));
@@ -299,6 +302,7 @@ impl Cluster {
 			subscribers: Vec::new(),
 			_pair: pair,
 			origin,
+			pool,
 		}
 	}
 }
@@ -307,6 +311,7 @@ struct Viewer {
 	subscribers: Vec<track::Subscriber>,
 	_pair: MockPair,
 	origin: origin::Producer,
+	pool: cache::Pool,
 }
 
 impl Viewer {
@@ -372,12 +377,6 @@ impl Room {
 			viewers.push(viewer);
 		}
 
-		// First measure the complete batch without eviction. The delivery benchmark must
-		// fit its working set; cache-pressure loss is a different workload.
-		let capacities: Vec<_> = cluster.pools.iter().map(cache::Pool::capacity).collect();
-		for pool in &cluster.pools {
-			pool.resize(None);
-		}
 		let mut room = Self {
 			cluster,
 			viewers,
@@ -396,11 +395,19 @@ impl Room {
 		};
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
+
+		// First measure the complete batch without eviction. The delivery benchmark must
+		// fit its working set; cache-pressure loss is a different workload.
+		let capacities: Vec<_> = room.pools().map(cache::Pool::capacity).collect();
+		for pool in room.pools() {
+			pool.resize(None);
+		}
 		// Warm every path so the timed rounds skip first-group setup.
 		for _ in 0..FRAMES / shape.frames() {
+			room.tick();
 			room.round().await;
 		}
-		for (pool, capacity) in room.cluster.pools.iter().zip(capacities) {
+		for (pool, capacity) in room.pools().zip(capacities) {
 			// Keep the old and current batch resident during the handover, including
 			// bookkeeping rather than estimating a group from payload bytes alone.
 			pool.resize(capacity.map(|capacity| capacity.max(pool.used() * 2)));
@@ -408,19 +415,28 @@ impl Room {
 		// Exercise turnover as well as the empty cache, including Criterion's one-pass
 		// nightly smoke mode.
 		for _ in 0..4 {
+			room.tick();
 			room.round().await;
 		}
 		room
 	}
 
-	async fn round(&mut self) {
-		// Unpaced rounds otherwise collapse many complete batches into one cache
-		// tick, where yesterday's read outranks today's unread write. Sample a new
-		// recency epoch per batch without sleeping or changing protocol time.
+	fn pools(&self) -> impl Iterator<Item = &cache::Pool> {
+		let viewers = self.viewers.iter().map(|viewer| &viewer.pool);
+		self.cluster.pools.iter().chain(viewers)
+	}
+
+	/// Unpaced rounds otherwise collapse many complete batches into one cache tick,
+	/// where yesterday's read outranks today's unread write. Sample a new recency
+	/// epoch per round without sleeping or changing protocol time.
+	fn tick(&mut self) {
 		self.cache_now += Duration::from_secs(1);
-		for pool in &self.cluster.pools {
+		for pool in self.pools() {
 			pool.gc(self.cache_now);
 		}
+	}
+
+	async fn round(&mut self) {
 		if self.shape.paced {
 			return self.paced_round().await;
 		}
@@ -472,12 +488,17 @@ impl Room {
 		assert_eq!(bytes, self.shape.expected());
 	}
 
+	/// Time `iters` rounds, excluding each round's cache tick: its cost grows with the
+	/// number of pools, not with the delivery being measured.
 	async fn measure(&mut self, iters: u64) -> Duration {
-		let start = Instant::now();
+		let mut elapsed = Duration::ZERO;
 		for _ in 0..iters {
+			self.tick();
+			let start = Instant::now();
 			self.round().await;
+			elapsed += start.elapsed();
 		}
-		start.elapsed()
+		elapsed
 	}
 }
 
