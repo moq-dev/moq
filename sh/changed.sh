@@ -5,6 +5,8 @@
 #
 # BASE: the argument, then $GITHUB_BASE_REF, then the open PR's base,
 # then an upstream named main or release, then origin/main.
+# For an unpublished or offline stack, pass its base explicitly: an arbitrary
+# upstream cannot distinguish a stacked base from a differently named PR head.
 set -euo pipefail
 
 base=${1:-}
@@ -16,11 +18,12 @@ if [[ -z "$base" && -n "${GITHUB_BASE_REF:-}" ]]; then
 fi
 if [[ -z "$base" ]]; then
     upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+    upstream_head=${upstream#*/}
     head=$(git branch --show-current)
     heads=("$head")
-    case "$upstream" in
-        */main | */release | "") ;;
-        *) [[ "${upstream#*/}" == "$head" ]] || heads+=("${upstream#*/}") ;;
+    case "$upstream_head" in
+        main | release | "") ;;
+        *) [[ "$upstream_head" == "$head" ]] || heads+=("$upstream_head") ;;
     esac
 
     # Prefer the local branch's PR; an upstream may be its stacked base.
@@ -32,14 +35,18 @@ if [[ -z "$base" ]]; then
             pr_base=$(GH_PROMPT_DISABLED=1 timeout 3s gh pr view "$head" \
                 --json baseRefName,state --jq 'select(.state == "OPEN") | .baseRefName' 2>/dev/null || true)
             if [[ -n "$pr_base" ]]; then
-                base="origin/$pr_base"
+                if [[ "$upstream_head" == "$pr_base" ]]; then
+                    base=$upstream
+                else
+                    base="origin/$pr_base"
+                fi
                 break
             fi
         done
     fi
     if [[ -z "$base" ]]; then
-        case "$upstream" in
-            */main | */release) base=$upstream ;;
+        case "$upstream_head" in
+            main | release) base=$upstream ;;
             *) base=origin/main ;;
         esac
     fi

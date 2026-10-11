@@ -119,6 +119,22 @@ class ChangedTests(unittest.TestCase):
         self.track("origin/release")
         self.expect("origin/release", ["feature.txt"])
 
+    def test_tracked_head_with_trunk_suffix_is_not_the_base(self):
+        for branch in ("feature/main", "feature/release"):
+            with self.subTest(branch=branch):
+                self.git("branch", "-m", branch)
+                self.git("update-ref", f"refs/remotes/origin/{branch}", "HEAD")
+                self.track(f"origin/{branch}")
+                self.expect("origin/main", ["stack.txt", "feature.txt"])
+
+    def test_pr_preserves_matching_base_remote(self):
+        self.git("remote", "add", "upstream", "https://github.com/moq-dev/moq.git")
+        self.git("update-ref", "refs/remotes/upstream/main", "origin/main")
+        self.track("upstream/main")
+        self.git("update-ref", "-d", "refs/remotes/origin/main")
+        self.env["GH_BASE"] = "main"
+        self.expect("upstream/main", ["stack.txt", "feature.txt"])
+
     def test_offline_unauthenticated_or_timed_out(self):
         self.track("origin/quest/m1/pr-name")
         for status in (1, 4, 124):
@@ -149,6 +165,7 @@ class ChangedTests(unittest.TestCase):
         self.assertFalse((self.root / "gh.log").exists())
 
     def test_explicit_base_wins_without_lookup(self):
+        self.track("origin/stack")
         self.env["GITHUB_BASE_REF"] = "main"
         self.expect("origin/stack", ["feature.txt"], "origin/stack")
         self.assertFalse((self.root / "gh.log").exists())
