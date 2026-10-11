@@ -83,7 +83,8 @@ punching. Discovery still publishes the endpoint's addresses to n0's DNS
 whichever way it is configured. Browsers can't use iroh at all: WebTransport
 gives a page a connection, not an endpoint.
 
-The relay opts in with `[iroh] enabled = true` and a persisted `secret` so the
+Build the relay from source with `cargo build -p moq-relay --release --features iroh`,
+then opt in with `[iroh] enabled = true` and a persisted `secret` so the
 endpoint id survives restarts. See the [config reference](/bin/relay/config#iroh).
 
 ## Custom Rust transports

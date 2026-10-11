@@ -21,6 +21,11 @@ public final class TrackRequest: Sendable {
         TrackProducer(try ffi.accept(info: info))
     }
 
+    /// Watch this track's subscribers, including after accepting it.
+    public func demand() throws -> TrackDemand {
+        TrackDemand(try ffi.demand())
+    }
+
     /// Create a fetch handler before accepting this requested track.
     public func dynamic() throws -> TrackDynamic {
         TrackDynamic(try ffi.dynamic())

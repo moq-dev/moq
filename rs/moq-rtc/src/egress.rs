@@ -328,7 +328,7 @@ mod tests {
 	#[test]
 	fn catalog_codecs_ignores_codecs_available_only_via_escaping_references() {
 		let origin = produce_origin();
-		let source = moq_mux::Source::new(origin.consume(), "a/pub");
+		let source = moq_mux::Source::new(origin.consume(), origin.create_broadcast("a/pub").unwrap().consume());
 		let mut catalog = Catalog::default();
 
 		let mut escaped_audio = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
@@ -362,7 +362,7 @@ mod tests {
 	#[test]
 	fn picks_the_best_video_rendition_whatever_its_name() {
 		let origin = produce_origin();
-		let source = moq_mux::Source::new(origin.consume(), "a/pub");
+		let source = moq_mux::Source::new(origin.consume(), origin.create_broadcast("a/pub").unwrap().consume());
 		let mut catalog = Catalog::default();
 
 		let rendition = |height: u32| {
@@ -395,7 +395,7 @@ mod tests {
 	#[test]
 	fn picks_the_best_opus_rendition_whatever_its_name() {
 		let origin = produce_origin();
-		let source = moq_mux::Source::new(origin.consume(), "a/pub");
+		let source = moq_mux::Source::new(origin.consume(), origin.create_broadcast("a/pub").unwrap().consume());
 		let mut catalog = Catalog::default();
 
 		let opus = |bitrate: Option<u64>| {

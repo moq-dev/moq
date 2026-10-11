@@ -62,7 +62,7 @@ async fn resolve(
 	};
 
 	let origin = origin.ok_or_else(|| Error::UnresolvableBroadcast(reference.as_str().to_string()))?;
-	let source = moq_mux::Source::new(origin, &broadcast.info().path);
+	let source = moq_mux::Source::new(origin, broadcast);
 	Ok(source.resolve(Some(&reference.borrow())).await?)
 }
 

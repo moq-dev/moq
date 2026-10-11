@@ -2,17 +2,10 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Error as NetError, Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
-import { CaptionsRenderer, parseText, VTTCue, type VTTRegion } from "media-captions";
-// media-captions positions and styles cues purely through these stylesheets (via `[part]`
-// attributes and CSS variables it sets); without them the overlay renders nothing visible.
-import captionsCss from "media-captions/styles/captions.css?inline";
-import regionsCss from "media-captions/styles/regions.css?inline";
+import type { VTTCue, VTTRegion } from "media-captions";
 import { subscribeMedia } from "../media";
 import type { Sync } from "../sync";
 import type { Source } from "./source";
-
-// The renderer positions cues relative to a `[part="captions"]` box using the stylesheets above.
-const OVERLAY_CSS = `${captionsCss}\n${regionsCss}`;
 
 // Drop cues whose end is more than this far behind the playhead, to bound memory on a long stream.
 const PRUNE_BEHIND = Time.Milli(30_000);
@@ -233,85 +226,91 @@ export class Renderer {
 			return;
 		}
 
-		// The media-captions stylesheet, mounted as a sibling of the overlay (its `[part]` selectors are
-		// global). It can't live inside the overlay: the renderer clears `overlay.textContent` on every
-		// track change, which would wipe it.
-		const style = document.createElement("style");
-		style.textContent = OVERLAY_CSS;
-		container.appendChild(style);
-		effect.cleanup(() => style.remove());
-
-		// A fresh overlay per selection, so cleanup is just removing it.
-		const overlay = document.createElement("div");
-		overlay.style.position = "absolute";
-		overlay.style.inset = "0";
-		overlay.style.pointerEvents = "none";
-		container.appendChild(overlay);
-		effect.cleanup(() => overlay.remove());
-
-		const renderer = new CaptionsRenderer(overlay);
-		// The renderer installs a ResizeObserver; destroy() disconnects it (removing the overlay alone
-		// does not), so a track switch or reconnect doesn't leak an observer.
-		effect.cleanup(() => renderer.destroy());
-
-		const sub = subscribeMedia(effect, {
-			broadcast: active,
-			track,
-			priority: Catalog.PRIORITY.text,
-			maxDelay: this.sync.out.maxDelay,
-		});
-		if (!sub) return;
-		const store: CueStore = { cues: [], regions: new Map(), clears: [] };
-		const commit = () => renderer.changeTrack({ cues: [...store.cues], regions: [...store.regions.values()] });
-
-		// Drive the caption clock off the shared media clock so cues line up with audio/video, and
-		// prune cues that have scrolled well past the playhead. Reschedules itself each frame.
-		const tick = () => {
-			const now = this.sync.now();
-			if (now !== undefined) {
-				renderer.currentTime = now / 1000;
-
-				if (pruneCues(store, (now - PRUNE_BEHIND) / 1000)) commit();
-			}
-			effect.animate(tick);
-		};
-		effect.animate(tick);
-
-		// Accept groups and read each in its own task, like `Container.Consumer` does for media. A
-		// group whose stream stalls then delays only its own cue instead of every later one.
+		const abort = effect.abort;
 		effect.spawn(async () => {
-			for (;;) {
-				const group = await sub.recvGroup().catch((err) => {
-					if (!(err instanceof NetError.Stream)) throw err;
-					console.debug("captions subscription ended", err);
-					return undefined;
-				});
-				if (!group) break;
+			const { CaptionsRenderer, OVERLAY_CSS } = await import("./captions");
+			if (abort.aborted) return;
+			// The media-captions stylesheet, mounted as a sibling of the overlay (its `[part]` selectors are
+			// global). It can't live inside the overlay: the renderer clears `overlay.textContent` on every
+			// track change, which would wipe it.
+			const style = document.createElement("style");
+			style.textContent = OVERLAY_CSS;
+			container.appendChild(style);
+			effect.cleanup(() => style.remove());
 
-				effect.spawn(async () => {
-					try {
-						for (;;) {
-							const frame = await group.readFrame();
-							if (!frame) break;
-							for (const sample of format.decode(frame.payload, frame.timestamp)) {
-								await this.#ingest(config.format, sample, store);
-							}
-						}
-					} catch (err) {
+			// A fresh overlay per selection, so cleanup is just removing it.
+			const overlay = document.createElement("div");
+			overlay.style.position = "absolute";
+			overlay.style.inset = "0";
+			overlay.style.pointerEvents = "none";
+			container.appendChild(overlay);
+			effect.cleanup(() => overlay.remove());
+
+			const renderer = new CaptionsRenderer(overlay);
+			// The renderer installs a ResizeObserver; destroy() disconnects it (removing the overlay alone
+			// does not), so a track switch or reconnect doesn't leak an observer.
+			effect.cleanup(() => renderer.destroy());
+
+			const sub = subscribeMedia(effect, {
+				broadcast: active,
+				track,
+				priority: Catalog.PRIORITY.text,
+				maxDelay: this.sync.out.maxDelay,
+			});
+			if (!sub) return;
+			const store: CueStore = { cues: [], regions: new Map(), clears: [] };
+			const commit = () => renderer.changeTrack({ cues: [...store.cues], regions: [...store.regions.values()] });
+
+			// Drive the caption clock off the shared media clock so cues line up with audio/video, and
+			// prune cues that have scrolled well past the playhead. Reschedules itself each frame.
+			const tick = () => {
+				const now = this.sync.now();
+				if (now !== undefined) {
+					renderer.currentTime = now / 1000;
+
+					if (pruneCues(store, (now - PRUNE_BEHIND) / 1000)) commit();
+				}
+				effect.animate(tick);
+			};
+			effect.animate(tick);
+
+			// Accept groups and read each in its own task, like `Container.Consumer` does for media. A
+			// group whose stream stalls then delays only its own cue instead of every later one.
+			effect.spawn(async () => {
+				for (;;) {
+					const group = await sub.recvGroup().catch((err) => {
 						if (!(err instanceof NetError.Stream)) throw err;
-					} finally {
-						group.close();
-					}
+						console.debug("captions subscription ended", err);
+						return undefined;
+					});
+					if (!group) break;
 
-					commit();
-				});
-			}
+					effect.spawn(async () => {
+						try {
+							for (;;) {
+								const frame = await group.readFrame();
+								if (!frame) break;
+								for (const sample of format.decode(frame.payload, frame.timestamp)) {
+									await this.#ingest(config.format, sample, store);
+								}
+							}
+						} catch (err) {
+							if (!(err instanceof NetError.Stream)) throw err;
+						} finally {
+							group.close();
+						}
+
+						commit();
+					});
+				}
+			});
 		});
 	}
 
 	// Parse one cue payload into the cue/region store. The frame timestamp is the authoritative cue
 	// start on the media clock; a VTT payload also carries its own absolute timing.
 	async #ingest(format: string, sample: Container.Frame, store: CueStore): Promise<void> {
+		const { VTTCue, parseText } = await import("./captions");
 		const text = new TextDecoder().decode(sample.payload);
 		const start = (sample.timestamp as number) / 1e6;
 
