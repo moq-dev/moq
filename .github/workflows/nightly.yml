@@ -217,6 +217,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs c-tests
 
+      - name: TS table alignment
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --pair
+
       # The TS exporter's PCR release timing. Everything else about the stream
       # can be graded from a capture, but *when* the bytes were handed over
       # cannot: the grader has to sit on the exporter's stdout for the length of
