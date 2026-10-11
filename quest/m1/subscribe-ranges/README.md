@@ -45,9 +45,11 @@ relay bounds a sparse FETCH only if the model can request ranges:
   Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
   flag and closing #5085). Each range end is `Absolute(group, frame)` or
-  `Relative(n)`, naming the group n before the latest (clamped at group 0,
-  in both languages and the cross-language tests); either end may be
-  relative, and an omitted end is live. Ends are inclusive of whole groups:
+  `Relative(n)`, naming the group n before the latest; either end may be
+  relative, and an omitted end is live. An offset past the track's start
+  clamps to group 0. Before any group exists, relative ends resolve when the
+  first one arrives, so `Relative(0)..` starts at it. The cross-language and
+  bridge tests cover both edges. Ends are inclusive of whole groups:
   a relative start resolves to frame 0 of that group, and a relative end to
   just after its last frame (the model's exclusive `Position::after_group`),
   so `Absolute(0)..Relative(0)` includes the latest group. Live is `Relative(0)..`, so no separate `Live` field exists.
