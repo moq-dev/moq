@@ -19,8 +19,8 @@ The validation run in #5328 used `just test ts --pair`: two exports of one
 exporters and the publisher exited successfully. PAT/PMT agreement was 100%;
 SDT had 20 common placements out of 23 in the union, or 86.96%, below the
 existing 90% gate over 41 seconds of shared media. The mismatches were near
-acquisition; from source PCR 7.384306 onward, the next 20 SDT placements
-matched. These observations do not establish permanent phase drift.
+acquisition; 20 consecutive later SDT placements matched. These observations
+do not establish permanent phase drift.
 
 `test/ts/table-anchor.py` tags a table with the next PES PTS and infers a
 timer-driven phase difference from median cadence. Check those assumptions
