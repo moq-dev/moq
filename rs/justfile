@@ -40,7 +40,7 @@ check *args:
 # Compile, lint, and test in one build, plus everything else `check` verifies.
 [positional-arguments]
 check-test *args:
-    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ require("clippy-driver") }} cargo nextest run --locked --all-targets --no-tests=pass "$@"
+    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ require("clippy-driver") }} bash sh/rs/nextest.sh cargo nextest run --locked --all-targets --no-tests=pass "$@"
     just rs _lint "$@"
 
 # Everything `check` verifies besides clippy.
@@ -101,9 +101,9 @@ windows-test:
 [positional-arguments]
 uring *args:
     just rs uring-check "$@"
-    cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@"
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@"
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
-    cargo nextest run --locked -p moq-uring --features qlog --all-targets "$@"
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --all-targets "$@"
 
 # Compile the io_uring relay path, off the default feature set.
 [positional-arguments]
@@ -191,7 +191,7 @@ audit:
 
 # Verify relay startup validation without a QUIC backend.
 relay-minimal:
-    cargo nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
 
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
@@ -216,7 +216,7 @@ features:
     cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
     cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
-    cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
+    bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
 
 # Compile the media crates at supported feature boundaries and prove expensive
 # native/render dependencies are absent when their features are excluded.
@@ -232,7 +232,7 @@ media-features:
 # Run the test suite, reporting clippy findings from the same compile.
 [positional-arguments]
 test *args:
-    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --locked --all-targets "$@"
+    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" bash sh/rs/nextest.sh cargo nextest run --locked --all-targets "$@"
 
 # Exercise the ignored hardware tests for every GPU vendor on this Linux host.
 gpu:
@@ -341,7 +341,7 @@ gst-smoke *args:
 
 # Device-free mixer cost, swept over sink count and frames per callback.
 bench-playback:
-    cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks)' --success-output immediate
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks)' --success-output immediate
 
 # Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
 [positional-arguments]
