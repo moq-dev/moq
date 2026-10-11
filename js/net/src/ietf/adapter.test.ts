@@ -22,6 +22,7 @@ test("draft-14 TRACK_STATUS_OK cannot be routed as NAMESPACE_DONE", async () => 
 	const peer = await Stream.accept(pair.client, Version.DRAFT_14);
 	if (!peer) throw new Error("no control stream");
 	await peer.writer.u53(0x0e);
+	await peer.writer.u16(0);
 	// The adapter may reject while the writer yields a browser task.
 	await new Promise<void>((resolve) => {
 		const channel = new MessageChannel();
@@ -32,7 +33,6 @@ test("draft-14 TRACK_STATUS_OK cannot be routed as NAMESPACE_DONE", async () => 
 		};
 		channel.port2.postMessage(null);
 	});
-	await peer.writer.u16(0);
 	await expect(running).rejects.toThrow("unexpected message 0x0e");
 });
 
