@@ -269,7 +269,8 @@ type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "filter" | "b
 /** A `{Group, Object}` pair carried by a message parameter, such as LARGEST_OBJECT. */
 export type MessageLocation = { groupId: bigint; objectId: bigint };
 
-function getMessageParamKind(id: bigint): MessageParamKind {
+/** The kind of a message parameter we define, or undefined for an unrecognized id. */
+function messageParamKind(id: bigint): MessageParamKind | undefined {
 	switch (id) {
 		case MSG_PARAM_DELIVERY_TIMEOUT:
 		case MSG_PARAM_FILL_TIMEOUT:
@@ -296,9 +297,14 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_HOP_PATH:
 			return "bytes";
 		default:
-			if (MSG_PARAM_REPEATABLE.includes(id)) return "bytes";
-			throw new Error(`unknown message parameter id: ${id.toString()}`);
+			return MSG_PARAM_REPEATABLE.includes(id) ? "bytes" : undefined;
 	}
+}
+
+function getMessageParamKind(id: bigint): MessageParamKind {
+	const kind = messageParamKind(id);
+	if (kind === undefined) throw new Error(`unknown message parameter id: ${id.toString()}`);
+	return kind;
 }
 
 /**
@@ -640,11 +646,12 @@ export class Parameters {
 				prevType = id;
 			}
 
-			// These definitions postdate the legacy drafts. Consume their KVP framing
-			// without interpreting a future value or exposing it to message validation.
+			// Drafts 14 and 15 have a receiver ignore unrecognized parameters, repeats included,
+			// and the later definitions are unrecognized there. Consume their KVP framing
+			// without interpreting a value or exposing it to message validation.
 			if (
 				(version === Version.DRAFT_14 || version === Version.DRAFT_15) &&
-				MSG_PARAM_AFTER_DRAFT15.includes(id)
+				(MSG_PARAM_AFTER_DRAFT15.includes(id) || messageParamKind(id) === undefined)
 			) {
 				if (id % 2n === 0n) await r.u62();
 				else await r.read(await r.u53());

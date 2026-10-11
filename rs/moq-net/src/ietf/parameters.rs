@@ -1140,7 +1140,13 @@ mod tests {
 	#[test]
 	fn legacy_unknown_parameter_is_ignored() {
 		for version in [Version::Draft14, Version::Draft15] {
-			for data in [&[2, 0x3e, 1, 0x20, 7][..], &[2, 0x3d, 1, 42, 0x20, 7][..]] {
+			for data in [
+				&[2, 0x3e, 1, 0x20, 7][..],
+				&[2, 0x3d, 1, 42, 0x20, 7][..],
+				// Unknown ids may repeat.
+				&[3, 0x3e, 1, 0x3e, 2, 0x20, 7][..],
+				&[3, 0x3d, 1, 42, 0x3d, 1, 43, 0x20, 7][..],
+			] {
 				let mut bytes = data;
 				let result: Result<Option<u8>, DecodeError> = (|| {
 					decode_params!(&mut bytes, version, 0x20 => priority: Option<u8>);
