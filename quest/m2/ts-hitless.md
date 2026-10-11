@@ -1,4 +1,4 @@
-# [L] Two TS export legs emit identical packets for ST 2022-7
+# [L] Redundant TS exports preserve common packet identity
 
 ## Goal
 

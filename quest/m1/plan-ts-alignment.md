@@ -42,5 +42,5 @@ tests against the [standard](https://pub.smpte.org/latest/st2022-7/st2022-7-2019
 ## Related
 
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - currently assumes an input-derived wall anchor is available
-- [TS hitless legs](/quest/m2/ts-hitless.md) - TS identity and RTP recovery need separate acceptance evidence
+- [Deterministic TS legs](/quest/m2/ts-hitless.md) - TS identity and RTP recovery need separate acceptance evidence
 - [TS passthrough export](/quest/m1/ts-passthrough-export.md) - unchanged packets do not establish identical groups from independent starts
