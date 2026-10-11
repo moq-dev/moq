@@ -227,14 +227,8 @@ impl<O: Output> Media<O> {
 						}
 					};
 					// Nothing older than the playhead is worth presenting, so the delay
-					// doubles as the staleness budget on the wire. With no speaker to
-					// follow, the playhead is video's own, so waiting on the audio
-					// estimate's budget would only freeze the picture.
-					let max_delay = if snapshot.audio.renditions.is_empty() {
-						self.args.video_delay()
-					} else {
-						self.args.max_delay()
-					};
+					// doubles as the staleness budget on the wire.
+					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					let opened = async {
 						let decoder = moq_video::decode::Sink::open(config, &Default::default()).await?;
 						let track = rendition.track(name)?;

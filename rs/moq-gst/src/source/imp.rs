@@ -798,8 +798,8 @@ async fn follow_catalog(
 
 /// Bring the run's pumps in line with `catalog`: spawn pumps for newly announced renditions,
 /// hand the pad of any whose caps or container changed to a new pump, leave ones that vanished to
-/// end with their track, and end the kept pads of renditions it no longer lists. Returns the
-/// renditions it lists.
+/// end with their track, stop disabled ones, and end the kept pads of renditions it no longer
+/// lists. Returns the renditions it lists.
 ///
 /// Infallible by design: every way a single rendition can be unusable (unsupported codec,
 /// malformed init, a name the broadcast refuses) skips just that rendition, so one bad entry in
@@ -842,6 +842,24 @@ fn reconcile(
 		insert(name, TrackKind::Audio, audio_caps(config), &config.container);
 	}
 
+	// A disabled rendition stays listed: its pump stops, but its pad waits idle for a re-enable,
+	// since a pipeline links pads by name (`s.video_0 ! ...`).
+	let disabled: HashSet<Rendition> = catalog
+		.video
+		.renditions
+		.iter()
+		.filter(|(_, config)| !config.enabled)
+		.map(|(name, _)| (TrackKind::Video, name.clone()))
+		.chain(
+			catalog
+				.audio
+				.renditions
+				.iter()
+				.filter(|(_, config)| !config.enabled)
+				.map(|(name, _)| (TrackKind::Audio, name.clone())),
+		)
+		.collect();
+
 	// Pure set math: which pumps to tear down, which renditions to spawn.
 	let plan = plan_reconcile(
 		&desired
@@ -862,33 +880,22 @@ fn reconcile(
 	// a pad stays in `active` and ends with its track, where `follow_catalog` ends its pad. One
 	// that never took a pad is stopped.
 	for name in plan.remove {
+		let Some(track) = active.get(&name) else { continue };
 		// An explicit disable stops a live pump too; a delist still drains its tail.
-		let disabled = active.get(&name).is_some_and(|track| match track.kind {
-			TrackKind::Video => catalog
-				.video
-				.renditions
-				.get(&name)
-				.is_some_and(|config| !config.enabled),
-			TrackKind::Audio => catalog
-				.audio
-				.renditions
-				.get(&name)
-				.is_some_and(|config| !config.enabled),
-		});
-		if !disabled
-			&& !desired.contains_key(&name)
-			&& active.get(&name).is_some_and(|track| !track.state.cancel_before_live())
-		{
-			continue;
-		}
-		if let Some(track) = active.remove(&name) {
+		let drains = !desired.contains_key(&name)
+			&& !disabled.contains(&(track.kind, name.clone()))
+			&& !track.state.cancel_before_live();
+		if !drains && let Some(track) = active.remove(&name) {
 			track.cancel();
 		}
 	}
 
 	// A kept pad the catalog no longer lists ends with EOS, unless a pump still drains its track.
-	let unwanted = pads.unwanted(|(kind, name)| {
-		desired.get(name).is_some_and(|d| d.kind == *kind) || active.get(name).is_some_and(|t| t.kind == *kind)
+	let unwanted = pads.unwanted(|rendition| {
+		let (kind, name) = rendition;
+		desired.get(name).is_some_and(|d| d.kind == *kind)
+			|| disabled.contains(rendition)
+			|| active.get(name).is_some_and(|t| t.kind == *kind)
 	});
 	for rendition in unwanted {
 		if let Some(retire) = pads.retire(&rendition) {
@@ -962,7 +969,11 @@ fn reconcile(
 		);
 	}
 
-	desired.into_iter().map(|(name, d)| (d.kind, name)).collect()
+	desired
+		.into_iter()
+		.map(|(name, d)| (d.kind, name))
+		.chain(disabled)
+		.collect()
 }
 
 /// Tear-down / spawn decisions for one catalog update, computed purely from the desired and
@@ -1959,48 +1970,6 @@ mod session_tests {
 		drop(shutdown);
 	}
 
-	#[test]
-	fn disabling_a_live_rendition_cancels_its_pump() {
-		let element = element();
-		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		let mut config = video_rendition();
-		config.enabled = false;
-		catalog.video.renditions.insert("video".into(), config.clone());
-		let state = std::sync::Arc::new(super::PumpState::new());
-		assert!(state.go_live());
-		let (cancel, cancelled) = watch::channel(false);
-		let task = super::RUNTIME.spawn(std::future::pending::<()>());
-		let mut active = std::collections::HashMap::from([(
-			"video".into(),
-			super::ActiveTrack {
-				kind: super::TrackKind::Video,
-				shape: super::Shape {
-					caps: super::video_caps(&config).unwrap(),
-					container: config.container.clone(),
-				},
-				cancel,
-				task: task.abort_handle(),
-				state,
-			},
-		)]);
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let mut pumps = tokio::task::JoinSet::new();
-		let (_shutdown, shutdown) = watch::channel(false);
-		super::reconcile(
-			&catalog,
-			&mut active,
-			&mut pumps,
-			&broadcast.consume(),
-			&Pads::default(),
-			&element.downgrade(),
-			&shutdown,
-		);
-		task.abort();
-		assert!(super::RUNTIME.block_on(task).unwrap_err().is_cancelled());
-		assert!(*cancelled.borrow(), "a disabled live rendition kept its pump");
-		assert!(active.is_empty());
-	}
-
 	/// Pipelines link `moqsrc`'s pads by name, so the first video rendition that actually
 	/// arrives has to be `video_0`. A rendition announced but never served must not claim that
 	/// name and leave the real one on `video_1`, where `s.video_0 ! ...` never links.
@@ -2556,6 +2525,56 @@ mod session_tests {
 
 		let seen = recorder.seen();
 		assert!(seen.contains(&Seen::Caps(pad, "video/x-vp8".into())), "{seen:?}");
+		recorder.assert_one_pad_held();
+	}
+
+	/// Disabling a rendition stops its pump but holds its pad idle, without an EOS, so a pipeline
+	/// linked by name resumes on it once the rendition is enabled again.
+	#[test]
+	fn a_reenabled_rendition_resumes_on_the_same_pad() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+
+		let mut publisher = Publisher::new(&origin, epoch(), video_rendition());
+		let _audio = publisher
+			.broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let session = follow(&element, &origin);
+		let pad = recorder.written(&mut publisher, 1);
+
+		// The catalog consumer only yields the newest snapshot, so the same update lists an audio
+		// rendition: its pad appearing proves the run acted on the disable.
+		{
+			let mut guard = publisher.catalog.modify().unwrap();
+			guard.video.renditions.get_mut("video").unwrap().enabled = false;
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		await_pad(&element, "audio_");
+
+		publisher
+			.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("video")
+			.unwrap()
+			.enabled = true;
+		assert_eq!(
+			recorder.written(&mut publisher, 2),
+			pad,
+			"the re-enabled rendition moved to another pad"
+		);
+		stop(session);
+
+		let seen = recorder.seen();
+		assert!(
+			seen.contains(&Seen::Start(pad)),
+			"the disabled pump kept running: {seen:?}"
+		);
 		recorder.assert_one_pad_held();
 	}
 
