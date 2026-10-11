@@ -48,10 +48,13 @@ playback needs an error rate it cannot see client-side):
   `moq_relay_sessions_opened_total` already is, so there is one counter.
 - **Gateway admission counts** (folded from the m2 refusal-reasons quest,
   2026-10-10). `Cluster::admit` returns a refusal (from `Auth::admit` or
-  `scope`) to the embedder uncounted, while the QUIC, WebSocket, and io_uring
-  paths record theirs around `scope`. Count it once, unattributed like the
-  relay's own, so the embedder records through the handle only what the
-  relay never saw.
+  `scope`) to the embedder uncounted. Native QUIC (`Connection::run` in
+  `connection.rs`) and the non-LAN io_uring branch (`uring.rs`) already record
+  whatever `cluster.admit` returns, and WebSocket records around its own
+  `scope`. Make `Cluster::admit` the single owner of its refusals, unattributed
+  like the relay's own, and drop the QUIC and io_uring records of its errors;
+  those callers keep recording only what they refuse themselves (LAN). The
+  embedder records through the handle only what the relay never saw.
 - **Ends are classified from a typed close kind, not a string.** A peer's
   application close is already typed (`Error::from_transport` decodes it into
   `Error::Session`), but `moq_net::Error::Transport(String)` still flattens
@@ -75,7 +78,7 @@ playback needs an error rate it cannot see client-side):
 - Tests: a forbidden path and an auth server refusal each count under their
   reason; an embedder refusal on its handle counts under its root, tier, and
   reason, in the stats track and `/metrics`; a `Cluster::admit` refusal
-  counts once; a refusal with `--stats-depth 1` and no admitted session
+  counts once, through an embedder, native QUIC, and io_uring alike; a refusal with `--stats-depth 1` and no admitted session
   appears in the root group's totals; a clean close, a peer's zero-code
   close, an idle timeout, and a peer application error each count as their
   kind; the aggregator sums the counters across nodes, and a node departing

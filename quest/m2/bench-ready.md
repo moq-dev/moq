@@ -29,22 +29,28 @@ Decided 2026-10-10 by maintainer priority:
   connects). A connection counts on `Status::Connected`, as today.
 - **Idle tracks are refused.** An fps of 0 never writes a group, so a
   subscriber of it never becomes established. Refuse a configuration that
-  subscribes while fps can roll 0.
+  subscribes to media it generates (a mesh run that publishes, or fan-out)
+  while fps can roll 0. A subscribe-only run's local fps is unused; its
+  external publisher decides whether groups arrive.
 - **Unreachable rolls are refused** (decided 2026-10-11 by the maintainer).
   A mesh connection discovers only its run's namespace when the run
   publishes, so it can subscribe to at most the others' broadcasts. Refuse
   at startup when the largest `subscribe` exceeds
-  `(connections.min - 1) * broadcasts.min`. The check uses the ranges, not
-  the roll, so a configuration is always accepted or always refused. Never
+  `(connections.min - 1) * broadcasts.min`, each bound taken as
+  `Range::sample` normalizes it (an inverted range swaps its ends) and the
+  connection count at least 1, as `main.rs` rolls it. The check uses the
+  ranges, not the roll, so a configuration is always accepted or always
+  refused. Never
   clamp: a smaller roll would measure a lighter load than requested.
 - **External publishers skip the check.** A subscribe-only run
   (`broadcasts` 0) discovers broadcasts from other invocations, which it
   cannot count ahead. Its target is the requested sum, and `ready` stays
   false until that is met.
 - Test: a small run's lines read `ready: false` until its gauges reach the
-  targets, then `ready: true`; an unreachable range and a subscribing run
-  with fps 0 are each refused at startup; a subscribe-only run reports the
-  requested sum as its target. Document the fields in
+  targets, then `ready: true`; an unreachable range, the same range
+  inverted, and a publishing run that subscribes with fps 0 are each refused
+  at startup; a subscribe-only run with local fps 0 is accepted and reports
+  the requested sum as its target. Document the fields in
   `rs/moq-bench/README.md` ("Machine-readable output").
 
 Public API: none (CLI output only). Wire: none.

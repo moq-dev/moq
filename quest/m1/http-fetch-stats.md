@@ -26,10 +26,11 @@ Decided 2026-10-10 by maintainer priority:
 - Group reads meter through a tagged consumer, so check that both
   `fetch_group` paths (a numbered group and `latest`) land on the tagged
   track rather than an untagged one.
-- `/announced` serves no media, but it is a request too: count it in
-  `requests` if sharing the helper makes that free.
+- `/announced` (`serve_announced`) serves no media, but it is an admitted
+  request too: it takes the same request context and counts one `requests`.
 - Test: a `/fetch` of a known group adds its bytes to that broadcast's path
-  and one `requests` to the token's root, both on the token's tier;
+  and one `requests` to the token's root, both on the token's tier; an
+  `/announced` adds one `requests` and no bytes;
   `sessions_started` does not change, and a token on another tier keeps them
   apart.
 - Update `doc/concept/stats.md` for the new counter, and
