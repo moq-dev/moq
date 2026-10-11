@@ -2362,6 +2362,18 @@ impl TrackIo {
 	}
 }
 
+/// A track the ended front left in flight, held until its last reader leaves. It
+/// keeps none of the driver's wake state, which would queue its name for a driver
+/// that is gone.
+struct InFlight {
+	weak: track::TrackWeak,
+	routes: super::resume::Producer,
+	// Kept for its readers: the logical track, its copy, and the copy's subscription.
+	_accepted: Option<track::Producer>,
+	_copy: Option<track::Consumer>,
+	_held: Option<kio::Pending<track::Subscribing>>,
+}
+
 /// Drives one front until it ends, then holds the tracks it left in flight until
 /// their last reader leaves, or until nothing owns the origin: a reader never keeps
 /// the driver from finishing.
@@ -2424,7 +2436,7 @@ fn pick<'a>(
 /// until the front ends; returns the tracks it ended in flight. The decisions live
 /// in the machine; this only waits and executes, so nothing here decides anything
 /// twice.
-async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
+async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 	let FrontTask {
 		shared,
 		broadcast,
@@ -2839,7 +2851,21 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 								continue;
 							}
 							io.routes.conclude();
-							in_flight.push(io);
+							let TrackIo {
+								weak,
+								routes,
+								accepted,
+								copy,
+								held,
+								..
+							} = io;
+							in_flight.push(InFlight {
+								weak,
+								routes,
+								_accepted: accepted,
+								_copy: copy.map(|(_, copy)| copy),
+								_held: held,
+							});
 						}
 						return in_flight;
 					}
