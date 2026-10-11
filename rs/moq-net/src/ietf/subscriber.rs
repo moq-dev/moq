@@ -3100,7 +3100,7 @@ where
 /// nothing.
 fn end_track(track: &mut track::Producer, end: track::Position) -> Result<(), Error> {
 	// Lower groups may still be on the wire, behind the one that carried the end.
-	if let Err(err) = track.end_at(end) {
+	if let Err(err) = track.finish_at_pending(end) {
 		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
@@ -8318,7 +8318,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.final_sequence(), Some(SEQUENCE + 1));
+		assert_eq!(h.track.end(), Some(track::Position { group: SEQUENCE, frame: 1 }));
 
 		let mut group = consumer.recv_group().await.unwrap().expect("the group arrives");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"last");
@@ -8335,7 +8335,7 @@ mod stitch_tests {
 		let h = Harness::new(Fill::Done, vec![marker]);
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.final_sequence(), Some(6));
+		assert_eq!(h.track.end(), Some(track::Position { group: 5, frame: 5 }));
 		assert_eq!(h.track.latest(), None, "a terminal marker creates no payload group");
 	}
 
@@ -8346,7 +8346,7 @@ mod stitch_tests {
 		use futures::FutureExt;
 
 		let mut h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"late"])]);
-		h.track.finish_at(SEQUENCE).unwrap();
+		h.track.finish_at(track::Position::group(SEQUENCE)).unwrap();
 		let mut stream = h.stream().await;
 
 		let res = h.subscriber.clone().recv_group(&mut stream).await;
@@ -8368,7 +8368,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.final_sequence(), Some(SEQUENCE));
+		assert_eq!(h.track.end(), Some(track::Position::group(SEQUENCE)));
 		assert_eq!(h.track.latest(), None, "no group was created");
 	}
 

@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
-import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
@@ -155,12 +154,12 @@ test("END_OF_TRACK after a group's last object ends the track after that group",
 	group.write(END_OF_TRACK);
 	group.finish();
 
-	expect(await reader.finished()).toBe(5);
+	expect(await reader.finished()).toEqual({ group: 4, frame: 1 });
 	expect(await readAll(await reader.recvGroup())).toEqual(["4.0"]);
 
 	await done(TRACK_ENDED, 1n);
 	expect(await reader.recvGroup()).toBeUndefined();
-	expect(reader.final()).toBe(5);
+	expect(reader.end()).toEqual({ group: 4, frame: 1 });
 });
 
 test("END_OF_TRACK at object 0 ends the track before its group, which never exists", async () => {
@@ -172,11 +171,11 @@ test("END_OF_TRACK at object 0 ends the track before its group, which never exis
 	end.write(END_OF_TRACK);
 	end.finish();
 
-	expect(await reader.finished()).toBe(2);
+	expect(await reader.finished()).toEqual({ group: 2, frame: 0 });
 	await done(TRACK_ENDED, 2n);
 	expect((await reader.recvGroup())?.sequence).toBe(0);
 	expect(await reader.recvGroup()).toBeUndefined();
-	expect(reader.final()).toBe(2);
+	expect(reader.end()).toEqual({ group: 2, frame: 0 });
 });
 
 test("a standalone END_OF_TRACK at object 5 preserves its terminal group", async () => {
@@ -185,8 +184,7 @@ test("a standalone END_OF_TRACK at object 5 preserves its terminal group", async
 	end.write(new Uint8Array([5, 0, 0x4]));
 	end.finish();
 	await end.handled;
-	expect(reader.final()).toBe(6);
-	expect(hooks.trackTerminal(reader)).toEqual({ group: 5, frame: 5 });
+	expect(reader.end()).toEqual({ group: 5, frame: 5 });
 	await done(TRACK_ENDED, 1n);
 	expect(await reader.recvGroup()).toBeUndefined();
 });
@@ -196,7 +194,7 @@ test("a group at or past the END_OF_TRACK aborts the track", async () => {
 	const end = groupStream(subscriber, 2);
 	end.write(END_OF_TRACK);
 	end.finish();
-	expect(await reader.finished()).toBe(2);
+	expect(await reader.finished()).toEqual({ group: 2, frame: 0 });
 
 	const late = groupStream(subscriber, 2);
 	late.write(object("2.0"));

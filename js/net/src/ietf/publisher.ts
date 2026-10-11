@@ -634,7 +634,7 @@ export class Publisher {
 
 			// Draft 14 on has no end location in PUBLISH_DONE: an END_OF_TRACK object is what
 			// tells the subscriber where the track ended.
-			const final = hooks.trackTerminal(track);
+			const final = track.end();
 			if (ended && !publishError && final !== undefined && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
@@ -775,8 +775,10 @@ export class Publisher {
 					}
 				}
 
-				const terminal = hooks.trackTerminal(track);
-				if (terminal?.group === group.sequence && terminal.frame === next) {
+				// The track ends right after this group's last object, so the marker rides this
+				// stream rather than a separate one.
+				const end = track.end();
+				if (end?.group === group.sequence && end.frame === next) {
 					await new Frame({ endOfTrack: true }).encode(
 						stream,
 						header.flags,

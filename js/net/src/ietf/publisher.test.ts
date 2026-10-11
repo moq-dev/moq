@@ -5,7 +5,6 @@ import * as Epoch from "../epoch.ts";
 import { error } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
-import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -2190,7 +2189,7 @@ test.each([false, true])("draft-20: exact terminal 5/5 survives group FIN=%s", a
 			group.close();
 			expect(await reader.done()).toBe(true);
 		}
-		hooks.endTrack(track, { group: 5, frame: 5 });
+		track.finishAt({ group: 5, frame: 5 });
 		group.close();
 		track.close();
 		if (finished) {

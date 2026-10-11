@@ -2817,10 +2817,12 @@ where
 	}
 }
 
-/// The terminal shared by a subscription's group writers.
+/// The track's end, shared by a subscription's group writers so the one serving the end's
+/// group can carry the END_OF_TRACK inline.
 #[derive(Default)]
 struct Terminal {
-	position: std::sync::Mutex<Option<track::Position>>,
+	end: std::sync::OnceLock<track::Position>,
+	/// A group stream carrying the marker was acknowledged, so no standalone one is needed.
 	sent: AtomicBool,
 }
 
@@ -2955,8 +2957,11 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if let Poll::Ready(Ok(end)) = self.track.poll_terminal(waiter) {
-			*self.terminal.position.lock().expect("terminal poisoned") = Some(end);
+		// Before the groups, so one finishing on this poll sees an end declared beside it.
+		if self.terminal.end.get().is_none()
+			&& let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter)
+		{
+			let _ = self.terminal.end.set(end);
 		}
 		if self.draining {
 			return self.children.poll(waiter).map(Ok);
@@ -3026,7 +3031,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					// Datagrams written before the track finished still go out.
 					self.poll_datagrams(waiter);
 					self.draining = true;
-					if let Poll::Ready(Ok(end)) = self.track.poll_terminal(waiter) {
+					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
 						self.end = Some(end);
 					}
 					return self.children.poll(waiter).map(Ok);
@@ -3349,13 +3354,13 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										}
 									}
 									Poll::Ready(Ok(None)) => {
+										// The track ends right after this group's last object, so
+										// the marker rides this stream rather than a separate one.
 										if !self.marked
 											&& self
 												.terminal
 												.as_ref()
-												.and_then(|terminal| {
-													*terminal.position.lock().expect("terminal poisoned")
-												})
+												.and_then(|terminal| terminal.end.get())
 												.is_some_and(|end| {
 													end.group == self.msg.group_id && end.frame == self.group.index()
 												}) {
@@ -3384,14 +3389,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						Ok(()) => {
 							let mut writer = writer;
 							match writer.finish() {
-								Ok(()) => {
-									if self.marked
-										&& let Some(terminal) = &self.terminal
-									{
-										terminal.sent.store(true, Ordering::Relaxed);
-									}
-									self.state = GroupState::Closed { writer };
-								}
+								Ok(()) => self.state = GroupState::Closed { writer },
 								Err(err) => return Poll::Ready(Err(err)),
 							}
 						}
@@ -3418,6 +3416,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					};
 					let sequence = self.msg.group_id;
 					self.state = GroupState::Done;
+					// Only an acknowledged marker spares the standalone one: a stream reset
+					// after its FIN may never deliver it.
+					if res.is_ok()
+						&& self.marked
+						&& let Some(terminal) = &self.terminal
+					{
+						terminal.sent.store(true, Ordering::Relaxed);
+					}
 					return Poll::Ready(res.map(|()| {
 						tracing::debug!(sequence, "finished group");
 					}));
@@ -3559,8 +3565,7 @@ mod group_priority_test {
 					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
 				}
-				track.end_at(track::Position { group: 5, frame: 5 }).unwrap();
-				track.set_tail_pending(false);
+				track.finish_at(track::Position { group: 5, frame: 5 }).unwrap();
 				if !finished {
 					group.finish().unwrap();
 				}
@@ -3590,6 +3595,66 @@ mod group_priority_test {
 				}
 				assert_eq!(&bytes[..], &[if finished { 5 } else { 0 }, 0, END_OF_TRACK as u8]);
 			}
+		}
+	}
+
+	/// An inline END_OF_TRACK spares the standalone marker only once its stream is
+	/// acknowledged: a stream reset after its FIN may never deliver it.
+	#[moq_net_sim::test]
+	async fn an_unacknowledged_inline_end_of_track_is_not_sent() {
+		for acked in [true, false] {
+			let mut session = SinkSession::new(Default::default());
+			if !acked {
+				session = session.with_unacked_fin();
+			}
+			let log = session.log.clone();
+			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let mut subscriber = track.subscribe(None);
+			let mut old = track.append_group().unwrap();
+			old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
+			old.finish().unwrap();
+			let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+			// Set directly rather than through the track, which a later group expires.
+			let terminal = Arc::new(Terminal::default());
+			terminal.end.set(track::Position { group: 0, frame: 1 }).unwrap();
+			let mut serve = GroupServe::new(
+				session,
+				ietf::GroupHeader {
+					track_alias: 0,
+					group_id: 0,
+					sub_group_id: 0,
+					publisher_priority: 0,
+					flags: Default::default(),
+				},
+				kio::Producer::new(0).consume(),
+				group,
+				Some(Timescale::default()),
+				Version::Draft19,
+				GroupSlice::default(),
+			)
+			.terminal(terminal.clone());
+			let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
+			if acked {
+				assert!(matches!(futures::poll!(serving.as_mut()), Poll::Ready(Ok(()))));
+				assert!(terminal.sent.load(Ordering::Relaxed), "an acknowledged marker was sent");
+				continue;
+			}
+			assert!(futures::poll!(serving.as_mut()).is_pending(), "the FIN is unacknowledged");
+			let written = log.writes.lock().unwrap().clone();
+			assert!(
+				written.ends_with(&[0, 0, END_OF_TRACK as u8]),
+				"the marker was written: {written:?}"
+			);
+			assert!(!terminal.sent.load(Ordering::Relaxed), "not until acknowledged");
+
+			moq_net_sim::advance(Duration::from_secs(1)).await;
+			let mut edge = track.append_group().unwrap();
+			edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+				.unwrap();
+			edge.finish().unwrap();
+			assert!(matches!(futures::poll!(serving.as_mut()), Poll::Ready(Err(Error::Old))));
+			assert!(!terminal.sent.load(Ordering::Relaxed), "a reset marker leaves the fallback");
 		}
 	}
 
@@ -6389,7 +6454,7 @@ mod serve_tests {
 			}
 			Largest::IdleEnded => {
 				h.track.set_idle();
-				h.track.finish_at(10).unwrap();
+				h.track.finish_at(track::Position::group(10)).unwrap();
 				None
 			}
 			Largest::Datagram => {

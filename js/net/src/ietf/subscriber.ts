@@ -18,7 +18,7 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -1201,21 +1201,30 @@ export class Subscriber {
 					stream.stop(frame ?? new StreamError(StreamCode.Cancel));
 					return;
 				}
-				if (!frame || frame instanceof Error) break;
+				if (!frame || frame instanceof Error) {
+					// FIRST_OBJECT clear on a stream that ends with no object: it starts partway
+					// through its group and carries none of it, so drop it like any headless
+					// stream. Drafts 14-17 cannot clear the bit, so there it is an empty group.
+					if (!producer && !group.flags.firstObject) {
+						console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+						stream.stop(new Error("a group must start at object 0"));
+						return;
+					}
+					break;
+				}
 
 				if (frame.endOfTrack) {
 					// No object at or past this location exists: after the group's last object
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
-					const object = nextObject + frame.idDelta;
-					const end = group.groupId + Number(object !== 0);
+					const end = { group: group.groupId, frame: nextObject + frame.idDelta };
 					producer?.close();
 					try {
-						hooks.endTrack(track, { group: group.groupId, frame: object });
+						hooks.endTrack(track, end);
 					} catch (err: unknown) {
 						throw new ProtocolViolation(`invalid END_OF_TRACK: ${reason(error(err))}`);
 					}
-					subscription.end ??= end;
+					subscription.end ??= finalSequence(end);
 					return;
 				}
 				if (frame.payload === undefined) break;

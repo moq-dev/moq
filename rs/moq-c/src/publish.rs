@@ -741,7 +741,7 @@ impl Publish {
 	/// boundary and only releases the handle.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
-		if track.final_sequence().is_none() {
+		if track.end().is_none() {
 			track.finish()?;
 		}
 		Ok(())
@@ -750,7 +750,7 @@ impl Publish {
 	/// Declare a raw track's exclusive final group sequence.
 	pub fn track_finish_at(&mut self, track: Id, final_sequence: u64) -> Result<(), Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		track.finish_at(final_sequence)?;
+		track.finish_at(moq_net::track::Position::group(final_sequence))?;
 		Ok(())
 	}
 

@@ -147,6 +147,10 @@ pub(crate) struct GroupState {
 	// production stopped, and an abort is exactly when it asks.
 	next_index: usize,
 
+	// Exclusive cap on `next_index`, set when the track ends inside this group: a write
+	// past the track's end is refused rather than served as content that does not exist.
+	limit: Option<usize>,
+
 	// One past the last frame that was fully written. Trails `next_index` while a chunked
 	// frame is in flight, which is the frame a replacement route has to redeliver: only
 	// its opener saw the payload, and only partly.
@@ -192,6 +196,14 @@ enum Timeline {
 }
 
 impl GroupState {
+	/// Refuse a write that would advance the group to `next_index`, past the track's end.
+	fn admit(&self, next_index: usize) -> Result<()> {
+		match self.limit {
+			Some(limit) if next_index > limit => Err(Error::Closed),
+			_ => Ok(()),
+		}
+	}
+
 	/// Whether the first frame opened, or the group ended without one.
 	fn started(&self) -> bool {
 		!matches!(self.timeline, Timeline::Empty) || self.fin.is_some() || self.abort.is_some()
@@ -574,6 +586,7 @@ impl Producer {
 			.next_index
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		state.admit(next_index)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let size = payload.len() as u64;
 		if state.would_overflow(1, size) {
@@ -633,6 +646,7 @@ impl Producer {
 			.next_index
 			.checked_add(count)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		state.admit(next_index)?;
 		if state.would_overflow(count, bytes) {
 			return Err(self.abort_too_large(state));
 		}
@@ -723,6 +737,7 @@ impl Producer {
 			.next_index
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		state.admit(next_index)?;
 		// Only one frame is ever in flight, so the declared size is the most the cache
 		// can grow by before the next check.
 		if state.would_overflow(1, frame.size) {
@@ -805,6 +820,21 @@ impl Producer {
 	/// logical length rather than the number of frames this handle holds.
 	pub fn frame_count(&self) -> usize {
 		self.state.read().next_index
+	}
+
+	/// Cap the group at `frames`, for a track end inside it: later writes past the cap are
+	/// [`Error::Closed`]. A frame already at or past the cap is [`Error::ProtocolViolation`].
+	/// An aborted group gets no more frames, so it takes no cap.
+	pub(crate) fn limit(&self, frames: u64) -> Result<()> {
+		let Ok(mut state) = self.state.write() else {
+			return Ok(());
+		};
+		let frames = usize::try_from(frames).unwrap_or(usize::MAX);
+		if state.next_index > frames {
+			return Err(Error::ProtocolViolation);
+		}
+		state.limit = Some(frames);
+		Ok(())
 	}
 
 	/// Mark the group as complete; no more frames will be written.
