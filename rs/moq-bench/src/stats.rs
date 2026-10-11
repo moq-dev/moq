@@ -60,12 +60,12 @@ impl Stats {
 
 	/// Record one group keyframe's wall-clock delivery latency.
 	pub fn latency(&self, sent_ms: u128) {
-		let mut latency = self.latency.state.lock().expect("latency lock poisoned");
+		// Read the clock before locking so contention is not measured as latency.
 		let now_ms = SystemTime::now()
 			.duration_since(UNIX_EPOCH)
 			.unwrap_or_default()
 			.as_millis();
-		latency.observe(sent_ms, now_ms);
+		self.latency.observe(sent_ms, now_ms);
 	}
 
 	/// Reject an invalid subscriber run that completed without one delivered group.
@@ -307,6 +307,8 @@ struct LatencyState {
 	buckets: Vec<u64>,
 	max_ms: u64,
 	clock_skew: u64,
+	/// The latest capture bound in milliseconds. Later observations land after it.
+	captured_ms: u128,
 }
 
 impl Default for Latency {
@@ -316,6 +318,7 @@ impl Default for Latency {
 				buckets: vec![0; LATENCY_BUCKETS],
 				max_ms: 0,
 				clock_skew: 0,
+				captured_ms: 0,
 			}),
 		}
 	}
@@ -323,6 +326,9 @@ impl Default for Latency {
 
 impl LatencyState {
 	fn observe(&mut self, sent_ms: u128, now_ms: u128) {
+		// A capture may take the lock between the clock read and this update.
+		// The observation then belongs to the next interval, so it cannot predate that bound.
+		let now_ms = now_ms.max(self.captured_ms);
 		let Some(latency_ms) = now_ms.checked_sub(sent_ms) else {
 			self.clock_skew += 1;
 			return;
@@ -337,7 +343,6 @@ impl LatencyState {
 }
 
 impl Latency {
-	#[cfg(test)]
 	fn observe(&self, sent_ms: u128, now_ms: u128) {
 		self.state
 			.lock()
@@ -346,14 +351,17 @@ impl Latency {
 	}
 
 	fn snapshot(&self) -> LatencySnapshot {
-		// Observation timestamps and this boundary share one lock. The histogram
-		// cannot include only part of an observation or cross the recorded cut.
-		let state = self.state.lock().expect("latency lock poisoned");
+		// Observations and this boundary share one lock, and later observations
+		// clamp to it. The histogram cannot include only part of an observation
+		// or cross the recorded cut.
+		let mut state = self.state.lock().expect("latency lock poisoned");
 		let captured_at = SystemTime::now();
+		state.captured_ms = captured_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
 		let LatencyState {
 			buckets,
 			max_ms,
 			clock_skew,
+			..
 		} = state.clone();
 		drop(state);
 
@@ -416,6 +424,11 @@ mod tests {
 
 	use super::*;
 
+	/// Observations after a capture clamp to its bound, so synthetic times start there.
+	fn bound(captured_at: SystemTime) -> u128 {
+		captured_at.duration_since(UNIX_EPOCH).unwrap().as_millis()
+	}
+
 	/// A failed stats write must surface as an error so the run dies loudly.
 	/// Silently dropping output leaves a partial JSONL file behind a green exit,
 	/// which reads as a valid benchmark that quietly lost data.
@@ -468,8 +481,9 @@ mod tests {
 			stats.latency.observe(0, 500);
 		}
 		let ramp = Snapshot::take(&stats);
+		let base = bound(ramp.captured_at);
 		for value in 1..=100 {
-			stats.latency.observe(1_000, 1_000 + value);
+			stats.latency.observe(base, base + value);
 		}
 		let steady = Snapshot::take(&stats);
 		let interval = IntervalLatency::from_delta(&ramp.latency_buckets, &steady.latency_buckets);
@@ -572,7 +586,8 @@ mod tests {
 		assert_eq!(interval.latency_interval_max_ms, Some(60_000));
 		assert_eq!(interval.latency_interval_p99_ms, Some(60_000));
 
-		latency.observe(0, 2);
+		let base = bound(slow.captured_at);
+		latency.observe(base, base + 2);
 		let next = latency.snapshot();
 		let interval = IntervalLatency::from_delta(&slow.buckets, &next.buckets);
 		assert_eq!(next.max_ms, Some(70_000));
@@ -585,13 +600,15 @@ mod tests {
 	fn report_bounds_belong_to_captured_samples() {
 		let stats = Stats::default();
 		let mut previous = Snapshot::take(&stats);
-		previous.captured_at = UNIX_EPOCH + Duration::from_millis(1_000);
-		stats.latency.observe(1_000, 1_050);
+		let start = bound(previous.captured_at);
+		stats.latency.observe(start, start + 50);
 		let mut snapshot = Snapshot::take(&stats);
+		let end = bound(snapshot.captured_at);
+		previous.captured_at = UNIX_EPOCH + Duration::from_millis(1_000);
 		snapshot.captured_at = UNIX_EPOCH + Duration::from_millis(2_000);
 
 		// This delivery belongs to the next capture, even if report construction is delayed.
-		stats.latency.observe(2_000, 2_050);
+		stats.latency.observe(end, end + 50);
 		let interval = IntervalLatency::from_delta(&previous.latency_buckets, &snapshot.latency_buckets);
 		let record = Record::new(&previous, &snapshot, &interval).unwrap();
 		assert_eq!(record.interval_start_ms, 1_000);
@@ -603,6 +620,23 @@ mod tests {
 			IntervalLatency::from_delta(&snapshot.latency_buckets, &next.latency_buckets).latency_interval_samples,
 			1
 		);
+	}
+
+	/// An observation whose clock read lost the race to a capture belongs to the
+	/// next interval, at that capture's bound rather than before it.
+	#[test]
+	fn late_observation_clamps_to_capture_bound() {
+		let latency = Latency::default();
+		let first = latency.snapshot();
+		let captured_ms = bound(first.captured_at);
+
+		// Clock read 50ms before the capture, applied after it.
+		latency.observe(captured_ms - 100, captured_ms - 50);
+		let next = latency.snapshot();
+		let interval = IntervalLatency::from_delta(&first.buckets, &next.buckets);
+		assert_eq!(first.samples, 0);
+		assert_eq!(interval.latency_interval_samples, 1);
+		assert_eq!(interval.latency_interval_max_ms, Some(100));
 	}
 
 	/// Sweep observation concurrency and report density without a network bottleneck.
