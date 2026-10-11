@@ -515,7 +515,8 @@ macro_rules! encode_params {
 /// optional parameters (defaults to `None` when absent) and bare types like `u8`
 /// for parameters where `T::default()` is an acceptable fallback.
 ///
-/// Unknown parameters cause `DecodeError::InvalidValue`.
+/// Unknown parameters are ignored in drafts 14/15 and otherwise cause `DecodeError::InvalidValue`.
+/// A false `where` gate treats a declared key as unknown before decoding its value.
 /// Duplicate parameters cause `DecodeError::Duplicate`, unless the type allows a repeat
 /// (see [`Param::param_repeat`]), such as `Vec<T>`.
 ///
@@ -528,7 +529,7 @@ macro_rules! encode_params {
 /// let subscriber_priority = subscriber_priority.unwrap_or(128);
 /// ```
 macro_rules! decode_params {
-	($r:expr, $version:expr, $($key:expr => $name:ident: $ty:ty),* $(,)?) => {
+	($r:expr, $version:expr, $($key:expr => $name:ident: $ty:ty $(where $gate:expr)?),* $(,)?) => {
 		#[allow(unused)]
 		const _: () = {
 			let _keys: &[u64] = &[$($key),*];
@@ -574,7 +575,7 @@ macro_rules! decode_params {
 				// An if-chain rather than a `match`, so a key can be a named constant:
 				// the macro captures it as an expression, which is not a legal pattern.
 				$(
-					if _key == $key {
+					if _key == $key $( && ($gate) )? {
 						let _value = <$ty as $crate::ietf::Param>::param_decode($r, _version)?;
 						$name = Some(match $name.take() {
 							None => _value,

@@ -145,6 +145,11 @@ export class SubscribeNamespaceLegacy {
 			subscribeOptions = await r.u53();
 		}
 		const params = await Parameters.decode(r, version);
+		// FORWARD is defined here from draft-15. Its value is ignored, but must be a boolean.
+		const forward = params.vars.get(0x10n);
+		if (version !== Version.DRAFT_14 && forward !== undefined && forward > 1n) {
+			throw new Error(`invalid FORWARD parameter: ${forward}`);
+		}
 
 		return new SubscribeNamespaceLegacy({ namespace, requestId, subscribeOptions, hidden: params.hidden });
 	}

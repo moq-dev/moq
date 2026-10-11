@@ -204,13 +204,13 @@ impl Message for Fetch<'_> {
 				let fetch_type = FetchType::decode(buf, version)?;
 				decode_params!(buf, version,
 					0x03 => _authorization_token: Vec<Opaque>,
-					0x0A => fill_timeout: Option<u64>,
+					0x0A => fill_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 					0x20 => subscriber_priority: Option<u8>,
 					0x22 => group_order: Option<GroupOrder>,
-					0x25 => subgroup_filter: Vec<Opaque>,
-					0x26 => object_id_filter: Vec<Opaque>,
-					0x27 => priority_filter: Vec<Opaque>,
-					0x28 => object_property_filter: Vec<Opaque>,
+					0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
+					0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
+					0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
+					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 				);
 				let range_filters = [
 					subgroup_filter,
@@ -220,13 +220,6 @@ impl Message for Fetch<'_> {
 				]
 				.iter()
 				.any(|filter| !filter.is_empty());
-
-				// An unknown message parameter is a protocol violation, so each stays rejected
-				// on the drafts that predate it: FILL_TIMEOUT arrived in draft-18.
-				let has_fill_timeout = !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17);
-				if (fill_timeout.is_some() && !has_fill_timeout) || (range_filters && !has_range_filters(version)) {
-					return Err(DecodeError::InvalidValue);
-				}
 
 				(
 					fetch_type,
@@ -242,14 +235,14 @@ impl Message for Fetch<'_> {
 				let track = Cow::<str>::decode(buf, version)?;
 				decode_params!(buf, version,
 					0x03 => _authorization_token: Vec<Opaque>,
-					0x0A => fill_timeout: Option<u64>,
+					0x0A => fill_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
-					0x25 => subgroup_filter: Vec<Opaque>,
-					0x26 => object_id_filter: Vec<Opaque>,
-					0x27 => priority_filter: Vec<Opaque>,
-					0x28 => object_property_filter: Vec<Opaque>,
+					0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
+					0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
+					0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
+					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 					0x35 => _include_properties: Option<bool>,
 				);
 				let range_filters = [

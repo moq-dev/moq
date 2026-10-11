@@ -1954,3 +1954,54 @@ for (const version of [Version.DRAFT_14, Version.DRAFT_15]) {
 		}
 	});
 }
+
+test("Subscribe draft15 recognizes only its parameters", async () => {
+	for (const parameter of [
+		[0x32, 7],
+		[0x04, 0],
+		[0x23, 1, 255],
+		[0x25, 1, 255],
+		[0x35, 1, 255],
+	]) {
+		const body = framed([...TRACK_HEAD, 2, ...parameter, 0x20, 7]);
+		const decoded = await decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_15);
+		expect(decoded.subscriberPriority).toBe(7);
+		expect(decoded.fill).toBeUndefined();
+		expect(decoded.rangeFilters).toBe(false);
+	}
+	await expect(
+		decodeVersioned(framed([...TRACK_HEAD, 1, 0x21, 1, 255]), Subscribe.Subscribe.decode, Version.DRAFT_15),
+	).rejects.toThrow();
+});
+
+test("Publish draft15 ignores subscription-only parameters", async () => {
+	for (const parameter of [
+		[0x02, 7],
+		[0x20, 0x41, 0],
+		[0x21, 1, 255],
+	]) {
+		const body = framed([1, 1, 1, 116, 1, 118, 1, 2, ...parameter, 0x10, 0]);
+		const decoded = await decodeVersioned(body, Publish.decode, Version.DRAFT_15);
+		expect(decoded.forward).toBe(false);
+	}
+});
+
+for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17]) {
+	test(`SubscribeNamespace ${version}: FORWARD follows the draft`, async () => {
+		for (const value of [0, 1, 2]) {
+			const head = [
+				1,
+				...(version === Version.DRAFT_17 ? [0] : []),
+				0,
+				...(version >= Version.DRAFT_16 ? [1] : []),
+			];
+			const decoded = decodeVersioned(
+				framed([...head, 1, 0x10, value]),
+				SubscribeNamespace.SubscribeNamespaceLegacy.decode,
+				version,
+			);
+			if (version === Version.DRAFT_14 || value <= 1) await decoded;
+			else await expect(decoded).rejects.toThrow();
+		}
+	});
+}

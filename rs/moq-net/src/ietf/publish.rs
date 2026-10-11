@@ -336,28 +336,17 @@ impl Message for Publish<'_> {
 				// parameter fails the whole message, which would kill the session instead of
 				// letting the request reach its NOT_SUPPORTED response.
 				decode_params!(r, version,
-					0x02 => object_delivery_timeout: Option<u64>,
+					0x02 => _object_delivery_timeout: Option<u64> where version == Version::Draft15 || Filter::is_draft20(version),
 					0x03 => _authorization_token: Vec<super::Opaque>,
-					0x06 => subgroup_delivery_timeout: Option<u64>,
+					0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft20(version),
 					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
 					0x10 => forward: Option<bool>,
-					0x20 => subscriber_priority: Option<u8>,
-					0x21 => filter: Option<Filter>,
+					0x20 => _subscriber_priority: Option<u8> where Filter::is_draft20(version),
+					0x21 => _filter: Option<Filter> where Filter::is_draft20(version),
 					0x22 => group_order: Option<GroupOrder>,
 				);
 
-				// The values are dropped: we refuse the PUBLISH itself, so the subscription
-				// settings it proposes never take effect. They still have to be consumed.
-				let subscription_params = [
-					object_delivery_timeout.is_some(),
-					subgroup_delivery_timeout.is_some(),
-					subscriber_priority.is_some(),
-					filter.is_some(),
-				];
-				if subscription_params.contains(&true) && !Filter::is_draft20(version) {
-					return Err(DecodeError::InvalidValue);
-				}
 				let mut properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
 
@@ -508,6 +497,17 @@ impl Message for PublishError<'_> {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn publish_draft15_ignores_subscription_only_parameters() {
+		for parameter in [&[0x02, 7][..], &[0x20, 0x41, 0], &[0x21, 1, 255]] {
+			let mut body = vec![1, 1, 1, b't', 1, b'v', 1, 2];
+			body.extend_from_slice(parameter);
+			body.extend_from_slice(&[0x10, 0]);
+			let decoded: Publish = decode_message(&body, Version::Draft15).unwrap();
+			assert!(!decoded.forward);
+		}
+	}
+
 	use super::*;
 
 	/// Draft-20 moved the subscription parameters into PUBLISH. We refuse the request

@@ -237,6 +237,16 @@ const MSG_PARAM_REPEATABLE: readonly bigint[] = [
 	MSG_PARAM_TRACK_PROPERTY_FILTER,
 ];
 
+// These definitions are unknown KVPs in drafts 14 and 15.
+const MSG_PARAM_AFTER_DRAFT15: readonly bigint[] = [
+	MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT,
+	MSG_PARAM_FILL_TIMEOUT,
+	MSG_PARAM_FILL_PARAMETERS,
+	...MSG_PARAM_RANGE_FILTERS,
+	MSG_PARAM_TRACK_PROPERTY_FILTER,
+	MSG_PARAM_INCLUDE_PROPERTIES,
+];
+
 type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "filter" | "bytes";
 /** A `{Group, Object}` pair carried by a message parameter, such as LARGEST_OBJECT. */
 export type MessageLocation = { groupId: bigint; objectId: bigint };
@@ -303,6 +313,7 @@ export class Parameters {
 	#locations: Map<bigint, MessageLocation>;
 	/** LOCATION_FILTER, kept decoded because its framing depends on the draft. */
 	#filter: Filter.Filter | undefined;
+	#filterBytes: { value: Uint8Array; version: IetfVersion } | undefined;
 	/** Every instance of a parameter that may repeat, decoded only; we never send one. */
 	#repeated: Map<bigint, Uint8Array[]>;
 
@@ -420,11 +431,15 @@ export class Parameters {
 
 	/** LOCATION_FILTER: which Objects the subscription delivers. See `filter.ts`. */
 	get subscriptionFilter(): Filter.Filter | undefined {
+		if (this.#filterBytes && this.#filter === undefined) {
+			this.#filter = Filter.decode(this.#filterBytes.value, this.#filterBytes.version);
+		}
 		return this.#filter;
 	}
 
 	set subscriptionFilter(v: Filter.Filter) {
 		this.#filter = v;
+		this.#filterBytes = undefined;
 	}
 
 	/** FILL_PARAMETERS: the draft-20 backfill request, as its raw parameter value. */
@@ -471,7 +486,7 @@ export class Parameters {
 	}
 
 	async encode(w: Writer, version: IetfVersion) {
-		const filter = this.#filter;
+		const filter = this.subscriptionFilter;
 		await w.u53(this.vars.size + this.bytes.size + this.#locations.size + (filter ? 1 : 0));
 
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
@@ -602,6 +617,17 @@ export class Parameters {
 				prevType = id;
 			}
 
+			// These definitions postdate the legacy drafts. Consume their KVP framing
+			// without interpreting a future value or exposing it to message validation.
+			if (
+				(version === Version.DRAFT_14 || version === Version.DRAFT_15) &&
+				MSG_PARAM_AFTER_DRAFT15.includes(id)
+			) {
+				if (id % 2n === 0n) await r.u62();
+				else await r.read(await r.u53());
+				continue;
+			}
+
 			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 				if (id % 2n === 0n) {
 					if (params.vars.has(id)) {
@@ -621,10 +647,16 @@ export class Parameters {
 						params.#locations.set(id, decodeLocation(bytes));
 					} else if (id === MSG_PARAM_SUBSCRIPTION_FILTER && version !== Version.DRAFT_14) {
 						// Draft-14 carries the filter in the SUBSCRIBE body, so 0x21 is undefined there.
-						if (params.#filter !== undefined) {
+						if (params.#filterBytes !== undefined || params.#filter !== undefined) {
 							throw new Error(`duplicate message parameter id: ${id.toString()}`);
 						}
-						params.#filter = Filter.decode(bytes, version);
+						// Legacy messages can carry a known parameter on the wrong message.
+						// Validate its semantics only when that message consumes the filter.
+						if (version === Version.DRAFT_15) {
+							params.#filterBytes = { value: bytes, version };
+						} else {
+							params.#filter = Filter.decode(bytes, version);
+						}
 					} else {
 						if (params.bytes.has(id)) {
 							throw new Error(`duplicate message parameter id: ${id.toString()}`);
