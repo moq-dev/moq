@@ -40,8 +40,9 @@ end carries no cause since #4031, so only track errors are in scope.
     (`StreamError` and `SessionError`); `Dropped` stays `Internal`
     deliberately, since it then marks a real bug.
   - Regression: a relay test closes a broadcast under an active subscription
-    and expects the source's error, never `internal error`, and a subscribe
-    against a withdrawn route expects `Unroutable`.
+    whose source copy ends with a specific non-clean error, and expects that
+    exact error, never `internal error`; a subscribe against a withdrawn
+    route expects `Unroutable`.
 
 Public API: none expected; error values consumers observe change. Wire: none.
 
