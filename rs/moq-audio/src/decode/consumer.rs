@@ -67,8 +67,8 @@ impl Options {
 ///
 /// The mirror of [`encode::Producer`](crate::encode::Producer): output format /
 /// sample rate / layout are fixed at construction, and
-/// [`read`](Self::read) returns [`Frame`]s carrying the codec activity they
-/// were decoded from.
+/// [`read`](Self::read) returns samples carrying each frame's delivery continuity
+/// and codec activity.
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
@@ -274,10 +274,11 @@ impl Consumer {
 			let mux_frame = self.track.read().await?;
 			self.apply_discontinuity()?;
 			let Some(sample) = mux_frame else {
-				return Ok(self.flush()?.map(|frame| {
+				if let Some(frame) = self.flush()? {
 					let continuous = std::mem::replace(&mut self.continuous, true);
-					Sample { frame, continuous }
-				}));
+					self.ready.push_back(Sample { frame, continuous });
+				}
+				return Ok(self.ready.pop_front());
 			};
 
 			let mux_frame = sample.frame;
@@ -420,6 +421,12 @@ impl Consumer {
 			return Ok(());
 		}
 
+		// Samples already buffered belong to the old span, even when the next
+		// packet declares a new one. Drain before clearing their timeline labels.
+		if let Some(frame) = self.drain()? {
+			let continuous = std::mem::replace(&mut self.continuous, true);
+			self.ready.push_back(Sample { frame, continuous });
+		}
 		self.discontinuity = discontinuity;
 		self.next_start = None;
 		self.spans.clear();
@@ -444,13 +451,7 @@ impl Consumer {
 	fn gap(&mut self) -> Result<Option<Frame>, Error> {
 		self.decoder.reset_prediction()?;
 
-		let mut frame = None;
-		if let Some(resampler) = self.resampler.as_mut() {
-			let held = resampler.held_at();
-			let skipped = resampler.skipped();
-			let pcm = resampler.drain()?;
-			frame = self.tail(pcm, held, skipped)?;
-		}
+		let frame = self.drain()?;
 
 		self.next_start = None;
 		self.spans.clear();
@@ -458,6 +459,17 @@ impl Consumer {
 		self.epoch = None;
 		self.delay_trimmed = 0;
 		Ok(frame)
+	}
+
+	/// Drain one span while keeping the resampler available for the next.
+	fn drain(&mut self) -> Result<Option<Frame>, Error> {
+		let Some(resampler) = self.resampler.as_mut() else {
+			return Ok(None);
+		};
+		let held = resampler.held_at();
+		let skipped = resampler.skipped();
+		let pcm = resampler.drain()?;
+		self.tail(pcm, held, skipped)
 	}
 
 	/// The tail the resampler is still holding when the track ends, once.
@@ -874,6 +886,62 @@ mod tests {
 		let total = first_frames + tail_frames;
 		assert!((1105..=1120).contains(&total), "unexpected total: {total}");
 		assert!(consumer.read().await.unwrap().is_none());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn resampled_continuity_keeps_the_tail_before_a_marker() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 44_100, 1);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Options {
+				max_delay: Duration::from_secs(10),
+				output: Output {
+					sample_rate: Some(48_000),
+					..Output::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		for index in 0..2 {
+			if index != 0 {
+				producer.discontinuity().unwrap();
+			}
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(index * 1_000_000).unwrap(),
+					duration: None,
+					payload: vec![0u8; 1024 * size_of::<f32>()].into(),
+					keyframe: true,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+		let mut samples = Vec::new();
+		while let Some(sample) = consumer.read().await.unwrap() {
+			samples.push((sample.frame.timestamp.as_micros(), sample.continuous));
+		}
+		assert_eq!(
+			samples.iter().map(|(_, continuous)| *continuous).collect::<Vec<_>>(),
+			[false, true, false, true]
+		);
+		assert!(
+			samples[1].0 < 1_000_000,
+			"the old resampler tail stays before the marker"
+		);
+		assert_eq!(samples[2].0, 1_000_000, "the new span starts on its source timestamp");
 	}
 
 	#[tokio::test]

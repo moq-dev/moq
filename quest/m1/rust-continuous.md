@@ -41,7 +41,21 @@ picture and loses the new picture boundary, so that approach is not included.
 Carry input continuity through codec output association before extending the
 video read result. Prefer private decoder metadata association over a
 timestamp heuristic, and cover delayed output on both sides of a marker.
-The video propagation goal remains open here.
+The video propagation goal remains open here. Native backends need explicit
+input identity, not a map keyed only by presentation time: equal timestamps
+can straddle a marker. VideoToolbox and Media Foundation already map synthetic
+sample times, OpenH264 queues presentation times, and VAAPI, NVDEC and
+MediaCodec carry codec timestamps. Media Foundation also has an unmatched-output
+fallback. Decide how a backend reports an output with no surviving input
+identity before exposing continuity: recommend an explicit error, rather than
+borrowing the latest input's flag. Keep dropped-input bookkeeping bounded and
+cover delayed output, duplicate timestamps and decoder recovery on each backend.
+
+The audio path now drains a resampler's buffered tail before applying a
+playhead boundary. A paused-time regression previously returned flags
+`false, false, true`, incorrectly joining the old tail into the new span;
+it now returns the old body/tail and new body/tail as
+`false, true, false, true`.
 
 ## Related
 
