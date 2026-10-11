@@ -213,7 +213,7 @@ export class Subscriber {
 		this.#grant = grant;
 		// A draining peer usually stops publishing namespaces, so reprice from the signal
 		// itself. Waiting for another message would leave the route primary until close.
-		if (goaway) void goaway.then(() => this.#drainAnnounced());
+		void goaway?.then(() => this.#drainAnnounced());
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement

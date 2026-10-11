@@ -125,7 +125,6 @@ End+Start. The child quests own their focused regressions.
 
 - [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - a held broadcast or track cannot open unpinned wire work against its replacement
 - [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - a delayed group is delivered once even beyond the old 1024-entry history
-- [JS restart keeps the request](/quest/m0/broadcast-epoch/js-restart-keeps-request.md) - a resolved request remains on its old instance, matching Rust's sticky subscriptions
 - [Source pin](/quest/m0/broadcast-epoch/source-pin.md) - `Source` is built from the resolved catalog broadcast and every later request stays on it, so an epochless replacement never splices into the old program
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce

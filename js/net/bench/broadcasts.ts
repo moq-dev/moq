@@ -123,6 +123,38 @@ for (const pinned of [false, true]) {
 	}
 }
 
+// Restart a served prefix while both its path count and readers per path grow.
+console.log("restart,paths,readers,update_us");
+const nextEpoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
+for (const pathCount of routeCounts) {
+	for (const readerCount of observerCounts) {
+		const origin = new Producer();
+		const dynamic = origin.dynamic(Path.from("room"), { epoch });
+		const pending = dynamic.requested();
+		const requests = Array.from({ length: pathCount }, (_, index) =>
+			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
+		).flat();
+		const broadcasts = Array.from({ length: pathCount }, () => new BroadcastProducer());
+		for (const broadcast of broadcasts) (await pending.next()).value?.accept(broadcast);
+		await Promise.resolve();
+		const before = requests.map((request) => request.active.peek());
+		const start = performance.now();
+		dynamic.update({ epoch: nextEpoch });
+		await Promise.resolve();
+		const elapsed = performance.now() - start;
+		for (const [index, request] of requests.entries()) {
+			if (!before[index] || request.active.peek() !== before[index]) throw new Error("Restart lost an answer");
+			checksum++;
+		}
+		console.log(`restart,${pathCount},${readerCount},${(elapsed * 1000).toFixed(1)}`);
+		for (const request of requests) request.close();
+		await pending.return?.();
+		for (const broadcast of broadcasts) broadcast.close();
+		dynamic.close();
+		origin.close();
+	}
+}
+
 // Only a touched announcement and path should cost work, regardless of unrelated routes or consumes.
 console.log("subscriber,announcements,consumers,update_and_consume_us");
 for (const routeCount of routeCounts) {

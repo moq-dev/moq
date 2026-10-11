@@ -60,6 +60,6 @@ Update existing identity and request-lifetime documentation inline.
 
 - [Source pin](/quest/m0/broadcast-epoch/source-pin.md) - the exporter holds the exact catalog broadcast
 - [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - fresh consumers select the serving announcement's identity
-- [JS restart keeps the request](/quest/m0/broadcast-epoch/js-restart-keeps-request.md) - an existing resolved request stays sticky
+- [JS restart keeps the request](https://github.com/moq-dev/moq/pull/5199) - an existing resolved request stays sticky
 - [IETF epochs](/quest/m1/ietf-epochs.md) - explicit wire identity removes the epochless ambiguity
 - [Pipelined first FETCH](/quest/m1/pipeline-requests/fetch.md) - staged requests must retain the same instance validity
