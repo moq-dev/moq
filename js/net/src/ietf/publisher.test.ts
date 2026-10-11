@@ -2323,3 +2323,38 @@ for (const version of [Version.DRAFT_15, Version.DRAFT_19] as const) {
 		}
 	}
 }
+
+for (const version of [
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+] as const) {
+	test(`namespace fill includes visible routes without solicitation in ${version}`, async () => {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const broadcast = publish(origin, Path.from("room/cam"));
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("missing request stream");
+		const serving = pub.runSubscribeNamespace(
+			new SubscribeNamespace({ requestId: 0n, namespace: Path.from("room") }),
+			server,
+		);
+		try {
+			expect(await client.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(client.reader, version);
+			expect(await client.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+			expect((await SubscribeNamespaceEntry.decode(client.reader, version)).suffix).toBe(Path.from("cam"));
+		} finally {
+			client.close();
+			await serving;
+			broadcast.close();
+			origin.close();
+		}
+	});
+}

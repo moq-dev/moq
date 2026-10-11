@@ -782,13 +782,18 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					let (group, track, timescale, reading) = {
 						let mut subs = self.subscriber.subscribes.lock();
 						let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
-						// The subscription's end waits until this stream is read.
-						let reading = Reading::open(&entry.tail, Some(hdr.sequence), self.subscriber.runtime.now());
 
 						let group_info = group::Info { sequence: hdr.sequence };
 						// Stats (groups/frames/bytes) are counted in the model as the group
 						// is written, through the tagged `track::Producer`.
-						let mut group = match entry.producer.create_group(group_info) {
+						let created = entry.producer.create_group(group_info);
+						// The subscription's end waits until this stream is read. Counted
+						// whatever the cache said, since the publisher counts every stream it
+						// opens (a resubscribe resends a cached group), and only after the
+						// cache holds the group, so a fetch held for the feed that sees it
+						// accounted also finds it.
+						let reading = Reading::open(&entry.tail, Some(hdr.sequence), self.subscriber.runtime.now());
+						let mut group = match created {
 							Ok(group) => group,
 							// The group is at or past the end the publisher declared, which no
 							// later stream can repair. Before lite-05 only a local finish sets
@@ -1425,6 +1430,109 @@ mod tests {
 
 	const VERSION: Version = Version::Lite05;
 
+	/// A pre-lite-05 relay's track, with a fetch of `sequence` queued on it.
+	fn feed_fetch(sequence: u64) -> (track::Producer, kio::Pending<track::Fetching>, group::Request) {
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let dynamic = track.dynamic();
+		let fetching = track.consume().fetch_group(sequence, None);
+		let req = dynamic.requested_group().now_or_never().expect("queued").unwrap();
+		(track, fetching, req)
+	}
+
+	/// A live feed whose ledger is `tail`.
+	async fn feed_sub(tail: &kio::Producer<Tail>) -> Sub<crate::lite::test_transport::ScriptedSession> {
+		let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		Sub::Active(SubStream {
+			stream: Stream::open(&mut session, Version::Lite04).await.unwrap(),
+			id: 0,
+			max_age: Duration::ZERO,
+			start: None,
+			priority: 0,
+			requested: None,
+			tail: tail.clone(),
+			served: None,
+			end: None,
+		})
+	}
+
+	/// A group arriving at the relay as its header lands: cached, then accounted for.
+	fn arrive(track: &track::Producer, tail: &kio::Producer<Tail>, sequence: u64, now: crate::time::Instant) {
+		let mut group = track.create_group(group::Info { sequence }).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, &b"x"[..]).unwrap();
+		group.finish().unwrap();
+		let Ok(mut ledger) = tail.write() else {
+			panic!("ledger closed")
+		};
+		ledger.account(sequence..sequence + 1, now);
+	}
+
+	/// A fetch held for a pre-lite-05 feed is released once its caller gives up, rather
+	/// than waiting, track handle and all, for a group the feed may never reach.
+	#[tokio::test]
+	async fn an_abandoned_feed_fetch_is_released() {
+		let start = crate::time::Instant::now();
+		let clock = crate::time::Clock::new(start);
+		let tail = kio::Producer::new(Tail::default());
+		let sub = feed_sub(&tail).await;
+		let (track, fetching, req) = feed_fetch(100);
+
+		let mut fetches = FeedFetches::new(&clock);
+		fetches.held.push((req, track.consume()));
+		fetches.poll(&sub, start, &kio::Waiter::noop());
+		assert_eq!(fetches.held.len(), 1, "held while its caller waits");
+
+		drop(fetching);
+		fetches.poll(&sub, start, &kio::Waiter::noop());
+		assert!(fetches.held.is_empty(), "released once abandoned");
+	}
+
+	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
+	/// A fetch held for group 1 keeps waiting through the grace and is served when it lands.
+	#[tokio::test]
+	async fn a_feed_fetch_waits_out_a_reordered_group() {
+		let start = crate::time::Instant::now();
+		let clock = crate::time::Clock::new(start);
+		let tail = kio::Producer::new(Tail::default());
+		let sub = feed_sub(&tail).await;
+		let (track, fetching, req) = feed_fetch(1);
+		arrive(&track, &tail, 0, start);
+
+		let mut fetches = FeedFetches::new(&clock);
+		fetches.held.push((req, track.consume()));
+		arrive(&track, &tail, 2, start);
+		let late = start + crate::tail::GRACE / 2;
+		fetches.poll(&sub, late, &kio::Waiter::noop());
+		assert_eq!(fetches.held.len(), 1, "group 2 alone does not give up on group 1");
+		assert_eq!(fetches.fold.deadline(), Some(start + crate::tail::GRACE));
+
+		arrive(&track, &tail, 1, late);
+		fetches.poll(&sub, late, &kio::Waiter::noop());
+		assert!(fetches.held.is_empty());
+		let group = fetching
+			.now_or_never()
+			.expect("answered")
+			.expect("served from the feed");
+		assert_eq!(group.sequence, 1);
+	}
+
+	/// A group still missing a grace after a later one arrived is a miss, not a hold.
+	#[tokio::test]
+	async fn a_feed_fetch_misses_once_the_ledger_gives_up() {
+		let start = crate::time::Instant::now();
+		let clock = crate::time::Clock::new(start);
+		let tail = kio::Producer::new(Tail::default());
+		let sub = feed_sub(&tail).await;
+		let (track, fetching, req) = feed_fetch(1);
+		arrive(&track, &tail, 0, start);
+		arrive(&track, &tail, 2, start);
+
+		let mut fetches = FeedFetches::new(&clock);
+		fetches.held.push((req, track.consume()));
+		fetches.poll(&sub, start + crate::tail::GRACE, &kio::Waiter::noop());
+		assert!(fetches.held.is_empty());
+		assert!(matches!(fetching.now_or_never(), Some(Err(Error::NotFound))));
+	}
+
 	/// The owed groups start at the floor the demand last asked for, which an update can move
 	/// either way after SUBSCRIBE_START answered the SUBSCRIBE.
 	#[tokio::test]
@@ -1527,6 +1635,61 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// An idle copy that resubscribes gets its newest cached group again. That stream only
+	/// duplicates the cache, but lite-07's SUBSCRIBE_END still counts it, so the tail must
+	/// too, or the subscription waits out the grace before it ends.
+	#[tokio::test]
+	async fn a_duplicate_group_stream_still_counts_toward_the_end() {
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let mut script = Vec::new();
+		lite::Group {
+			subscribe: 7,
+			sequence: 3,
+			frame_start: 0,
+		}
+		.encode(&mut script, version)
+		.unwrap();
+		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let clock = crate::time::Clock::new(crate::time::Instant::now());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: clock.clone(),
+			session: session.clone(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: Default::default(),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+		});
+
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let mut cached = track.create_group(group::Info { sequence: 3 }).unwrap();
+		cached.write_frame(crate::Timestamp::ZERO, &b"x"[..]).unwrap();
+		cached.finish().unwrap();
+		let tail = kio::Producer::new(Tail::default());
+		subscriber.subscribes.lock().insert(
+			7,
+			TrackEntry {
+				producer: track.clone(),
+				timescale: Some(Timescale::default()),
+				tail: tail.clone(),
+			},
+		);
+
+		let (_, recv) = session.open_bi().await.unwrap();
+		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
+		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
+		assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
+		drop(group);
+
+		// SUBSCRIBE_END counted one stream: the tail settles without the clock moving.
+		let mut settle = Settle::new(&clock, tail.consume());
+		assert!(settle.poll(&kio::Waiter::noop(), |tail| tail.streams() >= 1).is_ready());
 	}
 
 	/// A SUBSCRIBE_END below a group already received contradicts that group. lite-05
@@ -3806,6 +3969,8 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	dynamic: track::Dynamic,
 	sub: Sub<S>,
 	fetches: kio::Tasks<FetchServeRun<S>>,
+	/// Fetches a pre-lite-05 upstream has no FETCH for, held for the live feed.
+	feed_fetches: FeedFetches,
 	// A dedicated close-watch handle for the session-died arm.
 	closed: S,
 	// SUBSCRIBE_UPDATE only exists on Lite03+, so older peers can't carry a
@@ -3836,6 +4001,69 @@ enum ServeMode<S: crate::transport::poll::Session> {
 	},
 }
 
+/// Fetches a pre-lite-05 upstream has no FETCH for, held while the live subscription may
+/// still deliver the group. A group the feed delivers lands in the cache, where a waiting
+/// fetch reads it once its request is dropped.
+struct FeedFetches {
+	held: Vec<(group::Request, track::Consumer)>,
+	/// Armed at the earliest instant the feed's ledger gives up on a held group, so one
+	/// that never arrives still fails.
+	fold: crate::runtime::Deadline<crate::time::Clock>,
+}
+
+impl FeedFetches {
+	fn new(clock: &crate::time::Clock) -> Self {
+		Self {
+			held: Vec::new(),
+			fold: crate::runtime::Deadline::new(clock),
+		}
+	}
+
+	/// Settle the held fetches against `sub`, the feed. A group it will not deliver is a
+	/// miss, the same answer as an evicted one: with no feed open, once the feed starts past
+	/// it or ends before it, or once its ledger settles it without the group (dropped, or
+	/// still missing a grace after a later group arrived). A newer group alone settles
+	/// nothing, since QUIC does not order streams. A fetch nobody waits on any more is
+	/// dropped, as [`FetchServeRun`] does, so a far-future one isn't held forever.
+	fn poll<S: crate::transport::poll::Session>(
+		&mut self,
+		sub: &Sub<S>,
+		now: crate::time::Instant,
+		waiter: &kio::Waiter,
+	) {
+		let Sub::Active(active) = sub else {
+			for (req, _) in self.held.drain(..) {
+				req.reject(Error::NotFound);
+			}
+			self.fold.set(None);
+			return;
+		};
+		let tail = active.tail.read();
+		let mut fold: Option<crate::time::Instant> = None;
+		for (req, feed) in std::mem::take(&mut self.held) {
+			if req.poll_unused(waiter).is_ready() {
+				continue;
+			}
+			let sequence = req.sequence();
+			// The ledger before the cache: a group it accounts for by arrival is cached first.
+			let missing = !tail.covers(sequence..sequence.saturating_add(1));
+			let folds = tail.folds_at(sequence);
+			match feed.poll_landed(sequence, waiter) {
+				Poll::Ready(Some(_)) => drop(req),
+				Poll::Ready(None) => req.reject(Error::NotFound),
+				Poll::Pending if !missing || folds.is_some_and(|at| at <= now) => req.reject(Error::NotFound),
+				Poll::Pending => {
+					fold = fold.into_iter().chain(folds).min();
+					self.held.push((req, feed));
+				}
+			}
+		}
+		drop(tail);
+		self.fold.set(fold);
+		let _ = self.fold.poll(waiter);
+	}
+}
+
 impl<S: crate::transport::poll::Session> ServeLoop<S> {
 	fn new(serve: &TrackServe<S>, request: track::Request, info: track::Info, timescale: Option<Timescale>) -> Self {
 		// Register the fetch handler before accepting: `accept` releases the
@@ -3854,6 +4082,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			dynamic,
 			sub: Sub::None,
 			fetches: kio::Tasks::new(),
+			feed_fetches: FeedFetches::new(&serve.subscriber.runtime),
 			closed: serve.subscriber.session.clone(),
 			supports_update: !matches!(serve.subscriber.version, Version::Lite01 | Version::Lite02),
 			supports_fetch: serve.subscriber.version.has_track_stream(),
@@ -3881,6 +4110,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 				}
 				ServeMode::Tail { settle, owed, streams } => {
 					let _ = self.fetches.poll(waiter);
+					self.feed_fetches
+						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
 					if settle
 						.poll(waiter, |tail| match streams {
 							Some(streams) => tail.streams() >= *streams,
@@ -3930,7 +4161,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								self.fetches
 									.push(FetchServeRun::new(serve.clone(), req, self.timescale));
 							} else {
-								req.reject(Error::Version);
+								// No FETCH on the wire: wait for the live feed, which a
+								// subscription arriving alongside may still be opening.
+								self.feed_fetches.held.push((req, self.serving.consume()));
 							}
 							continue;
 						}
@@ -3959,8 +4192,11 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						Poll::Pending => {}
 					}
 
-					// (2) In-flight fetches; completions just retire.
+					// (2) In-flight fetches; completions just retire. The demand is settled,
+					// so a held fetch with no feed open is a miss.
 					let _ = self.fetches.poll(waiter);
+					self.feed_fetches
+						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
 
 					// (3) Nobody reads this copy anymore: the origin dropped its source
 					// copy when demand ended, so drop it instead of holding the track
@@ -4023,8 +4259,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 											let _ = self.serving.start_at(start.group);
 										}
 										active.served = Some(start.group);
-										// The groups the SUBSCRIBE asked for below it are
-										// unavailable, whatever the demand asks later.
+										// The groups the SUBSCRIBE asked for below it are not
+										// waited for, whatever the demand asks later. One that
+										// still arrives is delivered.
 										if let Some(requested) = active.requested
 											&& let Ok(mut tail) = active.tail.write()
 										{

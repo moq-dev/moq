@@ -235,8 +235,8 @@ pub(crate) struct TrackState {
 	closed: bool,
 
 	// The first sequence the live feed serves, once the publisher declared one
-	// (the wire's SUBSCRIBE_START). Lower groups never arrive on their own; a
-	// fetch can still create them.
+	// (the wire's SUBSCRIBE_START). Lower groups are not waited for, though one
+	// may still arrive late or be fetched.
 	start_sequence: Option<u64>,
 
 	// Whether `start_sequence` is only the floor a subscription asked for, still
@@ -1561,8 +1561,8 @@ impl Producer {
 
 	/// Declare the first group the live feed serves (the wire's SUBSCRIBE_START,
 	/// or the start the subscription itself requested): groups below `sequence`
-	/// will never arrive on their own, so a reader waiting for one fails over
-	/// instead of stalling. A fetch can still retrieve them.
+	/// are not waited for, so a reader waiting for one fails over instead of
+	/// stalling. One may still arrive late, and a fetch can still retrieve them.
 	///
 	/// Scoped to the current subscription's demand, so a later declaration
 	/// replaces this one in either direction: a re-subscription may start
@@ -2670,6 +2670,34 @@ impl Consumer {
 					.map(|group| group.consume())
 			}
 			ConsumerKind::Spliced(resume) => resume.peek_before(sequence),
+		}
+	}
+
+	/// Poll for group `sequence` the way the live feed delivers it: `Some` once it is
+	/// cached, `None` once the feed starts past it or ends before it, and pending while it
+	/// still may land. A newer group is no verdict: QUIC does not order streams, so this one
+	/// may still land behind it. A spliced copy has no feed of its own.
+	pub(crate) fn poll_landed(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			return Poll::Ready(None);
+		};
+		let res = state.poll(waiter, |state| {
+			if let Some(slot) = state.lookup.get(&sequence)
+				&& !slot.group.is_aborted()
+			{
+				return Poll::Ready(Some(slot.group.consume()));
+			}
+			match state.start_sequence.is_some_and(|start| start > sequence)
+				|| state.final_sequence.is_some_and(|fin| fin <= sequence)
+			{
+				true => Poll::Ready(None),
+				false => Poll::Pending,
+			}
+		});
+		match res {
+			Poll::Ready(Ok(group)) => Poll::Ready(group),
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
 		}
 	}
 

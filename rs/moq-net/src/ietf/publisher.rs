@@ -1382,10 +1382,11 @@ where
 		// The subscriber cancelling is the only other way this ends early, and is owed
 		// nothing.
 		let group = {
+			let mut finished = false;
 			let mut read = std::pin::pin!(read_fetch(&track, start.group, start.object, until, priority));
 			kio::wait(|waiter| {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
-				if stream.reader.poll_closed(&mut cx).is_ready() {
+				if super::request_stream::poll_cancel(&mut stream, &mut finished, self.version, &mut cx).is_ready() {
 					return Poll::Ready(None);
 				}
 				waiter.poll_future(read.as_mut()).map(Some)
@@ -1488,13 +1489,11 @@ where
 		// the lifetime of a request whose subscription never arrives or resolves.
 		let joined = {
 			let mut pending = false;
+			let mut finished = false;
 			let mut deadline = crate::runtime::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
-				// The request reader is what the subscriber FINs or resets. The writer
-				// on a draft-14-16 virtual stream reports closed immediately, which is
-				// not a cancellation.
-				if stream.reader.poll_closed(&mut cx).is_ready() {
+				if super::request_stream::poll_cancel(stream, &mut finished, self.version, &mut cx).is_ready() {
 					return Poll::Ready(Err(Error::Cancel));
 				}
 				let joins = self.joins.poll(waiter, |joins| match joins.get(&subscribe_id) {
@@ -2040,8 +2039,8 @@ where
 	/// ([`solicit`](super::solicit)),
 	/// and then this loop does nothing and
 	/// [`Self::run_subscribe_namespace_stream`] carries the advertisements instead.
-	/// Exactly one of the two is live, which is what keeps the peer from hearing a
-	/// namespace twice.
+	/// On draft 16 and later, an explicit subscription also fills its requested
+	/// namespaces even when this unsolicited loop is active.
 	pub async fn run_publish_namespaces(self) -> Result<(), Error> {
 		if self.requires_solicitation().await {
 			return Ok(());
@@ -2065,8 +2064,9 @@ where
 	///
 	/// All the announce state is local to this task (mirroring `lite::Publisher`'s
 	/// announce handling): whatever this subscription advertised is withdrawn
-	/// when its stream ends. It only advertises anything when the peer asked to be told
-	/// on request; otherwise [`Self::run_publish_namespaces`] has already said it all.
+	/// when its stream ends. Drafts 14 and 15 suppress visible namespaces already
+	/// carried by [`Self::run_publish_namespaces`]; later drafts fill the request
+	/// independently of unsolicited advertisements.
 	async fn run_subscribe_namespace_stream(
 		self,
 		mut stream: Stream<S, Version>,
@@ -2138,15 +2138,16 @@ where
 		let declared = self.peer_setup.get().await.hidden;
 		let origin = origin.discovery(!declared || msg.hidden || self.origin.includes_hidden());
 
-		// Unless the peer asked to be told only on request, it has already heard what an
-		// unsolicited PUBLISH_NAMESPACE can say. Repeating it here would leave it holding
-		// two sources for one namespace, so this stream carries only what that loop hid
-		// from the empty prefix and this request may see, and otherwise simply stays open
-		// until the peer is done with it.
-		let origin = match self.requires_solicitation().await {
-			true => origin,
-			false if !declared || self.origin.includes_hidden() => origin.empty(),
-			false => origin.beyond(&self.origin.clone().discovery(false)),
+		// NAMESPACE is discovery, so draft 16+ fills the request even after an unsolicited
+		// PUBLISH_NAMESPACE. Earlier drafts only send advertisements the other loop hid.
+		let origin = if matches!(self.version, Version::Draft14 | Version::Draft15) {
+			match self.requires_solicitation().await {
+				true => origin,
+				false if !declared || self.origin.includes_hidden() => origin.empty(),
+				false => origin.beyond(&self.origin.clone().discovery(false)),
+			}
+		} else {
+			origin
 		};
 
 		let ns = Namespaces::new(peer, target);
@@ -4676,6 +4677,68 @@ mod serve_tests {
 		}
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn requester_fin_is_version_gated_for_fetches() {
+		for version in ALL_VERSIONS.into_iter().filter(|v| !Filter::is_draft20(*v)) {
+			for joining in [false, true] {
+				for reset in [false, true] {
+					let mut h = serve(version);
+					publish_pairs(&mut h, 1, None);
+					settle().await;
+					let requester = if reset {
+						ScriptedSession::per_stream_reset(vec![vec![]])
+					} else {
+						ScriptedSession::per_stream_eof(vec![vec![]])
+					};
+					let stream = Stream::open(&mut requester.clone(), version).await.unwrap();
+					if joining {
+						h.publisher.joins.lock().insert(
+							RequestId(REQUEST_ID),
+							Some(Joined::Group {
+								end: Location { group: 0, object: 2 },
+								cache: h.track.consume(),
+								timescale: None,
+							}),
+						);
+					}
+					let fetch_type = if joining {
+						FetchType::RelativeJoining {
+							subscriber_request_id: RequestId(REQUEST_ID),
+							group_offset: 0,
+						}
+					} else {
+						FetchType::Standalone {
+							namespace: crate::Path::new("room"),
+							track: "video".into(),
+							start: Location { group: 0, object: 0 },
+							end: Location { group: 0, object: 2 },
+						}
+					};
+					let _ = h
+						.publisher
+						.clone()
+						.run_fetch_stream(
+							stream,
+							ietf::Fetch {
+								request_id: FETCH_ID,
+								subscriber_priority: 128,
+								group_order: GroupOrder::Ascending,
+								fetch_type,
+								range_filters: false,
+								fill_timeout: false,
+							},
+						)
+						.await;
+					assert_eq!(
+						occurrences(&h.log, b"0-0"),
+						usize::from(!reset && !fin_cancels(version)),
+						"{version}, joining={joining}, reset={reset}"
+					);
+				}
+			}
+		}
+	}
+
 	/// A reset request stream still cancels the subscription on every draft.
 	#[tokio::test(start_paused = true)]
 	async fn requester_reset_cancels_subscriptions() {
@@ -5431,13 +5494,13 @@ mod tests {
 	}
 
 	/// A hidden namespace reaches only a subscription that opted in or named its dot
-	/// segment. With the unsolicited loop live, the subscription stream carries just
-	/// what that loop hid, so nothing is advertised twice.
+	/// segment. Modern subscriptions include visible namespaces even when the
+	/// unsolicited loop also advertises them; drafts 14 and 15 suppress duplicates.
 	#[tokio::test]
 	async fn hidden_namespaces_need_an_opt_in() {
 		for (solicit, prefix, hidden, cam, stats) in [
-			(Some(false), "", false, 1, 0),
-			(Some(false), "", true, 1, 1),
+			(Some(false), "", false, 2, 0),
+			(Some(false), "", true, 2, 1),
 			(Some(false), ".stats", false, 1, 1),
 			(Some(true), "", false, 1, 0),
 			(Some(true), "", true, 1, 1),
@@ -5479,7 +5542,16 @@ mod tests {
 								scoped,
 							})
 							.await;
-							let expected = usize::from(!declared || hidden || prefix == ".stats");
+							let on_stream = !declared || hidden || prefix == ".stats";
+							let unsolicited = solicit != Some(true) && !declared;
+							let legacy = matches!(version, Version::Draft14 | Version::Draft15);
+							let inline = if legacy {
+								(solicit == Some(true) && on_stream)
+									|| (solicit != Some(true) && declared && (hidden || prefix == ".stats"))
+							} else {
+								on_stream
+							};
+							let expected = usize::from(inline) + usize::from(unsolicited);
 							assert_eq!(
 								occurrences(&log, b"node"),
 								expected,
@@ -5492,20 +5564,24 @@ mod tests {
 		}
 	}
 
-	/// The regression that made announces solicited in the first place: a namespace sent
-	/// as both PUBLISH_NAMESPACE and NAMESPACE leaves the peer holding two sources for
-	/// one broadcast, and whichever arrives second replaces the one the first attached.
-	/// The peer's SETUP picks which loop carries it, so the other stays quiet and the
-	/// namespace goes out exactly once either way.
-	#[tokio::test]
-	async fn each_namespace_is_advertised_exactly_once() {
-		let (unsolicited, streams) = advertise_both_ways(Some(false)).await;
-		assert_eq!(unsolicited, 1, "a peer that required nothing is told once");
-		assert_eq!(streams, 2, "on its own PUBLISH_NAMESPACE request");
-
-		let (solicited, streams) = advertise_both_ways(Some(true)).await;
-		assert_eq!(solicited, 1, "a peer that asked to be told on request is told once");
-		assert_eq!(streams, 1, "inline on the SUBSCRIBE_NAMESPACE stream it asked on");
+	/// Namespace discovery on a request stream also reaches non-SOLICIT peers from draft 16.
+	#[tokio::test(start_paused = true)]
+	async fn a_non_solicit_peer_hears_a_namespace_both_ways() {
+		let (times, streams) = advertise_both_ways(Some(false)).await;
+		assert_eq!(times, 2, "PUBLISH_NAMESPACE and NAMESPACE");
+		assert_eq!(streams, 2, "one subscription and one PUBLISH_NAMESPACE request");
+		let (once, streams) = advertise_both_ways(Some(true)).await;
+		assert_eq!(once, 1);
+		assert_eq!(streams, 1);
+		for version in [Version::Draft14, Version::Draft15] {
+			let log = advertise_with_hidden(Discovery {
+				version,
+				solicit: Some(false),
+				..Discovery::default()
+			})
+			.await;
+			assert_eq!(occurrences(&log, b"cam"), 1, "{version}");
+		}
 	}
 
 	/// A peer out of stream credit parks the open. That must not wedge the loop, because
