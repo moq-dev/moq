@@ -45,9 +45,11 @@ relay bounds a sparse FETCH only if the model can request ranges:
   Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
   flag and closing #5085). Each range end is `Absolute(group, frame)` or
-  `Relative(n)`, where `Relative(n)` resolves at the publisher to frame 0 of
-  the group n before the latest; either end may be relative, and an omitted
-  end is live. Live is `Relative(0)..`, so no separate `Live` field exists.
+  `Relative(n)`, naming the group n before the latest; either end may be
+  relative, and an omitted end is live. Ends are inclusive of whole groups:
+  a relative start resolves to frame 0 of that group, and a relative end to
+  just after its last frame (the model's exclusive `Position::after_group`),
+  so `Absolute(0)..Relative(0)` includes the latest group. Live is `Relative(0)..`, so no separate `Live` field exists.
   Merging subscribers is the union of their ranges, so a range above the
   live edge never hides the latest group from a merged live subscriber,
   which is the starvation the flag existed to prevent. Subscriber Max Age
