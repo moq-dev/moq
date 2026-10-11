@@ -161,11 +161,17 @@ pub async fn run(ctx: Connection) {
 				own,
 				rolled.subscribe,
 				config.startup(),
+				config.max_delay(),
 				stats.clone(),
 			));
 		}
 		Role::FanoutSubscriber { path } => {
-			tasks.spawn(subscribe_named(consume.consume(), path.clone(), stats.clone()));
+			tasks.spawn(subscribe_named(
+				consume.consume(),
+				path.clone(),
+				config.max_delay(),
+				stats.clone(),
+			));
 		}
 		Role::Mesh | Role::FanoutPublisher { .. } => {}
 	}
@@ -291,13 +297,18 @@ fn discover(consume: &moq_net::origin::Producer, name: &str) -> moq_net::origin:
 }
 
 /// Wait for one exact broadcast and drain it for the lifetime of the source.
-async fn subscribe_named(consume: moq_net::origin::Consumer, path: String, stats: Arc<Stats>) -> anyhow::Result<()> {
+async fn subscribe_named(
+	consume: moq_net::origin::Consumer,
+	path: String,
+	max_delay: Duration,
+	stats: Arc<Stats>,
+) -> anyhow::Result<()> {
 	consume
 		.routed(path.as_str())
 		.await
 		.ok_or_else(|| anyhow::anyhow!("target broadcast was never announced: {path}"))?;
 	let broadcast = consume.request_broadcast(path.as_str(), None).await?;
-	drain(broadcast, &stats).await
+	drain(broadcast, max_delay, &stats).await
 }
 
 /// Watch announcements and drain up to `want` peer broadcasts (excluding our own).
@@ -317,6 +328,7 @@ async fn subscribe(
 	own: HashSet<String>,
 	want: u64,
 	startup: Duration,
+	max_delay: Duration,
 	stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
 	let mut announced = consume.announced();
@@ -359,7 +371,7 @@ async fn subscribe(
 		let Ok(broadcast) = consume.request_broadcast(path.as_str(), None).await else {
 			continue;
 		};
-		spawn_drain(&mut tasks, path, broadcast, stats.clone());
+		spawn_drain(&mut tasks, path, broadcast, max_delay, stats.clone());
 	}
 
 	// Top up from late announcements, first-come: the pool was too small, so
@@ -382,7 +394,7 @@ async fn subscribe(
 			continue;
 		};
 		selected += 1;
-		spawn_drain(&mut tasks, path, broadcast, stats.clone());
+		spawn_drain(&mut tasks, path, broadcast, max_delay, stats.clone());
 	}
 
 	// Keep the drain tasks alive; they run until their broadcasts close.
@@ -407,9 +419,15 @@ fn reservoir_push<T>(pool: &mut Vec<T>, want: usize, eligible: usize, item: T) {
 
 /// Queue one broadcast for draining. No extra delay: the caller's gather window
 /// and main's connection stagger already spread subscription starts.
-fn spawn_drain(tasks: &mut JoinSet<()>, path: String, broadcast: broadcast::Consumer, stats: Arc<Stats>) {
+fn spawn_drain(
+	tasks: &mut JoinSet<()>,
+	path: String,
+	broadcast: broadcast::Consumer,
+	max_delay: Duration,
+	stats: Arc<Stats>,
+) {
 	tasks.spawn(async move {
-		if let Err(err) = drain(broadcast, &stats).await {
+		if let Err(err) = drain(broadcast, max_delay, &stats).await {
 			tracing::debug!(%path, %err, "subscription ended");
 		}
 	});
@@ -421,10 +439,14 @@ fn spawn_drain(tasks: &mut JoinSet<()>, path: String, broadcast: broadcast::Cons
 /// Only a track- or session-level failure ends the subscription. A group that
 /// fails mid-read is the relay giving up on that one group, which a real player
 /// skips over while it keeps watching.
-async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<()> {
+///
+/// `max_delay` is the player's staleness budget: a group still in flight when a
+/// newer one starts is waited on that long before it is skipped.
+async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stats) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
-	let mut track = broadcast.track(TRACK)?.subscribe(None).await?;
+	let subscription = track::Subscription::default().with_max_delay(max_delay);
+	let mut track = broadcast.track(TRACK)?.subscribe(subscription).await?;
 	let mut gaps = GapTracker::new(stats);
 	let mut learned_shape = false;
 
@@ -772,7 +794,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let announced = discover(&origin, "bench/current");
-		subscribe(announced, own, 1, Duration::ZERO, stats.clone())
+		subscribe(announced, own, 1, Duration::ZERO, Duration::ZERO, stats.clone())
 			.await
 			.unwrap();
 
@@ -786,7 +808,12 @@ mod tests {
 		let stats = Arc::new(Stats::default());
 		let origin = moq_tokio::origin::spawn();
 		let consume = origin.consume();
-		let task = tokio::spawn(subscribe_named(consume, "bench/run/chat".into(), stats.clone()));
+		let task = tokio::spawn(subscribe_named(
+			consume,
+			"bench/run/chat".into(),
+			Duration::ZERO,
+			stats.clone(),
+		));
 
 		let broadcast = origin.create_broadcast("bench/run/chat").unwrap();
 		broadcast.announce(Default::default()).unwrap();
@@ -835,9 +862,9 @@ mod tests {
 
 		let task = {
 			let stats = stats.clone();
-			tokio::spawn(async move { drain(consumer, &stats).await })
+			tokio::spawn(async move { drain(consumer, Duration::ZERO, &stats).await })
 		};
-		// `subscribe(None)` starts at the live frontier. Let the drain consume
+		// A zero max delay starts at the live frontier. Let the drain consume
 		// group 0 before opening group 1, or the task may subscribe to group 1
 		// and the frame count can never reach two.
 		wait_for(&stats.frames_recv, 1).await;
@@ -866,6 +893,59 @@ mod tests {
 
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 3, "the three intact groups");
 		assert_eq!(lost(&stats), 1, "the failed group counts as a gap");
+	}
+
+	/// Drain a group that a newer one overtook, then report the groups lost.
+	///
+	/// The drain is parked in group 0 while groups 1 and 2 are written, so when it
+	/// asks for the next group, group 1 already trails group 2 by 500ms of media
+	/// time. Timestamps are explicit, so no wall clock is involved.
+	async fn lost_to_an_overtaken_group(max_delay: Duration) -> u64 {
+		fn write_group(track: &mut track::Producer, millis: &[u64]) {
+			let mut group = track.append_group().unwrap();
+			for &millis in millis {
+				let at = moq_net::Timestamp::from_millis(millis).unwrap();
+				group.write_frame(at, Bytes::from_static(b"{}")).unwrap();
+			}
+			group.finish().unwrap();
+		}
+
+		let stats = Arc::new(Stats::default());
+		let broadcast = broadcast::Info::new().produce();
+		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		let consumer = broadcast.consume();
+
+		let task = {
+			let stats = stats.clone();
+			tokio::spawn(async move { drain(consumer, max_delay, &stats).await })
+		};
+
+		let mut first = track.append_group().unwrap();
+		let at = moq_net::Timestamp::from_millis(1_000).unwrap();
+		first.write_frame(at, Bytes::from_static(b"{}")).unwrap();
+		wait_for(&stats.frames_recv, 1).await;
+
+		write_group(&mut track, &[1_100]);
+		write_group(&mut track, &[1_500, 1_600]);
+		first.finish().unwrap();
+		wait_for(&stats.groups_recv, 2).await;
+
+		// A last group moves the live frontier past group 2, so 1 and 2 are accounted.
+		write_group(&mut track, &[2_000]);
+		track.finish().unwrap();
+		broadcast.close();
+
+		task.await.unwrap().unwrap();
+		lost(&stats)
+	}
+
+	/// A player waits out a late group within its budget. A zero budget skips group 1
+	/// as soon as group 2 is ahead of it, which charged short groups as loss that no
+	/// player would see.
+	#[tokio::test]
+	async fn drain_waits_for_a_late_group_within_max_delay() {
+		assert_eq!(lost_to_an_overtaken_group(Duration::from_secs(2)).await, 0);
+		assert_eq!(lost_to_an_overtaken_group(Duration::ZERO).await, 1);
 	}
 
 	/// Subscription targets must be picked at random from the announced stream.

@@ -83,10 +83,11 @@ merged `{floor: 2, live}` through a lite-03 to 05 upstream with groups 2-4
 retained that delivers all three, a buffered `live` merged with a floor-5
 subscriber over a moq-transport upstream with fresh groups 2-4 that still
 delivers 2-4, an untimed `live` merged with a floor, and the codec mapping
-of each older wire.
+of each older wire. Also the mixed case #5000 left out: through a lite-05
+relay, a `live` subscriber already reading group 1, then one with a floor of
+group 0, and a fresh group 0 reaches only the second.
 
 ## Related
 
 - [One max_age meaning](/quest/m1/cache-max-age.md) - decides where an untimed `Live` starts
-- [Late lower group](/quest/m1/lite-late-lower-group.md) - requires this; #5000 rebases onto it and drops its own floor-combining change
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - names undelivered groups once publishers report them

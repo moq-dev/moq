@@ -429,6 +429,9 @@ async def test_fetch_group_and_serve_dynamic_miss():
     request = await asyncio.wait_for(dynamic.requested_group(), timeout=5.0)
     assert request.sequence == 7
     assert request.priority == 11
+    demand = request.demand()
+    assert demand.sequence == 7
+    assert demand.is_used()
 
     produced = request.accept()
     produced.write_frame(b"archive", timedelta(microseconds=140_000))

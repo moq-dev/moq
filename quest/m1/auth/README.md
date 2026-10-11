@@ -71,7 +71,9 @@ Decisions settled while planning, recorded so review does not relitigate them:
   token like any client; AUTH reports the grant actually admitted in each
   direction. The next mTLS scope quest can restrict or refuse it. A v1 endpoint
   must explicitly grant `**` for unrestricted access; AUTH does not widen a
-  scoped grant because the caller is another relay.
+  scoped grant because the caller is another relay. Mesh dials use the default
+  version set, which leaves out `moq-lite-07-wip`, so this applies once lite-07
+  is cut or a cluster opts in.
 - **Client API.** Tokens live on `moq_tokio::connect::Config`, the
   dial-side config. `Connection::auth()` is a handle the connection owns: it
   keeps every added token, presents them on each session as it reconnects,
@@ -89,8 +91,10 @@ Decisions settled while planning, recorded so review does not relitigate them:
 Everything here is additive: `Session::auth()` is new, and the relay derives
 the grant from the origin handles it already scopes. Decided 2026-10-05: wire
 work targets the wip lite version until the maintainer cuts it, never a
-published version in place, so AUTH and its stream code land in
-`moq-lite-07-wip` (or whichever version is wip then), not lite-06.
+published version in place, so AUTH lands in `moq-lite-07-wip` (or whichever
+version is wip then), not lite-06. The UNAUTHORIZED stream code stays on lite-06
+(#5004), since a relay can narrow a session with no Auth Stream; it is 0x3B,
+because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
@@ -110,13 +114,12 @@ published version in place, so AUTH and its stream code land in
   Setup extensions it offers with one `Extensions` struct
 - [Request tokens](/quest/m1/auth/request-token.md) - a token on a
   moq-transport request authorizes that request and renews it in band
+- [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
+  refused up front and held to the grant through a gate its dispatcher owns
 - [Request leases](/quest/m1/auth/request-lease.md) - moq-relay honors a
   request token with a lease of its own
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
-- [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - an
-  auth decider sees `webtransport` for a WebTransport session and `quic` only
-  for native QUIC
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
