@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
-import { nextMedia, subscribeMedia } from "../media";
+import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
@@ -44,6 +44,8 @@ export type DecoderProps = Inputs<DecoderInput> & {
 };
 
 type DecoderOutput = {
+	/** Fatal decode failure, cleared when another source is selected. */
+	error: Signal<Error | undefined>;
 	context: Signal<AudioContext | undefined>;
 
 	// The root of the audio graph, which can be used for custom visualizations.
@@ -92,6 +94,7 @@ export class Decoder {
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
+		error: new Signal<Error | undefined>(undefined),
 		context: new Signal<AudioContext | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 		sampleRate: new Signal<number | undefined>(undefined),
@@ -135,6 +138,7 @@ export class Decoder {
 	#instance?: Moq.Broadcast.Consumer["closed"];
 
 	#signals = new Effect();
+	#failed?: Failure;
 
 	// The catalog fields that require a replacement subscription or decoder.
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
@@ -313,26 +317,52 @@ export class Decoder {
 	}
 
 	#runDecoder(effect: Effect): void {
-		const enabled = effect.get(this.in.enabled);
-		if (!enabled) return;
-		if (effect.get(this.sync.out.instant)) return;
-
+		const running = effect.get(this.in.enabled) && !effect.get(this.sync.out.instant);
 		const broadcast = effect.get(this.source.in.broadcast);
-		if (!broadcast) return;
-
 		const track = effect.get(this.source.out.track);
-		if (!track) return;
-
 		const identity = effect.get(this.#identity);
-		if (!identity) return;
+
+		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
+		// broadcast instead of the catalog's own broadcast. A stopped decoder resolves it only to
+		// tell whether a failure's source is still selected.
+		const active =
+			broadcast && track && identity && (running || this.#failed)
+				? broadcast.relativeBroadcast(effect, identity.broadcast)
+				: undefined;
+		const key = identity && JSON.stringify(identity);
+
+		// A failure belongs to its source: selecting another clears it, even while muted or paused.
+		const failed = this.#failed;
+		const selected = broadcast && failed ? effect.get(broadcast.out.active)?.closed : undefined;
+		if (failed && failureMoved(failed, { broadcast: selected, media: active?.closed, track, identity: key })) {
+			this.#failed = undefined;
+			this.#out.error.set(undefined);
+		}
+
+		if (!running || !broadcast || !track || !identity) return;
 
 		const config = identity.decoder;
 		this.#frame.set(frameDuration(config));
 
-		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
-		// broadcast instead of the catalog's own broadcast.
-		const active = broadcast.relativeBroadcast(effect, identity.broadcast);
-		if (!active) return;
+		if (!active || !key) return;
+
+		// This source already failed; wait for another.
+		if (this.#failed) return;
+		// Closing this effect releases both its container reader and track subscription.
+		const failure = new Signal<Error | undefined>(undefined);
+		let attempt: Effect | undefined;
+		effect.run((inner) => {
+			const error = inner.get(failure);
+			if (!error) return;
+			this.#failed = {
+				broadcast: broadcast.out.active.peek()?.closed,
+				media: active.closed,
+				track,
+				identity: key,
+			};
+			this.#out.error.set(error);
+			attempt?.close();
+		});
 
 		// Another broadcast (a new name, or a republish) brings its own timeline, which a ring and a
 		// clock anchored on the previous one would discard as already played. A return to the same
@@ -353,22 +383,29 @@ export class Decoder {
 		// of tail beyond them. Drop that once the replacement's first frame says where it starts.
 		this.#handover.opened();
 
-		const sub = subscribeMedia(effect, {
-			broadcast: active,
-			track,
-			priority: Catalog.PRIORITY.audio,
-			maxDelay: this.#subscribeMaxDelay,
-		});
-		if (!sub) return;
+		effect.run((run) => {
+			attempt = run;
+			const sub = subscribeMedia(run, {
+				broadcast: active,
+				track,
+				priority: Catalog.PRIORITY.audio,
+				maxDelay: this.#subscribeMaxDelay,
+			});
+			if (!sub) return;
 
-		if (config.container.kind === "cmaf") {
-			this.#runCmafDecoder(effect, sub, config);
-		} else {
-			this.#runLegacyDecoder(effect, sub, config);
-		}
+			if (config.container.kind === "cmaf") {
+				this.#runCmafDecoder(run, sub, { config, failure });
+			} else {
+				this.#runLegacyDecoder(run, sub, { config, failure });
+			}
+		});
 	}
 
-	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: DecoderConfig): void {
+	#runLegacyDecoder(
+		effect: Effect,
+		sub: Moq.Track.Subscriber,
+		{ config, failure }: { config: DecoderConfig; failure: Signal<Error | undefined> },
+	): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(preSkip);
@@ -410,7 +447,7 @@ export class Decoder {
 					}
 					this.#emit(data, decoded);
 				},
-				error: (error) => console.error("audio decoder error", error),
+				error: (error) => failure.set(error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -478,7 +515,11 @@ export class Decoder {
 		});
 	}
 
-	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: DecoderConfig): void {
+	#runCmafDecoder(
+		effect: Effect,
+		sub: Moq.Track.Subscriber,
+		{ config, failure }: { config: DecoderConfig; failure: Signal<Error | undefined> },
+	): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
 		const initSegment = base64ToBytes(config.container.init);
@@ -519,7 +560,7 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => this.#emit(data),
-				error: (error) => console.error("audio decoder error", error),
+				error: (error) => failure.set(error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();

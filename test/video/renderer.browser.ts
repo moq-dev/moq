@@ -17,8 +17,15 @@ import { build } from "vite";
 import { worklet } from "../../js/common/vite-plugin-worklet";
 import type { ElementReport, RendererReport } from "./src/main";
 
+declare global {
+	interface Window {
+		readonly activeObservers: number;
+	}
+}
+
 // SwiftShader stands in for a GPU, so this runs the same with or without one. The fake camera
 // feeds `<moq-publish source="camera">` without a prompt.
+
 const ARGS = [
 	"--enable-unsafe-webgpu",
 	"--enable-features=Vulkan",
@@ -65,6 +72,21 @@ afterAll(async () => {
 
 async function open(): Promise<Page> {
 	const page = await browser.newPage();
+	await page.addInitScript(() => {
+		const active = new Set<ResizeObserver>();
+		const Original = window.ResizeObserver;
+		window.ResizeObserver = class extends Original {
+			override observe(...args: Parameters<ResizeObserver["observe"]>) {
+				active.add(this);
+				super.observe(...args);
+			}
+			override disconnect() {
+				active.delete(this);
+				super.disconnect();
+			}
+		};
+		Object.defineProperty(window, "activeObservers", { get: () => active.size });
+	});
 	page.on("console", (message) => console.error(`[page] ${message.text()}`));
 	page.on("pageerror", (error) => console.error(`[page error] ${error.message}`));
 	await page.goto(`http://127.0.0.1:${server.port}/`, { waitUntil: "load" });
@@ -97,3 +119,69 @@ test("<moq-publish> swaps its canvas when the GPU is lost and keeps previewing t
 		await page.close();
 	}
 }, 60_000);
+
+test("captions load on selection and tear down across switches and close", async () => {
+	const page = await open();
+	await page.evaluate(() => window.startCaptions());
+	const observers = await page.evaluate(() => window.activeObservers);
+	try {
+		expect(await page.locator("#captions").innerHTML()).toBe("");
+		expect(await page.evaluate(() => window.activeObservers)).toBe(observers);
+		expect(
+			await page.evaluate(() =>
+				performance.getEntriesByType("resource").some((entry) => entry.name.includes("/captions-")),
+			),
+		).toBe(false);
+		await page.evaluate(() => window.captions.select("first"));
+		await page.waitForFunction(() => document.querySelector("#captions")?.textContent?.includes("First caption"));
+		expect(await page.locator("#captions style").count()).toBe(1);
+		expect(await page.evaluate(() => window.activeObservers)).toBe(observers + 1);
+		await page.evaluate(() => window.captions.select("second"));
+		await page.waitForFunction(() => document.querySelector("#captions")?.textContent?.includes("Second caption"));
+		expect(await page.locator("#captions").textContent()).not.toContain("First caption");
+		expect(await page.locator("#captions style").count()).toBe(1);
+		expect(await page.evaluate(() => window.activeObservers)).toBe(observers + 1);
+		await page.evaluate(() => window.captions.select());
+		await page.waitForFunction(() => document.querySelector("#captions")?.childElementCount === 0);
+		expect(await page.evaluate(() => window.activeObservers)).toBe(observers);
+		await page.evaluate(() => window.captions.select("first"));
+		await page.waitForFunction(() => document.querySelector("#captions")?.textContent?.includes("First caption"));
+		await page.evaluate(() => window.captions.close());
+		await page.waitForFunction(() => document.querySelector("#captions")?.childElementCount === 0);
+		expect(await page.evaluate(() => window.activeObservers)).toBe(observers);
+	} finally {
+		await page.close();
+	}
+});
+
+test("closing while the caption chunk loads installs no stale overlay", async () => {
+	const page = await open();
+	await page.evaluate(() => window.startCaptions());
+	const observers = await page.evaluate(() => window.activeObservers);
+	let release!: () => void;
+	const held = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	try {
+		await page.route("**/captions-*.js", async (route) => {
+			await held;
+			await route.continue();
+		});
+		const requested = page.waitForRequest((request) => request.url().includes("/captions-"));
+		await page.evaluate(() => window.captions.select("first"));
+		const request = await requested;
+		await page.evaluate(() => window.captions.close());
+		release();
+		// Await the same module evaluation, then the queued renderer continuation.
+		await page.evaluate(async (url) => {
+			await import(url);
+			await new Promise(requestAnimationFrame);
+		}, request.url());
+		expect(await page.locator("#captions").innerHTML()).toBe("");
+		expect(await page.evaluate(() => window.activeObservers)).toBe(observers);
+	} finally {
+		release();
+		await page.unrouteAll({ behavior: "wait" });
+		await page.close();
+	}
+});
