@@ -30,7 +30,7 @@ Decided in planning:
   - the packaged outputs nightly already builds. `nightly.yml` runs the
     Python, Kotlin, and Swift release builds, so read their wheel, AAR, and
     xcframework sizes instead of rebuilding them.
-- Out of scope: moq-wasm, which [Remove moq-wasm](/quest/m1/rs2ts/remove-wasm.md)
+- Out of scope: moq-wasm, which [Remove moq-wasm](/quest/m2/rs2ts-remove-wasm.md)
   deletes (decided 2026-10-08), Docker images, and per-target release assets
   nightly doesn't build. The Docker quest measures its images once. Add
   others only if one of them regresses unnoticed.
