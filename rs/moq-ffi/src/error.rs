@@ -25,7 +25,7 @@ pub enum MoqProtocolKind {
 	Cancel,
 	/// Something went wrong that isn't worth a dedicated code. Session 1, stream 0.
 	Internal,
-	/// The peer's token does not grant the requested path or operation.
+	/// The peer's token does not grant the requested path or operation. Session 2, stream 0x3B.
 	Unauthorized,
 	/// The peer broke a protocol rule; the session is unusable.
 	ProtocolViolation,
@@ -144,6 +144,7 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 		moq_net::StreamError::WrongSize => MoqProtocolKind::WrongSize,
 		moq_net::StreamError::FrameTooLarge => MoqProtocolKind::FrameTooLarge,
 		moq_net::StreamError::TimestampMismatch => MoqProtocolKind::TimestampMismatch,
+		moq_net::StreamError::Unauthorized => MoqProtocolKind::Unauthorized,
 		moq_net::StreamError::App(_) => MoqProtocolKind::App,
 		moq_net::StreamError::Unknown(_) => MoqProtocolKind::Unknown,
 		_ => MoqProtocolKind::Unknown,
@@ -250,14 +251,14 @@ pub enum MoqError {
 	#[error("unsupported")]
 	Unsupported,
 
-	/// This track already committed to the other delivery order.
+	/// This track already committed to another way of reading it.
 	///
-	/// A track is read in arrival order or in sequence order, never both, and the first
-	/// group read picks which. Reaching for the other one afterwards is this error rather
-	/// than [`Self::Unsupported`]: both orders work fine here, the track just isn't
-	/// reading in the one you asked for. Read the track through a second consumer if you
-	/// genuinely need both.
-	#[error("already committed to the other delivery order")]
+	/// A track is read in arrival order, in sequence order, or by a typed reader such as a
+	/// JSON consumer, never two of them, and the first group read picks the order. Reaching
+	/// for another one afterwards is this error rather than [`Self::Unsupported`]: each works
+	/// fine here, the track just isn't reading the way you asked for. Read the track through
+	/// a second consumer if you genuinely need both.
+	#[error("already committed to another way of reading")]
 	AlreadyCommitted,
 
 	/// A route carried an invalid hop id or too many hops.
@@ -275,6 +276,10 @@ pub enum MoqError {
 
 	#[error("log: {0}")]
 	Log(String),
+
+	/// A configuration record held a value the constructor cannot use.
+	#[error("config: {0}")]
+	Config(String),
 }
 
 impl From<moq_net::Error> for MoqError {
@@ -466,6 +471,19 @@ mod tests {
 				assert_eq!(protocol.scope, MoqErrorScope::Session);
 				assert_eq!(protocol.code, 0x1f);
 				assert_eq!(protocol.kind, MoqProtocolKind::Unknown);
+			}
+			other => panic!("expected Protocol, got {other}"),
+		}
+	}
+
+	#[test]
+	fn stream_unauthorized_keeps_its_kind() {
+		let err = MoqError::from(moq_net::Error::from(moq_net::StreamError::Unauthorized));
+		match err {
+			MoqError::Protocol { details: protocol } => {
+				assert_eq!(protocol.scope, MoqErrorScope::Stream);
+				assert_eq!(protocol.code, 0x3b);
+				assert_eq!(protocol.kind, MoqProtocolKind::Unauthorized);
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}

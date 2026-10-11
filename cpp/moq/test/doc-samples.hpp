@@ -28,7 +28,7 @@ inline void ok(moq::expected<void> result) {
 }
 
 inline std::shared_ptr<moq::Session> session;
-inline std::shared_ptr<moq::MediaConsumer> media;
+inline std::shared_ptr<moq::MediaContainerConsumer> media;
 inline std::vector<uint8_t> opus_init;
 inline std::vector<uint8_t> packet;
 inline std::vector<uint8_t> rgba;

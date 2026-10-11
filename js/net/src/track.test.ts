@@ -395,6 +395,15 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(await none).toBeUndefined();
 });
 
+// A resume floor above the live edge must not hide the latest group from a reader that
+// joins after it: on a quiet track that group may be the only one for a long time.
+test("an unfloored subscriber clears a resume floor above the live edge", () => {
+	const producer = new TrackProducer("test");
+	producer.subscribe({ groups: { start: { included: 4 } } });
+	producer.subscribe({});
+	expect(producer.subscription.peek()?.groups?.start).toBeUndefined();
+});
+
 test("the producer aggregate is clamped without changing subscriber options", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxDelay: Milli(10_000) });

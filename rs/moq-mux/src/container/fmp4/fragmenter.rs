@@ -568,7 +568,7 @@ mod tests {
 	}
 
 	// A keyframe may open a new group, and a group boundary is never a duration: the publisher
-	// may have paused across it (the 2405 second sample of moq-dev/moq.pro#814). The pending
+	// may have paused across it (which once produced a 2405 second sample). The pending
 	// frame takes the catalog cadence, and the new group re-anchors the decode timeline at its
 	// keyframe's presentation time rather than pretending the stream was continuous.
 	#[test]

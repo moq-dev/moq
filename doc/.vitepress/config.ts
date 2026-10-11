@@ -187,6 +187,7 @@ export default defineConfig({
 								{ text: "@moq/hang", link: "/lib/js/hang" },
 								{ text: "@moq/watch", link: "/lib/js/watch" },
 								{ text: "@moq/publish", link: "/lib/js/publish" },
+								{ text: "@moq/video", link: "/lib/js/video" },
 								{ text: "@moq/room", link: "/lib/js/room" },
 								{ text: "@moq/auth", link: "/lib/js/auth" },
 								{ text: "@moq/signals", link: "/lib/js/signals" },

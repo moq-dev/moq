@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { isWebTransportUserAgentSupported } from "./browser.ts";
+import { isWebTransportUserAgentSupported, parseUserAgent } from "./browser.ts";
 
 test.each([
 	[
@@ -39,4 +39,19 @@ test.each([
 	["Firefox 153", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Gecko/20100101 Firefox/153.0"],
 ])("enables WebTransport on %s", (_browser, userAgent) => {
 	expect(isWebTransportUserAgentSupported(userAgent)).toBeTrue();
+});
+
+test("iPadOS desktop Safari is WebKit and exposes its Safari version", () => {
+	const ua =
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
+	expect(isWebTransportUserAgentSupported(ua)).toBeFalse();
+	expect(parseUserAgent(ua)).toMatchObject({ webkit: true, ios: "unknown", safari: "18.5" });
+});
+test("desktop Edge's AppleWebKit token is Chromium", () => {
+	const ua =
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0";
+	expect(isWebTransportUserAgentSupported(ua)).toBeTrue();
+});
+test("Firefox 152 still has the incoming-stream limit", () => {
+	expect(isWebTransportUserAgentSupported("Mozilla/5.0 Gecko/20100101 Firefox/152.0")).toBeFalse();
 });

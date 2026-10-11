@@ -63,6 +63,10 @@ public:
 	void CopyLastFailure(int *code, std::string *reason);
 
 private:
+	friend struct MoQOutputStatsTest;
+	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
+				   ConnectionStats *out);
+
 	// One Start()'s connection: the client dialing, the session once it connects,
 	// and the pending call whose continuation reports on it. Replaced wholesale by
 	// the next Start() and dropped by Stop(), which cancels that call.
@@ -141,8 +145,8 @@ private:
 	std::shared_ptr<moq::OriginProducer> origin;
 	std::shared_ptr<moq::BroadcastProducer> broadcast;
 	// An encoder maps to null when its track failed to initialize, so it isn't retried.
-	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaProducer>> video_tracks;
-	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaProducer>> audio_tracks;
+	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaTrackProducer>> video_tracks;
+	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaTrackProducer>> audio_tracks;
 
 	// Retired sessions still draining their finished tracks, which the destructor
 	// waits out. Guarded by signal_mutex.

@@ -98,41 +98,28 @@ class Server internal constructor(
 
     companion object {
         /**
-         * Bind a server at [bind] and start accepting.
+         * Bind a server described by [config] and start accepting.
          *
-         * @param bind local socket address to listen on, e.g. "127.0.0.1:4443" or "[::]:443".
-         * @param tlsCert PEM certificate chain paths to serve.
-         * @param tlsKey PEM private key paths to serve.
-         * @param tlsGenerate hostnames to generate a self-signed certificate for.
-         * @param publish origin whose broadcasts are served to incoming sessions; auto-created when null.
-         * @param subscribe origin that receives broadcasts published by incoming sessions; auto-created when null.
+         * [config] carries the bind address (`[::]:443` when null), the TLS identity,
+         * protocol versions, QUIC tuning, and origins. A value the native side cannot
+         * use throws `MoqException.Config`.
+         *
+         * With neither [ServerConfig.publish] nor [ServerConfig.consume] set, one shared
+         * origin is wired to both, so a broadcast announced on this server is also
+         * visible to sessions publishing into it. Mirrors [Moq.connect].
          */
-        suspend fun listen(
-            bind: String = "[::]:443",
-            tlsCert: List<String>? = null,
-            tlsKey: List<String>? = null,
-            tlsGenerate: List<String>? = null,
-            publish: OriginProducer? = null,
-            subscribe: OriginProducer? = null,
-        ): Server {
-            // With neither side specified, wire ONE shared origin to both so a
-            // broadcast announced on this server is also visible to sessions
-            // publishing into it. Mirrors Moq.connect.
-            val shared = if (publish == null && subscribe == null) OriginProducer(OriginConfig()) else null
-            val publishOrigin = publish ?: shared
-            val subscribeOrigin = subscribe ?: shared
+        suspend fun listen(config: ServerConfig): Server {
+            val wired = if (config.publish == null && config.consume == null) {
+                val shared = OriginProducer(OriginConfig())
+                config.copy(publish = shared, consume = shared)
+            } else {
+                config
+            }
 
-            val server = MoqServer()
+            val server = MoqServer(wired)
             try {
-                server.setBind(bind)
-                if (tlsCert != null) server.setTlsCert(tlsCert)
-                if (tlsKey != null) server.setTlsKey(tlsKey)
-                if (tlsGenerate != null) server.setTlsGenerate(tlsGenerate)
-                if (publishOrigin != null) server.setPublish(publishOrigin)
-                if (subscribeOrigin != null) server.setConsume(subscribeOrigin)
-
                 val localAddr = server.listen()
-                return Server(server, localAddr, publishOrigin)
+                return Server(server, localAddr, wired.publish)
             } catch (e: Throwable) {
                 // listen() failed: don't leak the server handle.
                 server.cancel()

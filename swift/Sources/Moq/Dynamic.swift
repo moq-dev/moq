@@ -21,6 +21,11 @@ public final class TrackRequest: Sendable {
         TrackProducer(try ffi.accept(info: info))
     }
 
+    /// Watch this track's subscribers, including after accepting it.
+    public func demand() throws -> TrackDemand {
+        TrackDemand(try ffi.demand())
+    }
+
     /// Create a fetch handler before accepting this requested track.
     public func dynamic() throws -> TrackDynamic {
         TrackDynamic(try ffi.dynamic())
@@ -29,6 +34,40 @@ public final class TrackRequest: Sendable {
     /// Reject the request with an application error code, failing the subscriber.
     public func abort(errorCode: UInt16) throws {
         try ffi.abort(errorCode: errorCode)
+    }
+}
+
+/// A watch-only handle to the callers waiting on a requested group.
+///
+/// Returned by `GroupRequest.demand()`. Weak: holding it does not keep the request alive. The last
+/// caller to leave withdraws the request, so once unused, demand never returns: drop the request.
+/// Waits throw once the request is answered: `MoqError.Closed` if it was dropped, otherwise the
+/// error the accept or reject left for the waiting fetches.
+public final class GroupDemand: Sendable {
+    let ffi: MoqGroupDemand
+
+    init(_ ffi: MoqGroupDemand) {
+        self.ffi = ffi
+    }
+
+    /// The sequence of the group this watches.
+    public var sequence: UInt64 {
+        ffi.sequence()
+    }
+
+    /// Whether the group has at least one waiting caller right now.
+    public var isUsed: Bool {
+        ffi.isUsed()
+    }
+
+    /// Suspend until the group has at least one waiting caller.
+    public func used() async throws {
+        try await ffi.used()
+    }
+
+    /// Suspend until the group has no waiting callers.
+    public func unused() async throws {
+        try await ffi.unused()
     }
 }
 
@@ -48,6 +87,11 @@ public final class GroupRequest: Sendable {
     /// The consumer's delivery priority for this fetch.
     public var priority: UInt8 {
         ffi.priority()
+    }
+
+    /// A watch-only handle to whether any caller still wants this group.
+    public func demand() throws -> GroupDemand {
+        GroupDemand(try ffi.demand())
     }
 
     /// Accept the request and return a producer for the group.

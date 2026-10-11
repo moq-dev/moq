@@ -17,7 +17,7 @@ relay serves video, audio, and data alike.
 - **A group cache** with byte and age budgets, so late joiners and the HLS gateway can fetch recent history.
 - **HTTP endpoints** to list broadcasts, fetch groups, probe health, and scrape Prometheus metrics. See [HTTP](/bin/relay/http).
 - **Live stats** published as MoQ tracks per node and per tenant, split by billing tier.
-- **Plaintext TCP and Unix-socket listeners** for trusted local workers, and experimental [iroh](/concept/transport#iroh-peer-to-peer-experimental) peer-to-peer.
+- **Plaintext TCP and Unix-socket listeners** for trusted local workers, and experimental [iroh](/concept/transport#iroh-peer-to-peer-experimental) peer-to-peer in source builds with the `iroh` feature.
 - **Hot reload** of certificates and trust roots.
 
 ## Run

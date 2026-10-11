@@ -37,14 +37,18 @@
 //! its base, ten bytes into its packet, so even an object that starts at a PCR packet sits ten
 //! bytes of that rate before its own PCR.
 //!
+//! Every timestamp is then shifted onto the catalog's [`Clock`](crate::Clock) by one offset, fixed
+//! through the reservation's [`Timebase`](crate::catalog::Timebase) by the first object: zero when
+//! that object places the clock, and otherwise whatever lands it at now on a clock already in use.
+//!
 //! PCRs are unwrapped into a 64-bit count of 27 MHz ticks that never goes back. A step forward of
 //! at most half the 2^33 * 300 tick period adds to the count, across the wrap included. A PCR with
 //! `discontinuity_indicator` whose step is forward by that measure adds the step too, after the
 //! bytes before it are timed at the rate before it, and starts a group behind a break marker. Any
 //! step back ends the import: [`PcrRewindError`] without the flag, [`PcrRestartError`] with it,
 //! since a signalled restart is new content and needs a new broadcast. The timeline therefore
-//! depends only on the bytes since the importer's first PCR, and two importers of one feed started
-//! at the same packet publish identical objects.
+//! depends only on the bytes since the importer's first PCR and its shift, and two importers of one
+//! feed started at the same packet each placing its own catalog's clock publish identical objects.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -167,6 +171,8 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	/// Held until the first group is written, so the first catalog already names the track with
 	/// its final `randomAccess`.
 	reservation: Option<crate::catalog::Reserved<E>>,
+	/// Shifts every object's PCR time onto the catalog clock, anchored by the first object.
+	shift: crate::catalog::Timebase<E>,
 	media: crate::container::Producer<crate::catalog::hang::Container>,
 	/// The section as last written to the catalog, `None` before the first group.
 	section: Option<Section<E>>,
@@ -293,6 +299,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		)?;
 		Ok(Self {
 			catalog,
+			shift: reserved.timebase(),
 			reservation: Some(reserved),
 			media,
 			section: None,
@@ -602,6 +609,8 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		let ticks = ticks.max(self.written);
 		self.written = ticks;
 		let timestamp = moq_net::Timestamp::from_micros(ticks / (PCR_HZ / 1_000_000))?;
+		// The first object, which starts a group, anchors the shift and is live on arrival.
+		let timestamp = self.shift.shift(timestamp)?;
 		let size = object.payload.len() as u64;
 		let start = object.start.or_else(|| {
 			self.group
@@ -616,10 +625,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			}
 			if start != Start::RandomAccess || !self.single {
 				self.all_random_access = false;
-			}
-			if self.reservation.is_some() {
-				// The first object of the import is live on arrival.
-				self.catalog.anchor(timestamp)?;
 			}
 			self.group = Some(Group {
 				ticks,

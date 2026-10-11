@@ -11,7 +11,7 @@ drawn as if it were SDR as today.
 ## Plan
 
 Decided 2026-10-08 in the WebGPU renderer `/quest-plan` interview: SDR and
-wide gamut first in [WebGPU renderer](/quest/m1/webgpu-renderer.md), HDR here,
+wide gamut first in the `@moq/video` WebGPU renderer (`js/video`), HDR here,
 both in m1.
 
 Facts (2026-10):
@@ -43,5 +43,4 @@ Public API: none beyond the renderer. Wire: none.
 
 ## Required
 
-- [WebGPU renderer](/quest/m1/webgpu-renderer.md) - the renderer and `@moq/video` package this extends
 - [Catalog colour](/quest/m1/color-catalog.md) - the mastering display and content light levels

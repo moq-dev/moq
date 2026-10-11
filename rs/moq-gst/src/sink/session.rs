@@ -253,6 +253,9 @@ pub(crate) struct Session {
 	join: tokio::task::JoinHandle<()>,
 	/// The reconnect loop, held so [`stop`](Self::stop) can wait for it to end.
 	connection: moq_tokio::Connection,
+	/// The client behind `connection`, closed by [`stop`](Self::stop) so the close reaches the
+	/// relay before the process exits rather than leaving it to time the connection out.
+	client: moq_tokio::Client,
 	status: Arc<Status>,
 	/// The live send-bitrate estimate, tracked across reconnects by the reconnect loop. Read directly
 	/// by the `estimated-send-rate` getter.
@@ -325,6 +328,7 @@ impl Session {
 			Self {
 				join,
 				connection: reconnect,
+				client,
 				status,
 				send_bandwidth,
 				recv_bandwidth,
@@ -376,7 +380,11 @@ impl Session {
 		// The status task goes first, so it never reports the loop's end as a failure.
 		self.join.abort();
 		self.connection.abort(moq_net::Error::Cancel);
-		let _ = crate::block_on(self.connection.closed());
+		crate::block_on(async {
+			let _ = self.connection.closed().await;
+			// A clone, since `Drop` keeps the fields in place; it closes the shared endpoint.
+			self.client.clone().close().await;
+		});
 	}
 }
 

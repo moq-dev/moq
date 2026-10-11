@@ -16,6 +16,10 @@ name = "moq-shaper"
 path = "src/main.rs"
 doc = false
 
+[features]
+# One-shot fault controls for cross-crate transport tests.
+test = []
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }

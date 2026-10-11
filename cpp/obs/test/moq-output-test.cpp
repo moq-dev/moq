@@ -186,18 +186,15 @@ long long obs_data_get_int(obs_data_t *, const char *)
 } // extern "C"
 
 // Stands in for the advanced settings: reconnect fast, so a dropped session is
-// back within a test's patience.
+// back within a test's patience. An unparseable bind address is what moq-ffi refuses
+// when it builds the client.
 namespace MoQSettings {
-bool Configure(obs_data_t *, moq::Client &client, std::string *error)
+void Configure(obs_data_t *, moq::ClientConfig &config)
 {
-	if (!g_settings_ok) {
-		*error = "bind: invalid address";
-		return false;
-	}
-	moq::Backoff backoff{};
-	backoff.initial_us = 10'000;
-	backoff.max_us = 50'000;
-	return client.set_backoff(backoff).has_value();
+	if (!g_settings_ok)
+		config.bind = "not an address";
+	config.backoff.initial_us = 10'000;
+	config.backoff.max_us = 50'000;
 }
 } // namespace MoQSettings
 
@@ -292,7 +289,7 @@ std::optional<moq::Catalog> relayCatalog(const std::shared_ptr<moq::BroadcastCon
 {
 	if (!broadcast)
 		return std::nullopt;
-	auto catalogs = TestOk(broadcast->subscribe_catalog().get(), "subscribe_catalog");
+	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(broadcast).get(), "catalog consumer");
 	for (;;) {
 		auto next = catalogs->next();
 		if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
@@ -306,8 +303,63 @@ std::optional<moq::Catalog> relayCatalog(const std::shared_ptr<moq::BroadcastCon
 }
 } // namespace
 
+// The production commit boundary lets a real stats call race retirement without
+// callbacks or branches in the output's hot path.
+struct MoQOutputStatsTest {
+	static std::shared_ptr<moq::Session> Session(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.mutex);
+		return output.session;
+	}
+	static bool Commit(MoQOutput &output, const std::shared_ptr<moq::Session> &session,
+			   MoQOutput::ConnectionStats *accepted)
+	{
+		MoQOutput::ConnectionStats stale;
+		stale.dial = "retired";
+		stale.bytes_sent = 123;
+		return output.CommitConnectionStats(session, std::move(stale), accepted);
+	}
+	static void Disconnect(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.mutex);
+		output.live = false;
+	}
+};
+
 int main()
 {
+	for (int retirement = 0; retirement < 3; ++retirement) {
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput output(nullptr, OUTPUT);
+		CHECK(output.Start());
+		CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		auto sampled = MoQOutputStatsTest::Session(output);
+		CHECK(sampled != nullptr);
+		if (!sampled)
+			continue;
+		// Use the generated bindings and real session before crossing the commit boundary.
+		const auto raw = sampled->stats();
+		(void)raw;
+		MoQOutput::ConnectionStats accepted;
+		accepted.dial = "accepted";
+		accepted.bytes_sent = 456;
+		if (retirement == 0) {
+			output.Stop();
+		} else if (retirement == 1) {
+			output.Stop();
+			CHECK(output.Start());
+			CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		} else {
+			MoQOutputStatsTest::Disconnect(output);
+		}
+		CHECK(!MoQOutputStatsTest::Commit(output, sampled, &accepted));
+		CHECK(accepted.dial == "accepted");
+		CHECK(accepted.bytes_sent == 456);
+		output.Stop();
+	}
+	printf("retired stats never replace the accepted sample: ok\n");
+
 	// Publishes over a real session: connects, reports itself live, carries
 	// stats, and lands video and audio renditions in the relay's catalog. Only CBR
 	// publishes the configured bitrate as a hint.
@@ -380,8 +432,9 @@ int main()
 		CHECK(catalog.has_value());
 		if (catalog) {
 			const auto &[name, rendition] = *catalog->video.begin();
-			auto media = TestOk(broadcast->subscribe_media(name, rendition.container, std::nullopt).get(),
-					    "subscribe_media");
+			auto media = TestOk(
+				moq::MediaContainerConsumer::subscribe(broadcast, {name, rendition.container}).get(),
+				"container consumer");
 			// Read a frame first, so the relay is subscribed before the last one is written.
 			auto next = media->next();
 			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
