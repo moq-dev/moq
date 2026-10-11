@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, btree_map};
 use bytes::Bytes;
 
 use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, DurationMilliSeconds};
+use serde_with::DisplayFromStr;
 
 use crate::catalog::Container;
 use crate::catalog::hex::Hex;
@@ -153,7 +153,8 @@ pub struct AudioConfig {
 	pub jitter: Option<std::time::Duration>,
 
 	/// After a non-continuous join, decode from the group start, present at start plus warmup, and join that much earlier.
-	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
+	/// Serialized as whole milliseconds, rounded up so presentation never starts early.
+	#[serde_as(as = "Option<MillisCeil>")]
 	#[serde(default)]
 	pub warmup: Option<std::time::Duration>,
 
@@ -208,6 +209,18 @@ mod test {
 			assert_eq!(encoded["warmup"], millis);
 			let decoded: AudioConfig = serde_json::from_value(encoded).unwrap();
 			assert_eq!(decoded.warmup, config.warmup);
+		}
+	}
+
+	#[test]
+	fn warmup_rounds_up() {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		for (nanos, millis) in [(1, 1), (499_999, 1), (333_200_000, 334)] {
+			config.warmup = Some(std::time::Duration::from_nanos(nanos));
+			let encoded = serde_json::to_value(&config).unwrap();
+			assert_eq!(encoded["warmup"], millis);
+			let decoded: AudioConfig = serde_json::from_value(encoded).unwrap();
+			assert_eq!(decoded.warmup, Some(std::time::Duration::from_millis(millis)));
 		}
 	}
 
