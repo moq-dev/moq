@@ -1217,8 +1217,9 @@ async fn pump<S: Stream>(
 					}
 					ServerSessionEvent::PublishStreamFinished { .. } => finished = true,
 					// onMetaData and other script data: the FLV importer reads codec
-					// config from the sequence headers, so metadata isn't forwarded.
-					ServerSessionEvent::StreamMetadataChanged { .. } => publisher.metadata.record(),
+					// config from the sequence headers, so script data isn't forwarded.
+					ServerSessionEvent::StreamMetadataChanged { .. }
+					| ServerSessionEvent::UnhandleableAmf0Data { .. } => publisher.metadata.record(),
 					other => tracing::trace!(%peer, ?other, "ignoring RTMP event"),
 				},
 				ServerSessionResult::UnhandleableMessageReceived(_) => {
@@ -1511,15 +1512,15 @@ mod tests {
 		let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
 		let origin = moq_tokio::origin::spawn();
 		let mut publisher = Publisher::new(&origin, "metadata", Default::default()).unwrap();
-		let mut work: VecDeque<_> = (0..2)
-			.map(|_| {
-				ServerSessionResult::RaisedEvent(ServerSessionEvent::StreamMetadataChanged {
-					app_name: "live".into(),
-					stream_key: "metadata".into(),
-					metadata: crate::rml::sessions::StreamMetadata::new(),
-				})
-			})
-			.collect();
+		let mut work = VecDeque::from([ServerSessionResult::RaisedEvent(
+			ServerSessionEvent::StreamMetadataChanged {
+				app_name: "live".into(),
+				stream_key: "metadata".into(),
+				metadata: crate::rml::sessions::StreamMetadata::new(),
+			},
+		)]);
+		// A custom script message goes through the session's own parser.
+		work.extend(session.handle_input(&crate::metadata::cue_point_packet()).unwrap());
 		work.push_back(ServerSessionResult::RaisedEvent(
 			ServerSessionEvent::PublishStreamFinished {
 				app_name: "live".into(),

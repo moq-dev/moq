@@ -365,9 +365,10 @@ impl<S: Stream> Client<S> {
 							tracing::warn!(%err, "dropping RTMP audio frame that failed to demux");
 						}
 					}
-					// Codec config arrives in the sequence-header tags, so metadata
-					// isn't forwarded.
-					ClientSessionEvent::StreamMetadataReceived { .. } => publisher.metadata.record(),
+					// Codec config arrives in the sequence-header tags, so script
+					// data isn't forwarded.
+					ClientSessionEvent::StreamMetadataReceived { .. }
+					| ClientSessionEvent::UnhandleableAmf0Data { .. } => publisher.metadata.record(),
 					other => tracing::trace!(?other, "ignoring RTMP event during pull"),
 				},
 				ClientSessionResult::UnhandleableMessageReceived(_) => {}
@@ -554,7 +555,9 @@ mod tests {
 	#[tracing_test::traced_test]
 	async fn pull_metadata_drops_warn_once() {
 		let (stream, _peer) = tokio::io::duplex(1024);
-		let (session, _) = ClientSession::new(crate::rml::sessions::ClientSessionConfig::new()).unwrap();
+		let (mut session, _) = ClientSession::new(crate::rml::sessions::ClientSessionConfig::new()).unwrap();
+		// A custom script message goes through the session's own parser.
+		let cue_point = session.handle_input(&crate::metadata::cue_point_packet()).unwrap();
 		let mut client = Client {
 			stream,
 			session,
@@ -566,11 +569,12 @@ mod tests {
 		};
 		let origin = moq_tokio::origin::spawn();
 		let mut publisher = Publisher::new(&origin, "metadata", Default::default()).unwrap();
-		let events = (0..2).map(|_| {
-			ClientSessionResult::RaisedEvent(ClientSessionEvent::StreamMetadataReceived {
+		let events = std::iter::once(ClientSessionResult::RaisedEvent(
+			ClientSessionEvent::StreamMetadataReceived {
 				metadata: crate::rml::sessions::StreamMetadata::new(),
-			})
-		});
+			},
+		))
+		.chain(cue_point);
 		client.pull_results(events, &mut publisher).await.unwrap();
 		assert_eq!(publisher.metadata.count, 2);
 		publisher.finish().unwrap();
