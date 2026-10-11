@@ -25,11 +25,17 @@ and captions also passed the existing exact refusal assertion. No failing
 observation was retried or accepted as an alternate result.
 
 The harness reads the raw WebTransport close result rather than the client
-library's error translation. `Connection.connectTransport` still has a
-100 ms SETUP-error close grace, after which it locally closes the transport.
-Whether that competes with a delayed remote capsule under load is unproven;
-the server HTTP/3 control-stream lifetime is another candidate. A failing
-browser trace paired with relay logs is needed before altering either
-lifetime. No timeout, retry, or accepted error was changed.
+library's error translation. A mocked-clock regression now proves one client
+failure: when a SETUP operation rejects with `source: "session"`, the existing
+100 ms reset-only fallback closes locally before a delayed authoritative
+session close arrives. The draft reuses `sessionCause` to await that guaranteed
+session close first. A remote unauthorized code survives a one-second mocked
+delay; the regression fails without the change. Stream-only failures retain
+the existing cleanup behavior, with no timeout increase or retry.
+
+This does not establish that the historical Chromium `Connection lost`
+observation had the same cause. The server HTTP/3 control-stream lifetime is
+still another candidate. Preserve this quest until a failing browser trace
+paired with relay logs establishes that cause and its regression.
 
 Public API: none expected. Wire: none expected.
