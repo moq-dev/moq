@@ -54,6 +54,10 @@ source "$DIR/process.sh"
 # whether they arrived as flags or as environment overrides.
 RERUN="$(harness_env TSC_DURATION TSC_BITRATE TSC_PORT TSC_PROFILE)just test ts$(harness_argv "$@")"
 
+# Seamless session replacement needs an explicit publisher epoch. Keep this
+# opt-in local to the validation rig; epochless replacement is tested as refusal.
+VERSION=moq-lite-07-wip
+
 SOURCE=""       # real capture to publish instead of a generated clip
 ANALYZE_ONLY="" # existing TS to analyze without a round-trip
 CAPTURE_OUT=""  # keep the subscriber capture here (for callers asserting on it)
@@ -343,9 +347,10 @@ if harness_probe "$URL/certificate.sha256"; then
     exit 1
 fi
 
-echo "### starting relay on 127.0.0.1:${PORT}"
+echo "### starting relay on 127.0.0.1:${PORT} ($VERSION)"
+printf '%s\n' "$VERSION" >"$HARNESS_RUN/moq-version.txt"
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$DIR/relay.toml" \
-    --listen "127.0.0.1:${PORT}" --web-http-listen "127.0.0.1:${PORT}"
+    --listen-version "$VERSION" --listen "127.0.0.1:${PORT}" --web-http-listen "127.0.0.1:${PORT}"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "error: relay never became ready" >&2
     sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
@@ -381,7 +386,7 @@ grade_live() {
     # status we are here to record.
     set +e
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log" |
+        "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log" |
         ts_drain python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
             ${SCHEDULE[@]+"${SCHEDULE[@]}"} ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$HARNESS_RUN/timing.out" 2>&1
     printf '%s\n' "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$HARNESS_RUN/timing.rc"
@@ -390,7 +395,7 @@ grade_live() {
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 capture() {
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
+        "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
 }
 
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
@@ -401,7 +406,7 @@ capture_b() {
     # the media, because it has no shared history to derive them from.
     sleep "$PAIR_JOIN"
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
+        "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
 }
 
 if [[ -n "$LIVE" ]]; then
@@ -432,11 +437,11 @@ sleep 1
 echo "### publishing PCR-paced TS -> $BROADCAST"
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 publish() {
-    # shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
+    # shellcheck disable=SC2016  # $1..$5 are the child bash -c positionals, not ours.
     timeout -k 3 $((DURATION + 20)) bash -o pipefail -c '
         tsp -I file "$1" -P regulate --pcr-synchronous --wait-min 5 |
-            "$2" --connect "$3" --broadcast "$4" import ts
-    ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST"
+            "$2" --connect "$3" --connect-version "$5" --broadcast "$4" import ts
+    ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" "$VERSION"
 }
 harness_spawn pub "$HARNESS_RUN/pub.log" publish
 PUB_PID="$HARNESS_PID"

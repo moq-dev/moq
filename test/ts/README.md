@@ -596,9 +596,18 @@ claiming the CBR PCR-accuracy profile.
 
 ## CI
 
+The round-trip rig explicitly negotiates `moq-lite-07-wip` on the relay,
+publisher and subscribers. Its publisher epochs allow acquisition to continue
+when WebSocket upgrades to QUIC. Production defaults remain unchanged: Lite-06
+cannot prove publisher identity across session replacement and must refuse a
+pending acquisition. `rs/moq-net/tests/catalog_acquisition.rs` covers both
+outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
+Actual transport teardown coverage belongs to the transport-upgrade tests; a
+clean TS run alone does not prove that an upgrade occurred.
+
 [`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
 browser interop. Relevant mux, Hang, CLI, transport, harness and toolchain PRs run
-`just test ts-controls`, the default and 2 Mb/s round trips, HRD, headroom,
+`just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, headroom,
 open-GOP, EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
