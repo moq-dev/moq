@@ -8,7 +8,7 @@ import { BinarySchema } from "./binary";
 import { ClockSchema } from "./clock";
 import { TRACK } from "./format";
 import { JsonSchema } from "./json";
-import type { RelativeBroadcast } from "./path";
+import { type RelativeBroadcast, RelativeBroadcastSchema } from "./path";
 import { PRIORITY } from "./priority";
 import { section } from "./section";
 import { TextSchema } from "./text";
@@ -20,7 +20,7 @@ import { VideoSchema } from "./video";
  * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `archive`
  * (the segment index and any durable recording) and its `clock` (the one wall-clock mapping);
  * `json` and `binary` list application data tracks that aren't media. A section is omitted
- * when it holds no tracks.
+ * when it holds no tracks. `contributions` lists whole broadcasts without opening them.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
@@ -28,6 +28,8 @@ import { VideoSchema } from "./video";
  * built via `z.extend(RootSchema, { ... })`.
  */
 export const RootSchema = z.looseObject({
+	// Whole broadcasts are listed without opening their catalogs. IDs stay scoped to each broadcast.
+	contributions: z.optional(z.record(z.string(), z.object({ broadcast: RelativeBroadcastSchema }))),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
 	// An incompatible archive disables seeking/recording, not the rest of the catalog.
@@ -108,6 +110,7 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 		root.text?.renditions,
 		root.json?.tracks,
 		root.binary?.tracks,
+		root.contributions,
 	];
 	for (const section of sections) {
 		for (const { broadcast } of Object.values(section ?? {})) {

@@ -300,7 +300,15 @@ export class Broadcast {
 			const catalog = effect.get(this.in.catalog);
 			let accepted: Catalog.Root | undefined;
 			try {
-				accepted = catalog && Catalog.checkResolvable(Catalog.checkRenditions(catalog), name);
+				accepted =
+					catalog &&
+					Catalog.checkResolvable(
+						Catalog.checkRenditions({
+							...catalog,
+							contributions: Catalog.RootSchema.shape.contributions.parse(catalog.contributions),
+						}),
+						name,
+					);
 			} catch (err) {
 				console.error("rejecting catalog", name, err);
 			}
@@ -434,6 +442,39 @@ export class Broadcast {
 		if (!origin) return undefined;
 
 		return this.#requestBroadcast(effect, origin, target.path);
+	}
+
+	/**
+	 * Select a whole contribution, opening its catalog only while the caller owns this effect.
+	 * Wire the returned broadcast into a media source inside a nested effect. Its rendition
+	 * IDs stay local to that broadcast, so they never replace the parent catalog's IDs.
+	 *
+	 * ```ts
+	 * effects.run((effect) => {
+	 *   const child = broadcast.contribution(effect, "extra");
+	 *   if (!child) return;
+	 *   const source = new Video.Source({ broadcast: child, supported: Video.Decoder.supported });
+	 *   effect.cleanup(() => source.close());
+	 *   const decoder = new Video.Decoder({ source, sync });
+	 *   effect.cleanup(() => decoder.close());
+	 *   // Feed decoder.out.frame into your renderer.
+	 * });
+	 * ```
+	 */
+	contribution(effect: Effect, id: string): Broadcast | undefined {
+		const catalog = effect.get(this.out.catalog);
+		const entry = catalog?.contributions?.[id];
+		if (!entry || !Object.hasOwn(catalog?.contributions ?? {}, id)) return undefined;
+		const name = Path.tryResolve(effect.get(this.in.name), entry.broadcast);
+		if (name === undefined) throw new Catalog.EscapingBroadcast(entry.broadcast);
+		const child = new Broadcast({
+			origin: this.in.origin,
+			name,
+			enabled: this.in.enabled,
+			announced: this.in.announced,
+		});
+		effect.cleanup(() => child.close());
+		return child;
 	}
 
 	close() {

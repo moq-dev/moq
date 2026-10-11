@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// `archive` (each track's timeline and any durable recording), the optional `clock` (the
 /// broadcast's one wall-clock mapping), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
-/// transport stream carried whole).
+/// transport stream carried whole). `contributions` names whole broadcasts for explicit selection.
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
@@ -29,6 +29,10 @@ use serde::{Deserialize, Serialize};
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned + Default"))]
 #[non_exhaustive]
 pub struct Catalog<E = ()> {
+	/// Whole broadcasts offered for explicit, lazy selection, keyed by contribution ID.
+	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+	pub contributions: std::collections::BTreeMap<String, Contribution>,
+
 	/// Video track information with multiple renditions.
 	///
 	/// Contains a map of video track renditions that the viewer can choose from
@@ -112,6 +116,13 @@ pub struct Catalog<E = ()> {
 	pub ext: E,
 }
 
+/// A whole broadcast whose catalog describes its own renditions.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Contribution {
+	/// Reference resolved relative to the catalog broadcast.
+	pub broadcast: moq_net::path::RelativeOwned,
+}
+
 impl Catalog<()> {
 	/// The default name for the catalog track.
 	pub const DEFAULT_NAME: &str = "catalog.json";
@@ -167,6 +178,7 @@ impl<E> Catalog<E> {
 	/// Copy the media sections into a catalog with no application extension.
 	pub fn media(&self) -> Catalog<()> {
 		Catalog {
+			contributions: self.contributions.clone(),
 			video: self.video.clone(),
 			audio: self.audio.clone(),
 			archive: self.archive.clone(),
@@ -335,6 +347,21 @@ mod test {
 		] {
 			let encoded = encoded.replace(EPOCH, bad);
 			assert!(Catalog::<()>::from_str(&encoded).is_err(), "{bad} must be refused");
+		}
+	}
+
+	#[test]
+	fn contributions_round_trip_and_refuse_malformed_entries() {
+		let json = r#"{"contributions":{"extra":{"broadcast":"./extra.hang"}}}"#;
+		let catalog = Catalog::<()>::from_str(json).unwrap();
+		assert_eq!(catalog.contributions["extra"].broadcast.as_str(), "extra.hang");
+		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
+		for json in [
+			r#"{"contributions":{"extra":null}}"#,
+			r#"{"contributions":{"extra":{}}}"#,
+			r#"{"contributions":{"extra":{"broadcast":42}}}"#,
+		] {
+			assert!(Catalog::<()>::from_str(json).is_err());
 		}
 	}
 

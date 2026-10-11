@@ -66,6 +66,7 @@ fn check_resolvable<E>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
 		.chain(text.map(|(_, config)| config.broadcast.as_ref()))
 		.chain(json.map(|(_, config)| config.broadcast.as_ref()))
 		.chain(binary.map(|(_, config)| config.broadcast.as_ref()))
+		.chain(catalog.contributions.values().map(|entry| Some(&entry.broadcast)))
 		.flatten()
 	{
 		if !rel.is_empty() && base.try_resolve(rel).is_none() {
@@ -79,6 +80,12 @@ fn check_resolvable<E>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	#[test]
+	fn contributions_cannot_escape_the_root() {
+		let catalog = Catalog::<()>::from_str(r#"{"contributions":{"extra":{"broadcast":"../../escape"}}}"#).unwrap();
+		assert!(check_resolvable(&PathOwned::from("room/main.hang"), &catalog).is_err());
+	}
 
 	#[tokio::test]
 	async fn subscribe_reads_a_typed_root() {
