@@ -30,7 +30,9 @@ gaps shape it.
   translated. Convert all of moq-net at once; it is mechanical.
 - Replace the codec's u128 uses (`Duration::as_millis`/`as_nanos` in
   `lite/auth.rs:106`, `lite/track.rs:103-105`, `lite/subscribe.rs:96`) with
-  checked u64 math that keeps the same results and errors.
+  checked u64 math that keeps the same results and errors. The same goes
+  for `Timescale::new` (`model/time.rs`), which TRACK_INFO decoding calls and
+  which widens to u128 for its `2^62 - 1` bound; check the bound in u64.
 - Keep zigzag and the u64 halves as they are: the runtime's `U64` provides
   the bit operations (the #5049 prototype translated zigzag exactly).
 - Benchmark `--bench codec` before and after.
