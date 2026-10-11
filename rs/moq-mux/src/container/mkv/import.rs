@@ -450,7 +450,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					.ok_or_else(|| anyhow::Error::new(LacingError::MissingDuration))?,
 			)
 		} else {
-			track.default_duration
+			None
 		};
 		// Validate the last timestamp before publishing any part of this block.
 		let step = duration.map(|duration| duration.as_nanos()).unwrap_or_default();

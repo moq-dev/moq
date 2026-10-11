@@ -741,3 +741,52 @@ async fn malformed_lacing_is_refused() {
 		assert!(imported.published.values().all(Vec::is_empty));
 	}
 }
+
+/// An unlaced block's duration follows its cadence, not an unparsed track default.
+#[tokio::test(start_paused = true)]
+async fn unlaced_block_duration_does_not_use_track_default() {
+	let mut entry = track_entry_video_vp9(1, 16, 16);
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+		unreachable!()
+	};
+	children.push(MatroskaSpec::DefaultDuration(20_000_000));
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![entry])
+		.cluster(0, || {
+			[0, 40]
+				.into_iter()
+				.map(|timestamp| {
+					let MatroskaSpec::SimpleBlock(raw) = simple_block(1, timestamp, true, b"frame") else {
+						unreachable!()
+					};
+					let mut children = vec![MatroskaSpec::Block(raw), MatroskaSpec::BlockDuration(40)];
+					if timestamp != 0 {
+						children.push(MatroskaSpec::ReferenceBlock(-40));
+					}
+					MatroskaSpec::BlockGroup(Master::Full(children))
+				})
+				.collect()
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&data).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let name = snapshot.video.renditions.keys().next().unwrap();
+	let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut last = None;
+	while let Some(mut group) = track.recv_group().await.unwrap() {
+		while let Some(frame) = group.read_frame().await.unwrap() {
+			let frame = hang::container::Frame::decode(frame.payload).unwrap();
+			last = Some((frame.timestamp.as_micros(), frame.payload.len()));
+		}
+	}
+	assert_eq!(last, Some((80_000, 0)));
+}
