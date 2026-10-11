@@ -95,8 +95,9 @@ func BenchmarkPublisher(b *testing.B) {
 									done <- err
 									return
 								}
-								if frame == nil || !bytes.Equal(frame.Payload, payload) {
-									done <- fmt.Errorf("missing or corrupt frame")
+								want := time.Duration(n*frames+f) * time.Millisecond
+								if frame == nil || frame.Timestamp == nil || *frame.Timestamp != want || !bytes.Equal(frame.Payload, payload) {
+									done <- fmt.Errorf("missing, reordered, or corrupt frame %d", f)
 									return
 								}
 							}

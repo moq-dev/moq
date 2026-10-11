@@ -150,17 +150,18 @@ auto frame = co_await media->next();
 
 ## Runtime
 
-Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
-host still poll in place; independent native wake callbacks can run concurrently.
-The configured executor dispatches continuations. Call `moq::shutdown()` from a
-host thread before unloading the module; it joins native workers and then the
-executor. Never call shutdown from a continuation.
+Native I/O and background tasks run on a Tokio worker pool. Futures are still
+polled on the [executor](#executor), while `get()` and `wait_for()` block the
+calling thread; independent native wake callbacks can run concurrently. The
+executor passed to `then()` dispatches only the continuation. Call
+`moq::shutdown()` from a host thread before unloading the module; it joins
+native workers and then the executor. Never call shutdown from a continuation.
 
 ## Executor
 
-Futures are polled, and continuations run, on one process-wide executor
-thread unless you install your own with `moq::set_executor(executor,
-shutdown)` before the first async call. An `Executor` takes a `moq::Task` and
+Futures are polled on one process-wide executor thread unless you install your
+own with `moq::set_executor(executor, shutdown)` before the first async call.
+An `Executor` takes a `moq::Task` and
 returns true once it has accepted it; `shutdown` stops accepting and returns
 once no task can still run. A host with its own threads (a game engine)
 installs one that hops onto them. The executor passed to `then()` is separate:

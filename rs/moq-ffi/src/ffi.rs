@@ -415,20 +415,49 @@ mod tests {
 		let runtime = Arc::new(Runtime::new());
 		let (entered, entering) = std::sync::mpsc::channel();
 		let (release, released) = std::sync::mpsc::channel();
-		let (finished, finishing) = std::sync::mpsc::channel();
+		let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let callback = finished.clone();
 		runtime.spawn(async move {
 			entered.send(()).unwrap();
 			released.recv().unwrap();
-			finished.send(()).unwrap();
+			callback.store(true, std::sync::atomic::Ordering::SeqCst);
 		});
 		entering.recv().unwrap();
-		let owner = runtime.clone();
-		let shutdown = std::thread::spawn(move || owner.shutdown());
+
+		// Each caller reports whether the callback had finished when its shutdown returned.
+		let shutdown = |runtime: Arc<Runtime>, finished: Arc<std::sync::atomic::AtomicBool>| {
+			move || {
+				runtime.shutdown();
+				finished.load(std::sync::atomic::Ordering::SeqCst)
+			}
+		};
+
+		// Wait until the first caller has flagged the stop, so it holds the owner lock and is
+		// joining the workers while the callback is still held.
+		let mut stopped = runtime.stopped.subscribe();
+		let first = std::thread::spawn(shutdown(runtime.clone(), finished.clone()));
+		tokio::runtime::Builder::new_current_thread()
+			.build()
+			.unwrap()
+			.block_on(stopped.wait_for(|&stopped| stopped))
+			.unwrap();
+
+		let (started, starting) = std::sync::mpsc::channel();
+		let second = std::thread::spawn({
+			let shutdown = shutdown(runtime.clone(), finished.clone());
+			move || {
+				started.send(()).unwrap();
+				shutdown()
+			}
+		});
+		starting.recv().unwrap();
+
 		release.send(()).unwrap();
-		shutdown.join().unwrap();
-		finishing
-			.try_recv()
-			.expect("shutdown returned with a callback in flight");
+		assert!(first.join().unwrap(), "shutdown returned with a callback in flight");
+		assert!(
+			second.join().unwrap(),
+			"a concurrent shutdown returned with a callback in flight"
+		);
 		runtime.shutdown();
 	}
 
