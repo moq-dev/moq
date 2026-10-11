@@ -24,6 +24,7 @@
 
 mod adts;
 mod export;
+mod follower;
 mod health;
 mod import;
 mod mux_rate;
@@ -39,6 +40,7 @@ mod catalog;
 
 pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, SiEntry, Track, Verbatim};
 pub use export::Export;
+pub use follower::Follower;
 pub use import::*;
 pub use passthrough::Passthrough;
 pub use programs::Programs;

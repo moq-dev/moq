@@ -42,6 +42,7 @@ A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, and `lb_id` (or `load_balancer`), which
 only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
+`lb_nonce` needs `lb_id`. `lb_id` and `lb_nonce` cannot be combined with `load_balancer`.
 `unix.allow` needs `unix.bind`.
 
 ## \[quic]
@@ -201,6 +202,8 @@ limits, past which one is closed with `TOO_MANY_REQUESTS`. [Stats](/concept/stat
 encodings; read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
+
+Iroh requires building the relay from source with `cargo build --release -p moq-relay --features iroh`. Published binaries, Docker images, and the Nix package leave it out.
 
 ```toml
 [iroh]
