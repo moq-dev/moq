@@ -400,6 +400,7 @@ impl Producer {
 			state: self.state.consume(),
 			rendition,
 			after: None,
+			feed: None,
 		}
 	}
 }
@@ -427,15 +428,35 @@ pub struct Segment {
 
 /// A cursor over one rendition's segments, in timeline order.
 ///
-/// Obtained from [`Rendition::segments`](super::Rendition::segments). Drives the same
-/// fetch-on-demand path the HTTP serve path uses, so it adds no standing traffic: each
-/// [`next`](Self::next) awaits the next segment, then FETCHes and transmuxes it.
+/// Obtained from [`Rendition::segments`](super::Rendition::segments). Each
+/// [`next`](Self::next) awaits the next segment, then FETCHes and transmuxes it through the
+/// path the HTTP serve path uses. The cursor also holds a live subscription to the media
+/// track, so each group reaches the cache as it is published and that FETCH is a hit. A
+/// cursor reads every group anyway, so this costs no extra traffic, and a source without
+/// FETCH (moq-lite before 05) can serve a group no other way.
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
 	/// Last fetched or skipped segment, with the reference numbering it; errors leave it unchanged
 	/// so callers can retry.
 	after: Option<(Reference, u64)>,
+	feed: Option<Feed>,
+}
+
+/// The live subscription a [`Consumer`] holds on its rendition's media track.
+struct Feed {
+	/// What it subscribed through: a rebound sibling publisher gets a fresh feed.
+	binding: Arc<moq_mux::Binding>,
+	state: FeedState,
+}
+
+enum FeedState {
+	/// Waiting for the binding to resolve the broadcast.
+	Binding,
+	Subscribing(moq_net::track::Subscribing),
+	Live(Box<moq_net::track::Subscriber>),
+	/// The track can't be subscribed; fetches fail on their own.
+	Failed,
 }
 
 impl Consumer {
@@ -476,7 +497,8 @@ impl Consumer {
 		}
 	}
 
-	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
+		self.poll_feed(waiter);
 		let poll = self
 			.state
 			.poll(waiter, |state| match state.next_after(self.after.as_ref()) {
@@ -489,6 +511,39 @@ impl Consumer {
 			// The producer closed without a clean end (broadcast dropped): no more segments.
 			Poll::Ready(Err(_)) => Poll::Ready(None),
 			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Hold a live subscription on the media track the rendition is bound to now.
+	fn poll_feed(&mut self, waiter: &kio::Waiter) {
+		let binding = self.rendition.binding();
+		let feed = match &mut self.feed {
+			Some(feed) if Arc::ptr_eq(&feed.binding, &binding) => feed,
+			feed => feed.insert(Feed {
+				binding,
+				state: FeedState::Binding,
+			}),
+		};
+		loop {
+			feed.state = match &mut feed.state {
+				FeedState::Binding => match self.rendition.poll_subscribe(&feed.binding, waiter) {
+					Poll::Ready(Some(subscribing)) => FeedState::Subscribing(subscribing),
+					Poll::Ready(None) => FeedState::Failed,
+					Poll::Pending => return,
+				},
+				FeedState::Subscribing(subscribing) => match subscribing.poll_ok(waiter) {
+					Poll::Ready(Ok(subscriber)) => FeedState::Live(Box::new(subscriber)),
+					Poll::Ready(Err(_)) => FeedState::Failed,
+					Poll::Pending => return,
+				},
+				FeedState::Live(subscriber) => {
+					// Drop each group as it arrives: the cache keeps it for the fetch, and a
+					// subscription that resumed across routes only pulls while it is read.
+					while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(waiter) {}
+					return;
+				}
+				FeedState::Failed => return,
+			};
 		}
 	}
 }

@@ -142,6 +142,19 @@ impl Tail {
 				.any(|run| run.groups.start <= groups.start && groups.end <= run.groups.end)
 	}
 
+	/// When the ledger gives up on a missing `group`: once the grace has passed since a later
+	/// group opened the gap below it. `None` while it is accounted for, or while no later
+	/// group has arrived, since nothing says it is late yet.
+	pub fn folds_at(&self, group: u64) -> Option<Instant> {
+		let above = self
+			.runs
+			.get(self.runs.partition_point(|run| run.groups.end <= group))?;
+		match above.groups.start <= group {
+			true => None,
+			false => above.since.checked_add(self.grace),
+		}
+	}
+
 	/// The runs of `groups` not accounted for, in order.
 	pub fn gaps(&self, groups: Range<u64>) -> Vec<Range<u64>> {
 		let mut gaps = Vec::new();
@@ -307,6 +320,21 @@ mod tests {
 		tail.expire(start + GRACE * 2);
 		assert_eq!(groups(&tail), vec![0..9]);
 		assert!(tail.covers(0..9));
+	}
+
+	/// A missing group is given up on a grace after a later one opened its gap, and not
+	/// before anything later has arrived.
+	#[test]
+	fn a_missing_group_folds_a_grace_after_its_gap_opened() {
+		let start = Instant::now();
+		let mut tail = Tail::new(GRACE);
+		tail.account(0..1, start);
+		assert_eq!(tail.folds_at(0), None, "accounted for");
+		assert_eq!(tail.folds_at(1), None, "nothing later arrived");
+
+		tail.account(2..3, start + GRACE / 2);
+		assert_eq!(tail.folds_at(1), Some(start + GRACE / 2 + GRACE));
+		assert_eq!(tail.folds_at(3), None);
 	}
 
 	/// Splitting a gap leaves both halves with its age.
