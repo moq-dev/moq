@@ -1754,6 +1754,7 @@ impl<E: catalog::Catalog> Export<E> {
 
 		self.schedule.set_buffer(0, Buffer::SYSTEM);
 		self.schedule.set_buffer(pmt_pid, Buffer::SYSTEM);
+		self.schedule.set_clock(pcr_pid);
 		for track in self.tracks.values() {
 			self.liveness.register(track.pid);
 		}
@@ -2024,12 +2025,12 @@ impl<E: catalog::Catalog> Export<E> {
 		};
 		let (pcr_pid, pmt_pid) = (psi.pcr_pid, psi.pmt_pid);
 		while let Some(slot) = self.schedule.next(known)? {
-			let mut payload = pcr_packet(pcr_pid, slot.pcr)?;
+			let mut clock = pcr_packet(pcr_pid, slot.pcr)?;
 			let discontinuity = std::mem::take(&mut self.pcr_discontinuity);
 			if discontinuity {
-				payload[5] |= 0x80;
+				clock[5] |= 0x80;
 			}
-			payload.extend_from_slice(&slot.layout(pmt_pid, &NULL_PACKET));
+			let mut payload = slot.layout(&clock, pmt_pid, &NULL_PACKET);
 			self.number(&mut payload);
 			let frame = Frame {
 				timestamp: slot_stamp(slot.index)?,
