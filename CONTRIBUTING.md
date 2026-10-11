@@ -1,7 +1,7 @@
 # Commits
 
 PRs into `main` are squash-merged through the merge queue, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
-The one exception is the release back-merge, which lands as a merge commit (see [Merge queue](#merge-queue)).
+The one exception is the maintainer's pre-release merge of `release` into `main`, which lands as a merge commit (see [Releases](#releases)).
 PRs into `release` use a merge commit, so their history survives until they land.
 
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
@@ -34,10 +34,7 @@ Enqueue a reviewed PR with `gh pr merge <number>`.
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
 Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.
 
-Never bypass the queue with `--admin`, with one exception: the queue only squashes, so Check's `land` job has moq-bot merge the release back-merge with `--admin` as a merge commit once Check and Test pass on its head.
-moq-bot can bypass the queue only when merging a pull request, never on a direct push.
-The `land` job fires only for this repository's `merge/release-into-main` branch, so anyone with write access who pushes to that branch gets a passing head merged past the queue, unreviewed.
-Never enqueue the back-merge, since the queue would squash it; if `land` fails, re-run it from the PR's Check run.
+Never bypass the queue with `--admin`, with one exception: the maintainer's pre-release merge of `release` into `main`, since the queue would squash it.
 
 # AI
 
@@ -49,7 +46,7 @@ Prefer a quest for work needing durable scope or coordination.
 
 # Reviews
 
-AI agents review every push on their own.
+AI agents review pushes on their own, skipping ones they judge trivial.
 Never explicitly request a review.
 
 For each finding:
@@ -57,8 +54,9 @@ For each finding:
 - If you don't agree with it, reply to the finding and move on.
 - If it's a relatively easy improvement, fix it and push. Update the summary if needed.
 
-Wait for a review of the final head from any reviewer other than Grok.
+Wait for a review from any reviewer other than Grok.
 Codex (OpenAI) reacts with a thumbs up when it has no findings; that counts as a review.
+A push that gets no new review once CI finishes was judged trivial, so the earlier review still covers it.
 Skipped or rate-limited reviews do not count.
 For a fork with no automatic non-Grok review, ask the maintainer to arrange one.
 Merge only when that review has no findings, or every finding is fixed or replied to.
@@ -86,7 +84,7 @@ For an advisory against noq or Quinn, compare the pinned release's `PARENT` with
 
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
 - Consider a backport for any critical bug fix (crash, security, data loss, broken interop): land it on `main` first, then cherry-pick it onto `release` as a separate PR.
-- After every push to `release`, the Back-merge workflow opens a PR merging `release` into `main`, so trunk carries the published versions and CHANGELOGs. It lands as a merge commit, outside the merge queue; never squash it, or the next back-merge conflicts.
+- Nothing merges `release` into `main` automatically. Before cutting a minor or breaking release, the maintainer merges `release` into `main` once, so trunk carries the published versions, CHANGELOGs, and any `release`-only commits. It lands as a merge commit with `--admin`, never squashed, so the cut starts from an advanced merge base.
 
 # Versions
 

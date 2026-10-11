@@ -529,6 +529,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 
 		// One publisher instance per run, unless redundant publishers named a shared one.
 		let epoch = moq.epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+		tracing::info!(%epoch, "publisher instance");
 
 		for stage in stages {
 			let name = stage.broadcast(&moq);
@@ -652,6 +653,7 @@ fn spawn_import(
 			.with_bandwidth(bandwidth.clone());
 		let publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
+			..
 		}) = &import.source
 		{
 			let name = require_broadcast(name, "import ts --program all")?;
@@ -740,6 +742,7 @@ fn spawn_export(
 			format: stdout.format,
 			max_delay: stdout.max_delay,
 			linger: stdout.linger,
+			stitch: stdout.stitch,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			catalog: export.catalog_format,
@@ -763,11 +766,11 @@ fn spawn_export(
 				}
 			}
 			ExportSink::Srt(srt) => {
-				if let Some(addr) = srt.listen {
+				if let Some(addr) = srt.endpoint.listen {
 					let name = require_broadcast(name, "export srt --listen")?;
-					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt.latency.into_std()));
-				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt.latency.into_std()));
+					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt));
+				} else if let Some(url) = srt.endpoint.connect.clone() {
+					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt));
 				}
 			}
 			ExportSink::Rtc(rtc) => {
@@ -814,8 +817,7 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
-	let source = moq_mux::Source::new(consumer, &name);
-	Subscribe::new(source, catalog, args).run().await
+	Subscribe::new(consumer, &name, catalog, args).run().await
 }
 
 /// Run every endpoint until the first finishes (stdin EOF, SIGINT, SIGTERM, or an

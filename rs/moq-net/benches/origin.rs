@@ -9,20 +9,29 @@
 //! down to its prefix and beneath it. Competing routes at that prefix are
 //! ranked once per change, then each cursor selects its first visible entry.
 //!
+//! `origin/narrow*` put a session in front of the origin, since a narrowing is
+//! enforced by the session serving it: every subscription holds a gate on the
+//! session's grant, and a narrowing wakes each one. The baseline is a session
+//! that never narrows.
+//!
 //! An equal-cost pool is swept the same way, over its members and the paths it
-//! already serves.
+//! already serves, and over those paths and the cursors watching the pool.
 //!
 //! A route swap on one front is swept over its tracks and the copies each track
 //! still holds from earlier routes, and a front retiring over the fronts around it.
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
+#[path = "../tests/support/mod.rs"]
+mod support;
+
 use std::task::Poll;
 use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Epoch, Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio, origin, track};
+use moq_net::{Epoch, Hop, Hops, Pattern, Patterns, Timestamp, announce, auth, broadcast, kio, origin, track};
+use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
@@ -465,23 +474,38 @@ fn bench_retire(c: &mut Criterion) {
 const POOL: [usize; 3] = [4, 32, 256];
 const POOL_PATHS: [usize; 3] = [100, 1_000, 10_000];
 
+/// Announce cursors watching the pool, against [`POOL_PATHS`].
+const POOL_CURSORS: [usize; 3] = [1, 100, 1_000];
+
 /// Hop ids for pool members, clear of the origin's own.
 const POOL_HOP: u64 = 1_000;
 
 /// An origin where `members` equal-cost advertisers claim `pool`, already
 /// serving `paths` requested paths beneath it, spread across the pool by the
-/// hash on each path. Every handle is held so the fronts stay up.
+/// hash on each path, and watched by `cursors` announce cursors. Every handle
+/// is held so the fronts stay up.
 struct Pool {
 	producer: origin::Producer,
 	driver: origin::Driver,
 	_members: Vec<origin::Dynamic>,
 	_producers: Vec<broadcast::Producer>,
 	_consumers: Vec<broadcast::Consumer>,
+	cursors: Vec<announce::Consumer>,
 }
 
-fn pool(members: usize, paths: usize) -> Pool {
+impl Pool {
+	/// Discard what the cursors were delivered, so each iteration measures only what it adds.
+	fn drain(&mut self) {
+		for cursor in &mut self.cursors {
+			while cursor.next().now_or_never().flatten().is_some() {}
+		}
+	}
+}
+
+fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 	let consumer = producer.consume();
+	let cursors = (0..cursors).map(|_| consumer.announced()).collect();
 	let members: Vec<_> = (0..members)
 		.map(|i| producer.dynamic("pool", pool_route(POOL_HOP + i as u64)).unwrap())
 		.collect();
@@ -506,13 +530,16 @@ fn pool(members: usize, paths: usize) -> Pool {
 		.map(|request| request.now_or_never().expect("resolved once driven").expect("served"))
 		.collect();
 
-	Pool {
+	let mut pool = Pool {
 		producer,
 		driver,
 		_members: members,
 		_producers: producers,
 		_consumers: consumers,
-	}
+		cursors,
+	};
+	pool.drain();
+	pool
 }
 
 /// A pool member's claim: one hop, at the same cost as every other member.
@@ -535,7 +562,7 @@ fn bench_pool_churn(c: &mut Criterion) {
 		for paths in POOL_PATHS {
 			let id = BenchmarkId::from_parameter(format!("{members}m_{paths}p"));
 			group.bench_function(id, |b| {
-				let mut pool = pool(members, paths);
+				let mut pool = pool(members, paths, 0);
 				let waiter = kio::Waiter::noop();
 				let hop = POOL_HOP + members as u64;
 				b.iter(|| {
@@ -543,6 +570,35 @@ fn bench_pool_churn(c: &mut Criterion) {
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 					drop(joined);
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+/// [`bench_pool_churn`] at 32 members, watched by `cursors` announce cursors.
+///
+/// A front whose path the newcomer takes checks whether every cursor on the
+/// prefix already restarted for it before renewing the prefix, so the moved
+/// fronts times the cursors is the slope to watch.
+fn bench_pool_cursors(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/pool_cursors");
+	group.sample_size(10);
+	let members = 32;
+	for paths in POOL_PATHS {
+		for cursors in POOL_CURSORS {
+			let id = BenchmarkId::from_parameter(format!("{paths}p_{cursors}c"));
+			group.bench_function(id, |b| {
+				let mut pool = pool(members, paths, cursors);
+				let waiter = kio::Waiter::noop();
+				let hop = POOL_HOP + members as u64;
+				b.iter(|| {
+					let joined = pool.producer.dynamic("pool", pool_route(hop)).unwrap();
+					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					drop(joined);
+					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					pool.drain();
 				});
 			});
 		}
@@ -604,6 +660,152 @@ fn bench_handoff(c: &mut Criterion) {
 					}
 					total
 				})
+			});
+		});
+	}
+	group.finish();
+}
+
+/// `(routes, subscribers)` shapes for the narrowing benchmarks: [`SHAPES`] plus a
+/// row that grows the routes alone, so each axis shows its own slope.
+const NARROW_SHAPES: [(usize, usize); 4] = [(100, 10), (1_000, 10), (1_000, 100), (1_000, 1_000)];
+
+/// A relay serving `routes` broadcasts to one client session subscribed to
+/// `subscribers` of them. The first subscription is the one a narrowing to
+/// `room/**` ends: its broadcast sits at `muted` instead.
+struct Watching {
+	pair: MockPair,
+	tracks: Vec<track::Producer>,
+	subscriptions: Vec<track::Subscriber>,
+	_broadcasts: Vec<broadcast::Producer>,
+	_origins: [origin::Producer; 2],
+}
+
+fn watched_path(index: usize) -> String {
+	match index {
+		0 => "muted".to_string(),
+		index => format!("room/{index}"),
+	}
+}
+
+async fn watching(routes: usize, subscribers: usize) -> Watching {
+	let spawn = |hop| {
+		let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+		support::harness::spawn(driver);
+		producer
+	};
+	let relay = spawn(1);
+	let received = spawn(2);
+
+	let mut broadcasts = Vec::new();
+	let mut tracks = Vec::new();
+	for index in 0..routes {
+		let broadcast = relay.publish(watched_path(index), origin::Route::default()).unwrap();
+		tracks.push(broadcast.create_track("video", None).unwrap());
+		broadcasts.push(broadcast);
+	}
+
+	let mut options = MockConnectOptions::new("moq-lite-06".parse().unwrap());
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(received.clone());
+	let pair = connect_mock(options).await;
+
+	let mut subscriptions = Vec::new();
+	for index in 0..subscribers {
+		let remote = received.consume().routed_broadcast(watched_path(index)).await.unwrap();
+		let subscription = remote.track("video").unwrap().subscribe(None).await.unwrap();
+		subscriptions.push(subscription);
+	}
+	// One round, so every subscription is live end to end before anything is timed.
+	let mut watching = Watching {
+		pair,
+		tracks,
+		subscriptions,
+		_broadcasts: broadcasts,
+		_origins: [relay, received],
+	};
+	watching.round().await;
+	watching
+}
+
+impl Watching {
+	/// Every subscribed track writes a group, and every subscription reads it.
+	async fn round(&mut self) {
+		for track in &self.tracks[..self.subscriptions.len()] {
+			let mut group = track.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		for subscription in &mut self.subscriptions {
+			subscription.recv_group().await.unwrap().expect("track ended");
+		}
+	}
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.build()
+		.unwrap()
+}
+
+/// Everything under `room/`, which leaves out only the `muted` subscription.
+fn room() -> auth::Grant {
+	auth::Grant {
+		subscribe: Pattern::subtree("room").unwrap().into(),
+		..auth::Grant::all()
+	}
+}
+
+/// Steady-state delivery through a session's gates: one round across every
+/// subscription, on a session that never narrows and on one narrowed to a grant
+/// that still covers them all. Neither may depend on `routes`.
+fn bench_narrow_delivery(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/narrow_delivery");
+	let rt = runtime();
+	for (routes, subscribers) in NARROW_SHAPES {
+		group.throughput(Throughput::Elements(subscribers as u64));
+		for narrowed in [false, true] {
+			let label = if narrowed { "narrowed" } else { "never" };
+			let id = BenchmarkId::new(label, format!("{routes}r_{subscribers}s"));
+			group.bench_function(id, |b| {
+				let mut watching = rt.block_on(watching(routes, subscribers));
+				if narrowed {
+					// Covers every subscription but the muted one, which is not subscribed here.
+					let mut grant = room();
+					grant.subscribe.insert(Pattern::literal("muted").unwrap());
+					watching.pair.server.auth().authorize(&grant);
+				}
+				b.iter(|| rt.block_on(watching.round()));
+			});
+		}
+	}
+	group.finish();
+}
+
+/// One narrowing on a live session: from `narrow` until the subscription it
+/// excludes resets. It wakes every subscription's gate and re-checks every route
+/// the session announced, so it may grow with the session's own `subscribers`
+/// and `routes`, never with anything else on the origin.
+fn bench_narrow(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/narrow");
+	group.sample_size(10);
+	group.sampling_mode(criterion::SamplingMode::Flat);
+	let rt = runtime();
+	for (routes, subscribers) in NARROW_SHAPES {
+		let id = BenchmarkId::from_parameter(format!("{routes}r_{subscribers}s"));
+		group.bench_function(id, |b| {
+			b.iter_custom(|iters| {
+				let mut elapsed = Duration::ZERO;
+				for _ in 0..iters {
+					let mut watching = rt.block_on(watching(routes, subscribers));
+					let start = std::time::Instant::now();
+					watching.pair.server.auth().authorize(&room());
+					let ended = rt.block_on(watching.subscriptions[0].recv_group());
+					elapsed += start.elapsed();
+					assert!(ended.is_err(), "the muted subscription outlived the narrowing");
+				}
+				elapsed
 			});
 		});
 	}
@@ -881,7 +1083,10 @@ criterion_group!(
 	bench_request,
 	bench_retire,
 	bench_pool_churn,
+	bench_pool_cursors,
 	bench_handoff,
+	bench_narrow_delivery,
+	bench_narrow,
 	bench_relay,
 	bench_parked,
 	bench_copy_walk

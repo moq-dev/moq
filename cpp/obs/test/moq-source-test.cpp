@@ -493,13 +493,17 @@ public:
 			moq::VideoInit init{};
 			init.format = moq::VideoFormat::kAvc3;
 			init.data = TestH264Init();
-			this->video = TestOk(broadcast->publish_video(init), "publish_video");
+			this->video =
+				TestOk(moq::MediaTrackProducer::video(broadcast, moq::MediaTarget::kNamed{}, init),
+				       "video producer");
 		}
 		if (audio) {
 			moq::AudioInit init{};
 			init.format = moq::AudioFormat::kOpus;
 			init.data = TestOpusHead();
-			this->audio = TestOk(broadcast->publish_audio(init), "publish_audio");
+			this->audio =
+				TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init),
+				       "audio producer");
 		}
 		TestOk(broadcast->announce(moq::Route{}), "announce");
 	}
@@ -531,8 +535,8 @@ public:
 	}
 
 	std::shared_ptr<moq::BroadcastProducer> broadcast;
-	std::shared_ptr<moq::MediaProducer> video;
-	std::shared_ptr<moq::MediaProducer> audio;
+	std::shared_ptr<moq::MediaTrackProducer> video;
+	std::shared_ptr<moq::MediaTrackProducer> audio;
 
 private:
 	uint64_t timestamp_us = 1'000'000;

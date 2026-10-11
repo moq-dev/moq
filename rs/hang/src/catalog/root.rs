@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// The base catalog carries the media sections (`video`, `audio`, `text`), the optional
 /// `archive` (each track's timeline and any durable recording), the optional `clock` (the
-/// broadcast's one wall-clock mapping), and the data sections
-/// (`json`, `binary`) for application tracks that aren't media.
+/// broadcast's one wall-clock mapping), the data sections
+/// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
+/// transport stream carried whole).
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
@@ -98,6 +99,11 @@ pub struct Catalog<E = ()> {
 		deserialize_with = "crate::catalog::deserialize_section"
 	)]
 	pub binary: Binary,
+
+	/// A transport stream carried whole rather than demultiplexed: the one track holding its
+	/// packets, verbatim. See [`M2ts`](crate::catalog::M2ts). Omitted from the wire when absent.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub m2ts: Option<crate::catalog::M2ts>,
 
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	#[serde(flatten)]
@@ -697,6 +703,23 @@ mod test {
 		assert_eq!(
 			Catalog::<()>::from_str(&json).expect("failed to decode").clock,
 			Some(clock)
+		);
+	}
+
+	#[test]
+	fn m2ts_roundtrips_at_the_root() {
+		let mut m2ts = crate::catalog::M2ts::new("0.m2ts");
+		m2ts.random_access = true;
+		let catalog = Catalog::<()> {
+			m2ts: Some(m2ts.clone()),
+			..Default::default()
+		};
+
+		let json = catalog.to_json().expect("failed to encode");
+		assert_eq!(json, r#"{"m2ts":{"track":"0.m2ts","randomAccess":true}}"#);
+		assert_eq!(
+			Catalog::<()>::from_str(&json).expect("failed to decode").m2ts,
+			Some(m2ts)
 		);
 	}
 

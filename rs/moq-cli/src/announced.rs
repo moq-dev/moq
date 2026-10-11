@@ -93,9 +93,9 @@ async fn follow(
 		let (announce, active) = match event {
 			Event::Start(announce) => (announce, true),
 			Event::End(announce) => (announce, false),
-			// An `Update` is a new route for a path already announced, which changes
-			// nothing shown; nothing else names a path.
-			_ => continue,
+			// A new route or a new instance for a path already announced, which changes
+			// nothing shown.
+			Event::Update(_) | Event::Restart(_) => continue,
 		};
 
 		let path = announce.prefix.as_str();

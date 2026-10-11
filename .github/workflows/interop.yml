@@ -107,6 +107,16 @@ jobs:
           # and a passing one is deleted as usual.
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # Registry installs and the release matrix run only on main, nightly or
+      # on demand: a break only needs catching before the next release.
+      - name: Released wire compatibility
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: nix develop --command just test wire-compat
+        shell: bash -leo pipefail {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       - name: Interop negative control
         run: nix develop --command just test interop-negative
         shell: bash -leo pipefail {0}
@@ -143,6 +153,14 @@ jobs:
       # export has to as well without overflowing the receiver's buffers.
       - name: TS broadcast-sized CPB
         run: nix develop --command just test ts --hrd
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # The same video beside four audio PIDs in a multiplex faster than its Rx: each slot
+      # has to interleave the video with the rest, or its transport buffer overflows.
+      - name: TS multiplex above the video's Rx
+        run: nix develop --command just test ts --headroom
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs

@@ -60,6 +60,7 @@ impl AnnouncedRecord {
 			Event::Start(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_START),
 			Event::Update(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_UPDATE),
 			Event::End(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_END),
+			Event::Restart(update) => (update, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART),
 		};
 		let captures = update.captures.map(|captures| {
 			captures

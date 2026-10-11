@@ -2,14 +2,12 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
-use bytes::Buf;
-
 use crate::error::MoqError;
 use crate::ffi::{Guard, Task};
 use crate::media::*;
 use crate::producer::MoqTrackInfo;
 
-fn timestamp_us(timestamp: moq_net::Timestamp) -> Result<u64, MoqError> {
+pub(crate) fn timestamp_us(timestamp: moq_net::Timestamp) -> Result<u64, MoqError> {
 	timestamp.as_micros().try_into().map_err(|_| MoqError::TimeOverflow)
 }
 
@@ -19,24 +17,6 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 		payload: frame.payload.to_vec(),
 		timestamp_us,
 	})
-}
-
-fn media_frame(mut frame: moq_mux::container::Frame) -> Result<MoqMediaFrame, MoqError> {
-	let timestamp_us = timestamp_us(frame.timestamp)?;
-	let payload = frame.payload.copy_to_bytes(frame.payload.remaining()).to_vec();
-
-	Ok(MoqMediaFrame {
-		payload,
-		timestamp_us,
-		keyframe: frame.keyframe,
-	})
-}
-
-fn media_container(container: MoqContainer) -> Result<moq_mux::catalog::hang::Container, MoqError> {
-	let container: hang::catalog::Container = container.into();
-	// This byte-oriented API has no media-kind configuration.
-	moq_mux::catalog::hang::Container::new(&container, moq_mux::container::Kind::Data)
-		.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))
 }
 
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
@@ -52,7 +32,7 @@ pub struct MoqSubscription {
 	/// `0` skips immediately; a larger value tolerates that much reordering.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
-	/// buffering, such as `subscribe_media`'s jitter buffer.
+	/// buffering, such as [`MoqMediaContainerConsumer`]'s jitter buffer.
 	#[uniffi(default = 0)]
 	pub max_delay_us: u64,
 	/// The lowest group to deliver (a floor), or null for none. A floor is not a
@@ -93,7 +73,7 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 
 #[derive(Clone, uniffi::Object)]
 pub struct MoqBroadcastConsumer {
-	inner: moq_net::broadcast::Consumer,
+	pub(crate) inner: moq_net::broadcast::Consumer,
 	/// The origin this broadcast was resolved through, if any. A catalog rendition may name a
 	/// sibling broadcast, and only an origin can fetch one; a standalone broadcast (a local
 	/// producer's `consume`) has none, so such a rendition is unresolvable rather than wrong.
@@ -119,8 +99,7 @@ impl MoqBroadcastConsumer {
 		}
 	}
 
-	/// Access the underlying `moq_net::broadcast::Consumer` for sibling
-	/// modules (e.g. `audio`) that need to subscribe a typed track.
+	#[cfg(test)]
 	pub(crate) fn inner(&self) -> &moq_net::broadcast::Consumer {
 		&self.inner
 	}
@@ -150,42 +129,6 @@ impl MoqBroadcastConsumer {
 	}
 }
 
-#[derive(uniffi::Object)]
-pub struct MoqCatalogConsumer {
-	task: Task<Catalog>,
-}
-
-struct Catalog {
-	// Consume with the untyped `Extra` extension so application sections survive into
-	// `MoqCatalog.sections` instead of being dropped.
-	inner: moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>,
-}
-
-impl Catalog {
-	async fn next(&mut self) -> Result<Option<MoqCatalog>, MoqError> {
-		match self.inner.next().await {
-			Ok(Some(catalog)) => Ok(Some(convert_catalog(&catalog))),
-			Ok(None) => Ok(None),
-			Err(e) => Err(e.into()),
-		}
-	}
-}
-
-#[derive(uniffi::Object)]
-pub struct MoqMediaConsumer {
-	task: Task<Media>,
-}
-
-struct Media {
-	inner: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
-}
-
-impl Media {
-	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.inner.read().await?.map(media_frame).transpose()
-	}
-}
-
 // ---- Broadcast ----
 
 #[uniffi::export]
@@ -194,8 +137,8 @@ impl MoqBroadcastConsumer {
 	///
 	/// `reference` is [`MoqVideo::broadcast`] / [`MoqAudio::broadcast`]: absent or empty names
 	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
-	/// rendition that carries one before [`Self::subscribe_media`], [`Self::subscribe_track`],
-	/// [`Self::fetch_group`], or [`Self::fetch_media_group`], which take a track name rather than a
+	/// rendition that carries one before [`crate::media::MoqMediaContainerConsumer::subscribe`], [`Self::subscribe_track`],
+	/// [`Self::fetch_group`], or [`crate::media::MoqMediaContainerGroupConsumer::fetch`], which take a track name rather than a
 	/// rendition; `decode_video` and `decode_audio` resolve it themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
@@ -207,19 +150,6 @@ impl MoqBroadcastConsumer {
 		Ok(Arc::new(match self.origin.clone() {
 			Some(origin) => Self::routed(broadcast, origin),
 			None => Self::new(broadcast),
-		}))
-	}
-
-	/// Subscribe to the catalog for this broadcast.
-	pub async fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
-		let track = self
-			.inner
-			.track(hang::catalog::Catalog::DEFAULT_NAME)?
-			.subscribe(hang::catalog::Catalog::default_subscription())
-			.await?;
-		let consumer = moq_mux::catalog::hang::Consumer::from(track);
-		Ok(Arc::new(MoqCatalogConsumer {
-			task: Task::new(Catalog { inner: consumer }),
 		}))
 	}
 
@@ -253,54 +183,9 @@ impl MoqBroadcastConsumer {
 		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
 		Ok(Arc::new(MoqGroupConsumer::new(group)))
 	}
-
-	/// Fetch one group and decode its track container into media frames.
-	///
-	/// Unlike [`Self::subscribe_media`], this does not create a live subscription or apply
-	/// age-based group skipping. The returned consumer reads exactly the requested group
-	/// until [`MoqMediaGroupConsumer::next`] returns `None`.
-	pub async fn fetch_media_group(
-		&self,
-		name: String,
-		sequence: u64,
-		container: MoqContainer,
-		options: Option<MoqFetchGroupOptions>,
-	) -> Result<Arc<MoqMediaGroupConsumer>, MoqError> {
-		// Parse the container before fetching so invalid CMAF init data does not leave a
-		// dynamic group request waiting for a consumer that can never read it.
-		let media = media_container(container)?;
-		let options = options.map(moq_net::group::Fetch::from);
-		let track = self.inner.track(&name).map_err(map_fetch_error)?;
-		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
-		Ok(Arc::new(MoqMediaGroupConsumer::new(group, media)))
-	}
-
-	/// Subscribe to a track by name, delivering frames in decode order.
-	///
-	/// `container` is the track container from the catalog.
-	/// `subscription` tunes delivery priority, group range, and staleness; omit for defaults.
-	///
-	/// [`MoqSubscription::max_delay_us`] bounds the local jitter buffer as well as
-	/// the publisher's cache, so both ends skip a stalled group on the same budget.
-	pub async fn subscribe_media(
-		&self,
-		name: String,
-		container: MoqContainer,
-		subscription: Option<MoqSubscription>,
-	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
-		// Parse the container before subscribing so we don't leave a dangling
-		// subscription if init parsing fails.
-		let media = media_container(container)?;
-		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
-		let track = self.inner.track(&name)?.subscribe(subscription).await?;
-		let consumer = moq_mux::container::Consumer::new(track, media);
-		Ok(Arc::new(MoqMediaConsumer {
-			task: Task::new(Media { inner: consumer }),
-		}))
-	}
 }
 
-fn map_fetch_error(err: moq_net::Error) -> MoqError {
+pub(crate) fn map_fetch_error(err: moq_net::Error) -> MoqError {
 	match err {
 		moq_net::Error::NotFound | moq_net::Error::NotFetchable => MoqError::NotFound,
 		moq_net::Error::Unsupported | moq_net::Error::Version => MoqError::Unsupported,
@@ -544,6 +429,29 @@ impl MoqTrackConsumer {
 		}
 	}
 
+	/// Hand the subscription to a typed reader (a JSON consumer, say), closing this handle.
+	///
+	/// Errors with [`MoqError::AlreadyCommitted`] once a group read has started, since the reader
+	/// would miss whatever that read consumed.
+	pub(crate) fn take(&self) -> Result<moq_net::track::Subscriber, MoqError> {
+		let mut guard = self.shared.inner.lock().expect("track reader");
+		match guard.as_ref().map(|inner| &inner.track) {
+			Some(Cursor::Uncommitted(_)) => {}
+			Some(_) => return Err(MoqError::AlreadyCommitted),
+			None => return Err(MoqError::Closed),
+		}
+		let Some(TrackInner {
+			track: Cursor::Uncommitted(track),
+		}) = guard.take()
+		else {
+			unreachable!("just matched Uncommitted");
+		};
+		drop(guard);
+		// Wake any datagram read still parked on the subscriber this handle no longer owns.
+		self.cancel_lanes();
+		Ok(track)
+	}
+
 	fn cancel_lanes(&self) {
 		self.shared.close();
 		self.groups.cancel();
@@ -681,54 +589,6 @@ pub struct MoqGroupConsumer {
 	task: Task<GroupInner>,
 }
 
-struct MediaGroupInner {
-	inner: moq_mux::container::GroupConsumer<moq_mux::catalog::hang::Container>,
-}
-
-impl MediaGroupInner {
-	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.inner.read().await?.map(media_frame).transpose()
-	}
-}
-
-/// A finite, container-decoded media group returned by
-/// [`MoqBroadcastConsumer::fetch_media_group`].
-#[derive(uniffi::Object)]
-pub struct MoqMediaGroupConsumer {
-	sequence: u64,
-	task: Task<MediaGroupInner>,
-}
-
-impl MoqMediaGroupConsumer {
-	fn new(group: moq_net::group::Consumer, container: moq_mux::catalog::hang::Container) -> Self {
-		let inner = moq_mux::container::GroupConsumer::new(group, container);
-		Self {
-			sequence: inner.sequence(),
-			task: Task::new(MediaGroupInner { inner }),
-		}
-	}
-}
-
-#[uniffi::export]
-impl MoqMediaGroupConsumer {
-	/// The sequence number of this group within the track.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
-	}
-
-	/// Read the next decoded media frame, or `None` when the group ends.
-	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
-	}
-
-	/// Cancel all current and future `next()` calls.
-	///
-	/// Terminal: the subscription is released here, not when the handle is.
-	pub fn cancel(&self) {
-		self.task.cancel();
-	}
-}
-
 impl MoqGroupConsumer {
 	pub(crate) fn new(group: moq_net::group::Consumer) -> Self {
 		Self {
@@ -755,40 +615,6 @@ impl MoqGroupConsumer {
 	/// Cancel all current and future `read_frame()` calls.
 	///
 	/// Terminal: the group and whatever it still buffers are released here, not when the handle is.
-	pub fn cancel(&self) {
-		self.task.cancel();
-	}
-}
-
-// ---- Catalog Consumer ----
-
-#[uniffi::export]
-impl MoqCatalogConsumer {
-	/// Get the next catalog update. Returns `None` when the track ends or is closed.
-	pub async fn next(&self) -> Result<Option<MoqCatalog>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
-	}
-
-	/// Cancel all current and future `next()` calls.
-	///
-	/// Terminal: the subscription is released here, not when the handle is.
-	pub fn cancel(&self) {
-		self.task.cancel();
-	}
-}
-
-// ---- Media Consumer ----
-
-#[uniffi::export]
-impl MoqMediaConsumer {
-	/// Get the next frame. Returns `None` when the track ends or is closed.
-	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
-	}
-
-	/// Cancel all current and future `next()` calls.
-	///
-	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

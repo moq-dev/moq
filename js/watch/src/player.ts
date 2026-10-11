@@ -36,6 +36,8 @@ export type PlayerInput = {
 	muted: Getter<boolean>;
 	/** Canvas visibility policy for video downloads. */
 	visible: Getter<Video.Visible>;
+	/** Which graphics API paints the canvas. */
+	backend: Getter<Video.Backend>;
 	/** Playback distance from the live edge. */
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
@@ -90,6 +92,7 @@ export class Player {
 			volume: getter(props.volume ?? 0.5),
 			muted: getter(props.muted ?? false),
 			visible: getter(props.visible ?? "20%"),
+			backend: getter<Video.Backend>(props.backend ?? "auto"),
 			delay: getter(props.delay ?? "auto"),
 			buffer: getter(props.buffer ?? Time.Milli.zero),
 			target: getter<Video.Target | undefined>(props.target),
@@ -137,6 +140,7 @@ export class Player {
 			decoder: this.video,
 			canvas: this.in.canvas,
 			visible: this.in.visible,
+			backend: this.in.backend,
 		});
 		this.#signals.cleanup(() => {
 			this.emitter.close();

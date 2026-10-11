@@ -81,18 +81,21 @@ authorization and hidden names work exactly as without one.
 - **Same epoch resumes.** A subscription moves between routes with the same
   epoch without a seam, continuing from the first frame it lacks. A route
   without an epoch keeps its subscriptions until that route goes, which is how
-  a transcoder claim stays on the worker that first served it.
-- **A newer epoch replaces.** Subscriptions to the old instance end, and
-  clients re-request the path to get the new broadcast. That is how a restarted
-  encoder, whose group numbers start over, takes the name instead of stalling
-  viewers on the old sequence.
+  a transcoder claim stays on the worker that first served it, and a track that
+  fails ends instead of resuming, so request the path again.
+- **Another instance restarts.** A newer epoch, or, without one, another route
+  winning the path, is announced as a restart. Subscriptions already open stay
+  on the old instance until dropped or its route goes, while new requests get
+  the new one, so a player follows the restart by requesting the path again.
+  That is how a restarted encoder, whose group numbers start over, takes the
+  name instead of stalling viewers on the old sequence. A relay drops its copy
+  of the old instance, so a new subscriber never sees its cached groups.
 
-The epoch travels on moq-lite 07, which is opt-in. Older moq-lite versions and
-moq-transport cannot carry it, so their routes have no epoch: a relay keeps a
-subscription on the route it first resolved through, and viewers of a
-restarted publisher wait until the old session closes. In a mixed deployment
-the epoch-carrying route supersedes the one without each time it appears, so a
-flapping moq-lite 07 link cuts viewers that resolved through the older link.
+The epoch and the restart message travel on moq-lite 07, which is opt-in.
+Older moq-lite versions and moq-transport carry neither, so their routes have
+no epoch and a restart reaches them as an end then a start of the path. Without
+an epoch, any other route winning is a restart, even a reconnect over the same
+path, since nothing says it serves the same bytes.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
 RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
@@ -137,6 +140,24 @@ a literal `*`. The empty pattern matches the empty path.
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
 its scope can use.
+
+## Authorization
+
+On moq-lite 07 (`moq-lite-07-wip`, opt-in) each side presents a token on its
+own Auth stream and learns what it may publish and subscribe to: a union of
+[path patterns](#path-patterns), delivered exactly as issued rather than widened
+to a prefix. Right after setup both sides present the credential the connection
+already carried (the URL token, a client certificate, or nothing), so a
+publisher learns before anyone subscribes whether its broadcasts can reach the
+peer. More tokens can be added without reconnecting; the session's scope is the
+union of every open token's grant.
+
+A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
+code and the session stays up. A client that publishes outside its grant closes
+the session with `UNAUTHORIZED`, naming the path. moq-transport carries the same
+exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
+to namespace prefixes. Older versions have no grant; the URL token keeps working
+everywhere.
 
 ## Subscriptions
 

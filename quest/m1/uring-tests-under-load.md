@@ -4,10 +4,9 @@
 
 `just check` passes while several checks run on one machine. During the
 2026-10-06 parallel quest run, moq-uring tests failed while concurrent runs
-shared an 8 MiB `RLIMIT_MEMLOCK`, and `deadline_fires_at_park` and
-`dropped_worker_rejects_operations` failed under heavy load and passed alone.
-It recurred on 2026-10-08: four `moq-uring` worker tests failed on ENOMEM
-during a 19-agent quest run, in a PR that never touched the crate.
+shared an 8 MiB `RLIMIT_MEMLOCK`. It recurred on 2026-10-08: four
+`moq-uring` worker tests failed on ENOMEM during a 19-agent quest run, in a PR
+that never touched the crate.
 
 ## Plan
 
@@ -21,8 +20,10 @@ Fix at the cause, never with a retry or longer timeout:
   and CI setup actually allow the tests to pass under parallel load.
   `Error::ring` already reports `RLIMIT_MEMLOCK` on ENOMEM; check that this
   reaches the failing tests. A clearer failure alone does not meet the goal.
-- The worker tests: check the two named tests for wall-clock dependencies and
-  move them to mocked time or event assertions. Leave `remote_wake_unparks`
+- Decided 2026-10-10: `deadline_fires_at_park` and
+  `dropped_worker_rejects_operations`, which failed under heavy load and
+  passed alone, moved to [moq-uring on moq-time](/quest/m1/time/uring.md),
+  which puts the worker on a controlled clock. Leave `remote_wake_unparks`
   alone; it is not this quest.
 - Keep this resource-sharing follow-up standalone: it has no shared fixture
   with the current children of the load-flake questline. Run the affected
@@ -31,3 +32,4 @@ Fix at the cause, never with a retry or longer timeout:
 ## Related
 
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the same cause-first rules and final loaded check apply here
+- [moq-uring on moq-time](/quest/m1/time/uring.md) - the worker deadline tests

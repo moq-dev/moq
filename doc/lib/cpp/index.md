@@ -91,14 +91,14 @@ void ok(moq::expected<void> result) {
 
 ```cpp
 // Subscribe.
-auto client = moq::Client::init();
+auto client = ok(moq::Client::init({}));   // a moq::ClientConfig; {} takes every default
 auto session = ok(client->connect("https://relay.example.com").get());
 auto announced = ok(session->consume()->announced_broadcast("my-stream.hang"));
 auto broadcast = ok(announced->available().get());
-auto catalogs = ok(broadcast->subscribe_catalog().get());
+auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[name, video] : catalog->video) {
-        auto media = ok(broadcast->subscribe_media(name, video.container, std::nullopt).get());
+        auto media = ok(moq::MediaContainerConsumer::subscribe(broadcast, {name, video.container}).get());
         auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }
@@ -109,7 +109,7 @@ if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the cata
 // session is connected as above; opus_init, packet, and rgba come from your
 // encoder or capture source.
 auto broadcast = ok(session->publish()->create_broadcast("my-stream.hang"));
-auto audio = ok(broadcast->publish_audio({moq::AudioFormat::kOpus, opus_init}));
+auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, 20'000}));
 
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};

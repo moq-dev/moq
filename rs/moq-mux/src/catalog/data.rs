@@ -38,7 +38,7 @@ pub(crate) struct Listing {
 	/// Measures `delay` against the catalog's other renditions, media included.
 	estimator: Estimator,
 	/// The catalog clock as of the last write. Read again on every write, since an importer's first
-	/// frame re-anchors the catalog's clock however long after this track was created.
+	/// frame still places the clock if it lands while the catalog is withheld.
 	clock: crate::Clock,
 }
 

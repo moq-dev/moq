@@ -26,9 +26,9 @@ import moq
 
 
 async def main() -> int:
-    server = moq.MoqServer()
-    server.set_bind("127.0.0.1:0")
-    server.set_tls_generate(["localhost"])
+    server = moq.MoqServer(
+        moq.MoqServerConfig(bind="127.0.0.1:0", tls=moq.MoqServerTls(generate=["localhost"]))
+    )
 
     addr = await server.listen()
     print(f"server bound on {addr}")
@@ -40,9 +40,7 @@ async def main() -> int:
 
     accept_task = asyncio.create_task(accept_one())
 
-    client = moq.MoqClient()
-    client.set_tls_verify(False)
-    client.set_bind("127.0.0.1:0")
+    client = moq.MoqClient(moq.MoqClientConfig(bind="127.0.0.1:0", tls=moq.MoqClientTls(insecure=True)))
 
     client_session = await client.connect(f"https://{addr}")
     server_session = await accept_task

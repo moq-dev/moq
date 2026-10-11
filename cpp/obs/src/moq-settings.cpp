@@ -28,8 +28,11 @@ constexpr const char *QUIC_MAX_STREAMS = "quic_max_streams";
 constexpr const char *WEBSOCKET_ENABLED = "websocket_enabled";
 constexpr const char *WEBSOCKET_DELAY = "websocket_delay_ms";
 
-// moq-ffi documents these defaults on the MoqClient setters but does not report them,
-// so they are repeated here. The backoff defaults come from moq::Backoff itself.
+// moq-ffi documents these defaults on MoqClientConfig but leaves each field null rather
+// than reporting it, so they are repeated here.
+constexpr long long BACKOFF_INITIAL_DEFAULT_MS = 1000;
+constexpr long long BACKOFF_MAX_DEFAULT_MS = 5000;
+constexpr long long BACKOFF_TIMEOUT_DEFAULT_MS = 10000;
 constexpr long long QUIC_MAX_STREAMS_DEFAULT = 1024;
 constexpr bool WEBSOCKET_ENABLED_DEFAULT = true;
 constexpr long long WEBSOCKET_DELAY_DEFAULT_MS = 200;
@@ -78,17 +81,11 @@ Field File(const char *key, const char *label, const char *filter, const char *t
 	return Field{key, label, tooltip, Kind::File, 0, 0, 0, false, 0, "", {}, false, filter};
 }
 
-long long Millis(uint64_t us)
-{
-	return static_cast<long long>(us / 1000);
-}
-
 } // namespace
 
 const std::vector<Field> &Fields()
 {
 	static const std::vector<Field> fields = [] {
-		const moq::Backoff backoff{};
 		std::vector<Field> f;
 
 		f.push_back(Text(BIND, "Bind address",
@@ -109,11 +106,11 @@ const std::vector<Field> &Fields()
 				 "Trust this CA instead of the system roots."));
 
 		// Reconnect.
-		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", Millis(backoff.initial_us), 1, 60000, 100,
+		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", BACKOFF_INITIAL_DEFAULT_MS, 1, 60000, 100,
 				   "Delay before the first reconnect attempt; it grows from here."));
-		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", Millis(backoff.max_us), 1, 600000, 1000,
+		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", BACKOFF_MAX_DEFAULT_MS, 1, 600000, 1000,
 				   "Ceiling on the growing reconnect delay."));
-		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(backoff.timeout_us), 0, 3600000, 1000,
+		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", BACKOFF_TIMEOUT_DEFAULT_MS, 0, 3600000, 1000,
 				   "Total time to keep retrying before the stream fails. Also how long the "
 				   "broadcast lingers for viewers across the gap. 0 retries forever."));
 
@@ -199,52 +196,29 @@ void AddProperties(obs_properties_t *props)
 	obs_properties_add_group(props, ENABLED, "Advanced", OBS_GROUP_CHECKABLE, group);
 }
 
-bool Configure(obs_data_t *settings, moq::Client &client, std::string *error)
+void Configure(obs_data_t *settings, moq::ClientConfig &config)
 {
 	if (!settings || !obs_data_get_bool(settings, ENABLED))
-		return true; // advanced off: the client keeps the library defaults
+		return; // advanced off: the client keeps the library defaults
 
-	// Stops at the first setter moq-ffi rejects, naming the setting it came from.
-	auto apply = [&](const char *key, moq::expected<void> result) {
-		if (!result && error)
-			*error = std::string(key) + ": " + result.error().to_string();
-		return result.has_value();
-	};
+	if (const char *bind = OptionalString(settings, BIND))
+		config.bind = bind;
 
-	if (const char *bind = OptionalString(settings, BIND)) {
-		if (!apply(BIND, client.set_bind(bind)))
-			return false;
-	}
+	if (obs_data_get_bool(settings, TLS_DISABLE_VERIFY))
+		config.tls.insecure = true;
+	if (const char *fingerprint = OptionalString(settings, TLS_FINGERPRINT))
+		config.tls.fingerprints = {fingerprint};
+	if (const char *root = OptionalString(settings, TLS_ROOT))
+		config.tls.roots = {root};
 
-	if (obs_data_get_bool(settings, TLS_DISABLE_VERIFY)) {
-		if (!apply(TLS_DISABLE_VERIFY, client.set_tls_verify(false)))
-			return false;
-	}
-	if (const char *fingerprint = OptionalString(settings, TLS_FINGERPRINT)) {
-		if (!apply(TLS_FINGERPRINT, client.set_tls_fingerprints({fingerprint})))
-			return false;
-	}
-	if (const char *root = OptionalString(settings, TLS_ROOT)) {
-		if (!apply(TLS_ROOT, client.set_tls_roots({root})))
-			return false;
-	}
+	config.backoff.initial_us = Amount(settings, BACKOFF_INITIAL) * 1000;
+	config.backoff.max_us = Amount(settings, BACKOFF_MAX) * 1000;
+	config.backoff.timeout_us = Amount(settings, BACKOFF_TIMEOUT) * 1000;
 
-	moq::Backoff backoff{};
-	backoff.initial_us = Amount(settings, BACKOFF_INITIAL) * 1000;
-	backoff.max_us = Amount(settings, BACKOFF_MAX) * 1000;
-	backoff.timeout_us = Amount(settings, BACKOFF_TIMEOUT) * 1000;
-	if (!apply(BACKOFF_INITIAL, client.set_backoff(backoff)))
-		return false;
+	config.quic.max_streams = Amount(settings, QUIC_MAX_STREAMS);
 
-	if (!apply(QUIC_MAX_STREAMS, client.set_quic_max_streams(Amount(settings, QUIC_MAX_STREAMS))))
-		return false;
-
-	if (!apply(WEBSOCKET_ENABLED, client.set_websocket_enabled(obs_data_get_bool(settings, WEBSOCKET_ENABLED))))
-		return false;
-	if (!apply(WEBSOCKET_DELAY, client.set_websocket_delay(Amount(settings, WEBSOCKET_DELAY) * 1000)))
-		return false;
-
-	return true;
+	config.websocket.enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);
+	config.websocket.delay_us = Amount(settings, WEBSOCKET_DELAY) * 1000;
 }
 
 } // namespace MoQSettings

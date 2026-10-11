@@ -13,6 +13,11 @@ core arrives as a prebuilt static library through the `moq.dev/moq-ffi` module, 
 `go get` is all it takes (`CGO_ENABLED=1`, the default on Unix). Targets:
 linux/amd64, linux/arm64, darwin/arm64 (macOS 12.3+), windows/amd64.
 
+`moq.dev/moq/media` owns catalogs, encoded imports, and container consumers.
+Construct `NewAudioTrackProducer` / `NewVideoTrackProducer` from a broadcast, an init record,
+and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast weakly;
+catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
+
 ```bash
 go get moq.dev/moq@latest
 ```
@@ -21,6 +26,7 @@ go get moq.dev/moq@latest
 import "fmt"
 import "log"
 import "moq.dev/moq"
+import moqmedia "moq.dev/moq/media"
 
 // Subscribe. The iterator is live, so run it in its own goroutine.
 client, err := moq.Dial(ctx, "https://relay.example.com", moq.WithTLSRoots("ca.pem"))
@@ -49,7 +55,7 @@ for event, err := range announced.All(ctx) {
     if err != nil {
         log.Fatal(err)
     }
-    catalog, err := broadcast.Catalog(ctx)
+    catalog, err := moqmedia.CatalogSnapshot(ctx, broadcast)
     if err != nil {
         log.Fatal(err)
     }
@@ -58,12 +64,14 @@ for event, err := range announced.All(ctx) {
 ```
 
 ```go
+import "time"
+
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 broadcast, _ := client.CreateBroadcast("my-stream.hang")
-audio, _ := broadcast.PublishAudio(moq.AudioFormatOpus, opusInit)
-pts := uint64(20_000)
-_ = audio.WriteFrame(moq.Frame{Payload: packet, TimestampUs: &pts})
+audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
+timestamp := 20 * time.Millisecond
+_ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
 _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 
 track := "camera"
@@ -87,10 +95,10 @@ one to one; the API reference has the names.
 - **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A one-shot call (`RequestBroadcast`, `FetchGroup`, `Server.Accept`) aborts alone; a stream read (`Next`, `ReadFrame`, and the iterators over them) cancels the stream it reads.
 - **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer, published broadcast, and `OriginDynamic`), and its consumers then fail with `moq.ErrClosed`.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `Cut()`: after every frame, or at a segment cadence to align with video.
-- **Live encoder timing.** After writing a frame you encoded yourself, call `Flush(timestampUs)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Live encoder timing.** After writing a frame you encoded yourself, call `Flush(timestamp)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
 - **Closing.** `client.Close()` gives finished tracks up to one second to deliver and returns an error if they did not. `session.Shutdown(ctx)` does the same, and `session.Cancel(code)` closes at once. Finish or abort live tracks first.
-- **Stats.** `Session().Stats()` reports `RttUs`, `EstimatedSendRateBps`, `EstimatedRecvRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero.
+- **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, `EstimatedRecvRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero.
 
 ## Reference
 
