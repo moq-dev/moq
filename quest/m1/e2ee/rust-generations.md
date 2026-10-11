@@ -31,3 +31,12 @@ wire.
 Public API: breaking generation construction and separate producing and
 consuming types in moq-e2ee. Wire: unchanged; the existing epoch derivation
 and ciphertext format stay the same.
+
+Provisional recommendation: `Credential::produce()` returns a
+`generation::Producer` with a freshly minted epoch, and `Credential::consume(epoch)`
+returns a `generation::Consumer`. Each keeps `credential()`, `epoch()` and
+`name()`; only the producer has `produce(track)`, only the consumer has
+`consume(track)`. The alternative is `mint()`/`bind(epoch)` for the credential
+methods, or role-parameterized generations. Prefer the producer/consumer names
+that the rest of the Rust API already uses. Keep this quest and the PR draft
+until the names are settled; the TypeScript core mirrors that decision.
