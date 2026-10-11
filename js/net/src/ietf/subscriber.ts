@@ -1,5 +1,6 @@
-import { type GetPromise, race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
+import type { Grant } from "../auth.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
@@ -13,6 +14,7 @@ import {
 	StreamCode,
 	Stream as StreamError,
 	sessionCause,
+	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
@@ -164,6 +166,9 @@ export class Subscriber {
 
 	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
 	#goaway?: GetPromise<Drain>;
+	// Our grant (MoQ Auth): a subscription it stops covering is cancelled. Undefined until
+	// the peer answers, which allows everything.
+	#grant?: Getter<Grant | undefined>;
 
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
@@ -182,6 +187,7 @@ export class Subscriber {
 		hidden = false,
 		solicit,
 		goaway,
+		grant,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -195,6 +201,8 @@ export class Subscriber {
 		solicit?: boolean;
 		/** Settles when the peer sends GOAWAY. */
 		goaway?: GetPromise<Drain>;
+		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
+		grant?: Getter<Grant | undefined>;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
@@ -202,6 +210,7 @@ export class Subscriber {
 		this.#hidden = hidden;
 		this.#solicit = solicit;
 		this.#goaway = goaway;
+		this.#grant = grant;
 		// A draining peer usually stops publishing namespaces, so reprice from the signal
 		// itself. Waiting for another message would leave the route primary until close.
 		if (goaway) void goaway.then(() => this.#drainAnnounced());
@@ -226,6 +235,12 @@ export class Subscriber {
 		for (const [path, info] of this.#announced) {
 			this.#updateAnnounce(path, info.route);
 		}
+	}
+
+	// Whether our grant no longer lets us subscribe to `broadcast`. No grant yet allows it.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant?.peek();
+		return grant !== undefined && !grant.subscribe.matches(broadcast);
 	}
 
 	/**
@@ -298,7 +313,9 @@ export class Subscriber {
 			if (this.#goingAway()) this.#updateAnnounce(path, existing.route);
 			return;
 		}
-		this.#announced.set(path, { count: 1, route });
+		const entry = { count: 1, route };
+		this.#announced.set(path, entry);
+		this.#consumes.announce(path, entry, route);
 
 		console.debug(`announced: broadcast=${path} active=true`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
@@ -319,6 +336,7 @@ export class Subscriber {
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;
+		this.#consumes.announce(path, existing, route);
 		console.debug(`announced: broadcast=${path} rerouted`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
@@ -342,7 +360,7 @@ export class Subscriber {
 
 		// The path is gone, so stop sharing its broadcast: a holder outliving the publisher
 		// would otherwise hand the dead generation to whoever consumes the path next.
-		this.#consumes.evict(path);
+		this.#consumes.withdraw(path, existing);
 		console.debug(`announced: broadcast=${path} active=false`);
 
 		for (const [consumer, filter] of this.#announcedConsumers) {
@@ -549,12 +567,13 @@ export class Subscriber {
 	/**
 	 * Consumes a broadcast from the connection.
 	 *
-	 * Deduplicated per path: repeat calls for the same still-live path share one reference-counted
+	 * Deduplicated per serving instance: repeat calls for the same path share one reference-counted
 	 * broadcast (and one upstream subscription). The shared broadcast closes once every caller has
 	 * closed its handle, so callers close normally.
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
-		return this.#consumes.get(path) ?? this.#consumes.insert(path, this.#createConsume(path));
+		const instance = this.#consumes.instance(path);
+		return this.#consumes.get(path, instance) ?? this.#consumes.insert(path, instance, this.#createConsume(path));
 	}
 
 	#createConsume(path: Path.Valid): broadcast.Consumer {
@@ -586,6 +605,12 @@ export class Subscriber {
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
+		const refused = unauthorized(broadcast);
+		if (this.#denied(broadcast)) {
+			request.reject(refused);
+			return;
+		}
+
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
 			request.reject(await this.#closedSession());
@@ -696,18 +721,33 @@ export class Subscriber {
 			return;
 		}
 
+		let disposeGrant: Dispose | undefined;
 		try {
 			// Which terminal fired decides whether we owe the publisher a cancellation, so
 			// tag them rather than racing bare promises.
 			const publisherEnded = Symbol("publisher");
 			const localEnded = Symbol("local");
+			const revokedEnded = Symbol("revoked");
 			const idle = Symbol("idle");
 
+			// Losing the grant ends the subscription, leaving the session alone.
+			let revoke!: () => void;
+			const revoked = new Promise<typeof revokedEnded>((resolve) => {
+				revoke = () => resolve(revokedEnded);
+			});
+			disposeGrant = this.#grant?.subscribe(() => {
+				if (this.#denied(broadcast)) revoke();
+			});
+			// The grant may have shrunk during setup, before this watcher existed.
+			if (this.#denied(broadcast)) revoke();
+
 			// Terminal conditions settle at most once (PublishDone, track close = local
-			// unsubscribe); race them once so the demand loop doesn't re-subscribe each pass.
+			// unsubscribe, a revoked grant); race them once so the demand loop doesn't
+			// re-subscribe each pass.
 			const done = race([
 				this.#runPublishDone(stream, subscription).then(() => publisherEnded),
 				producer.closed.then(() => localEnded),
+				revoked,
 			]);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
@@ -726,7 +766,12 @@ export class Subscriber {
 			// reopens the window the demand re-check above just closed, and a subscriber that
 			// returned during it would be closed by this line. The lite subscriber closes
 			// straight out of its loop for the same reason.
-			producer.close();
+			if (terminal === revokedEnded) {
+				console.info(`subscription no longer authorized: broadcast=${broadcast} track=${request.name}`);
+				producer.close(refused);
+			} else {
+				producer.close();
+			}
 
 			// The publisher already ended the request, so there is nothing to cancel. Sending
 			// UNSUBSCRIBE here would name a request it has already torn down.
@@ -742,6 +787,7 @@ export class Subscriber {
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
 		} finally {
+			disposeGrant?.();
 			// Only the owner tears down the alias metadata: a later subscription may have
 			// reclaimed the alias and installed its own timescale.
 			if (this.#aliases.retire(trackAlias, subscription)) this.#timescales.delete(trackAlias);
@@ -1149,7 +1195,12 @@ export class Subscriber {
 			if (!group.flags.firstObject) {
 				let id: bigint | undefined;
 				try {
-					id = await stream.peekU62();
+					const peek = await race([stream.peekU62(), track.closed]);
+					if (typeof peek !== "bigint") {
+						stream.stop(peek ?? new StreamError(StreamCode.Cancel));
+						return;
+					}
+					id = peek;
 				} catch (err: unknown) {
 					if (!(err instanceof UnexpectedEnd)) throw err;
 				}
@@ -1173,9 +1224,11 @@ export class Subscriber {
 				// cache.
 				const frame =
 					stream.tryDecode(decode) ??
-					(await (producer
-						? race([stream.decodeMaybe(decode), producer.closed])
-						: stream.decodeMaybe(decode)));
+					(await race([stream.decodeMaybe(decode), producer?.closed ?? track.closed]));
+				if (!producer && (frame === null || frame instanceof Error)) {
+					stream.stop(frame ?? new StreamError(StreamCode.Cancel));
+					return;
+				}
 				if (!frame || frame instanceof Error) break;
 
 				if (frame.endOfTrack) {
