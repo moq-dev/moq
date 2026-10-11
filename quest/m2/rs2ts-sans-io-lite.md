@@ -29,8 +29,15 @@ Guidance:
 - Turn the session's async test bodies into synchronous `poll_*` tests with
   explicit instants as it is rewritten, so they translate with the code.
 
+- Move the lite session out from behind the
+  [async feature](/quest/m1/net-async-feature.md), which gates it whole
+  until this lands.
+
+Decided 2026-10-11: this waits on the generated model, not just the codec
+go/no-go, so moq-net's API breaks only after the risky stage works.
+
 Public API: breaks moq-net's session API. Wire: none.
 
 ## Required
 
-- [rs2ts](/quest/m1/rs2ts/translator.md) - its go/no-go decides whether moq-net breaks its API for generated TypeScript
+- [Generated model](/quest/m2/rs2ts-model.md) - proves the hard stage before moq-net breaks its API

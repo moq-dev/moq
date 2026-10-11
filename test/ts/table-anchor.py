@@ -1,44 +1,31 @@
 #!/usr/bin/env python3
-"""Grade whether a table's emission points belong to the broadcast or to the process.
+"""Compare table placement on the PCR timeline after a complete acquisition group.
 
-    ./table-anchor.py a.ts b.ts
+Tables and PES are interleaved by the slot scheduler. The next PES PTS is not the
+emission time: interpolate packet position between PCRs instead. Start at the
+second video random-access PES on each leg, when its first acquired group is out,
+as the exporter's late-join convergence tests do. The end comes from the clock,
+never from the tables, so disappearing tables cannot shorten their own test.
 
-`export ts` writes a frame by emitting any due tables and then that frame's PES
-packets into one buffer, so the first PES header after a table belongs to the
-frame that triggered it. Tagging each table emission with that frame's PTS says
-what two exporters of one broadcast cannot otherwise be asked: whether they put
-a table in the same place in *media* time, or merely at the same rate.
-
-That distinction is the whole property. A cadence driven by the exporter's own
-clock still produces a correct stream on each leg and still emits at the right
-average interval; it just emits at different points, so the legs are two
-transports of one programme rather than one transport sent twice. Anything that
-merges or switches between them - an ST 2022-7 receiver, a standby packager, a
-late joiner expected to converge on a running peer - needs the second.
-
-Why not compare bytes. Two legs order the same frames differently, because the
-exporter emits whichever track has a frame in hand and arrival order is a
-property of the network path rather than of the broadcast. A packet-by-packet
-walk desynchronises on that regardless of where the tables land, so it cannot
-answer this question even in principle. Indexing by PTS is immune to it, which
-isolates the cadence from the interleave.
-
-Comparison is restricted to the media-time window the two legs share, so a late
-joiner is graded on the overlap rather than penalised for the start it missed.
-
-Exit status is 0 when every hard check passes, 1 otherwise. `--strict` promotes
-the report-only (shape) checks to hard.
+This checks table placement, not packet identity or hitless switching. It supports
+one continuous program clock and video carrying random_access_indicator; refuse
+captures that cannot establish those conditions rather than guess a grace period.
 """
 
 import argparse
 import json
 import sys
+from bisect import bisect_right
 from collections import defaultdict
+from dataclasses import dataclass
+from importlib import import_module
+
+parse_pcr = import_module("pcr-timing").parse_pcr
+CLOCK = 27_000_000
+WRAP = (1 << 33) * 300
 
 PKT = 188
 SYNC = 0x47
-HARD, SHAPE = "hard", "shape"
-NULL_PID = 0x1FFF
 
 # PIDs whose table is fixed by the standard. A PMT sits on a PID the PAT chooses,
 # so it is discovered rather than listed.
@@ -57,16 +44,16 @@ NOT_GRADED = {0x0014}
 
 
 def packets(path):
-    """188-byte packets from a TS file, resynchronising on the first stable sync run."""
+    """Read the exporter's complete 188-byte packets, refusing broken framing."""
     with open(path, "rb") as f:
         data = f.read()
-    start = 0
-    while start + PKT * 8 < len(data):
-        if all(data[start + i * PKT] == SYNC for i in range(8)):
-            break
-        start += 1
-    end = len(data) - (len(data) - start) % PKT
-    return (data[i : i + PKT] for i in range(start, end, PKT))
+    if not data or len(data) % PKT:
+        raise ValueError(f"{path}: empty or truncated transport")
+    for at in range(0, len(data), PKT):
+        pkt = data[at : at + PKT]
+        if pkt[0] != SYNC or pkt[1] & 0x80 or not pkt[3] & 0x30:
+            raise ValueError(f"{path}: malformed packet at {at}")
+        yield pkt
 
 
 def pid_of(pkt):
@@ -97,13 +84,7 @@ def parse_pts(pkt):
     if len(p) < 14 or not (p[7] & 0x80):  # PTS_DTS_flags
         return None
     b = p[9:14]
-    return (
-        ((b[0] >> 1) & 0x07) << 30
-        | b[1] << 22
-        | ((b[2] >> 1) & 0x7F) << 15
-        | b[3] << 7
-        | ((b[4] >> 1) & 0x7F)
-    )
+    return ((b[0] >> 1) & 0x07) << 30 | b[1] << 22 | ((b[2] >> 1) & 0x7F) << 15 | b[3] << 7 | ((b[4] >> 1) & 0x7F)
 
 
 def pmt_pids(path):
@@ -111,7 +92,7 @@ def pmt_pids(path):
 
     Sections are reassembled across packets. A PAT carrying more than about forty
     programmes does not fit in one packet, and stopping at the packet boundary would
-    silently find only the programmes that happened to land in the first one — which
+    silently find only the programmes that happened to land in the first one; which
     on a full multiplex is a subset, with no error to say so.
     """
     found = set()
@@ -150,242 +131,174 @@ def pmt_pids(path):
     return found
 
 
-def anchors(path, pmts):
-    """Frame PTS values each table was emitted at, and the capture's media bounds.
+@dataclass
+class Capture:
+    tables: dict
+    start: float
+    end: float
+    positions: list[int]
+    clocks: list[int]
 
-    The bounds are returned alongside because the scoring window has to come from
-    the media the capture covers, not from the emissions themselves — see
-    `agreement()`.
-    """
-    out = defaultdict(list)
-    pending = []
-    lo = hi = None
+    def rate(self, window):
+        """Packet duration in the shared window, refusing non-CBR interpolation."""
+        lo = max(0, bisect_right(self.clocks, window[0]) - 1)
+        hi = bisect_right(self.clocks, window[1])
+        clocks, positions = self.clocks[lo:hi], self.positions[lo:hi]
+        if len(clocks) < 2:
+            raise ValueError("insufficient shared PCR samples")
+        ticks = (clocks[-1] - clocks[0]) / (positions[-1] - positions[0])
+        # Two integer PCR samples bound the rounding error in the fitted slope.
+        if any(abs(t - clocks[0] - (i - positions[0]) * ticks) > 2 for i, t in zip(positions, clocks)):
+            raise ValueError("pair grading requires a constant-rate shared PCR/packet timeline")
+        return ticks
+
+
+def anchors(path, pmts):
+    """Table positions and the independently observed, acquired clock window."""
+    clocks, positions = [], []
+    tables, access = defaultdict(list), defaultdict(list)
+    clock_pid = None
     watched = set(WELL_KNOWN) | pmts
-    for pkt in packets(path):
+    for index, pkt in enumerate(packets(path)):
         pid = pid_of(pkt)
-        if pid == NULL_PID:
-            continue
-        if pid in watched:
-            if pkt[1] & 0x40:
-                pending.append(pid)
-            continue
-        pts = parse_pts(pkt)
-        if pts is None:
-            continue
-        lo = pts if lo is None or pts < lo else lo
-        hi = pts if hi is None or pts > hi else hi
-        if pending:
-            for table in pending:
-                out[table].append(pts)
-            pending = []
-    return out, (lo, hi)
+        pcr = parse_pcr(pkt)
+        if pcr is not None:
+            if clock_pid is not None and pid != clock_pid:
+                raise ValueError("pair grading requires a single program clock")
+            clock_pid = pid
+            if clocks:
+                if pkt[5] & 0x80:
+                    raise ValueError("PCR discontinuity inside pair capture")
+                delta = (pcr - clocks[-1]) % WRAP
+                if not 0 < delta < WRAP // 2:
+                    raise ValueError("non-increasing program clock")
+                pcr = clocks[-1] + delta
+            clocks.append(pcr)
+            positions.append(index)
+        if pid in watched and pkt[1] & 0x40:
+            tables[pid].append(index)
+        off = payload_offset(pkt)
+        if parse_pts(pkt) is not None and 0xE0 <= pkt[off + 3] <= 0xEF:
+            # Record the PID even when every random-access flag is missing.
+            points = access[pid]
+            if pkt[3] & 0x20 and pkt[4] and pkt[5] & 0x40:
+                points.append(index)
+    if len(clocks) < 2 or not access or any(len(v) < 2 for v in access.values()):
+        raise ValueError("need PCR and two video random-access points per video PID")
+
+    def at(index):
+        i = bisect_right(positions, index) - 1
+        if i < 0 or i >= len(clocks) - 1:
+            raise ValueError("acquisition point is outside the measured PCR window")
+        return clocks[i] + (index - positions[i]) * (clocks[i + 1] - clocks[i]) / (positions[i + 1] - positions[i])
+
+    start = max(at(v[1]) for v in access.values())
+    return Capture(
+        {pid: [at(i) for i in points if positions[0] <= i < positions[-1]] for pid, points in tables.items()},
+        start,
+        clocks[-1],
+        positions,
+        clocks,
+    )
 
 
 def name(pid, pmts):
-    if pid in WELL_KNOWN:
-        return WELL_KNOWN[pid]
-    return f"PMT {pid:#06x}" if pid in pmts else f"PID {pid:#06x}"
+    return WELL_KNOWN.get(pid, f"PMT {pid:#06x}" if pid in pmts else f"PID {pid:#06x}")
 
 
-def agreement(a_pts, b_pts, window):
-    """Share of emission points the legs share, over the media time they both cover.
-
-    The window is the media both captures carry, and it must come from the captures
-    rather than from the emissions being scored. Deriving it from the emissions
-    instead is a false pass: a leg that stops emitting a table halfway through pulls
-    the upper bound back to its own last emission, so the partner's later emissions
-    fall outside the window and the desertion scores 100 %.
-
-    Returns None when the captures do not overlap in media time at all, which is a
-    different answer from "they overlap and disagree" and must not be scored as 0.
-    """
+def agreement(a, b, window, tolerance):
+    """One-to-one matches within one packet, retaining losses and duplicates."""
     lo, hi = window
-    if lo is None or hi is None or lo > hi:
-        return None
-    oa = {t for t in a_pts if lo <= t <= hi}
-    ob = {t for t in b_pts if lo <= t <= hi}
-    union = oa | ob
-    if not union:
-        return None
-    shared = oa & ob
-    return len(oa), len(ob), len(union), len(shared), 100.0 * len(shared) / len(union)
-
-
-def cadence(pts):
-    """The period a leg emits on, in seconds, or None if it keeps no steady one.
-
-    "Steady" has to tolerate a few odd gaps rather than demand none: a leg that
-    re-phases once on joining, or drops an emission, is still running a timer, and a
-    spread test over the extremes would miss exactly the case worth catching. So the
-    period is the median gap and the leg counts as steady when most gaps sit on it.
-    """
-    pts = sorted(pts)
-    if len(pts) < 4:
-        return None
-    gaps = sorted((pts[i + 1] - pts[i]) / 90000.0 for i in range(len(pts) - 1))
-    period = gaps[len(gaps) // 2]
-    if period <= 0:
-        return None
-    on_period = sum(1 for g in gaps if abs(g - period) <= 0.05 * period)
-    return period if on_period >= 0.6 * len(gaps) else None
-
-
-def phase(pts, period):
-    """Where a leg's grid sits inside one period, as a robust median.
-
-    Taken relative to the first point so that a grid straddling the modulus does not
-    split into two clusters and median to a value in neither.
-    """
-    base = min(pts) / 90000.0
-    offs = sorted(((t / 90000.0 - base) % period) for t in pts)
-    return offs[len(offs) // 2] + base
-
-
-def diagnose(a_pts, b_pts):
-    """Say why two legs disagree, when the shape of the disagreement is legible.
-
-    The case worth naming is a table both legs emit on the same steady period but at
-    different phase: that is a timer started when the exporter started, and no amount
-    of running time will bring the two legs back together.
-    """
-    pa, pb = cadence(a_pts), cadence(b_pts)
-    if pa is None or pb is None or abs(pa - pb) > 0.05 * max(pa, pb):
-        return None
-    offset = abs(phase(a_pts, pa) - phase(b_pts, pa)) % pa
-    offset = min(offset, pa - offset)
-    if offset <= 0.01 * pa:
-        return None
-    return (
-        f"both legs emit every {pa:.3f}s, {offset:.3f}s out of phase "
-        f"-> a timer started with the exporter, not an anchor in the media"
-    )
+    a = [t for t in a if lo <= t <= hi]
+    b = [t for t in b if lo <= t <= hi]
+    i = j = shared = 0
+    while i < len(a) and j < len(b):
+        if abs(a[i] - b[j]) <= tolerance:
+            shared += 1
+            i += 1
+            j += 1
+        elif a[i] < b[j]:
+            i += 1
+        else:
+            j += 1
+    union = len(a) + len(b) - shared
+    return len(a), len(b), union, shared, 100 * shared / union if union else 0
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Grade table emission points across two exporters.")
-    ap.add_argument("a", help="TS captured from the first exporter")
-    ap.add_argument("b", help="TS captured from the second exporter")
-    ap.add_argument(
-        "--min-agreement",
-        type=float,
-        default=90.0,
-        help="percent of shared emission points required per table (default 90)",
-    )
-    ap.add_argument(
-        "--min-emissions",
-        type=int,
-        default=8,
-        help="a table with fewer emissions in the overlap is reported, not graded (default 8)",
-    )
-    ap.add_argument(
-        "--min-window",
-        type=float,
-        default=20.0,
-        help="seconds of shared media required before any verdict is given (default 20)",
-    )
-    ap.add_argument("--strict", action="store_true", help="fail on shape checks too")
-    ap.add_argument("--report-json", help="write the full report here")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("a")
+    ap.add_argument("b")
+    ap.add_argument("--min-agreement", type=float, default=90.0)
+    ap.add_argument("--min-emissions", type=int, default=8)
+    ap.add_argument("--min-window", type=float, default=20.0)
+    ap.add_argument("--source", help="require the source's non-clock SI tables on both legs")
+    ap.add_argument("--strict", action="store_true", help="also grade clock tables")
+    ap.add_argument("--report-json")
     args = ap.parse_args()
-
-    pmts = pmt_pids(args.a) | pmt_pids(args.b)
-    a, (a_lo, a_hi) = anchors(args.a, pmts)
-    b, (b_lo, b_hi) = anchors(args.b, pmts)
-    if not a and not b:
-        print("error: neither capture carries a table on a known PID", file=sys.stderr)
-        return 1
-    if None in (a_lo, a_hi, b_lo, b_hi):
-        print("error: a capture carries no PTS, so there is no media time to compare in", file=sys.stderr)
-        return 1
-    # The media both captures carry. Every table is scored inside this one window, so a
-    # table one leg abandons is scored against the partner's emissions rather than
-    # silently shrinking the window to hide them.
-    window = (max(a_lo, b_lo), min(a_hi, b_hi))
-    shared_s = (window[1] - window[0]) / 90000.0
-    print(f"### shared media window: {shared_s:.1f}s")
-    # A window too short to carry the slower tables would put them under the emission
-    # floor and report them without a verdict, which reads as a pass. Refuse the run
-    # instead: a capture that came up short is the commonest way this grades clean.
-    if shared_s < args.min_window:
-        print(
-            f"error: the captures share only {shared_s:.1f}s of media, below the "
-            f"{args.min_window:.0f}s needed for a verdict",
-            file=sys.stderr,
+    try:
+        pmts = pmt_pids(args.a) | pmt_pids(args.b)
+        if args.source:
+            pmts |= pmt_pids(args.source)
+        if not pmts:
+            raise ValueError("no PAT program mapping")
+        expected = {pid_of(pkt) for pkt in packets(args.source) if pid_of(pkt) in WELL_KNOWN} if args.source else set()
+        a, b = anchors(args.a, pmts), anchors(args.b, pmts)
+        # Captures may start on opposite sides of the 33-bit wrap.
+        shift = round((a.start - b.start) / WRAP) * WRAP
+        b.start += shift
+        b.end += shift
+        b.clocks = [t + shift for t in b.clocks]
+        b.tables = {pid: [t + shift for t in points] for pid, points in b.tables.items()}
+        window = max(a.start, b.start), min(a.end, b.end)
+        shared_s = (window[1] - window[0]) / CLOCK
+        if shared_s < args.min_window:
+            raise ValueError(f"only {shared_s:.3f}s of acquired shared clock; need {args.min_window}s")
+        tolerance = max(a.rate(window), b.rate(window)) + 1
+        rows = []
+        # PAT and its declared PMTs are mandatory, even when absent after acquisition.
+        for pid in sorted({0} | pmts | expected | set(a.tables) | set(b.tables)):
+            na, nb, union, shared, pct = agreement(a.tables.get(pid, []), b.tables.get(pid, []), window, tolerance)
+            graded = pid not in NOT_GRADED or args.strict
+            enough = min(na, nb) >= args.min_emissions
+            ok = enough and pct >= args.min_agreement
+            rows.append(
+                dict(
+                    pid=pid,
+                    table=name(pid, pmts),
+                    a=na,
+                    b=nb,
+                    either=union,
+                    both=shared,
+                    agreement_pct=round(pct, 4),
+                    graded=graded,
+                    ok=ok,
+                    note=None if enough else "insufficient emissions",
+                )
+            )
+        report = dict(
+            window_seconds=[t / CLOCK for t in window],
+            shared_seconds=shared_s,
+            tolerance_ticks=tolerance,
+            min_agreement=args.min_agreement,
+            tables=rows,
         )
-        print("  run for longer, join earlier, or lower --min-window deliberately", file=sys.stderr)
-        return 1
-
-    rows = []
-    for pid in sorted(set(a) | set(b)):
-        label = name(pid, pmts)
-        scored = agreement(a.get(pid, []), b.get(pid, []), window)
-        if scored is None:
-            rows.append((pid, label, len(a.get(pid, [])), len(b.get(pid, [])), None, None, "one leg only"))
-            continue
-        na, nb, union, shared, pct = scored
-        # A table emitted a handful of times cannot separate "anchored to the media"
-        # from "coincidence", so it is reported without a verdict rather than graded
-        # on a sample too small to mean anything.
-        severity = SHAPE if pid in NOT_GRADED or union < args.min_emissions else HARD
-        rows.append((pid, label, na, nb, union, shared, pct, severity))
-
-    width = max(len(r[1]) for r in rows)
-    print(f"### table anchor report - {len(rows)} table(s)")
-    print()
-    print(f"  {'':4}  {'table':<{width}}  {'A':>7} {'B':>7} {'either':>7} {'both':>7}  agreement")
-    failed = 0
-    report = []
-    for row in rows:
-        if len(row) == 7:
-            pid, label, na, nb, _, _, note = row
-            print(f"  {'--':4}  {label:<{width}}  {na:>7,} {nb:>7,} {'-':>7} {'-':>7}  {note}")
-            report.append({"pid": pid, "table": label, "a": na, "b": nb, "graded": False, "note": note})
-            continue
-        pid, label, na, nb, union, shared, pct, severity = row
-        ok = pct >= args.min_agreement
-        if ok:
-            verdict = "PASS"
-        elif severity == HARD or args.strict:
-            verdict = "FAIL"
-            failed += 1
-        else:
-            verdict = "WARN"
-        print(
-            f"  {verdict:4}  {label:<{width}}  {na:>7,} {nb:>7,} {union:>7,} {shared:>7,}  {pct:8.2f}%"
-        )
-        why = None if ok else diagnose(a.get(pid, []), b.get(pid, []))
-        if why:
-            print(f"  {'':4}  {'':<{width}}  {why}")
-        report.append(
-            {
-                "pid": pid,
-                "table": label,
-                "a": na,
-                "b": nb,
-                "either": union,
-                "both": shared,
-                "agreement_pct": round(pct, 4),
-                "severity": severity,
-                "graded": True,
-                "ok": ok,
-                "diagnosis": why,
-            }
-        )
-
-    print()
-    print(
-        "agreement = emission points both legs used, over those either used, inside the\n"
-        "media time they share. 100% means the emission points are a function of the\n"
-        "broadcast; a low figure with a healthy count on both legs means each leg is\n"
-        "emitting to its own clock."
-    )
-    print()
-    print(f"{failed} check(s) failed" if failed else "all checks passed")
-
+        print(f"### acquired shared clock: {shared_s:.3f}s")
+        for row in rows:
+            verdict = "PASS" if row["ok"] else "FAIL" if row["graded"] else "INFO"
+            print(
+                f"{verdict}: {row['table']}: {row['both']}/{row['either']} ({row['agreement_pct']:.2f}%)"
+                + (f"; {row['note']}" if row["note"] else "")
+            )
+        failed = any(row["graded"] and not row["ok"] for row in rows)
+    except ValueError as error:
+        report = dict(error=str(error))
+        print(f"error: {error}", file=sys.stderr)
+        failed = True
     if args.report_json:
         with open(args.report_json, "w") as f:
-            json.dump({"min_agreement": args.min_agreement, "tables": report}, f, indent=2)
-
-    return 1 if failed else 0
+            json.dump(report, f, indent=2)
+    return int(failed)
 
 
 if __name__ == "__main__":

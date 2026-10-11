@@ -13,9 +13,23 @@ requests for misses instead of one request per group.
 See the [line](/quest/m1/subscribe-ranges/README.md) for the decisions.
 Guidance:
 
-- Aggregating several subscribers' ranges and orders onto one upstream
-  request needs a rule. For example, the union of ranges, and desc wins when
-  orders conflict. Decide it and write it down.
+- Ranges have `Absolute` or `Relative` ends (see the line). Aggregating
+  subscribers onto one upstream request is the union of their ranges; a
+  relative end resolves against the track's latest group when the publisher
+  serves it. Decide and document the order rule when orders conflict (for
+  example, desc wins).
+- This absorbs the deleted lite-07 Live flag quest, so the model mirrors the
+  wire with no `live` field, and its tests move here, on mock time and both
+  in-process and through a relay: a subscriber from `Absolute(4)` merged with
+  a `Relative(0)..` subscriber on a quiet track whose newest group is 3 (the
+  live one still gets group 3); a buffering `Relative(k)..` merged with a
+  range above the live edge; a frame-precise start merged with live; an
+  untimed `Absolute(0)..` (it follows
+  [One max_age meaning](/quest/m1/cache-max-age.md)); and the lite-05 relay
+  case #5000 left out: a live subscriber already reading group 1, then one
+  from `Absolute(0)`, and a fresh group 0 reaches only the second. The closed
+  #5085 branch has reusable pieces (older-wire codec mappings, the JS fix
+  keeping groups below a floor buffered, mocked-time tests).
 - Replace `requested_group` and `fetch_group` rather than keep both. Update
   every caller (relay, moq-archive, hls, the ladder) in the same PR, plus the
   published surfaces built on them, per the cross-package table: moq-ffi
@@ -31,10 +45,6 @@ Guidance:
   [FETCH max-delay](/quest/m1/fetch-max-delay.md) owns the FETCH option and
   enforcement; reuse its contract rather than restoring a historical exemption.
 - Benchmark range count and span as separate axes (AGENTS.md fan-out rule).
-
-## Required
-
-- [lite-07 Live flag](/quest/m1/lite-live.md) - reshapes the same `Subscription` first
 
 ## Related
 

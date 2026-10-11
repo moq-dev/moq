@@ -23,6 +23,27 @@ end carries no cause since #4031, so only track errors are in scope.
   neither document nor test `is_auth` for a stream-scoped Unauthorized. Each
   should surface Unauthorized.
 
+- Decided 2026-10-11 from [#4349](https://github.com/moq-dev/moq/issues/4349),
+  where a clean publisher close ended an in-flight subscription with
+  `internal error` and subscribes during cross-node churn answered the same.
+  `Dropped` has no arm in `From<&Error> for StreamError`, so it falls through
+  the `_ => Internal` catch-all to 0x0.
+  - Fronts end with `Error::Dropped` today (`model/front.rs`: `Retired`,
+    `Closed`, a resolved front whose route leaves the table, `source_closed`).
+    Requests and tracks a front actually aborts end with `Unroutable` instead,
+    or `Cancel` on a local origin `Retired` or `Closed`.
+  - Tracks in flight are not aborted: `Action::End` in `model/origin.rs`
+    leaves them on their copy, which drains (ANNOUNCE_END does not disturb
+    in-flight subscriptions) and ends with the source's own error. Trace that
+    copy's end for the reported case rather than remapping the front.
+  - Remove the `_ => Internal` catch-alls in both `From<&Error>` conversions
+    (`StreamError` and `SessionError`); `Dropped` stays `Internal`
+    deliberately, since it then marks a real bug.
+  - Regression: a relay test closes a broadcast under an active subscription
+    whose source copy ends with a specific non-clean error, and expects that
+    exact error, never `internal error`; a subscribe against a withdrawn
+    route expects `Unroutable`.
+
 Public API: none expected; error values consumers observe change. Wire: none.
 
 ## Required
