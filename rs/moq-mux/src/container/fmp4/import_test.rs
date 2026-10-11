@@ -1709,3 +1709,128 @@ fn an_unknown_subtitle_track_does_not_refuse_supported_media() {
 	assert!(!catalog.snapshot().video.renditions.is_empty());
 	assert!(catalog.snapshot().text.renditions.is_empty());
 }
+
+fn webvtt_input(payload: Vec<u8>, duration: u32) -> Vec<u8> {
+	let (_, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let mut trak = moov.trak[0].clone();
+	trak.tkhd.track_id = 1;
+	trak.mdia.mdhd.timescale = 1000;
+	trak.mdia.mdhd.language = "eng".into();
+	trak.mdia.hdlr.handler = b"text".into();
+	trak.mdia.minf.stbl.stsd.codecs = vec![mp4_atom::Codec::Wvtt(mp4_atom::Wvtt {
+		plaintext: mp4_atom::PlainText {
+			data_reference_index: 1,
+		},
+		config: mp4_atom::VttC {
+			config: "WEBVTT".into(),
+		},
+		label: Some(mp4_atom::Vlab {
+			source_label: "English captions".into(),
+		}),
+		btrt: None,
+	})];
+	let mut input = audio_init(trak);
+	let moof = mp4_atom::Moof {
+		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+		traf: vec![mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id: 1,
+				default_sample_duration: Some(duration),
+				default_sample_size: Some(payload.len() as u32),
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt {
+				base_media_decode_time: 250,
+			}),
+			trun: vec![mp4_atom::Trun {
+				data_offset: None,
+				entries: vec![mp4_atom::TrunEntry::default()],
+			}],
+			..Default::default()
+		}],
+	};
+	moof.encode(&mut input).unwrap();
+	mp4_atom::Mdat { data: payload }.encode(&mut input).unwrap();
+	input
+}
+
+fn subtitle_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+	let mut bytes = Vec::new();
+	bytes.extend_from_slice(&((8 + payload.len()) as u32).to_be_bytes());
+	bytes.extend_from_slice(kind);
+	bytes.extend_from_slice(payload);
+	bytes
+}
+
+#[tokio::test(start_paused = true)]
+async fn webvtt_samples_become_timed_text_with_source_metadata() {
+	let mut cue = subtitle_box(b"iden", b"cue-1");
+	cue.extend(subtitle_box(b"sttg", b"align:start"));
+	cue.extend(subtitle_box(b"payl", b"Hello"));
+	let payload = subtitle_box(b"vttc", &cue);
+	let input = webvtt_input(payload, 1250);
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.text.renditions.len(), 1);
+	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
+	assert_eq!(config.lang.as_deref(), Some("eng"));
+	assert_eq!(config.label.as_deref(), Some("English captions"));
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default())
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read().await.unwrap().unwrap();
+	assert_eq!(frame.timestamp.as_micros(), 250_000);
+	assert_eq!(
+		&frame.payload[..],
+		b"WEBVTT\n\ncue-1\n00:00:00.250 --> 00:00:01.500 align:start\nHello\n\n"
+	);
+}
+
+#[test]
+fn malformed_webvtt_samples_are_refused() {
+	let payl = subtitle_box(b"payl", b"hello");
+	let mut duplicate = payl.clone();
+	duplicate.extend_from_slice(&payl);
+	for (payload, duration) in [
+		(Vec::new(), 1250),
+		(vec![0, 0, 0, 4], 1250),
+		(subtitle_box(b"vttc", &[]), 1250),
+		(subtitle_box(b"vttc", &duplicate), 1250),
+		(subtitle_box(b"vttc", &subtitle_box(b"payl", b"\xff")), 1250),
+		(subtitle_box(b"vttc", &payl), 0),
+	] {
+		let input = webvtt_input(payload, duration);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		assert!(importer.decode(&input).is_err());
+	}
+}
+
+#[test]
+fn empty_and_multiple_webvtt_cues_are_supported() {
+	let cue = subtitle_box(b"vttc", &subtitle_box(b"payl", b"hello"));
+	let mut multiple = cue.clone();
+	multiple.extend(cue);
+	for payload in [subtitle_box(b"vtte", &[]), multiple] {
+		let input = webvtt_input(payload, 1250);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&input).unwrap();
+		importer.finish().unwrap();
+		assert_eq!(catalog.snapshot().text.renditions.len(), 1);
+	}
+}

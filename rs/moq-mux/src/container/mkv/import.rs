@@ -37,7 +37,7 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// - FLAC (`A_FLAC`)
 /// - MP3 (`A_MPEG/L3`)
 ///
-/// **Text:** UTF-8 (`S_TEXT/UTF8`) and TTML (`S_TEXT/TTML`).
+/// **Text:** timed SRT (`S_TEXT/UTF8`) and WebVTT (`S_TEXT/WEBVTT`), emitted as WebVTT.
 ///
 /// Unsupported track roles and subtitle encodings are logged and dropped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
@@ -94,8 +94,20 @@ impl TrackKind {
 
 struct MkvTrack {
 	kind: TrackKind,
+	default_duration: Option<u64>,
+	text_header: Option<String>,
 	track: Media,
 	group: Option<moq_net::group::Producer>,
+}
+
+struct Block<'a> {
+	track: u64,
+	timestamp: i16,
+	keyframe: bool,
+	payload: &'a [u8],
+	duration: Option<u64>,
+	addition: Option<&'a [u8]>,
+	laced: bool,
 }
 
 enum Media {
@@ -296,7 +308,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			MatroskaSpec::SimpleBlock(ref data) => {
 				let sb = SimpleBlock::try_from(data.as_slice()).map_err(|_| Error::InvalidSimpleBlock)?;
-				self.handle_block(sb.track, sb.timestamp, sb.keyframe, sb.raw_frame_data())?;
+				self.handle_block(Block {
+					track: sb.track,
+					timestamp: sb.timestamp,
+					keyframe: sb.keyframe,
+					payload: sb.raw_frame_data(),
+					duration: None,
+					addition: None,
+					laced: sb.lacing.is_some(),
+				})?;
 			}
 			MatroskaSpec::BlockGroup(Master::Full(children)) => {
 				self.handle_block_group(&children)?;
@@ -324,6 +344,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry
 				&& let Err(e) = self.add_track(reserved, children)
 			{
+				if matches!(e, crate::Error::Mkv(Error::InvalidSubtitle(_))) {
+					return Err(e);
+				}
 				tracing::warn!(error = ?e, "skipping MKV track");
 			}
 		}
@@ -340,6 +363,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let mut language = None;
 		let mut language_ietf = None;
 		let mut name = None;
+		let mut default_duration = None;
 
 		for c in children {
 			match c {
@@ -349,6 +373,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				MatroskaSpec::Language(v) => language = Some(v),
 				MatroskaSpec::LanguageIETF(v) => language_ietf = Some(v),
 				MatroskaSpec::Name(v) => name = Some(v),
+				MatroskaSpec::DefaultDuration(v) => default_duration = Some(v),
 				MatroskaSpec::CodecPrivate(v) => codec_private = Some(Bytes::from(v)),
 				MatroskaSpec::Audio(Master::Full(v)) => audio_children = Some(v),
 				MatroskaSpec::Video(Master::Full(v)) => video_children = Some(v),
@@ -364,7 +389,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let (kind, suffix) = match track_type {
 			1 => (TrackKind::Video, ".mkv-v"),
 			2 => (TrackKind::Audio, ".mkv-a"),
-			17 if matches!(codec_id.as_str(), "S_TEXT/UTF8" | "S_TEXT/TTML") => (TrackKind::Text, ".mkv-t"),
+			17 if matches!(codec_id.as_str(), "S_TEXT/UTF8" | "S_TEXT/WEBVTT") => (TrackKind::Text, ".mkv-t"),
 			17 => {
 				tracing::warn!(codec_id, "unsupported MKV subtitle encoding, skipping");
 				return Ok(());
@@ -390,14 +415,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				TrackKind::Text => crate::container::Kind::Data,
 			},
 		)?;
+		let text_header = if codec_id == "S_TEXT/WEBVTT" {
+			let private = codec_private
+				.as_deref()
+				.ok_or(Error::InvalidSubtitle("missing WebVTT codec private"))?;
+			let header =
+				std::str::from_utf8(private).map_err(|_| Error::InvalidSubtitle("invalid WebVTT header UTF-8"))?;
+			Some(crate::container::text::header(header).map_err(Error::InvalidSubtitle)?)
+		} else {
+			None
+		};
 		let media = match kind {
 			TrackKind::Text => {
-				let format = if codec_id == "S_TEXT/UTF8" {
-					hang::catalog::TextFormat::Utf8
-				} else {
-					hang::catalog::TextFormat::Ttml
-				};
-				let mut config = hang::catalog::TextConfig::new(format);
+				let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
 				config.lang = language_ietf.or(language);
 				config.label = name;
 				config.container = self.container.clone();
@@ -419,6 +449,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track_number,
 			MkvTrack {
 				kind,
+				default_duration,
+				text_header,
 				track: media,
 				group: None,
 			},
@@ -430,11 +462,41 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn handle_block_group(&mut self, children: &[MatroskaSpec]) -> Result<()> {
 		let mut block_data: Option<&[u8]> = None;
 		let mut has_reference = false;
+		let mut duration = None;
+		let mut addition = None;
 
 		for c in children {
 			match c {
 				MatroskaSpec::Block(data) => block_data = Some(data.as_slice()),
 				MatroskaSpec::ReferenceBlock(_) => has_reference = true,
+				MatroskaSpec::BlockAdditions(Master::Full(entries)) => {
+					for entry in entries {
+						if let MatroskaSpec::BlockMore(Master::Full(fields)) = entry {
+							let mut id = 1;
+							let mut data = None;
+							for field in fields {
+								match field {
+									MatroskaSpec::BlockAddID(value) => id = *value,
+									MatroskaSpec::BlockAdditional(value) => data = Some(value.as_slice()),
+									_ => {}
+								}
+							}
+							if id == 1 {
+								if addition.is_some() {
+									return Err(Error::InvalidSubtitle("duplicate cue additions").into());
+								}
+								addition = data;
+							}
+						}
+					}
+				}
+				MatroskaSpec::BlockDuration(value) => {
+					duration = Some(
+						value
+							.checked_mul(self.timestamp_scale_ns)
+							.ok_or(Error::TimestampOverflow)?,
+					)
+				}
 				_ => {}
 			}
 		}
@@ -449,18 +511,26 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let parsed = SimpleBlock::try_from(data).map_err(|_| Error::InvalidBlock)?;
 		let keyframe = !has_reference;
 
-		self.handle_block(parsed.track, parsed.timestamp, keyframe, parsed.raw_frame_data())
+		self.handle_block(Block {
+			track: parsed.track,
+			timestamp: parsed.timestamp,
+			keyframe,
+			payload: parsed.raw_frame_data(),
+			duration,
+			addition,
+			laced: parsed.lacing.is_some(),
+		})
 	}
 
-	fn handle_block(&mut self, track_number: u64, rel_ts: i16, keyframe: bool, payload: &[u8]) -> Result<()> {
-		let Some(track) = self.tracks.get_mut(&track_number) else {
+	fn handle_block(&mut self, block: Block<'_>) -> Result<()> {
+		let Some(track) = self.tracks.get_mut(&block.track) else {
 			// Unknown or skipped track.
 			return Ok(());
 		};
 
 		// Compute PTS in MKV's native nanosecond units and stamp it on the
 		// timestamp at NANO scale so a passthrough re-emit preserves precision.
-		let block_ticks = (self.cluster_timestamp as i64) + (rel_ts as i64);
+		let block_ticks = (self.cluster_timestamp as i64) + (block.timestamp as i64);
 		if block_ticks < 0 {
 			return Err(Error::NegativeBlockTimestamp.into());
 		}
@@ -475,13 +545,62 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		self.initial_reservation = None;
 
 		// Audio tracks: always treat as keyframes (matches fmp4 behavior).
-		let keyframe = matches!(track.kind, TrackKind::Audio | TrackKind::Text) || keyframe;
+		let keyframe = matches!(track.kind, TrackKind::Audio | TrackKind::Text) || block.keyframe;
 
+		if track.kind == TrackKind::Text && block.laced {
+			return Err(Error::InvalidSubtitle("laced subtitles are unsupported").into());
+		}
+		let duration = block
+			.duration
+			.or(track.default_duration)
+			.map(Timestamp::from_nanos)
+			.transpose()?;
+		let payload = if track.kind == TrackKind::Text {
+			let duration = duration.ok_or(Error::InvalidSubtitle("missing cue duration"))?;
+			let end = timestamp.checked_add(duration)?;
+			let body = std::str::from_utf8(block.payload).map_err(|_| Error::InvalidSubtitle("invalid UTF-8"))?;
+			let mut output = track.text_header.clone().unwrap_or_else(|| "WEBVTT\n\n".into());
+			let mut id = "";
+			let mut settings = "";
+			if let Some(addition) = block.addition.filter(|_| track.text_header.is_some()) {
+				let addition =
+					std::str::from_utf8(addition).map_err(|_| Error::InvalidSubtitle("invalid cue additions UTF-8"))?;
+				let mut lines = addition.splitn(3, '\n');
+				settings = lines.next().unwrap_or_default();
+				id = lines.next().unwrap_or_default();
+				if let Some(comments) = lines.next().filter(|value| !value.is_empty()) {
+					if !comments.starts_with("NOTE") || comments.contains("-->") {
+						return Err(Error::InvalidSubtitle("invalid cue comments").into());
+					}
+					output.push_str(comments.trim_end_matches('\n'));
+					output.push_str("\n\n");
+				}
+			}
+			let body = if track.text_header.is_some() {
+				crate::container::text::rebase(body, timestamp, end).map_err(Error::InvalidSubtitle)?
+			} else {
+				body.into()
+			};
+			crate::container::text::append(
+				&mut output,
+				crate::container::text::Cue {
+					start: timestamp,
+					end,
+					body: &body,
+					id,
+					settings,
+				},
+			)
+			.map_err(Error::InvalidSubtitle)?;
+			Bytes::from(output)
+		} else {
+			Bytes::copy_from_slice(block.payload)
+		};
 		let frame = crate::container::Frame {
 			timestamp,
-			payload: Bytes::copy_from_slice(payload),
+			payload,
 			keyframe,
-			duration: None,
+			duration,
 		};
 
 		// Manage groups: new group on video keyframe; audio always finishes its group immediately.
