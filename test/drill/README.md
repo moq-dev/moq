@@ -45,7 +45,8 @@ reader leaves, and is covered by moq-net's origin tests. Waiting out a
 linger would make this the slowest test in the workspace; the rejoin the
 drill does assert is the half of that behavior worth grading here.
 
-The impaired cluster drills arm a one-shot ingress burst after setup and subscription.
+The impaired cluster drills arm a one-shot ingress burst once the origin has subscribed
+to the publisher, since the gate also holds the replies and credit that subscription needs.
 The shaper keeps seeded loss, then collects surviving datagrams on the publisher's
 upstream flow until they exceed the rate bucket's burst and queue allowance. It
 accounts that batch at one instant, so scheduling gaps cannot silently drain the

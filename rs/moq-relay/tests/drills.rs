@@ -1039,6 +1039,18 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 
 	// Subscribed before the first burst, as an app watching a control channel is.
 	let mut reader = subscribe(&subscribed, "live").await;
+	// The subscriber's subscription can start before the origin's reaches the
+	// publisher, which takes extra round trips over a moq-transport peer. The
+	// ingress burst holds every publisher datagram, including the replies and
+	// credit the origin needs before it subscribes, so arming it any earlier
+	// starves the publisher's session until it idles out.
+	tokio::time::timeout(TIMEOUT, async {
+		while track.subscription().is_none() {
+			track.subscription_changed().await.expect("track aborted");
+		}
+	})
+	.await
+	.expect("the origin never subscribed to the publisher");
 
 	// What connecting and subscribing overflowed, so only the bursts are graded.
 	let paths = [&peer, &publish_path, &subscribe_path];
