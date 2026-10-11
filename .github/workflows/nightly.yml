@@ -224,7 +224,7 @@ jobs:
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
-        # `gh test` exercises the release tooling, which no pull request runs.
+        # `gh test` exercises workflow and release tooling, which no pull request runs.
         recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test"]
     steps:
       - name: Free disk space
@@ -320,8 +320,12 @@ jobs:
       # its apt runtime libs, and run.sh's own install then no-ops.
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
+
+      - name: Browser publisher fairness benchmark
+        run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}
       - name: Audio quality
+        if: ${{ !cancelled() }}
         run: nix develop --command just test audio-quality --enforce --capture
         shell: bash -leo pipefail {0}
         env:

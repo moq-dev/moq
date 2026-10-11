@@ -52,6 +52,12 @@ bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts
 
+# Sweep browser publisher fairness over backlog x viewers; requires installed Chromium.
+serve-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project net/bench/tsconfig.json
+    bun net/bench/serve-browser.ts
+
 # Sweep catalog estimate publishes and subscribe updates over tracks x viewers.
 catalog-bench:
     bun install --frozen-lockfile

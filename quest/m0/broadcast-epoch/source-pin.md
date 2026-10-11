@@ -63,3 +63,8 @@ of resolving the current route. Document it on `Source`, fix stale
 comments inline, and add a line for the `Source::new` break to the
 Unreleased section of `doc/setup/upgrade.md`; no new doc page (decided
 2026-10-10). Wire: none.
+
+## Related
+
+- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - held track FETCH and JS wire operations also need instance validity after retirement; handle pinning alone does not fix them
+- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players adopt the same sibling policy, and optional catalog epochs constrain initial resolution where supported

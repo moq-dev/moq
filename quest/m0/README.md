@@ -61,6 +61,7 @@ remain and no release waits on them.
 - [CI host](/quest/m0/ci-host.md) - the maintainer brings up the spare desktop as the `moq-ci` and `moq-gpu` runner host
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, before Seattle
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
+- [Interop latecomer control](/quest/m0/interop-latecomer-control.md) - the lagging-latecomer control fails as designed, and a red Interop step no longer skips the TS steps
 - [Paused spinner](/quest/m0/watch-paused-spinner.md) - the watch buffering spinner never covers the paused play button, so Interop's resume step can click it
 - [Check base](/quest/m0/check-base.md) - `just check` diffs against the PR's base whatever the local branch tracks, so scoped checks stay scoped
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to

@@ -1,7 +1,9 @@
 /** Sweep observers against routes for one route update, and against tracks for one demand edge. */
 
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
+import { BroadcastCache } from "../src/consume.ts";
 import * as Epoch from "../src/epoch.ts";
+import { Route } from "../src/hop.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 
@@ -118,5 +120,101 @@ for (const pinned of [false, true]) {
 			for (const request of [...requests, ...background]) request.close();
 			origin.close();
 		}
+	}
+}
+
+// Only a touched announcement and path should cost work, regardless of unrelated routes or consumes.
+console.log("subscriber,announcements,consumers,update_and_consume_us");
+for (const routeCount of routeCounts) {
+	for (const consumerCount of [8, 32, 128]) {
+		const cache = new BroadcastCache();
+		const owners = Array.from({ length: routeCount }, () => ({}));
+		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`pool/${i}`), owners[i], Route.default);
+		const sources = Array.from({ length: consumerCount }, () => new BroadcastProducer());
+		const held = sources.map((source, i) => {
+			const path = Path.from(`pool/${i % routeCount}/job/${i}`);
+			return cache.insert(path, cache.instance(path), source.consume());
+		});
+		const touched = Path.from("pool/0/job/0");
+		const start = performance.now();
+		for (let i = 0; i < 4096; i++) {
+			cache.announce(Path.from("pool/0"), owners[0], { ...Route.default, cost: BigInt(i) });
+			const shared = cache.get(touched, cache.instance(touched));
+			if (!shared || shared.closed !== held[0].closed) throw new Error("update replaced the source");
+			shared.close();
+		}
+		console.log(`cache,${routeCount},${consumerCount},${(((performance.now() - start) * 1000) / 4096).toFixed(2)}`);
+		for (const consumer of held) consumer.close();
+		for (const source of sources) source.close();
+	}
+}
+
+// Switching a more-specific route on and off must recover all held fallback consumers.
+console.log("alternation,announcements,consumers,select_us,duplicates");
+for (const routeCount of routeCounts) {
+	for (const consumerCount of [1, 8, 32]) {
+		const cache = new BroadcastCache();
+		const owners = Array.from({ length: routeCount }, () => ({}));
+		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`pool/${i}`), owners[i], Route.default);
+		const sources = Array.from({ length: consumerCount }, () => new BroadcastProducer());
+		const paths = sources.map((_, i) => Path.from(`pool/0/job/${i}`));
+		const held = sources.map((source, i) => cache.insert(paths[i], cache.instance(paths[i]), source.consume()));
+		const specific = {};
+		const prefix = Path.from("pool/0/job");
+		const epoch = Epoch.mint();
+		let duplicates = 0;
+		const start = performance.now();
+		for (let round = 0; round < 256; round++) {
+			if (round % 2 === 0) cache.announce(prefix, specific, { ...Route.default, epoch });
+			else cache.withdraw(prefix, specific);
+			for (let i = 0; i < consumerCount; i++) {
+				const instance = cache.instance(paths[i]);
+				const shared = cache.get(paths[i], instance);
+				if (shared) shared.close();
+				else {
+					if (round > 0) duplicates++;
+					held.push(cache.insert(paths[i], instance, sources[i].consume()));
+				}
+			}
+		}
+		console.log(
+			`alternation,${routeCount},${consumerCount},${(((performance.now() - start) * 1000) / 256).toFixed(2)},${duplicates}`,
+		);
+		for (const consumer of held) consumer.close();
+		for (const source of sources) source.close();
+	}
+}
+
+// Blind invalidation touches only the held paths covered by the new announcement.
+console.log("blind,announcements,consumers,invalidate_us,stale");
+for (const routeCount of routeCounts) {
+	for (const consumerCount of [1, 8, 32]) {
+		const cache = new BroadcastCache();
+		for (let i = 0; i < routeCount; i++) cache.announce(Path.from(`other/${i}`), {}, Route.default);
+		const source = new BroadcastProducer();
+		const keeper = source.consume();
+		const paths = Array.from({ length: consumerCount }, (_, i) => Path.from(`pool/job/${i}`));
+		const prefix = Path.from("pool");
+		const owner = {};
+		let elapsed = 0;
+		let stale = 0;
+		for (let round = 0; round < 256; round++) {
+			const held = paths.map((path) => cache.insert(path, cache.instance(path), source.consume()));
+			const start = performance.now();
+			cache.announce(prefix, owner, Route.default);
+			cache.withdraw(prefix, owner);
+			elapsed += performance.now() - start;
+			for (const path of paths) {
+				const shared = cache.get(path, cache.instance(path));
+				if (shared) {
+					stale++;
+					shared.close();
+				}
+			}
+			for (const consumer of held) consumer.close();
+		}
+		console.log(`blind,${routeCount},${consumerCount},${((elapsed * 1000) / 256).toFixed(2)},${stale}`);
+		keeper.close();
+		source.close();
 	}
 }
