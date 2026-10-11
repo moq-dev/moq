@@ -467,9 +467,9 @@ class DecoderTrack {
 						this.frame.set(frame.clone());
 					}
 
-					// Returns immediately when the latency is "instant".
-					const ok = await effect.race(this.sync.wait(timestamp).then(() => true));
-					if (!ok) return;
+					// Returns immediately when the latency is "instant". Closing the track releases it.
+					await this.sync.wait(timestamp, effect.abort);
+					if (effect.abort.aborted) return;
 					if (epoch !== this.sync.epoch) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {

@@ -169,6 +169,22 @@ describe("wait", () => {
 		sync.close();
 	});
 
+	it("releases a wait parked across a reset when its signal aborts", async () => {
+		const sync = new Sync({ delay: 10_000 as Time.Milli });
+		await flush();
+		const timestamp = Time.Milli.now();
+		sync.received(timestamp);
+
+		const controller = new AbortController();
+		const waiting = sync.wait(timestamp, controller.signal);
+		await flush();
+		sync.reset();
+		await flush();
+		controller.abort();
+		await waiting;
+		sync.close();
+	});
+
 	it("releases a wait parked across a reset when closed", async () => {
 		const sync = new Sync({ delay: 10_000 as Time.Milli });
 		await flush();

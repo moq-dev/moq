@@ -626,6 +626,46 @@ it("a shared audio clock reset cannot present a parked video frame", async () =>
 	}
 });
 
+it("closing the track releases a video wait parked across a reset", async () => {
+	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
+	const timer = spyOn(globalThis, "setTimeout").mockImplementation(
+		(() => 1 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
+	);
+	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const reads: Read[] = [];
+	const playback = await guardedPlayback("legacy", reads);
+	const waits: Promise<void>[] = [];
+	const original = playback.sync.wait.bind(playback.sync);
+	const wait = spyOn(playback.sync, "wait").mockImplementation((timestamp, signal) => {
+		const waiting = original(timestamp, signal);
+		waits.push(waiting);
+		return waiting;
+	});
+	try {
+		playback.enabled.set(false);
+		playback.delay.set(Time.Milli(1000));
+		await microtasks();
+		reads.push(sample(0, 0), sample(0, 100_000, 0, false));
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.submitted).toEqual([0, 100_000]);
+		playback.sync.reset();
+		await microtasks();
+		expect(waits.map((waiting) => Bun.peek.status(waiting))).toContain("pending");
+		// No frame re-anchors the shared clock, but the closed track must not leave its wait behind.
+		playback.enabled.set(false);
+		await microtasks();
+		expect(waits.map((waiting) => Bun.peek.status(waiting))).not.toContain("pending");
+	} finally {
+		wait.mockRestore();
+		playback.close();
+		await microtasks();
+		clear.mockRestore();
+		timer.mockRestore();
+		now.mockRestore();
+	}
+});
+
 it("a reset drops a parked video frame even when the next anchor restores the reference", async () => {
 	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
 	const timers: Array<() => void> = [];

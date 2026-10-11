@@ -224,9 +224,13 @@ export class Sync {
 		return Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), this.#out.delay.peek());
 	}
 
-	// Sleep until it's time to render this frame. A reset holds the wait until the next frame
-	// re-anchors the clock, then measures the frame against that new reference.
-	async wait(timestamp: Time.Milli): Promise<void> {
+	/**
+	 * Sleep until it's time to render this frame, or until `signal` aborts.
+	 *
+	 * A reset holds the wait until the next frame re-anchors the clock, then measures the frame
+	 * against that new reference. Aborting resolves the wait early and releases it.
+	 */
+	async wait(timestamp: Time.Milli, signal?: AbortSignal): Promise<void> {
 		// A zero delay still sleeps: the sleep comes from the reference, which holds an early frame
 		// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
 		// Peek the input, not `out.instant`, which lags a same-turn change until effects flush.
@@ -238,8 +242,8 @@ export class Sync {
 		}
 
 		for (;;) {
-			// Switching to "instant" or closing wakes the sleep below, so frames parked here leave.
-			if (this.in.delay.peek() === "instant" || this.#closed.peek()) return;
+			// Switching to "instant", closing, or aborting wakes the sleep below, so frames parked here leave.
+			if (this.in.delay.peek() === "instant" || this.#closed.peek() || signal?.aborted) return;
 
 			// Sleep until it's time to decode the next frame.
 			// NOTE: This function runs in parallel for each frame.
@@ -248,7 +252,7 @@ export class Sync {
 
 			const currentRef = this.#out.reference.peek();
 			if (currentRef === undefined) {
-				await this.#sleep();
+				await this.#sleep(undefined, signal);
 				continue;
 			}
 
@@ -258,14 +262,15 @@ export class Sync {
 			// Skip setTimeout for small sleeps; the timer resolution (~4ms) would overshoot.
 			if (sleep < 5) return;
 
-			if (await this.#sleep(sleep)) return;
+			if (await this.#sleep(sleep, signal)) return;
 		}
 	}
 
-	// Sleeps for `ms` (forever if omitted), or returns false early once anything the sleep was
-	// computed from changes. Releases every listener either way: frames sleep once each, so a
-	// listener left on a signal that never changes would pile up for the life of the player.
-	#sleep(ms?: number): Promise<boolean> {
+	// Sleeps for `ms` (forever if undefined), or returns false early once anything the sleep was
+	// computed from changes or `signal` aborts. Releases every listener either way: frames sleep
+	// once each, so a listener left on a signal that never changes would pile up for the life of
+	// the player.
+	#sleep(ms: number | undefined, signal?: AbortSignal): Promise<boolean> {
 		return new Promise((resolve) => {
 			const wake = (ok: boolean) => {
 				clearTimeout(timer);
@@ -279,6 +284,11 @@ export class Sync {
 				this.#out.reference.changed(() => wake(false)),
 				this.#closed.changed(() => wake(false)),
 			];
+			if (signal) {
+				const abort = () => wake(false);
+				signal.addEventListener("abort", abort, { once: true });
+				disposes.push(() => signal.removeEventListener("abort", abort));
+			}
 		});
 	}
 

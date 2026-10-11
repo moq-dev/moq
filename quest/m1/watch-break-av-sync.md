@@ -20,7 +20,7 @@ the reachable pre-gap GOP by design, per #4914 and #5158) or the player's
 sync re-anchors one track and not the other. Fix it at that cause, and assert
 the offset in the media check.
 
-Public API: none expected. Wire: none.
+Public API: `Sync.wait` gains an optional `AbortSignal`. Wire: none.
 
 ### Investigation
 
@@ -47,7 +47,9 @@ decoder presented its parked frame. Decided 2026-10-11 (no public API change):
 `Sync.wait` stays `Promise<void>` and holds a parked wait across a reset until
 the next frame re-anchors the clock. Video drops a frame whose wait spanned a
 reset, keyed on an `@internal` reset epoch (stripped from the published types),
-which also covers a reset and same-value re-anchor in one turn. Focused
+which also covers a reset and same-value re-anchor in one turn. `Sync.wait`
+gained an optional `AbortSignal` (additive), which the decoder passes so a
+closed track releases its parked waits. Focused
 regressions fail before and pass after the fix.
 
 The media harness now keeps early-resume grading active until audio is running
