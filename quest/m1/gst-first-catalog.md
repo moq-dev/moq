@@ -34,14 +34,20 @@ Decided 2026-10-10, planning the follow-ups of moqsrc's restart work
   caps are opaque, which the catalog never lists. The catalog withholds its
   first snapshot until every reservation resolves, so that snapshot lists
   every pad. The catalog producer exists only during a run (`READY` to
-  `PAUSED`), so each run reserves for the pads that exist when it starts, and
-  a pad requested mid-run reserves at once.
+  `PAUSED`), so each run reserves for the pads that exist when it starts
+  (`start_session`), and a pad requested mid-run reserves at once.
+- A pad admitted while a run starts must land in exactly one of those sets:
+  reserve in `confirm_admission`, under the control lock `start_session`
+  takes, rather than after `add_pad`, so a pad added after `start_session`
+  enumerated `sink_pads` still reserves before the first snapshot.
 
 Decided 2026-10-11 by the maintainer, in #5189:
 
 - A pad requested but never fed holds back the run's first catalog, so its
   reservation drops when the pad is released, reaches EOS without caps, or
-  gets opaque caps. Dropping reservations once another pad's first frame is
+  gets opaque caps. A pad whose caps fail (`CapsOutcome::Failed`, such as AAC
+  without `codec_data` or a duplicate track name) is terminal and drops it
+  too. Dropping reservations once another pad's first frame is
   ready was rejected: it brings back the race this quest removes. The
   initial gate only holds the first snapshot, so later catalogs never wait.
 - m1, ranked after #3021: only a restart of a `moqsink` whose pads negotiate
@@ -52,8 +58,10 @@ Decided 2026-10-11 by the maintainer, in #5189:
   negotiate before the broadcast lists anything. No separate docs quest.
 
 Tests: a `moqsink` whose audio pad gets caps after its video pad's first
-buffer publishes one first catalog listing both; and a `moqsrc` following
-that `moqsink` across a restart keeps both pads without EOS.
+buffer publishes one first catalog listing both; a pad that is released,
+ends without caps, or fails its caps lets the first catalog publish; a pad
+requested while the run starts is listed; and a `moqsrc` following that
+`moqsink` across a restart keeps both pads without EOS.
 
 ## Related
 
