@@ -790,8 +790,17 @@ export class Publisher {
 						case "update": {
 							const update = control.update;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
+							// `positionCursor` pins an unfloored pre-06 SUBSCRIBE to the latest
+							// group, so an update that drops a named floor re-pins there too. On
+							// an empty track the next group is the latest, whatever its sequence.
+							const start =
+								update.startGroup === undefined &&
+								bounds.startGroup !== undefined &&
+								!resolvesStart(this.version)
+									? (track.latest() ?? 0)
+									: update.startGroup;
 							hooks.replaceGroups(track, {
-								start: update.startGroup === undefined ? undefined : { included: update.startGroup },
+								start: start === undefined ? undefined : { included: start },
 								end: update.endGroup === undefined ? undefined : { included: update.endGroup },
 							});
 							bounds.startGroup = update.startGroup;
@@ -851,13 +860,17 @@ export class Publisher {
 
 				if (emitRange && !startSent) {
 					startSent = true;
-					// SUBSCRIBE_START promises nothing below this sequence will be delivered.
-					// Arrival-order serving could later surface a straggler below the first
-					// group, so pin the floor to what was announced.
-					hooks.replaceGroups(track, {
-						start: { included: group.sequence },
-						end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
-					});
+					// SUBSCRIBE_START names the first group served now. A later group at or
+					// above an explicit floor is still delivered, so the cursor stays put.
+					// A pre-06 subscribe that named no group is the exception: an absent
+					// Group Start is the latest group, and this sequence becomes the floor.
+					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
+					if (bounds.startGroup === undefined && !resolvesStart(this.version)) {
+						hooks.replaceGroups(track, {
+							start: { included: group.sequence },
+							end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
+						});
+					}
 					if (
 						!(await controls.response(
 							encodeSubscribeResponse(

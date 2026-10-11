@@ -1502,10 +1502,9 @@ mod test {
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
-	/// The run_track contract behind SUBSCRIBE_OK's implicit drop: once the first
-	/// served group resolves the start, the cursor floor rises to it, so a lower
-	/// group arriving late (unordered delivery) is never served after the range
-	/// was declared dropped.
+	/// An unfloored join adopts the first served group: the cursor rises to it, so a
+	/// group created below it is not served. An explicit floor does not; see
+	/// [`explicit_floor_delivers_a_late_lower_group`].
 	#[tokio::test]
 	async fn start_floor_suppresses_late_lower_arrivals() {
 		use futures::FutureExt;
@@ -1538,6 +1537,39 @@ mod test {
 			recv_next(&mut subscriber, false, false).now_or_never().is_none(),
 			"a group below the resolved start must be suppressed"
 		);
+	}
+
+	/// The explicit-floor twin of [`start_floor_suppresses_late_lower_arrivals`].
+	/// The subscription named group 0, so group 5 is still inside the floor when
+	/// it is created after group 7.
+	#[tokio::test]
+	async fn explicit_floor_delivers_a_late_lower_group() {
+		let mut producer = track_producer("test");
+		let mut subscriber = producer.subscribe(
+			track::Subscription::default()
+				.with_start(track::Position::group(0))
+				.with_max_age(std::time::Duration::from_secs(60)),
+		);
+
+		let write = |producer: &mut track::Producer, sequence: u64| {
+			let mut group = producer.create_group(crate::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
+				.unwrap();
+			group.finish().unwrap();
+		};
+
+		write(&mut producer, 7);
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Group(group) => assert_eq!(group.sequence, 7),
+			_ => panic!("expected the first group"),
+		}
+
+		write(&mut producer, 5);
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Group(group) => assert_eq!(group.sequence, 5),
+			_ => panic!("expected the late group above the floor"),
+		}
 	}
 
 	#[tokio::test]
@@ -2300,14 +2332,27 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		}
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
+		// Read first: `update` replaces these preferences.
+		let requested = self.track.subscription().start;
+		let floored = requested.is_some_and(|start| start.group > 0);
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
 			max_age: serving_max_age(self.ctx.version, upd.max_age),
 			..bounds.positions()
 		});
-		if let Some(start_group) = upd.start_group {
-			self.track.start_at(start_group);
+		// Clearing a resume floor must also expose a finished group below it.
+		// An unfloored cursor keeps its progress and never replays served groups.
+		// Pre-06 an absent start means the latest group: `position_cursor` pins an
+		// unfloored SUBSCRIBE there, so an update that drops a named floor re-pins too.
+		// On an empty track the next group is the latest, whatever its sequence.
+		match upd.start_group {
+			Some(start_group) => self.track.start_at(start_group),
+			None if floored && self.ctx.version.resolves_start() => self.track.start_at(0),
+			None if requested.is_some() && !self.ctx.version.resolves_start() => {
+				self.track.start_at(self.track.latest().unwrap_or(0))
+			}
+			None => {}
 		}
 		self.track
 			.end_at(upd.end_group.map_or(Bound::Unbounded, Bound::Included));
@@ -2436,12 +2481,19 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// Only the group: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`).
 		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart { group: start }))?;
-		// SUBSCRIBE_START is an implicit drop of everything below the resolved start (the
-		// subscriber records it as a permanent miss), so a lower group arriving late must
-		// not be served after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
-		// renegotiating the resolved start along with the demand. Raised, not assigned: an
-		// update that landed while the group was held may already have raised it past.
-		self.track.raise_start_to(start);
+		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
+		// the requested floor and this group are not served. A later group at or above an
+		// explicit floor, still inside the subscriber's max age, is delivered, so the cursor
+		// stays at that floor.
+		//
+		// A pre-06 subscription that named no group is the exception: those drafts define an
+		// absent Group Start as the latest group, and the resolved start becomes the
+		// floor. Lite-06 encodes a floor of group 0 as 0, which decodes as no named floor;
+		// that 0 is group 0, so it is not pinned. Raised, not assigned: an update that
+		// landed while the group was held may already have raised it past.
+		if self.track.subscription().start.is_none() && !self.ctx.version.resolves_start() {
+			self.track.raise_start_to(start);
+		}
 		self.serve(group);
 		Ok(())
 	}
@@ -3284,6 +3336,92 @@ mod serve_group_test {
 		assert_eq!(*log.writes.lock().unwrap(), [0, 1, 0, 1, 2, 3, 2]);
 	}
 
+	/// A lite-05 subscription's run loop and its count of group streams opened.
+	fn lite05_run(track: track::Subscriber) -> (TrackRun<SinkSession>, Writer<SinkSend, Version>, Arc<Opens>) {
+		let opens = Arc::<Opens>::default();
+		let track_priority = kio::Producer::new(0u8);
+		let ctx = Subscription {
+			session: SinkSession::new(Log::default()),
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite05,
+			timescale: Some(crate::Timescale::default()),
+			opens: opens.clone(),
+		};
+		let bounds = Bounds {
+			start_group: Some(0),
+			start_frame: 0,
+			end_group: None,
+			end_frame: None,
+		};
+		let writer = Writer::new(SinkSend::new(Log::default()), Version::Lite05);
+		(TrackRun::new(ctx, track, bounds, track_priority), writer, opens)
+	}
+
+	/// Pre-06 an absent Group Start is the latest group, so an update that drops a named
+	/// floor re-pins the cursor there: a group created below it afterwards is not served.
+	#[tokio::test]
+	async fn a_pre06_update_dropping_the_floor_repins_to_the_latest_group() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_start(track::Position::group(0))
+				.with_max_age(Duration::from_secs(60)),
+		);
+		let (mut run, mut writer, opens) = lite05_run(subscriber);
+		let mut settle = |run: &mut TrackRun<SinkSession>| {
+			let res = kio::wait(|waiter| run.poll(&mut writer, waiter)).now_or_never();
+			assert!(res.is_none(), "the run ended");
+			opens.opened.load(Ordering::Relaxed)
+		};
+
+		write_group(&mut track, 7, 7);
+		assert_eq!(settle(&mut run), 1);
+
+		run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_age: Duration::from_secs(60),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		write_group(&mut track, 5, 5);
+		assert_eq!(settle(&mut run), 1, "served a group below the latest");
+
+		write_group(&mut track, 8, 8);
+		assert_eq!(settle(&mut run), 2);
+	}
+
+	/// On an empty track the re-pin has no latest group to name, so the first group the
+	/// track produces is served, even below the dropped floor.
+	#[tokio::test]
+	async fn a_pre06_update_dropping_the_floor_on_an_empty_track_serves_the_next_group() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_start(track::Position::group(5))
+				.with_max_age(Duration::from_secs(60)),
+		);
+		let (mut run, mut writer, opens) = lite05_run(subscriber);
+		run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_age: Duration::from_secs(60),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+
+		write_group(&mut track, 0, 0);
+		let res = kio::wait(|waiter| run.poll(&mut writer, waiter)).now_or_never();
+		assert!(res.is_none(), "the run ended");
+		assert_eq!(opens.opened.load(Ordering::Relaxed), 1, "group 0 was not served");
+	}
+
 	/// A lite-07 run over a relay's track, whose upstream subscription still waits on the
 	/// source's SUBSCRIBE_START, on a subscribe stream the test can push updates onto.
 	struct RelayRun {
@@ -3349,6 +3487,56 @@ mod serve_group_test {
 			let start = start.encode_bytes(Version::Lite07).unwrap();
 			self.session.log.writes.lock().unwrap().starts_with(&start)
 		}
+	}
+
+	/// A resume past the only finished group leaves that group below the cursor.
+	/// Widening to no floor serves it: it is the live edge until a newer group
+	/// exists, and a catalog never publishes the next one.
+	#[tokio::test(start_paused = true)]
+	async fn a_widening_update_serves_the_finished_group_it_had_skipped() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		write_group(&mut track, 0, 0);
+		let mut relay = RelayRun::new(&mut track, 1);
+		track.start_at(0).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 0, "the resume is past the only group");
+
+		relay.run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_age: Duration::from_secs(30),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the finished group is the live edge");
+	}
+
+	/// Widening the floor never rewinds past a group already served: group 0
+	/// arrived before the served groups, so the cursor has moved past it.
+	#[tokio::test(start_paused = true)]
+	async fn a_widening_update_does_not_rewind_past_served_groups() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		for sequence in 0..3 {
+			write_group(&mut track, sequence, sequence);
+		}
+		let mut relay = RelayRun::new(&mut track, 1);
+		relay.settle();
+		track.start_at(0).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 2, "groups 1 and 2 are at or above the floor");
+
+		relay.run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_age: Duration::from_secs(30),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		relay.settle();
+		assert_eq!(relay.opened(), 2, "group 0 was passed, not skipped");
 	}
 
 	/// A SUBSCRIBE_UPDATE landing while the first group waits on the source's start keeps
