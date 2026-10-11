@@ -2,46 +2,41 @@
 
 ## Goal
 
-A binding app (moq-ffi, moq-c, and every language wrapper) can publish
-several containers from one source on one shared offset, so separate audio and
-video containers stay in sync on a clock that is already in use.
-
-Today each `publish_container` call reserves through `catalog.reserve()`, a
-fresh `catalog::Timebase` per call. Two containers fed from one PTS base (say
-separate audio and video fMP4) each get their own offset once the clock is
-fixed, apart by the gap between their first frames' arrivals.
-
-Non-goals: codec-level publishes (`publish_audio`, `publish_video`, and their
-`_on_track` and stream forms) take caller timestamps and have no offset.
-`Timebase::place` stays Rust-only until a binding consumer needs it.
+A binding app can publish several containers from one source on one shared
+offset, so separate audio and video containers stay synchronized on a clock
+already in use. Container constructors currently reserve a fresh
+`catalog::Timebase` per call, making their offsets depend on first arrival.
 
 ## Plan
 
-Follow-up of [moq-dev/moq#5082](https://github.com/moq-dev/moq/pull/5082),
-which added `catalog::Timebase` in Rust.
+Decided in the 2026-10-10 audit, adapting the approved shared-offset behavior
+to the media constructors introduced by #4519:
 
-Decided (2026-10-09):
+- `Media.Timebase(broadcast)` constructs the shared handle, mirrored as
+  `MoqMediaTimebase` in FFI and `Timebase` under each wrapper's media namespace.
+  Prefer this constructor over a factory on CatalogProducer; it needs no
+  extra catalog handle and keeps media methods off the net broadcast API.
+- Container init carries an optional timebase. Present uses that shared
+  reservation; absent preserves a fresh offset. The container stream
+  constructor takes an init record with format and optional timebase instead
+  of a bare format. Change the constructor, not a compatibility variant.
+- A timebase belongs to one broadcast/catalog. Refuse pairing it with another;
+  do not let the handle independently keep a publication alive. Mirror the
+  current media handle ownership rather than introducing a second lifetime.
+- Apply it to current media container constructors and every wrapper. C uses
+  the generated binding surface; the hand-written C API gets no new features.
+- Codec producers still take caller timestamps with no offset. `Timebase::place`
+  stays Rust-only until a consumer needs it. Retain m2 priority.
+- Update existing container-publishing docs inline. No additional timebase guide.
 
-- Shape: `MoqBroadcastProducer::timebase()` returns a `MoqTimebase` handle,
-  and `MoqContainerInit` gains an optional `timebase` field. A container
-  publish with one reserves through it; without one it reserves fresh, as
-  today. `publish_container_stream(format)` becomes a breaking change taking
-  an init record carrying the same field, not a `_with_timebase` variant.
-  Rejected: methods on the handle (`timebase.publish_container`), which doubles
-  each container entry point in every wrapper, and a positional parameter,
-  which breaks the init-record convention.
-- C: `moq_container_init.timebase` is a handle id, 0 for none, minted by
-  `moq_publish_timebase(broadcast)` with a matching close. moq-c has no
-  container-stream entry point, so only `moq_publish_container` changes.
-- Name: `Timebase`, mirroring Rust (`MoqTimebase` in FFI, `Timebase` in the
-  wrappers). PR 5082 renamed the Rust `catalog::Input` to it before release.
-- Wrappers: Python and Swift take a defaulted keyword argument, Go an options
-  field; Kotlin and Dart add one alias each (`rs/moq-ffi/AGENTS.md`).
-- Docs: inline only, a note where each `doc/lib/{py,swift,kt,go,dart,c}`
-  page covers container publishing. No new guide page.
-- m2: no consumer has asked, and a live feed's drift is usually just network
-  jitter.
+Test two containers sharing an offset after the clock is already taken,
+independent offsets when omitted, foreign-broadcast refusal, and handle
+teardown. Use controlled time and existing interop CI; run
+`just test interop --all` and `just check`.
 
-Test: two containers published through one `MoqTimebase` onto a clock already
-taken land their first frames on the same shifted timeline, and two without
-one each shift by their own offset. Run `just test interop --all`.
+Public API: media Timebase and optional init fields across bindings; the
+stream constructor takes a record. Wire: none.
+
+## Related
+
+- [Generated C](/quest/m1/c/README.md) - mirrors the FFI surface instead of extending the retired hand-written API

@@ -1366,6 +1366,22 @@ impl TrackState {
 		}
 	}
 
+	/// Group `sequence` once cached, `None` once the feed starts past it or ends before it,
+	/// and pending while it still may land.
+	fn landing(&self, sequence: u64) -> Poll<Option<group::Consumer>> {
+		if let Some(slot) = self.lookup.get(&sequence)
+			&& !slot.is_aborted()
+		{
+			return Poll::Ready(Some(slot.serving().consume()));
+		}
+		match self.start_sequence.is_some_and(|start| start > sequence)
+			|| self.final_sequence.is_some_and(|fin| fin <= sequence)
+		{
+			true => Poll::Ready(None),
+			false => Poll::Pending,
+		}
+	}
+
 	/// Record the declared first sequence of the live feed, replacing any earlier
 	/// declaration: the signal is scoped to the current subscription's demand,
 	/// which may legitimately move in either direction. `None` clears it (the
@@ -3004,21 +3020,22 @@ impl Consumer {
 	/// cached, `None` once the feed will not deliver it (it went past it, starts past it,
 	/// or ended), and pending while it still may.
 	pub(crate) fn poll_group(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
-		let res = self.state.poll(waiter, |state| {
-			if let Some(slot) = state.lookup.get(&sequence)
-				&& !slot.is_aborted()
-			{
-				return Poll::Ready(Some(slot.serving().consume()));
-			}
-			let passed = state.max_sequence.is_some_and(|newest| newest > sequence)
-				|| state.start_sequence.is_some_and(|start| start > sequence)
-				|| state.final_sequence.is_some_and(|fin| fin <= sequence);
-			match passed {
-				true => Poll::Ready(None),
-				false => Poll::Pending,
-			}
+		let res = self.state.poll(waiter, |state| match state.landing(sequence) {
+			Poll::Pending if state.max_sequence.is_some_and(|newest| newest > sequence) => Poll::Ready(None),
+			landed => landed,
 		});
 		match res {
+			Poll::Ready(Ok(group)) => Poll::Ready(group),
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// [`Self::poll_group`], except a newer group is no verdict: QUIC does not order
+	/// streams, so this one may still land behind it. Pending until it is cached, or the
+	/// feed starts past it or ends before it.
+	pub(crate) fn poll_landed(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
+		match self.state.poll(waiter, |state| state.landing(sequence)) {
 			Poll::Ready(Ok(group)) => Poll::Ready(group),
 			Poll::Ready(Err(_)) => Poll::Ready(None),
 			Poll::Pending => Poll::Pending,

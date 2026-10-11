@@ -448,6 +448,12 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 	}
 	snapshot.dial = DialSchemeLabel(dial_url);
 
+	return CommitConnectionStats(current, std::move(snapshot), out);
+}
+
+bool MoQOutput::CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
+				      ConnectionStats *out)
+{
 	// A Stop(), restart, or disconnect while stats() ran retired this session, so
 	// its numbers no longer describe the output.
 	std::lock_guard<std::mutex> lock(mutex);
