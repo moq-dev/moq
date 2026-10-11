@@ -87,6 +87,50 @@ impl Buffer {
 	}
 }
 
+/// TBsys in a receiver over one slot: the single 512-byte transport buffer that PIDs 0-3 and
+/// the program's PMT share, draining at Rxsys (ISO 13818-1 2.4.2.3).
+///
+/// Its fill is in bytes times the slot's positions, so each position drains a whole slot's
+/// worth of Rxsys bytes and nothing rounds. It starts each slot empty: a slot's 25 ms drains
+/// six times its size.
+struct SystemBuffer {
+	pmt_pid: u16,
+	positions: u128,
+	fill: u128,
+}
+
+impl SystemBuffer {
+	/// The buffer's size in bytes.
+	const SIZE: u128 = 512;
+	/// The bytes it drains a slot.
+	const DRAIN: u128 = Buffer::SYSTEM.rate as u128 * PCR_INTERVAL.as_nanos() / 8_000_000_000;
+
+	fn new(pmt_pid: u16, positions: usize) -> Self {
+		Self {
+			pmt_pid,
+			positions: positions as u128,
+			fill: 0,
+		}
+	}
+
+	fn carries(&self, pid: u16) -> bool {
+		pid <= 3 || pid == self.pmt_pid
+	}
+
+	/// Whether a packet it carries fits at the next position.
+	fn fits(&self) -> bool {
+		self.fill.saturating_sub(Self::DRAIN) + TsPacket::SIZE as u128 * self.positions <= Self::SIZE * self.positions
+	}
+
+	/// Take the next position, laid with `packet`.
+	fn lay(&mut self, packet: &[u8]) {
+		self.fill = self.fill.saturating_sub(Self::DRAIN);
+		if self.carries(pid(packet)) {
+			self.fill += TsPacket::SIZE as u128 * self.positions;
+		}
+	}
+}
+
 /// One access unit's packets, with the tables muxed ahead of it, still to go out.
 struct Unit {
 	/// The elementary stream it carries, whose buffers bound it.
@@ -156,15 +200,19 @@ impl Slot {
 	/// tables (PAT and the PMT on `pmt_pid`) go just ahead of the first packet muxed after
 	/// them, so they still lead the keyframe they were written for and a reader knows each PID
 	/// before its first packet.
+	///
+	/// The tables share one [`SystemBuffer`]. Where the next table would overflow it, a null
+	/// packet (or failing that, a packet muxed ahead of the table) takes the position instead,
+	/// so a PMT spanning several packets goes out at the buffer's rate.
 	pub fn layout(&self, clock: &[u8], pmt_pid: u16, null: &[u8]) -> Vec<u8> {
 		let packets = self.packets.as_chunks::<{ TsPacket::SIZE }>().0;
-		let mut tables = Vec::new();
+		let mut tables = VecDeque::new();
 		// Each PID's packets in mux order: the clock's PID first, then the rest as they appear.
 		let mut lanes: Vec<(u16, VecDeque<usize>)> = vec![(pid(clock), VecDeque::new())];
 		for (i, packet) in packets.iter().enumerate() {
 			let pid = pid(packet);
 			if pid == 0 || pid == pmt_pid {
-				tables.push(i);
+				tables.push_back(i);
 			} else if let Some((_, lane)) = lanes.iter_mut().find(|(p, _)| *p == pid) {
 				lane.push_back(i);
 			} else {
@@ -184,9 +232,8 @@ impl Slot {
 		let total: i64 = weights.iter().sum();
 		let mut credit = weights.clone();
 		credit[0] -= total;
-		let mut tables = tables.into_iter().peekable();
-		let mut out = Vec::with_capacity((1 + packets.len() + self.nulls) * TsPacket::SIZE);
-		out.extend_from_slice(clock);
+		// The media and null positions in order, `None` for a null.
+		let mut order: VecDeque<Option<usize>> = VecDeque::with_capacity(total as usize);
 		for _ in 1..total {
 			for (credit, weight) in credit.iter_mut().zip(&weights) {
 				*credit += weight;
@@ -198,20 +245,50 @@ impl Slot {
 				}
 			}
 			credit[pick] -= total;
-			let Some((_, lane)) = lanes.get_mut(pick) else {
-				out.extend_from_slice(null);
-				continue;
-			};
-			let i = lane
-				.pop_front()
-				.expect("a lane takes no more positions than its weight");
-			while let Some(table) = tables.next_if(|&table| table < i) {
-				out.extend_from_slice(&packets[table]);
-			}
-			out.extend_from_slice(&packets[i]);
+			order.push_back(lanes.get_mut(pick).map(|(_, lane)| {
+				lane.pop_front()
+					.expect("a lane takes no more positions than its weight")
+			}));
 		}
-		for table in tables {
-			out.extend_from_slice(&packets[table]);
+
+		let positions = 1 + packets.len() + self.nulls;
+		let mut system = SystemBuffer::new(pmt_pid, positions);
+		let mut out = Vec::with_capacity(positions * TsPacket::SIZE);
+		out.extend_from_slice(clock);
+		system.lay(clock);
+		loop {
+			// The next table, once the next media packet was muxed after it.
+			let table = tables
+				.front()
+				.copied()
+				.filter(|&table| order.front().is_none_or(|next| next.is_some_and(|i| table < i)));
+			let next = match table {
+				None => order.pop_front(),
+				Some(table) => {
+					let filler = || {
+						order
+							.iter()
+							.position(Option::is_none)
+							.or_else(|| order.iter().position(|next| next.is_some_and(|i| i < table)))
+					};
+					match (!system.fits()).then(filler).flatten() {
+						Some(k) => order.remove(k),
+						// The table fits, or nothing is left to space it with.
+						None => {
+							tables.pop_front();
+							system.lay(&packets[table]);
+							out.extend_from_slice(&packets[table]);
+							continue;
+						}
+					}
+				}
+			};
+			let Some(next) = next else {
+				break;
+			};
+			let packet = next.map_or(null, |i| &packets[i]);
+			system.lay(packet);
+			out.extend_from_slice(packet);
 		}
 		out
 	}
@@ -921,5 +998,54 @@ mod tests {
 		(null[1], null[2]) = (0x1f, 0xff);
 		let laid: Vec<u16> = slot.layout(&unit(1, 1), 100, &null).chunks(188).map(pid).collect();
 		assert_eq!(laid, [1, 0, 100, 3, 0x1fff, 3, 3, 1, 0x1fff, 3]);
+	}
+
+	/// A PAT and a three-packet PMT go out at TBsys's rate rather than in a burst, still in
+	/// order ahead of the keyframe muxed after them. Nulls space them in a padded slot, and a
+	/// packet muxed ahead of them where the slot has no nulls.
+	#[test]
+	fn the_tables_go_out_at_the_system_buffer_rate() {
+		for (ahead, nulls) in [(0, 332 - 1 - 54), (40, 0)] {
+			let mut packets = unit(3, ahead);
+			packets.extend(unit(0, 1));
+			for part in 0..3 {
+				let mut pmt = unit(100, 1);
+				pmt[4] = part;
+				packets.extend(pmt);
+			}
+			packets.extend(unit(1, 50));
+			let positions = 1 + packets.len() / TsPacket::SIZE + nulls;
+			let slot = Slot {
+				index: 0,
+				pcr: 0,
+				packets,
+				nulls,
+				keyframe: true,
+				units: vec![1],
+			};
+			let mut null = unit(0, 1);
+			(null[1], null[2]) = (0x1f, 0xff);
+			let laid = slot.layout(&unit(1, 1), 100, &null);
+			assert_eq!(laid.len(), positions * TsPacket::SIZE, "the slot keeps its size");
+			let laid: Vec<&[u8]> = laid.chunks(TsPacket::SIZE).collect();
+
+			let tables: Vec<usize> = (0..laid.len()).filter(|&k| [0, 100].contains(&pid(laid[k]))).collect();
+			let parts: Vec<u8> = tables.iter().skip(1).map(|&k| laid[k][4]).collect();
+			assert_eq!(parts, [0, 1, 2], "the PMT keeps its order");
+			let keyframe = (1..laid.len()).find(|&k| pid(laid[k]) == 1).unwrap();
+			assert!(tables.iter().all(|&k| k < keyframe), "the tables lead the keyframe");
+
+			// TBsys: 188 B in per table packet, drained at Rxsys over the slot's 25 ms.
+			let drain = 1_000_000.0 / 8.0 * 0.025 / positions as f64;
+			let (mut tb, mut peak) = (0.0f64, 0.0f64);
+			for packet in &laid {
+				tb = (tb - drain).max(0.0);
+				if [0, 100].contains(&pid(packet)) {
+					tb += 188.0;
+					peak = peak.max(tb);
+				}
+			}
+			assert!(peak <= 512.0, "TBsys peak {peak:.0} B with {ahead} packets ahead");
+		}
 	}
 }

@@ -7501,6 +7501,19 @@ async fn export_stats_count_a_gap_longer_than_the_backfill() {
 
 #[tokio::test(start_paused = true)]
 async fn a_large_pmt_is_split_across_packets() {
+	assert_eq!(large_pmt(24, None).await, 2);
+}
+
+/// A PMT spanning three packets at 20 Mb/s goes out at TBsys's rate: the PAT and PMT share its
+/// 512 bytes, which drain at Rxsys (ISO 13818-1 2.4.2.3).
+#[tokio::test(start_paused = true)]
+async fn a_large_pmt_keeps_within_the_system_buffer() {
+	assert_eq!(large_pmt(48, Some(20_000_000)).await, 3);
+}
+
+/// Export `streams` language-tagged AAC streams, check the PMT reassembles across its packets
+/// and keeps within TBsys at `mux_rate`, and return how many packets it spans.
+async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(
 		&mut broadcast,
@@ -7509,7 +7522,7 @@ async fn a_large_pmt_is_split_across_packets() {
 	.unwrap();
 	let mut config = tscat::Mpegts::default();
 	let mut producers = Vec::new();
-	for index in 0..24 {
+	for index in 0..streams {
 		let name = format!("audio{index:02}");
 		let track = broadcast
 			.create_track(
@@ -7542,15 +7555,32 @@ async fn a_large_pmt_is_split_across_packets() {
 		producers.push(producer);
 	}
 	catalog.modify().unwrap().ext.mpegts = config;
-	let exporter = Export::with_ts(crate::source::announced(&broadcast.consume()), Default::default())
+	let mut exporter = Export::with_ts(crate::source::announced(&broadcast.consume()), Default::default())
 		.await
 		.unwrap();
+	if let Some(mux_rate) = mux_rate {
+		exporter = exporter.with_mux_rate(mux_rate);
+	}
 	let ts = drain_with(exporter).await;
+	let packets = ts.as_chunks::<188>().0;
+	let pid = |packet: &[u8; 188]| (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+	if let Some(mux_rate) = mux_rate {
+		// TBsys: 188 B in per table packet, drained at Rxsys over each packet's time.
+		let drain = 1_000_000.0 / mux_rate as f64 * 188.0;
+		let (mut tb, mut peak) = (0.0f64, 0.0f64);
+		for packet in packets {
+			tb = (tb - drain).max(0.0);
+			if [0, 0x1000].contains(&pid(packet)) {
+				tb += 188.0;
+				peak = peak.max(tb);
+			}
+		}
+		assert!(peak <= 512.0, "TBsys peak {peak:.0} B");
+	}
 	let mut section = Vec::new();
 	let mut counters = Vec::new();
-	for packet in ts.as_chunks::<188>().0 {
-		let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
-		if pid != 0x1000 {
+	for packet in packets {
+		if pid(packet) != 0x1000 {
 			continue;
 		}
 		counters.push(packet[3] & 0x0f);
@@ -7572,18 +7602,18 @@ async fn a_large_pmt_is_split_across_packets() {
 			break;
 		}
 	}
-	assert!(counters.len() > 1, "PMT must span packets");
 	for pair in counters.windows(2) {
 		assert_eq!(pair[1], (pair[0] + 1) & 0x0f);
 	}
 	assert!(super::psi::crc_ok(&section));
 	let pmt = super::psi::Pmt::parse(&section).unwrap();
-	assert_eq!(pmt.streams.len(), 24);
+	assert_eq!(pmt.streams.len(), usize::from(streams));
 	for (index, stream) in pmt.streams.iter().enumerate() {
 		assert_eq!(stream.pid.as_u16(), 0x1001 + index as u16);
 		assert_eq!(stream.stream_type, 0x0f);
 		assert_eq!(stream.descriptors[0].data.as_ref(), b"eng\0");
 	}
+	counters.len()
 }
 
 /// Publish a catalog-only broadcast at `live`, for a test of what follows its end.
