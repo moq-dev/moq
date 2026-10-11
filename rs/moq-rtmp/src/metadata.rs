@@ -1,13 +1,23 @@
+/// Counts the script data one RTMP source discards, warning once and summarizing on drop.
 #[derive(Default)]
 pub(crate) struct Dropped {
 	pub(crate) count: u64,
+	/// The broadcast path, logged in place of the credential-bearing stream key.
+	path: String,
 }
 
 impl Dropped {
+	pub(crate) fn new(path: &str) -> Self {
+		Self {
+			count: 0,
+			path: path.to_string(),
+		}
+	}
+
 	pub(crate) fn record(&mut self) {
 		self.count += 1;
 		if self.count == 1 {
-			tracing::warn!(count = self.count, "discarding RTMP stream metadata");
+			tracing::warn!(path = %self.path, count = self.count, "discarding RTMP stream metadata");
 		}
 	}
 }
@@ -15,7 +25,7 @@ impl Dropped {
 impl Drop for Dropped {
 	fn drop(&mut self) {
 		if self.count > 1 {
-			tracing::warn!(count = self.count, "RTMP metadata discard summary");
+			tracing::warn!(path = %self.path, count = self.count, "RTMP metadata discard summary");
 		}
 	}
 }

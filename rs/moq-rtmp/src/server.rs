@@ -1465,7 +1465,7 @@ impl Publisher {
 
 		Ok(Self {
 			importer,
-			metadata: crate::metadata::Dropped::default(),
+			metadata: crate::metadata::Dropped::new(path),
 			broadcast: handle,
 			epoch,
 		})
@@ -1544,9 +1544,11 @@ mod tests {
 				.iter()
 				.filter(|line| line.contains("discarding RTMP stream metadata"))
 				.count();
-			let summary = lines
-				.iter()
-				.any(|line| line.contains("RTMP metadata discard summary") && line.contains("count=2"));
+			let summary = lines.iter().any(|line| {
+				line.contains("RTMP metadata discard summary")
+					&& line.contains("path=metadata")
+					&& line.contains("count=2")
+			});
 			if warnings == 1 && summary {
 				Ok(())
 			} else {

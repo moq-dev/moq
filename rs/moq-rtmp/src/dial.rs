@@ -294,6 +294,7 @@ impl<S: Stream> Client<S> {
 			.request_playback(stream_key.to_string())
 			.map_err(|e| anyhow::anyhow!("rtmp request play: {e:?}"))?;
 		self.work.push_back(request);
+		self.metadata = crate::metadata::Dropped::new(path.as_str());
 		self.await_event(Direction::Play).await?;
 
 		let config = moq_mux::catalog::Config::default()
@@ -582,7 +583,7 @@ mod tests {
 			export_max_delay: crate::DEFAULT_MAX_DELAY,
 			import_max_age: None,
 			import_bandwidth: Default::default(),
-			metadata: Default::default(),
+			metadata: crate::metadata::Dropped::new("metadata"),
 		};
 		let origin = moq_tokio::origin::spawn();
 		let mut publisher = Publisher::new(&origin, "metadata", Default::default()).unwrap();
@@ -597,9 +598,11 @@ mod tests {
 				.iter()
 				.filter(|line| line.contains("discarding RTMP stream metadata"))
 				.count();
-			let summary = lines
-				.iter()
-				.any(|line| line.contains("RTMP metadata discard summary") && line.contains("count=2"));
+			let summary = lines.iter().any(|line| {
+				line.contains("RTMP metadata discard summary")
+					&& line.contains("path=metadata")
+					&& line.contains("count=2")
+			});
 			if warnings == 1 && summary {
 				Ok(())
 			} else {
