@@ -294,6 +294,7 @@ impl Relay {
 		// web and stream alike: a stream-only relay has no web listener at all, and the
 		// point is that whichever socket goes quiet is the one a scrape can see.
 		let internal = internal::Internal::new(config.internal, cluster.stats.clone())
+			.with_timeout(handshake_timeout)
 			.with_cluster(&cluster)
 			.with_sessions(sessions.clone())
 			.with_shutdown(shutdown.clone())

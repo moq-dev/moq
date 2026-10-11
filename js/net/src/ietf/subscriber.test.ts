@@ -17,7 +17,7 @@ import { ObjectDatagram } from "./datagram.ts";
 import { encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
 import type { Properties } from "./properties.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
-import { RequestError, RequestOk } from "./request.ts";
+import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -798,6 +798,8 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	});
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(advert, request);
+	// A writer may yield a task before the rejection assertion below.
+	void handler.catch(() => {});
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "start" });
 
 	const peer = await nextStream(pair.client);
@@ -805,6 +807,16 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	await peer.writer.u53(PublishNamespace.id);
 	await advert.encode(peer.writer, VERSION);
 
+	// The malformed request can reject while the writer yields a browser task.
+	await new Promise<void>((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
 	await expect(handler).rejects.toThrow(ProtocolViolation);
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
 });
@@ -1431,8 +1443,9 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
  * in-progress group: drop it, keep the subscription, and deliver the next group, which
  * starts at object 0. A gap after an object was delivered still fails that group.
  */
-test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", async () => {
-	const version = Version.DRAFT_16;
+test.each([Version.DRAFT_14, Version.DRAFT_16])("draft %s drops a subgroup that starts mid-group", async (version) => {
+	const warning = spyOn(console, "warn").mockImplementation(() => {});
+	onTestFinished(() => warning.mockRestore());
 	const { subscriber, track } = await subscribeTrack({ version });
 
 	// The header cannot say otherwise on this draft: decode reports firstObject.
@@ -1446,6 +1459,7 @@ test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", asyn
 	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
 	expect(track.latest()).toBeUndefined();
 	expect(track.closed.peek()).toBeUndefined();
+	expect(warning).not.toHaveBeenCalled();
 
 	const whole = groupFlags(true);
 	await subscriber.handleGroup(
@@ -1466,6 +1480,7 @@ test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", asyn
 	expect(gapped?.sequence).toBe(5);
 	expect(await gapped?.readString()).toBe("object 0");
 	await expect(gapped?.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
+	expect(warning).toHaveBeenCalledWith(expect.stringContaining("object IDs must start at 0"));
 	expect(track.closed.peek()).toBeUndefined();
 
 	ordered.close();
@@ -1798,3 +1813,127 @@ test("a more specific epochless announcement replaces the consumed source", asyn
 	for (const consumer of [held, fresh, fallback]) consumer.close();
 	announced.close();
 });
+
+for (const version of [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	test(`status zero without the end bit delivers an empty object and continues (${version})`, async () => {
+		const { subscriber, track } = await subscribeTrack({ version });
+		onTestFinished(() => track.close());
+		const message = new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 0,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: { ...groupFlags(true), hasEnd: false },
+		});
+		// Empty normal object, a nonempty successor, then explicit group end.
+		await subscriber.handleGroup(
+			message,
+			new Reader(undefined, new Uint8Array([0, 0, 0, 0, 1, 42, 0, 0, 3]), version),
+		);
+		const group = await track.ordered().nextGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array());
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([42]));
+		expect(await group?.readFrame()).toBeUndefined();
+	});
+}
+
+// Retirement before allocation spends nothing; retirement after allocation drains that request.
+test.each(["waiting", "allocated"] as const)(
+	"legacy retirement while %s keeps subsequent request IDs contiguous",
+	async (phase) => {
+		const version = Version.DRAFT_15;
+		const pair = createMockTransportPair(ALPN.DRAFT_15);
+		const control = await Stream.open(pair.server, { version });
+		const session = new ControlStreamAdapter(pair.server, control, version, phase === "waiting" ? 0n : 4n, true);
+		const running = session.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+		const entered = Promise.withResolvers<void>();
+		const allocated = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		const allocate = session.nextRequestId.bind(session);
+		const intercepted = spyOn(session, "nextRequestId").mockImplementationOnce(async (signal) => {
+			entered.resolve();
+			const id = await allocate(signal);
+			allocated.resolve();
+			await resume.promise;
+			return id;
+		});
+		const subscriber = new Subscriber({ session });
+		const announced = subscriber.announced();
+		const path = Path.from("room");
+		const held = subscriber.consume(path);
+		const old = held
+			.track("video")
+			.info()
+			.then(
+				() => undefined,
+				(err: unknown) => err,
+			);
+		await entered.promise;
+		if (phase === "allocated") await allocated.promise;
+
+		const source = createMockTransportPair(ALPN.DRAFT_15);
+		const sourceStream = await Stream.open(source.server, { version });
+		const sourcePeer = await Stream.accept(source.client, version);
+		if (!sourcePeer) throw new Error("no announcement stream");
+		const advertising = subscriber.runPublishNamespace(
+			new PublishNamespace({ requestId: 1n, trackNamespace: path }),
+			sourceStream,
+		);
+		let fresh: ReturnType<Subscriber["consume"]> | undefined;
+		try {
+			expect(await sourcePeer.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(sourcePeer.reader, version);
+			await announced.next();
+			resume.resolve();
+			expect(await old).toBeInstanceOf(Error);
+			if (phase === "waiting") {
+				await peer.writer.u53(MaxRequestId.id);
+				await new MaxRequestId({ requestId: 4n }).encode(peer.writer, version);
+			} else {
+				expect(await peer.reader.u53()).toBe(Subscribe.id);
+				const canceled = await Subscribe.decode(peer.reader, version);
+				expect(canceled.requestId).toBe(0n);
+				expect(await peer.reader.u53()).toBe(Unsubscribe.id);
+				expect((await Unsubscribe.decode(peer.reader, version)).requestId).toBe(0n);
+			}
+			fresh = subscriber.consume(path);
+			const info = fresh
+				.track("video")
+				.info()
+				.catch((err: unknown) => err);
+			expect(await peer.reader.u53()).toBe(Subscribe.id);
+			const request = await Subscribe.decode(peer.reader, version);
+			expect(request.requestId).toBe(phase === "waiting" ? 0n : 2n);
+			await peer.writer.u53(SubscribeOk.id);
+			await new SubscribeOk({
+				requestId: request.requestId,
+				trackAlias: request.requestId,
+				properties: {},
+			}).encode(peer.writer, version);
+			expect(await info).not.toBeInstanceOf(Error);
+		} finally {
+			intercepted.mockRestore();
+			resume.resolve();
+			fresh?.close();
+			held.close();
+			announced.close();
+			sourcePeer.close();
+			await advertising;
+			peer.close();
+			session.close();
+			void running;
+		}
+	},
+);

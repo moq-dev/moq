@@ -99,3 +99,75 @@ test.each([false, true])("route alternation reuses every held instance (epoch: %
 	a.close();
 	b.close();
 });
+
+test("request validity cancels one selection period and permits the held fallback again", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("pool/job");
+	const broad = Path.from("pool");
+	const a = {};
+	const b = {};
+	cache.announce(broad, a, Route.default);
+	const sourceA = new Producer();
+	const instanceA = cache.instance(path);
+	const heldA = cache.insert(path, instanceA, sourceA.consume());
+	const first = instanceA.validity?.signal;
+	expect(first?.aborted).toBe(false);
+	cache.announce(path, b, Route.default);
+	expect(first?.aborted).toBe(true);
+	const sourceB = new Producer();
+	const instanceB = cache.instance(path);
+	const heldB = cache.insert(path, instanceB, sourceB.consume());
+	expect(instanceB.validity?.signal.aborted).toBe(false);
+	cache.withdraw(path, b);
+	expect(instanceB.validity?.signal.aborted).toBe(true);
+	expect(instanceA.validity?.signal).not.toBe(first);
+	expect(instanceA.validity?.signal.aborted).toBe(false);
+	expect(first?.aborted).toBe(true);
+	expect(heldA.closed.peek()).toBeUndefined();
+	expect(heldB.closed.peek()).toBeUndefined();
+	heldA.close();
+	heldB.close();
+	sourceA.close();
+	sourceB.close();
+});
+
+test("request validity follows the selected interest and ignores unrelated withdrawals", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("pool/job");
+	const broad = {};
+	const first = {};
+	const second = {};
+	cache.announce(Path.from("pool"), broad, Route.default);
+	cache.announce(path, first, Route.default);
+	cache.announce(path, second, Route.default);
+	const source = new Producer();
+	const instance = cache.instance(path);
+	const held = cache.insert(path, instance, source.consume());
+	const signal = instance.validity?.signal;
+	cache.withdraw(Path.from("pool"), broad);
+	cache.withdraw(path, second);
+	cache.announce(path, first, { ...Route.default, cost: 1n });
+	expect(instance.validity?.signal).toBe(signal);
+	expect(signal?.aborted).toBe(false);
+	cache.withdraw(path, first);
+	expect(signal?.aborted).toBe(true);
+	held.close();
+	source.close();
+});
+
+test("a blind selection retires on discovery while explicit epochs need no path gate", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("pool/job");
+	const blind = cache.instance(path);
+	const source = new Producer();
+	const held = cache.insert(path, blind, source.consume());
+	const owner = {};
+	cache.announce(Path.from("pool"), owner, { ...Route.default, epoch: Epoch.mint() });
+	expect(blind.validity?.signal.aborted).toBe(true);
+	expect(cache.instance(path).validity).toBeUndefined();
+	cache.withdraw(Path.from("pool"), owner);
+	expect(blind.validity?.signal.aborted).toBe(true);
+	expect(cache.instance(path).identity).not.toBe(blind.identity);
+	held.close();
+	source.close();
+});

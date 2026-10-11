@@ -11,6 +11,10 @@ test:
     python3 sh/size/report.test.py
     python3 sh/size/packaged.test.py
     python3 sh/size/nightly.test.py
+    python3 bench/compare.test.py
+    python3 bench/summary.test.py
+    python3 bench/relay.test.py
+    python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
@@ -56,3 +60,8 @@ size-report *args:
 # Collect and compare nightly shipping sizes through the existing alert path.
 size-nightly output packaged:
     sh/size/nightly.sh '{{ output }}' '{{ packaged }}'
+
+# Install the rendered GStreamer formula against the current macOS tarball.
+[positional-arguments]
+gst-formula *args:
+    python3 sh/gh/gst-formula.py "$@"

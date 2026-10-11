@@ -3,6 +3,7 @@ import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
 import { error, ProtocolViolation, SessionCode } from "../error.ts";
 import { Reader, Stream, type Writer } from "../stream.ts";
+import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
@@ -31,7 +32,7 @@ export interface Session {
 	openBi(): Stream | Promise<Stream>;
 	openNativeBi?(): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
-	nextRequestId(): Promise<bigint | undefined>;
+	nextRequestId(signal?: AbortSignal): Promise<bigint | undefined>;
 	close(): void;
 	readonly version: IetfVersion;
 }
@@ -61,7 +62,8 @@ export class NativeSession implements Session {
 		return Stream.accept(this.#quic, this.version);
 	}
 
-	async nextRequestId(): Promise<bigint | undefined> {
+	async nextRequestId(signal?: AbortSignal): Promise<bigint | undefined> {
+		signal?.throwIfAborted();
 		const id = this.#requestId;
 		this.#requestId += 2n;
 		return id;
@@ -142,7 +144,7 @@ export class ControlStreamAdapter implements Session {
 	// delivered to the wrong virtual stream).
 	#requestId: bigint;
 	#maxRequestId: bigint;
-	#maxRequestIdResolves: (() => void)[] = [];
+	#maxRequestIdResolves = new Set<() => void>();
 
 	// The peer's requests, flow controlled as moq-net does: at most `#peerWindow` open at
 	// once, every ID below `#peerMax`, and once half the window has closed the bound rises
@@ -279,19 +281,25 @@ export class ControlStreamAdapter implements Session {
 	}
 
 	/**
-	 * Allocate the next request ID, blocking if flow control limit reached.
+	 * Allocate the next request ID, canceling before allocation while waiting for credit.
+	 * A returned legacy ID is spent and its request must be sent, even if then canceled.
 	 */
-	async nextRequestId(): Promise<bigint | undefined> {
+	async nextRequestId(signal?: AbortSignal): Promise<bigint | undefined> {
 		for (;;) {
+			signal?.throwIfAborted();
 			if (this.#closed) return undefined;
 			const id = this.#requestId;
 			if (id < this.#maxRequestId) {
 				this.#requestId += 2n;
 				return id;
 			}
-			await new Promise<void>((resolve) => {
-				this.#maxRequestIdResolves.push(resolve);
-			});
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#maxRequestIdResolves.add(resolve);
+			try {
+				await untilAborted(promise, signal);
+			} finally {
+				this.#maxRequestIdResolves.delete(resolve);
+			}
 		}
 	}
 
@@ -362,7 +370,7 @@ export class ControlStreamAdapter implements Session {
 					case Route.MaxRequestId:
 						this.#maxRequestId = requestId;
 						for (const resolve of this.#maxRequestIdResolves) resolve();
-						this.#maxRequestIdResolves = [];
+						this.#maxRequestIdResolves.clear();
 						break;
 				}
 			}
@@ -923,6 +931,6 @@ export class ControlStreamAdapter implements Session {
 
 		// Unblock maxRequestId waiters
 		for (const resolve of this.#maxRequestIdResolves) resolve();
-		this.#maxRequestIdResolves = [];
+		this.#maxRequestIdResolves.clear();
 	}
 }

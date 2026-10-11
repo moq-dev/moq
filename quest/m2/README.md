@@ -13,8 +13,15 @@ feature. A study may end with a measured no-go. Work gated on hardware, a
 partner, a consumer, a provider, or an upstream release, or with no named
 consumer yet, waits in [m3](/quest/m3/README.md).
 
+Added 2026-10-10 by maintainer priority, ranked first: the grant stats label
+and bench readiness. Refusal reasons folded the same day into
+[Session outcomes](/quest/m1/session-outcomes.md) and
+[Typed refusal reason](/quest/m1/refusal-reason.md).
+
 ## Required
 
+- [Grant stats label](/quest/m2/grant-label.md) - an auth grant's optional `label` names what its session's presence and live bytes count under in stats, apart from the path scope it may access
+- [moq-bench readiness](/quest/m2/bench-ready.md) - every JSONL line carries the rolled targets and a `ready` flag, so a harness opens its window on readiness
 - [RTSP import](/quest/m2/rtsp-import.md) - `moq import rtsp` publishes an IP camera from its own network, through a `moq-rtsp` crate whose one-session ingest a caller can supervise itself
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [Bitrate claim](/quest/m2/rate-claim.md) - tokens and auth grants cap a session's upload and download bitrate, refused where unenforced and always on HTTP
@@ -34,6 +41,11 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
 - [Windows GPU input](/quest/m2/obs-windows.md) - import or blit OBS D3D11 textures with explicit synchronization
+- [rs2ts model support](/quest/m2/rs2ts-model-support.md) - rs2ts translates kio and the model's Drop, Arc, Weak, atomics, and collections; moves to the rs2ts repo once it exists
+- [Generated model](/quest/m2/rs2ts-model.md) - @moq/net's model layer and kio are generated from moq-net
+- [Sans-IO lite session](/quest/m2/rs2ts-sans-io-lite.md) - the lite session is driven by bytes, stream events, and `tick(now)`, once the generated model works
+- [Generated lite session](/quest/m2/rs2ts-session.md) - @moq/net's lite session is generated over the generated model
+- [Remove moq-wasm](/quest/m2/rs2ts-remove-wasm.md) - the WASM experiment is deleted once generated lite ships
 - [Sans-IO IETF session](/quest/m2/rs2ts-sans-io-ietf.md) - the moq-transport session is driven by bytes and tick(now), so it can translate
 - [IETF parameters](/quest/m2/rs2ts-ietf-params.md) - the IETF codec drops its `Param` trait on primitives, so it translates like lite
 - [Generated IETF](/quest/m2/rs2ts-ietf.md) - @moq/net's moq-transport session is generated too
@@ -55,7 +67,6 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [#3199](/quest/m2/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup, if a profile shows the win
 - [#3200](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
 - [Send depth](/quest/m2/send-depth.md) - moq-net futures prove Send at the default recursion limit, so downstream crates see no nightly lint
-- [Refusal reasons](/quest/m2/refusal-reasons.md) - refused-session metrics tell an expired token from an invalid one, and count gateway admissions
 - [Bench coverage](/quest/m2/bench-coverage.md) - Criterion targets for moq-pattern matching first, then moq-mux containers
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
 - [Generated lite browser report](/quest/m2/rs2ts-browser-report.md) - compare generated and hand-written js/net on bundle size, per-frame CPU, and first-frame latency
@@ -105,7 +116,6 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [Kotlin JVM exit](/quest/m2/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [JS audio ranking](/quest/m2/js-audio-ranked.md) - @moq/hang ranks audio and video renditions like Rust, enabled first, and HLS lists audio by that rank
 - [ts::Export catalog stream](/quest/m2/ts-export-catalog.md) - TS export takes (source, catalog) like the other exporters
-- [Load-balancer refusals](/quest/m2/listener-lb-refusals.md) - refuse ignored or conflicting QUIC load-balancer settings
 - [Draft changelog audit](/quest/m2/drafts-changelog-audit.md) - every published draft's changelog lists only what that version published
 - [Runtime trait](/quest/m2/runtime-trait.md) - one runtime trait for spawn and time replaces web-async, with tokio, browser, io_uring, and sim implementations
 - [QUIC on the sim](/quest/m2/quic-sim.md) - the sim drives `moq-quic` over in-memory datagrams with latency and loss

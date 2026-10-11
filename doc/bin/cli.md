@@ -143,6 +143,8 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
 ```
 
+`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
+
 ## Capture
 
 ```bash
