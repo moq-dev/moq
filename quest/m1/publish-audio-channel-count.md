@@ -65,7 +65,10 @@ The isolated real-worklet matrix is available in
 `test/interop/clients/js/capture-channel-count.browser.ts` and runs in
 `just test harness`. Chromium 153 on Linux delivered 512 quanta in every
 none/rate/channels/both case, with zero timestamp gaps and the requested output
-formats. The diagnostic counted brief silence near startup in the baseline,
+formats. The diagnostic now checks every output channel for finite, nonempty
+PCM and audibility, rather than trusting channel zero and format metadata.
+A missing-second-channel negative control is part of its validation evidence.
+The diagnostic counted brief silence near startup in the baseline,
 rate-only, and channels-only cases, not a channel-specific failure. The
 destination-node track refused a channelCount constraint with
 OverconstrainedError, so this does not cover the applied microphone constraint

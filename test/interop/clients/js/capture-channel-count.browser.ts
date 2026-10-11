@@ -15,10 +15,25 @@ test("capture format override matrix", async () => {
 		console.log(JSON.stringify({ platform: process.platform, browser: browser.version(), result }));
 		expect(result).toHaveLength(5);
 		expect(result.slice(0, 4)).toMatchObject([
-			{ mode: "none", audible: true, format: { sampleRate: 48_000, channelCount: 2 } },
-			{ mode: "rate", audible: true, format: { sampleRate: 48_000, channelCount: 2 } },
-			{ mode: "channels", audible: true, format: { sampleRate: 48_000, channelCount: 1 } },
-			{ mode: "both", audible: true, format: { sampleRate: 48_000, channelCount: 1 } },
+			{
+				mode: "none",
+				audible: true,
+				channelsAudible: [true, true],
+				format: { sampleRate: 48_000, channelCount: 2 },
+			},
+			{
+				mode: "rate",
+				audible: true,
+				channelsAudible: [true, true],
+				format: { sampleRate: 48_000, channelCount: 2 },
+			},
+			{
+				mode: "channels",
+				audible: true,
+				channelsAudible: [true],
+				format: { sampleRate: 48_000, channelCount: 1 },
+			},
+			{ mode: "both", audible: true, channelsAudible: [true], format: { sampleRate: 48_000, channelCount: 1 } },
 		]);
 	} finally {
 		await browser.close();

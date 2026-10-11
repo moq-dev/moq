@@ -43,6 +43,7 @@ window.captureMatrix = async () => {
 			}
 			const reader = fanout.subscribe(effect).getReader();
 			let audible = false;
+			const channelsAudible: boolean[] = [];
 			let leadingSilent = 0;
 			let silent = 0;
 			let gaps = 0;
@@ -50,6 +51,13 @@ window.captureMatrix = async () => {
 			for (let i = 0; i < 512; i++) {
 				const { value: frame } = await reader.read();
 				if (!frame) throw new Error("capture ended");
+				for (const [channel, samples] of frame.channels.entries()) {
+					if (!samples.length || samples.some((sample) => !Number.isFinite(sample))) {
+						throw new Error(`capture channel ${channel} has invalid PCM`);
+					}
+					const rms = Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
+					channelsAudible[channel] = (channelsAudible[channel] ?? false) || rms > 0.01;
+				}
 				const rms = Math.sqrt(frame.channels[0].reduce((sum, v) => sum + v * v, 0) / frame.channels[0].length);
 				if (rms > 0.01) audible = true;
 				else if (audible) silent++;
@@ -61,6 +69,7 @@ window.captureMatrix = async () => {
 			results.push({
 				mode,
 				audible,
+				channelsAudible,
 				leadingSilent,
 				silent,
 				gaps,
