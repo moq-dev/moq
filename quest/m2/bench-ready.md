@@ -20,17 +20,32 @@ Decided 2026-10-10 by maintainer priority:
   included, fixed at startup.
 - **`ready` latches.** It marks the window start; a later loss shows as a
   gauge below its target, not as `ready` turning off.
-- **Established** needs one definition per kind. A subscription's gauge rises
-  when it starts, not when data arrives; pick whichever matches "measurable"
-  (likely its first group) and document it.
-- **Reachable.** A mesh connection subscribes to up to `subscribe` peer
-  broadcasts, so a roll above what the run publishes never fills. Clamp the
-  target to what can exist, or refuse the configuration; never emit a target
-  that can never be met.
+- **Established** (decided 2026-10-11 by the maintainer). A subscription
+  counts once it reads its first group end to end, tracked in a new
+  per-subscription gauge; the existing `subscriptions` gauge, which rises at
+  `drain` entry before `subscribe().await`, is unchanged. A broadcast counts
+  once its connection is connected or it writes its first group, not when
+  `produce` starts (today's `broadcasts` gauge rises before the session
+  connects). A connection counts on `Status::Connected`, as today.
+- **Idle tracks are refused.** An fps of 0 never writes a group, so a
+  subscriber of it never becomes established. Refuse a configuration that
+  subscribes while fps can roll 0.
+- **Unreachable rolls are refused** (decided 2026-10-11 by the maintainer).
+  A mesh connection discovers only its run's namespace when the run
+  publishes, so it can subscribe to at most the others' broadcasts. Refuse
+  at startup when the largest `subscribe` exceeds
+  `(connections.min - 1) * broadcasts.min`. The check uses the ranges, not
+  the roll, so a configuration is always accepted or always refused. Never
+  clamp: a smaller roll would measure a lighter load than requested.
+- **External publishers skip the check.** A subscribe-only run
+  (`broadcasts` 0) discovers broadcasts from other invocations, which it
+  cannot count ahead. Its target is the requested sum, and `ready` stays
+  false until that is met.
 - Test: a small run's lines read `ready: false` until its gauges reach the
-  targets, then `ready: true`; an unreachable roll is clamped or refused.
-  Document the fields in `rs/moq-bench/README.md` ("Machine-readable
-  output").
+  targets, then `ready: true`; an unreachable range and a subscribing run
+  with fps 0 are each refused at startup; a subscribe-only run reports the
+  requested sum as its target. Document the fields in
+  `rs/moq-bench/README.md` ("Machine-readable output").
 
 Public API: none (CLI output only). Wire: none.
 

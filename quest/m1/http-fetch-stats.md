@@ -2,9 +2,10 @@
 
 ## Goal
 
-Group bytes served over HTTP `/fetch` count in the relay's stats under the
-token's tier and root, and each fetch bumps a new `requests` counter there
-instead of counting as a session. `requests` is generic: any
+Group bytes served over HTTP `/fetch` count in the relay's stats on the
+token's tier, keyed by broadcast path like a session's bytes, and each fetch
+bumps a new `requests` counter under the token's tier and root instead of
+counting as a session. `requests` is generic: any
 request/response transport counts requests, never sessions. An embedder can
 put HTTP traffic on a tier of its own through the auth hook it already has:
 the request names `Transport::Http`, so the decider picks the tier.
@@ -27,9 +28,10 @@ Decided 2026-10-10 by maintainer priority:
   track rather than an untagged one.
 - `/announced` serves no media, but it is a request too: count it in
   `requests` if sharing the helper makes that free.
-- Test: a `/fetch` of a known group adds its bytes and one `requests` to the
-  token's root and tier, `sessions_started` does not change, and a token on
-  another tier keeps them apart.
+- Test: a `/fetch` of a known group adds its bytes to that broadcast's path
+  and one `requests` to the token's root, both on the token's tier;
+  `sessions_started` does not change, and a token on another tier keeps them
+  apart.
 - Update `doc/concept/stats.md` for the new counter, and
   `doc/bin/relay/http.md` if it says what HTTP counts.
 
@@ -42,8 +44,6 @@ older reader ignores and a newer one defaults to zero.
 - [Rust papercuts](/quest/m1/papercuts-rs.md) - counts `/fetch` refusals in
   `/metrics`; this counts what an admitted fetch serves
 - [Bitrate claim](/quest/m2/rate-claim.md) - HTTP refuses capped tokens, so
-  stats are HTTP's only per-root byte account
+  stats are HTTP's only byte account
 - [Session outcomes](/quest/m1/session-outcomes.md) - the session counters
   `requests` sits beside
-- [Grant stats label](/quest/m2/grant-label.md) - requests count under a
-  grant's label like sessions do
