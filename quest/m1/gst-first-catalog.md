@@ -49,11 +49,16 @@ Decided 2026-10-11 by the maintainer, in #5189:
 
 - A pad requested but never fed holds back the run's first catalog, so its
   reservation drops when the pad is released, reaches EOS without caps, or
-  gets opaque caps. A pad whose caps fail (`CapsOutcome::Failed`, such as AAC
-  without `codec_data` or a duplicate track name) is terminal and drops it
-  too. Dropping reservations once another pad's first frame is
-  ready was rejected: it brings back the race this quest removes. The
-  initial gate only holds the first snapshot, so later catalogs never wait.
+  gets opaque caps. Every other terminal path before the rendition resolves
+  drops it too: caps that fail (`CapsOutcome::Failed`, such as AAC without
+  `codec_data` or a duplicate track name), and EOS after caps but before the
+  importer resolved a config (H.264 byte-stream that ends before its SPS),
+  whose importer owns the reservation by then. Today `handle_event(Eos)`
+  only marks the pad ended, and producers finalize once every pad ends, so a
+  streaming sibling would keep the gate shut. Dropping reservations once
+  another pad's first frame is ready was rejected: it brings back the race
+  this quest removes. The initial gate only holds the first snapshot, so
+  later catalogs never wait.
 - m1, ranked after #3021: only a restart of a `moqsink` whose pads negotiate
   at different times is affected, so it does not gate the release under
   [Broadcast epochs](/quest/m0/broadcast-epoch/README.md).
@@ -63,10 +68,11 @@ Decided 2026-10-11 by the maintainer, in #5189:
 
 Tests: a `moqsink` whose audio pad gets caps after its video pad's first
 buffer publishes one first catalog listing both; a pad that is released,
-ends without caps, or fails its caps lets the first catalog publish; a pad
-requested while the run starts is listed even when a sibling resolves before
-that pad confirms; and a `moqsrc` following that
-`moqsink` across a restart keeps both pads without EOS.
+ends without caps, fails its caps, or ends after caps but before its config
+lets the first catalog publish while a sibling streams; a pad requested while
+the run starts is listed even when a sibling resolves before that pad
+confirms; and a `moqsrc` following that `moqsink` across a restart keeps
+both pads without EOS.
 
 ## Related
 
