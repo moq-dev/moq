@@ -16,6 +16,9 @@ const PACKET_BITS: u64 = 188 * 8;
 pub(super) const PCR_WRAP: u64 = (1 << 33) * 300;
 /// How much PCR time one window spans before it is judged.
 const WINDOW: u64 = 2 * PCR_HZ;
+/// Media time after which a source that has not completed a window publishes without a rate:
+/// twice the window, so a usable PCR clock always completes one first.
+pub(super) const UNMEASURED: std::time::Duration = std::time::Duration::from_secs(2 * WINDOW / PCR_HZ);
 /// Intervals are pooled into samples this long before they are compared. One
 /// packet of rounding, or a clock a hardware muxer stamps at half-millisecond
 /// granularity, is a few percent of one 25 ms interval but well inside the

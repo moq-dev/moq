@@ -51,7 +51,8 @@ use moq_net::Timestamp;
 ///
 /// With the `mpegts` catalog extension, the initial catalog waits for a two-second PCR
 /// measurement window. This hold applies to every subscriber of the broadcast.
-/// A variable-rate window publishes without a rate; EOF releases a shorter input too.
+/// A variable-rate window publishes without a rate, as does four seconds of media without a
+/// complete PCR window; EOF releases a shorter input too.
 /// Imports without that extension do not wait for a rate measurement.
 ///
 /// The selected container applies only to decoded media renditions. Verbatim tracks in the
@@ -66,7 +67,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// final. A one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
 	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
-	/// Hold the whole catalog until one PCR measurement window, independently of decoder readiness.
+	/// Hold the whole catalog until one PCR measurement window completes, or enough media time
+	/// passes without one, independently of decoder readiness.
 	mux_rate_reservation: Option<crate::catalog::Reserved<E>>,
 
 	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
@@ -704,8 +706,15 @@ impl<E: catalog::Catalog> Import<E> {
 			Some(pts) => {
 				let pts = Timestamp::from_scale(pts, 90_000)?;
 				let offset = self.timebase.anchor(pts)?;
-				if self.start_pts.is_none() {
-					self.start_pts = Some(offset.apply(pts)?);
+				let pts = offset.apply(pts)?;
+				let start = *self.start_pts.get_or_insert(pts);
+				// A source without a usable PCR never completes a measurement window, so media
+				// time releases its catalog without a rate.
+				if pts
+					.checked_sub(start)
+					.is_ok_and(|elapsed| std::time::Duration::from(elapsed) >= super::mux_rate::UNMEASURED)
+				{
+					self.mux_rate_reservation = None;
 				}
 				offset
 			}
@@ -7453,6 +7462,34 @@ pub(super) mod test {
 			};
 			assert_eq!(first.ext.mpegts.mux_rate, cbr.then_some(3_760_000));
 		}
+	}
+
+	/// A live source with no PCR never completes a window, so media time releases its catalog.
+	#[test]
+	fn a_ts_without_pcr_releases_its_catalog_after_four_seconds_of_media() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		for frame in 0..100 {
+			import.decode(&pes_packet(PCR_PID, 90_000 + frame * 3_600)).unwrap();
+			assert!(updates.poll_next(&waiter).is_pending(), "catalog after frame {frame}");
+		}
+		import.decode(&pes_packet(PCR_PID, 90_000 + 100 * 3_600)).unwrap();
+		let std::task::Poll::Ready(Ok(Some(first))) = updates.poll_next(&waiter) else {
+			panic!("four seconds of media did not release the catalog");
+		};
+		assert_eq!(first.ext.mpegts.mux_rate, None);
 	}
 
 	#[test]

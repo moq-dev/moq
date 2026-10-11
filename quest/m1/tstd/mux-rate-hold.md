@@ -36,22 +36,24 @@ grades from the first null packet).
 
 ### Progress
 
-The draft implementation holds the initial catalog until a complete PCR window
-or EOF and grades PCR timing from the first interval. The hold applies to every
-subscriber of a broadcast whose producer uses the `mpegts` catalog extension.
+The draft holds the initial catalog until a complete PCR window, four seconds
+of media without one (a source with no usable PCR), or EOF, and grades PCR
+timing from the first interval. The hold applies to every subscriber of a
+broadcast whose producer uses the `mpegts` catalog extension.
 
-A real-relay one-second CBR import exposes an unresolved EOF boundary: the held
-catalog arrives as the publisher closes, and a subscriber captures no media.
-The same source without the hold captures 0.38 s of its 0.98 s reference. Session
-close drains subscriptions already serving the peer; it cannot cover media
-subscriptions initiated after that last catalog reaches the subscriber. The
-short-input unit test proves catalog publication, not end-to-end delivery.
+Decided (2026-10-11): drain to consumers. A short input's media must reach a
+subscriber already waiting on the broadcast, and an import never reports
+success while delivering zero media. A source that never completes a PCR
+window publishes unpadded rather than nothing.
 
-Keep this quest open until short-input delivery has a defined lifecycle and a
-real-relay regression. Recommended: explicitly preserve a finite broadcast
-until the intended consumer has discovered and drained its tracks. The
-alternative is to refuse short unmeasured live imports explicitly; silently
-exiting successfully with no delivered media is not a supported outcome. Do
-not add a sleep or extend a shutdown timeout to hide the subscription race.
-A source that never supplies a usable PCR window also needs an explicit
-refusal policy rather than an indefinitely unpublished live catalog.
+Open: the drain has no signal to wait on. A one-second import releases its
+catalog only at EOF, and the subscriber's media SUBSCRIBE reaches the
+publisher after it has left (`subscribe to the video: Dropped`). The ignored
+`a_short_import_drains_its_media_to_a_waiting_subscriber` in
+`rs/moq-cli/tests/import.rs` reproduces it; un-ignore it once the drain lands.
+Demand does not span the catalog-to-media handoff: the catalog subscription
+ends at its FIN, a relay releases its upstream at that FIN, and the media
+request is a separate stream, so the publisher sees no demand in between.
+Holding the catalog unfinished until media demand appears deadlocks a
+catalog-only subscriber, which `import_delivers_the_catalog_finish_at_eof`
+relies on. Do not add a sleep or extend a shutdown timeout to hide the race.
