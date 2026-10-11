@@ -46,6 +46,25 @@ pub struct ImportArgs {
 	pub program: Option<TsProgram>,
 }
 
+/// SRT export args: the endpoint, plus how a broadcast ending or being replaced is followed.
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct ExportArgs {
+	#[usage(flatten)]
+	pub endpoint: Args,
+
+	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
+	/// then carry on with the same stream. A replacement ends the stream unless `--stitch`
+	/// is passed.
+	#[usage(long, default = "0s")]
+	pub linger: crate::duration::Duration,
+
+	/// Follow another publisher instance that replaces the broadcast, as a full program switch
+	/// on the same SRT connection.
+	#[usage(long)]
+	pub stitch: bool,
+}
+
 impl ImportArgs {
 	/// The library's selection for `--program`.
 	pub fn program(&self) -> Option<moq_srt::Program> {
@@ -121,9 +140,10 @@ pub async fn listen_export(
 	origin: moq_net::origin::Consumer,
 	addr: SocketAddr,
 	name: String,
-	latency: Duration,
+	args: ExportArgs,
 ) -> anyhow::Result<()> {
-	let mut server = Server::bind(addr, latency).await?;
+	let mut server = Server::bind(addr, args.endpoint.latency.into_std()).await?;
+	let (linger, stitch) = (args.linger.into_std(), args.stitch);
 	tracing::info!(%addr, %name, "SRT listening (export)");
 	notify_ready();
 
@@ -133,6 +153,7 @@ pub async fn listen_export(
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
+					let subscribe = subscribe.with_linger(linger).with_stitch(stitch);
 					if let Err(err) = subscribe.accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "SRT request ended with error");
 					}
@@ -175,13 +196,16 @@ pub async fn connect_export(
 	origin: moq_net::origin::Consumer,
 	url: Url,
 	name: String,
-	latency: Duration,
+	args: ExportArgs,
 ) -> anyhow::Result<()> {
 	let (addr, resource) = parse_url(&url).await?;
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "SRT client pushing");
 	notify_ready();
 
-	let client = moq_srt::Client::new(addr, resource).with_latency(latency);
+	let client = moq_srt::Client::new(addr, resource)
+		.with_latency(args.endpoint.latency.into_std())
+		.with_linger(args.linger.into_std())
+		.with_stitch(args.stitch);
 	Ok(client.publish(&origin, &name).await?)
 }
 

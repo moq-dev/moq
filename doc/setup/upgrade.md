@@ -30,6 +30,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   moq-lite 06 and older and moq-transport. moq-lite 07 adds `ANNOUNCE_RESTART`
   (0x3), and lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it
   always meant.
+- **`moq export ts --linger` waits only for the same publisher instance.** A
+  restarted publisher (a new epoch, or any return on a version without one)
+  exits 1 unless `--stitch` follows it as a program switch. `export srt` takes
+  the same two flags. In Rust, moq-mux's `ts::Export::resume` is
+  `ts::Export::follow`, `Source::returned` is gone, and `ts::Follower` follows a
+  path's announcements the way both exports do.
 - **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
   catalog codec string and dimensions are enough, `moq export fmp4` writes an
   `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,
@@ -293,6 +299,17 @@ These land with the next breaking release, not the 2026-09-23 train.
   `TrackStream` accept a CMAF rendition's track at that timescale; a track you
   create yourself declares it with `track::Info::with_timescale`. Both decoders refuse a `trun` whose
   `data_offset` doesn't start at the next sample in the `mdat`.
+- **@moq/json and @moq/flate consumers return `Timed` values.** The snapshot
+  and stream consumers' `next()` and async iterator yield `{ value, at }`,
+  where `at` is the frame's timestamp and absent on an untimed track; read
+  `.value` for what they used to return. A snapshot consumer's `next()` now
+  yields every state in order. Call `latest()` for the old behavior, which
+  skips to the newest state. A caller that passes the result on as `any` or
+  `unknown` (logging, `JSON.stringify`, a generic setter) still compiles but
+  now gets the wrapper and every intermediate state, so search for each
+  `next()` and `for await` over a snapshot consumer rather than relying on
+  type errors. On an untimed track nothing marks a group stale, so a `next()`
+  reader that falls behind replays the whole backlog where it used to skip it.
 
 ## Wire
 
