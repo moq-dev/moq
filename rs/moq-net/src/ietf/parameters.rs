@@ -25,6 +25,8 @@ pub enum ParameterVarInt {
 	Solicit = super::solicit::SOLICIT,
 	/// HIDDEN, from the MoQ Hidden extension.
 	Hidden = super::hidden::HIDDEN,
+	/// AUTH, from the MoQ Auth extension.
+	Auth = super::auth::AUTH,
 	/// ACTIVE_COUNT, from the MoQ Active Count extension.
 	ActiveCount = super::active_count::ACTIVE_COUNT,
 	#[num_enum(catch_all)]

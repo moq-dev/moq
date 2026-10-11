@@ -21,7 +21,18 @@ this is Rust only (decided 2026-10-08).
 Test, beside #5086's `a_silent_stream_does_not_hold_up_the_next`: a silent
 bidi request stream does not block a SUBSCRIBE on the next one.
 
-`release` has the same loop; once this lands on `main`, backport it the way
-#5125 carried the uni half.
+Review of [#5208](https://github.com/moq-dev/moq/pull/5208) found that
+concurrent partial headers return transport credit before parsing completes,
+allowing retention far beyond the receive window. Keep that PR held until
+the shared native receive-memory work below bounds headers and frame data;
+do not substitute a separate header quota or speculative-allocation fallback.
+
+`release` has the same loop. Its backport needs a separate compatibility
+assessment because the new receive-credit prerequisite targets the in-tree
+stack; this plan does not authorize moving that stack onto `release`.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Bound message assembly](/quest/m1/quic/receive-memory.md) - concurrent headers retain connection credit and pressure cancellation restores progress
