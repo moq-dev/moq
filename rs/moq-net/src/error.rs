@@ -58,7 +58,7 @@ pub enum SessionError {
 	#[error("unknown code={0}")]
 	Unknown(u32),
 
-	/// A request ID was reused, skipped, decreased, or had the wrong parity.
+	/// A request ID was reused or violated the negotiated draft’s order or parity rules.
 	#[error("invalid request id")]
 	InvalidRequestId,
 }

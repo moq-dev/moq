@@ -376,7 +376,7 @@ test("a second use of an open request id closes the session", async () => {
 		const { pair, peer, running } = await windowed(version, alpn, 1n, false);
 		await trackStatus(peer, version, 0n);
 		await trackStatus(peer, version, 0n);
-		await expect(running).rejects.toThrow("request id is not next in sequence");
+		await expect(running).rejects.toThrow("request id was already spent or out of sequence");
 		expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 	}
 });
@@ -470,7 +470,7 @@ test("an update spending an open request id closes the session", async () => {
 			await trackStatus(peer, version, heldId);
 			if (!(await adapter.acceptBi())) throw new Error("no stream");
 			await update(peer, version, heldId, heldId);
-			await expect(running).rejects.toThrow("request id is not next in sequence");
+			await expect(running).rejects.toThrow("request id was already spent or out of sequence");
 			expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 		}
 	}
@@ -493,7 +493,7 @@ test("retired and lower request ids close the session", async () => {
 					stream.close();
 				}
 				await trackStatus(peer, version, later);
-				await expect(running).rejects.toThrow("request id is not next in sequence");
+				await expect(running).rejects.toThrow("request id was already spent or out of sequence");
 				expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 			}
 		}
@@ -507,7 +507,7 @@ test("an update id stays spent after the update retires", async () => {
 		if (!(await adapter.acceptBi())) throw new Error("no stream");
 		await update(peer, version, 2n, 0n);
 		await update(peer, version, 2n, 0n);
-		await expect(running).rejects.toThrow("request id is not next in sequence");
+		await expect(running).rejects.toThrow("request id was already spent or out of sequence");
 		expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
 	}
 });
@@ -548,7 +548,7 @@ test("more requests than the setup window complete on one session", async () => 
 
 // Both requests and updates allocate IDs, even when an update's target is gone.
 test("skipped request and update ids close the session", async () => {
-	for (const [version, alpn] of WINDOW_DRAFTS) {
+	for (const [version, alpn] of WINDOW_DRAFTS.filter(([version]) => version !== Version.DRAFT_16)) {
 		for (const client of [false, true]) {
 			for (const prefix of [0n, 1n]) {
 				for (const isUpdate of [false, true]) {
@@ -558,9 +558,38 @@ test("skipped request and update ids close the session", async () => {
 					const skipped = first + 2n * prefix + 2n;
 					if (isUpdate) await update(peer, version, skipped, 100n);
 					else await trackStatus(peer, version, skipped);
-					await expect(running).rejects.toThrow("request id is not next in sequence");
+					await expect(running).rejects.toThrow("request id was already spent or out of sequence");
 					expect((await pair.client.closed).closeCode).toBe(SessionCode.InvalidRequestId);
 				}
+			}
+		}
+	}
+});
+
+// SUBSCRIBE_NAMESPACE uses an independent bidi stream in draft 16, sharing the ID space.
+test("draft 16 accepts reordered native and control IDs but never reuses them", async () => {
+	for (const client of [false, true]) {
+		for (const nativeFirst of [false, true]) {
+			const version = Version.DRAFT_16;
+			const { pair, adapter, peer, running } = await windowed(version, ALPN.DRAFT_16, 8n, client);
+			void running.catch(() => undefined);
+			const first = client ? 1n : 0n;
+			const native = nativeFirst ? first + 2n : first;
+			const control = nativeFirst ? first : first + 2n;
+			try {
+				if (nativeFirst) adapter.admitRequest(native);
+				await trackStatus(peer, version, control);
+				const stream = await adapter.acceptBi();
+				if (!stream) throw new Error("no reordered control request");
+				if (!nativeFirst) adapter.admitRequest(native);
+				stream.close();
+				adapter.releaseRequest(native);
+				await trackStatus(peer, version, first);
+				await expect(running).rejects.toThrow("request id was already spent");
+				expect((await pair.client.closed).closeCode).toBe(SessionCode.InvalidRequestId);
+			} finally {
+				peer.close();
+				adapter.close();
 			}
 		}
 	}

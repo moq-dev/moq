@@ -147,6 +147,9 @@ export class ControlStreamAdapter implements Session {
 	#peerWindow: bigint;
 	#peerMax: bigint;
 	#peerNext: bigint;
+	// Draft 16 reorders across streams. Every missing ID retains an unreturned window
+	// credit, so this set is bounded by the window rather than the session lifetime.
+	#peerMissing: Set<bigint> | undefined;
 	#open = new Set<bigint>();
 	#retired = 0n;
 	#granting = false;
@@ -178,6 +181,7 @@ export class ControlStreamAdapter implements Session {
 		this.#peerWindow = window;
 		this.#peerMax = initialMaxRequestId(!client, window);
 		this.#peerNext = client ? 1n : 0n;
+		this.#peerMissing = version === Version.DRAFT_16 ? new Set() : undefined;
 		this.#requestId = client ? 0n : 1n;
 		this.#client = client;
 	}
@@ -487,11 +491,19 @@ export class ControlStreamAdapter implements Session {
 
 	#admitHeld(requestId: bigint): void {
 		this.#checkPeer(requestId);
-		if (requestId !== this.#peerNext) {
-			this.#refuse(SessionCode.InvalidRequestId, "request id is not next in sequence");
+		const unused =
+			requestId < this.#peerNext
+				? this.#peerMissing?.has(requestId)
+				: requestId === this.#peerNext || this.#peerMissing !== undefined;
+		if (!unused) {
+			this.#refuse(SessionCode.InvalidRequestId, "request id was already spent or out of sequence");
 		}
 		this.#checkLive();
-		this.#peerNext += 2n;
+		if (this.#peerMissing) {
+			for (let skipped = this.#peerNext; skipped < requestId; skipped += 2n) this.#peerMissing.add(skipped);
+			this.#peerMissing.delete(requestId);
+		}
+		if (requestId >= this.#peerNext) this.#peerNext = requestId + 2n;
 		this.#open.add(requestId);
 	}
 

@@ -36,7 +36,7 @@ export const SessionCode = Object.freeze(
 		Unauthorized: 0x2 as SessionCode,
 		/** A protocol rule was broken; the session is unusable. */
 		ProtocolViolation: 0x3 as SessionCode,
-		/** A request ID was reused, skipped, decreased, or had the wrong parity. */
+		/** A request ID was reused or violated the negotiated draft’s order or parity rules. */
 		InvalidRequestId: 0x4 as SessionCode,
 		/** A key-value pair was malformed or repeated more than allowed. */
 		KeyValueFormatting: 0x6 as SessionCode,
