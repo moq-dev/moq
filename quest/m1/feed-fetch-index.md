@@ -31,4 +31,4 @@ Public API: behavior only (a capped fetch is refused). Wire: none.
 
 ## Related
 
-- [Resume reorder](/quest/m1/resume-reorder.md) - later moves held fetches onto the model's arrival record; keep the index easy to carry over
+- [Resume reorder](/quest/m1/resume-reorder.md) - moves held fetches off their local `Tail` read onto the model's arrival record; whichever lands second carries the per-group index over
