@@ -407,3 +407,162 @@ async fn dynamic_epoch_second_route_keeps_winning() {
 	second.write(0, "second:1");
 	assert_eq!(read(&mut sticky).await, "second:1");
 }
+
+/// A held track must not fill an old instance's cache from its replacement.
+async fn retired_fetch(version: &str, explicit: bool) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let viewer = produce_origin(2);
+	let _session = link(version, &publisher, &viewer).await;
+	let (a, b) = epochs();
+	let old_route = if explicit {
+		origin::Route::default().with_epoch(a)
+	} else {
+		origin::Route::default()
+	};
+	let new_route = if explicit {
+		origin::Route::default().with_epoch(b)
+	} else {
+		origin::Route::default()
+	};
+	let old = publisher.publish("live", old_route).unwrap();
+	let old_track = old.create_track("video", None).unwrap();
+	let mut announced = viewer.consume().announced();
+	assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
+	let (held, mut subscription) = subscribe(&viewer, "live").await;
+	let track = held.track("video").unwrap();
+	write(&old_track, "old:0");
+	assert_eq!(read(&mut subscription).await, "old:0");
+
+	let replacement = publisher.publish("live", new_route).unwrap();
+	let replacement_track = replacement.create_track("video", None).unwrap();
+	let _late = replacement
+		.create_track("late", Some(track::Info::default().with_priority(17)))
+		.unwrap();
+	write(&replacement_track, "new:0");
+	write(&replacement_track, "new:1");
+	expect_restart(version, &mut announced, "live").await;
+
+	let fetched = track.fetch_group(1, None).await;
+	assert!(
+		fetched.is_err(),
+		"{version}: retired handle fetched replacement content"
+	);
+	let mut cached = track.fetch_group(0, None).await.expect("old cache stays readable");
+	assert_eq!(cached.read_frame().await.unwrap().unwrap().payload.as_ref(), b"old:0");
+	write(&old_track, "old:1");
+	assert_eq!(read(&mut subscription).await, "old:1");
+	if let Ok(late) = held.track("late")
+		&& let Ok(info) = late.query().await
+	{
+		assert_ne!(info.priority, 17, "{version}: late track resolved replacement");
+	}
+	drop(subscription);
+	settle().await;
+	let resumed = track.subscribe(None).await;
+	settle().await;
+	assert!(
+		replacement_track.subscription().is_none(),
+		"{version}: resubscribed to replacement"
+	);
+	drop(resumed);
+	let mut cached = track
+		.fetch_group(0, None)
+		.await
+		.expect("old cache survives resubscribe refusal");
+	assert_eq!(cached.read_frame().await.unwrap().unwrap().payload.as_ref(), b"old:0");
+}
+
+macro_rules! retired_fetch_tests {
+	($($name:ident: $version:literal,)*) => { $(
+		#[moq_net_sim::test]
+		async fn $name() {
+			moq_net_sim::timeout(TEST_TIMEOUT, retired_fetch($version, false)).await.expect("timed out");
+		}
+	)* };
+}
+
+retired_fetch_tests! {
+	retired_fetch_lite05: "moq-lite-05",
+	retired_fetch_lite06: "moq-lite-06",
+	retired_fetch_lite07: "moq-lite-07-wip",
+	retired_fetch_ietf14: "moq-transport-14",
+	retired_fetch_ietf15: "moq-transport-15",
+	retired_fetch_ietf16: "moq-transport-16",
+	retired_fetch_ietf17: "moq-transport-17",
+	retired_fetch_ietf18: "moq-transport-18",
+	retired_fetch_ietf19: "moq-transport-19",
+	retired_fetch_ietf20: "moq-transport-20",
+	retired_fetch_ietf21: "moq-transport-21",
+	retired_fetch_ietf22: "moq-transport-22",
+}
+
+#[moq_net_sim::test]
+async fn retired_fetch_explicit_epoch_control() {
+	moq_net_sim::timeout(TEST_TIMEOUT, retired_fetch("moq-lite-07-wip", true))
+		.await
+		.expect("timed out");
+}
+
+#[moq_net_sim::test]
+async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-14",
+		"moq-transport-22",
+	] {
+		let version: Version = version.parse().unwrap();
+		let publisher = produce_origin(1);
+		let viewer = produce_origin(2);
+		let _session = link(version, &publisher, &viewer).await;
+		let source = publisher.publish("live", origin::Route::default()).unwrap();
+		let produced = source.create_track("video", None).unwrap();
+		let mut announced = viewer.consume().announced();
+		assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
+		let (held, mut subscription) = subscribe(&viewer, "live").await;
+		let track = held.track("video").unwrap();
+		write(&produced, "old:0");
+		assert_eq!(read(&mut subscription).await, "old:0");
+		source.unannounce();
+		assert!(matches!(next_event(&mut announced).await, announce::Event::End(_)));
+		assert!(track.fetch_group(1, None).await.is_err(), "{version}");
+		write(&produced, "old:1");
+		assert_eq!(read(&mut subscription).await, "old:1");
+	}
+}
+
+#[moq_net_sim::test]
+async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
+	for name in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-14",
+		"moq-transport-22",
+	] {
+		let version: Version = name.parse().unwrap();
+		let publisher = produce_origin(1);
+		let viewer = produce_origin(2);
+		let _session = link(version, &publisher, &viewer).await;
+		let old = Claim::new(&publisher, None);
+		let mut announced = viewer.consume().announced();
+		assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
+		let (held, mut subscription) = subscribe(&viewer, "live/job").await;
+		let track = held.track("video").unwrap();
+		old.write(0, "old:0");
+		assert_eq!(read(&mut subscription).await, "old:0");
+		let replacement = publisher.publish("live/job", origin::Route::default()).unwrap();
+		let replacement_track = replacement.create_track("video", None).unwrap();
+		write(&replacement_track, "new:0");
+		write(&replacement_track, "new:1");
+		assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
+		assert!(
+			track.fetch_group(1, None).await.is_err(),
+			"{version}: covering handle fetched replacement"
+		);
+		old.write(0, "old:1");
+		assert_eq!(read(&mut subscription).await, "old:1");
+	}
+}
