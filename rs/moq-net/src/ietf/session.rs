@@ -207,7 +207,7 @@ where
 					session.close(SessionError::from(&err).to_code(), "setup stream required");
 					return Err(err);
 				};
-				let control = Control::new(request_id_max, client).with_window(limits.requests(), client);
+				let control = Control::new(request_id_max, client).with_window(limits.requests(), client, version);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
 				// No AUTH on these drafts, but a limit still reaches both halves.

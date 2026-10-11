@@ -121,3 +121,8 @@ harness = false
 [[bench]]
 name = "session"
 harness = false
+
+[[bench]]
+name = "request-ids"
+harness = false
+required-features = ["fuzz"]

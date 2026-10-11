@@ -1171,6 +1171,11 @@ impl crate::transport::Error for NoError {
 	}
 }
 
+/// Admit a draft-16 window for the request-ID benchmark, returning the accepted count.
+pub fn request_ids(window: u64, ids: &[u64]) -> usize {
+	ietf::request_ids(window, ids)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

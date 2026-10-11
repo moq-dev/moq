@@ -59,3 +59,13 @@ pub use subscribe_namespace::*; // includes PublishBlocked
 use subscriber::*;
 pub use track::*;
 pub use version::Version;
+
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) fn request_ids(window: u64, ids: &[u64]) -> usize {
+	let control = Control::new(None, false).with_window(window, false, Version::Draft16);
+	let held: Vec<_> = ids
+		.iter()
+		.filter_map(|id| control.accept(RequestId(*id)).ok())
+		.collect();
+	held.len()
+}

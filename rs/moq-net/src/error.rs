@@ -57,6 +57,10 @@ pub enum SessionError {
 	/// A code this version does not recognize, kept verbatim.
 	#[error("unknown code={0}")]
 	Unknown(u32),
+
+	/// A request ID was reused or violated the negotiated draft’s order or parity rules.
+	#[error("invalid request id")]
+	InvalidRequestId,
 }
 
 impl SessionError {
@@ -67,6 +71,7 @@ impl SessionError {
 			Self::Internal => 0x1,
 			Self::Unauthorized => 0x2,
 			Self::ProtocolViolation => 0x3,
+			Self::InvalidRequestId => 0x4,
 			Self::KeyValueFormatting => 0x6,
 			Self::TooManyRequests => 0x7,
 			Self::GoawayTimeout => 0x10,
@@ -88,6 +93,7 @@ impl SessionError {
 			0x1 => Self::Internal,
 			0x2 => Self::Unauthorized,
 			0x3 => Self::ProtocolViolation,
+			0x4 => Self::InvalidRequestId,
 			0x6 => Self::KeyValueFormatting,
 			0x7 => Self::TooManyRequests,
 			0x10 => Self::GoawayTimeout,
@@ -655,6 +661,7 @@ mod tests {
 			SessionError::Internal,
 			SessionError::Unauthorized,
 			SessionError::ProtocolViolation,
+			SessionError::InvalidRequestId,
 			SessionError::KeyValueFormatting,
 			SessionError::TooManyRequests,
 			SessionError::GoawayTimeout,
@@ -673,6 +680,7 @@ mod tests {
 
 		// The moq-transport codes we reuse must keep moq-transport's values.
 		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
+		assert_eq!(SessionError::InvalidRequestId.to_code(), 0x4);
 		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
