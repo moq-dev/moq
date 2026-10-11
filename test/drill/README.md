@@ -29,7 +29,7 @@ checks that what the fault owned was released.
 | `cancel_under_backpressure_releases_the_reader` | A subscriber stops reading while the publisher runs ahead, then cancels | the number of unread groups queued behind the reader at the moment it cancels | everything the cancelled session was feeding closes rather than parking, and the relay still serves a subscriber that joins afterwards |
 | `relay_killed_mid_group_aborts_then_resumes` | The relay's runtime is dropped mid-group: every task and socket at once, no `CONNECTION_CLOSE` | the error the interrupted group aborted with, and both reconnect loops reporting `Disconnected` | the interrupted group fails rather than reporting a clean finish, and after the relay returns the same handles resume delivery |
 | `interrupted_publisher_republishes_new_content` | A publisher vanishes with no finish and no unannounce, then a new one publishes the same name | the withdrawal of the dead publisher's broadcast | the name stops being announced, and the republished name serves the new publisher's content rather than the dead one's cache |
-| `bursts_cross_a_cluster` | Bursts of one-frame groups cross from an origin relay to a clustered edge relay; the subscriber reads newest-only and FETCHes every group it misses | how many groups missed the live subscription, which live groups were reset, and the slowest group's latency | every group arrives, live or by FETCH, within 10s of being written; a lost group fails by name (FETCH failed, FETCH unanswered, live group stalled), and the newest group comes live |
+| `bursts_cross_a_cluster` | Bursts of one-frame groups cross from an origin relay to a clustered edge relay; the subscriber reads newest-only and FETCHes every group it misses | how many groups missed the live subscription, which live groups were reset, the completed ingress burst and overflow count, and the slowest group's latency | every group arrives, live or by FETCH, within 10s of being written; a lost group fails by name (FETCH failed, FETCH unanswered, live group stalled), and the newest group comes live |
 | `bursts_cross_a_flapping_peer` | The same bursts, with the peer link cut as the second burst is written and restored once the edge withdraws the route | how long the link was down before the withdrawal, and the reads and FETCHes the flap failed | the route comes back and every group still arrives within 10s of being written, or of the route's return when it arrives after it; only a failure the flap caused is retried, on the restored route, so a hang on the dead one past the relays' idle timeout or a withdrawal with the link up still fails |
 | `bursts_cross_a_transport_peer` | The same bursts, with the relays peering over `moq-transport-19`, so the edge recovers gaps with IETF FETCHes | as `bursts_cross_a_cluster` | as `bursts_cross_a_cluster`: a group the origin still holds is served, never refused |
 | `no_publisher_never_delivers` | none: the negative control | - | with nothing publishing, nothing is announced and no broadcast resolves |
@@ -44,6 +44,18 @@ edge is the origin front's: it drops the source track when the last local
 reader leaves, and is covered by moq-net's origin tests. Waiting out a
 linger would make this the slowest test in the workspace; the rejoin the
 drill does assert is the half of that behavior worth grading here.
+
+The impaired cluster drills arm a one-shot ingress burst once the origin has subscribed
+to the publisher, since the gate also holds the replies and credit that subscription needs.
+The shaper keeps seeded loss, then collects surviving datagrams on the publisher's
+upstream flow until they exceed the rate bucket's burst and queue allowance. It
+accounts that batch at one instant, so scheduling gaps cannot silently drain the
+fault away. Transport credit holds two bucket allowances but remains smaller than
+the application burst. The first burst's newest frame also fills that window, since
+a latest-only subscription may skip every earlier group. The gate completion and
+actual overflow are both asserted.
+The test-only control is available through moq-shaper's `test` feature; dropping
+its handle discards a cancelled batch, and unrelated flows keep forwarding.
 
 The negative control is what keeps the rest honest. Five drills prove things by
 reading a frame; if the harness could report success without data moving, they
@@ -155,14 +167,15 @@ just test drill-sensitivity --list
 just test drill-sensitivity reconnect-stops-after-session-loss
 ```
 
-Each mutation names its drill's `loopback` lane, which is the faster of the two
-and grades the same body.
+Recovery mutations use the faster `loopback` lane. The ingress activation
+mutation uses `impaired`, where that fault is armed.
 
 | Mutation | Removes | Drill that must fail |
 |---|---|---|
 | `subscriber-leaks-broadcasts` | releasing the broadcasts a subscribing session fed when that session ends | `cancel_under_backpressure_releases_the_reader::loopback` |
 | `reconnect-stops-after-session-loss` | redialing after an established session is lost | `relay_killed_mid_group_aborts_then_resumes::loopback` |
 | `relay-withdraws-lost-publisher` | withdrawing a publisher's announcements when its session is lost | `interrupted_publisher_republishes_new_content::loopback` |
+| `ingress-burst-never-collected` | collecting the deliberately armed ingress burst; natural shaping still runs | `bursts_cross_a_cluster::impaired` |
 | `fetch-never-sent` | sending a FETCH for an uncached group, at the subscriber and at the edge relay | `bursts_cross_a_cluster::loopback` |
 | `peer-link-never-redialed` | redialing a cluster peer after its link is lost | `bursts_cross_a_flapping_peer::loopback` |
 

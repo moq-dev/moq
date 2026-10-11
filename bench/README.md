@@ -96,3 +96,17 @@ Generator CPU is reported beside relay CPU because sharing a loopback host can
 hide a relay improvement behind generator saturation. CPU efficiency remains
 withheld until offered load and delivery/loss are comparable. Zero-baseline
 metrics retain absolute deltas when their percentage ratio is undefined.
+
+Measure delivered payload through the Go bindings and a local QUIC relay:
+
+```bash
+nix develop --command just go bench -benchtime=3s -count=3
+```
+
+This independently sweeps 1/4 publishers and 1/4 subscribers per publisher,
+checks every received frame's payload and timestamp, and acknowledges each batch before publishing the
+next. Reported MB/s counts delivery to every subscriber. The optimized native
+library, relay and clients share the process, so pin the benchmark process with
+`taskset` to compare one CPU with multiple CPUs. Compare identical CPU sets and
+traffic shapes across revisions; the nightly smoke runs each shape once without
+a timing threshold.

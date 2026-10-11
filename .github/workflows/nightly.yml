@@ -83,6 +83,10 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
 
+      - name: Go publisher runtime benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just go bench -benchtime=1x
+
       - name: Audio grouping relay benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just bench-audio
