@@ -82,8 +82,13 @@ impl Buffer {
 	/// the slot, less one, but at least one. Even laid out evenly, the packets bunch a little
 	/// where one slot meets the next, and the slack drains that off.
 	fn per_slot(&self) -> usize {
+		self.passes().saturating_sub(1).max(1)
+	}
+
+	/// The packets its transport buffer passes on within a slot.
+	fn passes(&self) -> usize {
 		let bits = u128::from(self.rate) * PCR_INTERVAL.as_nanos() / 1_000_000_000;
-		(bits / (TsPacket::SIZE as u128 * 8)).saturating_sub(1).max(1) as usize
+		(bits / (TsPacket::SIZE as u128 * 8)) as usize
 	}
 }
 
@@ -186,6 +191,8 @@ pub(super) struct Slot {
 	pub keyframe: bool,
 	/// The PID of each access unit whose first packet rides in the slot.
 	pub units: Vec<u16>,
+	/// How many packets a slot each bounded PID's transport buffer passes on.
+	pub passes: HashMap<u16, usize>,
 }
 
 impl Slot {
@@ -203,7 +210,8 @@ impl Slot {
 	///
 	/// The tables share one [`SystemBuffer`]. Where the next table would overflow it, a null
 	/// takes the position instead, so a PMT spanning several packets goes out at the buffer's
-	/// rate where the slot has the nulls to spare.
+	/// rate, as long as the slot has nulls to spare and the delayed PIDs can still keep within
+	/// their own transport buffers ([`Self::passes`]).
 	pub fn layout(&self, clock: &[u8], pmt_pid: u16, null: &[u8]) -> Vec<u8> {
 		let packets = self.packets.as_chunks::<{ TsPacket::SIZE }>().0;
 		let mut tables = VecDeque::new();
@@ -261,8 +269,18 @@ impl Slot {
 			if let Some(table) = table {
 				// A null spaces a table that would overflow TBsys, and the rest of the slot is
 				// laid out afresh around it, so no PID's packets bunch up to make up the time.
-				// Without a null left, the table goes out regardless.
-				if !system.fits() && nulls > 0 {
+				// The stall must leave every PID the time to go no faster than its transport
+				// buffer passes packets on. Otherwise the table goes out regardless.
+				let room = || {
+					// Positions left after the stall, the remaining nulls among them.
+					let after = left as usize - 1 + tables.len();
+					lanes.iter().all(|(pid, lane)| {
+						self.passes
+							.get(pid)
+							.is_none_or(|&passes| lane.len() * positions <= passes * after)
+					})
+				};
+				if !system.fits() && nulls > 0 && room() {
 					nulls -= 1;
 					system.lay(null);
 					out.extend_from_slice(null);
@@ -538,6 +556,11 @@ impl Schedule {
 			nulls,
 			keyframe,
 			units,
+			passes: self
+				.buffers
+				.iter()
+				.map(|(&pid, buffer)| (pid, buffer.passes()))
+				.collect(),
 		}))
 	}
 
@@ -971,6 +994,7 @@ mod tests {
 			nulls: 416 - 1 - media,
 			keyframe: false,
 			units: vec![],
+			passes: HashMap::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -1007,6 +1031,7 @@ mod tests {
 			nulls: 2,
 			keyframe: true,
 			units: vec![1, 3],
+			passes: HashMap::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -1014,9 +1039,10 @@ mod tests {
 		assert_eq!(laid, [1, 0, 100, 3, 0x1fff, 3, 3, 1, 0x1fff, 3]);
 	}
 
-	/// A PAT and a three-packet PMT go out at TBsys's rate rather than in a burst, spaced by
+	/// A PAT and a multi-packet PMT go out at TBsys's rate rather than in a burst, spaced by
 	/// nulls and still in order ahead of the keyframe muxed after them. The video they delay
-	/// still keeps within its own transport buffer.
+	/// always keeps within its own transport buffer: where spacing a five-packet PMT would
+	/// leave the video too little time, the rest of the tables go out regardless.
 	#[test]
 	fn the_tables_go_out_at_the_system_buffer_rate() {
 		// The peak fill of a 512-byte transport buffer fed by `pids` and drained at `rx` b/s, over
@@ -1033,12 +1059,19 @@ mod tests {
 			}
 			peak
 		};
-		// A 20 Mb/s slot with a small keyframe, and a 25 Mb/s slot whose video takes most of it
-		// alongside AC-3, MPEG audio and teletext.
+		// The video's Rx is 1.2 x 17,999,872 b/s, as in the full-slot test above.
+		const RX: u64 = 21_599_846;
+		// A 20 Mb/s slot with a small keyframe, and 25 Mb/s slots whose video takes most of it
+		// alongside AC-3, MPEG audio and teletext: (positions, video PID and packets, other
+		// PIDs, PMT packets, whether TBsys holds).
 		let others: &[(u8, usize)] = &[(122, 9), (121, 5), (123, 5), (124, 5), (131, 1)];
-		for (positions, video, count, others) in [(332, 1, 50, &[][..]), (416, 111, 300, others)] {
+		for (positions, video, count, others, parts, paced) in [
+			(332, 1, 50, &[][..], 3, true),
+			(416, 111, 300, others, 3, true),
+			(416, 111, 300, others, 5, false),
+		] {
 			let mut packets = unit(0, 1);
-			for part in 0..3 {
+			for part in 0..parts {
 				let mut pmt = unit(100, 1);
 				pmt[4] = part;
 				packets.extend(pmt);
@@ -1054,6 +1087,7 @@ mod tests {
 				packets,
 				keyframe: true,
 				units: vec![video.into()],
+				passes: HashMap::from([(video.into(), Buffer { rate: RX, size: None }.passes())]),
 			};
 			let mut null = unit(0, 1);
 			(null[1], null[2]) = (0x1f, 0xff);
@@ -1062,16 +1096,18 @@ mod tests {
 			let laid: Vec<&[u8]> = laid.chunks(TsPacket::SIZE).collect();
 
 			let tables: Vec<usize> = (0..laid.len()).filter(|&k| [0, 100].contains(&pid(laid[k]))).collect();
-			let parts: Vec<u8> = tables.iter().skip(1).map(|&k| laid[k][4]).collect();
-			assert_eq!(parts, [0, 1, 2], "the PMT keeps its order");
+			let order: Vec<u8> = tables.iter().skip(1).map(|&k| laid[k][4]).collect();
+			assert_eq!(order, (0..parts).collect::<Vec<_>>(), "the PMT keeps its order");
 			let keyframe = (1..laid.len()).find(|&k| pid(laid[k]) == u16::from(video)).unwrap();
 			assert!(tables.iter().all(|&k| k < keyframe), "the tables lead the keyframe");
 
 			let system = peak(&laid, &[0, 100], 1_000_000.0);
-			assert!(system <= 512.0, "TBsys peak {system:.0} B in {positions} positions");
-			// The video's Rx is 1.2 x 17,999,872 b/s, as in the full-slot test above.
-			let video = peak(&laid, &[video.into()], 21_599_846.0);
-			assert!(video <= 512.0, "video TB peak {video:.0} B in {positions} positions");
+			assert!(
+				!paced || system <= 512.0,
+				"TBsys peak {system:.0} B, {parts} PMT packets"
+			);
+			let video = peak(&laid, &[video.into()], RX as f64);
+			assert!(video <= 512.0, "video TB peak {video:.0} B, {parts} PMT packets");
 		}
 	}
 }
