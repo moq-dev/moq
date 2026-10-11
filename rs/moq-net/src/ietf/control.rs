@@ -1,9 +1,15 @@
-use std::{collections::HashSet, task::Poll};
+use std::{collections::BTreeMap, task::Poll};
 
 use crate::{
 	Error, SessionError,
 	ietf::{RequestId, Version},
 };
+
+/// The skipped `start..end` run holding `id`, if any.
+fn missing_run(missing: &BTreeMap<u64, u64>, id: u64) -> Option<(u64, u64)> {
+	let (&start, &end) = missing.range(..=id).next_back()?;
+	(id < end).then_some((start, end))
+}
 
 /// The MAX_REQUEST_ID that first admits `window` requests from a peer.
 ///
@@ -35,9 +41,10 @@ struct Incoming {
 	retired: u64,
 	/// One past the highest accepted ID, preserving IDs whose requests retired.
 	next: RequestId,
-	/// Draft 16 can reorder across streams. Missing IDs retain unreturned window credits,
-	/// so remembering only these holes is bounded by the request window, not session age.
-	missing: Option<HashSet<RequestId>>,
+	/// Draft 16 can reorder across streams, so it remembers the IDs skipped below `next`
+	/// as `start..end` runs. A jump costs one run however far it skips, and only a request
+	/// landing inside a run splits it, so the runs never outnumber the requests received.
+	missing: Option<BTreeMap<u64, u64>>,
 }
 
 #[derive(Clone)]
@@ -69,7 +76,7 @@ impl Control {
 			live: 0,
 			retired: 0,
 			next: RequestId(u64::from(client)),
-			missing: (version == Version::Draft16).then(HashSet::new),
+			missing: (version == Version::Draft16).then(BTreeMap::new),
 		});
 		self
 	}
@@ -95,8 +102,12 @@ impl Control {
 			tracing::warn!(id = %id, max = incoming.max, live = incoming.live, "peer exceeded MAX_REQUEST_ID");
 			return Err(SessionError::TooManyRequests.into());
 		}
+		let run = match &incoming.missing {
+			Some(missing) if id < incoming.next => missing_run(missing, id.0),
+			_ => None,
+		};
 		let unused = if id < incoming.next {
-			incoming.missing.as_ref().is_some_and(|missing| missing.contains(&id))
+			run.is_some()
 		} else {
 			id == incoming.next || incoming.missing.is_some()
 		};
@@ -107,10 +118,17 @@ impl Control {
 			return Err(SessionError::TooManyRequests.into());
 		}
 		if let Some(missing) = &mut incoming.missing {
-			for skipped in (incoming.next.0..id.0).step_by(2) {
-				missing.insert(RequestId(skipped));
+			if let Some((start, end)) = run {
+				missing.remove(&start);
+				if start < id.0 {
+					missing.insert(start, id.0);
+				}
+				if id.0 + 2 < end {
+					missing.insert(id.0 + 2, end);
+				}
+			} else if id > incoming.next {
+				missing.insert(incoming.next.0, id.0);
 			}
-			missing.remove(&id);
 		}
 		incoming.next.0 = incoming.next.0.max(id.0 + 2);
 		incoming.live += 1;
@@ -301,8 +319,7 @@ mod tests {
 			drop(control.accept(RequestId(id * 2)).unwrap());
 			let state = control.state.lock();
 			let missing = state.incoming.as_ref().unwrap().missing.as_ref().unwrap();
-			assert_eq!(missing.len(), 1);
-			assert!(missing.contains(&RequestId(0)));
+			assert_eq!(missing.iter().collect::<Vec<_>>(), [(&0, &2)]);
 		}
 		drop(control.accept(RequestId(0)).unwrap());
 		assert!(
@@ -318,6 +335,34 @@ mod tests {
 				.is_empty()
 		);
 		for id in [0, 2, 2046] {
+			assert!(matches!(
+				control.accept(RequestId(id)),
+				Err(Error::Session(SessionError::InvalidRequestId))
+			));
+		}
+	}
+
+	/// Skipping to the top of a production-sized window records one run, not every ID.
+	#[test]
+	fn draft16_a_jump_is_one_run_split_only_by_requests_inside_it() {
+		let window = 220_000;
+		let control = Control::new(None, false).with_window(window, false, Version::Draft16);
+		let top = 2 * (window - 1);
+		let runs = |control: &Control| {
+			let state = control.state.lock();
+			let missing = state.incoming.as_ref().unwrap().missing.as_ref().unwrap();
+			missing.iter().map(|(&start, &end)| (start, end)).collect::<Vec<_>>()
+		};
+
+		drop(control.accept(RequestId(top)).unwrap());
+		assert_eq!(runs(&control), [(0, top)]);
+
+		for id in [100, 0, top - 2] {
+			drop(control.accept(RequestId(id)).unwrap());
+		}
+		assert_eq!(runs(&control), [(2, 100), (102, top - 2)]);
+
+		for id in [0, 100, top - 2, top] {
 			assert!(matches!(
 				control.accept(RequestId(id)),
 				Err(Error::Session(SessionError::InvalidRequestId))

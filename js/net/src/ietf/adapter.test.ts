@@ -9,6 +9,7 @@ import { GoAway } from "./goaway.ts";
 import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "./publish_namespace.ts";
 import { initialMaxRequestId, MaxRequestId, RequestError } from "./request.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
@@ -609,6 +610,61 @@ test("draft 16 accepts reordered native and control IDs but never reuses them", 
 				peer.close();
 				adapter.close();
 			}
+		}
+	}
+});
+
+// Draft 16 remembers a skipped stretch as one run, so a jump costs nothing per skipped ID.
+test("draft 16 tracks a jump across a production window as one run", async () => {
+	const window = 220_000n;
+	const { adapter, peer } = await windowed(Version.DRAFT_16, ALPN.DRAFT_16, window, false);
+	const top = 2n * (window - 1n);
+	try {
+		for (const id of [top, 100n, 0n, top - 2n, 2n, 98n]) adapter.admitRequest(id);
+		for (const id of [0n, 2n, 98n, 100n, top - 2n, top]) {
+			expect(() => adapter.admitRequest(id)).toThrow("request id was already spent");
+		}
+	} finally {
+		peer.close();
+		adapter.close();
+	}
+});
+
+// Allocation precedes an asynchronous encode, so a shorter later request can finish first.
+test("drafts 14 and 15 send concurrent requests in request id order", async () => {
+	for (const [version, alpn] of [
+		[Version.DRAFT_14, ALPN.DRAFT_14],
+		[Version.DRAFT_15, ALPN.DRAFT_15],
+	] as const) {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.server, { version });
+		const sender = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+		void sender.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+		const receiver = new ControlStreamAdapter(pair.client, peer, version, 100n, false, 8n);
+		void receiver.run().catch(() => undefined);
+		try {
+			const request = async (namespace: Path.Valid) => {
+				const requestId = await sender.nextRequestId();
+				if (requestId === undefined) throw new Error("no request id");
+				const stream = sender.openBi();
+				await stream.writer.u53(SubscribeNamespaceLegacy.id);
+				await new SubscribeNamespaceLegacy({ namespace, requestId }).encode(stream.writer, version);
+			};
+			await Promise.all([request(Path.from("a/b/c/d/e/f/g/h")), request(Path.from("a"))]);
+
+			const received: bigint[] = [];
+			for (let i = 0; i < 2; i++) {
+				const stream = await receiver.acceptBi();
+				if (!stream) throw new Error("the receiver refused a request");
+				expect(await stream.reader.u53()).toBe(SubscribeNamespaceLegacy.id);
+				received.push((await SubscribeNamespaceLegacy.decode(stream.reader, version)).requestId);
+			}
+			expect(received).toEqual([0n, 2n]);
+		} finally {
+			sender.close();
+			receiver.close();
 		}
 	}
 });

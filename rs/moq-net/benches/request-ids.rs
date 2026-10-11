@@ -7,14 +7,11 @@ fn request_ids(c: &mut Criterion) {
 	group.sample_size(20);
 	group.warm_up_time(Duration::from_millis(200));
 	group.measurement_time(Duration::from_secs(1));
-	for reversed in [false, true] {
+	// Up to the production window, which the session sizes to twice its 110,000 caps.
+	for mode in ["ordered", "reordered", "scattered"] {
 		for sessions in [1, 8, 32] {
-			for window in [8, 32, 128] {
-				let mut ids: Vec<_> = (0..window).map(|id| id * 2).collect();
-				if reversed {
-					ids.reverse();
-				}
-				let mode = if reversed { "reordered" } else { "ordered" };
+			for window in [8, 128, 220_000] {
+				let ids = ids(mode, window);
 				println!(
 					"admitted,{mode},{sessions},{window},{}",
 					moq_net::fuzz::request_ids(window, &ids) * sessions
@@ -32,5 +29,24 @@ fn request_ids(c: &mut Criterion) {
 	}
 	group.finish();
 }
+/// Every ID in the window: in order, reversed (one skip to the top, then each fill
+/// shortens it), or scattered (the top first, then every other ID descending, so each
+/// splits the lowest skipped run and the remembered runs grow to half the window).
+fn ids(mode: &str, window: u64) -> Vec<u64> {
+	let all = (0..window).map(|id| id * 2);
+	match mode {
+		"ordered" => all.collect(),
+		"reordered" => all.rev().collect(),
+		"scattered" => {
+			let below = (0..window - 1).rev().map(|id| id * 2);
+			let mut ids = vec![2 * (window - 1)];
+			ids.extend(below.clone().filter(|id| id / 2 % 2 == 1));
+			ids.extend(below.filter(|id| id / 2 % 2 == 0));
+			ids
+		}
+		_ => unreachable!(),
+	}
+}
+
 criterion_group!(benches, request_ids);
 criterion_main!(benches);

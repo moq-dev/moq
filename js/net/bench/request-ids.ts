@@ -3,18 +3,35 @@ import { ControlStreamAdapter } from "../src/ietf/adapter.ts";
 import { Version } from "../src/ietf/version.ts";
 import { Stream } from "../src/stream.ts";
 
+/**
+ * Every ID in the window: in order, reversed (one skip to the top, then each fill
+ * shortens it), or scattered (the top first, then every other ID descending, so each
+ * splits the lowest skipped run and the remembered runs grow to half the window).
+ */
+function order(mode: string, window: number): bigint[] {
+	const all = Array.from({ length: window }, (_, id) => BigInt(id * 2));
+	if (mode === "ordered") return all;
+	if (mode === "reordered") return all.reverse();
+	const top = all[window - 1];
+	const odd = all.filter((id, index) => index % 2 === 1 && id !== top).reverse();
+	const even = all.filter((id, index) => index % 2 === 0 && id !== top).reverse();
+	return [top, ...odd, ...even];
+}
+
 const debug = console.debug;
 console.debug = () => undefined;
 try {
 	console.log("mode,sessions,window,admit_us,accepted");
-	for (const reversed of [false, true]) {
+	// Up to the production window, REQUEST_WINDOW.
+	for (const mode of ["ordered", "reordered", "scattered"]) {
 		for (const sessions of [1, 8, 32]) {
-			for (const window of [8, 32, 128]) {
-				const ids = Array.from({ length: window }, (_, id) => BigInt(id * 2));
-				if (reversed) ids.reverse();
+			for (const window of [8, 128, 220_000]) {
+				const ids = order(mode, window);
+				// Fewer rounds for the large window, keeping each sweep to a similar budget.
+				const rounds = Math.max(1, Math.floor(8192 / window));
 				let elapsed = 0;
 				let accepted = 0;
-				for (let round = 0; round < 64; round++) {
+				for (let round = 0; round < rounds; round++) {
 					const fixtures = Array.from({ length: sessions }, () => {
 						const stream = new Stream({
 							readable: new ReadableStream(),
@@ -53,7 +70,7 @@ try {
 					await Promise.resolve();
 				}
 				console.log(
-					`${reversed ? "reordered" : "ordered"},${sessions},${window},${((elapsed * 1000) / 64).toFixed(2)},${accepted}`,
+					`${mode},${sessions},${window},${((elapsed * 1000) / rounds).toFixed(2)},${accepted / rounds}`,
 				);
 			}
 		}
