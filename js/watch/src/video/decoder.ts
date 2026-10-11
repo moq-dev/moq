@@ -107,6 +107,7 @@ export class Decoder {
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
+	#selected?: DecoderTrack;
 	#failed?: { instance: unknown; track: string; identity: string };
 
 	#clearCurrentFrame(): void {
@@ -167,6 +168,7 @@ export class Decoder {
 	}
 
 	#runPending(effect: Effect): void {
+		this.#selected = undefined;
 		const enabled = effect.get(this.in.enabled);
 		const broadcast = effect.get(this.source.in.broadcast);
 		const track = effect.get(this.source.out.track);
@@ -216,25 +218,32 @@ export class Decoder {
 			broadcast: active,
 			track,
 			config: identity.decoder,
+			identity: key,
 			stats: this.#out.stats,
 			catalog: broadcast.out.catalog,
 		});
-		const candidate = pending;
+		this.#selected = pending;
 		effect.run((inner) => {
-			const error = inner.get(candidate.error);
+			if (!pending) {
+				inner.close(); // Promoted tracks are observed by their active lifetime.
+				return;
+			}
+			const error = inner.get(pending.error);
 			if (!error) return;
-			this.#failed = { instance: active.closed, track, identity: key };
-			this.#out.error.set(error);
-			if (this.#active.peek() === candidate) this.#active.set(undefined);
+			this.#recordError(pending, error);
+			pending.close();
+			pending = undefined;
 			this.#pending.set(undefined);
-			this.#clearCurrentFrame();
 		});
 		effect.set(this.#pending, { track, catalog: broadcast.out.catalog });
 
 		effect.cleanup(() => pending?.close());
 
 		effect.run((effect) => {
-			if (!pending) return;
+			if (!pending) {
+				effect.close();
+				return;
+			}
 
 			const current = effect.get(this.#active);
 			if (current && !republished) {
@@ -268,11 +277,24 @@ export class Decoder {
 
 		effect.cleanup(() => active.close());
 
+		effect.run((inner) => {
+			const error = inner.get(active.error);
+			if (!error) return;
+			this.#recordError(active, error);
+			this.#active.set(undefined);
+			this.#clearCurrentFrame();
+		});
+
 		// Clone the frame so we own it independently of the DecoderTrack.
 		// proxy() would share the same reference, allowing the source to close our frame.
 		effect.run((inner) => {
 			const frame = inner.get(active.frame);
 			if (!frame) return; // A promoted track holds the previous picture until its first frame.
+			if (active.error.peek()) return;
+			if (this.#selected === active) {
+				this.#failed = undefined;
+				this.#out.error.set(undefined);
+			}
 			this.#out.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
 			this.#out.frame.update((prev) => {
 				prev?.close();
@@ -281,6 +303,13 @@ export class Decoder {
 		});
 		effect.proxy(this.#out.buffered, active.buffered);
 		effect.proxy(this.#spread, active.spread);
+	}
+
+	#recordError(track: DecoderTrack, error: Error): void {
+		// An outgoing failure must not replace the selected rendition's failure latch.
+		if (track !== this.#selected && this.#selected?.error.peek()) return;
+		this.#failed = { instance: track.broadcast.closed, track: track.track, identity: track.identity };
+		this.#out.error.set(error);
 	}
 
 	#runDisplay(effect: Effect): void {
@@ -334,6 +363,7 @@ interface DecoderTrackProps {
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
 	config: DecoderConfig;
+	identity: string;
 	// The broadcast catalog this subscription started from. Updates on that broadcast still apply;
 	// a later source does not.
 	catalog: Getter<Catalog.Root | undefined>;
@@ -347,6 +377,7 @@ class DecoderTrack {
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
 	config: DecoderConfig;
+	identity: string;
 	catalog: Getter<Catalog.Root | undefined>;
 	stats: Signal<Stats | undefined>;
 
@@ -380,6 +411,7 @@ class DecoderTrack {
 		this.broadcast = props.broadcast;
 		this.track = props.track;
 		this.config = props.config;
+		this.identity = props.identity;
 		this.catalog = props.catalog;
 		this.stats = props.stats;
 

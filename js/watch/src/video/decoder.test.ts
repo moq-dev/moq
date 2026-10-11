@@ -192,6 +192,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const pending: Array<() => void> = [];
 	let resets = 0;
 	const errors: VideoDecoderInit["error"][] = [];
+	const frames: VideoDecoderInit["output"][] = [];
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
 	class Codec {
 		state = "unconfigured";
@@ -201,6 +202,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		constructor(callbacks: VideoDecoderInit) {
 			this.callbacks = callbacks;
 			errors.push(callbacks.error);
+			frames.push(callbacks.output);
 		}
 		configure() {
 			this.state = "configured";
@@ -274,7 +276,14 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	await microtasks();
 	return {
 		decoder,
-		fail: (error: DOMException) => errors.at(-1)?.(error),
+		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
+		emit: (timestamp: number, index = -1) => frames.at(index)?.(new Picture(timestamp) as unknown as VideoFrame),
+		get codecs() {
+			return errors.length;
+		},
+		switchRendition(track = "replacement") {
+			catalog.set({ video: { renditions: { [track]: video } } });
+		},
 		enabled,
 		catalog,
 		submitted,
@@ -490,3 +499,56 @@ it("releases a failed video subscription and recovers only on a new source", asy
 		close.mockRestore();
 	}
 });
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	it(`reports the outgoing ${kind} decoder failing during a rendition handover`, async () => {
+		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);
+		try {
+			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(100));
+			playback.switchRendition();
+			await microtasks();
+			expect(playback.codecs).toBe(2);
+			const failure = new DOMException("outgoing decoder failed", "EncodingError");
+			playback.fail(failure, 0);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.emit(200_000, 1);
+			await microtasks();
+			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(200));
+			expect(playback.decoder.out.error.peek()).toBeUndefined();
+			playback.switchRendition("video");
+			await microtasks();
+			expect(playback.codecs).toBe(3);
+		} finally {
+			playback.close();
+		}
+	});
+
+	it(`keeps a failed pending ${kind} rendition out of the active slot`, async () => {
+		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);
+		try {
+			playback.switchRendition();
+			await microtasks();
+			const failure = new DOMException("replacement decoder failed", "EncodingError");
+			playback.fail(failure, 1);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			// Healthy outgoing frames must not conceal the selected rendition's failure.
+			playback.emit(200_000, 0);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.fail(new DOMException("outgoing decoder failed", "EncodingError"), 0);
+			await microtasks();
+			expect(playback.decoder.out.jitter.peek()).toBeUndefined();
+			expect(playback.decoder.out.timestamp.peek()).toBeUndefined();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.enabled.set(false);
+			await microtasks();
+			playback.enabled.set(true);
+			await microtasks();
+			expect(playback.codecs).toBe(2);
+		} finally {
+			playback.close();
+		}
+	});
+}
