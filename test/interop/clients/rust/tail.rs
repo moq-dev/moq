@@ -26,7 +26,8 @@ async fn main() -> anyhow::Result<()> {
             let broadcast = origin.create_broadcast(&args[3])?;
             let mut track = broadcast.create_track("tail", None)?;
             broadcast.announce(Default::default())?;
-            let _session = client
+            let session = client
+                .clone()
                 .with_publisher(&origin)
                 .connect(url)
                 .established()
@@ -50,11 +51,13 @@ async fn main() -> anyhow::Result<()> {
                 "reader did not acknowledge a clean end"
             );
             broadcast.close();
+            session.close().await?;
             eprintln!("tail acknowledged");
         }
         "subscribe" => {
             let consumer = origin.consume();
-            let _session = client
+            let session = client
+                .clone()
                 .with_subscriber(origin)
                 .connect(url)
                 .established()
@@ -86,9 +89,12 @@ async fn main() -> anyhow::Result<()> {
                 "wrong groups: {seen:?}"
             );
             ensure!(track.finished().await? == GROUPS, "wrong declared end");
+            session.close().await?;
             eprintln!("tail clean end=4 groups=0,1,2,3 bytes=1048576");
         }
         _ => anyhow::bail!("unknown role: {}", args[1]),
     }
+    // Dropping only queues the QUIC close; send it before the runtime stops.
+    client.close().await;
     Ok(())
 }
