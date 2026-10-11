@@ -43,6 +43,17 @@ fn retry_budget(reconnect: bool, retry_start: tokio::time::Instant, timeout: Dur
 	(reconnect && !timeout.is_zero()).then(|| retry_start + timeout)
 }
 
+/// Whether a failed candidate is the peer's answer for every candidate, ending the walk.
+///
+/// An auth rejection arrives as [`Error::Connect`] with its status already consumed, so it
+/// is checked alongside the statuses that do not invite another attempt.
+fn settles_walk(err: &Error) -> bool {
+	err.is_auth()
+		|| err
+			.status()
+			.is_some_and(|status| !crate::error::status_retryable(status))
+}
+
 /// When the attempt at candidate `index` of `total` must be given up, or `None`
 /// to let it run.
 ///
@@ -1105,13 +1116,7 @@ impl Connection {
 				// on would offer the same rejected credentials at the peer's other
 				// addresses, and worse, a later transport failure would overwrite the
 				// real reason and leave the outer loop retrying until its budget ran out.
-				Err(err)
-					if err
-						.status()
-						.is_some_and(|status| !crate::error::status_retryable(status)) =>
-				{
-					return Err(err);
-				}
+				Err(err) if settles_walk(&err) => return Err(err),
 				Err(err) => {
 					tracing::debug!(peer = %Endpoint(url), %err, "address unreachable");
 					if !err.is_terminal() {
@@ -2260,6 +2265,17 @@ mod tests {
 				"{status} invites another attempt, so the walk should continue"
 			);
 		}
+	}
+
+	/// An auth rejection settles the walk like the status it came from, so a transient
+	/// failure from another candidate cannot replace it and keep an unlimited loop retrying.
+	#[test]
+	fn an_auth_rejection_stops_the_walk() {
+		assert!(settles_walk(&Error::Connect(crate::ConnectError::Unauthorized)));
+		assert!(settles_walk(&Error::Connect(crate::ConnectError::Forbidden)));
+		assert!(!settles_walk(&Error::Io(std::sync::Arc::new(
+			std::io::ErrorKind::ConnectionRefused.into()
+		))));
 	}
 
 	/// The retry window bounds the walk only when there are retries.
