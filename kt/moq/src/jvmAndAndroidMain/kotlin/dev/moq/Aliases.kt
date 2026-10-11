@@ -154,6 +154,7 @@ typealias Backoff = uniffi.moq.MoqBackoff
 /** Whether a protocol code is from the session or stream registry. */
 typealias ErrorScope = uniffi.moq.MoqErrorScope
 /** A recognized protocol kind, or APP / UNKNOWN when the code is not named. */
+// Includes TooManyRequests when a peer exceeds its session request caps.
 typealias ProtocolKind = uniffi.moq.MoqProtocolKind
 /** A protocol failure: scope, verbatim wire code, kind, and a diagnostic message. */
 typealias ProtocolError = uniffi.moq.MoqProtocolError

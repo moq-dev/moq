@@ -138,7 +138,7 @@ ends on the old one and starts on the new.
 
 `announces_peak` and `subscriptions_peak` are the most broadcasts announced to
 the relay, and subscriptions held on it, by any one session under the root.
-Compare them with the relay's per-session limits: a session that goes past one
+Compare them with the relay's [client or peer session limits](/bin/relay/config#session-and-peer): a session that goes past one
 is closed with `TOO_MANY_REQUESTS`. A peak never goes down while the root has a
 session, and summing nodes takes the largest.
 

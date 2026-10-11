@@ -102,6 +102,7 @@ public typealias MoqError = MoqFFI.MoqError
 public typealias ErrorScope = MoqFFI.MoqErrorScope
 
 /// A recognized protocol kind, or `app` / `unknown` when the code is not named.
+// Includes TooManyRequests when a peer exceeds its session request caps.
 public typealias ProtocolKind = MoqFFI.MoqProtocolKind
 
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.

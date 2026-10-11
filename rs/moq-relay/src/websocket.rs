@@ -68,6 +68,7 @@ pub(crate) async fn serve_ws(
 		.admit(state.auth.admit(request.clone()))
 		.await
 		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
+	let limits = state.cluster.limits(&lease);
 	let token = lease.token();
 	let publish = state.cluster.publisher(token);
 	// A verified client certificate marks a cluster peer, which discovers hidden
@@ -105,6 +106,7 @@ pub(crate) async fn serve_ws(
 			alpn,
 			versions,
 			extensions,
+			limits,
 			publish,
 			subscribe,
 			stats,
@@ -125,6 +127,8 @@ struct SessionInputs {
 	versions: moq_net::Versions,
 	/// The moq-transport extensions this side offers in SETUP.
 	extensions: moq_net::setup::Extensions,
+	/// The request caps selected by the admitted grant.
+	limits: moq_net::session::Limits,
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Consumer>,
 	stats: Session,
@@ -162,6 +166,7 @@ where
 		alpn,
 		versions,
 		extensions,
+		limits,
 		publish,
 		subscribe,
 		stats,
@@ -199,7 +204,8 @@ where
 	let mut server = moq_net::Server::new()
 		.with_versions(versions)
 		.with_extensions(extensions)
-		.with_stats(stats);
+		.with_stats(stats)
+		.with_limits(limits);
 	if let Some(subscribe) = subscribe {
 		server = server.with_publisher(subscribe);
 	}
@@ -993,6 +999,7 @@ mod tests {
 		let frozen = Arc::new(AtomicBool::new(false));
 
 		let session = SessionInputs {
+			limits: Default::default(),
 			id: 0,
 			session: String::new(),
 			remote: "127.0.0.1:0".parse().unwrap(),
@@ -1060,6 +1067,7 @@ mod tests {
 		let timeout = Duration::from_secs(10);
 
 		let session = SessionInputs {
+			limits: Default::default(),
 			id: 0,
 			session: String::new(),
 			remote: "127.0.0.1:0".parse().unwrap(),

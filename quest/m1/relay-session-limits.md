@@ -32,6 +32,22 @@ Sync table.
 Public API: a relay config field and flag, and a new error kind in moq-ffi
 and the bindings. Wire: none.
 
+Proposed configuration:
+
+The implementation uses `[session]` and `[peer]`, each with `announces` and
+`subscriptions`, mirrored by `--session-*` and `--peer-*` flags. Ordinary
+clients default to 1,000 of each; peers retain 100,000 announcements and
+10,000 subscriptions. Zero admits no entries. Peer classification requires
+an admitted `peer` or `upstream` grant, including verified LAN membership;
+outgoing cluster links also use peer caps.
+
+Recommendation: keep these two tables so the peer-limit quest can extend the
+same peer policy. Alternatives are nesting client policy under `[client]`,
+which overlaps outbound client terminology, or retaining the loose client
+defaults until operators configure caps. Keep the PR draft until the names
+and tighter default are settled. C and UniFFI append the structured
+TooManyRequests kind without changing existing discriminants or wire codes.
+
 ## Related
 
 - [Peer limits](/quest/m1/quic/peer-limits.md) - extends the peer table with QUIC stream and data limits

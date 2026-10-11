@@ -79,6 +79,31 @@ how much unread data one peer can make the relay buffer. Keep
 `stream_receive_window` well under it so one slow group cannot starve the
 connection.
 
+## \[session] and \[peer]
+
+Request caps apply separately to each session on every transport. The relay
+uses `[peer]` for an admitted grant marked `peer` or `upstream`, including
+verified LAN membership, and for links it dials through the cluster. A client
+certificate, route hop, or cluster-looking URL alone does not select peer caps.
+
+```toml
+[session]
+announces = 1000                     # Simultaneous broadcasts or namespaces.
+subscriptions = 1000                # Simultaneously held subscriptions.
+
+[peer]
+announces = 100000
+subscriptions = 10000
+```
+
+These are the defaults. For example, `--peer-subscriptions=50000` raises the
+subscription cap on cluster links. Size peer caps for the combined traffic
+they carry, and use session peak counters to check headroom. Exceeding a cap
+closes the session with `TOO_MANY_REQUESTS`; reconnecting with the same load
+will exceed it again. Zero admits no entries of that kind, not unlimited
+entries. On moq-transport drafts 14 to 16 these caps also size the request
+window, so very small values can prevent other requests from progressing.
+
 ## \[runtime]
 
 By default one work-stealing runtime serves every connection off one UDP

@@ -168,8 +168,15 @@ async fn spawn_relay_with(
 /// Stand up the relay's axum web stack with WebSocket enabled and return the
 /// port plus an abort handle.
 async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	spawn_ws_relay_with(auth, cluster).await
+}
+
+async fn spawn_ws_relay_with(
+	auth: moq_relay::auth::Auth,
+	cluster: cluster::Cluster,
+) -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	// Stream listeners bind lazily, so this server never opens a socket; only
 	// its certificate handle is used.
@@ -1372,4 +1379,66 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 	}
 	relay.abort();
 	let _ = relay.await;
+}
+
+/// Both admission paths apply the selected cap before starting the session driver.
+#[tokio::test]
+async fn relay_request_limits_distinguish_clients_and_peers() {
+	for scheme in ["tcp", "ws"] {
+		for peer in [false, true] {
+			let mut grant = Grant::new(all(), all());
+			grant.peer = peer;
+			let script = Script::new(grant);
+			let auth = build_auth(script.spawn().await);
+			let mut options = cluster::Options::default();
+			options.session.announces = 1;
+			options.peer.announces = 2;
+			let cluster = cluster::Cluster::new(options).unwrap();
+			let consumer = cluster.origin.consume();
+			let mut observed = consumer.announced();
+			let (port, relay) = match scheme {
+				"tcp" => spawn_relay_with(auth, cluster).await,
+				_ => spawn_ws_relay_with(auth, cluster).await,
+			};
+			let origin = moq_tokio::origin::spawn();
+			let session = client()
+				.with_publisher(origin.consume())
+				.with_reconnect(false)
+				.connect(room_url(scheme, port))
+				.established()
+				.await
+				.unwrap();
+			let first = origin.create_broadcast("one").unwrap();
+			first.announce(Default::default()).unwrap();
+			tokio::time::timeout(TIMEOUT, next_update(&mut observed))
+				.await
+				.unwrap()
+				.unwrap();
+			let second = origin.create_broadcast("two").unwrap();
+			second.announce(Default::default()).unwrap();
+			if peer {
+				let (route, active) = tokio::time::timeout(TIMEOUT, next_update(&mut observed))
+					.await
+					.unwrap()
+					.unwrap();
+				assert!(active, "the peer must retain its second announcement: {route:?}");
+			} else {
+				let error = tokio::time::timeout(TIMEOUT, session.closed())
+					.await
+					.expect("the second client announcement exceeds the cap");
+				assert!(
+					matches!(
+						error,
+						Err(moq_tokio::Error::MoqNet(moq_net::Error::Session(
+							moq_net::SessionError::TooManyRequests
+						)))
+					),
+					"{error:?}"
+				);
+			}
+			drop(session);
+			relay.abort();
+			let _ = relay.await;
+		}
+	}
 }

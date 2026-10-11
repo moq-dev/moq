@@ -813,6 +813,10 @@ struct LanAuth {
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Options {
+	/// Request caps for ordinary client sessions.
+	pub session: crate::limits::Session,
+	/// Request caps for authenticated peers and outbound cluster links.
+	pub peer: crate::limits::Peer,
 	/// Cluster identity, peers, and discovery.
 	pub config: Config,
 
@@ -906,6 +910,8 @@ struct Work {
 /// client can serve local sessions but cannot dial remote peers.
 #[derive(Clone)]
 pub struct Cluster {
+	session_limits: moq_net::session::Limits,
+	peer_limits: moq_net::session::Limits,
 	config: Config,
 	client: Option<moq_tokio::Client>,
 	/// Dial template for LAN peers that pin a fingerprint; static and API
@@ -967,6 +973,15 @@ pub struct Admitted {
 }
 
 impl Cluster {
+	pub(crate) fn limits(&self, lease: &auth::Lease) -> moq_net::session::Limits {
+		let token = lease.token();
+		if token.peer || token.upstream {
+			self.peer_limits
+		} else {
+			self.session_limits
+		}
+	}
+
 	/// The origin ID used by this relay on the wire.
 	pub fn id(&self) -> u64 {
 		self.origin.hop().id()
@@ -987,7 +1002,12 @@ impl Cluster {
 	/// Errors if `config.id` is set but invalid: it must be non-zero and below
 	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
 	pub fn new(options: Options) -> anyhow::Result<Self> {
-		let Options { config, cache } = options;
+		let Options {
+			config,
+			cache,
+			session,
+			peer,
+		} = options;
 		let id = match config.id {
 			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
 			Some(id) if id >= 1 << 62 => {
@@ -1011,6 +1031,8 @@ impl Cluster {
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.hop(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
+			session_limits: session.resolve(),
+			peer_limits: peer.resolve(),
 			config,
 			client: None,
 			connect: None,
@@ -1720,7 +1742,8 @@ impl Cluster {
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
-			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
+			.with_stats(self.stats.tier(self.cluster_tier()).session(""))
+			.limits(self.peer_limits);
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
@@ -1956,6 +1979,26 @@ pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+	#[tokio::test]
+	async fn request_limits_follow_the_admitted_grant() {
+		let mut options = Options::default();
+		options.session.announces = 2;
+		options.session.subscriptions = 3;
+		options.peer.announces = 20;
+		options.peer.subscriptions = 30;
+		let cluster = Cluster::new(options).unwrap();
+		for (peer, upstream, expected) in [(false, false, (2, 3)), (true, false, (20, 30)), (false, true, (20, 30))] {
+			let mut grant = moq_auth::Grant::new(Default::default(), Default::default());
+			grant.peer = peer;
+			grant.upstream = upstream;
+			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
+			// A cluster-looking path alone never selects the peer policy.
+			let lease = auth::Lease::new("/.cluster/untrusted", consumer);
+			let limits = cluster.limits(&lease);
+			assert_eq!((limits.announces, limits.subscriptions), expected);
+		}
+	}
+
 	use super::*;
 	use crate::Config as RelayConfig;
 
