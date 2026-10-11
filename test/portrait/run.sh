@@ -12,7 +12,7 @@ bun install --frozen-lockfile
 (cd test/interop/clients/js && bunx vite build --outDir "$HARNESS_RUN/js-dist" && bunx playwright install chromium)
 harness_port relay
 URL="http://127.0.0.1:$HARNESS_PORT"
-sed "s/4443/$HARNESS_PORT/g" test/interop/interop.toml >"$HARNESS_RUN/relay.toml"
+sed "s/4443/$HARNESS_PORT/g" "$DIR/relay.toml" >"$HARNESS_RUN/relay.toml"
 harness_spawn relay "$HARNESS_RUN/relay.log" "$WORKSPACE/target/debug/moq-relay" "$HARNESS_RUN/relay.toml"
 harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"
 # shellcheck disable=SC2329 # invoked by harness_spawn
