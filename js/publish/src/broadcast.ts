@@ -239,7 +239,8 @@ export class Broadcast {
 
 		// Each track lives as long as the broadcast: a track name always means the same content,
 		// so a re-announce or a rendition change keeps writing to it instead of restarting its
-		// group sequence under the same epoch.
+		// group sequence under the same epoch. Rendition tracks by name, so registering a name
+		// again finds its track; the catalog's stay out of reach of a colliding rendition.
 		const tracks = new Map<string, Moq.Track.Producer>();
 		effect.cleanup(() => {
 			for (const track of tracks.values()) track.close();
@@ -270,7 +271,7 @@ export class Broadcast {
 						maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
 						priority: Catalog.PRIORITY.catalog,
 					});
-					tracks.set(name, track);
+					effect.cleanup(() => track.close());
 					this.catalog.serve(track, effect, { compression });
 				}
 			}
