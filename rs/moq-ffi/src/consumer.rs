@@ -123,7 +123,7 @@ impl MoqBroadcastConsumer {
 			reason: reference.as_str().to_string(),
 		})?;
 
-		let source = moq_mux::Source::new(origin, &self.inner.info().path);
+		let source = moq_mux::Source::new(origin, self.inner.clone());
 		Ok(source.resolve(Some(&reference)).await?)
 	}
 }

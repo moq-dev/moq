@@ -13,8 +13,8 @@ tag-driven publish works. `moq` has only 0.1.0 (2026-09-25), the one
 `moq-dart-v*` tag so far, so whether its tag publishes unattended through
 trusted publishing is still unproven.
 
-Decided in the 2026-10-10 audit: publication waits for Codecs, the epoch
-rename, and named error fields, so Dart takes the binding breaks in one
+Decided in the 2026-10-10 audit: publication waits for Codecs and the epoch
+rename, so Dart takes the binding breaks in one
 release. This replaces the 2026-10-05 decision to drop the FFI shape wait.
 Trusted-publishing configuration and checks of already-published artifacts
 can proceed independently; cutting the tag cannot.
@@ -32,7 +32,6 @@ Public API: none. Wire: none.
 
 - [Codecs](/quest/m1/ffi-shape/codec.md) - settle the audio and video binding API before publishing
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - include the epoch rename in the same breaking release
-- [Named error fields](/quest/m1/ffi-shape/error-fields.md) - include named error payloads in the same breaking release
 
 ## Related
 

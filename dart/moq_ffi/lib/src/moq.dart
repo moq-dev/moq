@@ -8380,6 +8380,7 @@ class FfiConverterMoqTrackProducer {
 abstract class MoqTrackRequestInterface {
   void abort({required int errorCode});
   MoqTrackProducer accept({required MoqTrackInfo? info});
+  MoqTrackDemand demand();
   MoqTrackDynamic dynamic_();
   String name();
 }
@@ -8425,6 +8426,17 @@ class MoqTrackRequest implements MoqTrackRequestInterface {
         status,
       ),
       FfiConverterMoqTrackProducer.lift,
+      moqExceptionErrorHandler,
+    );
+  }
+
+  MoqTrackDemand demand() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqtrackrequest_demand(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterMoqTrackDemand.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -11970,6 +11982,14 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqtrackrequest_accept(
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqtrackrequest_demand(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqtrackrequest_dynamic(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
@@ -12922,6 +12942,9 @@ external int uniffi_moq_ffi_checksum_method_moqtrackrequest_abort();
 external int uniffi_moq_ffi_checksum_method_moqtrackrequest_accept();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqtrackrequest_demand();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqtrackrequest_dynamic();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -13444,6 +13467,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackrequest_accept() != 31841) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqtrackrequest_demand() != 3618) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackrequest_dynamic() != 24801) {

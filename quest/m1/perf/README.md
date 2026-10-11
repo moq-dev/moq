@@ -66,7 +66,6 @@ sample becomes its `moq-time` clock; it keeps #3122's measurement bar.
 
 ## Required
 
-- [Performance comparisons](/quest/m1/performance-comparisons.md) - the noise estimate every "within noise" verdict here depends on
 - [Relay profiling](/quest/m1/perf/lock-profile.md) - one recipe captures lock wait by stack (first), CPU stacks, and heap profiles, with no code in kio
 - [kio channel contention](/quest/m1/perf/kio-channel-contention.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers)
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter

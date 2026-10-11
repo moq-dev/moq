@@ -80,7 +80,7 @@ impl Listening {
 	/// Stop the accept loop and block until the listener's sockets are released.
 	///
 	/// Waits on a std channel so it works from inside another runtime, but must not run on
-	/// the FFI runtime thread, which the loop needs.
+	/// an FFI runtime worker, which the accept loop may need.
 	fn close(self) {
 		drop(self.stop);
 		// Disconnects when the loop finishes, or when the runtime is gone and dropped it.

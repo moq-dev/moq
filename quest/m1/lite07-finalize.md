@@ -79,7 +79,7 @@ is published; older versions are unchanged.
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical requests have a reader budget, carried by FETCH while present and by ranges after its removal
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
-- [Claim-served epochs](/quest/m1/claim-epochs.md) - TRACK_INFO carries the epoch of the instance that answered
+- [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 
 ## Related
 

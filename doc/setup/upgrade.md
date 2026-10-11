@@ -19,6 +19,10 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **A QUIC load-balancer nonce needs its server id.** `listen.lb_nonce`,
+  `--listen-quic-lb-nonce`, and `MOQ_LISTEN_QUIC_LB_NONCE` without `lb_id` stop
+  startup. Setting `lb_id` (or `lb_nonce`) and `load_balancer` together also
+  stops; `lb_id` used to win and the other value was ignored. Set one of them.
 - **A replaced broadcast restarts announce consumers, and subscriptions stay.**
   Rust's `AnnounceEvent` gains `Restart`, `@moq/net`'s announce events gain the
   `"restart"` kind, moq-ffi's `MoqAnnounceEvent` gains `Restart`, and libmoq's
@@ -36,6 +40,16 @@ These land with the next breaking release, not the 2026-09-23 train.
   the same two flags. In Rust, moq-mux's `ts::Export::resume` is
   `ts::Export::follow`, `Source::returned` is gone, and `ts::Follower` follows a
   path's announcements the way both exports do.
+- **moq-mux's `Source` is built from the resolved catalog broadcast.**
+  `Source::new(origin, path)` is `Source::new(origin, broadcast)`: resolve the
+  broadcast first (`origin.request_broadcast(path, None)`), and its path is
+  where catalog references resolve from. `Source::broadcast()` returns that
+  broadcast without awaiting. Every later request for a path, siblings
+  included, stays on the broadcast the source first held there and fails once
+  it ends, rather than reaching a replacement; `bind` included. Build a new
+  `Source` to follow a new instance. moq-hls's `Broadcaster::new` no longer
+  awaits or fails, and a rendition whose sibling broadcast ends now ends its
+  playlist instead of rebinding.
 - **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
   catalog codec string and dimensions are enough, `moq export fmp4` writes an
   `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,
@@ -87,6 +101,10 @@ These land with the next breaking release, not the 2026-09-23 train.
   `used`, and `unused`; read them through `demand()`. The wrappers expose these
   as `moq.media` in Python, `moq.dev/moq/media` in Go, `dev.moq.media` in
   Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift.
+- **moq-ffi error payloads are named.** `MoqError` cases that carried a
+  positional string (`Transport`, `Internal`, `Connect`, ...) name it
+  `reason` (`Reason` in Go, the `reason:` label in Swift). The Display text is
+  unchanged.
 - **Python and Go durations are native.** `Frame`, `Datagram`, `Subscription`,
   `TrackInfo`, and `ConnectionStats` carry `timedelta` in Python and
   `time.Duration` in Go instead of microsecond integers: `max_delay_us` is

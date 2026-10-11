@@ -937,6 +937,45 @@ async fn json_consumer_takes_an_unread_track() {
 }
 
 #[tokio::test]
+async fn track_request_demand_survives_accept() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
+	let request = dynamic.requested_track().await.unwrap();
+	let demand = request.demand().unwrap();
+	assert_eq!(demand.name(), "events");
+	assert!(demand.is_used());
+	let track = request.accept(None).unwrap();
+	assert!(matches!(request.demand(), Err(MoqError::Closed)));
+	let consumer = subscribe.await.unwrap().unwrap();
+	demand.used().await.unwrap();
+	consumer.cancel();
+	demand.unused().await.unwrap();
+	let consumer = track.consume(None).unwrap();
+	demand.used().await.unwrap();
+	consumer.cancel();
+	demand.unused().await.unwrap();
+	drop(track);
+	broadcast.close().unwrap();
+	assert!(matches!(demand.used().await, Err(MoqError::Closed)));
+}
+
+#[tokio::test]
+async fn track_request_demand_ends_on_rejection() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
+	let request = dynamic.requested_track().await.unwrap();
+	let demand = request.demand().unwrap();
+	request.abort(404).unwrap();
+	assert!(subscribe.await.unwrap().is_err());
+	assert!(demand.used().await.is_err());
+	assert!(matches!(request.demand(), Err(MoqError::Closed)));
+}
+
+#[tokio::test]
 async fn dynamic_track_request() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let dynamic = broadcast.dynamic().unwrap();

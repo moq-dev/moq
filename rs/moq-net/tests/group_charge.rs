@@ -2,7 +2,7 @@
 //!
 //! `cache::ENTRY_OVERHEAD` is derived from `size_of`, which keeps it following the
 //! structs but proves nothing about the heap the structs actually take. This weighs
-//! the process: cache a run of groups shaped like chat traffic (one small frame each)
+//! the process: cache groups with small frames
 //! and compare the bytes the allocator handed out against the bytes the pool believes
 //! it is holding. A relay is killed when those two diverge.
 //!
@@ -46,17 +46,16 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// Frames per group and payload bytes per frame: the chat shape, where bookkeeping
-/// rather than payload is the whole cost.
+/// Payload bytes per frame in the chat shape, where bookkeeping is most of the cost.
 const PAYLOAD: usize = 150;
 
 /// Enough groups that the track's containers reach their amortised per-entry cost
 /// and the one-off setup washes out.
 const GROUPS: usize = 4096;
 
-/// Cache `GROUPS` single-frame groups and compare the heap they really occupy against
+/// Cache `GROUPS` groups of the supplied shape and compare their heap against
 /// what the pool charged, both in bytes per group.
-fn measure() -> (usize, u64) {
+fn measure(frames: usize, payload: usize) -> (usize, u64) {
 	// Unbounded: nothing may be evicted underneath the measurement.
 	let pool = cache::Pool::unbounded();
 	let mut info = broadcast::Info::new();
@@ -68,7 +67,7 @@ fn measure() -> (usize, u64) {
 	// Warm up outside the measurement so the track's own one-time allocations and
 	// any lazy statics aren't billed to the groups.
 	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, vec![0u8; PAYLOAD]).unwrap();
+	group.write_frame(Timestamp::ZERO, vec![0u8; payload]).unwrap();
 	group.finish().unwrap();
 
 	let before_heap = LIVE.with(Cell::get);
@@ -76,7 +75,9 @@ fn measure() -> (usize, u64) {
 
 	for _ in 0..GROUPS {
 		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, vec![0u8; PAYLOAD]).unwrap();
+		for _ in 0..frames {
+			group.write_frame(Timestamp::ZERO, vec![0u8; payload]).unwrap();
+		}
 		group.finish().unwrap();
 	}
 
@@ -95,7 +96,7 @@ fn measure() -> (usize, u64) {
 /// nothing until it thinks it is full, and the process dies first.
 #[test]
 fn charge_tracks_real_memory() {
-	let (heap, charged) = measure();
+	let (heap, charged) = measure(1, PAYLOAD);
 
 	assert!(
 		charged as usize >= heap / 2,
@@ -104,5 +105,19 @@ fn charge_tracks_real_memory() {
 	assert!(
 		charged as usize <= heap * 2,
 		"charged {charged} B/group against {heap} B of real heap: the pool is overcounting"
+	);
+}
+
+#[test]
+fn many_small_frames_charge_tracks_real_memory() {
+	let (heap, charged) = measure(64, 1);
+	eprintln!("64 one-byte frames: charged {charged} B/group against {heap} B of real heap");
+	assert!(
+		charged as usize >= heap / 2,
+		"charged {charged} B/group against {heap} B of real heap"
+	);
+	assert!(
+		charged as usize <= heap * 2,
+		"charged {charged} B/group against {heap} B of real heap"
 	);
 }
