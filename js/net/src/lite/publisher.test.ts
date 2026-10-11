@@ -758,6 +758,20 @@ test("lite draft-05: an update dropping the floor re-pins to the latest group", 
 	}
 });
 
+// On an empty track the re-pin has no latest group to name, so the first group the
+// track produces is served, even below the dropped floor.
+test("lite draft-05: an update dropping the floor on an empty track serves the next group", async () => {
+	const sub = await servedSubscription({ startGroup: 5 });
+	try {
+		await replayUpdate({ priority: 0 }).encode(sub.client.writer, Version.DRAFT_05);
+		await flush();
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+	} finally {
+		await sub.close();
+	}
+});
+
 // Lite-06 encodes a floor of group 0 as 0, including a subscribe that omitted Group Start.
 // That is a floor, so a later group 0 is still served.
 test("lite draft-06: an omitted group start still serves a group below the first one", async () => {

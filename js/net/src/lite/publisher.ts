@@ -1016,12 +1016,13 @@ export class Publisher {
 							const update = control.update;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `positionCursor` pins an unfloored pre-06 SUBSCRIBE to the latest
-							// group, so an update that drops a named floor re-pins there too.
+							// group, so an update that drops a named floor re-pins there too. On
+							// an empty track the next group is the latest, whatever its sequence.
 							const start =
 								update.startGroup === undefined &&
 								bounds.startGroup !== undefined &&
 								!resolvesStart(this.version)
-									? track.latest()
+									? (track.latest() ?? 0)
 									: update.startGroup;
 							hooks.replaceGroups(track, {
 								start: start === undefined ? undefined : { included: start },
