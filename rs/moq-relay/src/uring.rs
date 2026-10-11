@@ -669,7 +669,12 @@ async fn serve_connection(
 		}
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
-	let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path.clone());
+	// Only a WebTransport session carries a URL.
+	let transport = match url {
+		Some(_) => moq_auth::Transport::WebTransport,
+		None => moq_auth::Transport::Quic,
+	};
+	let mut auth_request = serve.auth.request(transport, path.clone());
 	auth_request.query = query;
 	auth_request.remote = Some(remote);
 	auth_request.local = Some(serve.local);
@@ -774,11 +779,6 @@ async fn serve_connection(
 		}
 	});
 
-	// Only a WebTransport session carries a URL.
-	let transport = match url {
-		Some(_) => moq_tokio::Transport::WebTransport,
-		None => moq_tokio::Transport::Quic,
-	};
 	tracing::info!(id, version = %session.version(), %transport, "negotiated");
 
 	// The session handle is Send + Sync however its transport is driven, so
@@ -786,8 +786,11 @@ async fn serve_connection(
 	// and the shutdown broadcast on the shared runtime.
 	let shutdown = serve.shutdown.clone();
 	serve.tokio.spawn(async move {
-		if let Err(err) = crate::connection::supervise(session, lease, shutdown, registration).await {
-			tracing::warn!(id, %err, "connection closed");
+		match crate::connection::supervise(session, lease, shutdown, registration).await {
+			// A lease or shutdown ending the session closes it too: logged, so every
+			// accepted connection pairs with its end.
+			Ok(()) => tracing::info!(id, "connection closed"),
+			Err(err) => tracing::warn!(id, %err, "connection closed"),
 		}
 	});
 

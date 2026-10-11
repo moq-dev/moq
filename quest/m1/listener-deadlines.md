@@ -15,6 +15,9 @@ after the handshake deadline (moq-dev/moq#4612), by applying
   the "There is no timeout here" note in `rs/moq-uring/src/quic/web.rs`, and
   the matching caveat in `doc/bin/relay/config.md`.
 - Test on the worker's timer: a stalled handshake closes at the deadline.
+  Decided 2026-10-10 from review: this waits for
+  [moq-uring on moq-time](/quest/m1/time/uring.md), so the test runs on
+  controlled time instead of the private timer heap.
 
 Split on 2026-10-08: the HTTP/2 idle deadline is
 [HTTP listener deadlines](/quest/m1/listener-deadlines-http.md) and the iroh
@@ -22,6 +25,10 @@ keep-alive is [iroh keep-alive](/quest/m1/iroh-keep-alive.md); each lands on
 its own.
 
 Public API: none beyond existing settings. Wire: none.
+
+## Required
+
+- [moq-uring on moq-time](/quest/m1/time/uring.md) - the worker's timer becomes a moq-time backend, so the deadline tests on controlled time
 
 ## Related
 

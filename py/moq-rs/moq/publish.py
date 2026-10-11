@@ -9,6 +9,7 @@ from moq_ffi import (
     MoqAudioProducer,
     MoqBroadcastDynamic,
     MoqBroadcastProducer,
+    MoqGroupDemand,
     MoqGroupProducer,
     MoqGroupRequest,
     MoqTrackDemand,
@@ -194,6 +195,37 @@ class TrackRequest:
         self._inner.abort(error_code)
 
 
+class GroupDemand:
+    """A watch-only handle to the callers waiting on a requested group.
+
+    Returned by ``GroupRequest.demand()``. Weak: holding it does not keep the
+    request alive. The last caller to leave withdraws the request, so once
+    unused, demand never returns: drop the request. Waits raise once the
+    request is answered: ``moq.Error.Closed`` if it was dropped, otherwise the
+    error the accept or reject left for the waiting fetches.
+    """
+
+    def __init__(self, inner: MoqGroupDemand) -> None:
+        self._inner = inner
+
+    @property
+    def sequence(self) -> int:
+        """The sequence of the group this watches."""
+        return self._inner.sequence()
+
+    def is_used(self) -> bool:
+        """Whether the group has at least one waiting caller right now."""
+        return self._inner.is_used()
+
+    async def used(self) -> None:
+        """Wait until the group has at least one waiting caller."""
+        await self._inner.used()
+
+    async def unused(self) -> None:
+        """Wait until the group has no waiting callers."""
+        await self._inner.unused()
+
+
 class GroupRequest:
     """A request to produce one uncached group for a fetch consumer."""
 
@@ -209,6 +241,10 @@ class GroupRequest:
     def priority(self) -> int:
         """The consumer's delivery priority for this fetch."""
         return self._inner.priority()
+
+    def demand(self) -> GroupDemand:
+        """A watch-only handle to whether any caller still wants this group."""
+        return GroupDemand(self._inner.demand())
 
     def accept(self) -> GroupProducer:
         """Accept the request and return a producer for the group."""
