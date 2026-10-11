@@ -5,7 +5,11 @@ out=$(realpath -m "${1:?usage: collect.sh OUTPUT [PACKAGED_ARTIFACTS]}")
 packaged=${2:-}
 mkdir -p "$out/native"
 target=$(cargo metadata --locked --format-version 1 --no-deps | jq -r .target_directory)
-case $(uname -s) in Linux) dylib=so ;; Darwin) dylib=dylib ;; *) echo 'native size capture requires Linux or macOS' >&2; exit 1 ;; esac
+case $(uname -s) in Linux) dylib=so ;; Darwin) dylib=dylib ;; *)
+    echo 'native size capture requires Linux or macOS' >&2
+    exit 1
+    ;;
+esac
 for package in moq-ffi moq-c moq-relay moq-cli; do
     cargo build --locked --release -p "$package"
     case "$package" in
@@ -22,20 +26,17 @@ bun install --frozen-lockfile
 just js build
 bun sh/size/bundles.ts "$out/js"
 # Symbols are necessary only for attribution; they never replace the measured shipping sizes.
-CARGO_PROFILE_RELEASE_STRIP=none cargo bloat --locked --release -p moq-ffi --crates --lib > "$out/ffi-bloat.txt"
+cargo bloat --locked --profile profiling -p moq-ffi --crates --lib >"$out/ffi-bloat.txt"
 python3 - "$out" "$packaged" <<'PY'
 import datetime, json, pathlib, subprocess, sys
+sys.path.insert(0, "sh/size")
+from packaged import sizes as packaged_sizes
 out = pathlib.Path(sys.argv[1])
-sizes = {f'native/{p.name}': p.stat().st_size for p in (out / 'native').iterdir()}
+host = next(line.split(': ', 1)[1] for line in subprocess.check_output(['rustc', '-vV'], text=True).splitlines() if line.startswith('host: '))
+sizes = {f'native/{host}/{p.name}': p.stat().st_size for p in (out / 'native').iterdir()}
 sizes.update(json.loads((out / 'js/bytes.json').read_text()))
 if sys.argv[2]:
-    packaged = pathlib.Path(sys.argv[2])
-    for category, glob in [('python', '*.whl'), ('kotlin', '*.aar'), ('swift', '*.xcframework.zip')]:
-        paths = sorted(packaged.rglob(glob))
-        if not paths:
-            raise SystemExit(f'missing packaged {category} output under {packaged}')
-        for p in paths:
-            sizes[f'packaged/{p.relative_to(packaged)}'] = p.stat().st_size
+    sizes.update(packaged_sizes(sys.argv[2]))
 report = {'version': 1, 'date': datetime.date.today().isoformat(),
           'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
           'bytes': sizes}

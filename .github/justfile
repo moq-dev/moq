@@ -9,6 +9,8 @@ check:
 # Tests of repository tooling; nightly, not on every pull request.
 test:
     python3 sh/size/report.test.py
+    python3 sh/size/packaged.test.py
+    python3 sh/size/nightly.test.py
     python3 sh/changed.test.py
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh

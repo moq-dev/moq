@@ -8,17 +8,24 @@ from pathlib import Path
 
 def compare(current, history):
     """Return regressions without comparing different artifact sets or formats."""
-    if current.get("version") != 1 or not current.get("bytes"):
-        raise ValueError("expected a nonempty version 1 size report")
-    for name, size in current["bytes"].items():
-        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
-            raise ValueError(f"invalid byte count for {name}: {size}")
+    def validate(row):
+        if row.get("version") != 1 or not row.get("bytes"):
+            raise ValueError("expected a nonempty version 1 size report")
+        date = dt.date.fromisoformat(row["date"])
+        for name, size in row["bytes"].items():
+            if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+                raise ValueError(f"invalid byte count for {name}: {size}")
+        return date
+
+    now = validate(current)
+    for row in history:
+        if validate(row) > now:
+            raise ValueError("history contains a future report")
+        if row["bytes"].keys() != current["bytes"].keys():
+            raise ValueError("artifact set changed; review and explicitly start a new history")
     prior = sorted(history, key=lambda row: row["date"])
     if not prior:
         return []
-    if prior[-1]["bytes"].keys() != current["bytes"].keys():
-        raise ValueError("artifact set changed; review and explicitly start a new history")
-    now = dt.date.fromisoformat(current["date"])
     anchors = [row for row in prior if dt.date.fromisoformat(row["date"]) <= now - dt.timedelta(days=30)]
     comparisons = [("previous", prior[-1], 0.05)]
     if anchors:

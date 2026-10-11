@@ -37,10 +37,15 @@ Decided in planning:
 - The job summary also carries `cargo bloat --crates` for the ffi build and a
   metafile breakdown for the publish element, so the cause of a jump is
   visible without a local rebuild. `cargo bloat` needs symbols, so build that
-  pass with `CARGO_PROFILE_RELEASE_STRIP=none` and report stripped sizes
+  pass with the symbol-preserving `profiling` profile and report shipping sizes
   separately.
 - The work lives in a `sh/` script behind a `just` recipe, and `nightly.yml`
   calls the recipe.
+
+The collector uses canonical package/platform keys across version changes, includes
+Kotlin JVM JARs as well as AARs, and validates every retained history row. The
+profiling profile preserves attribution symbols even when release has package
+overrides.
 
 **Draft validation remaining:** the collector, trend reducer, and dependent nightly
 job are implemented. Validate the full native and packaged shipping matrix before

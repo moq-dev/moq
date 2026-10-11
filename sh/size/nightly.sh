@@ -12,13 +12,22 @@ while IFS= read -r run; do
     [[ -n "$run" ]] || continue
     artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" --jq '.artifacts[] | select(.name == "nightly-size-history" and .expired == false) | .id')
     if [[ -n "$artifact" ]]; then
-        gh run download "$run" --name nightly-size-history --dir "$out/previous"
-        history=(--history "$out/previous/history.json")
-        break
+        previous="$out/previous/$run"
+        gh run download "$run" --name nightly-size-history --dir "$previous"
+        # Failed collectors can upload diagnostics without producing a history.
+        if [[ -f "$previous/history.json" ]]; then
+            history=(--history "$previous/history.json")
+            break
+        fi
     fi
-done <<< "$runs"
+done <<<"$runs"
 sh/size/collect.sh "$out" "$packaged"
 status=0
 python3 sh/size/report.py "$out" "${history[@]}" || status=$?
-cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+{
+    cat "$out/summary.md"
+    printf '\n<details><summary>FFI crate attribution</summary>\n\n```text\n'
+    cat "$out/ffi-bloat.txt"
+    printf '\n```\n</details>\n'
+} >>"$GITHUB_STEP_SUMMARY"
 exit "$status"

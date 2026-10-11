@@ -10,6 +10,11 @@ outputs. It retains byte counts, bundle metafiles and native crate attribution,
 without uploading another copy of native build products. A regression fails
 Nightly and reaches its existing alert workflow. No direct notification is sent.
 
+Native keys include the Rust host triple. Packaged keys retain distribution,
+platform and feature identity while omitting release versions; Kotlin measures
+both shipping JARs and AARs and excludes source and Javadoc archives. Duplicate
+canonical keys are refused.
+
 An artifact-set change is refused. Review the new set and start a fresh history
 explicitly by invoking the reporting recipe without a history input; do not mix
 platforms, feature sets or packaging formats in one history. Histories are
