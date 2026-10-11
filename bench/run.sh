@@ -15,69 +15,7 @@ case $MODE in
         ;;
     --runtime)
         BASE=
-        RUNTIME_ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
-        RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
-        if [[ -z $RUNTIME_WORKERS ]]; then
-            RUNTIME_WORKERS=$(getconf _NPROCESSORS_ONLN)
-            if ((RUNTIME_WORKERS > 256)); then
-                RUNTIME_WORKERS=256
-            fi
-        fi
-        if [[ ! $RUNTIME_ROUNDS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_ROUNDS < 1)); then
-            printf 'runtime benchmark rounds must be a positive integer, got %q\n' "$RUNTIME_ROUNDS" >&2
-            exit 1
-        fi
-        if [[ ! $RUNTIME_WORKERS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_WORKERS < 1 || 10#$RUNTIME_WORKERS > 256)); then
-            printf 'runtime benchmark workers must be an integer from 1 to 256, got %q\n' "$RUNTIME_WORKERS" >&2
-            exit 1
-        fi
-        RUNTIME_ROUNDS=$((10#$RUNTIME_ROUNDS))
-        RUNTIME_WORKERS=$((10#$RUNTIME_WORKERS))
-        ;;
-    *)
-        BASE=$MODE
-        ;;
-esac
-ROOT=$(git rev-parse --show-toplevel)
-TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
-if [[ $TARGET != /* ]]; then
-    TARGET=$ROOT/$TARGET
-fi
-BASE_TARGET=$TARGET/base
-CURRENT_TARGET=$TARGET/current
-
-ARTIFACTS=${MOQ_BENCH_ARTIFACTS:-$TARGET/runs}
-mkdir -p "$ARTIFACTS"
-RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
-printf 'Benchmark evidence: %s\n' "$RUN"
-python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "${RUNTIME_ROUNDS:-}"
-cp -R "$ROOT/bench/workloads" "$RUN/workloads"
-cp -R "$ROOT/bench" "$RUN/harness"
-ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
-if [[ ! $ROUNDS =~ ^[1-9][0-9]*$ ]]; then
-    echo 'MOQ_BENCH_RUNTIME_ROUNDS must be a positive integer' >&2
-    exit 1
-fi
-WORKTREE=
-RELAY_PID=
-HOST_PID=
-
-cleanup() {
-    if [[ -n $HOST_PID ]]; then
-        kill "$HOST_PID" 2>/dev/null || true
-        wait "$HOST_PID" 2>/dev/null || true
-    fi
-    if [[ -n $RELAY_PID ]]; then
-        kill "$RELAY_PID" 2>/dev/null || true
-        wait "$RELAY_PID" 2>/dev/null || true
-    fi
-    if [[ -n $WORKTREE ]]; then
-        git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
-    fi
-    printf 'Benchmark evidence retained: %s\n' "$RUN"
-}
-trap cleanup EXIT INT TERM
-
+        RUNTIME_
 export CRITERION_HOME=$RUN/criterion
 
 # Shorter than Criterion's defaults, but still enough samples for confidence
@@ -463,7 +401,92 @@ elif [[ -n $BASE ]]; then
     mkdir -p "$RUN/base-context"
     (
         cd "$WORKTREE"
-        python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE_COMMIT" comparison-base
+        ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
+        RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
+        if [[ -z $RUNTIME_WORKERS ]]; then
+            RUNTIME_WORKERS=$(getconf _NPROCESSORS_ONLN)
+            if ((RUNTIME_WORKERS > 256)); then
+                RUNTIME_WORKERS=256
+            fi
+        fi
+        if [[ ! $RUNTIME_ROUNDS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_ROUNDS < 1)); then
+            printf 'runtime benchmark rounds must be a positive integer, got %q\n' "$RUNTIME_ROUNDS" >&2
+            exit 1
+        fi
+        if [[ ! $RUNTIME_WORKERS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_WORKERS < 1 || 10#$RUNTIME_WORKERS > 256)); then
+            printf 'runtime benchmark workers must be an integer from 1 to 256, got %q\n' "$RUNTIME_WORKERS" >&2
+            exit 1
+        fi
+        RUNTIME_ROUNDS=$((10#$RUNTIME_ROUNDS))
+        RUNTIME_WORKERS=$((10#$RUNTIME_WORKERS))
+        ;;
+    *)
+        BASE=$MODE
+        ;;
+esac
+ROOT=$(git rev-parse --show-toplevel)
+TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
+if [[ $TARGET != /* ]]; then
+    TARGET=$ROOT/$TARGET
+fi
+BASE_TARGET=$TARGET/base
+CURRENT_TARGET=$TARGET/current
+
+ARTIFACTS=${MOQ_BENCH_ARTIFACTS:-$TARGET/runs}
+mkdir -p "$ARTIFACTS"
+RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
+printf 'Benchmark evidence: %s\n' "$RUN"
+WORKTREE=
+RELAY_PID=
+HOST_PID=
+LOAD_PID=
+STDOUT_PID=
+STDERR_PID=
+
+cleanup() {
+    if [[ -n $LOAD_PID ]]; then
+        kill "$LOAD_PID" 2>/dev/null || true
+        wait "$LOAD_PID" 2>/dev/null || true
+    fi
+    if [[ -n $HOST_PID ]]; then
+        kill "$HOST_PID" 2>/dev/null || true
+        wait "$HOST_PID" 2>/dev/null || true
+    fi
+    if [[ -n $RELAY_PID ]]; then
+        kill "$RELAY_PID" 2>/dev/null || true
+        wait "$RELAY_PID" 2>/dev/null || true
+    fi
+    if [[ -n $WORKTREE ]]; then
+        git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
+    fi
+    # Close both pipe writers before waiting for the owned log copiers.
+    if [[ -n $STDOUT_PID ]]; then
+        exec 1>&3 2>&4
+        wait "$STDOUT_PID" || true
+        wait "$STDERR_PID" || true
+        exec 3>&- 4>&-
+    fi
+    printf 'Benchmark evidence retained: %s\n' "$RUN"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+exec 3>&1 4>&2
+exec > >(tee "$RUN/stdout.log")
+STDOUT_PID=$!
+exec 2> >(tee "$RUN/stderr.log" >&4)
+STDERR_PID=$!
+
+python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "${RUNTIME_ROUNDS:-}"
+cp -R "$ROOT/bench/workloads" "$RUN/workloads"
+cp -R "$ROOT/bench" "$RUN/harness"
+ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
+if [[ ! $ROUNDS =~ ^[1-9][0-9]*$ ]]; then
+    echo 'MOQ_BENCH_RUNTIME_ROUNDS must be a positive integer' >&2
+    exit 1
+fi
+
+python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE_COMMIT" comparison-base
     )
 
     printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
@@ -491,7 +514,7 @@ if [[ -n $BASE ]]; then
     printf '\nRelay workloads: paired base/current\n'
     for ((round = 1; round <= ROUNDS; round++)); do
         if ((round % 2)); then order=(base current); else order=(current base); fi
-        printf '%s\t%s\n' "$round" "${order[*]}" >> "$RUN/execution-order.tsv"
+        printf '%s\t%s\n' "$round" "${order[*]}" >>"$RUN/execution-order.tsv"
         for workload in video fanout; do
             for label in "${order[@]}"; do
                 if [[ $label == base ]]; then relay=$RUN/moq-relay-base; else relay=$CURRENT_TARGET/release/moq-relay; fi

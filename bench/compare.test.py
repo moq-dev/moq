@@ -8,7 +8,10 @@ spec.loader.exec_module(compare)
 
 
 def pair(delta=0):
-    return {"base": dict.fromkeys(compare.METRICS, 100), "current": dict.fromkeys(compare.METRICS, 100 + delta)}
+    result = {"base": dict.fromkeys(compare.METRICS, 100), "current": dict.fromkeys(compare.METRICS, 100 + delta)}
+    for row in result.values():
+        row['generator'] = {'cpu_cores': row.pop('generator_cpu_cores')}
+    return result
 
 
 class Paired(unittest.TestCase):
@@ -43,6 +46,13 @@ class Paired(unittest.TestCase):
                 compare.reduce([p])
         with self.assertRaises(ValueError):
             compare.reduce([])
+
+    def test_zero_baseline_keeps_absolute_regression(self):
+        p = pair()
+        p['base']['loss_pct'] = 0
+        p['current']['loss_pct'] = 2
+        metric = compare.reduce([p] * 3)['metrics']['loss_pct']
+        self.assertEqual(metric['paired_absolute_deltas'], [2, 2, 2])
 
 
 unittest.main()

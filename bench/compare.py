@@ -6,7 +6,11 @@ import math
 import statistics
 from pathlib import Path
 
-METRICS = ("recv_mbps", "send_mbps", "recv_fps", "send_fps", "cpu_cores", "loss_pct", "latency_p99_ms")
+METRICS = ("recv_mbps", "send_mbps", "recv_fps", "send_fps", "cpu_cores", "generator_cpu_cores", "loss_pct", "latency_p99_ms")
+
+
+def value(row, metric):
+    return row.get('generator', {}).get('cpu_cores') if metric == 'generator_cpu_cores' else row.get(metric)
 
 
 def reduce(pairs):
@@ -14,26 +18,28 @@ def reduce(pairs):
         raise ValueError("no paired rounds")
     result = {"pairs": len(pairs), "estimate": "median paired percent delta; dispersion is median absolute deviation", "metrics": {}}
     for metric in METRICS:
-        if metric == "cpu_cores" and all(pair[label].get(metric) is None for pair in pairs for label in ("base", "current")):
+        if metric in ("cpu_cores", "generator_cpu_cores") and all(value(pair[label], metric) is None for pair in pairs for label in ("base", "current")):
             result["metrics"][metric] = {"delta_pct": None, "status": "unavailable: no host CPU samples"}
             continue
         deltas = []
+        absolute = []
         for pair in pairs:
             for label in ("base", "current"):
-                value = pair[label].get(metric)
-                if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
-                    raise ValueError(f"invalid or missing {label}.{metric}: {value}")
-            base, current = pair["base"][metric], pair["current"][metric]
+                sample = value(pair[label], metric)
+                if not isinstance(sample, (int, float)) or isinstance(sample, bool) or not math.isfinite(sample) or sample < 0:
+                    raise ValueError(f"invalid or missing {label}.{metric}: {sample}")
+            base, current = value(pair["base"], metric), value(pair["current"], metric)
+            absolute.append(current - base)
             if base == 0:
                 continue # A ratio to zero is undefined, including zero loss on both sides.
             deltas.append(100 * (current / base - 1))
         if not deltas:
-            result["metrics"][metric] = {"delta_pct": None, "status": "undefined ratio to zero"}
+            result["metrics"][metric] = {"delta_pct": None, "status": "undefined ratio to zero", "paired_absolute_deltas": absolute}
             continue
         median = statistics.median(deltas)
         mad = statistics.median(abs(value - median) for value in deltas)
         result["metrics"][metric] = {"delta_pct": median, "mad_pct": mad,
-            "range_pct": [min(deltas), max(deltas)], "paired_deltas_pct": deltas,
+            "range_pct": [min(deltas), max(deltas)], "paired_deltas_pct": deltas, "paired_absolute_deltas": absolute,
             "status": "insufficient samples" if len(deltas) < 3 else
                       "sign varies across pairs" if min(deltas) < 0 < max(deltas) else "consistent sign"}
     # Keep offered load and delivery/loss next to CPU; no normalized CPU claim when windows differ.

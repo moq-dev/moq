@@ -41,8 +41,9 @@ rather than creating another benchmark runner.
 
 **Draft remaining proof:** the first draft implements retained evidence, alternating
 paired rounds, a tested median/MAD reducer and explicit counter scopes. It still
-needs generator CPU and worker metrics, aligned host/load windows, full command stdout/stderr, and
-controlled real A/A and degraded runs. Keep this quest until that evidence exists;
+needs controlled real A/A and degraded runs. Generator and relay CPU now share
+interpolated load-window boundaries, per-thread samples are retained, and full
+command stdout/stderr plus untracked source files survive the run. Keep this quest until that evidence exists;
 synthetic reducer tests are not a throughput result.
 
 ## Related
