@@ -51,6 +51,33 @@ Update comments and affected feature docs with the fix. No new guide, public
 API or wire change is expected; a newly required contract needs a maintainer
 decision rather than an invented retry or compatibility layer.
 
+### Evidence and remaining decision
+
+Controlled reproduction in `rs/moq-net/tests/catalog_acquisition.rs`: hold the
+publisher's initial catalog track request, introduce a cheaper second session to
+the same publisher, observe the route change, then answer the held request.
+Lite-06 returns `Unroutable`; Lite-07 with the publisher's explicit epoch acquires
+and reads the catalog. The old session and publisher both remain alive. No
+wall-clock timing, retry or transport teardown is needed.
+
+This follows the current identity contract: an epochless route replacement is a
+new instance, and a pending `TrackInfoFetch` checks its captured
+`RequestValidity` before accepting a response. Default negotiation excludes the
+work-in-progress Lite-07 wire. #5284's closed-fallback case is different: this
+reproduction has no closed session. The reproduction establishes a sufficient
+ordering for the reported error, not proof that all retained historical captures
+followed exactly that ordering.
+
+A fresh pair run also failed with the explicit replacement-broadcast error during
+upgrade; a subsequent traced direct-WebTransport run passed table alignment.
+The pair grader fix is #5331 and does not change routing semantics.
+
+The maintainer must settle the newly exposed contract before a production fix:
+use epoch-capable negotiation for seamless acquisition/continuation, or permit a
+fresh initial acquisition on a replacement before output begins. Existing handles
+must never silently cross publisher identities. Keep #5328 draft; do not paper
+over the default behavior with retries, `--stitch`, or disabled fallback.
+
 ## Related
 
 - [Validation PR #5328](https://github.com/moq-dev/moq/pull/5328) - records the process failures and successful PR CI baseline
