@@ -828,10 +828,10 @@ impl<S: Stream> Play<S> {
 		};
 
 		// The capability check consumed its snapshot, so the export follows a fresh
-		// subscription narrowed to what the client can play. It resolves through the
-		// same source as the tracks, so a publisher that reconnected since the check
-		// doesn't split the catalog from its media.
-		let source = moq_mux::Source::new(origin.consume(), path.as_str());
+		// subscription narrowed to what the client can play. It reads the broadcast the
+		// check resolved, so a publisher that reconnected since then doesn't split the
+		// catalog from its media.
+		let source = moq_mux::Source::new(origin.clone(), broadcast);
 		let stream = source
 			.catalog::<()>(CatalogFormat::default())
 			.await

@@ -24,7 +24,3 @@ docs in Rust, Go, Python, and Swift. Hand-written moq-c is frozen, so it gets
 no change.
 
 Public API: behavior only (the error a demand wait returns). Wire: none.
-
-## Related
-
-- [Track request demand](/quest/m1/ffi-shape/track-request-demand.md) - its demand should end the same way

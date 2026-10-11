@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
+import { SessionCode, SessionError } from "../error.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
@@ -252,4 +253,42 @@ test("connect without a signal still works", async () => {
 	expect(connection.url.href).toBe(url.href);
 
 	connection.abort();
+});
+
+// A session-level stream failure promises an authoritative session close, even when the
+// browser publishes that close after the reset-only fallback would otherwise fire.
+test("SETUP preserves a delayed session close code", async () => {
+	jest.useFakeTimers();
+	const closed = Promise.withResolvers<WebTransportCloseInfo>();
+	let localCloses = 0;
+	const transport = {
+		protocol: "",
+		closed: closed.promise,
+		createBidirectionalStream: async () => {
+			throw Object.assign(new Error("session closing"), { source: "session", streamErrorCode: null });
+		},
+		close: () => {
+			localCloses++;
+			closed.resolve({ closeCode: 0, reason: "" });
+		},
+	} as unknown as WebTransport;
+	const result = connect(url, { transport }).then(
+		() => new Error("unexpected admission"),
+		(cause: unknown) => cause,
+	);
+	try {
+		// Drain the finite async setup chain before advancing the mocked clock.
+		for (let i = 0; i < 64; i++) await Promise.resolve();
+		jest.advanceTimersByTime(1_000);
+		for (let i = 0; i < 64; i++) await Promise.resolve();
+		expect(localCloses).toBe(0);
+		closed.resolve({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		const cause = await result;
+		expect(cause).toBeInstanceOf(SessionError);
+		expect((cause as SessionError).code).toBe(SessionCode.Unauthorized);
+	} finally {
+		closed.resolve({ closeCode: 0, reason: "test cleanup" });
+		await result;
+		jest.useRealTimers();
+	}
 });

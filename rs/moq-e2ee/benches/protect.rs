@@ -8,7 +8,6 @@ use std::time::Duration;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use moq_e2ee::Credential;
 use moq_e2ee::credential::Config;
-use moq_net::Epoch;
 use moq_net::Timestamp;
 
 fn credential() -> Credential {
@@ -22,7 +21,7 @@ fn credential() -> Credential {
 
 /// Each producer is its own publisher instance, so it gets its own epoch.
 fn produce(credential: &Credential, semantic: &str) -> moq_e2ee::track::Producer {
-	let generation = credential.generation(Epoch::mint());
+	let generation = credential.produce();
 	let name = generation.name(semantic).unwrap();
 	// Advancing timestamps plus a zero max age keep only the newest group cached.
 	let info = moq_net::track::Info::default().with_max_age(Duration::ZERO);

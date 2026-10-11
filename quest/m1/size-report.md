@@ -30,7 +30,7 @@ Decided in planning:
   - the packaged outputs nightly already builds. `nightly.yml` runs the
     Python, Kotlin, and Swift release builds, so read their wheel, AAR, and
     xcframework sizes instead of rebuilding them.
-- Out of scope: moq-wasm, which [Remove moq-wasm](/quest/m1/rs2ts/remove-wasm.md)
+- Out of scope: moq-wasm, which [Remove moq-wasm](/quest/m2/rs2ts-remove-wasm.md)
   deletes (decided 2026-10-08), Docker images, and per-target release assets
   nightly doesn't build. The Docker quest measures its images once. Add
   others only if one of them regresses unnoticed.
@@ -41,6 +41,11 @@ Decided in planning:
   separately.
 - The work lives in a `sh/` script behind a `just` recipe, and `nightly.yml`
   calls the recipe.
+- Cover Linux x86_64 and aarch64, and record each artifact's release build
+  time alongside its size. The unified release profile (fat LTO, one codegen
+  unit, stripped; #5274) landed without a Linux aarch64 artifact matrix or a
+  controlled before/after build-cost comparison, so this job's first runs
+  supply them. Check the Go mirror's staticlibs stay under its 100 MB limit.
 
 Considered and declined (do not re-ask):
 
@@ -56,5 +61,4 @@ Considered and declined (do not re-ask):
 
 ## Related
 
-- [Release profile](/quest/m1/release-profile.md) - the profile this report measures
 - [Benchmark regressions in CI](/quest/m1/bench-ci.md) - the same nightly-trend shape for Criterion

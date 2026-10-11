@@ -542,3 +542,30 @@ test("more requests than the setup window complete on one session", async () => 
 		await reading;
 	}
 });
+
+// Canceling the wait must remove the allocation itself, not just stop awaiting it.
+test("a canceled request ID wait never spends a later grant", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.server, { version });
+		const adapter = new ControlStreamAdapter(pair.server, control, version, 0n, true);
+		const running = adapter.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+		try {
+			const signal = new AbortController();
+			const canceled = adapter.nextRequestId(signal.signal);
+			signal.abort(new Error("retired"));
+			await expect(canceled).rejects.toThrow("retired");
+			await peer.writer.u53(MaxRequestId.id);
+			await new MaxRequestId({ requestId: 4n }).encode(peer.writer, version);
+			expect(await adapter.nextRequestId()).toBe(0n);
+			await expect(adapter.nextRequestId(signal.signal)).rejects.toThrow("retired");
+			expect(await adapter.nextRequestId()).toBe(2n);
+		} finally {
+			peer.close();
+			adapter.close();
+			void running;
+		}
+	}
+});

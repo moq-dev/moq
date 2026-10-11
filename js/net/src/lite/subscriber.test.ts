@@ -898,13 +898,13 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 	return { quic, streams, opened };
 }
 
-async function answerTrackInfo(stream: FakeStream): Promise<void> {
+async function answerTrackInfo(stream: FakeStream, version: Version = Version.DRAFT_05): Promise<void> {
 	const chunks: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-		Version.DRAFT_05,
+		version,
 	);
-	await new TrackInfo({}).encode(writer, Version.DRAFT_05);
+	await new TrackInfo({}).encode(writer, version);
 	for (const chunk of chunks) stream.inbound.enqueue(chunk);
 	stream.inbound.close();
 }
@@ -1169,9 +1169,9 @@ test.each([
 	expect(((await b.catch((err: unknown) => err)) as Error).message).toBe("second");
 
 	if (stage === "track") {
-		// The TRACK_INFO still completes, but no FETCH is sent for the abandoned group.
-		await answerTrackInfo(streams[0]);
-		for (let i = 0; i < 100; i++) await Promise.resolve();
+		// The abandoned TRACK exchange is reset promptly; no FETCH is sent.
+		const err = fromTransport(await streams[0].aborted) as StreamError;
+		expect(err.code).toBe(StreamCode.Cancel);
 		expect(streams.length).toBe(1);
 	} else {
 		const err = fromTransport(await streams[1].aborted) as StreamError;
@@ -1275,6 +1275,169 @@ test("the last reader leaving mid-response cancels the fetch", async () => {
 	subscriber.close();
 });
 
+test.each(["initial", "track", "fetch", "body"] as const)(
+	"a revoked grant refuses a fetch during %s",
+	async (stage) => {
+		const { quic, streams, opened } = fakeSession();
+		const scoped = (prefix: string): Grant => ({
+			publish: new Path.Patterns(),
+			subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
+		});
+		const grant = new Signal<Grant | undefined>(scoped(stage === "initial" ? "other" : "room"));
+		const subscriber = new Subscriber(
+			quic,
+			Version.DRAFT_05,
+			HopSchema.parse(1n),
+			undefined,
+			undefined,
+			undefined,
+			grant,
+		);
+		let result: unknown;
+		const pending = subscriber.fetchGroup(Path.from("room/cam"), "video", 0).then(
+			(group) => {
+				result = group;
+				return group;
+			},
+			(err: unknown) => {
+				result = err;
+				return err;
+			},
+		);
+		try {
+			if (stage !== "initial") {
+				await opened(0);
+				await streams[0].reading;
+				if (stage !== "track") {
+					await answerTrackInfo(streams[0]);
+					await opened(1);
+					await streams[1].reading;
+				}
+				if (stage === "body") {
+					streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("head")]));
+					await pending;
+				}
+				grant.set(scoped("other"));
+			}
+			if (stage === "body") {
+				const group = result as Awaited<ReturnType<Subscriber["fetchGroup"]>>;
+				await group.closed;
+				expect(group.closed.peek()).toBeInstanceOf(StreamError);
+				expect((group.closed.peek() as StreamError).code).toBe(StreamCode.Unauthorized);
+				const reset = fromTransport(await streams[1].aborted) as StreamError;
+				expect(reset.code).toBe(StreamCode.Unauthorized);
+				group.close();
+			} else {
+				await pending;
+				expect(result).toBeInstanceOf(StreamError);
+				expect((result as StreamError).code).toBe(StreamCode.Unauthorized);
+				if (stage === "initial") expect(streams).toHaveLength(0);
+			}
+		} finally {
+			subscriber.close();
+			await pending;
+		}
+	},
+);
+
+// Serve announcements and metadata on separate mock streams, with no wall-clock wait.
+test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
+	"a retired epochless handle refuses new metadata on %s",
+	async (version) => {
+		const { quic, streams, opened } = fakeSession();
+		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+		const announced = subscriber.announced();
+		await opened(0);
+		const send = async (encode: (writer: Writer) => Promise<void>) => {
+			const writer = new Writer(
+				new WritableStream<Uint8Array>({
+					write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
+				}),
+				version,
+			);
+			await encode(writer);
+		};
+		const path = Path.from("pool");
+		await send((writer) => new AnnounceOk(PEER, 0).encode(writer, version));
+		await send((writer) =>
+			encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_A] }, version),
+		);
+		await announced.next();
+		const held = subscriber.consume(Path.from("pool/job"));
+		const track = held.track("video");
+		await send((writer) =>
+			encodeAnnounceBroadcast(
+				writer,
+				version === Version.DRAFT_05 ? { status: "ended", suffix: path } : { status: "endedId", id: 0n },
+				version,
+			),
+		);
+		await announced.next();
+		await send((writer) =>
+			encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
+		);
+		await announced.next();
+		const result = track.info().catch((err: unknown) => err);
+		await Promise.race([result, opened(1)]);
+		// The unfixed implementation asks B and accepts its metadata.
+		if (streams.length === 2) await answerTrackInfo(streams[1], version);
+		expect(await result).toBeInstanceOf(Error);
+		expect(streams.length).toBe(1);
+		expect(held.closed.peek()).toBeUndefined();
+		held.close();
+		announced.close();
+		subscriber.close();
+	},
+);
+
+test.each(["track", "fetch", "open"] as const)(
+	"retirement settles coalesced fetches during %s setup",
+	async (stage) => {
+		const { quic, streams, opened } = fakeSession(stage === "open" ? [1] : []);
+		const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
+		const retired = new AbortController();
+		const consumed = { id: 1, valid: retired.signal };
+		const path = Path.from("room");
+		const first = subscriber.fetchGroup(path, "video", 0, {}, consumed).catch((err: unknown) => err);
+		const second = subscriber.fetchGroup(path, "video", 0, {}, consumed).catch((err: unknown) => err);
+		await opened(0);
+		if (stage !== "track") {
+			await answerTrackInfo(streams[0], Version.DRAFT_06);
+			await opened(1);
+		}
+		const cause = new Error("broadcast instance retired");
+		retired.abort(cause);
+		expect(await first).toBe(cause);
+		expect(await second).toBe(cause);
+		if (stage === "open") streams[1].release();
+		const active = streams[stage === "track" ? 0 : 1];
+		expect(await active.aborted).toBeDefined();
+		subscriber.close();
+	},
+);
+
+test("retirement preserves an accepted fetch and its coalesced reads", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
+	const retired = new AbortController();
+	const consumed = { id: 1, valid: retired.signal };
+	const path = Path.from("room");
+	const fetch = subscriber.fetchGroup(path, "video", 0, {}, consumed);
+	await opened(0);
+	await answerTrackInfo(streams[0], Version.DRAFT_06);
+	await opened(1);
+	await streams[1].reading;
+	streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("old!")]));
+	const first = await fetch;
+	retired.abort(new Error("broadcast instance retired"));
+	const cached = await subscriber.fetchGroup(path, "video", 0, {}, consumed);
+	expect(streams.length).toBe(2);
+	expect((await first.readFrame())?.payload).toEqual((await cached.readFrame())?.payload);
+	first.close();
+	cached.close();
+	subscriber.close();
+});
+
 // Drive discovery and inspect the TRACK request before answering it. Waiting for the
 // reader means the whole request has reached the wire, without a clock-based settle.
 test("consumes resolve the serving prefix and pin its epoch", async () => {
@@ -1353,6 +1516,53 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 		expect(fresh.closed).not.toBe(held.closed);
 		expect(held.closed.peek()).toBeUndefined();
 		fresh.close();
+		held.close();
+		announced.close();
+		subscriber.close();
+	},
+);
+
+test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
+	"pending metadata cancels on selection change and a live fallback can request again on %s",
+	async (version) => {
+		const { quic, streams, opened } = fakeSession();
+		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+		const announced = subscriber.announced();
+		await opened(0);
+		const peer = new Writer(
+			new WritableStream<Uint8Array>({
+				write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
+			}),
+			version,
+		);
+		await new AnnounceOk(PEER, 0).encode(peer, version);
+		const pool = Path.from("pool");
+		const job = Path.from("pool/job");
+		await encodeAnnounceBroadcast(peer, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, version);
+		await announced.next();
+		const held = subscriber.consume(job);
+		const pending = held
+			.track("pending")
+			.info()
+			.catch((err: unknown) => err);
+		await opened(1);
+		await streams[1].reading;
+		await encodeAnnounceBroadcast(peer, { status: "active", suffix: job, hops: [PUBLISHER_B] }, version);
+		await announced.next();
+		expect(await pending).toBeInstanceOf(Error);
+		await streams[1].aborted;
+		await expect(held.track("during").info()).rejects.toThrow();
+		expect(streams.length).toBe(2);
+		await encodeAnnounceBroadcast(
+			peer,
+			version === Version.DRAFT_05 ? { status: "ended", suffix: job } : { status: "endedId", id: 1n },
+			version,
+		);
+		await announced.next();
+		const info = held.track("after").info();
+		await opened(2);
+		await answerTrackInfo(streams[2], version);
+		expect((await info).priority).toBe(0);
 		held.close();
 		announced.close();
 		subscriber.close();
