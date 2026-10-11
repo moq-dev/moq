@@ -1080,7 +1080,9 @@ export class Subscriber {
 						throw new StreamError(StreamCode.Cancel, { message: "cancel" });
 					}
 					pending = undefined;
-					if (!next || next instanceof Error) break;
+					// Reset the stream with the group's error, such as Unauthorized on revocation.
+					if (next instanceof Error) throw next;
+					if (!next) break;
 					frame = next;
 				}
 				group.writeFrame(frame);
