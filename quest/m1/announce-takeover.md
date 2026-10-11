@@ -85,10 +85,13 @@ Public API: a claim-to-independent-route operation and a `Takeover` event,
 mirrored across languages and exposed bindings. Wire: lite-07-wip gains
 ANNOUNCE_TAKEOVER; published versions retain their framing.
 
+## Required
+
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - shared routing layer and per-stream identity
+
 ## Related
 
 - [IETF takeover](/quest/m1/ietf-takeover.md) - negotiated IETF counterpart
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - shared routing layer and per-stream identity
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - a proven continuation preserves the same pin
 - [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - replacements never substitute content into held handles
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explains takeover alongside restart and legacy behavior
