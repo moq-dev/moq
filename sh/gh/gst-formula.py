@@ -8,6 +8,8 @@ import subprocess
 import sys
 
 version, target, release_dir = sys.argv[1:]
+if target != "aarch64-apple-darwin":
+    raise ValueError("the Homebrew smoke test requires the macOS arm64 archive")
 archive = (Path(release_dir) / f"moq-gst-v{version}-{target}.tar.gz").resolve(strict=True)
 template = Path(".github/homebrew/Formula/moq-gst.rb.tmpl").read_text()
 sha = hashlib.sha256(archive.read_bytes()).hexdigest()
@@ -17,6 +19,9 @@ for platform in ["AARCH64_APPLE_DARWIN", "AARCH64_UNKNOWN_LINUX_GNU", "X86_64_UN
 remote = f"https://github.com/moq-dev/moq/releases/download/moq-gst-v#{{version}}/moq-gst-v#{{version}}-{target}.tar.gz"
 formula = formula.replace(remote, archive.as_uri())
 environment = dict(os.environ, HOMEBREW_NO_AUTO_UPDATE="1")
+installed = subprocess.run(["brew", "list", "--formula", "--versions"], capture_output=True, text=True, env=environment, check=True)
+if any(line.split()[0].split("/")[-1] == "moq-gst" for line in installed.stdout.splitlines() if line.strip()):
+    raise ValueError("moq-gst is already installed; run this test in a clean Homebrew environment")
 subprocess.run(["brew", "tap-new", "moq-dev/ci-gst"], check=True, env=environment)
 try:
     tap = subprocess.check_output(["brew", "--repository", "moq-dev/ci-gst"], text=True, env=environment).strip()
