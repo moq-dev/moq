@@ -173,7 +173,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake_lite(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake_lite<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -296,7 +296,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -594,7 +594,7 @@ where
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version.into()));
 	}
 }
 
@@ -723,7 +723,7 @@ where
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version));
 	}
 }
 
@@ -856,18 +856,20 @@ where
 
 impl<S: crate::transport::poll::Session> RequestInner<S> {
 	fn close(self, err: Error) {
-		let mut session = match self.handshake {
-			PausedHandshake::LiteBare { session, .. } => session,
-			PausedHandshake::LiteSetup { session, .. } => session,
+		let (mut session, version) = match self.handshake {
+			PausedHandshake::LiteBare { session, version } => (session, version),
+			PausedHandshake::LiteSetup { session, version, .. } => (session, version),
 			PausedHandshake::Boxed(paused) => return paused.close(err),
 		};
-		close(&mut session, &err);
+		close(&mut session, &err, Some(version.into()));
 	}
 }
 
 /// Close `session` with `err`'s wire code.
-fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error) {
-	session.close(SessionError::from(err).to_code(), &err.to_string());
+fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error, version: Option<Version>) {
+	let error = SessionError::from(err);
+	let code = version.map_or_else(|| error.to_code(), |version| version.session_code(&error));
+	session.close(code, &err.to_string());
 }
 
 impl<S: crate::transport::poll::Session> Drop for Handshake<S> {

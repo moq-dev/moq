@@ -6,8 +6,10 @@ use crate::coding;
 /// unchanged; 64+ are the application's. The stream registry is [`StreamError`] and the two
 /// are disjoint, so the same integer means different things in each.
 ///
-/// Every variant is a registered code, so the registry round-trips: 32 through 47 is
-/// reserved, nothing is sent there, and a received one stays [`Unknown`](Self::Unknown).
+/// Shared codes round-trip through [`to_code`](Self::to_code) and
+/// [`from_code`](Self::from_code). Protocol drivers translate Lite-only variants at
+/// their wire boundary; the shared decoder keeps those numbers [`Unknown`](Self::Unknown).
+/// Codes 32 through 47 are reserved and have no assigned meaning.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SessionError {
@@ -64,7 +66,7 @@ pub enum SessionError {
 }
 
 impl SessionError {
-	/// The integer sent on the wire.
+	/// The shared session code; Lite-only conditions fall back to an internal error.
 	pub fn to_code(&self) -> u32 {
 		match self {
 			Self::Cancel => 0x0,
@@ -76,13 +78,13 @@ impl SessionError {
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
 			Self::Version => 0x15,
-			Self::Unsupported => 0x30,
+			Self::Unsupported => 0x1,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
 	}
 
-	/// Decode a code received off the wire.
+	/// Decode a shared session code, leaving protocol-specific codes unknown.
 	///
 	/// Unlike a raw peer code, the registered ones are specified, so decoding them is a
 	/// wire contract rather than an assumption. Anything unregistered stays
@@ -98,7 +100,6 @@ impl SessionError {
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
 			0x15 => Self::Version,
-			0x30 => Self::Unsupported,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -655,9 +656,9 @@ mod tests {
 	// Both registries are wire contracts now (draft-lcurley-moq-lite, Error Codes), so
 	// every code we send must decode back to what we meant.
 	#[test]
-	fn unsupported_has_a_lite_session_code() {
-		assert_eq!(SessionError::from(&Error::Unsupported).to_code(), 0x30);
-		assert_eq!(SessionError::from_code(0x30), SessionError::Unsupported);
+	fn lite_unsupported_is_not_in_the_shared_session_registry() {
+		assert_eq!(SessionError::from(&Error::Unsupported).to_code(), 0x1);
+		assert_eq!(SessionError::from_code(0x30), SessionError::Unknown(0x30));
 	}
 
 	#[test]
@@ -673,7 +674,6 @@ mod tests {
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,
 			SessionError::Version,
-			SessionError::Unsupported,
 			SessionError::App(0),
 			SessionError::App(404),
 		];
@@ -693,7 +693,7 @@ mod tests {
 
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
 		// of being given a meaning. A peer on the old placeholders (0x20-0x22) lands here.
-		for code in [0x1f, 0x20, 0x21, 0x22, 0x2f] {
+		for code in [0x1f, 0x20, 0x21, 0x22, 0x2f, 0x30] {
 			assert_eq!(SessionError::from_code(code), SessionError::Unknown(code));
 		}
 

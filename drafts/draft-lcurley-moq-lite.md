@@ -549,7 +549,6 @@ An endpoint that announces a broadcast outside the union once its own setup toke
 An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, MUST send AUTH_ERROR with NOT_SUPPORTED and close its side of the stream.
 This applies before or after an AUTH_OK, including when a grant exceeds the message size limit.
 A presenter receiving a stream reset before any reply treats it as unsupported, for compatibility with peers that do not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
-An opener that sees the stream reset before any reply treats the token as unsupported rather than refused.
 
 ### Goaway
 Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session shutdown.

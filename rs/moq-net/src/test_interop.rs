@@ -292,7 +292,7 @@ fn lite_auth_unsupported_interop() {
 		expires: None,
 	});
 	let refused = lite::AuthReply::Error(lite::AuthError {
-		code: crate::SessionError::Unsupported.to_code().into(),
+		code: crate::lite::error::to_session_code(&crate::SessionError::Unsupported).into(),
 		reason: "unsupported".into(),
 	});
 	let mut bytes = Vec::new();

@@ -204,7 +204,7 @@ where
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let Some(setup) = setup else {
 					let err = Error::ProtocolViolation;
-					session.close(super::error::to_session_code(&err), "setup stream required");
+					session.close(SessionError::from(&err).to_code(), "setup stream required");
 					return Err(err);
 				};
 				let control = Control::new(request_id_max, client).with_window(limits.requests(), client);
@@ -580,7 +580,7 @@ where
 			}
 			Err(err) => {
 				tracing::warn!(%err, "session error");
-				session.close(super::error::to_session_code(err), err.to_string().as_ref());
+				session.close(SessionError::from(err).to_code(), err.to_string().as_ref());
 			}
 			_ => {
 				tracing::info!("session closed");
@@ -1313,7 +1313,7 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 	tracing::error!(broadcast = %origin.absolute(&path), "publishing outside our grant; closing the session");
 	let err = Error::Unauthorized;
 	session.close(
-		super::error::to_session_code(&err),
+		SessionError::from(&err).to_code(),
 		&crate::auth::unauthorized_reason(&path),
 	);
 	Err(err)

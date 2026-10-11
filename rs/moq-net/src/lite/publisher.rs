@@ -371,10 +371,10 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						// logs per-stream errors, so close the session here rather than letting a
 						// peer silently replace a redirect an observer may already be acting on.
 						tracing::warn!(%uri, "duplicate GOAWAY received; closing session");
-						self.shared
-							.session
-							.clone()
-							.close(SessionError::from(&err).to_code(), &err.to_string());
+						self.shared.session.clone().close(
+							crate::lite::error::to_session_code(&SessionError::from(&err)),
+							&err.to_string(),
+						);
 						return Poll::Ready(Err(err));
 					}
 					return Poll::Ready(Ok(()));
@@ -546,7 +546,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				})
 			}
 			crate::auth::Reply::Refuse { code, reason } => lite::AuthReply::Error(lite::AuthError {
-				code: code.to_code().into(),
+				code: crate::lite::error::to_session_code(&code).into(),
 				reason,
 			}),
 		};
@@ -554,7 +554,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 		if let Err(err) = stream.writer.buffer(&msg) {
 			tracing::debug!(%err, "auth reply cannot be encoded; refusing the token");
 			stream.writer.buffer(&lite::AuthReply::Error(lite::AuthError {
-				code: crate::SessionError::Unsupported.to_code().into(),
+				code: crate::lite::error::to_session_code(&crate::SessionError::Unsupported).into(),
 				reason: Error::Unsupported.to_string(),
 			}))?;
 			return Ok(false);
@@ -594,7 +594,7 @@ impl Enforce {
 		);
 		let err = Error::Unauthorized;
 		shared.session.clone().close(
-			SessionError::from(&err).to_code(),
+			crate::lite::error::to_session_code(&SessionError::from(&err)),
 			&crate::auth::unauthorized_reason(&path),
 		);
 		Poll::Ready(Err(err))
@@ -1549,10 +1549,10 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 							Ok(charged) => self._charged = Some(charged),
 							// A peer past its limits loses the session, not just this request.
 							Err(err) => {
-								self.shared
-									.session
-									.clone()
-									.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
+								self.shared.session.clone().close(
+									crate::lite::error::to_session_code(&crate::SessionError::from(&err)),
+									"too many subscriptions",
+								);
 								return Poll::Ready(Err(err));
 							}
 						}
@@ -3651,7 +3651,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						Err(err) => {
 							self.settle_open(false);
 							self.state = GroupState::Done;
-							return Poll::Ready(Err(Error::from_transport(err)));
+							return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 						}
 					};
 					self.settle_open(true);

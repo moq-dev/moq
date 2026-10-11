@@ -584,14 +584,6 @@ pub(crate) mod request {
 	}
 }
 
-/// Map a session failure to the moq-transport registry, which has no NOT_SUPPORTED.
-pub(crate) fn to_session_code(err: &crate::Error) -> u32 {
-	match SessionError::from(err) {
-		SessionError::Unsupported => SessionError::Internal.to_code(),
-		code => code.to_code(),
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -608,15 +600,6 @@ mod tests {
 		Version::Draft21,
 		Version::Draft22,
 	];
-
-	#[test]
-	fn lite_unsupported_is_not_an_ietf_session_code() {
-		assert_eq!(to_session_code(&Error::Unsupported), SessionError::Internal.to_code());
-		assert_eq!(
-			to_session_code(&Error::Session(SessionError::Unsupported)),
-			SessionError::Internal.to_code()
-		);
-	}
 
 	/// A routine unsubscribe must not read as a fault on our side. moq-lite's own error
 	/// enum encodes a cancellation as 0, which is this wire's INTERNAL_ERROR, so the codes

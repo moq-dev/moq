@@ -9,6 +9,7 @@ mod auth;
 mod compress;
 mod datagram;
 mod epoch;
+pub(crate) mod error;
 mod fetch;
 mod goaway;
 mod group;

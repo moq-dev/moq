@@ -179,6 +179,26 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		server.abort();
 	});
 
+	test("an explicit unsupported token uses the negotiated AUTH registry", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		const requests = server.auth.requests();
+		const answering = (async () => {
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				if (request.token.byteLength === 0) request.accept(grant([], []));
+				else request.reject(SessionCode.Unsupported, "credential kind unsupported");
+			}
+		})();
+		try {
+			await expect(client.auth.add("unsupported")).rejects.toBeInstanceOf(Unsupported);
+		} finally {
+			client.abort();
+			server.abort();
+			await answering;
+		}
+	});
+
 	test("a refused token surfaces the acceptor's code and reason", async () => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 		const requests = server.auth.requests();
