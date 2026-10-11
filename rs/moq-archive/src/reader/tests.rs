@@ -725,6 +725,15 @@ async fn evicted_timeline_groups_remain_fetchable() {
 	pool.gc(now);
 	pool.gc(now + Duration::from_secs(1));
 	assert_eq!(fetch(&broadcast, &timeline("video"), 0, 0).await.unwrap(), expected);
+	// Past the end of an evicted complete group is EOF, as it is for a cached one.
+	pool.gc(now + Duration::from_secs(2));
+	pool.gc(now + Duration::from_secs(3));
+	assert!(
+		fetch(&broadcast, &timeline("video"), 0, expected.len() as u64 + 1)
+			.await
+			.unwrap()
+			.is_empty()
+	);
 	serve.abort();
 	let _ = serve.await;
 }

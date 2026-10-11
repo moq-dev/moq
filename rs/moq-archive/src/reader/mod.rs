@@ -407,7 +407,7 @@ async fn serve_timeline_group<T: ObjectStore>(shared: Arc<Shared<T>>, request: T
 		request.reject(moq_net::Error::NotFound);
 		return;
 	};
-	if object.frame_start != 0 || start > stored.frames.len() as u64 {
+	if object.frame_start != 0 {
 		request.reject(moq_net::Error::NotFound);
 		return;
 	}
