@@ -18,9 +18,9 @@ live readers or recovery; the JS lite-03/04 path does not run that response
 loop. Once a track ends, the Rust
 publisher on lite-05 and lite-06 names every sequence from its
 SUBSCRIBE_START to the end that the subscription never got (skipped,
-stale, or missing its head), just before its FIN. Still missing: JS
-publishers, drops sent as soon as a group is given up rather than at the end,
-and groups reset before their header. The end-of-track drops also miss a gap
+stale, or missing its head), just before its FIN. Still missing: groups
+reset before their header. JS publishers and drops sent as soon as a group is
+given up belong to [Early drops](/quest/m1/subscribe-drop-early.md). The end-of-track drops also miss a gap
 the publisher aged out of its grace while the subscriber still waits on it:
 the publisher ages a gap from when it queued the group above it, which can be
 well before stream credit lets that group's header out. lite-07 (still `moq-lite-07-wip`,
@@ -94,6 +94,10 @@ subscribers both settle on SUBSCRIBE_DROP through the relay, so a group the
 publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
+
+## Required
+
+- [Early drops](/quest/m1/subscribe-drop-early.md) - Rust and JS publishers drop a sequence the moment they give it up, and forward an upstream drop
 
 ## Related
 
