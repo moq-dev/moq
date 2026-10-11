@@ -30,6 +30,8 @@ Decided 2026-10-01 (moq-dev/moq#4694):
 - Switching between the peer and the relay resumes the subscription, since
   every route announcing a path under one
   [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs) is one source.
+  Different or absent epochs instead cause Restart and fresh resolution.
+  Use the shared JS handover rather than a P2P-specific resubscribe path.
 
 Deliverables: the `Peers` and `moq-cli` cost knobs with their defaults, the
 rule written beside route selection in the routing concept page the cluster
@@ -41,6 +43,8 @@ Public API: cost knobs on `Peers` and `moq-cli`. Wire: none beyond the route
 layer.
 
 ## Required
+
+- [JS track handover](/quest/m1/js-group-handover.md) - seamless same-epoch browser migration
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the origin node ids and metrics this compares
 - [Signaling and policy](/quest/m3/p2p/signal.md) - `Peers`, which gains the cost knobs

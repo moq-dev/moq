@@ -15,8 +15,18 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { isAnonymous, Route, routesEqual } from "./hop.ts";
-import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, spreadHash } from "./internal.ts";
+import { Route, routesEqual } from "./hop.ts";
+import {
+	compareRouteCandidates,
+	compareRoutes,
+	coveringPrefixes,
+	hiddenBelow,
+	hooks,
+	scopeCaptures,
+	scopeHead,
+	scopeOverlaps,
+	spreadHash,
+} from "./internal.ts";
 import * as Path from "./path.ts";
 import { type Advertised, type Advertisements, type Instance, registerWire, sameInstance, wireOf } from "./wire.ts";
 
@@ -235,21 +245,6 @@ function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): numb
 	return ha < hb ? -1 : ha > hb ? 1 : 0;
 }
 
-/** Orders two routes by preference: the newest epoch with none last, then identified before
- * anonymous, then lower static cost. */
-function compareRoutes(a: Route, b: Route): number {
-	if (a.epoch !== b.epoch) {
-		// An older epoch is a publisher that was replaced.
-		if (a.epoch === undefined) return 1;
-		if (b.epoch === undefined) return -1;
-		return a.epoch > b.epoch ? -1 : 1;
-	}
-	const anonymous = Number(isAnonymous(a)) - Number(isAnonymous(b));
-	if (anonymous !== 0) return anonymous;
-	if (a.cost !== b.cost) return a.cost < b.cost ? -1 : 1;
-	return 0;
-}
-
 /**
  * The preferred of `entries` (newest first) for resolving `path`, not skipped: the best route,
  * then fewest hops, then the lowest {@link spreadHash}, then newest. `path` is the requested
@@ -269,13 +264,7 @@ function preferredEntry(
 		}
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		let order = compareRoutes(a, b) || a.hops.length - b.hops.length;
-		// Hashed only on a tie, so the common single-route prefix never pays for it.
-		if (order === 0) {
-			const ha = spreadHash(path, a.hops);
-			const hb = spreadHash(path, b.hops);
-			order = ha < hb ? -1 : ha > hb ? 1 : 0;
-		}
+		const order = compareRouteCandidates(path, a, b);
 		if (order < 0) best = entry;
 	}
 	return best;
@@ -753,22 +742,19 @@ class OriginState {
 
 	/** The preferred entry on the most specific route covering `path`, ignoring skipped entries, if any. */
 	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
-		let bestPrefix: Path.Valid | undefined;
-		let best: RouteEntry | undefined;
-		for (const [prefix, entries] of this.routes.peek() ?? []) {
-			if (!Path.hasPrefix(prefix, path)) continue;
+		const routes = this.routes.peek();
+		if (!routes) return undefined;
+		for (const prefix of coveringPrefixes(path)) {
+			const entries = routes.get(prefix);
+			if (!entries) continue;
 			const entry = preferredEntry(
 				path,
 				entries,
 				(candidate) => !candidate.scope.matches(path) || (skip?.(candidate) ?? false),
 			);
-			if (!entry) continue;
-			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
-				bestPrefix = prefix;
-				best = entry;
-			}
+			if (entry) return entry;
 		}
-		return best;
+		return undefined;
 	}
 
 	/**
