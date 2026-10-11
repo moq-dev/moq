@@ -23,12 +23,18 @@ Release build time went from 5m to 9m on that machine.
 
 ## Plan
 
-Draft implementation unifies the settings and preserves profiling symbols.
-Linux x86_64 FFI builds passed: shared library 25,224,272 bytes, static library
-59,638,882 bytes (below the Go mirror limit). Remaining: the complete Linux
-x86_64 and aarch64 artifact matrix and controlled comparative link times. The existing macOS table above
-is planning evidence, not a new measurement from this draft. Keep this quest
-until the Linux matrix is recorded.
+The proposed exception to the original stripping plan follows a reproduced
+binding-generation failure. The shared profile uses fat LTO and one codegen unit.
+Executables strip symbols;
+moq-ffi retains the symbol table needed by UniFFI and strips debug data instead.
+The profiling profiles explicitly retain symbols even for that package override.
+C++ generation reads the linked cdylib, while consumers still link the staticlib.
+
+The original Linux x86_64 FFI build measured 25,224,272 shared-library bytes and
+59,638,882 static-library bytes, but its stripped ELF could not generate bindings.
+The corrected profile still needs the complete Linux x86_64 and aarch64 artifact
+matrix and controlled comparative link times. The macOS table above is planning
+evidence. Keep this quest until the corrected Linux matrix is recorded.
 
 
 Decided in planning:
@@ -44,7 +50,7 @@ Decided in planning:
 
 Guidance:
 
-- Delete the three `CARGO_PROFILE_RELEASE_*` exports. Move the comment about
+- Delete the local `CARGO_PROFILE_RELEASE_*` exports, including the C++ packager. Move the comment about
   the Go mirror's 100 MB limit next to the profile.
 - `profiling` and `release-with-debug` inherit from release, so they would
   inherit the strip too. Override them so they still produce symbolized

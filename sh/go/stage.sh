@@ -139,9 +139,8 @@ echo "go stage: assembling ffi module..." >&2
 # --skip-size-check because the lib above is a plain host build, unrelated to
 # what the mirror publishes. It is a debug build by default now, so it carries
 # full line-table debug info and measured 619 MiB against a 100 MiB limit; even
-# at MOQ_FFI_PROFILE=release it skips the thin LTO that rs/moq-ffi/build.sh
-# applies on the publish path. Enforcing the limit here fails on a lib nobody
-# publishes.
+# at MOQ_FFI_PROFILE=release this staging path is for local checks, not
+# publication. The release packager enforces the limit on shipped artifacts.
 bash "$SCRIPT_DIR/package-ffi.sh" \
     --version "0.0.0-dev" \
     --source-dir "$GO_DIR/ffi" \

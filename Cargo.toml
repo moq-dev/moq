@@ -315,15 +315,27 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 
+# UniFFI reads ELF's regular symbol table to generate bindings, including in
+# maturin and downstream generators. Remove debug data but retain that metadata.
+[profile.release.package.moq-ffi]
+strip = "debuginfo"
+
 [profile.profiling]
 inherits = "release"
 debug = "line-tables-only"
 strip = "none"
 # frame pointers: pass RUSTFLAGS="-C force-frame-pointers=yes" when building
 
+# Package overrides are inherited too and take precedence over the profile.
+[profile.profiling.package.moq-ffi]
+strip = "none"
+
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+strip = "none"
+
+[profile.release-with-debug.package.moq-ffi]
 strip = "none"
 
 # Size-optimized build for the browser/WASM bindings (rs/moq-wasm). Shipping over
