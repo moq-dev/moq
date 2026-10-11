@@ -65,7 +65,6 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [Archive S3 wire proof](/quest/m2/archive-s3.md) - the archive proof also runs through the S3 client against an in-process S3-compatible server
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
 - [Range-addressed HLS playlists](/quest/m2/hls-ranges.md) - `moq-hls` lists a start-to-end range of a recording as its own playlist, for moq.pro's managed HLS
-- [DASH rendition URLs](/quest/m2/dash-rendition-uri.md) - DASH init and segment URLs percent-encode the rendition name, so a name with a slash resolves to its own rendition
 - [IETF on the ring](/quest/m2/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
 - [Dropped uring session closes](/quest/m2/uring-drop-close.md) - a moq-uring session dropped without close() closes its connection
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
@@ -106,5 +105,7 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [Kotlin JVM exit](/quest/m2/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [JS audio ranking](/quest/m2/js-audio-ranked.md) - @moq/hang ranks audio and video renditions like Rust, enabled first, and HLS lists audio by that rank
 - [ts::Export catalog stream](/quest/m2/ts-export-catalog.md) - TS export takes (source, catalog) like the other exporters
-- [Load-balancer refusals](/quest/m2/listener-lb-refusals.md) - refuse ignored or conflicting QUIC load-balancer settings
 - [Draft changelog audit](/quest/m2/drafts-changelog-audit.md) - every published draft's changelog lists only what that version published
+- [Runtime trait](/quest/m2/runtime-trait.md) - one runtime trait for spawn and time replaces web-async, with tokio, browser, io_uring, and sim implementations
+- [QUIC on the sim](/quest/m2/quic-sim.md) - the sim drives `moq-quic` over in-memory datagrams with latency and loss
+- [Seeded sim](/quest/m2/sim-seed.md) - sim tests draw every jitter from one seeded generator and replay bit-exact

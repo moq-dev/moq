@@ -648,3 +648,50 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
+
+/// The embedded auth decider receives the same transport facts as the Tokio path.
+#[tokio::test]
+async fn uring_auth_reports_distinct_quic_and_webtransport() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let mut config = uring_config(&cert, &key);
+	config.auth.public.clear();
+	let mut relay = Relay::load(config).await.unwrap();
+	let port = relay.addr().unwrap().port();
+	let mut admissions = relay.admissions().expect("embedded auth");
+	let deciding = tokio::spawn(async move {
+		let mut leases = Vec::new();
+		for expected in ["quic", "webtransport"] {
+			let admission = tokio::time::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			let actual = admission.request.transport.as_str();
+			assert!(
+				admission
+					.request
+					.alpn
+					.as_ref()
+					.is_some_and(|alpn| alpn.starts_with("moq-lite-"))
+			);
+			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			let grant = moq_auth::Grant::new(all.clone(), all);
+			let (producer, consumer) = moq_auth::lease::Producer::new(grant);
+			leases.push(producer);
+			admission.grant(consumer);
+			assert_eq!(actual, expected);
+		}
+		leases
+	});
+	let running = tokio::spawn(relay.run());
+	let mut connections = Vec::new();
+	for scheme in ["moql", "https"] {
+		let url = format!("{scheme}://127.0.0.1:{port}/transport").parse().unwrap();
+		connections.push(connect(client(), url).await);
+	}
+	let _leases = deciding.await.unwrap();
+	drop(connections);
+	running.abort();
+	let _ = running.await;
+}

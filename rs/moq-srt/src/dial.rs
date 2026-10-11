@@ -60,6 +60,14 @@ pub struct Client {
 
 	/// The programs of a multi-program remote [`pull`] publishes, or `None` to refuse one.
 	program: Option<Program>,
+
+	/// How long [`publish`] waits for the same publisher instance to come back once its
+	/// broadcast ends. [`publish`] only.
+	linger: Duration,
+
+	/// Whether [`publish`] follows another instance replacing its broadcast, as a program
+	/// switch on the same connection. [`publish`] only.
+	stitch: bool,
 }
 
 impl Client {
@@ -73,6 +81,8 @@ impl Client {
 			max_age: None,
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			program: None,
+			linger: Duration::ZERO,
+			stitch: false,
 		}
 	}
 
@@ -101,11 +111,32 @@ impl Client {
 		self
 	}
 
+	/// Wait up to `linger` for the same publisher instance to come back once the broadcast
+	/// [`publish`](Self::publish) reads ends, carrying on with the same stream. Zero (the
+	/// default) ends the push at the broadcast's end.
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.linger = linger;
+		self
+	}
+
+	/// Follow another publisher instance replacing the broadcast [`publish`](Self::publish)
+	/// reads, as a full program switch on the same connection. Off by default, which ends the
+	/// push with [`moq_mux::Error::Replaced`].
+	pub fn with_stitch(mut self, stitch: bool) -> Self {
+		self.stitch = stitch;
+		self
+	}
+
 	/// Push a MoQ broadcast out to the remote as MPEG-TS until the broadcast ends.
 	pub async fn publish(&self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		let socket = self.call(Mode::Publish).await?;
-		serve_subscribe(origin, path.as_str(), socket, self.latency).await
+		let options = crate::ts::Options {
+			latency: self.latency,
+			linger: self.linger,
+			stitch: self.stitch,
+		};
+		serve_subscribe(origin, path.as_str(), socket, options).await
 	}
 
 	/// Pull a remote MPEG-TS stream into `origin` at `path` until the remote ends.
