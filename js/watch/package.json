@@ -34,6 +34,7 @@
 		"@moq/net": "workspace:^",
 		"@moq/msf": "workspace:^",
 		"@moq/signals": "workspace:^",
+		"@moq/video": "workspace:^",
 		"media-captions": "0.0.18"
 	},
 	"devDependencies": {

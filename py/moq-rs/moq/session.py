@@ -91,7 +91,7 @@ class Session:
         byte/packet counters). Cheap to call; intended for periodic polling.
 
         Individual fields are ``None`` when the transport backend doesn't report them."""
-        return self._inner.stats()
+        return ConnectionStats._from_ffi(self._inner.stats())
 
     def bandwidth(self) -> Bandwidth:
         """The session's bandwidth allocator.

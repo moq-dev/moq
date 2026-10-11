@@ -36,16 +36,16 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
-        --moq-c-release)
-            # Link a published moq-c release of this version instead of
-            # building rs/moq-c from source. CMake fetches the matching
-            # moq-c-<version>-<target> archive from the GitHub release and the
-            # plugin is versioned to match. Used by CI on a moq-c-v* tag.
+        --moq-release)
+            # Link a published moq-cpp release of this version instead of
+            # building cpp/moq from source. CMake fetches the matching
+            # moq-cpp-<version>-<target> archive from the GitHub release. The
+            # plugin keeps its own version. Used by CI on a cpp-v* tag.
             MOQ_RELEASE="$2"
             shift 2
             ;;
         -h | --help)
-            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--moq-c-release VERSION]"
+            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--moq-release VERSION]"
             exit 0
             ;;
         *)
@@ -55,20 +55,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# In moq-c-release mode the plugin version tracks the moq-c version.
-if [[ -n "$MOQ_RELEASE" ]]; then
-    VERSION="$MOQ_RELEASE"
-fi
-
 if [[ -z "$TARGET" ]]; then
     TARGET=$(cc -dumpmachine 2>/dev/null || echo unknown)
     echo "Detected target: $TARGET"
 fi
 
-# Default the version from buildspec.json's top-level "version" (the nested
-# dependency entries also have "version" keys, hence the leading-indent anchor).
+# Default to the plugin's own version.
 if [[ -z "$VERSION" ]]; then
-    VERSION=$(grep -E '^[[:space:]]{4}"version"' "$SCRIPT_DIR/buildspec.json" | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+    VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
     echo "Detected version: $VERSION"
 fi
 
@@ -112,7 +106,7 @@ if [[ -n "$MOQ_RELEASE" ]]; then
     # Empty MOQ_LOCAL forces CMake's release-download branch; MOQ_VERSION and
     # MOQ_TARGET steer it at this target's archive. MOQ_ARCHIVE is correct per
     # preset already.
-    echo "Linking moq-c release v$MOQ_RELEASE ($TARGET)"
+    echo "Linking moq-cpp release v$MOQ_RELEASE ($TARGET)"
     CONFIGURE_ARGS+=(-DMOQ_LOCAL= "-DMOQ_VERSION=$MOQ_RELEASE" "-DMOQ_TARGET=$TARGET")
 fi
 cmake --preset "$PRESET" ${CONFIGURE_ARGS[@]+"${CONFIGURE_ARGS[@]}"}

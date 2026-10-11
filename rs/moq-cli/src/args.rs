@@ -769,6 +769,9 @@ impl ImportSource {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
 			Self::Fmp4 => PublishFormat::Fmp4,
+			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
+				pcr_pid: args.pcr_pid.map(|pid| pid.0),
+			},
 			Self::Ts(args) => PublishFormat::Ts {
 				program: args.program.and_then(TsProgram::number),
 			},
@@ -798,6 +801,37 @@ pub struct TsImport {
 	/// `event/2.hang`, ...). Without it, a stream carrying more than one program is refused.
 	#[usage(long)]
 	pub program: Option<TsProgram>,
+
+	/// Publish the multiplex whole instead of demultiplexing it: every 188-byte packet verbatim,
+	/// on one track the catalog's `m2ts` section names. Scrambled streams, private PIDs, and the
+	/// PSI and SI ride through as authored. Bytes before the first group are dropped.
+	#[usage(long, conflicts = "--program")]
+	pub passthrough: bool,
+
+	/// Pace `--passthrough` on this PID's PCR rather than the `PCR_PID` of the PAT's first
+	/// program. Decimal, or hex with `0x`.
+	#[usage(long, requires = "--passthrough")]
+	pub pcr_pid: Option<TsPid>,
+}
+
+/// An `import ts --pcr-pid` value: a PID that can carry a PCR, in decimal or `0x` hex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TsPid(pub u16);
+
+impl std::str::FromStr for TsPid {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		let parsed = match arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X")) {
+			Some(hex) => u16::from_str_radix(hex, 16),
+			None => arg.parse(),
+		};
+		match parsed {
+			Ok(pid @ 0x0001..=0x1ffe) => Ok(Self(pid)),
+			Ok(pid) => Err(format!("PID {pid:#06x} cannot carry a PCR; expected 0x0001..=0x1ffe")),
+			Err(_) => Err(format!("expected a PID, got `{arg}`")),
+		}
+	}
 }
 
 /// An `import ts --program` or `import srt --program` value.
@@ -1237,6 +1271,42 @@ mod tests {
 		assert_eq!(program("all"), Some(Some(TsProgram::All)));
 		assert_eq!(program("0"), None, "0 is the network PID");
 		assert_eq!(program("two"), None);
+	}
+
+	#[test]
+	fn import_ts_passthrough_takes_an_optional_pcr_pid() {
+		// `None` when the command line is refused.
+		let format = |args: &[&str]| {
+			let cli = Invocation::try_parse_from([&["moq", "import", "ts"], args].concat()).ok()?;
+			let Command::Import(import) = &cli.stages[0] else {
+				panic!("an import stage");
+			};
+			import.source.stdin_format()
+		};
+		assert!(matches!(
+			format(&["--passthrough"]),
+			Some(PublishFormat::TsPassthrough { pcr_pid: None })
+		));
+		assert!(matches!(
+			format(&["--passthrough", "--pcr-pid", "0x21"]),
+			Some(PublishFormat::TsPassthrough { pcr_pid: Some(0x21) })
+		));
+		assert!(matches!(
+			format(&["--passthrough", "--pcr-pid", "33"]),
+			Some(PublishFormat::TsPassthrough { pcr_pid: Some(33) })
+		));
+		assert!(format(&["--pcr-pid", "33"]).is_none(), "--pcr-pid needs --passthrough");
+		assert!(
+			format(&["--passthrough", "--program", "1"]).is_none(),
+			"nothing to select"
+		);
+		assert!(
+			format(&["--passthrough", "--pcr-pid", "0x1fff"]).is_none(),
+			"null packets"
+		);
+		assert!(format(&["--passthrough", "--pcr-pid", "0"]).is_none(), "the PAT");
+		assert!(format(&["--passthrough", "--pcr-pid", "clock"]).is_none());
+		assert!(matches!(format(&[]), Some(PublishFormat::Ts { program: None })));
 	}
 
 	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.

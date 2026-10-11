@@ -5,8 +5,9 @@
 # public registry to catch packaging breakage), this builds every client from
 # the workspace source. It proves the code in the tree interoperates across
 # implementations before anything is published: a relay built from rs/moq-relay,
-# clients built from rs/moq-cli, py/, js/, and rs/moq-c, all talking to each
-# other. There's no apt/brew/npm/PyPI here, just cargo/bun/uv/cc.
+# clients built from rs/moq-cli, py/, go/, cpp/moq, js/, and rs/moq-c, all
+# talking to each other. There's no apt/brew/npm/PyPI here, just
+# cargo/bun/uv/go/cmake/cc.
 #
 # It stands up a moq-relay, then for each publisher language publishes an H.264
 # broadcast and confirms every subscriber sees data flowing before the timeout.
@@ -33,10 +34,18 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_NATIVE_CLIENT INTEROP_DECODE INTEROP_JS_PUBLISH_CLIENT INTEROP_COMPAT_TRANSPORT INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
+# The idle-out check guards this checkout's relay and clients. A run that swaps in other
+# binaries or JS clients (the wire-compat lanes run released ones) can't be held to it: a
+# released client may not close cleanly, and a released relay names no connection when one
+# closes.
+IDLE_CHECK=1
+if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
+    IDLE_CHECK=0
+fi
 TIMEOUT="${INTEROP_TIMEOUT:-20}"
 FPS="${INTEROP_FPS:-30}"
 SIZE="${INTEROP_SIZE:-320x240}"
@@ -93,8 +102,8 @@ while [[ $# -gt 0 ]]; do
         # The full matrix. --timeout 30 gives headless Chromium cold-start
         # headroom; flags after it still override.
         --all)
-            PUBLISHERS="rust,python,go,js"
-            SUBSCRIBERS="rust,python,go,js,js-native-node,js-native-bun,c,gst"
+            PUBLISHERS="rust,python,go,cpp,js"
+            SUBSCRIBERS="rust,python,go,cpp,js,js-native-node,js-native-bun,c,gst"
             TIMEOUT=30
             shift
             ;;
@@ -139,7 +148,7 @@ needs() {
 
 # True if any browser/native JS client is in play (they share one bun install).
 needs_js() {
-    needs js || needs js-native-node || needs js-native-bun
+    needs js || needs js-native || needs js-native-node || needs js-native-bun
 }
 
 harness_begin interop "$RERUN"
@@ -148,6 +157,7 @@ TARGET_BASE=""    # cargo target dir (resolved in require_tools)
 PY=""             # python interpreter with the workspace moq build (set in prepare)
 C_INTEROP=""      # compiled C client binary (set in prepare)
 GO_INTEROP=""     # compiled Go client binary (set in prepare)
+CPP_INTEROP=""    # compiled C++ client binary (set in prepare)
 GST_PLUGIN_DIR="" # dir holding the built moq-gst plugin (set in prepare)
 BROKEN_LANGS=""   # clients whose source build failed
 
@@ -192,6 +202,13 @@ require_tools() {
 # Build moq-relay + moq-cli from the workspace. The relay is the spine of the
 # test, so a failure here aborts rather than marking a single client broken.
 build_relay_cli() {
+    if [[ -n "$RELAY" && -n "$MOQ" ]]; then
+        [[ -x "$RELAY" && -x "$MOQ" ]] || {
+            echo "override binaries are not executable" >&2
+            exit 1
+        }
+        return
+    fi
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
     echo "building moq-relay + moq-cli ($PROFILE)..."
@@ -239,12 +256,24 @@ prepare_python() {
 # @moq/* packages resolve to this checkout's source) and build the browser page.
 prepare_js() {
     have bun || {
-        for v in js js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun not found"; done
+        for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun not found"; done
         return
     }
+    # Staged released-compat clients bring their own packages; check every one given.
+    if [[ -n "${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
+        [[ -z "${INTEROP_NATIVE_CLIENT:-}" || -f "$INTEROP_NATIVE_CLIENT/subscribe.ts" ]] || {
+            echo "missing staged native client" >&2
+            exit 1
+        }
+        [[ -z "${INTEROP_JS_PUBLISH_CLIENT:-}" || -f "$INTEROP_JS_PUBLISH_CLIENT/client.ts" ]] || {
+            echo "missing staged publisher" >&2
+            exit 1
+        }
+        return
+    fi
     echo "installing js clients (workspace @moq/* via bun)..."
     if ! (cd "$WORKSPACE" && bun install --frozen-lockfile) >"$HARNESS_RUN/js-install.log" 2>&1; then
-        for v in js js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
+        for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
         sed 's/^/        /' "$HARNESS_RUN/js-install.log" >&2 || true
         return
     fi
@@ -306,6 +335,35 @@ prepare_go() {
         mark_broken go "go build failed"
         sed 's/^/        /' "$HARNESS_RUN/go-build.log" >&2 || true
     fi
+}
+
+# Build and install cpp/moq (cargo builds moq-ffi, uniffi-bindgen-cpp renders the
+# bindings), then build the C++ client against the installed package with
+# find_package(moq-cpp), the way an external project consumes it. Debug, like the
+# rest of the run.
+prepare_cpp() {
+    local t
+    for t in cmake uniffi-bindgen-cpp; do
+        have "$t" || {
+            mark_broken cpp "$t not found (see cpp/moq/README.md)"
+            return
+        }
+    done
+    echo "building c++ client (workspace cpp/moq via uniffi-bindgen-cpp + cmake)..."
+    local build="$HARNESS_RUN/cpp-build" prefix="$HARNESS_RUN/cpp-prefix" config=Debug
+    [[ "$PROFILE" == "release" ]] && config=Release
+    if ! {
+        cmake -S "$WORKSPACE/cpp/moq" -B "$build/package" -DCMAKE_BUILD_TYPE="$config" -DCMAKE_INSTALL_LIBDIR=lib &&
+            cmake --build "$build/package" &&
+            cmake --install "$build/package" --prefix "$prefix" &&
+            cmake -S "$CLIENTS/cpp" -B "$build/client" -DCMAKE_BUILD_TYPE="$config" -DCMAKE_PREFIX_PATH="$prefix" &&
+            cmake --build "$build/client"
+    } >"$HARNESS_RUN/cpp-build.log" 2>&1; then
+        mark_broken cpp "cmake build failed"
+        sed 's/^/        /' "$HARNESS_RUN/cpp-build.log" >&2 || true
+        return
+    fi
+    CPP_INTEROP="$build/client/cpp-interop"
 }
 
 # Build moq-c (the C staticlib + cbindgen header) and compile the C subscriber
@@ -398,6 +456,7 @@ echo "moq-cli: $MOQ"
 
 needs python && prepare_python
 needs go && prepare_go
+needs cpp && prepare_cpp
 needs_js && prepare_js
 needs c && prepare_c
 needs gst && prepare_gst
@@ -415,34 +474,54 @@ if harness_probe "$URL/certificate.sha256"; then
     exit 1
 fi
 
+# Released-wire compatibility (compat.sh) pins one version and may run released
+# binaries that predate AUTH, so it runs anonymous: it compares the wire, and the
+# default matrix covers auth.
+COMPAT=0
+[[ -n "${INTEROP_VERSION:-}" ]] && COMPAT=1
+
 # The relay's auth server: `moq auth serve` verifying every token this run mints
 # against one fresh key. It answers only POST, so readiness is any HTTP reply.
-harness_port auth
-AUTH_URL="http://127.0.0.1:${HARNESS_PORT}/"
-auth_up() { curl -s -o /dev/null --max-time 1 "$AUTH_URL"; }
-if auth_up; then
-    echo "error: something is already listening on $AUTH_URL" >&2
-    exit 1
-fi
-KEY="$HARNESS_RUN/key.jwk"
-"$MOQ" auth generate --out "$KEY"
-harness_spawn auth "$HARNESS_RUN/auth.log" "$MOQ" auth serve --listen "127.0.0.1:${HARNESS_PORT}" --key "$KEY"
-AUTH_PID="$HARNESS_PID"
-deadline=$((SECONDS + 30))
-until auth_up; do
-    if ((SECONDS >= deadline)) || harness_exited "$AUTH_PID"; then
-        echo "auth server never became ready" >&2
-        sed 's/^/  auth: /' "$HARNESS_RUN/auth.log" >&2 || true
+if [[ "$COMPAT" -eq 0 ]]; then
+    harness_port auth
+    AUTH_URL="http://127.0.0.1:${HARNESS_PORT}/"
+    auth_up() { curl -s -o /dev/null --max-time 1 "$AUTH_URL"; }
+    if auth_up; then
+        echo "error: something is already listening on $AUTH_URL" >&2
         exit 1
     fi
-    sleep 0.05
-done
+    KEY="$HARNESS_RUN/key.jwk"
+    "$MOQ" auth generate --out "$KEY"
+    harness_spawn auth "$HARNESS_RUN/auth.log" "$MOQ" auth serve --listen "127.0.0.1:${HARNESS_PORT}" --key "$KEY"
+    AUTH_PID="$HARNESS_PID"
+    deadline=$((SECONDS + 30))
+    until auth_up; do
+        if ((SECONDS >= deadline)) || harness_exited "$AUTH_PID"; then
+            echo "auth server never became ready" >&2
+            sed 's/^/  auth: /' "$HARNESS_RUN/auth.log" >&2 || true
+            exit 1
+        fi
+        sleep 0.05
+    done
+fi
 
 echo "starting relay on 127.0.0.1:${PORT}..."
 # interop.toml is the source of truth; rewrite its ports into a scratch copy so the
 # committed file never has to be edited for a run.
-sed -e "s|:4443\"|:${PORT}\"|g" -e "s|http://127.0.0.1:4440/|${AUTH_URL}|" \
-    "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
+if [[ "$COMPAT" -eq 1 ]]; then
+    # Anonymous, offering only the pinned version, which comes from the executable's
+    # advertised CLI choices.
+    sed -e "s|:4443\"|:${PORT}\"|g" -e '/^version = \[/,/^\]/d' -e 's|^url = "http://127.0.0.1:4440/"|public = "**"|' \
+        "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
+    sed -i "/\[listen\]/a version = [\"${INTEROP_VERSION}\"]" "$HARNESS_RUN/relay.toml"
+    [[ "$(grep -c '^version = ' "$HARNESS_RUN/relay.toml")" == 1 && "$(grep -c '^public = ' "$HARNESS_RUN/relay.toml")" == 1 ]] || {
+        echo "relay.toml needs exactly one pinned [listen] version and anonymous access" >&2
+        exit 1
+    }
+else
+    sed -e "s|:4443\"|:${PORT}\"|g" -e "s|http://127.0.0.1:4440/|${AUTH_URL}|" \
+        "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
+fi
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
@@ -453,8 +532,12 @@ harness_endpoint relay "$URL"
 
 # ── tokens ──────────────────────────────────────────────────────────────────
 # Print the relay URL carrying a fresh token; the arguments are `moq auth sign`'s
-# (`--publish P`, `--subscribe S`).
+# (`--publish P`, `--subscribe S`). Compat runs anonymous, so it prints the bare URL.
 token_url() {
+    if [[ "$COMPAT" -eq 1 ]]; then
+        printf '%s' "$URL"
+        return
+    fi
     local token
     token=$("$MOQ" auth sign --key "$KEY" "$@")
     printf '%s/?jwt=%s' "$URL" "$token"
@@ -464,13 +547,14 @@ token_url() {
 CLI_LOG="${RUST_LOG:-info},moq_net::auth=debug"
 
 # The lite version with AUTH, which no client offers by default. The clients the
-# harness reads a grant or a refusal from dial it.
-AUTH_VERSION="moq-lite-07-wip"
+# harness reads a grant or a refusal from dial it. Compat dials its pinned version.
+AUTH_VERSION="${INTEROP_VERSION:-moq-lite-07-wip}"
 
 # The clients that print the grant they received as an `auth granted` line. The
 # binding clients (python, go, c, gst) have no grant to print until moq-ffi
 # exposes one, and the browser's shared connection keeps its session private.
 prints_grant() {
+    [[ "$COMPAT" -eq 0 ]] || return 1
     case "$1" in
         rust | js-native-node | js-native-bun) return 0 ;;
         *) return 1 ;;
@@ -535,10 +619,18 @@ run_publisher() {
         go)
             ffmpeg_h264 | "$GO_INTEROP" publish --url "$url" --broadcast "$broadcast"
             ;;
+        cpp)
+            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast"
+            ;;
+        js-native)
+            # exec, so the client leads the group and `stop_publisher` waits for its own close.
+            exec bun "$INTEROP_JS_PUBLISH_CLIENT/client.ts" publish "$url" "$broadcast"
+            ;;
         js)
             # Headless Chromium encodes its own H.264 from a fake camera via
-            # WebCodecs (lazily, once a subscriber creates demand).
-            cd "$CLIENTS/js" && bun driver.ts publish \
+            # WebCodecs (lazily, once a subscriber creates demand). exec, so the
+            # driver leads the group and `stop_publisher` waits for its own close.
+            cd "$CLIENTS/js" && exec bun driver.ts publish \
                 --url "$url" --broadcast "$broadcast"
             ;;
         *)
@@ -557,6 +649,84 @@ start_publisher() {
     PUB_PID="$HARNESS_PID"
 }
 
+# Stop a publisher the way a real one ends, so it closes its session and the idle-out check
+# below counts only real stalls. A stdin-fed client finishes once ffmpeg exits and its input
+# ends; the browser driver and the native JS client close on SIGTERM. Whatever is still
+# running after the wait is killed, and its connection then fails the round as an idle-out.
+stop_publisher() {
+    local pid="$1" lang="$2" deadline=$((SECONDS + 10))
+    case "$lang" in
+        # The leader alone: a SIGTERM to the group would reach Chromium too, which then exits
+        # without closing its sessions.
+        js | js-native) kill -TERM "$pid" 2>/dev/null || true ;;
+        *) pkill -TERM -g "$pid" -x ffmpeg 2>/dev/null || true ;;
+    esac
+    while ! harness_exited "$pid" && ((SECONDS < deadline)); do
+        sleep 0.1
+    done
+    if ! harness_exited "$pid"; then
+        echo "  WARN  publisher '$lang' was still running 10 s after it was stopped; killing it"
+    fi
+    harness_reap "$pid"
+}
+
+# The relay log line the next connection starts on.
+relay_next_line() {
+    echo $(($(wc -l <"$HARNESS_RUN/relay.log") + 1))
+}
+
+# The relay log from line FROM on, without its ANSI colors.
+relay_log_since() {
+    tail -n +"$1" "$HARNESS_RUN/relay.log" | sed 's/\x1b\[[0-9;]*m//g'
+}
+
+# Print each relay connection that appears from log line FROM on, with how it closed: the
+# relay's close error, "ended" for a close without one, or "open" while it hasn't closed yet.
+# The patterns follow the relay's `conn{id=...}` span and its `connection closed` log
+# (`rs/moq-relay/src/relay.rs`). Only connections opened in the window count, so a straggler
+# from an earlier round closing here isn't blamed on this one.
+relay_connections() {
+    relay_log_since "$1" | awk '
+        match($0, /conn\{id=[0-9]+ /) {
+            id = substr($0, RSTART + 8, RLENGTH - 9)
+            if (!(id in state)) { state[id] = "open"; order[++n] = id }
+        }
+        match($0, /connection closed id=[0-9]+/) {
+            id = substr($0, RSTART + 21, RLENGTH - 21)
+            if (id in state) {
+                rest = substr($0, RSTART + RLENGTH)
+                state[id] = sub(/^ err=/, "", rest) ? rest : "ended"
+            }
+        }
+        END { for (i = 1; i <= n; i++) print order[i], state[order[i]] }
+    '
+}
+
+# Fail the round for every relay connection it opened that idled out rather than closed.
+#
+# The relay times a silent peer out after its 10 s QUIC idle timeout, which can land long
+# after the cell that stalled finished. Every client closes its session on the way out, so
+# each close shows up at once, and an idle-out is a real stall that a reconnect would
+# otherwise hide behind a slow cell. A connection still open after the idle timeout is about
+# to idle out, so it fails the same way.
+check_idle_outs() {
+    local pub="$1" from="$2" deadline=$((SECONDS + 15)) id reason role failed=0
+    # Plain grep, not -q: under pipefail an early exit fails the pipeline on SIGPIPE.
+    while relay_connections "$from" | grep ' open$' >/dev/null && ((SECONDS < deadline)); do
+        sleep 0.2
+    done
+    while read -r id reason; do
+        [[ "$reason" == "open" || "$reason" == *"timed out"* ]] || continue
+        # The relay subscribes upstream only on the publisher's connection.
+        role=subscriber
+        relay_log_since "$from" | grep "conn{id=$id .*::subscriber: subscribe started" >/dev/null && role=publisher
+        echo "  FAIL  $pub round: relay connection $id ($role) idled out instead of closing ($reason)"
+        relay_log_since "$from" | grep -E "conn\{id=$id |connection closed id=$id " | sed 's/^/        /'
+        failed=1
+    done < <(relay_connections "$from")
+    ((failed == 0)) || overall=1
+}
+
 # Run a native-JS subscriber and judge it by the "received N bytes" marker it
 # prints, not its exit code. The @moq/web-transport NAPI addon can segfault
 # during the runtime's exit teardown *after* a frame has arrived (an upstream bug
@@ -565,9 +735,19 @@ start_publisher() {
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_native() {
     local out
-    out=$( (cd "$CLIENTS/js-native" && "$@") 2>&1) || true
+    out=$( (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && "$@") 2>&1) || true
     printf '%s\n' "$out" >&2
     printf '%s\n' "$out" | grep -q '^received '
+}
+
+# Write a track name and the group a live JS subscriber saw on it to
+# $HARNESS_RUN/<broadcast>.track. Extra args go to subscribe.ts (e.g. --track).
+# shellcheck disable=SC2329  # reached from run_subscriber, which 'harness_spawn' invokes
+observe_group() {
+    local broadcast="$1"
+    shift
+    (cd "${INTEROP_NATIVE_CLIENT:-$CLIENTS/js-native}" && node --import tsx subscribe.ts subscribe --url "$URL" --broadcast "$broadcast" \
+        --timeout "$TIMEOUT" --track-file "$HARNESS_RUN/$broadcast.track" "$@")
 }
 
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
@@ -577,9 +757,58 @@ run_subscriber() {
         rust)
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
             # SIGTERM that fires when no data arrives within the timeout.
+            if [[ "${INTEROP_FETCH_TRACK:-0}" == 1 ]]; then
+                # Discover the track from the decoded catalog, never today's naming
+                # convention, and a group live demand is filling.
+                observe_group "$broadcast" || return
+                local track group binary index=0
+                { read -r track && read -r group; } <"$HARNESS_RUN/$broadcast.track" || return
+                # Both readers FETCH that group by its observed ID, which waits for it to finish.
+                for binary in "$MOQ" "${INTEROP_SUB_MOQ:-$MOQ}"; do
+                    timeout -k 3 "$TIMEOUT" "$binary" --connect "$URL" ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} \
+                        --broadcast "$broadcast" fetch "$track" --group "$group" --json >"$HARNESS_RUN/$broadcast.$index.json" || return
+                    index=$((index + 1))
+                done
+                python3 - "$HARNESS_RUN/$broadcast.0.json" "$HARNESS_RUN/$broadcast.1.json" <<'PYCODE'
+import base64, json, sys
+outputs=[]
+sequence=None
+for path in sys.argv[1:]:
+    frames=[json.loads(line) for line in open(path)]
+    assert frames, "FETCH returned no frames"
+    payloads=[]
+    for index, frame in enumerate(frames):
+        payload=base64.b64decode(frame["payload"], validate=True)
+        if sequence is None: sequence=frame["group"]
+        assert frame["group"] == sequence and frame["frame"] == index and frame["size"] == len(payload), frame
+        payloads.append(payload)
+    outputs.append(payloads)
+assert outputs[0] == outputs[1], "current/released FETCH changed the immutable group's payloads"
+PYCODE
+                return
+            fi
+            if [[ "${INTEROP_FETCH_DATA:-0}" == 1 ]]; then
+                # The JS fixture writes one group on `data` once a subscriber wants it. A
+                # live subscriber observes it; the reader then FETCHes it by that ID.
+                observe_group "$broadcast" --track data || return
+                local track group
+                { read -r track && read -r group; } <"$HARNESS_RUN/$broadcast.track" || return
+                timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} \
+                    --broadcast "$broadcast" fetch "$track" --group "$group" >"$HARNESS_RUN/$broadcast.fetch" || return
+                [[ "$(cat "$HARNESS_RUN/$broadcast.fetch")" == "compat-fetch" ]]
+                return
+            fi
+            if [[ "${INTEROP_DECODE:-0}" == 1 ]]; then
+                # ffmpeg actually decodes the exported media; mux headers alone cannot pass.
+                (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
+                    ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
+                    ffmpeg -hide_banner -loglevel error -i - -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw"
+                [[ -s "$HARNESS_RUN/$broadcast.raw" ]]
+                return
+            fi
             local n
-            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$url" --connect-version "$AUTH_VERSION" \
-                --broadcast "$broadcast" export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
+            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$url" \
+                --connect-version "$AUTH_VERSION" --broadcast "$broadcast" export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
             [[ "${n:-0}" -ge 1 ]]
             ;;
         python)
@@ -588,6 +817,9 @@ run_subscriber() {
             ;;
         go)
             "$GO_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
+            ;;
+        cpp)
+            "$CPP_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
         c)
             "$C_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
@@ -598,18 +830,22 @@ run_subscriber() {
             # video_0 by name: a bare `moqsrc ! filesink` would take whichever pad
             # appears first, so a publisher with audio (every one but the Rust CLI)
             # could pass this cell on audio bytes without video ever flowing. We grab one byte, the
-            # same "bytes moved" bar as the rust subscriber (no decode). head closing
-            # the pipe SIGPIPEs gst-launch, so success returns at once; no data just
-            # runs out the timeout. Our plugin dir rides on top of the system path
+            # same "bytes moved" bar as the rust subscriber (no decode). SIGPIPE is ignored, so
+            # head closing the pipe fails filesink's next write and gst-launch stops the pipeline,
+            # closing its session, rather than dying with it open; no data just runs out the
+            # timeout. Our plugin dir rides on top of the system path
             # (which provides filesink); a private registry keeps the scan off the
             # user's cache. buffer-mode=2 makes filesink unbuffered so the first frame
             # reaches head immediately.
             local n
-            n=$(GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-                timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
-                moqsrc name=s url="$url" broadcast="$broadcast" \
-                s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
-                2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true)
+            n=$(
+                trap '' PIPE
+                GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
+                    timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
+                    moqsrc name=s url="$url" broadcast="$broadcast" \
+                    s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
+                    2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true
+            )
             [[ "${n:-0}" -ge 1 ]]
             ;;
         js)
@@ -663,13 +899,14 @@ run_cell() {
     return "$status"
 }
 
-# run_round <round> <broadcast> <pub_pid> <want_pass>: every subscriber dials with a
+# run_round <round> <broadcast> <pub_pid> <want_pass> <from>: every subscriber dials with a
 # token for <broadcast> alone, and must see data (want_pass=1) or time out (0). The
 # leading `**` matches zero segments, so the grant reaches every client as a pattern
 # no prefix could carry.
-# <round> names the publisher in the output and the logs.
+# <round> names the publisher in the output and the logs, and <from> is the relay log
+# line the round's connections start on.
 run_round() {
-    local pub="$1" broadcast="$2" pub_pid="$3" want_pass="$4"
+    local pub="$1" broadcast="$2" pub_pid="$3" want_pass="$4" from="$5"
     local pids=() names=() i sub sub_url sub_grant why
     sub_url=$(token_url --subscribe "**/$broadcast")
     sub_grant=$(grant_line "" "**/$broadcast")
@@ -711,11 +948,14 @@ run_round() {
         echo "  INFO  publisher '$pub' log:"
         sed 's/^/        /' "$HARNESS_RUN/pub-$pub.log" 2>/dev/null || true
     fi
-    # `harness_reap` retires the entry, so teardown never signals this now-reaped
-    # (possibly recycled) PID again.
+    # `stop_publisher` reaps it, retiring the entry, so teardown never signals this
+    # now-reaped (possibly recycled) PID again.
     if [[ -n "$pub_pid" ]]; then
-        harness_reap "$pub_pid"
+        # A round is named after its publisher's language, plus `-denied` for the refused one.
+        stop_publisher "$pub_pid" "${pub%-denied}"
     fi
+    # A round that expects no data ends its subscribers by timing out, which is its point.
+    [[ "$want_pass" -eq 0 || "$IDLE_CHECK" -eq 0 ]] || check_idle_outs "$pub" "$from"
     return 0
 }
 
@@ -743,6 +983,7 @@ run_media() {
 # binding publishers enforce the grant too, but surface it only through their
 # bindings, and the browser elements have no way to offer $AUTH_VERSION.
 enforces_grant() {
+    [[ "$COMPAT" -eq 0 ]] || return 1
     case "$1" in
         rust) return 0 ;;
         *) return 1 ;;
@@ -772,12 +1013,13 @@ if [[ "$MEDIA" -eq 1 ]]; then
         run_media "control: silent audio" --fault silent-audio --cases none --expect-fail "audio tone"
         run_media "control: offset audio" --fault audio-offset --cases none --expect-fail "audio/video sync"
         run_media "control: leaked session" --leak --cases detach --expect-fail "resource baseline"
+        run_media "control: lagging latecomer" --lag --cases late-join --expect-fail "late join reaches live"
     fi
 elif [[ "$NEGATIVE" -eq 1 ]]; then
     # Negative control: no publisher. Every subscriber must FAIL (time out with
     # no data), proving the harness can actually report failure.
     echo "=== negative control: subscribers expect NO data ==="
-    run_round "none" "interop-missing-$$-$RANDOM.hang" "" 0
+    run_round "none" "interop-missing-$$-$RANDOM.hang" "" 0 "$(relay_next_line)"
 else
     for pub in "${PUB_LIST[@]}"; do
         broadcast="interop-${pub}-$$-${RANDOM}.hang"
@@ -790,8 +1032,9 @@ else
             continue
         fi
         # The exact broadcast, not its subtree.
+        from=$(relay_next_line)
         start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$broadcast")"
-        run_round "$pub" "$broadcast" "$PUB_PID" 1
+        run_round "$pub" "$broadcast" "$PUB_PID" 1 "$from"
         if why=$(check_grant "$pub" "$HARNESS_RUN/pub-$pub.log" "$(grant_line "$broadcast" "")"); then
             prints_grant "$pub" && echo "  PASS  $pub grant"
         else
@@ -807,8 +1050,9 @@ else
         broadcast="interop-denied-${pub}-$$-${RANDOM}.hang"
         allowed="interop-allowed-*.hang"
         echo "=== publisher: $pub  broadcast: $broadcast (token grants only $allowed) ==="
+        from=$(relay_next_line)
         start_publisher "$pub-denied" "$pub" "$broadcast" "$(token_url --publish "$allowed")"
-        run_round "$pub-denied" "$broadcast" "$PUB_PID" 0
+        run_round "$pub-denied" "$broadcast" "$PUB_PID" 0 "$from"
         log="$HARNESS_RUN/pub-$pub-denied.log"
         if ! check_denied "$log" "$broadcast"; then
             echo "  FAIL  $pub publisher did not fail with Unauthorized naming $broadcast:"

@@ -28,6 +28,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Fix any outdated docs and comments inline; don't add a separate PR for it.
 - Add the AI marker `(Written by <model>)` to any posts on GitHub, excluding commit messages that contain `Co-Authored-By:` trailers.
 - Any AI comments may be challenged, and not confused with human maintainers.
+- This repo is public: never mention customers, partners, or prospects (names, volumes, terms) or link to private repos. Justify work on its merits.
 - Prompt the user to decide when unsure, but always provide recommendations.
 
 # Guidelines
@@ -98,7 +99,7 @@ The `quest` binary comes from the kixelated/quest flake input and serves the que
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `doc/lib/{py,swift,kt,go,dart,c}` |
+| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-auth` | `js/auth`, `doc/bin/relay/auth.md` |
@@ -106,7 +107,7 @@ The `quest` binary comes from the kixelated/quest flake input and serves the que
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
-| `rs/moq-c` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
+| `rs/moq-c` C ABI (`moq.h`) | `doc/lib/c` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 | a kramdown-rfc construct new to `drafts/` | `doc/.vitepress/drafts.ts`, which translates the drafts into `/draft/` site pages |
 

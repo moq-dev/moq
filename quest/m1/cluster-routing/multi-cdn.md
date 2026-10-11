@@ -9,7 +9,7 @@ one when that route goes away; a publisher pushes the same path to every CDN.
 The move resumes only between lite-07 routes with the same epoch. The
 secondary needs nothing from us: a moq-transport relay that speaks no ROUTE is
 just a link, but its routes carry no epoch, so moving onto it is a `Restart`
-([Restart](/quest/m0/broadcast-epoch/restart.md)) and the player
+(Restart) and the player
 re-requests.
 
 ## Plan
@@ -49,6 +49,3 @@ connect docs.
 Public API: per-upstream preference in client config, in Rust and JS. Wire:
 none.
 
-## Required
-
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - an epochless secondary takes over as a restart, not a resume

@@ -28,6 +28,7 @@ pub struct TransportConfig {
     pub(crate) max_concurrent_bidi_streams: VarInt,
     pub(crate) max_concurrent_uni_streams: VarInt,
     pub(crate) max_idle_timeout: Option<VarInt>,
+    pub(crate) handshake_idle_timeout: Duration,
     pub(crate) stream_receive_window: VarInt,
     pub(crate) receive_window: VarInt,
     pub(crate) send_window: u64,
@@ -101,6 +102,19 @@ impl TransportConfig {
     /// ```
     pub fn max_idle_timeout(&mut self, value: Option<IdleTimeout>) -> &mut Self {
         self.max_idle_timeout = value.map(|t| t.0);
+        self
+    }
+
+    /// Maximum duration of inactivity to accept before abandoning a handshake.
+    ///
+    /// Used in place of [`max_idle_timeout`](Self::max_idle_timeout) until the handshake
+    /// completes, so a short idle timeout meant to detect a dead peer quickly does not also cut
+    /// a handshake off after a single probe. It applies whether the idle timeout is shorter,
+    /// longer, or disabled, and whatever idle timeout the peer advertises; the negotiated idle
+    /// timeout takes over once the connection is established. Defaults to 10 seconds, as
+    /// msquic's `HandshakeIdleTimeoutMs`.
+    pub fn handshake_idle_timeout(&mut self, value: Duration) -> &mut Self {
+        self.handshake_idle_timeout = value;
         self
     }
 
@@ -383,6 +397,7 @@ impl Default for TransportConfig {
             max_concurrent_uni_streams: 100u32.into(),
             // 30 second default recommended by RFC 9308 § 3.2
             max_idle_timeout: Some(VarInt(30_000)),
+            handshake_idle_timeout: Duration::from_secs(10),
             stream_receive_window: STREAM_RWND.into(),
             receive_window: VarInt::MAX,
             send_window: (8 * STREAM_RWND).into(),
@@ -422,6 +437,7 @@ impl fmt::Debug for TransportConfig {
             max_concurrent_bidi_streams,
             max_concurrent_uni_streams,
             max_idle_timeout,
+            handshake_idle_timeout,
             stream_receive_window,
             receive_window,
             send_window,
@@ -452,6 +468,7 @@ impl fmt::Debug for TransportConfig {
         s.field("max_concurrent_bidi_streams", max_concurrent_bidi_streams)
             .field("max_concurrent_uni_streams", max_concurrent_uni_streams)
             .field("max_idle_timeout", max_idle_timeout)
+            .field("handshake_idle_timeout", handshake_idle_timeout)
             .field("stream_receive_window", stream_receive_window)
             .field("receive_window", receive_window)
             .field("send_window", send_window)

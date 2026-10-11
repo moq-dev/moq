@@ -11,7 +11,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
-import { AnnounceRequest } from "./announce.ts";
+import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
@@ -126,6 +126,56 @@ test.each([
 	pair.client.close();
 	pair.server.close();
 });
+
+test.each([Version.DRAFT_06, Version.DRAFT_07])(
+	"a republish restarts the advertisement (version %s)",
+	async (version) => {
+		const pair = createMockTransportPair(ALPN_05);
+		const origin = new OriginProducer();
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const old = publish(origin, Path.from("cam"));
+
+		const written: Uint8Array[] = [];
+		const stream = new Stream({
+			version: version,
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({
+				write(chunk) {
+					written.push(new Uint8Array(chunk));
+				},
+			}),
+		});
+		const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+		const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+		await settle();
+		const initial = written.length;
+
+		// Another broadcast at the path, without an epoch: another instance.
+		const republished = publish(origin, Path.from("cam"));
+		await settle();
+		const bytes = Uint8Array.from(written.slice(initial).flatMap((chunk) => [...chunk]));
+		const reader = new Reader(undefined, bytes, version);
+		const messages: AnnounceBroadcast[] = [];
+		while (!(await reader.done())) messages.push(await decodeAnnounceBroadcast(reader, version));
+		if (version === Version.DRAFT_07) {
+			expect(messages).toMatchObject([{ status: "restart", id: 0n }]);
+		} else {
+			expect(messages).toMatchObject([
+				{ status: "endedId", id: 0n },
+				{ status: "active", suffix: "cam" },
+			]);
+		}
+
+		stream.close();
+		await running;
+		publisher.close();
+		republished.close();
+		old.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+	},
+);
 
 // Delivers `sequences` in the given order, finishes the track, and returns the
 // SUBSCRIBE_END the publisher put on the wire.
@@ -647,9 +697,9 @@ test("lite draft-05: a late-arriving older group is still served", async () => {
 	}
 });
 
-// SUBSCRIBE_START promises nothing below the announced sequence will be delivered, so
-// the floor is pinned there: a straggler below the first served group is dropped even
-// though arrival-order serving would otherwise surface it.
+// An unfloored pre-06 subscribe joins at the publisher's start. SUBSCRIBE_START makes
+// that group the floor: a straggler below it is dropped even though arrival-order
+// serving would otherwise surface it.
 test("lite draft-05: a straggler below the announced start group is not served", async () => {
 	const sub = await servedSubscription();
 	try {
@@ -666,6 +716,39 @@ test("lite draft-05: a straggler below the announced start group is not served",
 		sub.serve(1);
 		sub.serve(3);
 		expect(await sub.servedSequence()).toBe(3);
+	} finally {
+		await sub.close();
+	}
+});
+
+// An explicit floor stays where it was named. SUBSCRIBE_START still reports the first
+// served group, and a later group at or above the floor is delivered.
+test("lite draft-05: an explicit floor still serves a group below the first one", async () => {
+	const sub = await servedSubscription({ startGroup: 0 });
+	try {
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
+		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+		expect(resp.start.group).toBe(2);
+
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+	} finally {
+		await sub.close();
+	}
+});
+
+// Lite-06 encodes a floor of group 0 as 0, including a subscribe that omitted Group Start.
+// That is a floor, so a later group 0 is still served.
+test("lite draft-06: an omitted group start still serves a group below the first one", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06 });
+	try {
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
 	} finally {
 		await sub.close();
 	}
@@ -712,8 +795,9 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 		await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		sub.serve(2);
 		await flush();
-		expect(ranges).toHaveBeenCalledTimes(1);
-		expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: undefined });
+		// Draft-06 group 0 is a floor, so the first group does not raise the cursor.
+		// The queued update is still waiting on the parked write.
+		expect(ranges).not.toHaveBeenCalled();
 
 		sub.release();
 
@@ -764,8 +848,9 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 
 		await replayUpdate({ priority: 0, startGroup: 1, startFrame: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
-		expect(ranges).toHaveBeenCalledTimes(1);
-		expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: undefined });
+		// Draft-06 group 0 is a floor, so serving the first group does not move the cursor.
+		// The queued update is still waiting on the parked write.
+		expect(ranges).not.toHaveBeenCalled();
 
 		sub.release();
 
@@ -1780,6 +1865,69 @@ test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", as
 		publisher.close();
 		client.close();
 		origin.close();
+	}
+});
+
+// A TRACK_INFO blocked on flow control when the grant shrinks is reset: the rest of the
+// answer never reaches the wire once the stream drains.
+test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const handle = origin.dynamic(Path.from("live"));
+	const requests = handle.requested();
+	const grant = new Signal<Grant | undefined>(grantOf("live"));
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), {
+		grant,
+		ready: Promise.resolve(),
+	});
+
+	// The first write (the length prefix) parks until released.
+	let release = () => {};
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let parked = () => {};
+	const writing = new Promise<void>((resolve) => {
+		parked = resolve;
+	});
+	const written: Uint8Array[] = [];
+	const stream = new Stream({
+		version: Version.DRAFT_06,
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			async write(chunk) {
+				parked();
+				await blocked;
+				written.push(chunk);
+			},
+		}),
+	});
+
+	const resets = spyOn(Writer.prototype, "reset");
+	const produced = new BroadcastProducer();
+	produced.createTrack("video", { timescale: Timescale.MILLI });
+	try {
+		const serving = publisher.runTrackInfo(new TrackMessage(Path.from("live/cam"), "video"), stream);
+		const request = await requests.next();
+		if (request.done) throw new Error("the handler never saw the request");
+		request.value.accept(produced);
+		await writing;
+
+		grant.set(grantOf("other"));
+		release();
+		await serving;
+
+		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");
+		// Only the in-flight length prefix; the body never followed it.
+		expect(written.length).toBe(1);
+	} finally {
+		resets.mockRestore();
+		produced.close();
+		handle.close();
+		publisher.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
 	}
 });
 

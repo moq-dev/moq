@@ -65,7 +65,15 @@ expiry, an expiry that leaves the union intact ends only that token, and
   stores every token added through it, presents them on each new session as
   it attaches, unions the live session's grant, and its `add` resolves against
   the session that is up at the time; a token the app drops is withdrawn from
-  the live session and forgotten.
+  the live session and forgotten. Its request-token half belongs to
+  [Request tokens](/quest/m1/auth/request-token.md); whichever lands first
+  adds the handle.
+- Bound pending tokens: `auth::Handle::requests()` hands out an unbounded
+  queue today, and a closed AUTH stream leaves its request queued, so a peer
+  that finishes AUTH streams faster than the relay verifies them grows it
+  without limit (Codex security review on #4039). This quest is the first
+  consumer, so bound it per session here and refuse what overflows; dropping a
+  `Request` already refuses its token.
 - Docs: `doc/bin/relay/auth.md` gains an "in-band tokens" section beside
   revalidation stating that grants union, that a token needs the admitted
   root, what an expiry does to the union today, and that the grant's expiry

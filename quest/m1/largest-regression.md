@@ -25,7 +25,7 @@ that bug visible instead of a silent stall. A change of route can't cause
 it: every route change, including a per-path winner change under a prefix
 pool, reaches downstream as a `Restart` of the route, which unsets the cached
 copy of every broadcast nested under it
-(maintainer, 2026-10-08, in [Restart](/quest/m0/broadcast-epoch/restart.md)).
+(maintainer, 2026-10-08, in Restart).
 Only a restart behind an unchanged route reaches a copy unannounced.
 
 Decided 2026-10-08: shrunk to the two answer-carrying wires and moved to m1.
@@ -59,10 +59,6 @@ group 0, never the old group. A same-epoch standby behind the cached copy
 keeps the copy and resumes it.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Restart](/quest/m0/broadcast-epoch/restart.md) - route changes reach a copy as a `Restart`, leaving only same-route restarts for this to catch
 
 ## Related
 

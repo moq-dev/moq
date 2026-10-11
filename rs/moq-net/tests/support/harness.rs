@@ -53,6 +53,8 @@ pub struct MockConnectOptions {
 	pub latency: std::time::Duration,
 	/// What the client may make the server's session hold, when not the default.
 	pub server_limits: Option<moq_net::session::Limits>,
+	/// The price the client puts on the link, when not the default.
+	pub cost: Option<u64>,
 }
 
 impl MockConnectOptions {
@@ -66,6 +68,7 @@ impl MockConnectOptions {
 			server_subscribe: None,
 			latency: std::time::Duration::ZERO,
 			server_limits: None,
+			cost: None,
 		}
 	}
 }
@@ -97,6 +100,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	let transports = (client_transport.clone(), server_transport.clone());
 
 	let mut client = Client::new().with_versions(opts.version.into());
+	if let Some(cost) = opts.cost {
+		client = client.with_cost(cost);
+	}
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}

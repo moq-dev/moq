@@ -10,7 +10,7 @@ OBS Studio install.
 
 - **Publish**: Settings > Stream, choose "MoQ", enter the relay URL (with `?jwt=` if needed) and broadcast path, Start Streaming.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
-- **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (negotiated draft, RTT, bandwidth, loss).
+- **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (RTT, bandwidth, loss).
 
 Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
 such as `https://cdn.moq.dev/anon/your-stream`. A URL with `?jwt=` fills the
@@ -52,16 +52,17 @@ just obs build
 ```
 
 macOS and Windows source builds use `just obs setup && just obs build` with
-Xcode or Visual Studio 2022; see
+Xcode or Visual Studio 2022, plus Rust and
+[`uniffi-bindgen-cpp`](/lib/cpp/) to build the C++ package in-tree; see
 [`cpp/obs/`](https://github.com/moq-dev/moq/tree/main/cpp/obs).
 
 ## Advanced settings
 
 Off by default; the defaults suit a normal relay. They cover what you would
-otherwise pass to `moq` on the command line: pinning a draft or QUIC backend,
-trusting a self-signed relay or private CA, reconnect pacing, congestion
-control, and qlog traces. A rejected value stops the stream with the reason in
-the log rather than silently using a default.
+otherwise pass to `moq` on the command line: the local bind address,
+trusting a self-signed relay or private CA, reconnect pacing, the QUIC
+stream limit, and the WebSocket fallback race. A rejected value stops the
+stream with the reason in the log rather than silently using a default.
 
-The plugin is C++ over [moq-c](/lib/c/)'s C ABI and ships with every moq-c
-release.
+The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
+every moq-cpp release.

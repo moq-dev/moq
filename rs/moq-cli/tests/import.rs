@@ -5,9 +5,22 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
+use tokio::process::Child;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const BBB: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb.ts");
+
+/// Await `step` while `moq` still holds stdin open, failing as soon as the process exits.
+///
+/// Until stdin ends, an exit is the publisher failing, so report its status rather than
+/// waiting out `TIMEOUT` and blaming the step.
+async fn running<T>(child: &mut Child, what: &str, step: impl Future<Output = T>) -> T {
+	tokio::select! {
+		out = step => out,
+		status = child.wait() => panic!("moq exited with {} before {what}", status.expect("wait for moq")),
+		_ = tokio::time::sleep(TIMEOUT) => panic!("{what} timed out"),
+	}
+}
 
 #[tokio::test]
 async fn import_delivers_the_catalog_finish_at_eof() {
@@ -58,17 +71,15 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 		.await
 		.expect("subscriber connects");
 
-	// `Live` can come first while the relay has yet to learn the publisher's route.
-	while !matches!(
-		tokio::time::timeout(TIMEOUT, announced.next())
-			.await
-			.expect("announce timed out")
-			.expect("origin closed"),
-		moq_tokio::moq_net::announce::Event::Start(_)
-	) {}
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("demo", None))
+	let event = running(&mut child, "the announce", announced.next())
 		.await
-		.expect("request timed out")
+		.expect("origin closed");
+	let moq_tokio::moq_net::announce::Event::Start(announce) = event else {
+		panic!("the first announce event is {event:?}, not a start");
+	};
+	assert_eq!(announce.prefix.as_str(), "demo");
+	let broadcast = running(&mut child, "the broadcast", consumer.request_broadcast("demo", None))
+		.await
 		.expect("announced broadcast resolves");
 	let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast)
 		.await
@@ -76,9 +87,8 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 
 	// The relay is serving the catalog before stdin ends, so the finish is queued on a
 	// live subscription when the process exits.
-	tokio::time::timeout(TIMEOUT, catalogs.next())
+	running(&mut child, "the first catalog", catalogs.next())
 		.await
-		.expect("catalog timed out")
 		.expect("catalog read")
 		.expect("a catalog");
 

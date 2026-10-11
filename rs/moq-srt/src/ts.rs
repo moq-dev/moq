@@ -454,8 +454,9 @@ mod tests {
 	}
 
 	/// A caller reconnecting under the same stream id while its stale connection is
-	/// still open replaces the stale broadcast at once: each connection is its own
-	/// epoch, so viewers re-request instead of stalling on the old one.
+	/// still open restarts the broadcast at once: each connection is its own epoch, so
+	/// a fresh request reaches the reconnect, while the stale viewer stays on the old
+	/// one until it leaves.
 	#[tokio::test(start_paused = true)]
 	async fn a_reconnect_replaces_the_stale_connection() {
 		let origin = produce_origin();
@@ -470,18 +471,16 @@ mod tests {
 			.unwrap();
 
 		let _fresh = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
-		let ended = tokio::time::timeout(Duration::from_secs(1), async {
+		let stale_viewer = tokio::time::timeout(Duration::from_secs(1), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
-					Ok(None) => panic!("the stale broadcast ended cleanly"),
-					Err(err) => return err,
+					other => return other.map(|_| ()),
 				}
 			}
 		})
-		.await
-		.expect("the stale viewer stalled");
-		assert!(matches!(ended, moq_net::Error::Unroutable), "{ended:?}");
+		.await;
+		assert!(stale_viewer.is_err(), "the stale viewer ended: {stale_viewer:?}");
 		let fresh = consumer.request_broadcast("ingest", None).await.unwrap();
 		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected caller");
 	}

@@ -192,15 +192,15 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 					false => (suffix.rest.into_owned(), hops.literal),
 				};
 				let path = prefix.join(&suffix);
-				if lite::restart_supported(self.version)
+				if lite::update_supported(self.version)
 					&& !self.version.has_announce_id()
 					&& run.announced.contains(&path)
 				{
-					// lite-05 only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
-					// atomically replace the broadcast. Lite06+ restarts by announce id, and older
-					// versions never defined restarts, so both fall through to start_announce, which
+					// lite-05 only: a duplicate ANNOUNCE for an already-announced path is an update;
+					// atomically replace its metadata. Lite06+ updates by announce id, and older
+					// versions never defined updates, so both fall through to start_announce, which
 					// rejects the duplicate (Error::ProtocolViolation).
-					self.restart_announce(
+					self.update_announce(
 						path,
 						hops,
 						cost,
@@ -232,11 +232,25 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 				run.announced.withdraw(&path);
 			}
-			lite::AnnounceBroadcast::Restart { id, hops, cost } => {
+			lite::AnnounceBroadcast::Update { id, hops, cost } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
 				// or retired id is a protocol violation.
 				let (suffix, hops) = run.decoder.update(id, hops)?;
 				let path = prefix.join(&suffix);
+				self.update_announce(
+					path,
+					hops,
+					cost,
+					run.link_cost,
+					run.responder_origin,
+					&mut run.announced,
+				)?;
+			}
+			lite::AnnounceBroadcast::Restart { id, epoch, hops, cost } => {
+				// Resolved like an update: the id stays live.
+				let (suffix, hops) = run.decoder.update(id, hops)?;
+				let path = prefix.join(&suffix);
+				run.announced.restart(&path, epoch);
 				self.restart_announce(
 					path,
 					hops,
@@ -376,9 +390,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			.unwrap_or(self.session_origin)
 	}
 
-	/// Handle a RESTART (an explicit restart status, or a duplicate ANNOUNCE on lite-05).
+	/// Handle an ANNOUNCE_UPDATE (an explicit update status, or a duplicate ANNOUNCE on
+	/// lite-05).
 	///
-	/// A restart carries no content claim, so this session's route re-prices in
+	/// An update carries no content claim, so this session's route re-prices in
 	/// place whatever the new chain says: in-flight tracks keep flowing and the
 	/// origin only hands over if the winner changed.
 	/// The advertisement is already live, so this can attach a route even when the
@@ -386,10 +401,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	///
 	/// Returns `Ok(false)` if the new hop chain is a reflected loop (this session's
 	/// route is now gone), `Ok(true)` otherwise.
-	fn restart_announce(
+	fn update_announce(
 		&mut self,
 		path: PathOwned,
-		mut hops: crate::Hops,
+		hops: crate::Hops,
 		// The route cost off the wire and this link's price. See `start_announce`.
 		cost: crate::origin::Cost,
 		link_cost: u64,
@@ -400,27 +415,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		announced: &mut Announced,
 	) -> Result<bool, Error> {
 		// Reflected loop (or a full chain): detach its route but keep the advertisement live.
-		let reflected = match responder_origin {
-			// A chain already naming the sender came back through it; see `start_announce`.
-			Some(responder) => {
-				(responder != crate::Hop::UNKNOWN && hops.contains(&responder))
-					|| hops.push(responder).is_err()
-					|| hops.contains(&self.self_origin)
-			}
-			None => hops.contains(&self.self_origin),
-		};
-		if reflected {
-			tracing::debug!(route = %self.log_path(&path), "dropping reflected restart");
+		let Some(hops) = self.chain(&path, hops, responder_origin) else {
 			announced.declined(path);
 			return Ok(false);
-		}
+		};
 
-		if hops.is_empty() {
-			hops.push(crate::Hop::UNKNOWN)
-				.expect("an empty hop chain always has room for one entry, and repeats nothing");
-		}
-
-		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
+		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "update");
 		let metadata = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
 
 		// A restart is a metadata update: the route keeps its prefix (and its
@@ -431,6 +431,66 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 
 		Ok(announced.offer(self, path, metadata))
+	}
+
+	/// Handle an ANNOUNCE_RESTART: another publisher instance replaces a live
+	/// advertisement, under the epoch the caller recorded.
+	///
+	/// The replacement enters the origin as a fresh route before the old one leaves, so
+	/// local consumers see one restart rather than an end and a start, and nothing
+	/// resolved through the old route is joined again. The sources the old route minted
+	/// take no new tracks, while the tracks already in flight run to their own end.
+	///
+	/// Returns `Ok(false)` if the new hop chain is a reflected loop (this session's
+	/// route is now gone), `Ok(true)` otherwise.
+	fn restart_announce(
+		&mut self,
+		path: PathOwned,
+		hops: crate::Hops,
+		// See `update_announce`.
+		cost: crate::origin::Cost,
+		link_cost: u64,
+		responder_origin: Option<crate::Hop>,
+		announced: &mut Announced,
+	) -> Result<bool, Error> {
+		let Some(hops) = self.chain(&path, hops, responder_origin) else {
+			announced.declined(path);
+			return Ok(false);
+		};
+
+		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
+		let route = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
+		// Held to the limit like a start: a restart outside it is withheld, dropping the old instance.
+		Ok(announced.offer(self, path, route))
+	}
+
+	/// The full chain of an advertisement replacing a live one, or `None` when it is a
+	/// reflected loop or full. See `start_announce`.
+	fn chain(
+		&self,
+		path: &PathOwned,
+		mut hops: crate::Hops,
+		responder_origin: Option<crate::Hop>,
+	) -> Option<crate::Hops> {
+		let reflected = match responder_origin {
+			// A chain already naming the sender came back through it; see `start_announce`.
+			Some(responder) => {
+				(responder != crate::Hop::UNKNOWN && hops.contains(&responder))
+					|| hops.push(responder).is_err()
+					|| hops.contains(&self.self_origin)
+			}
+			None => hops.contains(&self.self_origin),
+		};
+		if reflected {
+			tracing::debug!(route = %self.log_path(path), "dropping reflected announce");
+			return None;
+		}
+
+		if hops.is_empty() {
+			hops.push(crate::Hop::UNKNOWN)
+				.expect("an empty hop chain always has room for one entry, and repeats nothing");
+		}
+		Some(hops)
 	}
 
 	/// Remove a subscription, releasing the session's handle on its producer.
@@ -3228,7 +3288,7 @@ mod tests {
 
 		// A reprice from the same unnamed publisher stays anonymous and in place.
 		subscriber
-			.restart_announce(
+			.update_announce(
 				Path::new("room/host").to_owned(),
 				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
@@ -3284,7 +3344,7 @@ mod tests {
 		cursor.assert_next_active("room/host");
 
 		subscriber
-			.restart_announce(
+			.update_announce(
 				path.clone(),
 				crate::Hops::new(),
 				crate::origin::Cost::new(5),
@@ -3296,6 +3356,49 @@ mod tests {
 
 		let route = cursor.assert_next_active("room/host");
 		assert_eq!(route.cost, crate::origin::Cost::new(5).charged(0));
+	}
+
+	/// A restart is held to the subscribe limit like a start: one the limit no longer
+	/// covers is withheld, ending the old instance rather than attaching the new one.
+	#[moq_net_sim::test]
+	async fn a_restart_outside_the_limit_is_withheld() {
+		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+		let auth = subscriber.auth.clone();
+
+		let mut announced = Announced::default();
+		let path = Path::new("room/host").to_owned();
+		subscriber
+			.start_announce(
+				path.clone(),
+				None,
+				crate::Hops::new(),
+				crate::origin::Cost::UNKNOWN,
+				0,
+				Some(crate::Hop::new(7).unwrap()),
+				&mut announced,
+			)
+			.unwrap();
+		let mut cursor = consumer.announced();
+		cursor.assert_next_active("room/host");
+
+		auth.authorize(&crate::auth::Grant {
+			publish: Default::default(),
+			subscribe: [crate::Pattern::subtree("other").unwrap()].into_iter().collect(),
+			expires: None,
+		});
+		announced.restart(&path, None);
+		let attached = subscriber
+			.restart_announce(
+				path.clone(),
+				crate::Hops::new(),
+				crate::origin::Cost::UNKNOWN,
+				0,
+				Some(crate::Hop::new(7).unwrap()),
+				&mut announced,
+			)
+			.unwrap();
+		assert!(!attached, "a restart outside the limit was attached");
+		cursor.assert_next_ended("room/host");
 	}
 
 	/// An announce stream that dies without an explicit `ended` retracts the route
@@ -3680,6 +3783,14 @@ impl Announced {
 	/// The epoch the advertisement at `path` named, if any.
 	fn epoch(&self, path: &PathOwned) -> Option<crate::Epoch> {
 		self.epochs.get(path).cloned()
+	}
+
+	/// Record the epoch a restart of the live advertisement at `path` names.
+	fn restart(&mut self, path: &PathOwned, epoch: Option<crate::Epoch>) {
+		match epoch {
+			Some(epoch) => self.epochs.insert(path.clone(), epoch),
+			None => self.epochs.remove(path),
+		};
 	}
 
 	fn attached(&mut self, path: &PathOwned) -> Option<&mut AnnouncedRoute> {
@@ -4798,8 +4909,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 											let _ = self.serving.start_at(start.group);
 										}
 										active.served = Some(start.group);
-										// The groups the SUBSCRIBE asked for below it are
-										// unavailable, whatever the demand asks later.
+										// The groups the SUBSCRIBE asked for below it are not
+										// waited for, whatever the demand asks later. One that
+										// still arrives is delivered.
 										if let Some(requested) = active.requested
 											&& let Ok(mut tail) = active.tail.write()
 										{

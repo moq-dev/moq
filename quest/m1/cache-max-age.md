@@ -44,15 +44,15 @@ Decided (2026-10-06, maintainer):
   max(wall, pts), whose worry was a congestion stall (answered by starting the
   clock at the successor), and the retired untimed-failover quest's no-clock
   rule, which this rule replaces.
-- Blocked readers need a deadline wake. `track::Consumer::poll_stale`
-  re-checks only when the track state changes, and after a failover the
-  successor may be the last change, so a lazily checked wall term never fires
-  for a reader parked in `Recover::poll` or a subscriber waiting on a
-  superseded group. Arm a wake at successor arrival + budget on those reader
-  paths, re-armed when the successor changes. Decided 2026-10-08: one wake
-  mechanism. The deadline rides the held group's `expiry::Wakes` entry from
-  [Held group wakes](/quest/m1/held-group-wakes.md), not a wake of its own;
-  whichever lands second adds its trigger to that entry.
+- Blocked readers need a deadline wake. A reader parked in `Recover::poll` or
+  a subscriber waiting on a superseded group wakes only through
+  `model::expiry::Wakes`, which knows media-time deadlines, landings, and the
+  successor's first frame or abort, so a lazily checked wall term never fires
+  for it. Decided 2026-10-08: one wake mechanism. Arm successor arrival +
+  budget in `TrackState::poll_drifted`, which both reader paths share, once
+  the successor is resolved and before the early return for an unstamped one,
+  so re-selecting the successor re-arms it. The deadline needs a wall-clock
+  driver beside the index's write-driven ones.
 - The swept benchmark measures cost and picks between evaluating the wall
   term on a timer and evaluating it lazily on access, for retention only. It
   no longer decides the semantics.
@@ -122,7 +122,6 @@ encoding change; Max Age semantics in the lite draft change.
 
 ## Related
 
-- [Held group wakes](/quest/m1/held-group-wakes.md) - the `Wakes` entry this quest's wall-clock deadline rides on
 - [lite-07 Live flag](/quest/m1/lite-live.md) - its untimed `Live` start (the latest group) follows this rule instead: replay what is not stale
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors the failover rule in JS
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - relay memory past the expiry window, in the same cache
