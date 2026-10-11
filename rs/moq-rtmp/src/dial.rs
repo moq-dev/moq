@@ -75,6 +75,8 @@ pub struct Client<S = TcpStream> {
 	import_max_age: Option<Duration>,
 	/// Connection allocator each ingested track claims its peak-hold bitrate on.
 	import_bandwidth: moq_net::bandwidth::Allocator,
+	/// Script data [`pull`](Self::pull) discards, including any sent before Play.Start.
+	metadata: crate::metadata::Dropped,
 }
 
 impl Client<TcpStream> {
@@ -156,6 +158,7 @@ impl<S: Stream> Client<S> {
 			export_max_delay: crate::DEFAULT_MAX_DELAY,
 			import_max_age: None,
 			import_bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			metadata: Default::default(),
 		})
 	}
 
@@ -368,7 +371,7 @@ impl<S: Stream> Client<S> {
 					// Codec config arrives in the sequence-header tags, so script
 					// data isn't forwarded.
 					ClientSessionEvent::StreamMetadataReceived { .. }
-					| ClientSessionEvent::UnhandleableAmf0Data { .. } => publisher.metadata.record(),
+					| ClientSessionEvent::UnhandleableAmf0Data { .. } => self.metadata.record(),
 					other => tracing::trace!(?other, "ignoring RTMP event during pull"),
 				},
 				ClientSessionResult::UnhandleableMessageReceived(_) => {}
@@ -381,24 +384,19 @@ impl<S: Stream> Client<S> {
 	/// outbound packets and failing on an explicit rejection.
 	async fn await_event(&mut self, direction: Direction) -> Result<()> {
 		let mut buffer = [0u8; READ_BUFFER];
-		// Script data can precede Play.Start; hold it so the pull path still counts it.
-		let mut held = VecDeque::new();
 		loop {
 			while let Some(result) = self.work.pop_front() {
 				match result {
 					ClientSessionResult::OutboundResponse(packet) => self.stream.write_all(&packet.bytes).await?,
 					ClientSessionResult::RaisedEvent(event) => match (direction, event) {
 						(Direction::Publish, ClientSessionEvent::PublishRequestAccepted)
-						| (Direction::Play, ClientSessionEvent::PlaybackRequestAccepted) => {
-							held.append(&mut self.work);
-							self.work = held;
-							return Ok(());
-						}
+						| (Direction::Play, ClientSessionEvent::PlaybackRequestAccepted) => return Ok(()),
+						// Script data can precede Play.Start; count it without keeping the payload.
 						(
 							Direction::Play,
-							event @ (ClientSessionEvent::StreamMetadataReceived { .. }
-							| ClientSessionEvent::UnhandleableAmf0Data { .. }),
-						) => held.push_back(ClientSessionResult::RaisedEvent(event)),
+							ClientSessionEvent::StreamMetadataReceived { .. }
+							| ClientSessionEvent::UnhandleableAmf0Data { .. },
+						) => self.metadata.record(),
 						// A refused publish/play arrives as an onStatus *failure* code, not a
 						// Rejected event; surface it instead of hanging until the peer closes.
 						// Benign progress codes (e.g. NetStream.Play.Reset, which precedes
@@ -503,7 +501,6 @@ async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> 
 /// path.
 struct Publisher {
 	importer: FlvImport,
-	metadata: crate::metadata::Dropped,
 	// A clone of the importer's producer, so an end can close the broadcast
 	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
@@ -525,7 +522,6 @@ impl Publisher {
 		importer.decode(&flv::file_header())?;
 		Ok(Self {
 			importer,
-			metadata: crate::metadata::Dropped::default(),
 			epoch,
 			broadcast: handle,
 		})
@@ -586,15 +582,16 @@ mod tests {
 			export_max_delay: crate::DEFAULT_MAX_DELAY,
 			import_max_age: None,
 			import_bandwidth: Default::default(),
+			metadata: Default::default(),
 		};
 		let origin = moq_tokio::origin::spawn();
 		let mut publisher = Publisher::new(&origin, "metadata", Default::default()).unwrap();
 		client.await_event(Direction::Play).await.unwrap();
 		let queued = std::mem::take(&mut client.work);
 		client.pull_results(queued, &mut publisher).await.unwrap();
-		assert_eq!(publisher.metadata.count, 2);
+		assert_eq!(client.metadata.count, 2);
 		publisher.finish().unwrap();
-		drop(publisher);
+		drop(client);
 		logs_assert(|lines| {
 			let warnings = lines
 				.iter()
