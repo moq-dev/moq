@@ -798,6 +798,8 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	});
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(advert, request);
+	// A writer may yield a task before the rejection assertion below.
+	void handler.catch(() => {});
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "start" });
 
 	const peer = await nextStream(pair.client);
@@ -805,6 +807,16 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	await peer.writer.u53(PublishNamespace.id);
 	await advert.encode(peer.writer, VERSION);
 
+	// The malformed request can reject while the writer yields a browser task.
+	await new Promise<void>((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
 	await expect(handler).rejects.toThrow(ProtocolViolation);
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
 });
