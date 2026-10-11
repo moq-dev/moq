@@ -52,6 +52,9 @@ def main():
     summary = "| Artifact | Bytes |\n|---|---:|\n"
     summary += "".join(f"| {name} | {size:,} |\n" for name, size in sorted(current["bytes"].items()))
     summary += "\n" + ("\n".join(failures) if failures else "No size regression; a new artifact history starts with one report.") + "\n"
+    if current.get("seconds"):
+        summary += "\n| Release build | Seconds |\n|---|---:|\n"
+        summary += "".join(f"| {job} | {seconds:,} |\n" for job, seconds in sorted(current["seconds"].items()))
     (args.directory / "summary.md").write_text(summary)
     print(summary)
     if failures:

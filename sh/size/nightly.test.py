@@ -45,8 +45,8 @@ printf 'attribution' >"$1/ffi-bloat.txt"
 ''')
             collect.chmod(0o755)
             env = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
-                       GITHUB_REPOSITORY="moq-dev/moq", GITHUB_STEP_SUMMARY=str(root / "summary"))
-            result = subprocess.run(["bash", str(SCRIPT), "out", "packages"], cwd=root,
+                       GITHUB_STEP_SUMMARY=str(root / "summary"))
+            result = subprocess.run(["bash", str(SCRIPT), "out", "3"], cwd=root,
                                     env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             history = json.loads((root / "out/history.json").read_text())
