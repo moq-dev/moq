@@ -30,6 +30,9 @@ use std::{
 	time::Duration,
 };
 
+#[cfg(any(test, feature = "test"))]
+pub mod ingress;
+
 #[cfg(test)]
 mod mem;
 mod preset;
@@ -406,6 +409,8 @@ impl fmt::Display for Stats {
 
 /// A running shaper. Dropping it stops forwarding.
 pub struct Shaper {
+	#[cfg(any(test, feature = "test"))]
+	ingress: [ingress::Control; 2],
 	addr: SocketAddr,
 	setup: Setup,
 	tally: Arc<[Tally; 2]>,
@@ -435,20 +440,36 @@ impl Shaper {
 		let failed = Arc::new(OnceLock::new());
 		let cuts = Arc::new(AtomicU64::new(0));
 		let target = Arc::new(Mutex::new(config.target));
+		#[cfg(any(test, feature = "test"))]
+		let ingress: [ingress::Control; 2] = Default::default();
 		let task = tokio::spawn({
 			let setup = setup.clone();
 			let tally = tally.clone();
 			let failed = failed.clone();
 			let cuts = cuts.clone();
 			let target = target.clone();
+			#[cfg(any(test, feature = "test"))]
+			let ingress = ingress.clone();
 			async move {
-				if let Err(err) = run(Arc::new(listen), setup, tally, cuts, target).await {
+				if let Err(err) = run(
+					Arc::new(listen),
+					setup,
+					tally,
+					cuts,
+					target,
+					#[cfg(any(test, feature = "test"))]
+					ingress,
+				)
+				.await
+				{
 					let _ = failed.set(format!("{err:#}"));
 				}
 			}
 		});
 
 		Ok(Self {
+			#[cfg(any(test, feature = "test"))]
+			ingress,
 			addr,
 			setup,
 			tally,
@@ -457,6 +478,24 @@ impl Shaper {
 			target,
 			task,
 		})
+	}
+
+	/// Collect the next active link's surviving ingress until its rate bucket must overflow.
+	///
+	/// Armed after a handshake, this accounts the collected datagrams at one instant,
+	/// regardless of scheduling gaps. The chosen direction needs a fixed rate profile;
+	/// other flows and the opposite direction keep forwarding. A shared link collects
+	/// all its clients together. Holding enough bytes
+	/// requires transport credit beyond the bucket's burst plus queue allowance.
+	#[cfg(any(test, feature = "test"))]
+	pub fn burst(&self, direction: ingress::Direction) -> anyhow::Result<ingress::Burst> {
+		let (index, profile, options) = match direction {
+			ingress::Direction::Up => (UP, &self.setup.config.up, &self.setup.up),
+			ingress::Direction::Down => (DOWN, &self.setup.config.down, &self.setup.down),
+		};
+		anyhow::ensure!(profile.rate.is_some(), "an ingress burst needs a rate limit");
+		anyhow::ensure!(options.steps.is_empty(), "an ingress burst needs a fixed rate profile");
+		self.ingress[index].arm()
 	}
 
 	/// Take the path down both ways until the returned [`Outage`] drops.
@@ -566,6 +605,10 @@ impl Shaper {
 impl Drop for Shaper {
 	fn drop(&mut self) {
 		self.task.abort();
+		#[cfg(any(test, feature = "test"))]
+		for ingress in &self.ingress {
+			ingress.cancel();
+		}
 	}
 }
 
@@ -631,6 +674,7 @@ async fn run(
 	tally: Arc<[Tally; 2]>,
 	cuts: Arc<AtomicU64>,
 	target: Arc<Mutex<SocketAddr>>,
+	#[cfg(any(test, feature = "test"))] ingress: [ingress::Control; 2],
 ) -> anyhow::Result<()> {
 	let mut flows = HashMap::<SocketAddr, Flow>::new();
 	let mut tasks = JoinSet::new();
@@ -640,9 +684,20 @@ async fn run(
 	let start = Instant::now();
 
 	// A shared path is one link each way, drawing the streams the first flow would.
-	let shared = setup
-		.shared
-		.then(|| [UP, DOWN].map(|direction| link(&mut tasks, &setup, direction, 0, start, &tally)));
+	let shared = setup.shared.then(|| {
+		[UP, DOWN].map(|direction| {
+			link(
+				&mut tasks,
+				&setup,
+				direction,
+				0,
+				start,
+				&tally,
+				#[cfg(any(test, feature = "test"))]
+				&ingress,
+			)
+		})
+	});
 
 	loop {
 		let (size, from) = tokio::select! {
@@ -667,7 +722,18 @@ async fn run(
 
 				let [up, down] = match &shared {
 					Some(links) => links.clone(),
-					None => [UP, DOWN].map(|direction| link(&mut tasks, &setup, direction, number, start, &tally)),
+					None => [UP, DOWN].map(|direction| {
+						link(
+							&mut tasks,
+							&setup,
+							direction,
+							number,
+							start,
+							&tally,
+							#[cfg(any(test, feature = "test"))]
+							&ingress,
+						)
+					}),
 				};
 				tasks.spawn(reply(
 					upstream.clone(),
@@ -703,6 +769,7 @@ fn link(
 	flow: u64,
 	start: Instant,
 	tally: &Arc<[Tally; 2]>,
+	#[cfg(any(test, feature = "test"))] ingress: &[ingress::Control; 2],
 ) -> Arc<Mutex<Link>> {
 	let (profile, options) = match direction {
 		UP => (&setup.config.up, &setup.up),
@@ -711,14 +778,13 @@ fn link(
 	let (queue, queued) = mpsc::unbounded_channel();
 	tasks.spawn(deliver(queued, options.batch, tally.clone(), direction));
 	let stream = 2 * flow + direction as u64;
-	Arc::new(Mutex::new(Link::new(
-		profile,
-		options,
-		setup.config.seed,
-		stream,
-		start,
-		queue,
-	)))
+	let link = Link::new(profile, options, setup.config.seed, stream, start, queue);
+	#[cfg(any(test, feature = "test"))]
+	let link = Link {
+		ingress: ingress[direction].clone(),
+		..link
+	};
+	Arc::new(Mutex::new(link))
 }
 
 /// A socket that can reach `target`.
@@ -878,7 +944,16 @@ struct Parcel {
 
 /// One direction of one flow, or of every flow on a shared path: the decisions
 /// and the state they depend on.
+struct Draw {
+	skip: bool,
+	spread: f64,
+}
+
 struct Link {
+	#[cfg(any(test, feature = "test"))]
+	stream: u64,
+	#[cfg(any(test, feature = "test"))]
+	ingress: ingress::Control,
 	profile: Profile,
 	jitter: Jitter,
 	rng: Xoshiro256PlusPlus,
@@ -909,6 +984,10 @@ impl Link {
 		queue: mpsc::UnboundedSender<Parcel>,
 	) -> Self {
 		Self {
+			#[cfg(any(test, feature = "test"))]
+			ingress: Default::default(),
+			#[cfg(any(test, feature = "test"))]
+			stream,
 			profile: profile.clone(),
 			jitter: options.jitter_model,
 			rng: Xoshiro256PlusPlus::seed_from_u64(seed ^ stream.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
@@ -941,6 +1020,41 @@ impl Link {
 
 	/// Treat a datagram and queue it to leave by `socket` for `dest`.
 	fn push(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
+		#[cfg(any(test, feature = "test"))]
+		if let Some(state) = self.ingress.selected(self.stream) {
+			let Some(draw) = self.draw(now, tally) else {
+				return;
+			};
+			let packet = ingress::Held {
+				datagram,
+				socket: socket.clone(),
+				dest,
+				draw,
+			};
+			let released = state
+				.lock()
+				.expect("ingress poisoned")
+				.hold(self.profile.rate.as_ref().expect("validated rate"), packet);
+			if let Some(released) = released {
+				for packet in released.packets {
+					if let Some((at, delayed)) = self.schedule(now, packet.datagram.len(), packet.draw, tally) {
+						let _ = self.queue.send(Parcel {
+							arrived: now,
+							at,
+							delayed,
+							datagram: packet.datagram,
+							socket: packet.socket,
+							dest: packet.dest,
+						});
+					}
+				}
+				state.lock().expect("ingress poisoned").finished = true;
+				if let Some(done) = released.done {
+					let _ = done.send(());
+				}
+			}
+			return;
+		}
 		let Some((at, delayed)) = self.treat(now, datagram.len(), tally) else {
 			return;
 		};
@@ -958,6 +1072,11 @@ impl Link {
 	/// When a datagram of `size` bytes arriving `now` leaves, and whether it was
 	/// counted as delayed, or `None` when it is dropped.
 	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<(Instant, bool)> {
+		let draw = self.draw(now, tally)?;
+		self.schedule(now, size, draw, tally)
+	}
+
+	fn draw(&mut self, now: Instant, tally: &Tally) -> Option<Draw> {
 		self.step(now, tally);
 		bump(&tally.packets);
 
@@ -975,6 +1094,16 @@ impl Link {
 			return None;
 		}
 
+		Some(Draw { skip, spread })
+	}
+
+	fn schedule(
+		&mut self,
+		now: Instant,
+		size: usize,
+		Draw { skip, spread }: Draw,
+		tally: &Tally,
+	) -> Option<(Instant, bool)> {
 		let mut depart = now;
 		if let Some(rate) = &self.profile.rate {
 			// GCRA: a datagram may leave once the backlog, itself included, is
@@ -1032,6 +1161,119 @@ mod tests {
 	use super::*;
 
 	const LOCALHOST: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+
+	#[tokio::test(start_paused = true)]
+	async fn an_ingress_burst_overflows_despite_arbitrary_scheduling_gaps() {
+		let profile = Profile {
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (send, mut received) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let burst = link.ingress.arm().unwrap();
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let tally = Tally::default();
+		for index in 0..3 {
+			link.push(
+				start + Duration::from_secs(index * 10),
+				vec![0; 1000],
+				&socket,
+				LOCALHOST,
+				&tally,
+			);
+		}
+		assert_eq!(
+			tally.overflowed.load(Ordering::Relaxed),
+			1,
+			"scheduling drained the intended burst"
+		);
+		burst.completed().await.unwrap();
+		for _ in 0..2 {
+			assert_eq!(received.try_recv().unwrap().arrived, start + Duration::from_secs(20));
+		}
+		assert!(received.try_recv().is_err());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn ingress_preserves_loss_draws_and_cancellation_releases_held_packets() {
+		let profile = Profile {
+			loss: 0.25,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let start = Instant::now();
+		let (send, _received) = mpsc::unbounded_channel();
+		let mut gated = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let (send, _plain) = mpsc::unbounded_channel();
+		let mut plain = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let burst = gated.ingress.arm().unwrap();
+		assert!(gated.ingress.arm().is_err());
+		let a = Tally::default();
+		let b = Tally::default();
+		for index in 0..32 {
+			let now = start + Duration::from_secs(index * 10);
+			gated.push(now, vec![0; 1000], &socket, LOCALHOST, &a);
+			plain.push(now, vec![0; 1000], &socket, LOCALHOST, &b);
+		}
+		burst.completed().await.unwrap();
+		assert_eq!(a.lost.load(Ordering::Relaxed), b.lost.load(Ordering::Relaxed));
+		assert_eq!(gated.rng.random::<u64>(), plain.rng.random::<u64>());
+		assert!(a.overflowed.load(Ordering::Relaxed) > 0);
+
+		let clean = Profile { loss: 0.0, ..profile };
+		let (send, mut received) = mpsc::unbounded_channel();
+		let mut link = Link::new(&clean, &Options::default(), 42, 0, start, send);
+		let burst = link.ingress.arm().unwrap();
+		let holders = Arc::strong_count(&socket);
+		link.push(start, vec![0; 1000], &socket, LOCALHOST, &Tally::default());
+		assert_eq!(Arc::strong_count(&socket), holders + 1);
+		assert!(received.try_recv().is_err());
+		drop(burst);
+		assert_eq!(Arc::strong_count(&socket), holders);
+		link.push(start, vec![0; 1000], &socket, LOCALHOST, &Tally::default());
+		assert!(received.try_recv().is_ok());
+		assert!(link.ingress.arm().is_ok());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn ingress_selects_one_flow_and_ends_when_the_shaper_drops() {
+		let profile = Profile {
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let start = Instant::now();
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let (send, _received) = mpsc::unbounded_channel();
+		let mut first = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let (send, mut received) = mpsc::unbounded_channel();
+		let mut other = Link::new(&profile, &Options::default(), 42, 2, start, send);
+		other.ingress = first.ingress.clone();
+		let burst = first.ingress.arm().unwrap();
+		first.push(start, vec![0; 1000], &socket, LOCALHOST, &Tally::default());
+		other.push(start, vec![0; 1000], &socket, LOCALHOST, &Tally::default());
+		assert!(received.try_recv().is_ok(), "another flow was held");
+		drop(burst);
+
+		let (shaper, _client) = setup(42, profile, Profile::default()).await;
+		assert!(shaper.burst(ingress::Direction::Down).is_err());
+		let burst = shaper.burst(ingress::Direction::Up).unwrap();
+		drop(shaper);
+		assert!(burst.completed().await.is_err());
+	}
 
 	/// An echo server, a shaper in front of it, and a client dialing the shaper.
 	async fn setup(seed: u64, up: Profile, down: Profile) -> (Shaper, UdpSocket) {

@@ -9,8 +9,8 @@ once the grant recovers. The lower renditions keep their share instead of
 every rung degrading together. Covers the JS publisher (`js/publish`), the
 Rust and FFI publishers (the `rs/moq-video` producer under the `rs/moq-mux`
 rate policy), and the OBS plugin. `@moq/watch` already skips disabled
-renditions, and [native enabled](/quest/m1/native-enabled.md) brings native
-players along first, so a disabled rung never strands a viewer.
+renditions, and native consumers now skip them too, so a disabled rung
+never strands a viewer.
 
 ## Plan
 
@@ -53,10 +53,6 @@ browser and one through moq-ffi.
 
 Public API: the shared rule in `moq_mux::rate` and whatever knobs the
 publishers expose for it. Wire: none; `enabled` already exists.
-
-## Required
-
-- [Native enabled](/quest/m1/native-enabled.md) - native players move off a rendition disabled mid-playback
 
 ## Related
 

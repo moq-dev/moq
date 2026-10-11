@@ -39,7 +39,7 @@ pub fn from_setup(params: &super::Parameters, _version: Version) -> Result<Optio
 
 /// Declare that advertisements to us must be solicited.
 ///
-/// Unconditional, and true of every session we open or accept: we send
+/// Declared by default ([`Extensions::solicit`](crate::setup::Extensions::solicit)): we send
 /// SUBSCRIBE_NAMESPACE for every prefix we are allowed to discover, so there is nothing an
 /// unsolicited PUBLISH_NAMESPACE could tell us that we will not have asked for. A peer
 /// that honors it stops guessing which of the two we expect, which is the whole point.

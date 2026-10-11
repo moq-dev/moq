@@ -3,7 +3,9 @@
 ## Goal
 
 A session that came up over the WebSocket fallback moves to QUIC once the
-QUIC handshake completes, without dropping a group. `https://` races QUIC
+QUIC handshake completes. Matching explicit epochs permit continuation
+without dropping a group; epochless routes instead signal Restart and need a
+fresh follower resolution. `https://` races QUIC
 against WebSocket, and WebSocket wins whenever QUIC is slower than the head
 start plus a TCP+TLS+upgrade round trip (a lost Initial, a slow first
 WebTransport dial). The end state: when WebSocket wins, the QUIC dial keeps
@@ -11,7 +13,7 @@ going; if it lands, the reconnect loop attaches the QUIC session, hands the
 routes over, sends a GOAWAY on the WebSocket session, drains it, and forgets
 the "WebSocket won" memo. When QUIC wins, WebSocket is closed immediately.
 
-The Rust `moq_tokio::Connection` does this since #4180
+The Rust connection-level upgrade exists since #4180
 (`websocket_upgrades_to_quic`, `a_refused_upgrade_keeps_websocket` in
 `rs/moq-tokio/src/connection.rs`). What remains is the `js/net` half, where
 the loser is still closed and the memo never forgotten, plus the two
@@ -34,7 +36,7 @@ keeps the old session serving until it closes or overstays the handover cap,
 reports `Status::Migrating`, and `moq_net::Session::drain()` sends a GOAWAY on
 every version (a client may send one with an empty URI; only a redirect URI is
 forbidden to a moq-transport client). The origin's multi-route front prefers
-the newest of two equal routes, and since #4741 a front resumes each track
+the newest of two equal routes. With matching explicit epochs a front resumes each track
 from the new route's copy at the first frame the subscriber lacks
 (`model/resume.rs`), cancelling the old session's subscription once the new
 one feeds it. The JavaScript
@@ -66,6 +68,12 @@ Shared decisions, which Rust implements and [JavaScript](/quest/m1/transport-upg
   relay's route order prefers the newest route, and an anonymous client's
   per-session origin makes that a replacement rather than a join, which is
   immediate either way.
+
+The Rust `websocket_upgrades_to_quic` test currently reads only before the
+old WebSocket closes. Extend proof to publish/read after that close with an
+explicit epoch on lite-07. Add the default epochless case: old handles stay
+sticky and end with their route, Restart causes a fresh follower to resolve,
+and no cached groups splice across instances. Keep JS's matrix consistent.
 
 ## Required
 

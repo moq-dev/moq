@@ -204,9 +204,10 @@ impl Subscriber {
 			return Ok(None);
 		}
 
-		// The export resolves the broadcast (and any referenced sibling broadcast, via the
-		// catalog `broadcast` field) through the origin, joining the one just announced.
-		let source = moq_mux::Source::new(origin.consume(), path);
+		// Join the broadcast just announced. The export resolves any referenced sibling
+		// broadcast (the catalog `broadcast` field) through the same origin.
+		let broadcast = origin.request_broadcast(path, None).await?;
+		let source = moq_mux::Source::new(origin.clone(), broadcast);
 		let export = ts::Export::with_ts(source, moq_mux::catalog::CatalogFormat::Hang)
 			.await?
 			.with_delay(options.latency);
