@@ -137,6 +137,10 @@ before that snapshot are absent. Cancellation stops reporting without writing a
 partial final interval; the last emitted line covers exactly its recorded bounds.
 Ticker delays can extend or shorten a reported interval, so use its actual bounds
 rather than assuming the configured cadence.
+Latency observations and histogram capture share one lock: the timestamp and bucket
+counts describe the same cut. Percentile calculation and output run after releasing
+the lock. Bounds are rounded to milliseconds; the other cumulative counters remain
+independent atomic samples.
 
 `--output stats.jsonl` mirrors every report interval to a file as one JSON
 line, each stamped with `timestamp_ms`. The frame, byte, and group counters are
@@ -219,3 +223,9 @@ since every rate comes from deltas within a single file:
 Comparisons are only meaningful between runs on the same hardware with the same
 preset. Pin the relay build (`--version` appears in the logs) and record it next
 to the results.
+
+### Observation cost
+
+`just rs bench-latency` measures latency recording with 1, 4 and 16 concurrent
+writers and 0, 10 and 100 snapshots per run. It checks final sample conservation
+and prints throughput for each case. The nightly workflow runs the same matrix.
