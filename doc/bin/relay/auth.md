@@ -215,6 +215,11 @@ key = "/etc/moq/relay.key"
 
 ## Auth server
 
+Upgrade auth servers before relays when adopting the `webtransport` transport value.
+WebTransport sessions report `webtransport`; native QUIC sessions report `quic`.
+Older auth servers reject the new value. Updated Rust and JavaScript auth parsers
+map future transport names to `unknown`, which your policy should handle explicitly.
+
 `moq auth serve` is the reference auth server, answering the contract above.
 
 ```bash

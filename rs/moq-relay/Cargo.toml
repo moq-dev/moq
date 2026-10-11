@@ -25,7 +25,7 @@ doc = false
 [features]
 # A programmatic relay fixture with generated TLS and ephemeral ports.
 test-support = []
-default = ["iroh", "cluster-lan", "noq", "websocket", "uds"]
+default = ["cluster-lan", "noq", "websocket", "uds"]
 iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]

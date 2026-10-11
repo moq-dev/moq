@@ -152,6 +152,12 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 
+	/// After a non-continuous join, decode from the group start, present at start plus warmup, and join that much earlier.
+	/// Serialized as whole milliseconds, rounded up so presentation never starts early.
+	#[serde_as(as = "Option<MillisCeil>")]
+	#[serde(default)]
+	pub warmup: Option<std::time::Duration>,
+
 	/// How far this rendition's frames reach the transport behind the broadcast's earliest
 	/// rendition, measured at the publisher from each rendition's minimum flush lateness.
 	/// Absent on the earliest rendition and on any rendition the publisher did not measure.
@@ -183,6 +189,7 @@ impl AudioConfig {
 			description: None,
 			container: Container::default(),
 			jitter: None,
+			warmup: None,
 			delay: None,
 		}
 	}
@@ -191,6 +198,31 @@ impl AudioConfig {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	#[test]
+	fn warmup_round_trips() {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		assert!(serde_json::to_value(&config).unwrap().get("warmup").is_none());
+		for millis in [0, 80, 1_000] {
+			config.warmup = Some(std::time::Duration::from_millis(millis));
+			let encoded = serde_json::to_value(&config).unwrap();
+			assert_eq!(encoded["warmup"], millis);
+			let decoded: AudioConfig = serde_json::from_value(encoded).unwrap();
+			assert_eq!(decoded.warmup, config.warmup);
+		}
+	}
+
+	#[test]
+	fn warmup_rounds_up() {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		for (nanos, millis) in [(1, 1), (499_999, 1), (333_200_000, 334)] {
+			config.warmup = Some(std::time::Duration::from_nanos(nanos));
+			let encoded = serde_json::to_value(&config).unwrap();
+			assert_eq!(encoded["warmup"], millis);
+			let decoded: AudioConfig = serde_json::from_value(encoded).unwrap();
+			assert_eq!(decoded.warmup, Some(std::time::Duration::from_millis(millis)));
+		}
+	}
 
 	#[test]
 	fn ranked_orders_by_enabled_then_bitrate_then_rate_then_channels() {

@@ -170,10 +170,6 @@ export class Subscriber {
 	#consumes = new BroadcastCache();
 	#consumeNext = 0;
 
-	// The epoch each live advertisement named, by path. A consumed broadcast captures it
-	// once and asks for it on every request, so a later epoch never feeds an older handle.
-	#epochs = new Map<Path.Valid, Epoch.Valid>();
-
 	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, epoch, track, sequence].
 	// Concurrent (or repeat, while still open) fetchGroup() calls for the same group of one consume
 	// share one FETCH stream and each get an independent mirror; the entry is evicted once the
@@ -288,6 +284,21 @@ export class Subscriber {
 			return;
 		}
 
+		// Every advertisement the peer currently has live, keyed by suffix (at most one
+		// per path is current, and every announce on this stream shares `prefix`).
+		//
+		// An advertisement skipped locally as a reflected loop is recorded with
+		// `live: false`: the peer numbered it and will retract it regardless of what we
+		// made of it, so its path is not free. Dropping it from the map instead would let
+		// a later announce take the path, and the skipped one's `endedId` would then
+		// retract that one's state.
+		type Advertisement = {
+			live: boolean;
+			route: Route;
+			captures: Path.Pattern[] | undefined;
+		};
+		const advertised = new Map<Path.Valid, Advertisement>();
+
 		let stopDrain: Dispose | undefined;
 		try {
 			// Send the announce interest.
@@ -305,21 +316,6 @@ export class Subscriber {
 				// stay off this hop and are never forwarded.
 				responderOrigin = ok.hop;
 			}
-
-			// Every advertisement the peer currently has live, keyed by suffix (at most one
-			// per path is current, and every announce on this stream shares `prefix`).
-			//
-			// An advertisement skipped locally as a reflected loop is recorded with
-			// `live: false`: the peer numbered it and will retract it regardless of what we
-			// made of it, so its path is not free. Dropping it from the map instead would let
-			// a later announce take the path, and the skipped one's `endedId` would then
-			// retract that one's state.
-			type Advertisement = {
-				live: boolean;
-				route: Route;
-				captures: Path.Pattern[] | undefined;
-			};
-			const advertised = new Map<Path.Valid, Advertisement>();
 
 			switch (this.version) {
 				case Version.DRAFT_01:
@@ -342,6 +338,7 @@ export class Subscriber {
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { live, route, captures });
 						if (!live) continue;
+						this.#consumes.announce(path, announced, route);
 						console.debug(`announced: broadcast=${path} active=true`);
 						announced.append({ prefix: path, captures, kind: "start", route });
 					}
@@ -363,6 +360,7 @@ export class Subscriber {
 					const route = { ...ad.route, cost: DRAIN_COST };
 					if (routesEqual(ad.route, route)) continue;
 					advertised.set(path, { ...ad, route });
+					this.#consumes.announce(path, announced, route);
 					announced.append({ prefix: path, captures: ad.captures, kind: "update", route });
 				}
 			};
@@ -455,16 +453,15 @@ export class Subscriber {
 					throw new ProtocolViolation(`duplicate announce for ${path}`);
 				}
 
-				// Retract the path: forget the advertisement, drop the shared consume entry so a
-				// later announce subscribes fresh rather than cloning the dead generation's tracks,
-				// and tell the consumer. A no-op for an advertisement never surfaced, which is
+				// Retract this interest's advertisement so new consumes resolve the remaining
+				// serving instance, and tell the consumer. A no-op for an advertisement never surfaced, which is
 				// what an id retiring a skipped announce resolves to.
 				const retract = () => {
 					const previous = advertised.get(path);
 					advertised.delete(path);
-					this.#epochs.delete(path);
+					this.#consumes.withdraw(path, announced);
 					if (!previous?.live) return;
-					this.#consumes.evict(path);
+
 					console.debug(`announced: broadcast=${path} active=false`);
 					announced.append({
 						prefix: path,
@@ -530,10 +527,8 @@ export class Subscriber {
 				// the next consume subscribes fresh, while the handles already out keep theirs.
 				const previous = advertised.get(path);
 				if (restart && previous?.live) {
-					this.#consumes.evict(path);
 					advertised.set(path, { live: true, route, captures });
-					if (epoch) this.#epochs.set(path, epoch);
-					else this.#epochs.delete(path);
+					this.#consumes.announce(path, announced, route, true);
 					console.debug(`announced: broadcast=${path} restart=true epoch=${epoch}`);
 					announced.append({ prefix: path, captures, kind: "restart", route });
 					continue;
@@ -543,9 +538,9 @@ export class Subscriber {
 				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE. It updates the
 				// route in place, so a forwarder re-prices without retracting.
 				if (previous?.live) {
-					// Even from another publisher: the path still names the same broadcast, so
-					// the shared consume stays.
+					// An update preserves the advertisement identity, including on epochless drafts.
 					advertised.set(path, { live: true, route, captures });
+					this.#consumes.announce(path, announced, route);
 					console.debug(`announced: broadcast=${path} rerouted`);
 					if (!routesEqual(previous.route, route)) {
 						announced.append({ prefix: path, captures, kind: "update", route });
@@ -554,8 +549,7 @@ export class Subscriber {
 				}
 
 				advertised.set(path, { live: true, route, captures });
-				if (epoch) this.#epochs.set(path, epoch);
-				else this.#epochs.delete(path);
+				this.#consumes.announce(path, announced, route);
 
 				console.debug(`announced: broadcast=${path} active=true epoch=${epoch}`);
 				announced.append({ prefix: path, captures, kind: "start", route });
@@ -577,7 +571,8 @@ export class Subscriber {
 				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: closeReason(reason(e)) });
 			}
 		} finally {
-			// Releases this interest's routes on a session that never drains.
+			// Release only this interest's routes. Existing consumers remain pinned.
+			for (const path of advertised.keys()) this.#consumes.withdraw(path, announced);
 			stopDrain?.();
 		}
 	}
@@ -585,7 +580,7 @@ export class Subscriber {
 	/**
 	 * Consumes a broadcast from the connection.
 	 *
-	 * Deduplicated per path: repeat calls for the same still-live path share one reference-counted
+	 * Deduplicated per serving instance: repeat calls for the same path share one reference-counted
 	 * broadcast (and one upstream subscription). The shared broadcast closes once every caller has
 	 * closed its handle, so callers close normally.
 	 *
@@ -593,14 +588,17 @@ export class Subscriber {
 	 * @returns A Broadcast instance
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
-		return this.#consumes.get(path) ?? this.#consumes.insert(path, this.#createConsume(path));
+		const instance = this.#consumes.instance(path);
+		return (
+			this.#consumes.get(path, instance) ??
+			this.#consumes.insert(path, instance, this.#createConsume(path, instance.route.epoch))
+		);
 	}
 
-	#createConsume(path: Path.Valid): broadcast.Consumer {
+	#createConsume(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer {
 		// A consumed broadcast resolves info() and fetchGroup() over the wire by reaching
 		// back into this Subscriber (see ConsumeBroadcast below), rather than the wire
 		// installing callbacks on the broadcast.
-		const epoch = this.#epochs.get(path);
 		const consumer = new ConsumeBroadcast(this, path, { epoch, id: this.#consumeNext++ });
 
 		void (async () => {
