@@ -16,7 +16,10 @@ const VERSION: u32 = 9;
 const AUDIO_GROUP: &str = "aud";
 
 /// RFC 3986 unreserved characters, which are safe in one URL path segment.
-const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
+///
+/// The DASH manifest encodes rendition names with this same set, so a name stays one segment
+/// in both layouts.
+pub(crate) const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
 /// The live layout's media-playlist URI for a rendition, relative to the master, with an
 /// optional query (without the leading `?`) appended.

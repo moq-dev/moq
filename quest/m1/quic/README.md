@@ -39,10 +39,12 @@ MoQ's config names congestion families (`Loss`, `Delay`, and `RealTime` once
 GCC ships), never algorithms; the `Controller` trait is the seam experiments
 plug into, and MoQ owns which algorithm each family means.
 
-The scheduling contract has three levels: strict subscription priority,
-byte-fair service between send groups at the same priority, then the
-subscription's chosen group order within its own bucket. On a relay-to-relay
-session with fairness enabled, the send group is the broadcast. The default
+With fairness enabled, scheduling first shares bytes between broadcast
+domains. Inside each domain, subscription priority is strict, equal-priority
+subscriptions share bytes fairly, and each subscription applies its group
+order. Every subscription has a send group; the broadcast domain is the tier
+above it, not the send group itself. Without domain fairness, retain strict
+priority in the configured domain. The default
 MoQ order is newest group first; an ordered subscription keeps oldest first.
 Datagrams join their subscription's send group in its group order, ahead
 of a stream of the same group.
