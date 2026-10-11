@@ -1171,6 +1171,24 @@ impl crate::transport::Error for NoError {
 	}
 }
 
+/// A source-selection watch for the private request-lifetime benchmark.
+pub struct RequestValidity(crate::model::broadcast::RequestValidity);
+
+impl RequestValidity {
+	/// Watch which instance this route's peer selects for a path.
+	pub fn new(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
+	}
+
+	/// Capture the lifetime of one pending request.
+	pub fn start(&self) -> kio::Consumer<()> {
+		match self.0.start() {
+			crate::model::broadcast::RequestValidity::Route(route) => route,
+			_ => unreachable!("a source watch always captures a route lease"),
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

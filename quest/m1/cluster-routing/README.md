@@ -143,5 +143,5 @@ Once every child has landed:
 - [P2P](/quest/m3/p2p/README.md) - browser and native peers that become routing nodes over this layer
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
-- [Cross-relay bursts re-run](/quest/m1/cross-relay-bursts.md) - its #4349 report shows closed broadcasts announced for up to 229 s
+- [Reproduce cross-node announce flapping](/quest/m1/cross-node-flapping.md) - a drill for #4349's post-close announce toggling across nodes, checked on the release and on main
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - policy and aggregation at boundaries between operators

@@ -10,7 +10,7 @@ use mp4_atom::Atom;
 use webm_iterable::WebmIterator;
 use webm_iterable::errors::TagIteratorError;
 use webm_iterable::iterator::AllowableErrors;
-use webm_iterable::matroska_spec::{Master, MatroskaSpec, SimpleBlock};
+use webm_iterable::matroska_spec::{BlockLacing, Master, MatroskaSpec, SimpleBlock};
 
 use super::Error;
 
@@ -36,6 +36,8 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// - Opus (`A_OPUS`)
 /// - FLAC (`A_FLAC`)
 /// - MP3 (`A_MPEG/L3`)
+///
+/// Laced blocks require a positive TrackEntry DefaultDuration to timestamp each frame.
 ///
 /// Unsupported codecs (e.g. Vorbis, AC3, subtitles) are logged and dropped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
@@ -89,6 +91,7 @@ impl TrackKind {
 }
 
 struct MkvTrack {
+	default_duration: Option<std::time::Duration>,
 	kind: TrackKind,
 	track: Media,
 	group: Option<moq_net::group::Producer>,
@@ -286,7 +289,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			MatroskaSpec::SimpleBlock(ref data) => {
 				let sb = SimpleBlock::try_from(data.as_slice()).map_err(|_| Error::InvalidSimpleBlock)?;
-				self.handle_block(sb.track, sb.timestamp, sb.keyframe, sb.raw_frame_data())?;
+				self.handle_block(&sb, sb.keyframe)?;
 			}
 			MatroskaSpec::BlockGroup(Master::Full(children)) => {
 				self.handle_block_group(&children)?;
@@ -321,6 +324,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn add_track(&mut self, reserved: &crate::catalog::Reserved<E>, children: Vec<MatroskaSpec>) -> Result<()> {
+		let mut default_duration = None;
 		let mut track_number: Option<u64> = None;
 		let mut track_type: Option<u64> = None;
 		let mut codec_id: Option<String> = None;
@@ -330,6 +334,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		for c in children {
 			match c {
+				MatroskaSpec::DefaultDuration(v) if v > 0 => {
+					default_duration = Some(std::time::Duration::from_nanos(v))
+				}
 				MatroskaSpec::TrackNumber(v) => track_number = Some(v),
 				MatroskaSpec::TrackType(v) => track_type = Some(v),
 				MatroskaSpec::CodecID(v) => codec_id = Some(v),
@@ -384,6 +391,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		self.tracks.insert(
 			track_number,
 			MkvTrack {
+				default_duration,
 				kind,
 				track: media,
 				group: None,
@@ -415,18 +423,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let parsed = SimpleBlock::try_from(data).map_err(|_| Error::InvalidBlock)?;
 		let keyframe = !has_reference;
 
-		self.handle_block(parsed.track, parsed.timestamp, keyframe, parsed.raw_frame_data())
+		self.handle_block(&parsed, keyframe)
 	}
 
-	fn handle_block(&mut self, track_number: u64, rel_ts: i16, keyframe: bool, payload: &[u8]) -> Result<()> {
-		let Some(track) = self.tracks.get_mut(&track_number) else {
+	fn handle_block(&mut self, block: &SimpleBlock<'_>, keyframe: bool) -> Result<()> {
+		let Some(track) = self.tracks.get_mut(&block.track) else {
 			// Unknown or skipped track.
 			return Ok(());
 		};
 
 		// Compute PTS in MKV's native nanosecond units and stamp it on the
 		// timestamp at NANO scale so a passthrough re-emit preserves precision.
-		let block_ticks = (self.cluster_timestamp as i64) + (rel_ts as i64);
+		let block_ticks = (self.cluster_timestamp as i64) + (block.timestamp as i64);
 		if block_ticks < 0 {
 			return Err(Error::NegativeBlockTimestamp.into());
 		}
@@ -434,34 +442,41 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let pts_ns = (block_ticks as u64)
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
-		// The first block anchors the stream. Anchor before releasing the reservation, so the
-		// first snapshot carries the final clock; Tracks declared every track, so any track's
-		// block releases it.
-		let timestamp = self.timebase.shift(Timestamp::from_nanos(pts_ns)?)?;
-		self.initial_reservation = None;
-
-		// Audio tracks: always treat as keyframes (matches fmp4 behavior).
-		let keyframe = matches!(track.kind, TrackKind::Audio) || keyframe;
-
-		let frame = crate::container::Frame {
-			timestamp,
-			payload: Bytes::copy_from_slice(payload),
-			keyframe,
-			duration: None,
+		let frames = split_lacing(block).map_err(anyhow::Error::new)?;
+		let duration = if block.lacing.is_some() {
+			Some(
+				track
+					.default_duration
+					.ok_or_else(|| anyhow::Error::new(LacingError::MissingDuration))?,
+			)
+		} else {
+			None
 		};
-
-		// Manage groups: new group on video keyframe; audio always finishes its group immediately.
-		match track.kind {
-			TrackKind::Video => {
-				if keyframe && let Some(prev) = track.group.take() {
-					prev.finish()?;
-				}
-				track.track.write(frame)?;
-			}
-			TrackKind::Audio => {
-				track.track.write(frame)?;
-				track.track.cut(None)?;
-			}
+		// Validate the last timestamp before publishing any part of this block.
+		let step = duration.map(|duration| duration.as_nanos()).unwrap_or_default();
+		let duration = duration
+			.map(|duration| Timestamp::from_nanos(duration.as_nanos() as u64))
+			.transpose()?;
+		let last = u128::from(pts_ns) + step * (frames.len() - 1) as u128;
+		Timestamp::from_nanos(u64::try_from(last).map_err(|_| Error::TimestampOverflow)?)?;
+		for (index, payload) in frames.into_iter().enumerate() {
+			let pts_ns = (u128::from(pts_ns) + step * index as u128) as u64;
+			// Anchor before releasing the reservation, so the first catalog carries its clock.
+			let timestamp = self.timebase.shift(Timestamp::from_nanos(pts_ns)?)?;
+			self.initial_reservation = None;
+			let frame = crate::container::Frame {
+				timestamp,
+				payload: Bytes::copy_from_slice(payload),
+				keyframe: match track.kind {
+					TrackKind::Audio => index == 0,
+					TrackKind::Video => keyframe,
+				},
+				duration,
+			};
+			track.track.write(frame)?;
+		}
+		if matches!(track.kind, TrackKind::Audio) {
+			track.track.cut(None)?;
 		}
 
 		Ok(())
@@ -714,4 +729,85 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
 	config.description = Some(description.freeze());
 	Ok(config)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LacingError {
+	#[error("invalid MKV lacing")]
+	Invalid,
+	#[error("MKV lacing requires a positive TrackEntry DefaultDuration")]
+	MissingDuration,
+}
+
+// webm-iterable's splitter uses unchecked indexing and size arithmetic on malformed laces.
+// Keep bounds and signed EBML size deltas checked before slicing untrusted input.
+fn split_lacing<'a>(block: &'a SimpleBlock<'_>) -> std::result::Result<Vec<&'a [u8]>, LacingError> {
+	let Some(lacing) = block.lacing else {
+		return Ok(vec![block.raw_frame_data()]);
+	};
+	let invalid = || LacingError::Invalid;
+	let mut data = block.raw_frame_data();
+	let count = usize::from(*data.first().ok_or_else(invalid)?) + 1;
+	if count < 2 {
+		return Err(invalid());
+	}
+	data = &data[1..];
+	let mut sizes = Vec::with_capacity(count);
+	match lacing {
+		BlockLacing::FixedSize => {
+			if !data.len().is_multiple_of(count) {
+				return Err(invalid());
+			}
+			sizes.resize(count - 1, data.len() / count);
+		}
+		BlockLacing::Xiph => {
+			for _ in 0..count - 1 {
+				let mut size = 0usize;
+				loop {
+					let byte = *data.first().ok_or_else(invalid)?;
+					data = &data[1..];
+					size = size.checked_add(usize::from(byte)).ok_or_else(invalid)?;
+					if byte != 255 {
+						break;
+					}
+				}
+				sizes.push(size);
+			}
+		}
+		BlockLacing::Ebml => {
+			for index in 0..count - 1 {
+				let first = *data.first().ok_or_else(invalid)?;
+				let len = first.leading_zeros() as usize + 1;
+				if len > 8 || data.len() < len {
+					return Err(invalid());
+				}
+				let mut value = u64::from(first) & (0xffu64 >> len);
+				for byte in &data[1..len] {
+					value = (value << 8) | u64::from(*byte);
+				}
+				data = &data[len..];
+				let size = if index == 0 {
+					value as i64
+				} else {
+					let delta = value as i64 - ((1i64 << (7 * len - 1)) - 1);
+					i64::try_from(sizes[index - 1])
+						.map_err(|_| invalid())?
+						.checked_add(delta)
+						.ok_or_else(invalid)?
+				};
+				sizes.push(usize::try_from(size).map_err(|_| invalid())?);
+			}
+		}
+	}
+	let mut frames = Vec::with_capacity(count);
+	for size in sizes {
+		if size > data.len() {
+			return Err(invalid());
+		}
+		let (frame, remaining) = data.split_at(size);
+		frames.push(frame);
+		data = remaining;
+	}
+	frames.push(data);
+	Ok(frames)
 }

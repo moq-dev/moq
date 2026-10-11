@@ -52,6 +52,8 @@ if (command === "sign") {
 		publish: origin.consume(),
 		websocket: { enabled: false },
 	});
+	// Stopped by the harness with SIGTERM: close, so the relay sees a close rather than timing it out.
+	process.once("SIGTERM", () => void connection.close());
 	console.log("published");
 	// `demand()` replaced the producer's own `used` after @moq/net 0.4.2, and this one
 	// client runs against both packages.

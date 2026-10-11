@@ -4,7 +4,7 @@
 //! that pad's own streaming thread, so this type is touched from one thread and needs no generation
 //! tagging or cross-thread failure map.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -40,11 +40,10 @@ enum Sink {
 /// An audio or video pad, published through a codec importer.
 struct Media {
 	track: import::Track,
-	/// Decides grouping. `import::Track` draws no audio boundaries of its own (every packet is
-	/// independently decodable, so there is no keyframe to group on), leaving them to whoever knows
-	/// the latency target. A live sink wants each packet forwarded without waiting, so it cuts per
-	/// frame. Video groups at its own keyframes and needs nothing.
+	/// Audio is independently decodable, so bound its groups by media time instead of keyframes.
 	audio: bool,
+	/// The media time of the first packet in the current audio group.
+	group_start: Option<Duration>,
 	/// Records each frame's handoff against the wall clock, raising the catalog jitter by how
 	/// irregularly a local encoder delivers. Imports leave it off: their arrival times describe the
 	/// file or network, not the encoder.
@@ -64,6 +63,16 @@ impl Media {
 		if std::mem::take(&mut self.discontinuity) {
 			self.track.discontinuity()?;
 			self.keyframe = !self.audio;
+			self.group_start = None;
+		}
+		let timestamp = Duration::from_micros(micros);
+		if self.audio
+			&& self
+				.group_start
+				.is_some_and(|start| timestamp.saturating_sub(start) >= Duration::from_millis(20))
+		{
+			self.track.cut(None)?;
+			self.group_start = None;
 		}
 		let ts = hang::container::Timestamp::from_micros(micros).ok();
 		match self.track.decode(data, ts) {
@@ -72,14 +81,13 @@ impl Media {
 				// A rejected delta leaves its group open; later deltas cannot decode across that gap.
 				self.track.cut(None)?;
 				self.keyframe = !self.audio;
+				self.group_start = None;
 				return Ok(false);
 			}
 			result => result?,
 		}
-		// One group (one QUIC stream) per audio packet, so the relay forwards it without waiting for
-		// the next.
 		if self.audio {
-			self.track.cut(None)?;
+			self.group_start.get_or_insert(timestamp);
 		}
 		if self.encoder {
 			// Skipping the observation would publish a frame the jitter never saw.
@@ -478,6 +486,7 @@ impl Pad {
 		self.track = Some(Sink::Media(Box::new(Media {
 			track,
 			audio,
+			group_start: None,
 			encoder,
 			discontinuity: false,
 			keyframe: !audio,
@@ -1230,6 +1239,50 @@ mod tests {
 			builder = builder.field("streamheader", gst::Array::new([head]));
 		}
 		builder.build()
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn audio_groups_carry_twenty_milliseconds() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let consumer = broadcast.consume();
+		let mut pad = Pad::new();
+		pad.observe_caps(
+			&broadcast,
+			&catalog,
+			producer_options(&opus_caps(1, None, None), Some("audio")),
+		);
+		pad.observe_segment(time_segment());
+		let mut track = consumer
+			.track("audio")
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.await
+			.unwrap();
+		let anchor = Instant::now();
+		for index in 0..17 {
+			assert_eq!(
+				pad.push_buffer(
+					Bytes::from_static(&[0x80, 0xff, 0xfe]),
+					Some(gst::ClockTime::from_useconds(100_000 + index * 2_500)),
+					None,
+					None,
+					anchor
+				)
+				.unwrap(),
+				PushOutcome::Published
+			);
+		}
+		pad.finalize().unwrap();
+		for expected in [8, 8, 1] {
+			let mut group = track.recv_group().await.unwrap().unwrap();
+			let mut count = 0;
+			while group.read_frame().await.unwrap().is_some() {
+				count += 1;
+			}
+			assert_eq!(count, expected);
+		}
+		assert!(track.recv_group().await.unwrap().is_none());
 	}
 
 	fn published_opus(
