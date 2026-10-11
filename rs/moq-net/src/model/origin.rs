@@ -989,11 +989,13 @@ struct RemoteFront {
 	/// The front's broadcast, weak: dead once the front ends, so a
 	/// later request re-creates the front instead of joining a corpse.
 	broadcast: broadcast::WeakConsumer,
+	/// [`OriginState::next_route`] as a requester last joined; see [`Resolution::moved`].
+	joined: Arc<AtomicU64>,
 }
 
 /// The last route a cursor observed: the instance it serves, its metadata,
-/// servability, and captures.
-type CursorRoute = (Instance, RouteMeta, bool, Option<Vec<Pattern>>);
+/// servability, captures, and [`OriginState::next_route`] as it started.
+type CursorRoute = (Instance, RouteMeta, bool, Option<Vec<Pattern>>, u64);
 
 impl WeakEntry for RemoteFront {
 	fn is_closed(&self) -> bool {
@@ -1084,22 +1086,29 @@ impl TableCursor {
 			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
 	}
 
-	/// Deliver a changed winner at this presented prefix.
-	fn update(&mut self, presented: &PathOwned, best: Option<&RouteEntry>) {
+	/// Deliver a changed winner at this presented prefix, as of `now`, the
+	/// [`OriginState::next_route`].
+	fn update(&mut self, presented: &PathOwned, best: Option<&RouteEntry>, now: u64) {
 		match best {
 			Some(entry) => {
 				let meta = (entry.hops.clone(), entry.cost, entry.entered(), entry.epoch.clone());
 				let served = entry.server.is_some();
 				let captures = self.captures(&entry.prefix);
 				let instance = entry.instance();
+				let started = match self.current.get(presented) {
+					Some((prev, _, _, prev_captures, started)) if *prev == instance && *prev_captures == captures => {
+						*started
+					}
+					_ => now,
+				};
 				let previous = self.current.insert(
 					presented.clone(),
-					(instance.clone(), meta.clone(), served, captures.clone()),
+					(instance.clone(), meta.clone(), served, captures.clone(), started),
 				);
 				match previous {
 					// Captures are consumer identity, not route metadata. Replace the old
 					// identity explicitly so consumers keyed on it remove it.
-					Some((_, prev, _, prev_captures)) if prev_captures != captures => {
+					Some((_, prev, _, prev_captures, _)) if prev_captures != captures => {
 						if let Ok(mut state) = self.state.write() {
 							state.apply_unannounce(self.under.join(presented), prev, prev_captures);
 							state.apply_announce(self.under.join(presented), meta, captures);
@@ -1117,7 +1126,7 @@ impl TableCursor {
 					// A servability flip is delivered: a request that failed Unroutable
 					// under an advertise-only route retries on the update, and hiding
 					// it would park that waiter forever.
-					Some((_, prev, prev_served, _)) if prev == meta && prev_served == served => {}
+					Some((_, prev, prev_served, ..)) if prev == meta && prev_served == served => {}
 					_ => {
 						if let Ok(mut state) = self.state.write() {
 							state.apply_announce(self.under.join(presented), meta, captures);
@@ -1126,7 +1135,7 @@ impl TableCursor {
 				}
 			}
 			None => {
-				if let Some((_, last, _, captures)) = self.current.remove(presented)
+				if let Some((_, last, _, captures, _)) = self.current.remove(presented)
 					&& let Ok(mut state) = self.state.write()
 				{
 					state.apply_unannounce(self.under.join(presented), last, captures);
@@ -2264,6 +2273,8 @@ struct FrontTask {
 	watch: Watch,
 	/// Resolves the requesters parked on the front's channel.
 	request: kio::Producer<PendingFront>,
+	/// See [`RemoteFront::joined`].
+	joined: Arc<AtomicU64>,
 	timers: Clock,
 }
 
@@ -2409,6 +2420,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 		horizon,
 		watch,
 		request,
+		joined,
 		timers,
 	} = task;
 
@@ -2482,12 +2494,17 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 			.serving()
 			.and_then(|id| sources.get(&id))
 			.is_some_and(|source| source.is_closing());
+		let joined = joined.load(Ordering::Acquire);
 		let renew = resolved
 			.as_mut()
-			.and_then(|resolved| resolved.moved(&table, &path.as_path(), horizon));
+			.and_then(|resolved| resolved.moved(&table, &path.as_path(), horizon, joined));
 		drop(table);
 		if let Some(prefix) = renew {
-			shared.lock().renew(&prefix);
+			// Checked under the lock that renews: a restart after the read covers the move.
+			let mut table = shared.lock();
+			if !table.restarted_since(&prefix, joined) {
+				table.renew(&prefix);
+			}
 		}
 		Event::Selected { best, serving_closing }
 	};
@@ -2658,19 +2675,17 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 						let Some(instance) = instances.get(&source).cloned() else {
 							continue;
 						};
-						let prefix = {
-							let table = shared.read();
-							table
-								.routes
-								.covering(&path.as_path())
-								.find(|entry| entry.id == route)
-								.map(|entry| entry.prefix.clone())
-						};
+						let prefix = shared
+							.read()
+							.routes
+							.covering(&path.as_path())
+							.find(|entry| entry.id == route)
+							.map(|entry| entry.prefix.clone());
 						resolved = Some(Resolution {
 							instance: instance.clone(),
 							route,
 							prefix,
-							renewed: false,
+							settled: None,
 						});
 						if let Ok(mut pending) = request.write()
 							&& pending.resolved.is_none()
@@ -3405,6 +3420,8 @@ struct OriginState {
 	// The announced routes, keyed by prefix. The table holds one entry per live
 	// advertisement, not one per broadcast consumer.
 	routes: RouteTable,
+	// Route ids and generations, and the clock a cursor's start and a front's join
+	// read. A join takes a value of its own, so a start before it reads older.
 	next_route: u64,
 	next_watch: u64,
 
@@ -3515,6 +3532,7 @@ impl OriginState {
 	fn sync_route(&mut self, prefix: &Path, claim: &Pattern) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
+		let now = self.next_route;
 		let mut candidates = None;
 		for id in routes.cursors_touching(prefix) {
 			let Some(cursor) = self.cursors.get_mut(&id) else {
@@ -3523,7 +3541,7 @@ impl OriginState {
 			if let Some(presented) = cursor.presented(prefix, claim) {
 				if presented.is_empty() {
 					// A cursor root can collapse several covering prefixes into one.
-					Self::sync_cursor(routes, cursor, &presented);
+					Self::sync_cursor(routes, cursor, &presented, now);
 				} else {
 					// Every non-root presentation refers to this exact prefix. Rank
 					// its routes once, then take each cursor's first visible entry.
@@ -3539,7 +3557,7 @@ impl OriginState {
 						.iter()
 						.map(|(_, entry)| *entry)
 						.find(|entry| cursor.visible(entry));
-					cursor.update(&presented, best);
+					cursor.update(&presented, best, now);
 				}
 			}
 		}
@@ -3579,8 +3597,8 @@ impl OriginState {
 	}
 
 	/// Recompute the best visible route presenting at `presented` (relative) for
-	/// one cursor and deliver the change, if any.
-	fn sync_cursor(routes: &RouteTable, cursor: &mut TableCursor, presented: &PathOwned) {
+	/// one cursor and deliver the change, if any, as of `now`.
+	fn sync_cursor(routes: &RouteTable, cursor: &mut TableCursor, presented: &PathOwned, now: u64) {
 		// The entries presenting here are the ones announced at the absolute
 		// prefix, or, for the cursor's own root, at the root and every prefix
 		// above it (all of which present as the empty path). Among them, the
@@ -3604,7 +3622,7 @@ impl OriginState {
 				.min_by_key(|entry| route_order(&entry.prefix, entry))
 		});
 
-		cursor.update(presented, best);
+		cursor.update(presented, best, now);
 	}
 
 	/// Register a cursor and replay the current best route per presented prefix.
@@ -3625,7 +3643,7 @@ impl OriginState {
 			}
 		}
 		for p in &presented {
-			Self::sync_cursor(&self.routes, &mut cursor, p);
+			Self::sync_cursor(&self.routes, &mut cursor, p, self.next_route);
 		}
 		for head in &cursor.heads {
 			self.routes.add_cursor(head, id);
@@ -3678,6 +3696,33 @@ impl OriginState {
 		}
 		best
 	}
+
+	/// Whether every cursor presenting `prefix` restarted it since
+	/// [`next_route`](Self::next_route) read `since`: none still presents an instance
+	/// without an epoch it started before, which is what a [renewal](Self::renew)
+	/// would restart.
+	fn restarted_since(&self, prefix: &Path, since: u64) -> bool {
+		// Without a route there from before, no cursor can present one: the common
+		// case once a renewal moved every generation, and cheaper than the cursors.
+		let Some(claim) = self
+			.routes
+			.at(prefix)
+			.find(|entry| matches!(entry.instance(), Instance::Route(generation) if generation < since))
+			.map(|entry| &entry.claim)
+		else {
+			return true;
+		};
+		self.routes.cursors_touching(prefix).into_iter().all(|id| {
+			let Some(cursor) = self.cursors.get(&id) else {
+				return true;
+			};
+			let current = cursor
+				.presented(prefix, claim)
+				.and_then(|presented| cursor.current.get(&presented));
+			// An older route the cursor switched to since is a restart all the same.
+			!current.is_some_and(|(instance, .., started)| matches!(instance, Instance::Route(_)) && *started < since)
+		})
+	}
 }
 
 /// One-shot result of a dynamic broadcast request.
@@ -3707,17 +3752,23 @@ struct Resolution {
 	route: u64,
 	/// That route's prefix, when it was still in the table as the front resolved.
 	prefix: Option<PathOwned>,
-	/// Whether the front already renewed the prefix; see [`Self::moved`].
-	renewed: bool,
+	/// The [`RemoteFront::joined`] the prefix last restarted for the path's move, by
+	/// a renewal or on its own; see [`Self::moved`].
+	settled: Option<u64>,
 }
 
 impl Resolution {
-	/// The prefix to [renew](OriginState::renew), once per front: on a route without
-	/// an epoch, a request for the path, beneath the prefix, now resolves through
-	/// another route there. The prefix's own winner may be unchanged, so nothing else
-	/// tells its announce cursors that what they resolved under it moved.
-	fn moved(&mut self, table: &OriginState, path: &Path, horizon: Horizon) -> Option<PathOwned> {
-		if self.renewed || !matches!(self.instance, Instance::Route(_)) {
+	/// The prefix to [renew](OriginState::renew) unless it already
+	/// [restarted](OriginState::restarted_since) since the last requester `joined`
+	/// the front: on a route without an epoch, a request for the path, beneath the
+	/// prefix, now resolves through another route there. The prefix's own winner may
+	/// be unchanged, so nothing else tells its announce cursors that what they
+	/// resolved under it moved.
+	///
+	/// Settled once per join: a renewal leaves the front's instance behind, so
+	/// nobody joins it after.
+	fn moved(&mut self, table: &OriginState, path: &Path, horizon: Horizon, joined: u64) -> Option<PathOwned> {
+		if self.settled == Some(joined) || !matches!(self.instance, Instance::Route(_)) {
 			return None;
 		}
 		let prefix = self.prefix.as_ref()?;
@@ -3729,7 +3780,7 @@ impl Resolution {
 		if best.id == self.route || best.prefix != *prefix || best.epoch.is_some() {
 			return None;
 		}
-		self.renewed = true;
+		self.settled = Some(joined);
 		Some(prefix.clone())
 	}
 }
@@ -4669,6 +4720,8 @@ impl Consumer {
 				.then(|| front.broadcast.consume())
 				.filter(|held| !held.is_closed());
 			if let Some(held) = held {
+				state.next_route += 1;
+				front.joined.store(state.next_route, Ordering::Release);
 				let pending = Requesting::queued(front.request.consume(), held)
 					.with_path(requested)
 					.with_stats(scope)
@@ -4693,11 +4746,14 @@ impl Consumer {
 		// The front starts held by this request; see [`Front::new`].
 		let held = broadcast.consume();
 		let watch = state.watch(&self.shared, &absolute);
+		state.next_route += 1;
+		let joined = Arc::new(AtomicU64::new(state.next_route));
 		state.fronts.insert(
 			key,
 			RemoteFront {
 				request: request.clone(),
 				broadcast: held.weak(),
+				joined: joined.clone(),
 			},
 		);
 		// Released before the push: a set whose handles are gone drops the task,
@@ -4711,6 +4767,7 @@ impl Consumer {
 				horizon,
 				watch,
 				request,
+				joined,
 				timers: self.timers.clone(),
 			},
 			self.tasks.clone(),
@@ -5817,6 +5874,138 @@ mod tests {
 		assert!(!replaced.is_clone(&resolved));
 	}
 
+	/// An origin delivering restarts at once, and a way to claim `prefix` with a
+	/// producer scoped to `scope`, from `hop` at `cost`.
+	fn scoped_pool() -> (Producer, impl Fn(&str, &str, u64, u64) -> Dynamic) {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::new(origin(1))
+		}
+		.produce();
+		let claims = producer.clone();
+		let claim = move |prefix: &str, scope: &str, hop: u64, cost: u64| {
+			claims
+				.scope("", &scopes(&[scope]))
+				.unwrap()
+				.dynamic(prefix, Route::default().with_hops(hops(&[hop])).with_cost(cost))
+				.unwrap()
+		};
+		(producer, claim)
+	}
+
+	/// Request `path` from `consumer` and have `server` answer it: the answer, and
+	/// the requester's broadcast.
+	async fn hold(consumer: &Consumer, path: &str, server: &Dynamic) -> (broadcast::Producer, broadcast::Consumer) {
+		let pending = consumer.request_broadcast(path, None);
+		let answer = broadcast::Info::new().produce();
+		queued(server).await.accept(&answer);
+		(answer, pending.await.expect("the request resolves"))
+	}
+
+	/// Let the fronts react, then expect nothing more on `announced`.
+	async fn quiet(announced: &mut AnnounceConsumer) {
+		for _ in 0..20 {
+			moq_net_sim::yield_now().await;
+		}
+		announced.assert_next_wait();
+	}
+
+	/// Let the fronts react, then expect a restart of `prefix` on `announced`.
+	async fn restarted(announced: &mut AnnounceConsumer, prefix: &str) -> Route {
+		for _ in 0..20 {
+			moq_net_sim::yield_now().await;
+		}
+		announced.assert_next_restarted(prefix)
+	}
+
+	/// A held path moving restarts a scoped cursor whose own winner stayed, even
+	/// though the route the cursor cannot see left and so changed the prefix's
+	/// overall winner.
+	#[moq_net_sim::test]
+	async fn a_moved_path_restarts_a_scoped_cursor() {
+		let (producer, claim) = scoped_pool();
+		let consumer = producer.consume();
+		let _a = claim("room", "room/video/a", 10, 5);
+		let b = claim("room", "room/video/b", 11, 9);
+		let chat = claim("room", "room/chat", 12, 1);
+		let mut video = consumer
+			.clone()
+			.scope("", &scopes(&["room/video"]))
+			.unwrap()
+			.announced();
+		assert_eq!(video.assert_next_active("room").cost, Cost::new(5));
+		let _sticky = hold(&consumer, "room/video/b", &b).await;
+
+		drop(chat);
+		let _d = claim("room", "room/video/b", 13, 8);
+		assert_eq!(restarted(&mut video, "room").await.cost, Cost::new(5));
+		quiet(&mut video).await;
+	}
+
+	/// A requester joining the front after its cursor restarted is not covered by
+	/// that restart: the path moving afterwards restarts the prefix again.
+	#[moq_net_sim::test]
+	async fn a_moved_path_restarts_a_requester_that_joined_after_a_restart() {
+		let (producer, claim) = scoped_pool();
+		let consumer = producer.consume();
+		let _w = claim("pool", "pool/other", 10, 2);
+		let r = claim("pool", "pool/job", 11, 5);
+		let mut announced = consumer.announced();
+		assert_eq!(announced.assert_next_active("pool").cost, Cost::new(2));
+		let (_answer, sticky) = hold(&consumer, "pool/job", &r).await;
+
+		let _y = claim("pool", "pool/other", 12, 1);
+		assert_eq!(announced.assert_next_restarted("pool").cost, Cost::new(1));
+		quiet(&mut announced).await;
+		// The path still resolves through the front's route, so the re-request joins it.
+		let joined = consumer.request_broadcast("pool/job", None).await.unwrap();
+		assert!(joined.is_clone(&sticky));
+
+		let _z = claim("pool", "pool/job", 13, 3);
+		assert_eq!(restarted(&mut announced, "pool").await.cost, Cost::new(1));
+		quiet(&mut announced).await;
+	}
+
+	/// A path that moved with the prefix's own restart is settled: the prefix's winner
+	/// moving back to a route the front saw restarts it once, and the front adds none.
+	#[moq_net_sim::test]
+	async fn a_moved_path_settled_by_a_restart_stays_settled() {
+		let (producer, claim) = scoped_pool();
+		let consumer = producer.consume();
+		let a = claim("room", "room/job", 10, 5);
+		let _b = claim("room", "room/other", 11, 2);
+		let mut announced = consumer.announced();
+		assert_eq!(announced.assert_next_active("room").cost, Cost::new(2));
+		let _sticky = hold(&consumer, "room/job", &a).await;
+
+		let c = producer
+			.dynamic("room", Route::default().with_hops(hops(&[12])).with_cost(1))
+			.unwrap();
+		assert_eq!(announced.assert_next_restarted("room").cost, Cost::new(1));
+		quiet(&mut announced).await;
+
+		c.update(Route::default().with_hops(hops(&[12])).with_cost(3)).unwrap();
+		assert_eq!(announced.assert_next_restarted("room").cost, Cost::new(2));
+		quiet(&mut announced).await;
+	}
+
+	/// A route from before the request repricing to win both the prefix and the held
+	/// path restarts the prefix once: the cursor's own switch covers the move.
+	#[moq_net_sim::test]
+	async fn a_repriced_route_taking_a_held_path_restarts_once() {
+		let (producer, claim) = scoped_pool();
+		let consumer = producer.consume();
+		let a = claim("room", "room", 10, 5);
+		let b = claim("room", "room", 11, 9);
+		let mut announced = consumer.announced();
+		assert_eq!(announced.assert_next_active("room").cost, Cost::new(5));
+		let _sticky = hold(&consumer, "room/job", &a).await;
+
+		b.update(Route::default().with_hops(hops(&[11])).with_cost(3)).unwrap();
+		assert_eq!(announced.assert_next_restarted("room").cost, Cost::new(3));
+		quiet(&mut announced).await;
+	}
+
 	#[test]
 	fn exclude_hides_routes_through_the_peer() {
 		let producer = origin(1).produce();
@@ -6551,6 +6740,7 @@ mod tests {
 			horizon: Horizon::default(),
 			watch,
 			request: kio::Producer::default(),
+			joined: Arc::default(),
 			timers: consumer.timers.clone(),
 		};
 		let mut front = std::pin::pin!(serve_front(task));
