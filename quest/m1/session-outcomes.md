@@ -63,8 +63,6 @@ playback needs an error rate it cannot see client-side):
 
 ## Related
 
-- [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - the
-  same consumer's per-transport session split
 - [Typed refusal reason](/quest/m1/refusal-reason.md) - adds `expired`
   and per-root, per-tier refusal attribution on top of these counters
 - [Own the QUIC stack](/quest/m1/quic/README.md) - where a typed close kind

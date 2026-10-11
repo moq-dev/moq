@@ -466,6 +466,31 @@ test("a group duration packs frames until the minimum and restarts after a break
 	expect(groups).toEqual([5, 2, 1, 2]);
 });
 
+test("default audio groups carry twenty milliseconds", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	for (const [frameMs, packets, groupMs] of [
+		[2.5, 8, undefined],
+		[10, 2, undefined],
+		[20, 1, undefined],
+		[2.5, 1, 0],
+	] as const) {
+		using env = await setup(
+			new Baseline(),
+			{ mime: "opus", frameDuration: Time.Milli(frameMs) },
+			groupMs === undefined ? undefined : Time.Milli(groupMs),
+		);
+		for (let index = 0; index < packets * 2 + LaggingAudioEncoder.LAG; index++) {
+			await env.feed.push({
+				timestamp: Time.Micro(20_000 + index * frameMs * 1000),
+				channels: [new Float32Array(frameMs * 48)],
+			});
+		}
+		await env.feed.drain();
+		expect(env.groups).toEqual([packets, packets]);
+		expect(env.written).toHaveLength(packets * 2);
+	}
+});
+
 // Chromium stamps Opus output by counting the samples emitted, so every frame DTX suppresses pulls
 // later audio earlier. A plain-JS caller passing the old knob must not reach the encoder.
 test("never enables Opus DTX", async () => {
