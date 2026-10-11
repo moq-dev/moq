@@ -3,6 +3,7 @@ import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
 import { closeReason, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream, type Writer } from "../stream.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
 import { StreamId } from "./stream.ts";
 import { hasAuth, type Version } from "./version.ts";
@@ -133,11 +134,16 @@ export class AuthError {
 
 	static async #decode(r: Reader): Promise<AuthError> {
 		const code = await r.u53();
-		const reason = await r.string();
-		if (new TextEncoder().encode(reason).byteLength > MAX_REASON) {
-			throw new Error("AUTH_ERROR reason exceeds 8,192 bytes");
+		const size = await r.u53();
+		if (size > MAX_REASON) {
+			throw new ProtocolViolation("AUTH_ERROR reason exceeds 8,192 bytes");
 		}
-		return new AuthError(code, reason);
+		const bytes = await r.read(size);
+		try {
+			return new AuthError(code, decodeUtf8(bytes));
+		} catch (cause) {
+			throw new ProtocolViolation("invalid UTF-8 AUTH_ERROR reason", { cause });
+		}
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

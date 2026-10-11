@@ -133,24 +133,7 @@ test("malformed AUTH_OK closes its session", async () => {
 				{ id: AuthOk.id },
 			);
 		});
-		const closes: WebTransportCloseInfo[] = [];
-		const quic = { close: (info: WebTransportCloseInfo) => closes.push(info) } as unknown as WebTransport;
-		const wire = new LiteAuthWire(quic, Lite.Version.DRAFT_07);
-		const data = await reader.readAll();
-		const stream = new Stream({
-			readable: new ReadableStream({
-				start(controller) {
-					controller.enqueue(data);
-					controller.close();
-				},
-			}),
-			writable: new WritableStream(),
-			version: Lite.Version.DRAFT_07,
-		});
-		await expect(wire.read(stream)).rejects.toThrow();
-		expect(closes).toHaveLength(1);
-		expect(closes[0].closeCode).toBe(SessionCode.ProtocolViolation);
-		stream.close();
+		await assertSessionViolation(reader);
 	}
 });
 
@@ -158,4 +141,43 @@ test("the largest shared expiry remains valid", async () => {
 	const ok = new AuthOk(patterns(), patterns(), Number.MAX_SAFE_INTEGER);
 	const reader = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_07));
 	expect(await decodeAuthReplyMaybe(reader, Lite.Version.DRAFT_07)).toEqual(ok);
+});
+
+/** A malformed reply closes its session with the protocol-violation code. */
+async function assertSessionViolation(reader: Reader) {
+	const closes: WebTransportCloseInfo[] = [];
+	const quic = { close: (info: WebTransportCloseInfo) => closes.push(info) } as unknown as WebTransport;
+	const wire = new LiteAuthWire(quic, Lite.Version.DRAFT_07);
+	const data = await reader.readAll();
+	const stream = new Stream({
+		readable: new ReadableStream({
+			start(controller) {
+				controller.enqueue(data);
+				controller.close();
+			},
+		}),
+		writable: new WritableStream(),
+		version: Lite.Version.DRAFT_07,
+	});
+	await expect(wire.read(stream)).rejects.toThrow();
+	expect(closes).toHaveLength(1);
+	expect(closes[0].closeCode).toBe(SessionCode.ProtocolViolation);
+	stream.close();
+}
+
+test("malformed AUTH_ERROR reasons close their session", async () => {
+	for (const reason of [new Uint8Array([0xff]), new Uint8Array(8193).fill(0x61)]) {
+		const reader = await roundTrip(async (w) => {
+			await Message.encode(
+				w,
+				async (body) => {
+					await body.u53(SessionCode.Unauthorized);
+					await body.u53(reason.byteLength);
+					await body.write(reason);
+				},
+				{ id: AuthError.id },
+			);
+		});
+		await assertSessionViolation(reader);
+	}
 });

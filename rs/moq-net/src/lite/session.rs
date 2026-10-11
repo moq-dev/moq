@@ -952,7 +952,7 @@ mod tests {
 			w.varint(0).unwrap();
 			w.varint(0).unwrap();
 			w.fill(prefix).unwrap();
-			assert_malformed_grant_closes(script).await;
+			assert_malformed_reply_closes(script).await;
 		}
 		let mut script = Vec::new();
 		let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
@@ -962,10 +962,24 @@ mod tests {
 		w.varint(0).unwrap();
 		w.varint(1 << 53).unwrap();
 		w.fill(prefix).unwrap();
-		assert_malformed_grant_closes(script).await;
+		assert_malformed_reply_closes(script).await;
 	}
 
-	async fn assert_malformed_grant_closes(script: Vec<u8>) {
+	#[moq_net_sim::test]
+	async fn malformed_auth_error_reasons_close_the_session() {
+		for reason in [vec![0xff], vec![b'a'; 8193]] {
+			let mut script = Vec::new();
+			let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
+			w.varint(1).unwrap();
+			let prefix = w.prefix_varint();
+			w.varint(SessionError::Unauthorized.to_code().into()).unwrap();
+			w.bytes(&reason).unwrap();
+			w.fill(prefix).unwrap();
+			assert_malformed_reply_closes(script).await;
+		}
+	}
+
+	async fn assert_malformed_reply_closes(script: Vec<u8>) {
 		let transport = ScriptedSession::per_stream(vec![script]);
 		let log = transport.log.clone();
 		let start = start(Config {
@@ -989,7 +1003,7 @@ mod tests {
 			kio::wait(|waiter| driver.poll(waiter)),
 		)
 		.await
-		.expect("the session outlived a malformed AUTH_OK");
+		.expect("the session outlived a malformed AUTH reply");
 		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
 		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
 	}
