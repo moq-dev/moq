@@ -23,6 +23,7 @@
 //! demultiplexing cannot carry (TS-level scrambling, PSI and SI as authored).
 
 mod adts;
+mod damage;
 mod export;
 mod follower;
 mod health;

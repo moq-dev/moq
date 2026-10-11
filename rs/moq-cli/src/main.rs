@@ -810,14 +810,14 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 	let catalog = args.catalog_format(&name);
 
 	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
-	// resolves it (and any sibling broadcast a rendition's `broadcast` field references,
-	// e.g. "./source") through the origin.
+	// resolves it, and any sibling broadcast a rendition's `broadcast` field references
+	// (e.g. "./source") through the same origin.
 	consumer
 		.routed(&name)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
-	Subscribe::new(consumer, &name, catalog, args).run().await
+	Subscribe::new(consumer, &name, catalog, args).await?.run().await
 }
 
 /// Run every endpoint until the first finishes (stdin EOF, SIGINT, SIGTERM, or an
