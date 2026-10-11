@@ -78,4 +78,4 @@ stats field, which its quest documents inline.
 
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - orders streams; offset writes order ranges within one
 - [QoS](/quest/m1/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
-- [Frame slots are cached for free](/quest/m1/frame-slot-charge.md) - changes how the cache charges the in-flight frames a cut-through build would hold
+- [Frame slots are cached for free](https://github.com/moq-dev/moq/pull/5239) - changes how the cache charges the in-flight frames a cut-through build would hold

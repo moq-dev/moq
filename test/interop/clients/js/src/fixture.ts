@@ -17,7 +17,7 @@ import { Time } from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type { Fault, FixtureState } from "./contract";
-import { KEYFRAME_INTERVAL_MS, OFFSET_STEPS, readLiveGop, SAMPLE_RATE } from "./contract";
+import { KEYFRAME_INTERVAL_MS, OFFSET_STEPS, SAMPLE_RATE } from "./contract";
 import * as Pattern from "./pattern";
 
 /** Cap the encoder rather than letting it track a bandwidth estimate, so runs are comparable. */
@@ -47,7 +47,6 @@ export class Fixture {
 	readonly host: HTMLElement;
 
 	readonly #signals = new Effect();
-	readonly #broadcast: Publish.Broadcast;
 	readonly #audio: AudioContext;
 	readonly #frameId = new Signal(-1);
 	readonly #audioState = new Signal<AudioContextState>("suspended");
@@ -96,8 +95,6 @@ export class Fixture {
 			display: capture.out.display,
 		});
 		this.#signals.cleanup(() => broadcast.close());
-
-		this.#broadcast = broadcast;
 
 		const video = new Publish.Video.Encoder("video", {
 			broadcast,
@@ -218,13 +215,6 @@ export class Fixture {
 	/** Enable or disable the video rendition, which stays in the catalog either way. */
 	setVideo(enabled: boolean): void {
 		this.#videoEnabled.set(enabled);
-	}
-
-	/** Sample the current published keyframe before the viewer closes its subscription. */
-	async liveGop() {
-		const broadcast = this.#broadcast.net.peek();
-		if (!broadcast) throw new Error("the fixture is not publishing");
-		return readLiveGop(broadcast.track("video"));
 	}
 
 	/** Stop publishing and release the capture, audio graph, and session. */

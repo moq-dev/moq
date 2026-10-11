@@ -36,6 +36,8 @@ export type PlayerInput = {
 	muted: Getter<boolean>;
 	/** Canvas visibility policy for video downloads. */
 	visible: Getter<Video.Visible>;
+	/** Which graphics API paints the canvas. */
+	backend: Getter<Video.Backend>;
 	/** Playback distance from the live edge. */
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
@@ -69,6 +71,8 @@ export class Player {
 	readonly emitter: Audio.Emitter;
 	/** Caption overlay output. */
 	readonly textRenderer: Text.Renderer;
+	/** Fatal media decode failure, cleared when another source is selected. */
+	readonly error: Getter<Error | undefined>;
 
 	#videoEnabled = new Signal(false);
 	#audioEnabled = new Signal(false);
@@ -90,6 +94,7 @@ export class Player {
 			volume: getter(props.volume ?? 0.5),
 			muted: getter(props.muted ?? false),
 			visible: getter(props.visible ?? "20%"),
+			backend: getter<Video.Backend>(props.backend ?? "auto"),
 			delay: getter(props.delay ?? "auto"),
 			buffer: getter(props.buffer ?? Time.Milli.zero),
 			target: getter<Video.Target | undefined>(props.target),
@@ -127,6 +132,10 @@ export class Player {
 			this.audio.close();
 		});
 
+		this.error = this.#signals.computed(
+			(effect) => effect.get(this.video.out.error) ?? effect.get(this.audio.out.error),
+		);
+
 		this.emitter = new Audio.Emitter({
 			source: this.audio,
 			volume: this.in.volume,
@@ -137,6 +146,7 @@ export class Player {
 			decoder: this.video,
 			canvas: this.in.canvas,
 			visible: this.in.visible,
+			backend: this.in.backend,
 		});
 		this.#signals.cleanup(() => {
 			this.emitter.close();

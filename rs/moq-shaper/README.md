@@ -47,7 +47,9 @@ default. `Shaper::verify` fails when the shaper stopped forwarding, when an impa
 configures never acted and the traffic makes that silence implausible, or when a direction carried
 traffic but no datagram saw one of its phases, before the first step or after one. `Shaper::cut` takes
 the path down both ways until the `Outage` it returns drops, so a test can sever a link mid-run and
-restore it when it chooses rather than on a timer. The relay's drills
+restore it when it chooses rather than on a timer. `Shaper::retarget` forwards to a new target from then
+on, keeping each client's flow, so a restarted server can come back on a fresh port behind the address
+clients already dial. The relay's drills
 (`rs/moq-relay/tests/drills.rs`, described in `test/drill/README.md`) run every scenario through it.
 
 ## What a seed does and does not fix

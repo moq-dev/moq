@@ -39,7 +39,7 @@ The installed package compiles `moq.cpp` inside the consumer's project, at its `
 
 ## Cancellation
 
-Cancelling a future (`cancel()`, destroying it, destroying the `moq::Continuation` returned by `then`, or destroying a coroutine suspended on it) drops the Rust future. Native moq-ffi runs each async call as a spawned task that holds an `AbortOnDrop` on it (`rs/moq-ffi/src/ffi.rs`), so dropping the future aborts the work at its next await point instead of letting it finish unobserved. The continuation of a cancelled future never runs.
+Cancelling a future (`cancel()`, destroying it, destroying the `moq::Continuation` returned by `then`, or destroying a coroutine suspended on it) drops the Rust future. Most async calls run in place, on the thread that polls the future, so cancelling stops the work at once: it never finishes unobserved or takes data the next call is waiting for. The few calls spawned onto the moq-ffi runtime are aborted at their next await point. The continuation of a cancelled future never runs.
 
 Like `std::future`, `valid()` is false once `get()`, `then()`, `cancel()`, or a move took the future's state. Reading an invalid future aborts with "it was consumed or cancelled", so check `valid()` first when a future may have been cancelled, consumed, or moved from.
 

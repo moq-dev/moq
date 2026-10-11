@@ -56,4 +56,3 @@ stays byte-identical.
 ## Related
 
 - [Encoder colour](/quest/m1/color-model.md) - encoders signal the colour they actually produce
-- [WebGPU renderer](/quest/m1/webgpu-renderer.md) - renders SDR and wide gamut from `VideoFrame.colorSpace` before this lands

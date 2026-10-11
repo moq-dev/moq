@@ -32,7 +32,7 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 The Rust and TypeScript cores expose the same surface, and nothing else:
 
 - `Credential { context, kid, secret }` accepts the application-owned secret. The application generates and distributes it over its authenticated channel; the library does not mint a secret it cannot return. `credential.path(semantic)` derives the epoch-free opaque broadcast name. Credential is cheap to clone, never serializes the secret, and redacts it from `Debug`.
-- A core produces only under an epoch it minted itself (decided 2026-10-08). Only the credential mints a producing generation, and that call takes no epoch: it mints a fresh UUIDv7 and returns a generation owning `epoch()` for the route, `name(semantic)` for opaque track names, and `produce(track)` for protected `moq-net` tracks. A discovered epoch binds a consume-only generation with `name(semantic)` and `consume(track)`. The two are separate types, so producing under a discovered or shared epoch does not compile; [Rust protected publisher seams](/quest/m1/e2ee/rust-publish.md) owns the Rust change and proposes the names. Clones of a producing generation share publisher claims so reopening a track cannot reset its nonce counters.
+- A core produces only under an epoch it minted itself (decided 2026-10-08). Only the credential mints a producing generation, and that call takes no epoch: it mints a fresh UUIDv7 and returns a generation owning `epoch()` for the route, `name(semantic)` for opaque track names, and `produce(track)` for protected `moq-net` tracks. A discovered epoch binds a consume-only generation with `name(semantic)` and `consume(track)`. The two are separate types, so producing under a discovered or shared epoch does not compile; [Rust E2EE generations](/quest/m1/e2ee/rust-generations.md) owns the Rust change and settles the names. Clones of a producing generation share publisher claims so reopening a track cannot reset its nonce counters.
 - `track::Producer` appends groups and datagrams and allocates identities; `track::Consumer` yields groups and datagram events. `group::Producer` and `group::Consumer` wrap the whole group lifecycle so every AEAD call has the canonical physical name and transport identity.
 - Errors are the draft's typed codes plus the transport's. Nothing catalog-, hang-, or MSF-shaped lives here: a catalog is a track under a derived name, and compression is the catalog owner's job.
 - Stateless `seal`/`open` primitives with caller-chosen identities, HKDF labels and info builders, raw key bytes, and process-global claims are not public. The vectors are tested inside each core.
@@ -45,6 +45,7 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Required
 
+- [Rust E2EE generations](/quest/m1/e2ee/rust-generations.md) - producing and consuming generations have separate types, with the API both integrations mirror
 - [TypeScript E2EE core](/quest/m1/e2ee/typescript.md) - the `@moq/e2ee` package
   mirroring the Rust surface, with WebCrypto in a serial pump
 - [Rust protected publisher seams](/quest/m1/e2ee/rust-publish.md) - Rust media

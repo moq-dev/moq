@@ -20,10 +20,9 @@ place that names the pin.
   `cpp/moq/uniffi.toml` strips `Moq`. Delete the alias list in
   `cpp/moq/include/moq/moq.hpp` and the `just cpp check` audit of it, and
   drop the "each generated `moq::MoqFoo` is also `moq::Foo`" lines from
-  `doc/lib/cpp/index.md` and `cpp/moq/README.md`. The ffi-shape line ports
-  the hand-kept aliases today
-  ([The bindings mirror Rust's layers](/quest/m1/ffi-shape/README.md)), so
-  update that note when this lands.
+  `doc/lib/cpp/index.md` and `cpp/moq/README.md`. Then update the C++ note
+  in [The bindings mirror Rust's layers](/quest/m1/ffi-shape/README.md),
+  which keeps C++ flat with `Media*` names until this lands.
 - **expected**: the fork gains an option that always uses the bundled
   `tl::expected`. Delete the `MOQ_ABI` guard in `moq.hpp` and
   `src/moq.cpp`, the "C++ standard" sections of `doc/lib/cpp/index.md` and

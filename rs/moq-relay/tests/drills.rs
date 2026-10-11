@@ -27,6 +27,8 @@
 
 use std::time::Duration;
 
+use futures::FutureExt;
+
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
 
@@ -118,7 +120,7 @@ impl Path {
 	async fn through(relay: &RelayHost, profile: moq_shaper::Profile, seed: u64) -> Self {
 		let shaper = moq_shaper::Shaper::bind(moq_shaper::Config {
 			bind: "127.0.0.1:0".parse().unwrap(),
-			target: format!("127.0.0.1:{}", relay.port).parse().unwrap(),
+			target: relay.addr(),
 			seed,
 			up: profile.clone(),
 			down: profile,
@@ -131,6 +133,16 @@ impl Path {
 			url: format!("https://{}/drill", shaper.addr()).parse().unwrap(),
 			shaper: Some(shaper),
 		}
+	}
+
+	/// Forward to `relay` from now on, so clients reach it at the address they
+	/// already dial.
+	fn retarget(&self, relay: &RelayHost) {
+		self.shaper
+			.as_ref()
+			.expect("only a path through a shaper can move")
+			.retarget(relay.addr())
+			.expect("retarget the shaper");
 	}
 
 	/// Fail the drill unless the impairment it ran under actually acted.
@@ -239,18 +251,23 @@ impl RelayHost {
 			.expect("relay shutdown panicked");
 	}
 
+	/// The relay's UDP address.
+	fn addr(&self) -> std::net::SocketAddr {
+		std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, self.port))
+	}
+
 	/// The URL clients dial. `https` is WebTransport over QUIC.
 	fn url(&self) -> url::Url {
-		format!("https://127.0.0.1:{}/drill", self.port)
+		format!("https://{}/drill", self.addr())
 			.parse()
 			.expect("parse relay url")
 	}
 }
 
-/// A public relay on loopback with a generated certificate, on `port` or an ephemeral one.
-fn relay_config(port: Option<u16>) -> Config {
+/// A public relay on an ephemeral loopback port with a generated certificate.
+fn relay_config() -> Config {
 	let mut config = Config::default();
-	config.listen.bind = Some(format!("127.0.0.1:{}", port.unwrap_or_default()).parse().unwrap());
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config
@@ -412,7 +429,7 @@ async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 /// keeps being served. The rejoin below is the half of that behavior worth
 /// grading here.
 async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
-	let relay = RelayHost::start(relay_config(None)).await;
+	let relay = RelayHost::start(relay_config()).await;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
 
@@ -533,10 +550,18 @@ lanes!(cancel_under_backpressure_releases_the_reader);
 /// into one is the worst possible failure mode. And the reconnect loop has to
 /// restore service: the dead session's broadcast closes with it, and a fresh
 /// subscribe through the same origin resumes once the relay returns.
+///
+/// Clients dial a shaper in both lanes, unimpaired on loopback, so the relay
+/// can come back on a fresh port behind the address they already dial. The
+/// dead relay's port is free for any process's ephemeral bind to take, so a
+/// restart that needed it back would fail whenever one did.
 async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
-	let mut relay = RelayHost::start(relay_config(None)).await;
-	let port = relay.port;
-	let path = Path::start(lane, &relay).await;
+	let mut relay = RelayHost::start(relay_config()).await;
+	let profile = match lane {
+		Lane::Loopback => Default::default(),
+		Lane::Impaired => impairment(),
+	};
+	let path = Path::through(&relay, profile, seed(lane)).await;
 	let url = path.url.clone();
 
 	let publisher = moq_tokio::origin::spawn();
@@ -572,6 +597,9 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 		.expect("open group aborted")
 		.expect("open group finished");
 
+	// Start the replacement while the original still holds its port, so the two
+	// can never share one. Clients keep dialing the dead relay until the retarget.
+	let replacement = RelayHost::start(relay_config()).await;
 	relay.kill().await;
 
 	// Terminal result: the unread half of the open group fails. `Ok(None)` here
@@ -586,8 +614,8 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	expect_status(&mut subscribe_loop, moq_tokio::Status::Disconnected, "subscriber").await;
 	expect_status(&mut publish_loop, moq_tokio::Status::Disconnected, "publisher").await;
 
-	let relay = RelayHost::start(relay_config(Some(port))).await;
-	assert_eq!(relay.port, port, "relay bound the wrong port");
+	let relay = replacement;
+	path.retarget(&relay);
 
 	expect_status(&mut subscribe_loop, moq_tokio::Status::Connected, "subscriber").await;
 	expect_status(&mut publish_loop, moq_tokio::Status::Connected, "publisher").await;
@@ -640,7 +668,7 @@ async fn expect_status(reconnect: &mut moq_tokio::Connection, want: moq_tokio::S
 /// subscriber that re-consumes the same name after a republish gets what the
 /// new publisher is sending, never the previous one's cache.
 async fn interrupted_publisher_republishes_new_content(lane: Lane) {
-	let relay = RelayHost::start(relay_config(None)).await;
+	let relay = RelayHost::start(relay_config()).await;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
 
@@ -764,10 +792,10 @@ const SETTLE: Duration = Duration::from_secs(10);
 
 /// The cross-relay drill's link: the drills' impairment behind a bottleneck a
 /// burst overruns, so its tail waits in the queue or is dropped from it. It is
-/// slower than [`credit`]'s receive window lets a sender go (about 1 KiB per
-/// round trip, some 160 kbit/s), or the window would bind first and the queue
-/// would never fill. The window keeps a burst's datagrams small, so the 50ms
-/// queue holds one or two of them before it drops the rest.
+/// slower than [`credit`]'s receive window lets a sender go. The first burst
+/// is collected at ingress after setup, so scheduling cannot drain the bucket
+/// between its datagrams; its surviving bytes exceed the burst and 50ms queue
+/// allowance before they are accounted at one instant.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		rate: Some(moq_shaper::Rate {
@@ -786,10 +814,22 @@ fn bursty() -> moq_shaper::Profile {
 fn credit(lane: Lane, mut quic: moq_tokio::quic::Config) -> moq_tokio::quic::Config {
 	if let Lane::Impaired = lane {
 		quic.max_streams = Some(16);
-		quic.receive_window = Some(4 * PAYLOAD as u64);
-		quic.stream_receive_window = Some(2 * PAYLOAD as u64);
+		// The one-shot ingress burst must fit inside transport credit before
+		// anything is released. Keep two bucket allowances, rounded to groups,
+		// while still forcing a full application burst to wait for more credit.
+		let receive_window = ingress_bytes();
+		assert!(receive_window < BURST_GROUPS * PAYLOAD as u64);
+		quic.receive_window = Some(receive_window);
+		quic.stream_receive_window = Some(receive_window);
 	}
 	quic
+}
+
+/// Enough bytes to cross the ingress bucket without needing an acknowledgment.
+fn ingress_bytes() -> u64 {
+	let rate = bursty().rate.expect("bursty rate");
+	let queued = (rate.bits_per_second as u128 * rate.queue.as_nanos() / 8 / 1_000_000_000) as u64;
+	(rate.burst + queued).next_multiple_of(PAYLOAD as u64) * 2
 }
 
 /// How a cross-relay group reached the subscriber, or why it never did.
@@ -827,9 +867,16 @@ async fn read_payload(mut group: moq_net::group::Consumer, sequence: u64) -> Res
 	}
 }
 
-/// The payload of group `sequence`: its number, padded to [`PAYLOAD`].
+/// The group number, padded so the first burst's newest group can fill ingress.
 fn payload(sequence: u64) -> Vec<u8> {
-	format!("{sequence:>PAYLOAD$}").into_bytes()
+	// A latest-only subscription can skip every earlier group in a burst.
+	// Its newest frame alone must cross the gate before it needs an ACK.
+	let width = if sequence == BURST_GROUPS - 1 {
+		ingress_bytes() as usize
+	} else {
+		PAYLOAD
+	};
+	format!("{sequence:>width$}").into_bytes()
 }
 
 /// Drill: bursts of one-frame groups cross a two-relay cluster.
@@ -927,7 +974,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// bound each relay's side of an impaired handshake, which can sit silent
 	// that long between the client's backed-off retransmits. So a cut peer link
 	// idles out only after `relay_idle`, which the flap's waits allow for.
-	let mut config = relay_config(None);
+	let mut config = relay_config();
 	config.quic = credit(lane, config.quic);
 	let relay_idle = config.quic.idle_timeout;
 	let origin = RelayHost::start(config).await;
@@ -942,7 +989,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// The edge relay dials the origin as a cluster peer, through its own path.
 	let mut peer_url = peer.url.clone();
 	peer_url.set_path("/");
-	let mut config = relay_config(None);
+	let mut config = relay_config();
 	config.quic = credit(lane, config.quic);
 	config.connect = dial();
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
@@ -992,10 +1039,33 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 
 	// Subscribed before the first burst, as an app watching a control channel is.
 	let mut reader = subscribe(&subscribed, "live").await;
+	// The subscriber's subscription can start before the origin's reaches the
+	// publisher, which takes extra round trips over a moq-transport peer. The
+	// ingress burst holds every publisher datagram, including the replies and
+	// credit the origin needs before it subscribes, so arming it any earlier
+	// starves the publisher's session until it idles out.
+	tokio::time::timeout(TIMEOUT, async {
+		while track.subscription().is_none() {
+			track.subscription_changed().await.expect("track aborted");
+		}
+	})
+	.await
+	.expect("the origin never subscribed to the publisher");
 
 	// What connecting and subscribing overflowed, so only the bursts are graded.
 	let paths = [&peer, &publish_path, &subscribe_path];
 	let setup_overflowed: u64 = paths.iter().map(|path| path.overflowed()).sum();
+	let ingress = match lane {
+		Lane::Impaired => Some(
+			publish_path
+				.shaper
+				.as_ref()
+				.expect("impaired path")
+				.burst(moq_shaper::ingress::Direction::Up)
+				.expect("arm an ingress burst"),
+		),
+		Lane::Loopback => None,
+	};
 
 	let total = BURSTS * BURST_GROUPS;
 	let mut written = Vec::new();
@@ -1180,6 +1250,13 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 		.values()
 		.filter(|outcome| !matches!(outcome, Outcome::Live))
 		.count();
+	if let Some(ingress) = ingress {
+		ingress
+			.completed()
+			.now_or_never()
+			.expect("ingress burst never completed")
+			.expect("ingress burst cancelled");
+	}
 	let overflowed = paths.iter().map(|path| path.overflowed()).sum::<u64>() - setup_overflowed;
 	println!(
 		"fault activated: {gaps} of {total} groups missed the live subscription (reset: {resets:?}), {overflowed} datagrams overflowed a bottleneck during the bursts, slowest group {} after {:?}",
@@ -1234,7 +1311,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 /// harness with no publisher and requires that no announcement and no broadcast
 /// ever arrive, so "the frame showed up" cannot be a harness artifact.
 async fn no_publisher_never_delivers(lane: Lane) {
-	let relay = RelayHost::start(relay_config(None)).await;
+	let relay = RelayHost::start(relay_config()).await;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
 
@@ -1279,7 +1356,9 @@ lanes!(no_publisher_never_delivers);
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

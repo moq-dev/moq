@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import * as Moq from "@moq/net";
-import { lateJoinStartsLive, leakedPlayerStarted, readLiveGop, type Resources } from "./contract";
+import { leakedPlayerStarted, type Resources, reachesLive } from "./contract";
 
 const playing: Resources = { transports: 1, sockets: 0, audioContexts: 1, workers: 0 };
 
@@ -19,36 +18,25 @@ test("unchanged counts are not a leak start", () => {
 	expect(leakedPlayerStarted(playing, playing)).toBe(false);
 });
 
+const nearLive = {
+	previous: 183,
+	source: 196,
+	bound: 45,
+	sample: { frameId: 186, audioContext: "running", audioStalled: false },
+};
 
-test("late join uses the published GOP when painting is ahead of capture", async () => {
-	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MILLI });
-	try {
-		const old = track.appendGroup();
-		old.writeFrame({ payload: new Uint8Array([1]), timestamp: Moq.Time.Timestamp.fromMillis(3000) });
-		old.close();
-		const current = track.appendGroup();
-		current.writeFrame({ payload: new Uint8Array([2]), timestamp: Moq.Time.Timestamp.fromMillis(3700) });
-		current.writeFrame({ payload: new Uint8Array([3]), timestamp: Moq.Time.Timestamp.fromMillis(4199) });
+test("an advancing preview while audio buffers is not live playback", () => {
+	expect(reachesLive({ ...nearLive, sample: { ...nearLive.sample, audioStalled: true } })).toBe(false);
+});
 
-		// Painted counter 127 can precede capture while GOP 111 remains current. The old
-		// 127 - 111 <= 15 check rejects a valid join; an earlier published GOP must fail.
-		const viewer = track.subscribe();
-		const gop = await readLiveGop(broadcast.track("video"));
-		expect(gop.timestamp).toBe(3700);
-		expect(lateJoinStartsLive(gop, 3700)).toBe(true);
-		expect(lateJoinStartsLive(gop, 4199)).toBe(true);
-		expect(lateJoinStartsLive(gop, 3000)).toBe(false);
-		expect(lateJoinStartsLive(gop, undefined)).toBe(false);
-		expect(track.demand().used.peek()).toBe(true);
-		const viewed = await viewer.recvGroup();
-		expect((await viewed?.readFrame())?.payload).toEqual(new Uint8Array([2]));
-		expect((await viewed?.readFrame())?.payload).toEqual(new Uint8Array([3]));
-		viewed?.close();
-		viewer.close();
-		await track.demand().unused();
-		expect(track.demand().used.peek()).toBe(false);
-	} finally {
-		broadcast.close();
-	}
+test("a suspended audio graph cannot establish live playback", () => {
+	expect(reachesLive({ ...nearLive, sample: { ...nearLive.sample, audioContext: "suspended" } })).toBe(false);
+});
+
+test("live playback requires an advancing readable frame within the existing bound", () => {
+	expect(reachesLive(nearLive)).toBe(true);
+	expect(reachesLive({ ...nearLive, previous: undefined })).toBe(false);
+	expect(reachesLive({ ...nearLive, previous: 186 })).toBe(false);
+	expect(reachesLive({ ...nearLive, source: 232 })).toBe(false);
+	expect(reachesLive({ ...nearLive, sample: { ...nearLive.sample, frameId: undefined } })).toBe(false);
 });

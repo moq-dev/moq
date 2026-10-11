@@ -37,7 +37,8 @@ pub(super) enum Event {
 	Wake,
 	/// Stop now: Ctrl-C, or the transport is gone and there is nothing more coming.
 	Finished,
-	/// Every track reached its end. Present what is still queued, then stop.
+	/// The origin closed, so the broadcast can never come back. Present what is
+	/// still queued, then stop.
 	Ended,
 	Failed(String),
 }

@@ -111,19 +111,22 @@ impl Server {
 			}
 		}
 
-		// Confirm a route covers the broadcast (and it is in scope) before building a
-		// broadcaster; `Broadcaster::new` re-resolves it through the origin, which also
-		// lets a rendition's catalog `broadcast` field reference a sibling broadcast.
+		// Confirm a route covers the broadcast (and it is in scope) before resolving it. The
+		// source resolves a rendition's sibling `broadcast` reference through the same origin.
 		tokio::time::timeout(RESOLVE_TIMEOUT, self.inner.origin.routed(name))
 			.await
 			.ok()
 			.flatten()?;
 
-		let source = moq_mux::Source::new(self.inner.origin.consume(), name);
-		let broadcaster = Broadcaster::new(source, self.inner.config.clone())
+		let origin = self.inner.origin.consume();
+		// A covering dynamic route may never answer, so the request is bounded too.
+		let broadcast = tokio::time::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
 			.await
-			.map_err(|err| tracing::warn!(%err, %name, "failed to resolve broadcast catalog"))
+			.map_err(|_| tracing::warn!(%name, "timed out resolving broadcast"))
+			.ok()?
+			.map_err(|err| tracing::warn!(%err, %name, "failed to resolve broadcast"))
 			.ok()?;
+		let broadcaster = Broadcaster::new(moq_mux::Source::new(origin, broadcast), self.inner.config.clone());
 
 		let mut broadcasters = self.inner.broadcasters.lock().unwrap();
 		if let Some(existing) = broadcasters.get(name) {
@@ -256,10 +259,7 @@ mod tests {
 		let producer = origin.create_broadcast("gone").expect("publish allowed");
 		producer.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let source = moq_mux::Source::new(origin.consume(), "gone");
-		let broadcaster = Broadcaster::new(source, Config::default())
-			.await
-			.expect("catalog broadcast resolves while announced");
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "gone").await, Config::default());
 		// Close the publisher so the resolved broadcast (and the broadcaster) reports closed.
 		producer.close();
 		settle().await;
@@ -296,9 +296,7 @@ mod tests {
 		let new_producer = origin.create_broadcast("live").expect("publish allowed");
 		new_producer.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let new = Broadcaster::new(moq_mux::Source::new(origin.consume(), "live"), Config::default())
-			.await
-			.expect("catalog broadcast resolves while announced");
+		let new = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 
 		server
 			.inner

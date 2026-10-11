@@ -29,8 +29,15 @@ links the build job's `moq-cpp-<version>-<target>` artifacts instead of a
 published release. Keep publication tag-only. Without it, the first tag is the
 first run of that path.
 
+Decided in the 2026-10-10 audit: the tag also waits for Codecs, the epoch
+rename, and named error fields, so consumers take the binding breaks in one
+release. The nightly dry-run preparation can proceed independently.
+
 ## Required
 
+- [Codecs](/quest/m1/ffi-shape/codec.md) - settle the audio and video binding API before publishing
+- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - include the epoch rename in the same breaking release
+- [Named error fields](/quest/m1/ffi-shape/error-fields.md) - include named error payloads in the same breaking release
 - [Client settings parity](/quest/m1/obs-client-config.md) - the OBS Advanced settings the migration dropped come back
 - [Session report parity](/quest/m1/obs-session-report.md) - the dock shows the negotiated protocol and the reconnect failure again
 - [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - each type has one name and `moq::expected` one type before the API ships

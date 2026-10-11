@@ -38,6 +38,10 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// importers, until they release theirs too).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
+	/// The source's timestamp base: the first fragment anchors it, and every fragment's timestamp
+	/// shifts by its offset onto the catalog clock. The `tfdt` inside a fragment stays verbatim.
+	timebase: crate::catalog::Timebase<E>,
+
 	// Which track roles to publish. `None` imports every supported track.
 	select: Option<crate::select::Broadcast>,
 
@@ -143,6 +147,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		Self {
 			catalog: reserved.producer(),
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			select: None,
 			tracks: HashMap::default(),
@@ -859,14 +864,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			let fragment_bytes = Bytes::from(moof_buf);
 
-			// Carry the fragment's earliest presentation time as the frame timestamp,
-			// in the track's native timescale. Consumers present the fragment at it;
-			// `tfdt` only places the samples relative to each other.
-			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
-			// The first fragment of the import is live on arrival. Anchor before releasing the
-			// reservation, so the first snapshot carries the final clock; the moov declared every
-			// track, so any track's fragment releases it.
-			self.catalog.anchor(timestamp)?;
+			// Carry the fragment's earliest presentation time as the frame timestamp, in the
+			// track's native timescale and shifted onto the catalog clock. Consumers present the
+			// fragment at it; `tfdt` only places the samples relative to each other. Anchor before
+			// releasing the reservation, so the first snapshot carries the final clock; the moov
+			// declared every track, so any track's fragment releases it.
+			let earliest = min_timestamp.ok_or(Error::MissingTrun)?;
+			let offset = self.timebase.anchor(earliest)?;
+			let timestamp = offset.apply(earliest)?;
+			let max_end = max_end.map(|end| offset.apply(end)).transpose()?;
 			self.initial_reservation = None;
 
 			// Write the per-track fragment as a single MoQ frame (passthrough). The group rolls
