@@ -778,7 +778,8 @@ export class Publisher {
 				// The track ends right after this group's last object, so the marker rides this
 				// stream rather than a separate one.
 				const end = track.end();
-				if (end?.group === group.sequence && end.frame === next) {
+				const marked = end?.group === group.sequence && end.frame === next;
+				if (marked) {
 					await new Frame({ endOfTrack: true }).encode(
 						stream,
 						header.flags,
@@ -786,10 +787,18 @@ export class Publisher {
 						this.#session.version,
 						first ? next : 0,
 					);
-					streams.terminalSent = true;
 				}
 
 				stream.close();
+				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
+				// may not have, which leaves the standalone fallback in place, as in Rust.
+				if (marked) {
+					const delivered = stream.closed.then(
+						() => true,
+						() => false,
+					);
+					streams.terminalSent = (await race([delivered, unsubscribed.then(() => false)])) === true;
+				}
 			} catch (err: unknown) {
 				stream.reset(error(err));
 			}

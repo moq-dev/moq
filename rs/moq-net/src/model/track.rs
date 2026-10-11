@@ -1408,8 +1408,14 @@ impl TrackState {
 		if end.frame != 0
 			&& let Some(slot) = self.lookup.get(&end.group)
 		{
-			for group in slot.copies() {
-				group.limit(end.frame)?;
+			for (capped, group) in slot.copies().enumerate() {
+				if let Err(err) = group.limit(Some(end.frame)) {
+					// A refused end declares nothing, so it caps nothing either.
+					for group in slot.copies().take(capped) {
+						let _ = group.limit(None);
+					}
+					return Err(err);
+				}
 			}
 		}
 		self.end = Some(end);
@@ -1424,7 +1430,7 @@ impl TrackState {
 	/// Cap a new group the end cuts, so it never holds a frame past the end.
 	fn cap(&self, group: &group::Producer) -> Result<()> {
 		match self.end {
-			Some(end) if end.frame != 0 && end.group == group.sequence => group.limit(end.frame),
+			Some(end) if end.frame != 0 && end.group == group.sequence => group.limit(Some(end.frame)),
 			_ => Ok(()),
 		}
 	}
@@ -9341,6 +9347,32 @@ mod test {
 			group.read_frame().await.unwrap().unwrap().payload,
 			bytes::Bytes::from_static(b"delta")
 		);
+	}
+
+	/// A refused mid-group end caps none of its group's copies, even one that fit under it.
+	#[moq_net_sim::test]
+	async fn a_refused_end_leaves_every_copy_uncapped() {
+		let mut producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		// The live copy holds frames 0 and 1, the fetched head frames 0 to 2.
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, b"delta".as_slice()).unwrap();
+		let fetch = consumer.fetch_group(0, None);
+		let mut head = dynamic.requested_group().await.unwrap().accept(None).unwrap();
+		for _ in 0..3 {
+			head.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		}
+		fetch.await.unwrap();
+
+		assert!(matches!(
+			producer.finish_at(Position { group: 0, frame: 2 }),
+			Err(Error::ProtocolViolation)
+		));
+		assert_eq!(producer.end(), None);
+		live.write_frame(Timestamp::ZERO, b"delta".as_slice()).unwrap();
 	}
 
 	/// A live group with a fetched head: group 0, fed from frame 1, plus a two-frame head.

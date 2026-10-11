@@ -822,18 +822,18 @@ impl Producer {
 		self.state.read().next_index
 	}
 
-	/// Cap the group at `frames`, for a track end inside it: later writes past the cap are
-	/// [`Error::Closed`]. A frame already at or past the cap is [`Error::ProtocolViolation`].
-	/// An aborted group gets no more frames, so it takes no cap.
-	pub(crate) fn limit(&self, frames: u64) -> Result<()> {
+	/// Cap the group at `frames`, for a track end inside it, or lift the cap with `None`:
+	/// later writes past the cap are [`Error::Closed`]. A frame already at or past the cap is
+	/// [`Error::ProtocolViolation`]. An aborted group gets no more frames, so it takes no cap.
+	pub(crate) fn limit(&self, frames: Option<u64>) -> Result<()> {
 		let Ok(mut state) = self.state.write() else {
 			return Ok(());
 		};
-		let frames = usize::try_from(frames).unwrap_or(usize::MAX);
-		if state.next_index > frames {
+		let frames = frames.map(|frames| usize::try_from(frames).unwrap_or(usize::MAX));
+		if frames.is_some_and(|frames| state.next_index > frames) {
 			return Err(Error::ProtocolViolation);
 		}
-		state.limit = Some(frames);
+		state.limit = frames;
 		Ok(())
 	}
 
