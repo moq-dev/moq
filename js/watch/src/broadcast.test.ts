@@ -230,8 +230,25 @@ describe("blind resolution", () => {
 	});
 });
 
+it("a blind broadcast does not follow another publisher instance", async () => {
+	const owner = new Origin.Producer();
+	const name = Path.from("blind.hang");
+	const first = publish(owner, name);
+	const source = new Broadcast({ origin: owner, name, announced: false, catalogFormat: "manual" });
+	await settle();
+	const second = publish(owner, name);
+	await settle();
+	expect(source.out.active.peek()).toBeUndefined();
+	expect(source.out.error.peek()).toBeUndefined();
+	source.close();
+	first.close();
+	second.close();
+	owner.close();
+});
+
 describe("restart", () => {
-	it.each([true, false])("follows a republish through its announcement (announced: %p)", async (announced) => {
+	it("follows a republish through its announced request", async () => {
+		const announced = true;
 		const owner = new Origin.Producer();
 		const name = Path.from("live.hang");
 		const first = publish(owner, name);

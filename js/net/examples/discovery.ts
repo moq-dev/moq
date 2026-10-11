@@ -5,8 +5,8 @@ async function main() {
 	const origin = new Moq.Origin.Producer();
 	const connection = await Moq.Connection.connect({ url, consume: origin });
 
-	// Get the announced stream iterator
-	const announced = connection.announced();
+	// Own and close the origin announcement watch.
+	const announced = origin.announced();
 
 	// Discover broadcasts announced by the server
 	for await (const announcement of announced) {
@@ -14,11 +14,13 @@ async function main() {
 		console.log("New stream available:", announcement.prefix);
 
 		// Subscribe to new streams
-		const _broadcast = origin.request(announcement.prefix, { announced: true });
+		const broadcast = origin.request(announcement.prefix, { announced: true });
 
-		// Do something with the broadcast
+		// Read broadcast.active reactively while using it, then release the request.
+		broadcast.close();
 	}
 
+	announced.close();
 	await connection.close();
 	origin.close();
 }

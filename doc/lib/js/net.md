@@ -35,9 +35,9 @@ broadcast.announce();
 
 - **The origin holds the broadcasts, not the connection.** Closing a session unannounces them and leaves them created for the next one. A broadcast is invisible, locally and remotely, until `announce()`. `dynamic(prefix, route)` claims a prefix and yields each requested path to accept or reject. `accept` throws on a broadcast a session delivered, since JS apps do not proxy; copy its tracks into a broadcast you produce instead.
 - **Requests can pin an epoch.** `consumer.request(path, { epoch })` resolves only through a route announcing that [publisher epoch](/concept/moq-lite#publisher-epochs) and reports `unroutable` otherwise. The resolved broadcast's `epoch` names the route it came through, pinned or not.
-- **Follow restarts.** `origin.follow(path)` reduces the routes covering a path to the one a request resolves (the most specific) and streams its `start`, `update`, `restart`, and `end`. A `"restart"` says another publisher instance now serves the path: request it again. A request already resolved stays on the old instance, and ends with an `unroutable` error once that instance stops serving: it never moves onto another instance, since without a shared epoch nothing says the new one holds the same bytes. A blind answer (a session without discovery) ends with its session for the same reason, so only announcements can trigger following a restart.
+- **Follow restarts.** `origin.request(path, { announced: true })` owns a closeable announcement watch. Its `active` changes to a fresh consumer on a restart, clears on an end, and resolves again on the next start. Add `epoch` to pin one instance. Plain `request(path)` retains its accepted instance and can resolve blindly. Handler refusals remain terminal.
 - **One connection per URL, unless you opt out.** `new Connection({ url })` pools and reconnects with backoff, which the elements use. Supplying your own transport options, discovery, or origin selects a private loop.
-- **GOAWAY moves the session.** The connection dials the replacement at once while the old session keeps serving its groups, up to `goaway.handover` (default 10s, or the relay's deadline when that is sooner). New requests keep opening on the old session until the replacement's route outranks it, which is a restart without an epoch: a request on the old session ends when that session closes, so request the path again. An empty GOAWAY redials the same URL. A redirect stays on the same host unless `goaway.redirect` is `"follow"`.
+- **GOAWAY moves the session.** The connection dials the replacement at once while the old session keeps serving its groups, up to `goaway.handover` (default 10s, or the relay's deadline when that is sooner). New requests keep opening on the old session until the replacement's route outranks it, which is a restart without an epoch: an unpinned announced request follows the replacement, while a blind or epoch-pinned request stays on its accepted instance. An empty GOAWAY redials the same URL. A redirect stays on the same host unless `goaway.redirect` is `"follow"`.
 - **One send estimate per connection.** `Bandwidth.Allocator` divides it by track priority, max-min fair within a tier. An idle track claims nothing. Publishers reserve against it so their targets sum to the estimate.
 - **One track per name.** Concurrent subscriptions share one request and producer. An on-demand producer that replaces an ended one continues the name's group and datagram sequences; only a new broadcast restarts them. `createTrack` and `insertTrack` start at 0.
 - **Timing is per track, with no default.** A track that declares a `timescale` carries a `timestamp` on every frame; one without is [untimed](/concept/moq-lite#subscriptions) and its frames carry none. Unlike Rust, omitting it means untimed. Nothing stamps a frame for you: the publisher passes the timestamp, and the `Timed` type (`{ value, at }`) carries one into the `@moq/json` and `@moq/flate` producers.
@@ -51,3 +51,43 @@ Examples:
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side). Path patterns are on the
 [concept page](/concept/moq-lite#path-patterns).
+
+## Origin read API migration
+
+Replace the `follow(path)` event loop that closes and recreates requests on each
+`start` or `restart` with one request and a reactive read:
+
+```ts
+// Before: the application owns restart handling.
+let request = origin.request(path, { announced: true });
+const followed = origin.follow(path);
+for await (const event of followed) {
+  if (event.kind !== "start" && event.kind !== "restart") continue;
+  request.close();
+  request = origin.request(path, { announced: true });
+}
+request.close();
+followed.close();
+```
+
+```ts
+// After: one request owns the watch and current instance.
+const request = origin.request(path, { announced: true });
+const effect = new Moq.Signals.Effect();
+effect.run((run) => {
+  const active = run.get(request.active);
+  if (!active) return;
+  const track = active.track("chat").subscribe();
+  run.cleanup(() => track.close());
+});
+// When finished:
+effect.close();
+request.close();
+```
+
+`Origin.Consumer` and `Producer` no longer expose `follow` or `broadcasts`.
+Replace live map reads with `announced(scope)` and maintain the entries you need,
+closing the stream when finished. Use `{ announced: true, epoch }` for a read
+that must never cross publisher instances. Watch now delegates restart following
+to these requests; setting its `announced` input to false selects blind, pinned
+behavior instead of following later announcements.
