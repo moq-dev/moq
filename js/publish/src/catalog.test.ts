@@ -19,13 +19,13 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
 
 	// A new subscriber is seeded with the current catalog.
-	expect((await consumer.next())?.video).toEqual({ renditions: {} });
+	expect((await consumer.latest())?.value.video).toEqual({ renditions: {} });
 
 	// An extension owner adds its own section; the subscriber sees the update, video untouched.
 	catalog.mutate((c) => {
 		c.scte35 = { splices: [] };
 	});
-	const update = await consumer.next();
+	const update = (await consumer.latest())?.value;
 	expect(update?.video).toEqual({ renditions: {} });
 	expect(update?.scte35).toEqual({ splices: [] });
 
@@ -73,7 +73,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
 
 	// Before any rendition: a live-only publisher exposes its clock without an archive.
-	const first = Catalog.RootSchema.parse(await consumer.next());
+	const first = Catalog.RootSchema.parse((await consumer.latest())?.value);
 	if (!first.clock) throw new Error("expected a root clock");
 	expect(first.archive).toBeUndefined();
 	expect(first.clock.timescale).toBe(1_000_000);
@@ -88,7 +88,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	catalog.mutate((c) => {
 		c.video = { renditions: {} };
 	});
-	const second = Catalog.RootSchema.parse(await consumer.next());
+	const second = Catalog.RootSchema.parse((await consumer.latest())?.value);
 	expect(second.clock).toEqual(first.clock);
 
 	effect.close();
@@ -110,7 +110,7 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
-	const seeded = await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).next();
+	const seeded = (await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).latest())?.value;
 	expect(seeded?.video).toEqual({ renditions: {} });
 	expect(seeded?.scte35).toEqual({ splices: [] });
 
@@ -292,9 +292,9 @@ describe("estimate publication window", () => {
 
 	test("estimate rises publish at the leading edge and coalesce to the latest trailing value", async () => {
 		const { track, consumer, estimate } = fixture();
-		await consumer.next();
+		await consumer.latest();
 		estimate(1);
-		expect((await consumer.next())?.video?.renditions.v.jitter).toBe(Catalog.u53(1));
+		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(1));
 		const first = track.latest();
 		advance(100);
 		estimate(2);
@@ -302,26 +302,26 @@ describe("estimate publication window", () => {
 		estimate(17);
 		expect(track.latest()).toBe(first);
 		advance(1);
-		expect((await consumer.next())?.video?.renditions.v.jitter).toBe(Catalog.u53(17));
+		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(17));
 		const trailing = track.latest();
 		advance(1000);
 		expect(track.latest()).toBe(trailing);
 		estimate(18);
-		expect((await consumer.next())?.video?.renditions.v.jitter).toBe(Catalog.u53(18));
+		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(18));
 	});
 
 	test("a structural edit publishes immediately with any pending estimate", async () => {
 		const { producer, track, consumer, estimate } = fixture();
-		await consumer.next();
+		await consumer.latest();
 		estimate(1);
-		await consumer.next();
+		await consumer.latest();
 		advance(100);
 		estimate(2);
 		producer.mutate((catalog) => {
 			if (!catalog.video) throw new Error("video missing");
 			catalog.video.renditions.v.codedWidth = Catalog.u53(1280);
 		});
-		const catalog = await consumer.next();
+		const catalog = (await consumer.latest())?.value;
 		expect(catalog?.video?.renditions.v.jitter).toBe(Catalog.u53(2));
 		expect(catalog?.video?.renditions.v.codedWidth).toBe(Catalog.u53(1280));
 		const folded = track.latest();
@@ -331,14 +331,14 @@ describe("estimate publication window", () => {
 
 	test("removing a track cancels the pending estimate and publishes immediately", async () => {
 		const { producer, track, consumer, estimate } = fixture();
-		await consumer.next();
+		await consumer.latest();
 		estimate(1);
-		await consumer.next();
+		await consumer.latest();
 		estimate(2);
 		producer.mutate((catalog) => {
 			delete catalog.video;
 		});
-		expect((await consumer.next())?.video).toBeUndefined();
+		expect((await consumer.latest())?.value.video).toBeUndefined();
 		const removed = track.latest();
 		advance(1000);
 		expect(track.latest()).toBe(removed);
@@ -346,18 +346,18 @@ describe("estimate publication window", () => {
 
 	test("closing the last output cancels its trailing timer", async () => {
 		const { effect, consumer, estimate } = fixture();
-		await consumer.next();
+		await consumer.latest();
 		estimate(1);
-		await consumer.next();
+		await consumer.latest();
 		estimate(2);
 		effect.close();
 		expect(timers).toHaveLength(0);
 	});
 	test("delay shares the window across tracks and new tracks remain immediate", async () => {
 		const { producer, track, consumer, estimate } = fixture();
-		await consumer.next();
+		await consumer.latest();
 		estimate(1);
-		await consumer.next();
+		await consumer.latest();
 		advance(10);
 		producer.mutate((catalog) => {
 			if (!catalog.video) throw new Error("video missing");
@@ -365,31 +365,31 @@ describe("estimate publication window", () => {
 		});
 		const leading = track.latest();
 		advance(990);
-		expect((await consumer.next())?.video?.renditions.v.delay).toBe(Catalog.u53(7));
+		expect((await consumer.latest())?.value.video?.renditions.v.delay).toBe(Catalog.u53(7));
 		expect(track.latest()).toBe((leading ?? 0) + 1);
 		producer.mutate((catalog) => {
 			if (!catalog.video) throw new Error("video missing");
 			catalog.video.renditions.other = { codec: "avc1.640028", container: { kind: "legacy" } };
 		});
-		expect((await consumer.next())?.video?.renditions.other).toBeDefined();
+		expect((await consumer.latest())?.value.video?.renditions.other).toBeDefined();
 	});
 
 	test("a folded estimate starts a new window and an extension edit stays immediate", async () => {
 		const { producer, track, consumer, estimate } = fixture();
-		await consumer.next();
+		await consumer.latest();
 		estimate(1);
-		await consumer.next();
+		await consumer.latest();
 		advance(100);
 		estimate(2);
 		producer.mutate((catalog) => {
 			catalog.scte35 = { jitter: 3 };
 		});
-		expect((await consumer.next())?.scte35).toEqual({ jitter: 3 });
+		expect((await consumer.latest())?.value.scte35).toEqual({ jitter: 3 });
 		estimate(3);
 		const folded = track.latest();
 		advance(900);
 		expect(track.latest()).toBe(folded);
 		advance(100);
-		expect((await consumer.next())?.video?.renditions.v.jitter).toBe(Catalog.u53(3));
+		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(3));
 	});
 });

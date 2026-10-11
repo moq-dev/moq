@@ -28,7 +28,6 @@ frames decode independently and set nothing; HE-AAC is out of scope.
 
 ## Required
 
-- [Catalog warmup](/quest/m1/catalog-warmup.md) - the field this reads and writes
 - [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the signal the trim keys on
 
 ## Related

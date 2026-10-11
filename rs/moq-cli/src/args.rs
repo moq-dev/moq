@@ -937,7 +937,7 @@ pub enum ExportSink {
 	/// RTMP: push to a remote (`--connect`) or serve plays (`--listen`).
 	Rtmp(crate::rtmp::ExportArgs),
 	/// SRT: push to a remote (`--connect`) or serve requests (`--listen`).
-	Srt(crate::srt::Args),
+	Srt(crate::srt::ExportArgs),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Record the broadcast into an object store until it ends.
@@ -970,6 +970,7 @@ impl ExportSink {
 			format,
 			max_delay: container.max_delay.into_std(),
 			linger: container.linger.into_std(),
+			stitch: false,
 			fragment_duration: None,
 			mux_rate: None,
 		};
@@ -986,6 +987,7 @@ impl ExportSink {
 				format: SubscribeFormat::Ts,
 				max_delay: args.delay.into_std(),
 				linger: args.linger.into_std(),
+				stitch: args.stitch,
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
 			},
@@ -1003,6 +1005,8 @@ pub struct Stdout {
 	/// The staleness budget, which `ts` also holds every frame for (`--delay`).
 	pub max_delay: Duration,
 	pub linger: Duration,
+	/// Follow a replacement as a program switch (`ts` only).
+	pub stitch: bool,
 	pub fragment_duration: Option<Duration>,
 	pub mux_rate: Option<u64>,
 }
@@ -1052,11 +1056,16 @@ pub struct Transport {
 	#[usage(long, default = "500ms")]
 	pub delay: crate::duration::Duration,
 
-	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
-	/// The output stops while it is gone and resumes flagged as a break.
+	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
+	/// then carry on with the same stream. A replacement exits 1 unless `--stitch` is passed.
 	/// An export that fails while the broadcast is still up exits without waiting.
 	#[usage(long, default = "0s")]
 	pub linger: crate::duration::Duration,
+
+	/// Follow another publisher instance that replaces the broadcast, as a full program switch:
+	/// a new PMT from its catalog, flagged as a break on every PID.
+	#[usage(long)]
+	pub stitch: bool,
 
 	/// Pad the output with null packets to this constant rate, in bits per second.
 	/// Defaults to the multiplex rate the catalog recorded from a constant-rate
@@ -1325,6 +1334,34 @@ mod tests {
 
 		assert!(
 			Invocation::try_parse_from(["moq", "export", "srt", "--listen", "[::]:9000", "--program", "2"]).is_err()
+		);
+	}
+
+	/// `export srt` follows its broadcast with the same `--linger` and `--stitch` as `export ts`.
+	#[test]
+	fn export_srt_takes_linger_and_stitch() {
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"export",
+			"srt",
+			"--listen",
+			"[::]:9000",
+			"--linger",
+			"10s",
+			"--stitch",
+		])
+		.unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("an export stage");
+		};
+		let ExportSink::Srt(args) = &export.sink else {
+			panic!("an export srt stage");
+		};
+		assert_eq!(args.linger.into_std(), Duration::from_secs(10));
+		assert!(args.stitch);
+		assert!(
+			Invocation::try_parse_from(["moq", "import", "srt", "--listen", "[::]:9000", "--stitch"]).is_err(),
+			"an ingest has nothing to follow"
 		);
 	}
 
