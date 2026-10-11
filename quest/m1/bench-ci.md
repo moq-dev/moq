@@ -45,5 +45,5 @@ a GitHub App:
 
 ## Related
 
-- [Benchmark comparisons](/quest/m1/performance-comparisons.md) - extends the same `bench/run.sh` with repeated paired rounds
+- [Benchmark reporting](/bench/README.md) - the existing `bench/run.sh` retains repeated paired rounds
 - [Bench coverage](/quest/m2/bench-coverage.md) - more targets for this job to track

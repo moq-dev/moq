@@ -111,6 +111,11 @@ key = "key.pem"
 listen = "127.0.0.1:9101"            # Unauthenticated /health, /metrics, /nodes, /sessions, POST /sessions/revalidate. Keep private.
 ```
 
+`listen.timeout` also closes HTTP connections with no complete request in flight,
+including HTTPS peers that stall the TLS handshake
+and HTTP/2 peers that acknowledge keep-alive PINGs. Active response bodies
+keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
+
 See [HTTP endpoints](/bin/relay/http).
 
 ## \[auth]

@@ -83,7 +83,8 @@ impl Message for AuthOk {
 		let subscribe = decode_patterns(r)?;
 		let expires = match r.varint()? {
 			0 => None,
-			ms => Some(Duration::from_millis(ms)),
+			ms if ms <= MAX_EXPIRES_MS => Some(Duration::from_millis(ms)),
+			_ => return Err(DecodeError::InvalidValue),
 		};
 		Ok(Self {
 			publish,
@@ -301,6 +302,16 @@ mod tests {
 			panic!("expected AUTH_OK");
 		};
 		assert_eq!(got.expires, Some(Duration::from_millis(1)));
+	}
+
+	#[test]
+	fn maximum_expiry_round_trips() {
+		let msg = AuthReply::Ok(AuthOk {
+			publish: Patterns::new(),
+			subscribe: Patterns::new(),
+			expires: Some(Duration::from_millis(MAX_EXPIRES_MS)),
+		});
+		assert_eq!(round_trip(&msg), msg);
 	}
 
 	/// A message the peer would refuse as too large is never encoded, so the acceptor can
