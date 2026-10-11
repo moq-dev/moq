@@ -551,7 +551,10 @@ for (const cmaf of [false, true]) {
 			const before = playback.codecs();
 			expect(before).toBe(1);
 			// Nothing reads the ring, as with a muted AudioContext. Decode is held upstream.
-			const held = timestamps.find((timestamp) => !playback.inserted().includes(timestamp));
+			// The first frame past the last decoded one is the one blocked on backpressure. Earlier gaps
+			// are the legacy decoder's dropped warm-up output.
+			const last = Math.max(...playback.inserted());
+			const held = timestamps.find((timestamp) => timestamp > last);
 			expect(held).toBeDefined();
 			playback.restore({ description: "4f707573486561640102000080bb0000000000" });
 			await microtasks();
