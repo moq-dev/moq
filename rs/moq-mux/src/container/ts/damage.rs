@@ -29,7 +29,7 @@ impl Burst {
 impl Log {
 	pub fn record(&mut self, pid: u16, error: &anyhow::Error) {
 		let now = Instant::now();
-		self.flush(now, false);
+		self.flush(now);
 		let first = match self.bursts.entry(pid) {
 			std::collections::btree_map::Entry::Occupied(mut entry) => {
 				let burst = entry.get_mut();
@@ -54,16 +54,25 @@ impl Log {
 		self.next.get_or_insert(now + stats::Log::INTERVAL);
 	}
 
-	pub fn flush(&mut self, now: Instant, finish: bool) {
-		if !finish && self.next.is_none_or(|next| now < next) {
+	pub fn flush(&mut self, now: Instant) {
+		if self.next.is_none_or(|next| now < next) {
 			return;
 		}
 		self.bursts.retain(|&pid, burst| {
 			burst.flush(pid);
 			// A quiet interval ends the burst, so its next damage warns immediately.
-			!finish && now.duration_since(burst.last) < stats::Log::INTERVAL
+			now.duration_since(burst.last) < stats::Log::INTERVAL
 		});
 		self.next = (!self.bursts.is_empty()).then_some(now + stats::Log::INTERVAL);
+	}
+}
+
+impl Drop for Log {
+	// Input can end through finish, abort, or an error, so the final burst summarizes on drop.
+	fn drop(&mut self) {
+		for (&pid, burst) in &mut self.bursts {
+			burst.flush(pid);
+		}
 	}
 }
 
@@ -108,7 +117,7 @@ mod tests {
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
 		log.record(97, &error);
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
-		log.flush(Instant::now(), false);
+		log.flush(Instant::now());
 		// This PID is quiet for a full interval before the next global summary tick.
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
 		log.record(97, &error);
@@ -135,7 +144,7 @@ mod tests {
 			tokio::time::advance(stats::Log::INTERVAL / 2).await;
 			log.record(97, &error);
 		}
-		log.flush(Instant::now(), true);
+		drop(log);
 		logs_assert(|lines| {
 			let first = lines
 				.iter()

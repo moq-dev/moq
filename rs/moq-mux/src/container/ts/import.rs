@@ -232,7 +232,7 @@ impl<E: catalog::Catalog> Import<E> {
 	/// now completes. The buffer is fully consumed; a trailing partial packet
 	/// (< 188 bytes) is retained for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
-		self.damage_log.flush(web_async::time::Instant::now(), false);
+		self.damage_log.flush(web_async::time::Instant::now());
 		self.scratch.extend_from_slice(data);
 
 		// Route one whole packet at a time, so a PMT is parsed (and any PID it declares
@@ -1004,7 +1004,6 @@ impl<E: catalog::Catalog> Import<E> {
 			section.finish()?;
 		}
 		self.si.finish(self.last_pts.unwrap_or(Timestamp::ZERO))?;
-		self.damage_log.flush(web_async::time::Instant::now(), true);
 		Ok(())
 	}
 
@@ -3380,6 +3379,7 @@ pub(super) mod test {
 		import.damage(pid, &error).unwrap();
 		import.finish().unwrap();
 		assert_eq!(import.stats().streams[&0x61].damaged, 5);
+		drop(import);
 		logs_assert(|lines| {
 			let first = lines
 				.iter()
@@ -3393,6 +3393,31 @@ pub(super) mod test {
 				Ok(())
 			} else {
 				Err(format!("expected new burst and final summary, got {first}/{summary}"))
+			}
+		});
+	}
+
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn abort_summarizes_the_final_damage_burst() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pid = Pid::new(0x61).unwrap();
+		let error = anyhow::anyhow!("broken PES");
+		for _ in 0..3 {
+			import.damage(pid, &error).unwrap();
+		}
+		import.abort(moq_net::Error::Cancel);
+		logs_assert(|lines| {
+			let summary: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("TS damaged-unit summary"))
+				.collect();
+			if summary.len() == 1 && summary[0].contains("count=2") {
+				Ok(())
+			} else {
+				Err(format!("expected the aborted burst's two drops, got {summary:?}"))
 			}
 		});
 	}
