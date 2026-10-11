@@ -30,9 +30,10 @@ latest. At 500 ms a 540 s run still misses a video deadline about 157 s in,
 which [send-ahead](/quest/m1/tstd/send-ahead.md)'s 1 s default addresses, and
 10 % loss is still to pass.
 
-This README owns the end-to-end proof: the #4613 netem rig (10% loss, a real
-~10 Mb/s broadcast TS) passes the strict T-STD check, and the recipe runs
-nightly.
+This README owns the remaining end-to-end proof: make the #4613 netem rig
+(10% loss, a redistributable or reproducible ~10 Mb/s broadcast-style TS)
+pass the applicable strict T-STD checks, and run the recipe nightly. This
+is a completion requirement, not a result established by the measurements above.
 
 Audit clarification (2026-10-11): record what actually arrived, was
 retransmitted, or missed its deadline. The IP loss percentage alone is not

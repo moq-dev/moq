@@ -1,10 +1,10 @@
-# [M] Open-GOP leading pictures are dropped at tune-in only
+# [M] Open-GOP recovery drops orphaned leading pictures after each delivery break
 
 ## Goal
 
-A viewer joining an open-GOP broadcast at a recovery point never hands the
-decoder a leading picture whose references it does not have, while a viewer
-already playing keeps every frame. The rule is the same for H.264
+A viewer joining or resuming an open-GOP broadcast after a non-continuous
+transition never hands the decoder a leading picture whose references it
+does not have. Continuous groups keep every frame. The rule is the same for H.264
 recovery-point keyframes with `recovery_frame_cnt = 0` (the broadcast
 contribution case, and what the reference capture carries) and H.265 CRA
 pictures. Gradual recovery (`recovery_frame_cnt > 0`) is out of scope: unsafe pictures

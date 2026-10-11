@@ -38,8 +38,9 @@ container contract.
 
 The 2026-10-11 audit expands the decision to avoid settling timestamps in
 isolation. A source placement time used for mux scheduling is distinct from
-optional PTS and DTS. Today's private PES has only payload plus `stream_id`:
-the parser skips ESCR, ES rate, trick mode, copy information, CRC and extension
+optional PTS and DTS. Today's private-PES track retains payload, `stream_id`,
+and present PTS as the frame timestamp, but not the original DTS or other
+PES-header fields. The parser skips ESCR, ES rate, trick mode, copy information, CRC and extension
 fields; export synthesizes a generic PTS header and cannot reproduce all
 special stream-ID header forms. A track called verbatim must say which bytes
 or semantics that means. Unknown stream types also need to survive export or
