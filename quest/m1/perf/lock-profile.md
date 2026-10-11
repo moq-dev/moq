@@ -85,5 +85,5 @@ CPU and heap:
 ## Related
 
 - [kio channel contention](/quest/m1/perf/kio-channel-contention.md) - requires this for its before and after
-- [Benchmark comparisons](/quest/m1/performance-comparisons.md) - shares the workload lifecycle and artifact conventions
+- [Benchmark reporting](/bench/README.md) - shares the workload lifecycle and artifact conventions
 - [Release profile](/quest/m1/release-profile.md) - also changes the profile `[profile.profiling]` inherits; land one, then rebase the other

@@ -71,4 +71,4 @@ exemption and the distinction between age and upstream wait budgets.
 
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - upstream waiting bounded through the existing FETCH parameter
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - historical ranges retain this optional budget and publisher clamp
-- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - identity stays pinned independently of age
+- [Retired requests](https://github.com/moq-dev/moq/pull/5294) - identity stays pinned independently of age

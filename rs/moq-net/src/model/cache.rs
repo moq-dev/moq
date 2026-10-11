@@ -55,9 +55,8 @@ use super::{expiry, group};
 ///
 /// Derived from `size_of` rather than pasted from a measured process, so it follows the
 /// structs instead of rotting: each half lives beside the types it sizes, in
-/// [`group::CACHE_OVERHEAD`] and [`track::CACHE_OVERHEAD`]. It excludes what the
-/// allocator rounds up and what a group with many frames grows into, both of which only
-/// matter for shapes payload already dominates.
+/// [`group::CACHE_OVERHEAD`] and [`track::CACHE_OVERHEAD`]. It excludes allocator rounding. Frame-slot growth past the initial capacity is
+/// charged separately as each group grows.
 ///
 /// Also bounds the live group count (`used / ENTRY_OVERHEAD`), which keeps the
 /// access-time sum below u64 (see [`TICK_MS`]).

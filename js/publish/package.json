@@ -34,7 +34,7 @@
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@moq/video": "workspace:^",
-		"mediabunny": "^1.60.0"
+		"mediabunny": "^1.61.1"
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",
@@ -43,6 +43,6 @@
 		"esbuild": "^0.28.2",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2",
-		"vite": "^8.3.1"
+		"vite": "^8.3.2"
 	}
 }

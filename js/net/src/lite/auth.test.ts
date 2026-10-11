@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { SessionCode } from "../error.ts";
 import * as Path from "../path.ts";
-import { Reader, Writer } from "../stream.ts";
-import { AuthError, AuthMessage, AuthOk, decodeAuthReplyMaybe } from "./auth.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
+import { AuthError, AuthMessage, AuthOk, decodeAuthReplyMaybe, LiteAuthWire } from "./auth.ts";
 import * as Lite from "./index.ts";
 import * as Message from "./message.ts";
 
@@ -117,4 +117,67 @@ test.each([
 	["lite-06", Lite.Version.DRAFT_06],
 ])("%s carries no AUTH", async (_, version) => {
 	await expect(roundTrip((w) => new AuthMessage(new Uint8Array()).encode(w, version))).rejects.toThrow();
+});
+
+test("malformed AUTH_OK closes its session", async () => {
+	for (const pattern of ["*/**", "/room", Array(33).fill("room").join("/"), undefined]) {
+		const reader = await roundTrip(async (w) => {
+			await Message.encode(
+				w,
+				async (body) => {
+					await body.u53(pattern === undefined ? 0 : 1);
+					if (pattern !== undefined) await body.string(pattern);
+					await body.u53(0);
+					await body.u62(pattern === undefined ? 1n << 53n : 0n);
+				},
+				{ id: AuthOk.id },
+			);
+		});
+		await assertSessionViolation(reader);
+	}
+});
+
+test("the largest shared expiry remains valid", async () => {
+	const ok = new AuthOk(patterns(), patterns(), Number.MAX_SAFE_INTEGER);
+	const reader = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_07));
+	expect(await decodeAuthReplyMaybe(reader, Lite.Version.DRAFT_07)).toEqual(ok);
+});
+
+/** A malformed reply closes its session with the protocol-violation code. */
+async function assertSessionViolation(reader: Reader) {
+	const closes: WebTransportCloseInfo[] = [];
+	const quic = { close: (info: WebTransportCloseInfo) => closes.push(info) } as unknown as WebTransport;
+	const wire = new LiteAuthWire(quic, Lite.Version.DRAFT_07);
+	const data = await reader.readAll();
+	const stream = new Stream({
+		readable: new ReadableStream({
+			start(controller) {
+				controller.enqueue(data);
+				controller.close();
+			},
+		}),
+		writable: new WritableStream(),
+		version: Lite.Version.DRAFT_07,
+	});
+	await expect(wire.read(stream)).rejects.toThrow();
+	expect(closes).toHaveLength(1);
+	expect(closes[0].closeCode).toBe(SessionCode.ProtocolViolation);
+	stream.close();
+}
+
+test("malformed AUTH_ERROR reasons close their session", async () => {
+	for (const reason of [new Uint8Array([0xff]), new Uint8Array(8193).fill(0x61), 1n << 53n]) {
+		const reader = await roundTrip(async (w) => {
+			await Message.encode(
+				w,
+				async (body) => {
+					await body.u53(SessionCode.Unauthorized);
+					await body.u62(typeof reason === "bigint" ? reason : BigInt(reason.byteLength));
+					if (typeof reason !== "bigint") await body.write(reason);
+				},
+				{ id: AuthError.id },
+			);
+		});
+		await assertSessionViolation(reader);
+	}
 });
