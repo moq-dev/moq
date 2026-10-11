@@ -38,5 +38,5 @@ Decided 2026-10-09 while reworking #5088:
 
 ## Related
 
-- [Session burst hang](/quest/m1/session-burst-hang.md) - the same bench shapes that hang
+- [Session burst hang](https://github.com/moq-dev/moq/pull/5238) - the same bench shapes that hang
 - [FFI runtime](/quest/m1/ffi-runtime.md) - FFI apps run on more than one thread

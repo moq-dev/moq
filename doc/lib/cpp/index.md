@@ -164,6 +164,10 @@ Never block the executor. A continuation or resumed coroutine that calls
 which deadlocks. `moq::inline_executor` runs a continuation right where the
 future completed, which is the executor thread.
 
+## Track demand
+
+Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+
 ## Shutdown
 
 `moq::shutdown()` stops the `moq-ffi` runtime thread, then the executor.

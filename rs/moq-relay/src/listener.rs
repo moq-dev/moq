@@ -14,6 +14,8 @@
 //! back. Because the wrapper never yields an error upward, `axum_server`'s flat
 //! sleep is unreachable.
 
+mod idle;
+
 use std::io;
 use std::net::SocketAddr;
 
@@ -60,6 +62,12 @@ impl Listener {
 	}
 }
 
+/// Policy shared by the public and internal HTTP listeners.
+pub(crate) struct Config {
+	pub health: Health,
+	pub timeout: Option<std::time::Duration>,
+}
+
 /// An `axum_server` bound to [`Listener`] with `acceptor` installed, ready for
 /// `.serve(..)`.
 ///
@@ -71,10 +79,27 @@ impl Listener {
 /// doesn't pin `A` down, so inference cannot get there from the listener alone.
 pub(crate) fn server<A>(
 	listener: std::net::TcpListener,
-	health: Health,
+	config: Config,
 	acceptor: A,
-) -> io::Result<axum_server::Server<Peer, A>> {
-	Ok(axum_server::Server::from_listener(Listener::new(listener, health)?).acceptor(acceptor))
+) -> io::Result<axum_server::Server<Peer, idle::Acceptor<A>>> {
+	let Config { health, timeout } = config;
+	let mut server = axum_server::Server::from_listener(Listener::new(listener, health)?).acceptor(idle::Acceptor {
+		inner: acceptor,
+		timeout,
+	});
+	server
+		.http_builder()
+		.http1()
+		.timer(hyper_util::rt::TokioTimer::new())
+		.header_read_timeout(timeout);
+	let interval = timeout.unwrap_or(std::time::Duration::from_secs(30));
+	server
+		.http_builder()
+		.http2()
+		.timer(hyper_util::rt::TokioTimer::new())
+		.keep_alive_interval(timeout)
+		.keep_alive_timeout(interval);
+	Ok(server)
 }
 
 impl AddrListener<TcpStream, Peer> for Listener {

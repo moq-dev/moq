@@ -712,14 +712,12 @@ mod tests {
 				.await
 				.expect("announce timed out")
 				.expect("routed");
-			let source = moq_mux::Source::new(origin, "live");
-			let broadcaster = tokio::time::timeout(
-				TIMEOUT,
-				crate::export::Broadcaster::new(source, crate::export::Config::default()),
-			)
-			.await
-			.expect("broadcaster timed out")
-			.expect("broadcaster");
+			let remote = tokio::time::timeout(TIMEOUT, origin.request_broadcast("live", None))
+				.await
+				.expect("request timed out")
+				.expect("remote broadcast");
+			let source = moq_mux::Source::new(origin, remote);
+			let broadcaster = crate::export::Broadcaster::new(source, crate::export::Config::default());
 			// Recorded as soon as the catalog lists it, before any media, as a recorder does.
 			let mut renditions = broadcaster.renditions();
 			let rendition = match tokio::time::timeout(TIMEOUT, renditions.next()).await {

@@ -150,6 +150,15 @@ func (r *TrackRequest) Name() (string, error) {
 	return r.inner.Name()
 }
 
+// Demand watches this track's subscribers, including after accepting it.
+func (r *TrackRequest) Demand() (*TrackDemand, error) {
+	inner, err := r.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
+}
+
 // Dynamic creates a fetch handler before accepting this requested track.
 func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
 	inner, err := r.inner.Dynamic()
