@@ -321,6 +321,9 @@ jobs:
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
 
+      - name: WebSocket fallback startup benchmark
+        run: nix develop --command just js qmux-bench
+
       - name: Browser publisher fairness benchmark
         run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}

@@ -86,3 +86,9 @@ wasm:
 # Ensure the built public libraries can load without browser globals.
 dist-imports:
     bun -e 'await import("./watch/dist/index.js"); await import("./publish/dist/index.js")'
+
+# Compare eager and cold lazy WebSocket fallback setup in Chromium.
+qmux-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project net/bench/tsconfig.json
+    bun net/bench/qmux.ts
