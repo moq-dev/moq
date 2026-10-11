@@ -19,6 +19,18 @@ subscriber checks end-to-end: the browser encodes fake microphone audio, and the
 Python, Go, and C++ clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
 duration, so the matrix covers the FFI audio path with a non-default codec config.
 
+The normal run also checks a finite raw track through the relay. Its publisher
+announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
+exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
+native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` covers
+Node and Bun. `--tail` runs just these five lanes. The wire-compat lanes, which swap in released relays and clients, skip them.
+
+The finite clients keep their session alive until the harness acknowledges the
+reader's complete clean end over stdin, so a lane tests delivery rather than
+shutdown. No sleep stands in for drain completion. A missing group, error, or
+stall fails the lane; the timeout only bounds failure. QUIC on localhost rarely
+reorders, so the ordering race remains covered by transport unit tests.
+
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
 After each publisher's round, the harness waits for the relay to log the close of
@@ -128,6 +140,9 @@ just test interop --all
 
 # Pick your own axes:
 just test interop --publishers rust,python --subscribers rust,c,js-native-bun
+
+# Finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
+just test interop --tail
 
 # Subscription termination: Rust/JS response bytes over in-memory transports.
 just test bare-fin

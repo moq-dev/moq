@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use moq_e2ee::Credential;
 use moq_e2ee::credential::Config;
-use moq_net::Epoch;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -32,7 +31,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 		secret: *b"moq-e2ee-00 test secret!!!!!!!!!",
 	})
 	.unwrap();
-	let generation = cred.generation(Epoch::mint());
+	let generation = cred.produce();
 	let path = cred.path("meeting.hang").unwrap();
 	let name = generation.name(track).unwrap();
 
@@ -62,7 +61,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 		);
 	}
 	let epoch = route.epoch.unwrap_or_else(|| generation.epoch().clone());
-	let generation = cred.generation(epoch);
+	let consuming = cred.consume(epoch);
 	let remote = consumer.request_broadcast(&path, None).await.unwrap();
 	let subscriber = remote
 		.track(name.as_str())
@@ -75,7 +74,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 
 	Fixture {
 		producer: generation.produce(net).unwrap(),
-		consumer: generation.consume(subscriber).unwrap(),
+		consumer: consuming.consume(subscriber).unwrap(),
 		_broadcast: broadcast,
 		_pair: pair,
 	}

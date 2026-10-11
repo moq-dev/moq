@@ -77,3 +77,4 @@ the hang catalog's field semantics, documented in its draft.
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - lets a catalog list a new track name for a changed rendition
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a restart is a new epoch rather than a changed track
 - [Archive](/quest/m1/archive/README.md) - storage and replay consume the identity contract
+- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - an update cannot retarget an already-pinned sibling instance

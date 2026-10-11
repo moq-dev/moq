@@ -393,6 +393,37 @@ fn bench_subscriber_join(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Late joins scan a bounded datagram ring; sweep both the backlog and the joining audience.
+fn bench_datagram_subscriber_join(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_datagram_subscriber_join");
+	for buffered in [0, 1, 8, 64] {
+		for join in [1, 8, 64] {
+			group.throughput(Throughput::Elements(join as u64));
+			group.bench_function(BenchmarkId::new(format!("{buffered}d"), join), |b| {
+				b.iter_batched(
+					|| {
+						let broadcast = broadcast::Info::default().produce();
+						let mut track = broadcast.create_track("bench", None).unwrap();
+						for millis in 0..buffered {
+							track
+								.append_datagram(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
+								.unwrap();
+						}
+						(broadcast, track)
+					},
+					|(broadcast, track)| {
+						let preferences = track::Subscription::default().with_max_delay(Duration::from_millis(5));
+						let viewers: Vec<_> = (0..join).map(|_| track.subscribe(preferences.clone())).collect();
+						(broadcast, track, viewers)
+					},
+					BatchSize::SmallInput,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
 /// Queues a parked read as woken, so the bench visits only what an append wakes.
 struct Woken {
 	read: usize,
@@ -413,6 +444,7 @@ impl std::task::Wake for Woken {
 /// group streams, re-polling whatever it wakes. Swept over the backlog so a per-append
 /// cost that grows with the parked reads shows up as a slope.
 fn bench_parked_read(c: &mut Criterion) {
+	const MICROS_PER_GROUP: u64 = 2500;
 	let mut group = c.benchmark_group("track_parked_read");
 	group.throughput(Throughput::Elements(1));
 	for parked in [8, 64, 512] {
@@ -420,8 +452,16 @@ fn bench_parked_read(c: &mut Criterion) {
 			b.iter_custom(|iterations| {
 				let broadcast = broadcast::Info::default().produce();
 				let track = broadcast.create_track("bench", None).unwrap();
-				// Long enough that no read expires, so every append measures the same backlog.
-				let mut sub = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+				// Cover setup and every measured append so the same backlog stays parked,
+				// even when Criterion requests more iterations during warm-up.
+				let max_delay = Duration::from_micros(
+					iterations
+						.checked_add(parked as u64)
+						.unwrap()
+						.checked_mul(MICROS_PER_GROUP)
+						.unwrap(),
+				);
+				let mut sub = track.subscribe(track::Subscription::default().with_max_delay(max_delay));
 				let mut micros = 0;
 				let mut open = Vec::with_capacity(parked);
 				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -431,7 +471,7 @@ fn bench_parked_read(c: &mut Criterion) {
 						group
 							.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
 							.unwrap();
-						micros += 2500;
+						micros += MICROS_PER_GROUP;
 						// Left open, so its read parks instead of ending.
 						open.push(group);
 
@@ -466,7 +506,7 @@ fn bench_parked_read(c: &mut Criterion) {
 					next.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
 						.unwrap();
 					next.finish().unwrap();
-					micros += 2500;
+					micros += MICROS_PER_GROUP;
 					repoll(&mut reads);
 				}
 				start.elapsed()
@@ -485,6 +525,7 @@ criterion_group!(
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
 	bench_subscriber_join,
+	bench_datagram_subscriber_join,
 	bench_parked_read
 );
 criterion_main!(benches);

@@ -15,7 +15,7 @@
 //! that never narrows.
 //!
 //! An equal-cost pool is swept the same way, over its members and the paths it
-//! already serves.
+//! already serves, and over those paths and the cursors watching the pool.
 //!
 //! A route swap on one front is swept over its tracks and the copies each track
 //! still holds from earlier routes, and a front retiring over the fronts around it.
@@ -474,23 +474,38 @@ fn bench_retire(c: &mut Criterion) {
 const POOL: [usize; 3] = [4, 32, 256];
 const POOL_PATHS: [usize; 3] = [100, 1_000, 10_000];
 
+/// Announce cursors watching the pool, against [`POOL_PATHS`].
+const POOL_CURSORS: [usize; 3] = [1, 100, 1_000];
+
 /// Hop ids for pool members, clear of the origin's own.
 const POOL_HOP: u64 = 1_000;
 
 /// An origin where `members` equal-cost advertisers claim `pool`, already
 /// serving `paths` requested paths beneath it, spread across the pool by the
-/// hash on each path. Every handle is held so the fronts stay up.
+/// hash on each path, and watched by `cursors` announce cursors. Every handle
+/// is held so the fronts stay up.
 struct Pool {
 	producer: origin::Producer,
 	driver: origin::Driver,
 	_members: Vec<origin::Dynamic>,
 	_producers: Vec<broadcast::Producer>,
 	_consumers: Vec<broadcast::Consumer>,
+	cursors: Vec<announce::Consumer>,
 }
 
-fn pool(members: usize, paths: usize) -> Pool {
+impl Pool {
+	/// Discard what the cursors were delivered, so each iteration measures only what it adds.
+	fn drain(&mut self) {
+		for cursor in &mut self.cursors {
+			while cursor.next().now_or_never().flatten().is_some() {}
+		}
+	}
+}
+
+fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 	let consumer = producer.consume();
+	let cursors = (0..cursors).map(|_| consumer.announced()).collect();
 	let members: Vec<_> = (0..members)
 		.map(|i| producer.dynamic("pool", pool_route(POOL_HOP + i as u64)).unwrap())
 		.collect();
@@ -515,13 +530,16 @@ fn pool(members: usize, paths: usize) -> Pool {
 		.map(|request| request.now_or_never().expect("resolved once driven").expect("served"))
 		.collect();
 
-	Pool {
+	let mut pool = Pool {
 		producer,
 		driver,
 		_members: members,
 		_producers: producers,
 		_consumers: consumers,
-	}
+		cursors,
+	};
+	pool.drain();
+	pool
 }
 
 /// A pool member's claim: one hop, at the same cost as every other member.
@@ -544,7 +562,7 @@ fn bench_pool_churn(c: &mut Criterion) {
 		for paths in POOL_PATHS {
 			let id = BenchmarkId::from_parameter(format!("{members}m_{paths}p"));
 			group.bench_function(id, |b| {
-				let mut pool = pool(members, paths);
+				let mut pool = pool(members, paths, 0);
 				let waiter = kio::Waiter::noop();
 				let hop = POOL_HOP + members as u64;
 				b.iter(|| {
@@ -552,6 +570,35 @@ fn bench_pool_churn(c: &mut Criterion) {
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 					drop(joined);
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+/// [`bench_pool_churn`] at 32 members, watched by `cursors` announce cursors.
+///
+/// A front whose path the newcomer takes checks whether every cursor on the
+/// prefix already restarted for it before renewing the prefix, so the moved
+/// fronts times the cursors is the slope to watch.
+fn bench_pool_cursors(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/pool_cursors");
+	group.sample_size(10);
+	let members = 32;
+	for paths in POOL_PATHS {
+		for cursors in POOL_CURSORS {
+			let id = BenchmarkId::from_parameter(format!("{paths}p_{cursors}c"));
+			group.bench_function(id, |b| {
+				let mut pool = pool(members, paths, cursors);
+				let waiter = kio::Waiter::noop();
+				let hop = POOL_HOP + members as u64;
+				b.iter(|| {
+					let joined = pool.producer.dynamic("pool", pool_route(hop)).unwrap();
+					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					drop(joined);
+					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					pool.drain();
 				});
 			});
 		}
@@ -1036,6 +1083,7 @@ criterion_group!(
 	bench_request,
 	bench_retire,
 	bench_pool_churn,
+	bench_pool_cursors,
 	bench_handoff,
 	bench_narrow_delivery,
 	bench_narrow,

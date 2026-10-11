@@ -105,7 +105,7 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
 
-	// The minimum audio carried by each group. Defaults to 0, a group per frame.
+	// The minimum audio carried by each group. Defaults to 20 ms; zero puts every frame in its own group.
 	groupDuration?: Time.Milli | Signal<Time.Milli>;
 };
 
@@ -149,7 +149,7 @@ export class Encoder {
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
 	/**
-	 * The minimum timestamp span before a frame opens the next group, closing the previous one. 0 puts every frame in its own group. A longer group costs the
+	 * The minimum timestamp span before a frame opens the next group, closing the previous one. Defaults to 20 ms; zero puts every frame in its own group. A longer group costs the
 	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
 	 * negative or non-finite duration refuses the rendition.
 	 */
@@ -201,7 +201,7 @@ export class Encoder {
 	#fade: Time.Milli = FADE;
 
 	// The last valid group duration, validated by #runConfig the same way as #fade.
-	#groupDuration = Time.Micro(0);
+	#groupDuration = Time.Micro(20_000);
 
 	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
 	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
@@ -247,7 +247,7 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.fade = Signal.from(props?.fade ?? FADE);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
-		this.groupDuration = Signal.from(props?.groupDuration ?? Time.Milli(0));
+		this.groupDuration = Signal.from(props?.groupDuration ?? Time.Milli(20));
 
 		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {

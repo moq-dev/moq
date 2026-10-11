@@ -38,13 +38,13 @@ RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTER
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
-# The idle-out check guards this checkout's relay and clients. A run that swaps in other
-# binaries or JS clients (the wire-compat lanes run released ones) can't be held to it: a
-# released client may not close cleanly, and a released relay names no connection when one
-# closes.
-IDLE_CHECK=1
+# The idle-out check and the finite-tail lanes guard this checkout's relay and clients. A
+# run that swaps in other binaries or JS clients (the wire-compat lanes run released ones)
+# can't be held to them: a released client may not close cleanly, a released relay names no
+# connection when one closes, and the tail clients are built from this checkout only.
+IN_TREE=1
 if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_NATIVE_CLIENT:-}${INTEROP_JS_PUBLISH_CLIENT:-}" ]]; then
-    IDLE_CHECK=0
+    IN_TREE=0
 fi
 TIMEOUT="${INTEROP_TIMEOUT:-20}"
 FPS="${INTEROP_FPS:-30}"
@@ -55,6 +55,7 @@ URL=""
 KEY="" # the HMAC key every cell's token is signed with (set once the relay's auth server starts)
 NEGATIVE=0
 MEDIA=0
+TAIL_ONLY=0
 
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
@@ -95,6 +96,10 @@ while [[ $# -gt 0 ]]; do
             NEGATIVE=1
             shift
             ;;
+        --tail)
+            TAIL_ONLY=1
+            shift
+            ;;
         --media)
             MEDIA=1
             shift
@@ -124,6 +129,19 @@ done
     echo "error: port must be numeric (got '$PORT')" >&2
     exit 2
 }
+
+if [[ "$TAIL_ONLY" -eq 1 ]]; then
+    if [[ "$NEGATIVE" -eq 1 || "$MEDIA" -eq 1 ]]; then
+        echo "error: --tail, --media, and --negative are separate runs" >&2
+        exit 2
+    fi
+    if [[ "$IN_TREE" -eq 0 ]]; then
+        echo "error: --tail builds its clients from this checkout; drop the binary and client overrides" >&2
+        exit 2
+    fi
+    PUBLISHERS="rust,js-native-node,js-native-bun"
+    SUBSCRIBERS="$PUBLISHERS"
+fi
 
 # The media checks drive both roles from the browser client and never touch the matrix, so they
 # pick their own axes rather than accepting --publishers / --subscribers.
@@ -180,8 +198,10 @@ require_tools() {
     # The relay, CLI, ffmpeg, and harness essentials are hard requirements. A
     # missing per-client toolchain (uv / bun / node / cc) just marks that client
     # broken in prepare, so it fails its own cells instead of the whole run.
-    local missing=() t
-    for t in cargo ffmpeg curl timeout; do
+    # Tail-only runs publish raw tracks, so they never encode with ffmpeg.
+    local missing=() t tools=(cargo curl timeout)
+    [[ "$TAIL_ONLY" -eq 1 ]] || tools+=(ffmpeg)
+    for t in "${tools[@]}"; do
         have "$t" || missing+=("$t")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -218,6 +238,9 @@ build_relay_cli() {
         echo "error: failed to build moq-relay / moq-cli" >&2
         exit 1
     }
+    if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 ]]; then
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail)
+    fi
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
     [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
@@ -291,6 +314,10 @@ prepare_js() {
             mark_broken js "vite build failed"
             sed 's/^/        /' "$HARNESS_RUN/js-vite.log" >&2 || true
         fi
+    fi
+    if (needs js-native-node || needs js-native-bun) && ! (cd "$CLIENTS/js-native" && bun run check) >"$HARNESS_RUN/js-native-check.log" 2>&1; then
+        for v in js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "type check failed"; done
+        sed 's/^/        /' "$HARNESS_RUN/js-native-check.log" >&2 || true
     fi
     if needs js-native-node && ! have node; then
         mark_broken js-native-node "node not found"
@@ -522,13 +549,19 @@ else
     sed -e "s|:4443\"|:${PORT}\"|g" -e "s|http://127.0.0.1:4440/|${AUTH_URL}|" \
         "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
 fi
-harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
+# Connection spans and clean closes must survive an inherited warn-only filter.
+harness_spawn relay "$HARNESS_RUN/relay.log" env \
+    "RUST_LOG=${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info" \
+    "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
     sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
     exit 1
 fi
 harness_endpoint relay "$URL"
+
+# shellcheck source-path=SCRIPTDIR source=relay-log.sh
+source "$INTEROP_DIR/relay-log.sh"
 
 # ── tokens ──────────────────────────────────────────────────────────────────
 # Print the relay URL carrying a fresh token; the arguments are `moq auth sign`'s
@@ -673,58 +706,6 @@ stop_publisher() {
 # The relay log line the next connection starts on.
 relay_next_line() {
     echo $(($(wc -l <"$HARNESS_RUN/relay.log") + 1))
-}
-
-# The relay log from line FROM on, without its ANSI colors.
-relay_log_since() {
-    tail -n +"$1" "$HARNESS_RUN/relay.log" | sed 's/\x1b\[[0-9;]*m//g'
-}
-
-# Print each relay connection that appears from log line FROM on, with how it closed: the
-# relay's close error, "ended" for a close without one, or "open" while it hasn't closed yet.
-# The patterns follow the relay's `conn{id=...}` span and its `connection closed` log
-# (`rs/moq-relay/src/relay.rs`). Only connections opened in the window count, so a straggler
-# from an earlier round closing here isn't blamed on this one.
-relay_connections() {
-    relay_log_since "$1" | awk '
-        match($0, /conn\{id=[0-9]+ /) {
-            id = substr($0, RSTART + 8, RLENGTH - 9)
-            if (!(id in state)) { state[id] = "open"; order[++n] = id }
-        }
-        match($0, /connection closed id=[0-9]+/) {
-            id = substr($0, RSTART + 21, RLENGTH - 21)
-            if (id in state) {
-                rest = substr($0, RSTART + RLENGTH)
-                state[id] = sub(/^ err=/, "", rest) ? rest : "ended"
-            }
-        }
-        END { for (i = 1; i <= n; i++) print order[i], state[order[i]] }
-    '
-}
-
-# Fail the round for every relay connection it opened that idled out rather than closed.
-#
-# The relay times a silent peer out after its 10 s QUIC idle timeout, which can land long
-# after the cell that stalled finished. Every client closes its session on the way out, so
-# each close shows up at once, and an idle-out is a real stall that a reconnect would
-# otherwise hide behind a slow cell. A connection still open after the idle timeout is about
-# to idle out, so it fails the same way.
-check_idle_outs() {
-    local pub="$1" from="$2" deadline=$((SECONDS + 15)) id reason role failed=0
-    # Plain grep, not -q: under pipefail an early exit fails the pipeline on SIGPIPE.
-    while relay_connections "$from" | grep ' open$' >/dev/null && ((SECONDS < deadline)); do
-        sleep 0.2
-    done
-    while read -r id reason; do
-        [[ "$reason" == "open" || "$reason" == *"timed out"* ]] || continue
-        # The relay subscribes upstream only on the publisher's connection.
-        role=subscriber
-        relay_log_since "$from" | grep "conn{id=$id .*::subscriber: subscribe started" >/dev/null && role=publisher
-        echo "  FAIL  $pub round: relay connection $id ($role) idled out instead of closing ($reason)"
-        relay_log_since "$from" | grep -E "conn\{id=$id |connection closed id=$id " | sed 's/^/        /'
-        failed=1
-    done < <(relay_connections "$from")
-    ((failed == 0)) || overall=1
 }
 
 # Run a native-JS subscriber and judge it by the "received N bytes" marker it
@@ -955,8 +936,70 @@ run_round() {
         stop_publisher "$pub_pid" "${pub%-denied}"
     fi
     # A round that expects no data ends its subscribers by timing out, which is its point.
-    [[ "$want_pass" -eq 0 || "$IDLE_CHECK" -eq 0 ]] || check_idle_outs "$pub" "$from"
+    [[ "$want_pass" -eq 0 || "$IN_TREE" -eq 0 ]] || check_idle_outs "$pub" "$from"
     return 0
+}
+
+# Raw-track clients have no codecs: every byte, group, and the declared end is checked.
+# shellcheck disable=SC2329  # invoked indirectly via harness_spawn
+run_tail_client() {
+    local lang="$1" role="$2" broadcast="$3" url="$4" limit="$TIMEOUT"
+    # The publisher outlives the subscriber's whole deadline, waiting for its acknowledgement.
+    [[ "$role" == publish ]] && limit=$(awk -v t="$TIMEOUT" 'BEGIN { print t * 2 }')
+    case "$lang" in
+        rust) timeout -k 3 "$limit" "$TARGET_BASE/$PROFILE/examples/interop-tail" "$role" "$url" "$broadcast" ;;
+        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" node --import tsx tail.ts "$role" "$url" "$broadcast") ;;
+        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" bun tail.ts "$role" "$url" "$broadcast") ;;
+        *)
+            echo "unknown tail client: $lang" >&2
+            return 1
+            ;;
+    esac
+}
+
+# shellcheck disable=SC2329  # invoked indirectly via harness_spawn
+run_tail_publisher() {
+    local fifo="$1"
+    shift
+    run_tail_client "$@" <"$fifo" 9>&-
+}
+
+run_tail_pair() {
+    local pub="$1" sub="$2" name="tail-$1-$2" pid subscriber_pid
+    local fifo="$HARNESS_RUN/tail-ack" broadcast="tail-$1-$2-$$-$RANDOM"
+    if is_broken "$pub" || is_broken "$sub"; then
+        echo "  FAIL  tail $pub -> $sub (client unavailable)"
+        overall=1
+        return
+    fi
+    mkfifo "$fifo"
+    # Open both ends so neither child startup nor a failed publisher can block the harness.
+    exec 9<>"$fifo"
+    # Each side's token grants this broadcast alone, like a media round's.
+    harness_spawn "$name-pub" "$HARNESS_RUN/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")"
+    pid="$HARNESS_PID"
+    harness_spawn "$name-sub" "$HARNESS_RUN/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "**/$broadcast")"
+    subscriber_pid="$HARNESS_PID"
+    harness_wait "$subscriber_pid" || true
+    # Like run_native, a verified data result survives the NAPI addon's exit crash.
+    if grep -qx 'tail clean end=4 groups=0,1,2,3 bytes=1048576' "$HARNESS_RUN/$name-sub.log"; then
+        printf 'clean end\n' >&9
+        harness_wait "$pid" || true
+        if grep -qx 'tail acknowledged' "$HARNESS_RUN/$name-pub.log"; then
+            echo "  PASS  tail $pub -> $sub (groups 0,1,2,3; clean end 4)"
+        else
+            echo "  FAIL  tail $pub -> $sub (publisher did not acknowledge)"
+            overall=1
+            cat "$HARNESS_RUN/$name-pub.log"
+        fi
+    else
+        echo "  FAIL  tail $pub -> $sub (missing groups or clean end)"
+        overall=1
+        cat "$HARNESS_RUN/$name-pub.log" "$HARNESS_RUN/$name-sub.log"
+        harness_reap "$pid"
+    fi
+    exec 9>&-
+    rm "$fifo"
 }
 
 # One media.ts invocation. It reports its own verdict (a negative control passes by failing on the
@@ -1020,7 +1063,7 @@ elif [[ "$NEGATIVE" -eq 1 ]]; then
     # no data), proving the harness can actually report failure.
     echo "=== negative control: subscribers expect NO data ==="
     run_round "none" "interop-missing-$$-$RANDOM.hang" "" 0 "$(relay_next_line)"
-else
+elif [[ "$TAIL_ONLY" -eq 0 ]]; then
     for pub in "${PUB_LIST[@]}"; do
         broadcast="interop-${pub}-$$-${RANDOM}.hang"
         echo "=== publisher: $pub  broadcast: $broadcast ==="
@@ -1084,6 +1127,17 @@ else
             fi
         fi
     fi
+fi
+
+if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 && "$IN_TREE" -eq 1 ]]; then
+    echo "=== finite track tails ==="
+    run_tail_pair rust rust
+    for runtime in js-native-node js-native-bun; do
+        if needs "$runtime"; then
+            run_tail_pair rust "$runtime"
+            run_tail_pair "$runtime" rust
+        fi
+    done
 fi
 
 if [[ "$overall" -eq 0 ]]; then

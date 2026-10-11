@@ -124,18 +124,19 @@ pub async fn accept(
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
 
-	// Resolve the broadcast on the subscribe origin by path. The `Source` fetches it (and any
-	// sibling broadcast a rendition's catalog `broadcast` field references, e.g. `./source`)
-	// via `request_broadcast`, which resolves an announced broadcast immediately and falls back
-	// to a dynamic handler; with neither it errors and the WHEP client retries (typical).
-	let broadcast = broadcast.as_path().to_string();
-	let source = moq_mux::Source::new(subscriber.clone(), &broadcast);
-
+	// Resolve the broadcast on the subscribe origin by path. `request_broadcast` resolves an
+	// announced broadcast immediately and falls back to a dynamic handler; with neither it
+	// errors and the WHEP client retries (typical). The `Source` resolves any sibling broadcast
+	// a rendition's catalog `broadcast` field references (e.g. `./source`) the same way.
+	//
 	// Bound the wait for resolution + the first catalog: an unannounced broadcast, or an
 	// announced-but-catalog-less one, would otherwise park this handler forever.
-	let source = tokio::time::timeout(CATALOG_TIMEOUT, EgressSource::new(source))
-		.await
-		.map_err(|_| Error::CatalogTimeout)??;
+	let source = tokio::time::timeout(CATALOG_TIMEOUT, async {
+		let broadcast = subscriber.request_broadcast(broadcast.as_path(), None).await?;
+		EgressSource::new(moq_mux::Source::new(subscriber.clone(), broadcast)).await
+	})
+	.await
+	.map_err(|_| Error::CatalogTimeout)??;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::NoRenditions);
