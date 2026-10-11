@@ -3,15 +3,14 @@ use std::sync::Arc;
 
 use crate::error::MoqError;
 
-/// A dedicated runtime thread, which drives the I/O and timers every call registers and runs
-/// the background work spawned onto it.
+/// A worker runtime driving I/O, timers, and background work beside host-polled calls.
 ///
 /// wasm32 has neither threads nor a tokio driver. uniffi's `RustFuture` is polled by the
 /// JS event loop instead.
 #[cfg(not(target_arch = "wasm32"))]
 static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 
-/// The runtime thread and the handle every call spawns onto.
+/// The worker runtime and the owner thread that joins it on shutdown.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
@@ -54,8 +53,14 @@ impl std::ops::Deref for Runtime {
 /// The runtime, started on first use.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn runtime() -> &'static Runtime {
-	RUNTIME.get_or_init(|| {
-		let runtime = tokio::runtime::Builder::new_current_thread()
+	RUNTIME.get_or_init(Runtime::new)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Runtime {
+	fn new() -> Self {
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.thread_name("moq-ffi-worker")
 			.enable_all()
 			.build()
 			.unwrap();
@@ -66,11 +71,10 @@ pub(crate) fn runtime() -> &'static Runtime {
 			.name("moq-ffi".into())
 			.spawn(move || {
 				// `Err` when the sender is dropped, which the shutdown never does; either way the
-				// runtime is torn down here, on the thread that ran its tasks.
+				// runtime is torn down here, joining the threads that ran its tasks.
 				let _ = runtime.block_on(stopped);
-				// Not `drop`: that would wait for any blocking pool thread, and a DNS lookup
-				// mid-flight at process exit is not worth waiting for.
-				runtime.shutdown_background();
+				// Join every worker and blocking task before the host can unload callbacks.
+				drop(runtime);
 			})
 			.expect("failed to spawn runtime thread");
 
@@ -81,26 +85,37 @@ pub(crate) fn runtime() -> &'static Runtime {
 			polls: Default::default(),
 			idle: Default::default(),
 		}
-	})
+	}
 }
 
-/// Stop the runtime thread and wait for it to finish; a no-op when it never started.
+/// Stop the runtime workers and wait for them to finish; a no-op when it never started.
 ///
 /// See [`crate::moq_ffi_shutdown`] for what this is for.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn shutdown() {
 	let Some(runtime) = RUNTIME.get() else { return };
-	let Some(thread) = runtime.thread.lock().unwrap().take() else {
-		return;
-	};
-	// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
-	let mut polls = runtime.polls.lock().unwrap();
-	polls.stopped = true;
-	drop(runtime.idle.wait_while(polls, |polls| polls.active > 0).unwrap());
-	// Outside the lock: a waker may poll inline, which takes it.
-	runtime.stopped.send_replace(true);
-	let _ = thread.stop.send(());
-	let _ = thread.join.join();
+	runtime.shutdown();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Runtime {
+	fn shutdown(&self) {
+		let runtime = self;
+		let mut owner = runtime.thread.lock().unwrap();
+		let Some(thread) = owner.take() else {
+			return;
+		};
+		// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
+		let mut polls = runtime.polls.lock().unwrap();
+		polls.stopped = true;
+		drop(runtime.idle.wait_while(polls, |polls| polls.active > 0).unwrap());
+		// Outside the lock: a waker may poll inline, which takes it.
+		runtime.stopped.send_replace(true);
+		let _ = thread.stop.send(());
+		thread.join.join().expect("runtime owner panicked");
+		// Retain the owner lock until the join completes, including concurrent shutdown calls.
+		drop(owner);
+	}
 }
 
 /// Resolves once [`shutdown`] has run.
@@ -357,8 +372,7 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	/// Terminal: there is no way back from here, and the state is gone rather than idle.
 	/// The drop is not synchronous with this call, because an in-flight [Self::run] holds the
 	/// state until it observes the flag and unwinds, or its caller drops it. It also lands on the
-	/// runtime thread, which is where the state was built and the only place with a reactor for
-	/// what it unregisters.
+	/// runtime workers, whose entered reactor unregisters the state it drops.
 	pub fn cancel(&self) {
 		// send_replace, not send: `send` refuses to store the value while no
 		// receiver exists, so a cancel BEFORE the first `run` would silently
@@ -388,6 +402,64 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
+
+	#[test]
+	fn runtime_uses_parallel_workers() {
+		let runtime = Runtime::new();
+		assert_eq!(runtime.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread);
+		runtime.shutdown();
+	}
+
+	#[test]
+	fn shutdown_joins_a_worker_callback() {
+		let runtime = Arc::new(Runtime::new());
+		let (entered, entering) = std::sync::mpsc::channel();
+		let (release, released) = std::sync::mpsc::channel();
+		let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let callback = finished.clone();
+		runtime.spawn(async move {
+			entered.send(()).unwrap();
+			released.recv().unwrap();
+			callback.store(true, std::sync::atomic::Ordering::SeqCst);
+		});
+		entering.recv().unwrap();
+
+		// Each caller reports whether the callback had finished when its shutdown returned.
+		let shutdown = |runtime: Arc<Runtime>, finished: Arc<std::sync::atomic::AtomicBool>| {
+			move || {
+				runtime.shutdown();
+				finished.load(std::sync::atomic::Ordering::SeqCst)
+			}
+		};
+
+		// Wait until the first caller has flagged the stop, so it holds the owner lock and is
+		// joining the workers while the callback is still held.
+		let mut stopped = runtime.stopped.subscribe();
+		let first = std::thread::spawn(shutdown(runtime.clone(), finished.clone()));
+		tokio::runtime::Builder::new_current_thread()
+			.build()
+			.unwrap()
+			.block_on(stopped.wait_for(|&stopped| stopped))
+			.unwrap();
+
+		let (started, starting) = std::sync::mpsc::channel();
+		let second = std::thread::spawn({
+			let shutdown = shutdown(runtime.clone(), finished.clone());
+			move || {
+				started.send(()).unwrap();
+				shutdown()
+			}
+		});
+		starting.recv().unwrap();
+
+		release.send(()).unwrap();
+		assert!(first.join().unwrap(), "shutdown returned with a callback in flight");
+		assert!(
+			second.join().unwrap(),
+			"a concurrent shutdown returned with a callback in flight"
+		);
+		runtime.shutdown();
+	}
 
 	/// A state that reports its own drop, which is what a terminal cancel has to trigger.
 	struct Tracked(Option<tokio::sync::oneshot::Sender<()>>);

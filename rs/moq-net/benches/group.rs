@@ -1,11 +1,8 @@
 //! Delivery-path benchmarks for the group and track models.
 //!
-//! The point of interest is small frames: today each frame in a group is a
-//! `frame::Producer` owning its own `kio` channel plus a couple of `Arc`s, so a
-//! group with thousands of tiny frames allocates thousands of tiny control
-//! objects. These benchmarks write and read many small frames so that cost shows
-//! up as wall-clock time, giving a before/after for reshaping frames into plain
-//! data.
+//! Small frames expose control and frame-slot allocation costs. The write sweep
+//! includes the initial deque capacity and its first growth boundary, as well as
+//! groups with thousands of tiny frames.
 //!
 //! `track_recv_groups` covers the layer above: how much it costs to hand out one
 //! cached group, swept over cache depth so a per-delivery scan shows up as a slope.
@@ -28,7 +25,7 @@ const PAYLOAD: usize = 64;
 /// Frame counts to sweep. 8192 is the largest legal group (`MAX_GROUP_FRAMES`);
 /// the 8193rd write returns `GroupTooLarge`. The top end is that full group of
 /// tiny frames.
-const COUNTS: [usize; 3] = [512, 2_048, 8_192];
+const COUNTS: [usize; 5] = [4, 5, 512, 2_048, 8_192];
 
 /// Cached group counts to sweep for the track-level delivery benchmarks. A track
 /// publishing one group per frame at the default 5s retention sits in the hundreds,

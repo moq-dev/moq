@@ -173,8 +173,9 @@ pub(crate) struct WebState {
 	/// like a QUIC one.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
 	pub(crate) sessions: crate::session::Registry,
-	/// How long a connection has to send its request headers, and a WebSocket its
-	/// MoQ SETUP; `None` waits forever.
+	/// How long a connection may sit with no complete request in flight (TLS
+	/// handshake and partial headers included), and a WebSocket wait for its MoQ
+	/// SETUP; `None` waits forever.
 	pub(crate) timeout: Option<std::time::Duration>,
 }
 
@@ -314,8 +315,9 @@ impl Web {
 		self
 	}
 
-	/// Bound how long a connection may take to send its HTTP request headers, and a
-	/// WebSocket its MoQ SETUP after the upgrade; `None`, or a timeout past the
+	/// Close a connection that sits this long with no complete request in flight,
+	/// including one stalled in its TLS handshake or headers or idle in keep-alive,
+	/// and bound a WebSocket's MoQ SETUP after the upgrade; `None`, or a timeout past the
 	/// clock's range, waits forever. Defaults to the
 	/// [`moq_tokio::listen::Config::resolved_timeout`] default.
 	pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
@@ -401,8 +403,14 @@ impl Web {
 		let ws = config.resolved_ws();
 
 		let http = if let Some(listener) = http_listener {
-			let mut server = crate::listener::server(listener, health.clone(), WebAcceptor::plain(ws))?;
-			header_timeout(&mut server, state.timeout);
+			let server = crate::listener::server(
+				listener,
+				crate::listener::Config {
+					health: health.clone(),
+					timeout: state.timeout,
+				},
+				WebAcceptor::plain(ws),
+			)?;
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -416,8 +424,14 @@ impl Web {
 				config.https.key,
 				config.https.root,
 			));
-			let mut server = crate::listener::server(listener, health.clone(), WebAcceptor::tls(rustls_config, ws))?;
-			header_timeout(&mut server, state.timeout);
+			let server = crate::listener::server(
+				listener,
+				crate::listener::Config {
+					health: health.clone(),
+					timeout: state.timeout,
+				},
+				WebAcceptor::tls(rustls_config, ws),
+			)?;
 			Some(server.serve(app))
 		} else {
 			None
@@ -478,20 +492,6 @@ async fn get_cors(request: axum::extract::Request, next: axum::middleware::Next)
 		);
 	}
 	response
-}
-
-/// Close an HTTP/1 connection that hasn't sent its full request headers within
-/// `timeout`, or never when `None`.
-///
-/// axum-server builds hyper without a timer, and hyper enforces no header deadline
-/// without one, so a client that trickles its headers would otherwise hold its
-/// connection forever.
-fn header_timeout<A>(server: &mut axum_server::Server<crate::listener::Peer, A>, timeout: Option<std::time::Duration>) {
-	server
-		.http_builder()
-		.http1()
-		.timer(hyper_util::rt::TokioTimer::new())
-		.header_read_timeout(timeout);
 }
 
 /// Build a [`rustls::ServerConfig`] for the HTTPS listener.

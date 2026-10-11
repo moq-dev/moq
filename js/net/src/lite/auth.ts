@@ -1,8 +1,9 @@
 import { Unsupported } from "../auth.ts";
 import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
-import { type SessionCode, SessionError } from "../error.ts";
+import { closeReason, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream, type Writer } from "../stream.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
 import { StreamId } from "./stream.ts";
 import { hasAuth, type Version } from "./version.ts";
@@ -100,7 +101,13 @@ export class AuthOk {
 
 	static async decode(r: Reader, version: Version): Promise<AuthOk> {
 		guardAuth(version);
-		return Message.decode(r, AuthOk.#decode);
+		return Message.decode(r, async (body) => {
+			try {
+				return await AuthOk.#decode(body);
+			} catch (cause) {
+				throw new ProtocolViolation("malformed AUTH_OK", { cause });
+			}
+		});
 	}
 }
 
@@ -127,11 +134,16 @@ export class AuthError {
 
 	static async #decode(r: Reader): Promise<AuthError> {
 		const code = await r.u53();
-		const reason = await r.string();
-		if (new TextEncoder().encode(reason).byteLength > MAX_REASON) {
-			throw new Error("AUTH_ERROR reason exceeds 8,192 bytes");
+		const size = await r.u62();
+		if (size > BigInt(MAX_REASON)) {
+			throw new ProtocolViolation("AUTH_ERROR reason exceeds 8,192 bytes");
 		}
-		return new AuthError(code, reason);
+		const bytes = await r.read(Number(size));
+		try {
+			return new AuthError(code, decodeUtf8(bytes));
+		} catch (cause) {
+			throw new ProtocolViolation("invalid UTF-8 AUTH_ERROR reason", { cause });
+		}
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -181,7 +193,15 @@ export class LiteAuthWire implements AuthWire {
 	}
 
 	async read(stream: Stream): Promise<WireReply | undefined> {
-		const reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
+		let reply: AuthReply | undefined;
+		try {
+			reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
+		} catch (err) {
+			if (err instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: SessionCode.ProtocolViolation, reason: closeReason(err.message) });
+			}
+			throw err;
+		}
 		if (!reply) return undefined;
 		if (reply instanceof AuthOk) {
 			return { grant: { publish: reply.publish, subscribe: reply.subscribe, expires: reply.expires } };

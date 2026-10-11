@@ -45,13 +45,7 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import {
-	type CaptureState,
-	FAULTS,
-	leakedPlayerStarted,
-	SAMPLE_MS,
-	SAMPLE_RATE,
-} from "./src/contract";
+import { type CaptureState, FAULTS, leakedPlayerStarted, reachesLive, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
 import * as Pattern from "./src/pattern";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
@@ -198,6 +192,8 @@ const framesToMs = (frames: number) => Math.round((frames * 1000) / Pattern.FPS)
  * Only a frame that moved since the last reading counts. The player paints the first frame it decodes
  * as a preview and holds it until its sync delay comes up, so a held frame says nothing about where
  * playback runs: a player delayed seconds behind live still shows a near-live preview first.
+ * Audio must also have left preroll, just as in measurePlayback: a new preview can replace an old
+ * one while the audio buffer is still filling, so a changed canvas alone does not prove playback.
  */
 async function waitForLive(
 	publisher: Page,
@@ -221,8 +217,14 @@ async function waitForLive(
 			lag = fixture.frameId - state.frameId;
 			first ??= lag;
 			moved = frame !== undefined && state.frameId !== frame;
+			const live = reachesLive({
+				previous: frame,
+				source: fixture.frameId,
+				sample: state,
+				bound: LIVE_LAG_FRAMES,
+			});
 			frame = state.frameId;
-			if (moved && lag <= LIVE_LAG_FRAMES) return { first, lag, after: Date.now() - since };
+			if (live) return { first, lag, after: Date.now() - since };
 		}
 		await sleep(POLL_INTERVAL_MS);
 	}
@@ -263,7 +265,7 @@ function traceLine(sample: PlayerState, start: number): string {
 		`    +${((sample.at - start) / 1000).toFixed(2)}s frame=${sample.frameId ?? "-"} ` +
 		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
 		`rms=${sample.rms?.toFixed(3) ?? "-"} ats=${sample.audioTimestamp?.toFixed(0) ?? "-"} vts=${sample.videoTimestamp?.toFixed(0) ?? "-"} ` +
-			`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
+		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
 	);
 }
 

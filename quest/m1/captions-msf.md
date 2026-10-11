@@ -33,5 +33,5 @@ Per cross-package sync, mirror any schema movement in `js/msf`.
 
 ## Related
 
-- [Caption import](/quest/m1/captions-import.md) - the container half of the
-  same gap
+- [TTML caption import](/quest/m1/captions-ttml.md) - the remaining container
+  half of the same gap

@@ -10,7 +10,7 @@ use mp4_atom::Atom;
 use webm_iterable::WebmIterator;
 use webm_iterable::errors::TagIteratorError;
 use webm_iterable::iterator::AllowableErrors;
-use webm_iterable::matroska_spec::{Master, MatroskaSpec, SimpleBlock};
+use webm_iterable::matroska_spec::{BlockLacing, Master, MatroskaSpec, SimpleBlock};
 
 use super::Error;
 
@@ -38,6 +38,8 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// - MP3 (`A_MPEG/L3`)
 ///
 /// **Text:** timed SRT (`S_TEXT/UTF8`) and WebVTT (`S_TEXT/WEBVTT`), emitted as WebVTT.
+///
+/// Laced blocks require a positive TrackEntry DefaultDuration to timestamp each frame.
 ///
 /// Unsupported track roles and subtitle encodings are logged and dropped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
@@ -93,21 +95,20 @@ impl TrackKind {
 }
 
 struct MkvTrack {
+	default_duration: Option<std::time::Duration>,
 	kind: TrackKind,
-	default_duration: Option<u64>,
 	text_header: Option<String>,
 	track: Media,
 	group: Option<moq_net::group::Producer>,
 }
 
-struct Block<'a> {
-	track: u64,
-	timestamp: i16,
-	keyframe: bool,
-	payload: &'a [u8],
+/// BlockGroup fields that only subtitle tracks consume.
+#[derive(Default)]
+struct Cue<'a> {
+	/// BlockDuration, in Matroska ticks.
 	duration: Option<u64>,
+	/// WebVTT settings, identifier and comments (BlockAddID 1).
 	addition: Option<&'a [u8]>,
-	laced: bool,
 }
 
 enum Media {
@@ -308,15 +309,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			MatroskaSpec::SimpleBlock(ref data) => {
 				let sb = SimpleBlock::try_from(data.as_slice()).map_err(|_| Error::InvalidSimpleBlock)?;
-				self.handle_block(Block {
-					track: sb.track,
-					timestamp: sb.timestamp,
-					keyframe: sb.keyframe,
-					payload: sb.raw_frame_data(),
-					duration: None,
-					addition: None,
-					laced: sb.lacing.is_some(),
-				})?;
+				self.handle_block(&sb, sb.keyframe, Cue::default())?;
 			}
 			MatroskaSpec::BlockGroup(Master::Full(children)) => {
 				self.handle_block_group(&children)?;
@@ -367,13 +360,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		for c in children {
 			match c {
+				MatroskaSpec::DefaultDuration(v) if v > 0 => {
+					default_duration = Some(std::time::Duration::from_nanos(v))
+				}
 				MatroskaSpec::TrackNumber(v) => track_number = Some(v),
 				MatroskaSpec::TrackType(v) => track_type = Some(v),
 				MatroskaSpec::CodecID(v) => codec_id = Some(v),
 				MatroskaSpec::Language(v) => language = Some(v),
 				MatroskaSpec::LanguageIETF(v) => language_ietf = Some(v),
 				MatroskaSpec::Name(v) => name = Some(v),
-				MatroskaSpec::DefaultDuration(v) => default_duration = Some(v),
 				MatroskaSpec::CodecPrivate(v) => codec_private = Some(Bytes::from(v)),
 				MatroskaSpec::Audio(Master::Full(v)) => audio_children = Some(v),
 				MatroskaSpec::Video(Master::Full(v)) => video_children = Some(v),
@@ -448,8 +443,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		self.tracks.insert(
 			track_number,
 			MkvTrack {
-				kind,
 				default_duration,
+				kind,
 				text_header,
 				track: media,
 				group: None,
@@ -505,18 +500,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let parsed = SimpleBlock::try_from(data).map_err(|_| Error::InvalidBlock)?;
 		let keyframe = !has_reference;
 
-		self.handle_block(Block {
-			track: parsed.track,
-			timestamp: parsed.timestamp,
-			keyframe,
-			payload: parsed.raw_frame_data(),
-			duration,
-			addition,
-			laced: parsed.lacing.is_some(),
-		})
+		self.handle_block(&parsed, keyframe, Cue { duration, addition })
 	}
 
-	fn handle_block(&mut self, block: Block<'_>) -> Result<()> {
+	fn handle_block(&mut self, block: &SimpleBlock<'_>, keyframe: bool, cue: Cue<'_>) -> Result<()> {
 		let Some(track) = self.tracks.get_mut(&block.track) else {
 			// Unknown or skipped track.
 			return Ok(());
@@ -532,94 +519,74 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let pts_ns = (block_ticks as u64)
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
-		// The first block anchors the stream. Anchor before releasing the reservation, so the
-		// first snapshot carries the final clock; Tracks declared every track, so any track's
-		// block releases it.
-		let timestamp = self.timebase.shift(Timestamp::from_nanos(pts_ns)?)?;
-		self.initial_reservation = None;
-
-		// Audio tracks: always treat as keyframes (matches fmp4 behavior).
-		let keyframe = matches!(track.kind, TrackKind::Audio | TrackKind::Text) || block.keyframe;
-
-		if track.kind == TrackKind::Text && block.laced {
-			return Err(Error::InvalidSubtitle("laced subtitles are unsupported").into());
+		if track.kind == TrackKind::Text {
+			if block.lacing.is_some() {
+				return Err(Error::InvalidSubtitle("laced subtitles are unsupported").into());
+			}
+			let duration = match cue.duration {
+				Some(ticks) => ticks.checked_mul(self.timestamp_scale_ns).ok_or(Error::TimestampOverflow)?,
+				None => {
+					let duration = track
+						.default_duration
+						.ok_or(Error::InvalidSubtitle("missing cue duration"))?;
+					u64::try_from(duration.as_nanos()).map_err(|_| Error::TimestampOverflow)?
+				}
+			};
+			let duration = Timestamp::from_nanos(duration)?;
+			let timestamp = self.timebase.shift(Timestamp::from_nanos(pts_ns)?)?;
+			self.initial_reservation = None;
+			let payload = cue_payload(
+				track.text_header.as_deref(),
+				cue.addition,
+				block.raw_frame_data(),
+				timestamp,
+				duration,
+			)?;
+			track.track.write(crate::container::Frame {
+				timestamp,
+				payload,
+				keyframe: true,
+				duration: Some(duration),
+			})?;
+			// Each cue is self-contained, so close its group immediately.
+			return Ok(track.track.cut(None)?);
 		}
-		let duration = if track.kind == TrackKind::Text {
-			let duration = block
-				.duration
-				.map(|value| {
-					value
-						.checked_mul(self.timestamp_scale_ns)
-						.ok_or(Error::TimestampOverflow)
-				})
-				.transpose()?;
-			duration
-				.or(track.default_duration)
-				.map(Timestamp::from_nanos)
-				.transpose()?
+
+		let frames = split_lacing(block).map_err(anyhow::Error::new)?;
+		let duration = if block.lacing.is_some() {
+			Some(
+				track
+					.default_duration
+					.ok_or_else(|| anyhow::Error::new(LacingError::MissingDuration))?,
+			)
 		} else {
 			None
 		};
-		let payload = if track.kind == TrackKind::Text {
-			let duration = duration.ok_or(Error::InvalidSubtitle("missing cue duration"))?;
-			let end = timestamp.checked_add(duration)?;
-			let body = std::str::from_utf8(block.payload).map_err(|_| Error::InvalidSubtitle("invalid UTF-8"))?;
-			let mut output = track.text_header.clone().unwrap_or_else(|| "WEBVTT\n\n".into());
-			let mut id = "";
-			let mut settings = "";
-			if let Some(addition) = block.addition.filter(|_| track.text_header.is_some()) {
-				let addition =
-					std::str::from_utf8(addition).map_err(|_| Error::InvalidSubtitle("invalid cue additions UTF-8"))?;
-				let mut lines = addition.splitn(3, '\n');
-				settings = lines.next().unwrap_or_default();
-				id = lines.next().unwrap_or_default();
-				if let Some(comments) = lines.next().filter(|value| !value.is_empty()) {
-					if !comments.starts_with("NOTE") || comments.contains("-->") {
-						return Err(Error::InvalidSubtitle("invalid cue comments").into());
-					}
-					output.push_str(comments.trim_end_matches('\n'));
-					output.push_str("\n\n");
-				}
-			}
-			let body = if track.text_header.is_some() {
-				crate::container::text::rebase(body, timestamp, end).map_err(Error::InvalidSubtitle)?
-			} else {
-				body.into()
-			};
-			crate::container::text::append(
-				&mut output,
-				crate::container::text::Cue {
-					start: timestamp,
-					end,
-					body: &body,
-					id,
-					settings,
+		// Validate the last timestamp before publishing any part of this block.
+		let step = duration.map(|duration| duration.as_nanos()).unwrap_or_default();
+		let duration = duration
+			.map(|duration| Timestamp::from_nanos(duration.as_nanos() as u64))
+			.transpose()?;
+		let last = u128::from(pts_ns) + step * (frames.len() - 1) as u128;
+		Timestamp::from_nanos(u64::try_from(last).map_err(|_| Error::TimestampOverflow)?)?;
+		for (index, payload) in frames.into_iter().enumerate() {
+			let pts_ns = (u128::from(pts_ns) + step * index as u128) as u64;
+			// Anchor before releasing the reservation, so the first catalog carries its clock.
+			let timestamp = self.timebase.shift(Timestamp::from_nanos(pts_ns)?)?;
+			self.initial_reservation = None;
+			let frame = crate::container::Frame {
+				timestamp,
+				payload: Bytes::copy_from_slice(payload),
+				keyframe: match track.kind {
+					TrackKind::Audio => index == 0,
+					TrackKind::Video | TrackKind::Text => keyframe,
 				},
-			)
-			.map_err(Error::InvalidSubtitle)?;
-			Bytes::from(output)
-		} else {
-			Bytes::copy_from_slice(block.payload)
-		};
-		let frame = crate::container::Frame {
-			timestamp,
-			payload,
-			keyframe,
-			duration,
-		};
-
-		// Manage groups: new group on video keyframe; audio always finishes its group immediately.
-		match track.kind {
-			TrackKind::Video => {
-				if keyframe && let Some(prev) = track.group.take() {
-					prev.finish()?;
-				}
-				track.track.write(frame)?;
-			}
-			TrackKind::Audio | TrackKind::Text => {
-				track.track.write(frame)?;
-				track.track.cut(None)?;
-			}
+				duration,
+			};
+			track.track.write(frame)?;
+		}
+		if matches!(track.kind, TrackKind::Audio) {
+			track.track.cut(None)?;
 		}
 
 		Ok(())
@@ -872,4 +839,132 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
 	config.description = Some(description.freeze());
 	Ok(config)
+}
+
+/// Render one Matroska subtitle block as a self-contained WebVTT document.
+///
+/// `header` is the WebVTT CodecPrivate; SRT (`S_TEXT/UTF8`) tracks have none and get a bare header.
+fn cue_payload(
+	header: Option<&str>,
+	addition: Option<&[u8]>,
+	body: &[u8],
+	start: Timestamp,
+	duration: Timestamp,
+) -> Result<Bytes> {
+	let end = start.checked_add(duration)?;
+	let body = std::str::from_utf8(body).map_err(|_| Error::InvalidSubtitle("invalid UTF-8"))?;
+	let mut output = header.unwrap_or("WEBVTT\n\n").to_string();
+	let mut id = "";
+	let mut settings = "";
+	if let Some(addition) = addition.filter(|_| header.is_some()) {
+		let addition =
+			std::str::from_utf8(addition).map_err(|_| Error::InvalidSubtitle("invalid cue additions UTF-8"))?;
+		let mut lines = addition.splitn(3, '\n');
+		settings = lines.next().unwrap_or_default();
+		id = lines.next().unwrap_or_default();
+		if let Some(comments) = lines.next().filter(|value| !value.is_empty()) {
+			if !comments.starts_with("NOTE") || comments.contains("-->") {
+				return Err(Error::InvalidSubtitle("invalid cue comments").into());
+			}
+			output.push_str(comments.trim_end_matches('\n'));
+			output.push_str("\n\n");
+		}
+	}
+	let body = match header {
+		Some(_) => crate::container::text::rebase(body, start, end).map_err(Error::InvalidSubtitle)?,
+		None => body.into(),
+	};
+	crate::container::text::append(
+		&mut output,
+		crate::container::text::Cue {
+			start,
+			end,
+			body: &body,
+			id,
+			settings,
+		},
+	)
+	.map_err(Error::InvalidSubtitle)?;
+	Ok(Bytes::from(output))
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LacingError {
+	#[error("invalid MKV lacing")]
+	Invalid,
+	#[error("MKV lacing requires a positive TrackEntry DefaultDuration")]
+	MissingDuration,
+}
+
+// webm-iterable's splitter uses unchecked indexing and size arithmetic on malformed laces.
+// Keep bounds and signed EBML size deltas checked before slicing untrusted input.
+fn split_lacing<'a>(block: &'a SimpleBlock<'_>) -> std::result::Result<Vec<&'a [u8]>, LacingError> {
+	let Some(lacing) = block.lacing else {
+		return Ok(vec![block.raw_frame_data()]);
+	};
+	let invalid = || LacingError::Invalid;
+	let mut data = block.raw_frame_data();
+	let count = usize::from(*data.first().ok_or_else(invalid)?) + 1;
+	if count < 2 {
+		return Err(invalid());
+	}
+	data = &data[1..];
+	let mut sizes = Vec::with_capacity(count);
+	match lacing {
+		BlockLacing::FixedSize => {
+			if !data.len().is_multiple_of(count) {
+				return Err(invalid());
+			}
+			sizes.resize(count - 1, data.len() / count);
+		}
+		BlockLacing::Xiph => {
+			for _ in 0..count - 1 {
+				let mut size = 0usize;
+				loop {
+					let byte = *data.first().ok_or_else(invalid)?;
+					data = &data[1..];
+					size = size.checked_add(usize::from(byte)).ok_or_else(invalid)?;
+					if byte != 255 {
+						break;
+					}
+				}
+				sizes.push(size);
+			}
+		}
+		BlockLacing::Ebml => {
+			for index in 0..count - 1 {
+				let first = *data.first().ok_or_else(invalid)?;
+				let len = first.leading_zeros() as usize + 1;
+				if len > 8 || data.len() < len {
+					return Err(invalid());
+				}
+				let mut value = u64::from(first) & (0xffu64 >> len);
+				for byte in &data[1..len] {
+					value = (value << 8) | u64::from(*byte);
+				}
+				data = &data[len..];
+				let size = if index == 0 {
+					value as i64
+				} else {
+					let delta = value as i64 - ((1i64 << (7 * len - 1)) - 1);
+					i64::try_from(sizes[index - 1])
+						.map_err(|_| invalid())?
+						.checked_add(delta)
+						.ok_or_else(invalid)?
+				};
+				sizes.push(usize::try_from(size).map_err(|_| invalid())?);
+			}
+		}
+	}
+	let mut frames = Vec::with_capacity(count);
+	for size in sizes {
+		if size > data.len() {
+			return Err(invalid());
+		}
+		let (frame, remaining) = data.split_at(size);
+		frames.push(frame);
+		data = remaining;
+	}
+	frames.push(data);
+	Ok(frames)
 }
