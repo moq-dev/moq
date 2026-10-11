@@ -19,6 +19,27 @@ subscriber checks end-to-end: the browser encodes fake microphone audio, and the
 Python, Go, and C++ clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
 duration, so the matrix covers the FFI audio path with a non-default codec config.
 
+The normal run also checks a finite raw track through the relay. Its publisher
+announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
+exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
+native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` covers
+Node and Bun. `--tail` runs just these five lanes. The wire-compat lanes, which swap in released relays and clients, skip them.
+
+The finite clients keep their session alive until the harness acknowledges the
+reader's complete clean end over stdin, so a lane tests delivery rather than
+shutdown. No sleep stands in for drain completion. A missing group, error, or
+stall fails the lane; the timeout only bounds failure. QUIC on localhost rarely
+reorders, so the ordering race remains covered by transport unit tests.
+
+Every client closes its session on the way out: publishers stop when their input
+ends (the browser on SIGTERM), and subscribers close once they have their frame.
+After each publisher's round, the harness waits for the relay to log the close of
+every connection the round opened, and fails the round for any connection the relay
+timed out instead. A client that stalls and reconnects therefore fails, rather than
+passing as a slow cell, even when the idle-out lands after its cell finished. The
+check covers runs built from this checkout; the wire-compat lanes, which swap in
+released relays and clients, skip it.
+
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
 `WebTransport.closed` must carry the relay's code and reason. Chromium treats a
@@ -72,6 +93,37 @@ than this checkout: it's a prebuilt NAPI QUIC/HTTP3 addon, not part of the moq
 source tree. Everything else (`@moq/net`, `@moq/hang`, ...) resolves to the
 workspace packages, because the JS clients here are bun workspace members.
 
+## Auth
+
+The relay verifies tokens through `moq auth serve` with a key generated for the
+run; nothing is anonymous. Each publisher dials with a token for its broadcast's
+subtree and each subscriber with one to read it, so every cell also covers the
+`?jwt=` URL path in every client.
+
+Clients that print the grant the relay sent back over AUTH, as an
+`auth granted publish=[...] subscribe=[...]` line, must report exactly what
+their token implies: the Rust CLI (a `moq_net::auth` debug log) and the native
+JS subscribers. A cell whose grant is missing or wrong fails even when media
+flowed. The binding clients (Python, Go, C, GStreamer) have no grant to print
+until moq-ffi exposes one, and the browser's shared connection keeps its session
+private, so their cells check media alone. AUTH is only on the work-in-progress
+moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
+client that reports nothing never got its grant. The native JS subscribers dial
+WebTransport alone, since the WebSocket fallback cannot offer it. The rest keep
+their defaults, so the matrix also crosses versions through the relay, which
+accepts both.
+
+After the matrix, each publisher whose refusal the harness can read (Rust) runs
+once more with a token that excludes its broadcast. It must fail loud, logging
+Unauthorized and naming the path, and every subscriber must time out. The
+browser publisher enforces its grant too, but its elements cannot offer
+`moq-lite-07-wip` yet.
+
+Tokens use patterns no prefix could carry, so every cell checks that AUTH\_OK
+delivers them as minted: a publisher is granted its exact broadcast, a subscriber
+`**/name` (a leading `**` matching zero segments), and the refused publisher
+`interop-allowed-*.hang`.
+
 ## Running locally
 
 You need the workspace toolchain on `PATH` (cargo, ffmpeg, bun, uv, go,
@@ -88,6 +140,9 @@ just test interop --all
 
 # Pick your own axes:
 just test interop --publishers rust,python --subscribers rust,c,js-native-bun
+
+# Finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
+just test interop --tail
 
 # Subscription termination: Rust/JS response bytes over in-memory transports.
 just test bare-fin
@@ -128,6 +183,8 @@ The session lanes take the moq-lite drafts from each CLI's `--connect-version`
 choices. IETF drafts are left out on purpose: our clients and relays always
 prefer moq-lite with each other, and `just test interop` covers IETF. The relay
 offers only the cell's version, and JavaScript checks the negotiated version.
+The relay is anonymous here, since released binaries may predate AUTH; the
+default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
 publishers feed current readers, through both relay sources. Rust exports must
 decode to a video frame through ffmpeg. The existing JS subscriber
@@ -186,10 +243,12 @@ Each run covers, against a real local relay:
   The fake device is not physical hardware, and the headless permission decision
   is not a person clicking a browser prompt.
 - **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
-  **publisher stop and same-path republish**, and **late join**. The late join
-  must present the newest published GOP or a newer one. Its lower bound is the
-  encoded keyframe timestamp sampled before the existing viewer closes, since
-  painting the canvas does not mean capture and encoding have finished.
+  **publisher stop and same-path republish**, and **late join**. The late
+  joiner may first show the GOP from before the demand gap, but it must present
+  a frame within 5s of loading and then play, with the presented frame moving,
+  within 1.5s of the fixture's painted frame within 2s, both bounds about twice
+  the worst seen in looped runs under CPU load. A rejoin and a reattach cross
+  the same demand gap, so they must reach live the same way.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -200,8 +259,12 @@ median, and audio/video skew must stay within one 200ms tone step for 90% of
 samples. One step is the floor set by the analyser window straddling a step
 boundary and the canvas holding a frame up to one frame old.
 
-The run ends with negative controls. Each injects a defect in the fixture and
-names the assertion that has to catch it, and passes only by failing there:
+Each window opens once the player's audio buffer has filled and plays. Until
+then the player holds its first decoded frame, silent, for its sync delay, which
+rises past 400ms under load; that is startup, not a gap in playback.
+
+The run ends with negative controls. Each injects a defect and names the
+assertion that has to catch it, and passes only by failing there:
 
 | Control | Must fail |
 |---|---|
@@ -209,6 +272,7 @@ names the assertion that has to catch it, and passes only by failing there:
 | picture frozen after the first frame | `video progress` |
 | tone table shifted 800ms ahead of the picture | `audio/video sync` |
 | the detached player's session never torn down | `resource baseline` |
+| the latecomer's player delayed 3s behind live | `late join reaches live` |
 
 The leaked-session control waits for an extra `AudioContext` rather than an extra
 session: every player on one relay URL shares a transport, so a session count
@@ -227,7 +291,7 @@ contract](../README.md).
 
 ```text
 interop.sh              orchestrator: build clients, run the relay + matrix or media checks
-interop.toml            relay config (anonymous, self-signed localhost)
+interop.toml            relay config (token auth via `moq auth serve`, self-signed localhost)
 bare-fin.ts             the JS side of `just test bare-fin`, driven by moq-net's tests
 varint.ts               the JS side of the varint check, driven by moq-net's tests
 clients/

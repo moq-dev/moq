@@ -31,6 +31,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
+| `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), `always`, or `never`. Nobody can see or subscribe to the broadcast until it is announced. |
 
 Every attribute is also a reactive property. The
@@ -52,8 +53,9 @@ Codec, resolution, framerate, and bitrate are tunable through
 simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
-Each audio frame is its own group by default. `el.audio.groupDuration` (such as
-`Time.Milli(100)`) packs several frames per group, so a relay keeps fewer
+Audio groups carry at least 20 ms by default, packing shorter codec frames
+together. `el.audio.groupDuration` changes that minimum; `Time.Milli(0)` puts
+every frame in its own group. A longer minimum lets a relay keep fewer
 streams, at the cost of coarser loss: a viewer that falls behind skips a whole
 group. Frames still forward as they are encoded.
 

@@ -451,6 +451,13 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if request.Sequence() != 7 || request.Priority() != 11 {
 		t.Fatalf("unexpected request: sequence=%d priority=%d", request.Sequence(), request.Priority())
 	}
+	demand, err := request.Demand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if demand.Sequence() != 7 || !demand.IsUsed() {
+		t.Fatalf("unexpected demand: sequence=%d used=%v", demand.Sequence(), demand.IsUsed())
+	}
 	produced, err := request.Accept()
 	if err != nil {
 		t.Fatal(err)

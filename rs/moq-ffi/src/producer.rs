@@ -3,7 +3,7 @@ use std::sync::Arc;
 use moq_mux::catalog::hang::Extra;
 
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
-use crate::demand::MoqTrackDemand;
+use crate::demand::{MoqGroupDemand, MoqTrackDemand};
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::MoqFrame;
@@ -341,6 +341,12 @@ impl MoqGroupRequest {
 		self.priority
 	}
 
+	/// A handle that watches whether any caller still wants this group.
+	pub fn demand(&self) -> Result<Arc<MoqGroupDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqGroupDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
+	}
+
 	/// Accept the request and return a producer for filling the fetched group.
 	pub fn accept(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
@@ -392,6 +398,12 @@ impl MoqTrackRequest {
 		let guard = self.inner.lock().unwrap();
 		let request = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(request.name().to_string())
+	}
+
+	/// Watch this track's subscribers, including after the request is accepted.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
 	/// Create a handler for uncached group fetches before accepting this track.

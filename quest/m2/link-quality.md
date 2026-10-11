@@ -23,10 +23,9 @@ the default and measured cost is opt-in, so the line ships without it.
 - Hysteresis: only advertise a cost change past a threshold or after it
   holds, so the route layer sees a few changes per real shift. Report how
   many ROUTE changes a fading link causes.
-- Never mix it into business pricing: moq.pro's
-  [priced topology](https://github.com/moq-dev/moq.pro/blob/main/quest/m3/priced-topology.md)
-  keeps RTT out of monetary costs, and that stays true because measured cost
-  is opt-in on links the operator chooses.
+- Never mix it into business pricing: an operator's priced topology keeps
+  RTT out of monetary costs, and that stays true because measured cost is
+  opt-in on links the operator chooses.
 - A lossy-link fixture over the mock transport with mocked time.
 
 Public API: a per-link way to ask for measured cost in the peer entry.

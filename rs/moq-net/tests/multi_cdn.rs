@@ -47,12 +47,12 @@ async fn dial(
 	version: Version,
 	cdn: &origin::Producer,
 	subscriber: &origin::Producer,
-	preference: u32,
+	preference: u8,
 	cost: u64,
 ) -> MockPair {
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(cdn.consume());
-	options.client_subscribe = Some(subscriber.clone().with_preference(preference));
+	options.client_subscribe = Some(subscriber.clone().with_preference(origin::Preference::new(preference)));
 	options.cost = Some(cost);
 	connect_mock(options).await
 }
@@ -160,8 +160,8 @@ impl Topology {
 			push(lite, &publisher, &cdn_a).await,
 			push(secondary, &publisher, &cdn_b).await,
 		];
-		let s_to_a = dial(lite, &cdn_a, &subscriber, 0, 100).await;
-		let s_to_b = dial(secondary, &cdn_b, &subscriber, 1, 0).await;
+		let s_to_a = dial(lite, &cdn_a, &subscriber, 1, 100).await;
+		let s_to_b = dial(secondary, &cdn_b, &subscriber, 0, 0).await;
 		settle().await;
 
 		Self {
@@ -238,7 +238,7 @@ impl Topology {
 
 	async fn restore_a(&mut self) {
 		let lite: Version = "moq-lite-07-wip".parse().unwrap();
-		self.s_to_a = Some(dial(lite, &self.cdn_a, &self.subscriber, 0, 100).await);
+		self.s_to_a = Some(dial(lite, &self.cdn_a, &self.subscriber, 1, 100).await);
 		settle().await;
 	}
 }

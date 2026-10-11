@@ -303,8 +303,63 @@ std::optional<moq::Catalog> relayCatalog(const std::shared_ptr<moq::BroadcastCon
 }
 } // namespace
 
+// The production commit boundary lets a real stats call race retirement without
+// callbacks or branches in the output's hot path.
+struct MoQOutputStatsTest {
+	static std::shared_ptr<moq::Session> Session(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.mutex);
+		return output.session;
+	}
+	static bool Commit(MoQOutput &output, const std::shared_ptr<moq::Session> &session,
+			   MoQOutput::ConnectionStats *accepted)
+	{
+		MoQOutput::ConnectionStats stale;
+		stale.dial = "retired";
+		stale.bytes_sent = 123;
+		return output.CommitConnectionStats(session, std::move(stale), accepted);
+	}
+	static void Disconnect(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.mutex);
+		output.live = false;
+	}
+};
+
 int main()
 {
+	for (int retirement = 0; retirement < 3; ++retirement) {
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput output(nullptr, OUTPUT);
+		CHECK(output.Start());
+		CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		auto sampled = MoQOutputStatsTest::Session(output);
+		CHECK(sampled != nullptr);
+		if (!sampled)
+			continue;
+		// Use the generated bindings and real session before crossing the commit boundary.
+		const auto raw = sampled->stats();
+		(void)raw;
+		MoQOutput::ConnectionStats accepted;
+		accepted.dial = "accepted";
+		accepted.bytes_sent = 456;
+		if (retirement == 0) {
+			output.Stop();
+		} else if (retirement == 1) {
+			output.Stop();
+			CHECK(output.Start());
+			CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		} else {
+			MoQOutputStatsTest::Disconnect(output);
+		}
+		CHECK(!MoQOutputStatsTest::Commit(output, sampled, &accepted));
+		CHECK(accepted.dial == "accepted");
+		CHECK(accepted.bytes_sent == 456);
+		output.Stop();
+	}
+	printf("retired stats never replace the accepted sample: ok\n");
+
 	// Publishes over a real session: connects, reports itself live, carries
 	// stats, and lands video and audio renditions in the relay's catalog. Only CBR
 	// publishes the configured bitrate as a hint.

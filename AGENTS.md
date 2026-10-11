@@ -28,6 +28,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Fix any outdated docs and comments inline; don't add a separate PR for it.
 - Add the AI marker `(Written by <model>)` to any posts on GitHub, excluding commit messages that contain `Co-Authored-By:` trailers.
 - Any AI comments may be challenged, and not confused with human maintainers.
+- This repo is public: never mention customers, partners, or prospects (names, volumes, terms) or link to private repos. Justify work on its merits.
 - Prompt the user to decide when unsure, but always provide recommendations.
 
 # Guidelines

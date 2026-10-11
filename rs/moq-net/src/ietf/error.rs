@@ -284,7 +284,9 @@ pub(crate) mod request {
 	/// would say something the peer's registry gives a different meaning.
 	pub(crate) fn to_code(err: &Error, kind: Kind, version: Version) -> u64 {
 		let registered = match err {
-			Error::Unauthorized | Error::Session(SessionError::Unauthorized) => return UNAUTHORIZED,
+			Error::Unauthorized
+			| Error::Session(SessionError::Unauthorized)
+			| Error::Stream(StreamError::Unauthorized) => return UNAUTHORIZED,
 			Error::Timeout | Error::Stream(StreamError::DeliveryTimeout) | Error::Session(SessionError::Timeout) => {
 				return TIMEOUT;
 			}
@@ -380,6 +382,20 @@ pub(crate) mod request {
 			Error::GoingAway,
 			Error::Remote(0x30),
 		];
+
+		/// A relay bridging a moq-lite revocation onto a moq-transport request refuses it as
+		/// UNAUTHORIZED, the same as a local refusal.
+		#[test]
+		fn a_bridged_revocation_is_unauthorized() {
+			for version in ALL {
+				for kind in KINDS {
+					assert_eq!(
+						to_code(&Error::Stream(StreamError::Unauthorized), kind, version),
+						UNAUTHORIZED
+					);
+				}
+			}
+		}
 
 		/// Draft-14 numbers a missing track 0x4 and draft-15 moved it to 0x10, which is
 		/// draft-14's MALFORMED_AUTH_TOKEN. Getting this backwards tells a peer its token is
@@ -719,6 +735,7 @@ mod tests {
 			StreamError::FrameTooLarge,
 			StreamError::GroupTooLarge,
 			StreamError::TimestampMismatch,
+			StreamError::Unauthorized,
 			StreamError::ControlTimeout,
 			StreamError::App(7),
 			StreamError::Unknown(0x1234),
@@ -746,6 +763,7 @@ mod tests {
 			0x38,
 			0x39,
 			0x3a,
+			0x3b,
 			64 + 7,
 		] {
 			assert_eq!(from_stream_code(code, Version::Draft20), StreamError::Unknown(code));
@@ -758,7 +776,7 @@ mod tests {
 
 	/// Every stream error this crate can hold, so the conformance check below covers the
 	/// whole space rather than the variants someone remembered. A new variant belongs here.
-	const EVERY_ERROR: [StreamError; 19] = [
+	const EVERY_ERROR: [StreamError; 20] = [
 		StreamError::Session(SessionError::Cancel),
 		StreamError::Internal,
 		StreamError::Cancel,
@@ -776,6 +794,7 @@ mod tests {
 		StreamError::FrameTooLarge,
 		StreamError::GroupTooLarge,
 		StreamError::TimestampMismatch,
+		StreamError::Unauthorized,
 		StreamError::App(7),
 		StreamError::Unknown(0x22),
 	];

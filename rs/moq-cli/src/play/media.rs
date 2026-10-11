@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::Context;
 use hang::moq_net;
 use moq_mux::catalog::{self, Stream};
+use moq_net::announce::Event as AnnounceEvent;
 // tokio's clock, which is the wall clock unless a test pauses it to drive the
 // playout clock itself.
 use tokio::time::Instant;
@@ -15,7 +16,6 @@ use tokio::time::Instant;
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, joined};
-use super::source::subscribe;
 use super::timeline::{AudioTimeline, Presentation, fit, timestamp};
 use super::video::Video;
 use super::window::Event;
@@ -63,18 +63,70 @@ impl<O: Output> Media<O> {
 		output.send(event);
 	}
 
+	/// Follow the path's announcements for as long as the origin lasts: a start
+	/// plays the broadcast, a restart drops it for the instance that replaced it,
+	/// and an end lets what is playing finish while waiting for the next start. An
+	/// update is the same instance, which its subscriptions already ride out.
 	async fn play(self) -> anyhow::Result<()> {
-		let source = subscribe(self.origin.clone(), &self.broadcast).await?;
-		let broadcast = source
-			.broadcast()
+		let mut follow = self.origin.follow(&self.broadcast)?;
+		let mut playing = None;
+
+		loop {
+			tokio::select! {
+				event = follow.next() => {
+					// The origin is gone, so nothing can announce the path again.
+					let Some(event) = event else { return Ok(()) };
+					let announce = match event {
+						AnnounceEvent::Start(announce) | AnnounceEvent::Restart(announce) => announce,
+						AnnounceEvent::Update(_) => continue,
+						AnnounceEvent::End(_) => {
+							tracing::info!(broadcast = %self.broadcast, "offline, waiting for it to return");
+							continue;
+						}
+					};
+					tracing::info!(
+						broadcast = %self.broadcast,
+						epoch = announce.route.epoch.as_ref().map(tracing::field::display),
+						"online"
+					);
+
+					// Another instance's timeline is its own, so nothing of the old one carries over.
+					drop(playing.take());
+					*self.presentation.lock().unwrap() = Presentation::new(self.args.video_delay());
+					self.video.lock().unwrap().clear();
+					self.drained.notify_one();
+					self.output.send(Event::Wake);
+					playing = Some(Box::pin(self.play_broadcast()));
+				}
+				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
+					playing = None;
+					match result {
+						Ok(()) => tracing::info!(broadcast = %self.broadcast, "broadcast ended"),
+						Err(err) if err.is::<Unplayable>() => return Err(err),
+						Err(err) => tracing::warn!(broadcast = %self.broadcast, err = format!("{err:#}"), "broadcast ended"),
+					}
+				}
+			}
+		}
+	}
+
+	/// Play the broadcast now at the path until its catalog and every track it
+	/// started end.
+	async fn play_broadcast(&self) -> anyhow::Result<()> {
+		let broadcast = self
+			.origin
+			.request_broadcast(&self.broadcast, None)
 			.await
 			.context("failed to subscribe to the broadcast")?;
+		let source = moq_mux::Source::new(self.origin.clone(), broadcast.clone());
 		let catalog = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
 			.await
 			.context("failed to subscribe to the catalog")?;
 		let mut catalogs = catalog.select(self.args.select.selection(None));
 		let mut tasks = tokio::task::JoinSet::new();
 		let mut playback = Playback::default();
+		let mut video_demand: Option<(String, tokio::sync::oneshot::Sender<()>)> = None;
+		let mut audio_demand: Option<(String, tokio::sync::oneshot::Sender<()>)> = None;
 		// Shared by an audio rendition and the retired tails still playing beside
 		// it, so their sinks mix on one stream: a second stream on an exclusive
 		// device would fail to open. Released once none of them is left, so an
@@ -124,9 +176,15 @@ impl<O: Output> Media<O> {
 					// are still running.
 					snapshot = catalogs.next(), if playback.following() => {
 						match snapshot.context("failed to read the catalog")? {
-							Some(snapshot) => playback.received(snapshot),
+							Some(snapshot) => {
+								stop_disabled(&mut video_demand, snapshot.video.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
+								stop_disabled(&mut audio_demand, snapshot.audio.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
+								playback.received(snapshot);
+							},
 							None => {
-								anyhow::ensure!(playback.played, "the catalog contains no playable audio or video renditions");
+								if !playback.played {
+									return Err(Unplayable("the catalog contains no playable audio or video renditions".into()).into());
+								}
 								playback.catalog_ended = true;
 							}
 						}
@@ -157,7 +215,7 @@ impl<O: Output> Media<O> {
 
 			if playback.wants(Kind::Video) {
 				playback.read(Kind::Video);
-				for (name, config) in snapshot.video.renditions {
+				for (name, config) in snapshot.video.enabled() {
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
@@ -170,17 +228,11 @@ impl<O: Output> Media<O> {
 						}
 					};
 					// Nothing older than the playhead is worth presenting, so the delay
-					// doubles as the staleness budget on the wire. With no speaker to
-					// follow, the playhead is video's own, so waiting on the audio
-					// estimate's budget would only freeze the picture.
-					let max_delay = if snapshot.audio.renditions.is_empty() {
-						self.args.video_delay()
-					} else {
-						self.args.max_delay()
-					};
+					// doubles as the staleness budget on the wire.
+					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					let opened = async {
-						let decoder = moq_video::decode::Sink::open(&config, &Default::default()).await?;
-						let track = rendition.track(&name)?;
+						let decoder = moq_video::decode::Sink::open(config, &Default::default()).await?;
+						let track = rendition.track(name)?;
 						let mut subscriber = track
 							.subscribe(
 								moq_net::track::Subscription::default()
@@ -193,7 +245,7 @@ impl<O: Output> Media<O> {
 						if let Some(latest) = track.latest() {
 							subscriber.set_groups(latest..);
 						}
-						let format = catalog::hang::Container::try_from(&config)?;
+						let format = catalog::hang::Container::try_from(config)?;
 						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))
 					}
 					.await;
@@ -207,7 +259,17 @@ impl<O: Output> Media<O> {
 								output: self.output.clone(),
 								max_delay,
 							};
-							tasks.spawn(async move { (Kind::Video, video.run(track, decoder).await.map(|()| None)) });
+							let (stop, stopped) = tokio::sync::oneshot::channel();
+							video_demand = Some((name.clone(), stop));
+							tasks.spawn(async move {
+								(
+									Kind::Video,
+									tokio::select! {
+									result = video.run(track, decoder) => result.map(|()| None),
+									_ = stopped => Ok(None),
+									},
+								)
+							});
 							playback.started(Kind::Video);
 							break;
 						}
@@ -221,7 +283,7 @@ impl<O: Output> Media<O> {
 
 			if playback.wants(Kind::Audio) {
 				playback.read(Kind::Audio);
-				for (name, config) in snapshot.audio.renditions {
+				for (name, config) in snapshot.audio.enabled() {
 					let rendition = match source.resolve(config.broadcast.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
@@ -241,7 +303,7 @@ impl<O: Output> Media<O> {
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.
 					decode.output.format = moq_audio::Format::F32;
-					match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
+					match moq_audio::decode::Consumer::new(&rendition, config, name, decode).await {
 						Ok(consumer) => {
 							tracing::info!(track = name, decoder = consumer.name(), "playing audio rendition");
 							if speaker.is_none() {
@@ -254,7 +316,17 @@ impl<O: Output> Media<O> {
 								changed: self.drained.clone(),
 								output: self.output.clone(),
 							};
-							tasks.spawn(async move { (Kind::Audio, play_audio(consumer, audio).await.map(Some)) });
+							let (stop, stopped) = tokio::sync::oneshot::channel();
+							audio_demand = Some((name.clone(), stop));
+							tasks.spawn(async move {
+								(
+									Kind::Audio,
+									tokio::select! {
+									result = play_audio(consumer, audio) => result.map(Some),
+									_ = stopped => Ok(None),
+									},
+								)
+							});
 							playback.started(Kind::Audio);
 							break;
 						}
@@ -268,14 +340,41 @@ impl<O: Output> Media<O> {
 
 			// Renditions on offer and not one of them playable, with nothing
 			// already running to fall back on.
-			anyhow::ensure!(
-				!tasks.is_empty() || rejected.is_empty(),
-				"no playable rendition in the catalog: {}",
-				rejected.join("; ")
-			);
+			if tasks.is_empty() && !rejected.is_empty() {
+				return Err(
+					Unplayable(format!("no playable rendition in the catalog: {}", rejected.join("; "))).into(),
+				);
+			}
 		}
 	}
 }
+
+// Cancel through the task's own result so it still reports which half ended.
+fn stop_disabled<'a>(
+	playing: &mut Option<(String, tokio::sync::oneshot::Sender<()>)>,
+	mut disabled: impl Iterator<Item = &'a String>,
+) {
+	if playing
+		.as_ref()
+		.is_some_and(|(name, _)| disabled.any(|disabled| disabled == name))
+	{
+		let (_, stop) = playing.take().unwrap();
+		let _ = stop.send(());
+	}
+}
+
+/// A broadcast this build cannot play, which ends the player. A broadcast that
+/// ends or fails on the wire does not: the next announcement plays again.
+#[derive(Debug)]
+struct Unplayable(String);
+
+impl std::fmt::Display for Unplayable {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(&self.0)
+	}
+}
+
+impl std::error::Error for Unplayable {}
 
 struct AudioPlayback<O: Output> {
 	changed: Arc<tokio::sync::Notify>,
@@ -489,6 +588,43 @@ mod tests {
 		}
 	}
 
+	#[tokio::test]
+	async fn disabling_a_live_high_rendition_plays_the_lower_one() {
+		tokio::time::pause();
+		let origin = moq_tokio::origin::spawn();
+		let mut broadcast = origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut high = rendition(&broadcast, &catalog, "high");
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut high, 10, 0.25).await;
+		let mut low = rendition(&broadcast, &catalog, "low");
+		catalog
+			.mutate(|catalog| {
+				let high = catalog.audio.renditions.get_mut("high").unwrap();
+				high.bitrate = Some(u64::from(SAMPLE_RATE) * 32);
+				high.enabled = false;
+				// An unknown bitrate ranks below a known one without falsifying PCM metadata.
+				catalog.audio.renditions.get_mut("low").unwrap().bitrate = None;
+			})
+			.unwrap();
+		for index in 10..40 {
+			high.write(packet(index, 0.25)).unwrap();
+			low.write(packet(index, 0.5)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+		low.finish().unwrap();
+		catalog.finish().unwrap();
+		// The high rendition remains open: only the disabled catalog can stop it.
+		settle(player, &recorder).await;
+		assert!(recorder.played().iter().any(|part| part.sample == 0.25));
+		assert!(
+			recorder.played().iter().any(|part| part.sample == 0.5),
+			"the live disabled track prevented fallback"
+		);
+	}
+
 	/// A publisher retires an audio rendition by naming its replacement and then
 	/// finishing the old track. The retired sink still holds a delay of audio, and
 	/// the replacement's sink holds its own before its first sample sounds, so
@@ -538,12 +674,7 @@ mod tests {
 		drop(new);
 		catalog.finish().unwrap();
 
-		player.await.unwrap();
-		match recorder.events().pop() {
-			Some(Event::Ended) => {}
-			Some(Event::Failed(err)) => panic!("playback failed: {err}"),
-			_ => panic!("playback never ended"),
-		}
+		settle(player, &recorder).await;
 
 		let played = recorder.played();
 		let old_end = played.iter().filter(|p| p.sample == OLD).map(|p| p.to).max().unwrap();
@@ -555,6 +686,280 @@ mod tests {
 		let old_duration: Duration = played.iter().filter(|p| p.sample == OLD).map(|p| p.to - p.from).sum();
 		assert_eq!(old_duration, Duration::from_secs(1));
 	}
+
+	/// Publish an audio-only broadcast at `room` under `route`, returning what keeps
+	/// it up and its one rendition.
+	fn publish(
+		origin: &moq_net::origin::Producer,
+		route: moq_net::origin::Route,
+	) -> (
+		moq_net::broadcast::Producer,
+		catalog::Producer,
+		moq_mux::container::Producer<Container, AudioConfig>,
+	) {
+		let mut broadcast = origin.create_broadcast("room").unwrap();
+		let catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let audio = rendition(&broadcast, &catalog, "audio");
+		broadcast.announce(route).unwrap();
+		(broadcast, catalog, audio)
+	}
+
+	/// Write `count` packets of `sample` in real time, its timeline starting at 0.
+	async fn write(audio: &mut moq_mux::container::Producer<Container, AudioConfig>, count: u64, sample: f32) {
+		for index in 0..count {
+			audio.write(packet(index, sample)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+	}
+
+	/// How long `sample` played for, and through how many sinks.
+	fn played(recorder: &Recorder, sample: f32) -> (Duration, usize) {
+		let played: Vec<_> = recorder.played().into_iter().filter(|p| p.sample == sample).collect();
+		let mut sinks: Vec<_> = played.iter().map(|p| p.sink).collect();
+		sinks.dedup();
+		(played.iter().map(|p| p.to - p.from).sum(), sinks.len())
+	}
+
+	/// The player follows the path for as long as the origin lasts, so it never
+	/// ends on its own: give it long enough to play out what it was handed, then
+	/// stop it.
+	async fn settle(player: tokio::task::JoinHandle<()>, recorder: &Recorder) {
+		tokio::time::sleep(Duration::from_secs(5)).await;
+		for event in recorder.events() {
+			match event {
+				Event::Failed(err) => panic!("playback failed: {err}"),
+				Event::Ended | Event::Finished => panic!("the player stopped following the path"),
+				Event::Wake => {}
+			}
+		}
+		assert!(!player.is_finished(), "the player stopped following the path");
+		player.abort();
+	}
+
+	/// A restarted publisher announces a fresh epoch while its old run still
+	/// stands. The restart drops the old broadcast and plays the new one, whose
+	/// timeline starts over, instead of waiting for it to catch up.
+	#[tokio::test]
+	async fn a_republish_plays_the_new_broadcast() {
+		tokio::time::pause();
+
+		const OLD: f32 = 0.25;
+		const NEW: f32 = 0.5;
+		let origin = moq_tokio::origin::spawn();
+		let epoch = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+
+		let (_old_broadcast, _old_catalog, mut old) = publish(&origin, epoch());
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut old, 10, OLD).await;
+
+		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, epoch());
+		write(&mut new, 10, NEW).await;
+
+		settle(player, &recorder).await;
+		assert!(
+			played(&recorder, OLD).0 > Duration::ZERO,
+			"the old broadcast never played"
+		);
+		assert_eq!(
+			played(&recorder, NEW).0,
+			PACKET_DURATION * 10,
+			"the new broadcast did not play in full"
+		);
+	}
+
+	/// Without epochs (moq-lite 06), a restart that overlaps the old route still
+	/// replaces it: the newest announcement wins the path.
+	#[tokio::test]
+	async fn an_epochless_republish_plays_the_new_broadcast() {
+		tokio::time::pause();
+
+		const OLD: f32 = 0.25;
+		const NEW: f32 = 0.5;
+		let origin = moq_tokio::origin::spawn();
+
+		let (_old_broadcast, _old_catalog, mut old) = publish(&origin, Default::default());
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut old, 10, OLD).await;
+
+		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, Default::default());
+		// A restart without an epoch waits out the origin's update hold, since a
+		// withdrawal wave's stale route looks just like one, and the player joins the
+		// new broadcast at its live edge.
+		tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD).await;
+		write(&mut new, 10, NEW).await;
+
+		settle(player, &recorder).await;
+		assert!(
+			played(&recorder, OLD).0 > Duration::ZERO,
+			"the old broadcast never played"
+		);
+		assert_eq!(
+			played(&recorder, NEW).0,
+			PACKET_DURATION * 10,
+			"the new broadcast did not play in full"
+		);
+	}
+
+	/// A publisher that stops cleanly ends the path, and its restart starts it
+	/// afresh. The player waits through the gap and plays the restarted broadcast.
+	#[tokio::test]
+	async fn a_broadcast_that_returns_plays_again() {
+		tokio::time::pause();
+
+		const OLD: f32 = 0.25;
+		const NEW: f32 = 0.5;
+		let origin = moq_tokio::origin::spawn();
+
+		let (old_broadcast, mut old_catalog, mut old) = publish(&origin, Default::default());
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut old, 10, OLD).await;
+		old.finish().unwrap();
+		old_catalog.finish().unwrap();
+		drop((old_broadcast, old_catalog, old));
+
+		// Offline for longer than any timeout the player might give up on.
+		tokio::time::sleep(Duration::from_secs(60)).await;
+		assert!(!player.is_finished(), "the player stopped following the path");
+
+		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, Default::default());
+		write(&mut new, 10, NEW).await;
+
+		settle(player, &recorder).await;
+		assert_eq!(
+			played(&recorder, OLD).0,
+			PACKET_DURATION * 10,
+			"the old broadcast lost its tail"
+		);
+		assert_eq!(
+			played(&recorder, NEW).0,
+			PACKET_DURATION * 10,
+			"the new broadcast did not play in full"
+		);
+	}
+
+	/// A covering route of the same epoch that arrives as the exact route goes, both
+	/// before the player looks, is the path served again after a gap. A player with
+	/// nothing playing plays it.
+	#[tokio::test]
+	async fn a_covering_route_after_a_gap_plays_while_idle() {
+		tokio::time::pause();
+
+		const OLD: f32 = 0.25;
+		const NEW: f32 = 0.5;
+		let origin = moq_tokio::origin::spawn();
+		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+
+		let (exact, mut exact_catalog, mut old) = publish(&origin, route.clone());
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut old, 10, OLD).await;
+		old.finish().unwrap();
+		exact_catalog.finish().unwrap();
+		drop((exact_catalog, old));
+		// The broadcast ends while its route stands, so the player goes idle.
+		tokio::time::sleep(Duration::from_secs(60)).await;
+
+		let mut served = moq_net::broadcast::Info::new().produce();
+		let served_catalog = catalog::Producer::new(&mut served, Default::default()).unwrap();
+		let mut new = rendition(&served, &served_catalog, "audio");
+		let pool = origin.dynamic("", route).unwrap();
+		drop(exact);
+		let consumer = served.consume();
+		tokio::spawn(async move {
+			while let Ok(request) = pool.requested_broadcast().await {
+				request.accept(consumer.clone());
+			}
+		});
+		write(&mut new, 10, NEW).await;
+
+		settle(player, &recorder).await;
+		assert_eq!(
+			played(&recorder, NEW).0,
+			PACKET_DURATION * 10,
+			"the idle player never played the covering route"
+		);
+		drop((served, served_catalog));
+	}
+
+	/// The exact route goes while the old run still holds its delay, and a covering
+	/// route of the same epoch takes over. Playback reaches the covering route, whether
+	/// the announcements show the gap (a restart) or the origin rides it out (the same
+	/// run carrying on).
+	#[tokio::test]
+	async fn a_handoff_to_a_covering_route_plays_on_while_draining() {
+		tokio::time::pause();
+
+		const OLD: f32 = 0.25;
+		const NEW: f32 = 0.5;
+		let origin = moq_tokio::origin::spawn();
+		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+
+		// One instance, served by the exact route and mirrored behind a covering one.
+		let (exact, exact_catalog, mut old) = publish(&origin, route.clone());
+		let mut mirror = moq_net::broadcast::Info::new().produce();
+		let mirror_catalog = catalog::Producer::new(&mut mirror, Default::default()).unwrap();
+		let mut copy = rendition(&mirror, &mirror_catalog, "audio");
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(500), recorder.clone()).run());
+		for index in 0..50 {
+			old.write(packet(index, OLD)).unwrap();
+			copy.write(packet(index, OLD)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+
+		exact.unannounce();
+		let pool = origin.dynamic("", route).unwrap();
+		let consumer = mirror.consume();
+		tokio::spawn(async move {
+			while let Ok(request) = pool.requested_broadcast().await {
+				request.accept(consumer.clone());
+			}
+		});
+		for index in 50..60 {
+			copy.write(packet(index, NEW)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+
+		settle(player, &recorder).await;
+		assert!(
+			played(&recorder, NEW).0 > Duration::ZERO,
+			"the player never reached the covering route"
+		);
+		drop((mirror, mirror_catalog, copy, exact, exact_catalog, old));
+	}
+
+	/// Re-pricing the same instance is an update, which playback rides through on
+	/// one sink rather than starting over.
+	#[tokio::test]
+	async fn a_reprice_keeps_playing() {
+		tokio::time::pause();
+
+		const SAMPLE: f32 = 0.25;
+		let origin = moq_tokio::origin::spawn();
+		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+
+		let (broadcast, _catalog, mut audio) = publish(&origin, route.clone());
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		for index in 0..20 {
+			if index == 10 {
+				broadcast.announce(route.clone().with_cost(5)).unwrap();
+			}
+			audio.write(packet(index, SAMPLE)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+
+		settle(player, &recorder).await;
+		assert_eq!(
+			played(&recorder, SAMPLE),
+			(PACKET_DURATION * 20, 1),
+			"the update restarted playback"
+		);
+	}
+
 	#[tokio::test]
 	async fn a_finite_audio_track_plays_its_final_samples() {
 		tokio::time::pause();
@@ -570,12 +975,7 @@ mod tests {
 		audio.finish().unwrap();
 		drop(audio);
 		catalog.finish().unwrap();
-		player.await.unwrap();
-		match recorder.events().pop() {
-			Some(Event::Ended) => {}
-			Some(Event::Failed(err)) => panic!("playback failed: {err}"),
-			_ => panic!("playback never ended"),
-		}
+		settle(player, &recorder).await;
 		let played: Duration = recorder.played().iter().map(|p| p.to - p.from).sum();
 		assert_eq!(played, PACKET_DURATION, "the finished track lost its tail");
 	}

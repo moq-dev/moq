@@ -3,7 +3,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Signal } from "@moq/signals";
+import { type Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { Sync } from "../sync";
 import { Decoder } from "./decoder";
@@ -24,14 +24,17 @@ function config(fields: Record<string, unknown>): Catalog.VideoConfig {
 }
 
 // The subscription is already closed, so the track never reaches VideoDecoder.
-function closedConsumer(): Moq.Broadcast.Consumer {
-	return { closed: new Signal("ended") } as unknown as Moq.Broadcast.Consumer;
+function closedConsumer(path: string): Moq.Broadcast.Consumer {
+	return { closed: new Signal("ended"), path } as unknown as Moq.Broadcast.Consumer;
 }
 
+// Each source is another broadcast, at its own path.
+let sources = 0;
 function watchBroadcast(catalog: Signal<Catalog.Root>): Broadcast {
+	const media = closedConsumer(`source-${sources++}`);
 	return {
-		out: { catalog },
-		relativeBroadcast: () => closedConsumer(),
+		out: { catalog, active: new Signal(undefined) },
+		relativeBroadcast: () => media,
 	} as unknown as Broadcast;
 }
 
@@ -188,6 +191,8 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const owed = new Set(hold);
 	const pending: Array<() => void> = [];
 	let resets = 0;
+	const errors: VideoDecoderInit["error"][] = [];
+	const frames: VideoDecoderInit["output"][] = [];
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
 	class Codec {
 		state = "unconfigured";
@@ -196,6 +201,8 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		readonly callbacks: VideoDecoderInit;
 		constructor(callbacks: VideoDecoderInit) {
 			this.callbacks = callbacks;
+			errors.push(callbacks.error);
+			frames.push(callbacks.output);
 		}
 		configure() {
 			this.state = "configured";
@@ -245,13 +252,23 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const video = config({ codedWidth: 16, codedHeight: 16, description: "01640028ffe100046764002801000268ee" });
 	if (kind === "cmaf")
 		video.container = { kind, init: Buffer.from(Container.Cmaf.createVideoInitSegment(video)).toString("base64") };
-	const producer = new Moq.Broadcast.Producer();
-	const consumer = producer.consume();
+	// The catalog's own broadcast, and the one the rendition reads. They differ once only one of
+	// them is republished, as with a rendition's `broadcast` override.
+	let producer = new Moq.Broadcast.Producer();
+	let mediaProducer = producer;
+	const active = new Signal<Moq.Broadcast.Consumer>(producer.consume());
+	const media = new Signal<Moq.Broadcast.Consumer>(producer.consume());
 	const catalog = new Signal<Catalog.Root>({ video: { renditions: { video } } });
 	const broadcast = new Signal<Broadcast | undefined>({
-		out: { catalog },
-		relativeBroadcast: () => consumer,
+		out: { catalog, active },
+		relativeBroadcast: (effect: Effect) => effect.get(media),
 	} as unknown as Broadcast);
+	const closeAll = () => {
+		active.peek().close();
+		media.peek().close();
+		producer.close();
+		mediaProducer.close();
+	};
 	const source = new Source({ broadcast, supported: async () => true });
 	const sync = new Sync({ delay: "instant" });
 	const enabled = new Signal(true);
@@ -259,19 +276,47 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	await microtasks();
 	return {
 		decoder,
+		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
+		emit: (timestamp: number, index = -1) => frames.at(index)?.(new Picture(timestamp) as unknown as VideoFrame),
+		get codecs() {
+			return errors.length;
+		},
+		switchRendition(track = "replacement") {
+			catalog.set({ video: { renditions: { [track]: video } } });
+		},
 		enabled,
 		catalog,
 		submitted,
 		outputs,
+		sync,
 		get resets() {
 			return resets;
+		},
+		// A restarted publisher takes the name: another instance of the same broadcast.
+		republish() {
+			closeAll();
+			producer = new Moq.Broadcast.Producer();
+			mediaProducer = producer;
+			active.set(producer.consume());
+			media.set(producer.consume());
+		},
+		// Only the catalog's broadcast restarts; the media the rendition reads stays up.
+		republishCatalog() {
+			active.peek().close();
+			producer = new Moq.Broadcast.Producer();
+			active.set(producer.consume());
+		},
+		// Only the media the rendition reads restarts, under the same catalog.
+		republishMedia() {
+			media.peek().close();
+			mediaProducer = new Moq.Broadcast.Producer();
+			media.set(mediaProducer.consume());
 		},
 		close() {
 			decoder.close();
 			source.close();
 			sync.close();
-			consumer.close();
-			producer.close();
+			closeAll();
 			next.mockRestore();
 			for (const [name, original] of [
 				["VideoDecoder", originalDecoder],
@@ -297,6 +342,59 @@ it("promoting from no active track holds its picture and timestamp until a frame
 		expect(playback.decoder.out.frame.peek()).toBe(held);
 		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
 		expect((held as unknown as Picture).closed).toBe(false);
+	} finally {
+		playback.close();
+	}
+});
+
+it("switches to a republished broadcast at once, its timeline starting over", async () => {
+	const reads = [sample(10, 10_000_000)];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(10_000));
+		const reset = spyOn(playback.sync, "reset");
+
+		reads.push(sample(0, 1000));
+		playback.republish();
+		await microtasks();
+
+		// Waiting to catch up to the old picture would hold it until the new timeline passed 10s.
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		expect(reset).toHaveBeenCalledTimes(1);
+	} finally {
+		playback.close();
+	}
+});
+
+it("switches at once when only the media a rendition reads is republished", async () => {
+	const reads = [sample(10, 10_000_000)];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		const reset = spyOn(playback.sync, "reset");
+
+		reads.push(sample(0, 1000));
+		playback.republishMedia();
+		await microtasks();
+
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		expect(reset).toHaveBeenCalledTimes(1);
+	} finally {
+		playback.close();
+	}
+});
+
+it("keeps the clock when only the catalog's broadcast is republished", async () => {
+	const reads = [sample(10, 10_000_000)];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		const reset = spyOn(playback.sync, "reset");
+
+		playback.republishCatalog();
+		await microtasks();
+
+		// The media is the same instance, so its timeline did not start over.
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(10_000));
+		expect(reset).not.toHaveBeenCalled();
 	} finally {
 		playback.close();
 	}
@@ -372,6 +470,119 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200, 1300]);
 			expect(playback.resets).toBe(0);
+		} finally {
+			playback.close();
+		}
+	});
+}
+
+it("releases a failed video subscription and recovers only on a new source", async () => {
+	const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+	const playback = await guardedPlayback("legacy", []);
+	try {
+		const before = close.mock.calls.length;
+		const failure = new DOMException("invalid encoded video", "EncodingError");
+		playback.fail(failure);
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		expect(close.mock.calls.length).toBeGreaterThan(before);
+		playback.enabled.set(false);
+		await microtasks();
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		playback.republish();
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBeUndefined();
+	} finally {
+		playback.close();
+		close.mockRestore();
+	}
+});
+
+it("clears a video failure when a source without video is selected while hidden", async () => {
+	const playback = await guardedPlayback("legacy", []);
+	try {
+		const failure = new DOMException("invalid encoded video", "EncodingError");
+		playback.fail(failure);
+		await microtasks();
+		playback.enabled.set(false);
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		// Another broadcast, one advertising no video rendition.
+		playback.republishCatalog();
+		playback.catalog.set({});
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBeUndefined();
+	} finally {
+		playback.close();
+	}
+});
+
+it("keeps a video failure while the same rendition is muted by its publisher", async () => {
+	const playback = await guardedPlayback("legacy", []);
+	try {
+		const failure = new DOMException("invalid encoded video", "EncodingError");
+		playback.fail(failure);
+		await microtasks();
+		playback.catalog.set({});
+		await microtasks();
+		playback.switchRendition("video");
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		expect(playback.codecs).toBe(1);
+	} finally {
+		playback.close();
+	}
+});
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	it(`reports the outgoing ${kind} decoder failing during a rendition handover`, async () => {
+		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);
+		try {
+			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(100));
+			playback.switchRendition();
+			await microtasks();
+			expect(playback.codecs).toBe(2);
+			const failure = new DOMException("outgoing decoder failed", "EncodingError");
+			playback.fail(failure, 0);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.emit(200_000, 1);
+			await microtasks();
+			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(200));
+			expect(playback.decoder.out.error.peek()).toBeUndefined();
+			playback.switchRendition("video");
+			await microtasks();
+			expect(playback.codecs).toBe(3);
+		} finally {
+			playback.close();
+		}
+	});
+
+	it(`keeps a failed pending ${kind} rendition out of the active slot`, async () => {
+		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);
+		try {
+			playback.switchRendition();
+			await microtasks();
+			const failure = new DOMException("replacement decoder failed", "EncodingError");
+			playback.fail(failure, 1);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			// Healthy outgoing frames must not conceal the selected rendition's failure.
+			playback.emit(200_000, 0);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.fail(new DOMException("outgoing decoder failed", "EncodingError"), 0);
+			await microtasks();
+			expect(playback.decoder.out.jitter.peek()).toBeUndefined();
+			expect(playback.decoder.out.timestamp.peek()).toBeUndefined();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.enabled.set(false);
+			await microtasks();
+			playback.enabled.set(true);
+			await microtasks();
+			expect(playback.codecs).toBe(2);
 		} finally {
 			playback.close();
 		}
