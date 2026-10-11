@@ -5160,7 +5160,7 @@ mod test {
 
 	#[test]
 	fn datagram_replay_starts_after_evicted_entries_with_zero_delay() {
-		let mut producer = track_producer("test", None);
+		let mut producer = track_producer("test", Info::timed());
 		for _ in 0..MAX_DATAGRAMS + 1 {
 			producer.append_datagram(Timestamp::ZERO, b"old".as_slice()).unwrap();
 		}
