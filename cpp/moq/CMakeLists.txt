@@ -27,12 +27,20 @@ else()
 endif()
 if(WIN32)
     set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/moq_ffi.lib")
+    set(_metadata "${_cargo_target}/${_profile}/moq_ffi.dll")
+elseif(APPLE)
+    set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/libmoq_ffi.a")
+    set(_metadata "${_cargo_target}/${_profile}/libmoq_ffi.dylib")
 else()
     set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/libmoq_ffi.a")
+    set(_metadata "${_cargo_target}/${_profile}/libmoq_ffi.so")
 endif()
 
 find_program(UNIFFI_BINDGEN_CPP uniffi-bindgen-cpp REQUIRED)
 
+# Read metadata from the linked cdylib, like the other binding generators,
+# without depending on UniFFI support for every static archive object format.
+# Linking still uses the staticlib, so consumers need no runtime shared library.
 # Rendered to a scratch directory and copied only when changed, so a no-op cargo build does
 # not recompile the bindings.
 set(_generated "${CMAKE_CURRENT_BINARY_DIR}/include/moq/ffi")
@@ -43,12 +51,12 @@ list(TRANSFORM _generated_files PREPEND "${_render}/" OUTPUT_VARIABLE _render_pa
 add_custom_target(moq_ffi ALL
     COMMAND cargo build --locked --package moq-ffi ${_cargo_flags}
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${_render}"
-    COMMAND "${UNIFFI_BINDGEN_CPP}" --library "${MOQ_FFI_LIB}"
+    COMMAND "${UNIFFI_BINDGEN_CPP}" --library "${_metadata}"
         --config "${CMAKE_CURRENT_SOURCE_DIR}/uniffi.toml" --out-dir "${_render}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_generated}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_render_paths} "${_generated}"
     WORKING_DIRECTORY "${_workspace}"
-    BYPRODUCTS "${MOQ_FFI_LIB}" ${_generated_paths}
+    BYPRODUCTS "${MOQ_FFI_LIB}" "${_metadata}" ${_generated_paths}
     COMMENT "Building moq-ffi and rendering its C++ bindings"
     VERBATIM
 )

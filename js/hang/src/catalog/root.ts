@@ -114,7 +114,11 @@ export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<R
 	const track = broadcast.track(TRACK).subscribe({ priority: PRIORITY.catalog });
 	try {
 		const consumer = new Json.Snapshot.Consumer<Root>({ track, schema: RootSchema });
-		for await (const root of consumer) yield checkResolvable(checkRenditions(root), broadcast.path);
+		for (;;) {
+			const root = await consumer.latest();
+			if (!root) return;
+			yield checkResolvable(checkRenditions(root.value), broadcast.path);
+		}
 	} finally {
 		track.close();
 	}

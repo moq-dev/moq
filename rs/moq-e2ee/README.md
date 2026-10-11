@@ -17,12 +17,13 @@ cargo add moq-e2ee
 ## Shape
 
 The application distributes a `Credential { context, kid, secret }` over its own
-authenticated channel. Every publisher instance mints a shared `moq_net::Epoch` and binds it as a
-`Generation`, which derives the opaque track names and keys for that instance alone:
+authenticated channel. `credential.produce()` mints a fresh epoch and returns a
+`generation::Producer`, which derives opaque track names and keys for that instance alone.
+It accepts no explicit epoch; its clones share permanent track claims.
 
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
-let generation = credential.generation(moq_net::Epoch::mint());
+let generation = credential.produce();
 let path = credential.path("meeting.hang")?;
 let name = generation.name("video")?;
 let producer = generation.produce(broadcast.create_track(name.as_str(), None)?)?;
@@ -30,9 +31,10 @@ broadcast.announce(Route::default().with_epoch(generation.epoch().clone()))?;
 ```
 
 A subscriber discovers the broadcast at `credential.path(semantic)`, takes the epoch from the
-announced `Route::epoch` (or from the application's channel on a wire older than lite-07), binds the same generation, and calls
-`generation.consume(subscriber)` on a track whose name it derived or read from the
-decrypted catalog. Nothing survives a publisher instance: a restart mints a new epoch.
+announced `Route::epoch` (or from the application's channel on a wire older than lite-07),
+and calls `credential.consume(epoch)` to bind a `generation::Consumer`. Its
+`consume(subscriber)` opens a track whose name it derived or read from the decrypted
+catalog. A consuming generation cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.
 
 ## Processing
 

@@ -43,7 +43,7 @@ pub struct Options {
 	/// The minimum audio carried by each group. The packet that reaches it closes
 	/// the group, and the next packet opens a new one.
 	///
-	/// Defaults to zero, a group per packet. Each group costs the relay a stream
+	/// Defaults to 20 ms; zero puts every packet in its own group. Each group costs the relay a stream
 	/// and its bookkeeping, so raising this trades per-group overhead for coarser
 	/// loss: a viewer that falls behind skips a whole group, and a lost packet
 	/// stalls the rest of its group until retransmitted. Packets still forward as
@@ -61,7 +61,7 @@ impl Default for Options {
 			track: None,
 			settings: Settings::default(),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-			group_duration: std::time::Duration::ZERO,
+			group_duration: std::time::Duration::from_millis(20),
 		}
 	}
 }
@@ -974,6 +974,50 @@ mod tests {
 				sizes.push(frames);
 			}
 			assert_eq!(sizes, expected, "group duration {group_ms} ms");
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn default_groups_carry_twenty_milliseconds() {
+		for (frame_us, packets) in [(2_500, 8), (10_000, 2), (20_000, 1), (40_000, 1)] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let input = Input {
+				format: Format::F32,
+				sample_rate: 48_000,
+				layout: Layout::Mono,
+			};
+			let mut options = Options {
+				track: Some("audio".into()),
+				..Default::default()
+			};
+			options.settings.layout = Layout::Mono;
+			options.settings.frame_duration = Duration::from_micros(frame_us);
+			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+			let mut track = consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+				.await
+				.unwrap();
+			for index in 0..packets * 2 {
+				producer
+					.write(&pcm_frame(
+						&vec![0.1; (frame_us * 48_000 / 1_000_000) as usize],
+						1_000_000 + index * frame_us,
+					))
+					.unwrap();
+			}
+			for _ in 0..2 {
+				let mut group = track.recv_group().await.unwrap().unwrap();
+				let mut count = 0;
+				while group.read_frame().await.unwrap().is_some() {
+					count += 1;
+				}
+				assert_eq!(count, packets, "{frame_us} us packets");
+			}
+			producer.finish().unwrap();
 		}
 	}
 

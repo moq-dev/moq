@@ -61,6 +61,7 @@ using Client = MoqClient;
 using FlateSnapshotProducer = MoqFlateSnapshotProducer;
 using FlateStreamProducer = MoqFlateStreamProducer;
 using GroupConsumer = MoqGroupConsumer;
+using GroupDemand = MoqGroupDemand;
 using GroupProducer = MoqGroupProducer;
 using GroupRequest = MoqGroupRequest;
 using JsonSnapshotConsumer = MoqJsonSnapshotConsumer;
@@ -180,7 +181,7 @@ inline void set_executor(Executor executor, std::function<void()> shutdown) noex
     ::uniffi::set_async_dispatcher(std::move(executor), std::move(shutdown));
 }
 
-// Stops the moq-ffi runtime thread, then the executor, before the process or module goes away.
+// Stops the moq-ffi runtime workers, then the executor, before the process or module goes away.
 // Pending calls resolve Cancelled. Call it once from a thread that is not running a continuation.
 inline void shutdown() noexcept {
     moq_ffi_shutdown();

@@ -81,11 +81,14 @@ authorization and hidden names work exactly as without one.
 - **Same epoch resumes.** A subscription moves between routes with the same
   epoch without a seam, continuing from the first frame it lacks. A route
   without an epoch keeps its subscriptions until that route goes, which is how
-  a transcoder claim stays on the worker that first served it.
+  a transcoder claim stays on the worker that first served it, and a track that
+  fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
   winning the path, is announced as a restart. Subscriptions already open stay
   on the old instance until dropped or its route goes, while new requests get
   the new one, so a player follows the restart by requesting the path again.
+  Held handles can still read their old cached content, but cannot open new
+  epochless requests after retirement. Request the path again for new content.
   That is how a restarted encoder, whose group numbers start over, takes the
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
@@ -139,6 +142,24 @@ a literal `*`. The empty pattern matches the empty path.
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
 its scope can use.
+
+## Authorization
+
+On moq-lite 07 (`moq-lite-07-wip`, opt-in) each side presents a token on its
+own Auth stream and learns what it may publish and subscribe to: a union of
+[path patterns](#path-patterns), delivered exactly as issued rather than widened
+to a prefix. Right after setup both sides present the credential the connection
+already carried (the URL token, a client certificate, or nothing), so a
+publisher learns before anyone subscribes whether its broadcasts can reach the
+peer. More tokens can be added without reconnecting; the session's scope is the
+union of every open token's grant.
+
+A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
+code and the session stays up. A client that publishes outside its grant closes
+the session with `UNAUTHORIZED`, naming the path. moq-transport carries the same
+exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
+to namespace prefixes. Older versions have no grant; the URL token keeps working
+everywhere.
 
 ## Subscriptions
 

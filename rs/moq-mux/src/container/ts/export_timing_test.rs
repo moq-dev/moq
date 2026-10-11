@@ -1,6 +1,7 @@
 //! Timing of a delayed [`Export`] on a live clock: what a receiver renders when it joins a
-//! broadcast already running, when one track loses frames, when the source's clock runs off the
-//! receiver's, and when two receivers render one broadcast for a 1+1 (SMPTE ST 2022-7) pair.
+//! broadcast already running, when one track loses frames, when the source falls silent and
+//! resumes, when the source's clock runs off the receiver's, and when two receivers render one
+//! broadcast for a 1+1 (SMPTE ST 2022-7) pair.
 //!
 //! Every case runs on the paused clock, with each frame written at the instant a live source
 //! would send it. A receiver's view is measured from its own output: the lead of each PES (its
@@ -59,7 +60,7 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// A live H.264 + AAC broadcast whose frames are written on the source's clock.
 struct Live {
 	_broadcast: moq_net::broadcast::Producer,
-	_catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer,
 	/// Written group by group, so a group can be left open: see [`Self::run`].
 	video: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
@@ -82,7 +83,7 @@ struct Live {
 }
 
 impl Live {
-	fn new(scale: f64, audio_lag: i64) -> Self {
+	async fn new(scale: f64, audio_lag: i64) -> Self {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -127,9 +128,9 @@ impl Live {
 		let audio = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Audio));
 
 		Self {
-			source: crate::source::announced(&consumer),
+			source: crate::source::announced(&consumer).await,
 			_broadcast: broadcast,
-			_catalog: catalog,
+			catalog,
 			video,
 			group: None,
 			stalling: false,
@@ -158,6 +159,26 @@ impl Live {
 			false => (lag, Duration::ZERO),
 		};
 		(self.sent(video) + v, self.sent(audio) + a)
+	}
+
+	/// Declare that video decodes up to `jitter` before it is presented, as a deep B-pyramid's
+	/// catalog would, so a receiver holds that much of it for its DTS.
+	fn declare_video_jitter(&mut self, jitter: Duration) {
+		let mut catalog = self.catalog.modify().unwrap();
+		for config in catalog.video.renditions.values_mut() {
+			config.jitter = Some(jitter);
+		}
+	}
+
+	/// Send nothing for `gap`, as a publisher that died, then resume at the live edge on the
+	/// same timeline from the next group, as its replacement or the other half of a 1+1 pair
+	/// would.
+	async fn fall_silent(&mut self, gap: Duration, legs: &mut [&mut Leg]) {
+		let resume = Instant::now() + gap;
+		advance(resume, legs).await;
+		let media = (resume.duration_since(self.start).as_secs_f64() * self.scale * 1e6) as u64;
+		self.tick = media.div_ceil(VIDEO_US * GOP) * GOP;
+		self.audio_index = media.div_ceil(AUDIO_US);
 	}
 
 	/// A receiver joining now.
@@ -189,16 +210,7 @@ impl Live {
 			let (video_at, audio_at) = self.send_times(video, audio);
 			advance(video_at.min(audio_at), legs).await;
 			if audio_at < video_at {
-				let index = self.audio_index;
-				self.audio
-					.write(Frame {
-						timestamp: Timestamp::from_micros(audio).unwrap(),
-						duration: None,
-						payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
-						keyframe: index.is_multiple_of(AUDIO_GROUP),
-					})
-					.unwrap();
-				self.audio_index += 1;
+				self.send_audio();
 			} else {
 				let tick = self.tick;
 				let keyframe = tick.is_multiple_of(GOP);
@@ -234,6 +246,33 @@ impl Live {
 				}
 				self.tick += 1;
 			}
+			for leg in legs.iter_mut() {
+				leg.poll_now();
+			}
+		}
+	}
+
+	/// Write the next audio frame.
+	fn send_audio(&mut self) {
+		let index = self.audio_index;
+		self.audio
+			.write(Frame {
+				timestamp: Timestamp::from_micros(index * AUDIO_US).unwrap(),
+				duration: None,
+				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
+				keyframe: index.is_multiple_of(AUDIO_GROUP),
+			})
+			.unwrap();
+		self.audio_index += 1;
+	}
+
+	/// Send audio alone, each frame at its instant, until media time `until` (µs), as a
+	/// broadcast whose video has stopped.
+	async fn run_audio(&mut self, until: u64, legs: &mut [&mut Leg]) {
+		while self.audio_index * AUDIO_US < until {
+			let (_, at) = self.send_times(0, self.audio_index * AUDIO_US);
+			advance(at, legs).await;
+			self.send_audio();
 			for leg in legs.iter_mut() {
 				leg.poll_now();
 			}
@@ -469,7 +508,7 @@ const CLOCK_SLACK: f64 = 2.0 * SLOT_MS;
 /// Join mid-group with `lag`, render 7.2 s with the video ticks `stall` accepts stalled, and
 /// return the leg's units.
 async fn join(lag: i64, stall: impl Fn(u64) -> bool) -> Vec<Unit> {
-	let mut live = Live::new(1.0, lag);
+	let mut live = Live::new(1.0, lag).await;
 	live.run(JOIN, &mut [], |_| false).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(24 * GOP, &mut [&mut leg], stall).await;
@@ -534,7 +573,7 @@ async fn a_track_sent_later_than_the_delay_loses_nothing() {
 	let mut lost = Vec::new();
 	for lag in [LONG_LAG, -LONG_LAG] {
 		for join in [3 * GOP, JOIN] {
-			let mut live = Live::new(1.0, lag);
+			let mut live = Live::new(1.0, lag).await;
 			live.run(join, &mut [], |_| false).await;
 			let mut leg = live.join(Duration::ZERO).await;
 			live.run(join + 20 * GOP, &mut [&mut leg], |_| false).await;
@@ -556,6 +595,86 @@ async fn a_track_sent_later_than_the_delay_loses_nothing() {
 	);
 }
 
+// A publisher that dies leaves the last video frames it sent held for their DTS, and nothing
+// settles them until frames come again. Where the receiver is not told the source changed (a
+// replacement on a protocol without an epoch, or the other half of a 1+1 pair), those come on the
+// same timeline after the silence. In the field the held frames then went into a schedule that had
+// already gone past them, and the export ended on a missed decode deadline.
+
+/// A source silent for longer than the delay, with video held for its DTS, resumes on the same
+/// timeline: the frames held through the silence drop as late, nothing goes out after it
+/// decodes, and the video resumes. Sent in step, the tracks put a held unit on the slot where the
+/// schedule had stopped, as in the field.
+#[tokio::test(start_paused = true)]
+async fn frames_held_through_a_silence_drop_as_late() {
+	let jitter = Duration::from_millis(300);
+	// The frames presented within the jitter of the last one read before the silence.
+	let held = jitter.as_micros() as u64 / VIDEO_US + 1;
+	for lag in [0, LAGS[0], LAGS[1]] {
+		let mut live = Live::new(1.0, lag).await;
+		live.declare_video_jitter(jitter);
+		let mut leg = live.join(Duration::ZERO).await;
+		live.run(8 * GOP + 5, &mut [&mut leg], |_| false).await;
+		live.fall_silent(Duration::from_secs(3), &mut [&mut leg]).await;
+		let resumed = Instant::now();
+		live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
+
+		let dropped = leg.export.dropped();
+		assert!(
+			(1..=held).contains(&dropped),
+			"lag {lag}: {dropped} dropped, where {held} were held through the silence"
+		);
+		let after: Vec<Unit> = leg.units().into_iter().filter(|unit| unit.sent >= resumed).collect();
+		let late: Vec<f64> = after
+			.iter()
+			.filter(|unit| unit.lead < 0.0)
+			.map(|unit| unit.lead)
+			.collect();
+		assert!(
+			late.is_empty(),
+			"lag {lag}: units went out after they decode, by {late:?} ms"
+		);
+		let video = after.iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
+		assert!(
+			video >= 6 * GOP,
+			"lag {lag}: only {video} video units after the silence"
+		);
+	}
+}
+
+/// Video held for its DTS for most of the delay keeps its deadline on a clean source: the frame
+/// that settles a held one arrives the hold after it, inside the delay.
+#[tokio::test(start_paused = true)]
+async fn video_held_for_most_of_the_delay_drops_nothing() {
+	for lag in [0, LAGS[0], LAGS[1]] {
+		let mut live = Live::new(1.0, lag).await;
+		live.declare_video_jitter(DELAY * 4 / 5);
+		let mut leg = live.join(Duration::ZERO).await;
+		live.run(20 * GOP, &mut [&mut leg], |_| false).await;
+		assert_eq!(leg.export.dropped(), 0, "lag {lag}: frames dropped on a clean source");
+	}
+}
+
+/// Video that stops while the audio runs on, for longer than the delay, still holds its last
+/// frames for their DTS when the broadcast ends. Nothing but the end settles them, and the end of
+/// the stream is not a missed deadline, so they go out rather than drop.
+#[tokio::test(start_paused = true)]
+async fn the_video_held_at_the_end_goes_out() {
+	for lag in [0, LAGS[0], LAGS[1]] {
+		let mut live = Live::new(1.0, lag).await;
+		live.declare_video_jitter(Duration::from_millis(300));
+		let mut leg = live.join(Duration::ZERO).await;
+		let last = 8 * GOP + 5;
+		live.run(last, &mut [&mut leg], |_| false).await;
+		live.run_audio((last + 3 * GOP) * VIDEO_US, &mut [&mut leg]).await;
+		live.finish(&mut [&mut leg]).await;
+
+		assert_eq!(leg.export.dropped(), 0, "lag {lag}: frames dropped");
+		let video = leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
+		assert_eq!(video, last, "lag {lag}: {video} of {last} video units went out");
+	}
+}
+
 // A source's clock is never the receiver's. A transport stream's 27 MHz may be off by 30 ppm,
 // which walks a fixed anchor 108 ms an hour: a source running slow makes every frame late in
 // turn once the walk passes the delay, and one running fast makes the buffer grow without bound.
@@ -574,7 +693,7 @@ const DRIFT_TICKS: u64 = 300_000_000 / VIDEO_US;
 /// The spread of (slot sent − source's clock at the slot) after the first 10 s over `ticks`
 /// of media, the drops, and the export's stats at the end.
 async fn on_a_scaled_clock(scale: f64, ticks: u64) -> (Duration, u64, Stats) {
-	let mut live = Live::new(scale, 0);
+	let mut live = Live::new(scale, 0).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(ticks, &mut [&mut leg], |_| false).await;
 
@@ -662,7 +781,7 @@ async fn pair(scale: f64, lag: i64, ticks: u64, stall: impl Fn(u64) -> bool + Co
 }
 
 async fn pair_at(rate: u64, scale: f64, lag: i64, ticks: u64, stall: impl Fn(u64) -> bool + Copy) -> (Leg, Leg, u64) {
-	let mut live = Live::new(scale, lag);
+	let mut live = Live::new(scale, lag).await;
 	live.rate = rate;
 	let mut a = live.join(Duration::ZERO).await;
 	live.run(JOIN, &mut [&mut a], stall).await;
@@ -719,7 +838,7 @@ async fn two_legs_render_a_drifting_source_the_same_way() {
 #[tokio::test(start_paused = true)]
 async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 	const WINDOW: u64 = 30_000_000;
-	let mut live = Live::new(1.0, 0);
+	let mut live = Live::new(1.0, 0).await;
 	live.run(JOIN, &mut [], |_| false).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(JOIN + 300_000_000 / VIDEO_US, &mut [&mut leg], |_| false)
@@ -766,7 +885,7 @@ async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 /// joined on was.
 #[tokio::test(start_paused = true)]
 async fn a_joiner_runs_at_the_delay_from_its_first_output() {
-	let mut live = Live::new(1.0, 0);
+	let mut live = Live::new(1.0, 0).await;
 	live.run(JOIN, &mut [], |_| false).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(JOIN + 10_000_000 / VIDEO_US, &mut [&mut leg], |_| false).await;

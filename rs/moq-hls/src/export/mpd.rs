@@ -7,20 +7,25 @@
 //! that skips a span (a gap) or a client that joins mid-window never mis-addresses a segment
 //! the way positional numbering would.
 //!
-//! URIs are relative to the manifest (`/<broadcast>/manifest.mpd`), so a rendition's
-//! `<kind>/<name>/...` resources resolve under the broadcast directory, shared byte-for-byte
-//! with the HLS routes (only the time-addressed segment alias `seg/t<pts>.m4s` is DASH's own).
+//! URIs are relative to the manifest (`/<broadcast>/manifest.mpd`). The rendition name is
+//! one percent-encoded path segment, using the HLS master's set, and the finished URL is
+//! then XML-escaped, so a name containing `/` still resolves under the broadcast. The
+//! `Representation` id keeps the raw name. The resources are shared byte-for-byte with the
+//! HLS routes; only the time-addressed segment alias `seg/t<pts>.m4s` is DASH's own.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use percent_encoding::utf8_percent_encode;
+
 use super::Kind;
+use super::master::PATH_SEGMENT;
 
 /// One DASH representation: master-level metadata plus its segment timeline.
 pub(crate) struct Representation {
-	/// Rendition name (the `<name>` in its `<kind>/<name>/...` paths).
+	/// Rendition name. URLs carry it as one percent-encoded path segment; the id keeps it raw.
 	pub name: String,
 	/// Whether this is a video or audio rendition (also the URL path component).
 	pub kind: Kind,
@@ -139,19 +144,27 @@ fn max_segment_duration<'a>(representations: impl Iterator<Item = &'a Representa
 		.max(1)
 }
 
-fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
+fn render_representation(out: &mut String, rep: &Representation, query: Option<&str>) {
 	let kind = rep.kind.as_str();
-	let name = escape(&rep.name);
-	let init = escape(&rep.init);
-	let tag = escape(&rep.tag);
+	// The id is the raw name. The URL encodes it first, as one path segment: a slash left
+	// raw would name a different broadcast, and XML-escaping before encoding would turn `&`
+	// into `&amp;` inside that segment. `$Time$` stays literal because only the name is encoded.
+	let id = escape(&rep.name);
+	let segment = utf8_percent_encode(&rep.name, PATH_SEGMENT);
 	let generation = rep
 		.generation
 		.as_deref()
-		.map(|g| format!("{}.", escape(g)))
+		.map(|generation| format!("{generation}."))
 		.unwrap_or_default();
+	let suffix = query.map(|query| format!("?{query}")).unwrap_or_default();
+	let initialization = escape(&format!("{kind}/{segment}/init.{}.mp4{suffix}", rep.init));
+	let media = escape(&format!(
+		"{kind}/{segment}/seg/{generation}{}.t$Time$.m4s{suffix}",
+		rep.tag
+	));
 
 	let mut attrs = format!(
-		"id=\"{kind}/{name}\" bandwidth=\"{}\" codecs=\"{}\"",
+		"id=\"{kind}/{id}\" bandwidth=\"{}\" codecs=\"{}\"",
 		rep.bandwidth,
 		escape(&rep.codec)
 	);
@@ -175,7 +188,7 @@ fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
 
 	let _ = writeln!(
 		out,
-		"        <SegmentTemplate timescale=\"{}\" initialization=\"{kind}/{name}/init.{init}.mp4{suffix}\" media=\"{kind}/{name}/seg/{generation}{tag}.t$Time$.m4s{suffix}\">",
+		"        <SegmentTemplate timescale=\"{}\" initialization=\"{initialization}\" media=\"{media}\">",
 		rep.timescale.max(1)
 	);
 	let _ = writeln!(out, "          <SegmentTimeline>");
@@ -189,7 +202,7 @@ fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
 	let _ = writeln!(out, "      </Representation>");
 }
 
-fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Representation], suffix: &str) {
+fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Representation], query: Option<&str>) {
 	// Representations in one AdaptationSet must be seamlessly switchable, so group by codec
 	// (mirroring the HLS master's audio groups).
 	let mut codecs = BTreeMap::<&str, Vec<&Representation>>::new();
@@ -214,7 +227,7 @@ fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Repre
 			"    <AdaptationSet contentType=\"{content}\" mimeType=\"{mime}\" segmentAlignment=\"true\" startWithSAP=\"1\">"
 		);
 		for rep in representations {
-			render_representation(out, rep, suffix);
+			render_representation(out, rep, query);
 		}
 		let _ = writeln!(out, "    </AdaptationSet>");
 	}
@@ -226,7 +239,6 @@ fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Repre
 /// to every child URL (each representation's init and media templates), so a stock player that
 /// does not replay request headers still carries a credential on its follow-up requests.
 pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> String {
-	let suffix = query.map(|q| format!("?{}", escape(q))).unwrap_or_default();
 	let representations = || manifest.video.iter().chain(&manifest.audio);
 	let target = max_segment_duration(representations());
 
@@ -280,8 +292,8 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 	);
 
 	let _ = writeln!(out, "  <Period id=\"0\" start=\"PT0.000S\">");
-	render_adaptation_sets(&mut out, Kind::Video, &manifest.video, &suffix);
-	render_adaptation_sets(&mut out, Kind::Audio, &manifest.audio, &suffix);
+	render_adaptation_sets(&mut out, Kind::Video, &manifest.video, query);
+	render_adaptation_sets(&mut out, Kind::Audio, &manifest.audio, query);
 	let _ = writeln!(out, "  </Period>");
 	let _ = writeln!(out, "</MPD>");
 	out
@@ -450,5 +462,76 @@ mod tests {
 		let out = render_manifest(&manifest, None);
 		assert!(out.contains("id=\"video/video0\""));
 		assert!(!out.contains("id=\"audio/audio0\""), "an empty timeline is unplayable");
+	}
+
+	fn render_named(name: &str, query: Option<&str>) -> String {
+		let mut rep = video(vec![(0, 2_000)], false);
+		rep.name = name.into();
+		render_manifest(
+			&Manifest {
+				availability_start: Some(SystemTime::UNIX_EPOCH),
+				publish: SystemTime::UNIX_EPOCH,
+				window: Some(Duration::from_secs(16)),
+				finished: false,
+				video: vec![rep],
+				audio: Vec::new(),
+			},
+			query,
+		)
+	}
+
+	#[test]
+	fn rendition_name_is_one_percent_encoded_path_segment() {
+		// A raw slash under broadcast `live` would route to broadcast `live/video`,
+		// rendition `1080p`. The id keeps that slash; the URLs do not.
+		let out = render_named("video/1080p", Some("jwt=abc.def&x=1"));
+		assert!(out.contains("id=\"video/video/1080p\""), "{out}");
+		assert!(
+			out.contains("initialization=\"video/video%2F1080p/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""),
+			"{out}"
+		);
+		assert!(
+			out.contains("media=\"video/video%2F1080p/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""),
+			"{out}"
+		);
+		assert!(!out.contains("initialization=\"video/video/1080p/"), "{out}");
+
+		let cases = [
+			("cam?1", "cam%3F1"),
+			("cam#1", "cam%231"),
+			("100%", "100%25"),
+			("price$9", "price%249"),
+		];
+		for (name, segment) in cases {
+			let out = render_named(name, None);
+			assert!(
+				out.contains(&format!("id=\"video/{name}\"")),
+				"id stays raw for {name}: {out}"
+			);
+			assert!(
+				out.contains(&format!("initialization=\"video/{segment}/init.0123abcd.mp4\"")),
+				"init for {name}: {out}"
+			);
+			assert!(
+				out.contains(&format!("media=\"video/{segment}/seg/ab12cd34.t$Time$.m4s\"")),
+				"media for {name}: {out}"
+			);
+		}
+	}
+
+	#[test]
+	fn finished_url_is_xml_escaped_after_encoding() {
+		let out = render_named("a&b\"c", Some("x=1&y=2"));
+		assert!(out.contains("id=\"video/a&amp;b&quot;c\""), "{out}");
+		assert!(
+			out.contains("initialization=\"video/a%26b%22c/init.0123abcd.mp4?x=1&amp;y=2\""),
+			"{out}"
+		);
+		assert!(
+			out.contains("media=\"video/a%26b%22c/seg/ab12cd34.t$Time$.m4s?x=1&amp;y=2\""),
+			"{out}"
+		);
+		assert!(!out.contains("&amp;amp;"), "{out}");
+		assert!(!out.contains("%26amp"), "{out}");
 	}
 }

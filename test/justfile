@@ -22,6 +22,7 @@ default:
 # which this recipe installs, as the interop and wasm harnesses do.
 harness:
     ./lib/harness.test.sh
+    ./interop/relay-log.test.sh
     cd .. && bun test test/interop/compat/resolve.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
@@ -33,6 +34,7 @@ harness:
 # browser + C++ publish; everyone subscribes (incl. native node/bun JS, the
 # moq-c C client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
+# Finite track tails run too; `--tail` selects just Rust/Node/Bun tail checks.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
 # and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
 # moq-transport OBJECT_DATAGRAMs both ways on every draft.
@@ -146,6 +148,12 @@ drain *args:
 [positional-arguments]
 wasm *args:
     ./wasm/run.sh "$@"
+
+# The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
+video:
+    cd .. && bun install --frozen-lockfile
+    cd video && bunx playwright install chromium
+    cd video && bun test ./renderer.browser.ts
 
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:

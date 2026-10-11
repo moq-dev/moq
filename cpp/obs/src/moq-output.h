@@ -63,6 +63,10 @@ public:
 	void CopyLastFailure(int *code, std::string *reason);
 
 private:
+	friend struct MoQOutputStatsTest;
+	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
+				   ConnectionStats *out);
+
 	// One Start()'s connection: the client dialing, the session once it connects,
 	// and the pending call whose continuation reports on it. Replaced wholesale by
 	// the next Start() and dropped by Stop(), which cancels that call.

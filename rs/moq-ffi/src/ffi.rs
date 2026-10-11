@@ -3,19 +3,35 @@ use std::sync::Arc;
 
 use crate::error::MoqError;
 
-/// A dedicated runtime thread, so a foreign caller's thread never has to drive our futures.
+/// A worker runtime driving I/O, timers, and background work beside host-polled calls.
 ///
 /// wasm32 has neither threads nor a tokio driver. uniffi's `RustFuture` is polled by the
-/// JS event loop instead, so [`Task::run`] awaits in place there.
+/// JS event loop instead.
 #[cfg(not(target_arch = "wasm32"))]
 static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 
-/// The runtime thread and the handle every call spawns onto.
+/// The worker runtime and the owner thread that joins it on shutdown.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
+	/// Set by [`shutdown`] to wake the [`Task::run`] calls parked in place, so they observe
+	/// [`Polls::stopped`] and resolve `Cancelled`.
+	stopped: tokio::sync::watch::Sender<bool>,
+	/// The [`Task::run`] polls in flight on host threads, which [`shutdown`] waits out.
+	polls: std::sync::Mutex<Polls>,
+	/// Notified when the last in-flight poll finishes.
+	idle: std::sync::Condvar,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct Polls {
+	active: usize,
+	/// Set by [`shutdown`]: no poll may start once the drivers are about to stop, because a
+	/// tokio timer polled after its driver is gone panics rather than erroring.
+	stopped: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,8 +53,14 @@ impl std::ops::Deref for Runtime {
 /// The runtime, started on first use.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn runtime() -> &'static Runtime {
-	RUNTIME.get_or_init(|| {
-		let runtime = tokio::runtime::Builder::new_current_thread()
+	RUNTIME.get_or_init(Runtime::new)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Runtime {
+	fn new() -> Self {
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.thread_name("moq-ffi-worker")
 			.enable_all()
 			.build()
 			.unwrap();
@@ -49,32 +71,105 @@ pub(crate) fn runtime() -> &'static Runtime {
 			.name("moq-ffi".into())
 			.spawn(move || {
 				// `Err` when the sender is dropped, which the shutdown never does; either way the
-				// runtime is torn down here, on the thread that ran its tasks.
+				// runtime is torn down here, joining the threads that ran its tasks.
 				let _ = runtime.block_on(stopped);
-				// Not `drop`: that would wait for any blocking pool thread, and a DNS lookup
-				// mid-flight at process exit is not worth waiting for.
-				runtime.shutdown_background();
+				// Join every worker and blocking task before the host can unload callbacks.
+				drop(runtime);
 			})
 			.expect("failed to spawn runtime thread");
 
 		Runtime {
 			handle,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
+			stopped: tokio::sync::watch::Sender::new(false),
+			polls: Default::default(),
+			idle: Default::default(),
 		}
-	})
+	}
 }
 
-/// Stop the runtime thread and wait for it to finish; a no-op when it never started.
+/// Stop the runtime workers and wait for them to finish; a no-op when it never started.
 ///
 /// See [`crate::moq_ffi_shutdown`] for what this is for.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn shutdown() {
 	let Some(runtime) = RUNTIME.get() else { return };
-	let Some(thread) = runtime.thread.lock().unwrap().take() else {
-		return;
-	};
-	let _ = thread.stop.send(());
-	let _ = thread.join.join();
+	runtime.shutdown();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Runtime {
+	fn shutdown(&self) {
+		let runtime = self;
+		let mut owner = runtime.thread.lock().unwrap();
+		let Some(thread) = owner.take() else {
+			return;
+		};
+		// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
+		let mut polls = runtime.polls.lock().unwrap();
+		polls.stopped = true;
+		drop(runtime.idle.wait_while(polls, |polls| polls.active > 0).unwrap());
+		// Outside the lock: a waker may poll inline, which takes it.
+		runtime.stopped.send_replace(true);
+		let _ = thread.stop.send(());
+		thread.join.join().expect("runtime owner panicked");
+		// Retain the owner lock until the join completes, including concurrent shutdown calls.
+		drop(owner);
+	}
+}
+
+/// Resolves once [`shutdown`] has run.
+#[cfg(not(target_arch = "wasm32"))]
+async fn stopped() {
+	let mut stopped = runtime().stopped.subscribe();
+	// `Err` only when the sender is dropped, which a static never is.
+	let _ = stopped.wait_for(|&stopped| stopped).await;
+}
+
+/// wasm32's runtime is the JS event loop, which never stops under us.
+#[cfg(target_arch = "wasm32")]
+async fn stopped() {
+	std::future::pending().await
+}
+
+/// Marks a [`Task::run`] poll in flight, so [`shutdown`] waits for it to finish.
+#[cfg(not(target_arch = "wasm32"))]
+struct Polling;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Polling {
+	/// `None` once [`shutdown`] has begun.
+	fn start() -> Option<Self> {
+		let mut polls = runtime().polls.lock().unwrap();
+		if polls.stopped {
+			return None;
+		}
+		polls.active += 1;
+		Some(Self)
+	}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Polling {
+	fn drop(&mut self) {
+		let runtime = runtime();
+		let mut polls = runtime.polls.lock().unwrap();
+		polls.active -= 1;
+		if polls.active == 0 {
+			runtime.idle.notify_all();
+		}
+	}
+}
+
+/// wasm32's runtime is the JS event loop, which never stops under us.
+#[cfg(target_arch = "wasm32")]
+struct Polling;
+
+#[cfg(target_arch = "wasm32")]
+impl Polling {
+	fn start() -> Option<Self> {
+		Some(Self)
+	}
 }
 
 /// Enter the runtime context, so a handle built outside [`Task::run`] can still spawn.
@@ -213,48 +308,36 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		}
 	}
 
-	/// Spawn an async closure on the runtime.
+	/// Run an async closure against the state, awaiting it in place.
 	///
 	/// The closure receives a [Guard] which derefs to `T`.
 	/// If two calls are made concurrently, the second waits for the first to finish.
-	#[cfg(not(target_arch = "wasm32"))]
-	pub async fn run<R, F, Fut>(&self, f: F) -> Result<R, MoqError>
-	where
-		R: Send + 'static,
-		F: FnOnce(Guard<T>) -> Fut + Send + 'static,
-		Fut: Future<Output = Result<R, MoqError>> + Send + 'static,
-	{
-		let cancel = self.cancel.subscribe();
-		let state = self.state.clone();
-
-		let handle = runtime().spawn(async move { Self::drive(cancel, state, f).await });
-
-		// Dropping a JoinHandle detaches its task rather than stopping it, so a caller
-		// that gives up (an `asyncio.wait_for` timeout, a cancelled Swift/Kotlin task)
-		// would leave the closure running with the state lock held. It then consumes
-		// the very event the next call is waiting for, and that call blocks behind it
-		// meanwhile. Tie the work to the caller's future instead.
-		let _abort = AbortOnDrop(handle.abort_handle());
-
-		match handle.await {
-			Ok(result) => result,
-			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
-			Err(e) => Err(e.into()),
-		}
-	}
-
-	/// Run an async closure, awaiting it in place.
 	///
-	/// Unlike the native path this does not detach, so dropping the returned future
-	/// cancels the work rather than leaving it running on a runtime thread.
-	#[cfg(target_arch = "wasm32")]
+	/// Not spawned: a foreign cancel (uniffi's `rust_future_cancel`) only stops polling, and the
+	/// future is dropped later at `rust_future_free`. Spawned work would keep running until then
+	/// and take the very event the next call is waiting for. Each poll enters the runtime, so the
+	/// closure can still use tokio timers, sockets, and spawn.
 	pub async fn run<R, F, Fut>(&self, f: F) -> Result<R, MoqError>
 	where
-		R: 'static,
-		F: FnOnce(Guard<T>) -> Fut + 'static,
-		Fut: Future<Output = Result<R, MoqError>> + 'static,
+		F: FnOnce(Guard<T>) -> Fut,
+		Fut: Future<Output = Result<R, MoqError>>,
 	{
-		Self::drive(self.cancel.subscribe(), self.state.clone(), f).await
+		let drive = Self::drive(self.cancel.subscribe(), self.state.clone(), f);
+		let mut run = std::pin::pin!(async {
+			tokio::select! {
+				biased;
+				_ = stopped() => Err(MoqError::Cancelled),
+				result = drive => result,
+			}
+		});
+		std::future::poll_fn(|cx| {
+			let Some(_polling) = Polling::start() else {
+				return std::task::Poll::Ready(Err(MoqError::Cancelled));
+			};
+			let _runtime = enter();
+			run.as_mut().poll(cx)
+		})
+		.await
 	}
 
 	/// Wait for the lock, then run `f`, with [Self::cancel] able to interrupt either.
@@ -288,8 +371,8 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	///
 	/// Terminal: there is no way back from here, and the state is gone rather than idle.
 	/// The drop is not synchronous with this call, because an in-flight [Self::run] holds the
-	/// state until it observes the flag and unwinds. It also lands on the runtime thread, which
-	/// is where the state was built and the only place with a reactor for what it unregisters.
+	/// state until it observes the flag and unwinds, or its caller drops it. It also lands on the
+	/// runtime workers, whose entered reactor unregisters the state it drops.
 	pub fn cancel(&self) {
 		// send_replace, not send: `send` refuses to store the value while no
 		// receiver exists, so a cancel BEFORE the first `run` would silently
@@ -303,42 +386,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		spawn(async move {
 			state.lock().await.take();
 		});
-	}
-
-	/// [Self::cancel], then block until `shutdown` has run on the state.
-	///
-	/// A synchronous caller uses this to make the release of what the state owns
-	/// observable: the listening socket is gone, not merely scheduled to close.
-	/// `shutdown` runs on the runtime thread, after any in-flight [Self::run] has
-	/// unwound, and the lock is held across it so a second cancel waits too.
-	///
-	/// It waits on a channel rather than [tokio::sync::Mutex::blocking_lock] so it
-	/// works from inside another runtime, as the tests do; it must not run on the
-	/// runtime thread itself, which would deadlock.
-	#[cfg(not(target_arch = "wasm32"))]
-	pub fn cancel_and_wait<F, Fut>(&self, shutdown: F)
-	where
-		F: FnOnce(T) -> Fut + Send + 'static,
-		Fut: Future<Output = ()> + Send + 'static,
-	{
-		// Publish the flag before waiting: an in-flight [Self::run] only releases
-		// the lock once it observes it.
-		self.cancel.send_replace(true);
-
-		let state = self.state.clone();
-		let (done, wait) = std::sync::mpsc::channel();
-		spawn(async move {
-			let mut state = state.lock().await;
-			if let Some(inner) = state.take() {
-				shutdown(inner).await;
-			}
-			// A dropped receiver just means the caller is gone; the shutdown above
-			// still ran, which is what releases the state.
-			let _ = done.send(());
-		});
-		// A dropped sender means the runtime is gone, so nothing is left holding
-		// the state to wait for.
-		let _ = wait.recv();
 	}
 }
 
@@ -355,6 +402,64 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
+
+	#[test]
+	fn runtime_uses_parallel_workers() {
+		let runtime = Runtime::new();
+		assert_eq!(runtime.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread);
+		runtime.shutdown();
+	}
+
+	#[test]
+	fn shutdown_joins_a_worker_callback() {
+		let runtime = Arc::new(Runtime::new());
+		let (entered, entering) = std::sync::mpsc::channel();
+		let (release, released) = std::sync::mpsc::channel();
+		let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let callback = finished.clone();
+		runtime.spawn(async move {
+			entered.send(()).unwrap();
+			released.recv().unwrap();
+			callback.store(true, std::sync::atomic::Ordering::SeqCst);
+		});
+		entering.recv().unwrap();
+
+		// Each caller reports whether the callback had finished when its shutdown returned.
+		let shutdown = |runtime: Arc<Runtime>, finished: Arc<std::sync::atomic::AtomicBool>| {
+			move || {
+				runtime.shutdown();
+				finished.load(std::sync::atomic::Ordering::SeqCst)
+			}
+		};
+
+		// Wait until the first caller has flagged the stop, so it holds the owner lock and is
+		// joining the workers while the callback is still held.
+		let mut stopped = runtime.stopped.subscribe();
+		let first = std::thread::spawn(shutdown(runtime.clone(), finished.clone()));
+		tokio::runtime::Builder::new_current_thread()
+			.build()
+			.unwrap()
+			.block_on(stopped.wait_for(|&stopped| stopped))
+			.unwrap();
+
+		let (started, starting) = std::sync::mpsc::channel();
+		let second = std::thread::spawn({
+			let shutdown = shutdown(runtime.clone(), finished.clone());
+			move || {
+				started.send(()).unwrap();
+				shutdown()
+			}
+		});
+		starting.recv().unwrap();
+
+		release.send(()).unwrap();
+		assert!(first.join().unwrap(), "shutdown returned with a callback in flight");
+		assert!(
+			second.join().unwrap(),
+			"a concurrent shutdown returned with a callback in flight"
+		);
+		runtime.shutdown();
+	}
 
 	/// A state that reports its own drop, which is what a terminal cancel has to trigger.
 	struct Tracked(Option<tokio::sync::oneshot::Sender<()>>);

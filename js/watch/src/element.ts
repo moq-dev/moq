@@ -17,6 +17,24 @@ import type { Delay, Sync } from "./sync";
 import type * as Text from "./text";
 import type * as Video from "./video";
 
+function parseUrl(value: string | null): URL | undefined {
+	if (!value) return undefined;
+	try {
+		return new URL(value);
+	} catch {
+		console.warn(`moq-watch: invalid url="${value}", expected an absolute URL`);
+		return undefined;
+	}
+}
+
+function parseVolume(value: string | null): number {
+	if (!value?.trim()) return 0.5;
+	const volume = Number(value);
+	if (volume >= 0 && volume <= 1) return volume;
+	console.warn(`moq-watch: invalid volume="${value}", expected a number from 0 to 1`);
+	return 0.5;
+}
+
 const OBSERVED = [
 	"url",
 	"name",
@@ -24,6 +42,7 @@ const OBSERVED = [
 	"volume",
 	"muted",
 	"visible",
+	"backend",
 	"announced",
 	"delay",
 	"buffer",
@@ -48,6 +67,15 @@ function parseVisible(value: string | null): Video.Visible {
 	if (/^-?\d+(\.\d+)?$/.test(trimmed)) return `${trimmed}px`;
 	console.warn(`moq-watch: invalid visible="${value}", expected "never", "always", or a CSS length like "200px"`);
 	return "20%";
+}
+
+// Parse the `backend` attribute, falling back to "auto".
+function parseBackend(value: string | null): Video.Backend {
+	const trimmed = value?.trim();
+	if (!trimmed) return "auto";
+	if (trimmed === "auto" || trimmed === "webgpu" || trimmed === "2d") return trimmed;
+	console.warn(`moq-watch: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
+	return "auto";
 }
 
 // Parse the `delay` attribute: "auto" (adaptive), "instant" (no buffer, no pacing), or a duration.
@@ -106,6 +134,10 @@ export default class MoqWatch extends HTMLElement {
 
 	/** Headless playback pipeline behind this element. */
 	readonly player: Player;
+	/** Fatal media decode failure; select another source to clear it. */
+	get error() {
+		return this.player.error;
+	}
 
 	// The broadcast being watched.
 	broadcast: Broadcast;
@@ -140,6 +172,8 @@ export default class MoqWatch extends HTMLElement {
 		muted: new Signal(false),
 		// When video is downloaded relative to the canvas position. See {@link Video.Visible}.
 		visible: new Signal<Video.Visible>("20%"),
+		// Which graphics API paints the canvas. See {@link Video.Backend}.
+		backend: new Signal<Video.Backend>("auto"),
 		// How far playback trails the live edge.
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
@@ -245,6 +279,15 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.cleanup(() => observer.disconnect());
 		setCanvas();
 
+		// A canvas that lost its GPU never hands out another context, so swap in a fresh copy. The
+		// observer above picks it up, which clears the error and selects a renderer again.
+		this.signals.run((effect) => {
+			if (effect.get(this.renderer.out.error) !== "surface-lost") return;
+			// Peek: rerunning on the swap itself would replace the fresh canvas before the error clears.
+			const canvas = this.#canvas.peek();
+			canvas?.replaceWith(canvas.cloneNode());
+		});
+
 		// Optionally update attributes to match the library state.
 		// This is kind of dangerous because it can create loops.
 		// NOTE: This only runs when the element is connected to the DOM, which is not obvious.
@@ -289,6 +332,10 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.run((effect) => {
 			const visible = effect.get(this.controls.visible);
 			this.setAttribute("visible", visible);
+		});
+
+		this.signals.run((effect) => {
+			this.setAttribute("backend", effect.get(this.controls.backend));
 		});
 
 		// Each knob is 1:1 with its attribute, so the echo back through attributeChangedCallback
@@ -360,18 +407,20 @@ export default class MoqWatch extends HTMLElement {
 		}
 
 		if (name === "url") {
-			this.connection.url.set(newValue ? new URL(newValue) : undefined);
+			this.connection.url.set(parseUrl(newValue));
 		} else if (name === "name") {
 			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "paused") {
 			this.controls.paused.set(parseBoolean(newValue, false));
 		} else if (name === "volume") {
-			const volume = newValue ? Number.parseFloat(newValue) : 0.5;
+			const volume = parseVolume(newValue);
 			this.controls.volume.set(volume);
 		} else if (name === "muted") {
 			this.controls.muted.set(parseBoolean(newValue, false));
 		} else if (name === "visible") {
 			this.controls.visible.set(parseVisible(newValue));
+		} else if (name === "backend") {
+			this.controls.backend.set(parseBackend(newValue));
 		} else if (name === "announced") {
 			this.#announced.set(parseBoolean(newValue, true));
 		} else if (name === "delay") {
@@ -439,6 +488,15 @@ export default class MoqWatch extends HTMLElement {
 
 	set visible(value: Video.Visible) {
 		this.controls.visible.set(value);
+	}
+
+	/** Which graphics API paints the canvas. See {@link Video.Backend}. */
+	get backend(): Video.Backend {
+		return this.controls.backend.peek();
+	}
+
+	set backend(value: Video.Backend) {
+		this.controls.backend.set(value);
 	}
 
 	get announced(): boolean {

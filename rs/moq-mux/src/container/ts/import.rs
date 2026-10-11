@@ -79,6 +79,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 	retired_stats: BTreeMap<u16, stats::Stream>,
 	/// Damaged packets, PES, or access units refused, cumulative across PID remaps.
 	damaged: BTreeMap<u16, u64>,
+	damage_log: super::damage::Log,
 	/// Access units per elementary stream, timed on the program clock.
 	liveness: Liveness,
 	/// In-progress PES reassembly, keyed by elementary PID.
@@ -168,6 +169,7 @@ impl<E: catalog::Catalog> Import<E> {
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
 			damaged: BTreeMap::new(),
+			damage_log: Default::default(),
 			liveness: Liveness::default(),
 			pending: HashMap::new(),
 			health: Health::default(),
@@ -230,6 +232,7 @@ impl<E: catalog::Catalog> Import<E> {
 	/// now completes. The buffer is fully consumed; a trailing partial packet
 	/// (< 188 bytes) is retained for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+		self.damage_log.flush(web_async::time::Instant::now());
 		self.scratch.extend_from_slice(data);
 
 		// Route one whole packet at a time, so a PMT is parsed (and any PID it declares
@@ -774,7 +777,7 @@ impl<E: catalog::Catalog> Import<E> {
 			None => {}
 		}
 		*self.damaged.entry(pid.as_u16()).or_default() += 1;
-		tracing::warn!(pid = pid.as_u16(), error = %err, "dropped a damaged TS unit");
+		self.damage_log.record(pid.as_u16(), err);
 		Ok(())
 	}
 
@@ -1631,6 +1634,11 @@ pub(super) fn adaptation_valid(pkt: &[u8; TsPacket::SIZE]) -> bool {
 	if pkt[3] & 0x20 == 0 {
 		return true;
 	}
+	// Without payload the adaptation field fills the packet; with payload it leaves a byte.
+	let length = usize::from(pkt[4]);
+	if (pkt[3] & 0x10 == 0 && length != 183) || (pkt[3] & 0x10 != 0 && length > 182) {
+		return false;
+	}
 	let Some(field) = pkt.get(5..5 + usize::from(pkt[4])) else {
 		return false;
 	};
@@ -1849,13 +1857,24 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
+				let params = split.params();
 				// Each PES is one access unit, so flush to emit it immediately.
-				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
-				frames.extend(split.flush(pts).map_err(unit_error)?);
-				let mut published = 0;
-				for frame in frames {
-					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+				let published = (|| {
+					let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
+					frames.extend(split.flush(pts).map_err(unit_error)?);
+					let mut published = 0;
+					for frame in frames {
+						published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+					}
+					anyhow::Ok(published)
+				})();
+				// A refused unit must not leave its parameter sets for a bare keyframe to re-inject.
+				// The snapshot is per PES, so if one carries several AUs, a later damaged AU also rolls
+				// back new parameter sets an earlier, already published AU brought.
+				if published.as_ref().is_err_and(|err| err.is::<Damaged>()) {
+					split.restore(params);
 				}
+				let published = published?;
 				// After decode, so the track (and its catalog rendition) exists.
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder)?;
@@ -1865,13 +1884,24 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H265 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
 				let pts = unwrap_pts(unwrap, pending.pts, pending.offset)?;
+				let params = split.params();
 				// Each PES is one access unit, so flush to emit it immediately.
-				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
-				frames.extend(split.flush(pts).map_err(unit_error)?);
-				let mut published = 0;
-				for frame in frames {
-					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+				let published = (|| {
+					let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
+					frames.extend(split.flush(pts).map_err(unit_error)?);
+					let mut published = 0;
+					for frame in frames {
+						published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
+					}
+					anyhow::Ok(published)
+				})();
+				// A refused unit must not leave its parameter sets for a bare keyframe to re-inject.
+				// The snapshot is per PES, so if one carries several AUs, a later damaged AU also rolls
+				// back new parameter sets an earlier, already published AU brought.
+				if published.as_ref().is_err_and(|err| err.is::<Damaged>()) {
+					split.restore(params);
 				}
+				let published = published?;
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder)?;
 				}
@@ -3307,6 +3337,91 @@ pub(super) mod test {
 		assert_eq!(stats.unconfirmed, 1, "the unvouched publication is counted separately");
 	}
 
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn damaged_unit_warnings_are_aggregated_per_pid() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pid = Pid::new(0x61).unwrap();
+		let peer = Pid::new(0x62).unwrap();
+		let error = anyhow::anyhow!("broken PES");
+		for _ in 0..3 {
+			import.damage(pid, &error).unwrap();
+		}
+		import.damage(peer, &error).unwrap();
+		logs_assert(|lines| {
+			let first = lines
+				.iter()
+				.filter(|line| line.contains("dropped a damaged TS unit"))
+				.count();
+			if first == 2 {
+				Ok(())
+			} else {
+				Err(format!("expected one warning per PID, got {first}"))
+			}
+		});
+
+		tokio::time::advance(super::stats::Log::INTERVAL).await;
+		import.decode(&[]).unwrap();
+		logs_assert(|lines| {
+			let summary: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("TS damaged-unit summary"))
+				.collect();
+			if summary.len() == 1 && summary[0].contains("pid=97 ") && summary[0].contains("count=2") {
+				Ok(())
+			} else {
+				Err(format!("expected two additional drops on PID 97, got {summary:?}"))
+			}
+		});
+		import.damage(pid, &error).unwrap();
+		import.damage(pid, &error).unwrap();
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&0x61].damaged, 5);
+		drop(import);
+		logs_assert(|lines| {
+			let first = lines
+				.iter()
+				.filter(|line| line.contains("dropped a damaged TS unit"))
+				.count();
+			let summary = lines
+				.iter()
+				.filter(|line| line.contains("TS damaged-unit summary"))
+				.count();
+			if (first, summary) == (3, 2) {
+				Ok(())
+			} else {
+				Err(format!("expected new burst and final summary, got {first}/{summary}"))
+			}
+		});
+	}
+
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn abort_summarizes_the_final_damage_burst() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pid = Pid::new(0x61).unwrap();
+		let error = anyhow::anyhow!("broken PES");
+		for _ in 0..3 {
+			import.damage(pid, &error).unwrap();
+		}
+		import.abort(moq_net::Error::Cancel);
+		logs_assert(|lines| {
+			let summary: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("TS damaged-unit summary"))
+				.collect();
+			if summary.len() == 1 && summary[0].contains("count=2") {
+				Ok(())
+			} else {
+				Err(format!("expected the aborted burst's two drops, got {summary:?}"))
+			}
+		});
+	}
+
 	#[test]
 	fn remapping_a_pid_keeps_its_retired_resync_stats() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -3979,7 +4094,7 @@ pub(super) mod test {
 		import.finish().unwrap();
 
 		let exporter = crate::container::ts::Export::with_ts(
-			crate::source::announced(&consumer),
+			crate::source::announced(&consumer).await,
 			crate::catalog::CatalogFormat::Hang,
 		)
 		.await
@@ -6732,6 +6847,130 @@ pub(super) mod test {
 		damaged_video_recovers("clean").await;
 	}
 
+	/// A keyframe refused for a malformed inline SPS must not replace the splitter's last good
+	/// parameter sets: a later bare keyframe re-injects those and recovers.
+	async fn damaged_sps_keeps_the_last_good_parameter_sets(stream_type: StreamType) {
+		let (params, idr, delta): (&[&[u8]], &[u8], &[u8]) = match stream_type {
+			StreamType::H264 => {
+				use crate::container::test_util::{IDR, PPS, SPS};
+				(&[SPS, PPS], IDR, &[0x41, 0x9a, 0x00, 0x01])
+			}
+			StreamType::H265 => {
+				use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+				(&[VPS, SPS, PPS], &[0x26, 0x01, 0x80, 0xaa], &[0x02, 0x01, 0x80, 0x33])
+			}
+			_ => unreachable!(),
+		};
+		let good_sps = params[params.len() - 2];
+		// The SPS keeps its NAL header and loses the rest.
+		let truncated = &good_sps[..2];
+		let au = |nals: &[&[u8]]| {
+			let mut out = Vec::new();
+			for nal in nals {
+				out.extend_from_slice(&[0, 0, 0, 1]);
+				out.extend_from_slice(nal);
+			}
+			out
+		};
+		let mut keyframe = params.to_vec();
+		keyframe.push(idr);
+		let mut damaged = params.to_vec();
+		damaged[params.len() - 2] = truncated;
+		damaged.push(idr);
+		let units = [
+			au(&keyframe),
+			au(&[delta]),
+			au(&damaged),
+			au(&[delta]),
+			au(&[idr]),
+			au(&[delta]),
+		];
+		let mut data = synth_pmt(&[(stream_type, VIDEO)], false);
+		for (cc, unit) in units.iter().enumerate() {
+			let pts = 90_000 + cc as u64 * FRAME;
+			data.extend(video_pes(VIDEO, cc as u8, pts, None, unit));
+		}
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.decode(&data).expect("a damaged SPS stays local to its unit");
+		import.finish().unwrap();
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		let frames = read_track(&consumer, &name, crate::container::Kind::Video).await;
+		assert_eq!(frames.len(), 4, "the bare keyframe after the damage recovers");
+		assert!(frames[2].keyframe);
+		assert!(
+			frames[2].payload.windows(good_sps.len()).any(|bytes| bytes == good_sps),
+			"the recovery keyframe carries the last good SPS"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_h264_sps_keeps_the_last_good_parameter_sets() {
+		damaged_sps_keeps_the_last_good_parameter_sets(StreamType::H264).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_h265_sps_keeps_the_last_good_parameter_sets() {
+		damaged_sps_keeps_the_last_good_parameter_sets(StreamType::H265).await;
+	}
+
+	#[test]
+	fn adaptation_lengths_obey_the_packet_control() {
+		for (control, length, valid) in [
+			(0b10, 0, false),
+			(0b10, 182, false),
+			(0b10, 183, true),
+			(0b10, 184, false),
+			(0b11, 0, true),
+			(0b11, 182, true),
+			(0b11, 183, false),
+			(0b11, 184, false),
+		] {
+			let mut packet: [u8; TsPacket::SIZE] = clock_break_packet(VIDEO).try_into().unwrap();
+			packet[3] = control << 4;
+			packet[4] = length;
+			packet[5] = 0;
+			assert_eq!(
+				super::adaptation_valid(&packet),
+				valid,
+				"control={control:b} length={length}"
+			);
+		}
+	}
+
+	#[test]
+	fn invalid_adaptation_lengths_damage_media_and_dedicated_clock_pids() {
+		const PCR: u16 = 0x0200;
+		for pid in [VIDEO, PCR] {
+			for (control, length) in [(0b10, 0), (0b10, 182), (0b11, 183)] {
+				let mut mux = Mux {
+					out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+					..Default::default()
+				};
+				mux.gop(VIDEO, 90_000);
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+				let mut import = super::Import::new(broadcast, catalog.reserve());
+				import.decode(&mux.out).unwrap();
+				import.pcr_pid = Some(Pid::new(PCR).unwrap());
+
+				let mut packet = clock_break_packet(pid);
+				packet[3] = control << 4;
+				packet[4] = length;
+				import.decode(&packet).unwrap();
+				assert!(import.last_pts.is_some(), "invalid adaptation reset the clock");
+				assert_eq!(
+					import.stats().streams[&pid].damaged,
+					1,
+					"pid={pid} control={control:b} length={length}"
+				);
+			}
+		}
+	}
+
 	/// A dedicated PCR PID's malformed adaptation field cannot declare a timebase break.
 	#[test]
 	fn damaged_adaptation_on_a_dedicated_pcr_pid_keeps_the_clock() {
@@ -6955,7 +7194,7 @@ pub(super) mod test {
 			"the first group ends at the break, one frame after its last picture"
 		);
 
-		let mut exporter = super::super::Export::new(crate::source::announced(&consumer))
+		let mut exporter = super::super::Export::new(crate::source::announced(&consumer).await)
 			.await
 			.unwrap()
 			.with_delay(Duration::from_secs(30))
@@ -7362,7 +7601,7 @@ pub(super) mod test {
 		// and the boundary with them. The paused clock runs out the delay and every gap in
 		// the media without a real wait.
 		let delay = std::time::Duration::from_secs(3600);
-		let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
+		let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer).await)
 			.await
 			.unwrap()
 			.with_delay(delay)

@@ -12,9 +12,7 @@ CSP is out of scope: the dashboard adds no policy.
 Decided in planning: the maintainer wants hosted mode dogfooded, not just the
 pin bump. No CSP. moq.dev's half moved to
 [its own quest tree](https://github.com/moq-dev/moq.dev/blob/main/quest/m0/dogfood-assets.md)
-on 2026-10-09. The moq.pro side is part of its
-[package adoption](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/ship-dev.md).
-pronto/web is skipped: it renders video only and never loads a worklet.
+on 2026-10-09. The moq.pro side is part of its package adoption.
 
 Guidance:
 

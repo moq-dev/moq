@@ -173,6 +173,21 @@ test("the group range bounds datagrams", async () => {
 	expect(await track.recvDatagram()).toBeUndefined();
 });
 
+for (const timed of [true, false]) {
+	test(`late ${timed ? "timed" : "untimed"} subscribers do not replay datagrams`, async () => {
+		const producer = new TrackProducer("test").accept(timed ? { timescale: Timescale.MICRO } : {});
+		const timestamp = timed ? Timestamp.fromMillis(180_000) : undefined;
+		producer.appendDatagram(timestamp, enc.encode("before"));
+		const subscriber = producer.subscribe({ maxDelay: Milli(50) });
+		const sequence = producer.appendDatagram(timestamp, enc.encode("after"));
+		producer.close();
+		const datagram = await subscriber.recvDatagram();
+		expect(datagram?.sequence).toBe(sequence);
+		expect(datagram && dec.decode(datagram.payload)).toBe("after");
+		expect(await subscriber.recvDatagram()).toBeUndefined();
+	});
+}
+
 test("datagram buffers drop oldest at capacity without delaying active subscribers", async () => {
 	const producer = new TrackProducer("test");
 	const slow = producer.subscribe();
@@ -393,6 +408,15 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	const none = producer.subscription.changed();
 	bounded.close();
 	expect(await none).toBeUndefined();
+});
+
+// A resume floor above the live edge must not hide the latest group from a reader that
+// joins after it: on a quiet track that group may be the only one for a long time.
+test("an unfloored subscriber clears a resume floor above the live edge", () => {
+	const producer = new TrackProducer("test");
+	producer.subscribe({ groups: { start: { included: 4 } } });
+	producer.subscribe({});
+	expect(producer.subscription.peek()?.groups?.start).toBeUndefined();
 });
 
 test("the producer aggregate is clamped without changing subscriber options", async () => {

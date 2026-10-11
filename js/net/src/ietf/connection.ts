@@ -1,16 +1,19 @@
 import { type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
+import type * as Auth from "../auth.ts";
+import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
-import type * as Path from "../path.ts";
+import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
+import { AuthMessage, supported as authSupported, IetfAuthWire } from "./auth.ts";
 import * as Cluster from "./cluster.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
@@ -54,10 +57,19 @@ export class Connection implements Established {
 	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
+	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Established.auth}. */
+	get auth(): Auth.Auth {
+		return this.#auth;
+	}
+
+	// Our tokens and grants, and the answers to the peer's (MoQ Auth).
+	#auth: AuthSession;
+
 	// The established WebTransport session.
 	#quic: WebTransport;
 
-	// Whether this side opened the session. Only a server may name a redirect.
+	// Whether this side opened the session. Only a server may name a redirect, and only
+	// the dialing side fails loud on a publication its grant does not cover.
 	#client: boolean;
 
 	// Session abstraction: adapter for v14-v16, native for v17.
@@ -71,6 +83,8 @@ export class Connection implements Established {
 
 	// What the peer declared about being solicited; see {@link Ietf.solicitFromSetup}.
 	#solicit: boolean | undefined;
+	// Whether our SETUP declared MoQ Solicit, which is what makes an unasked announce a fault.
+	#declaredSolicit: boolean;
 
 	// The Hop IDs this session declared; see {@link Cluster}.
 	#cluster?: Cluster.Hops;
@@ -106,8 +120,10 @@ export class Connection implements Established {
 		solicit,
 		hidden = false,
 		cluster,
+		auth = false,
 		early = [],
 		requestWindow,
+		extensions,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -131,10 +147,14 @@ export class Connection implements Established {
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
 		 */
 		cluster?: Cluster.Hops;
+		/** Whether MoQ Auth is negotiated (draft-17+): offered by both SETUPs. */
+		auth?: boolean;
 		/** Uni streams that arrived before the peer's SETUP, type unread (v17+). */
 		early?: Reader[];
 		/** Requests the peer may hold open on drafts 14 to 16, the window our SETUP advertised (default `REQUEST_WINDOW`). */
 		requestWindow?: bigint;
+		/** What our own SETUP offered; every extension when omitted. */
+		extensions?: { solicit: boolean };
 	}) {
 		this.url = url;
 		this.discovery = discovery;
@@ -165,6 +185,25 @@ export class Connection implements Established {
 			});
 		}
 
+		// What the peer's connection credential earns by default: publishing anything to us,
+		// since we consume on demand, and subscribing to whatever we publish.
+		const session = this.#session;
+		this.#auth = new AuthSession({
+			wire:
+				auth && authSupported(version)
+					? new IetfAuthWire({
+							openBi: async () => session.openBi(),
+							nextRequestId: () => session.nextRequestId(),
+							version,
+						})
+					: undefined,
+			peerGrant: {
+				publish: new Path.Patterns([Path.Pattern.all()]),
+				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
+			},
+		});
+		this.#client = client;
+
 		this.#publisher = new Publisher({
 			quic: this.#quic,
 			session: this.#session,
@@ -172,8 +211,11 @@ export class Connection implements Established {
 			requiresSolicitation: solicit ?? false,
 			hidden,
 			cluster,
+			grant: this.#auth.grant,
+			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;
+		this.#declaredSolicit = extensions?.solicit ?? true;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({
 			session: this.#session,
@@ -182,6 +224,7 @@ export class Connection implements Established {
 			hidden,
 			solicit,
 			goaway: this.#goaway,
+			grant: this.#auth.grant,
 		});
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
@@ -215,6 +258,8 @@ export class Connection implements Established {
 		this.#closed = true;
 		this.#publisher.close();
 
+		this.#auth.close();
+
 		// Before the session, whose own close would send a clean code first.
 		try {
 			this.#quic.close(info);
@@ -237,12 +282,16 @@ export class Connection implements Established {
 			// solicited; otherwise it pushes PUBLISH_NAMESPACE. On draft-16 and later a
 			// SUBSCRIBE_NAMESPACE stream is filled either way. A NAMESPACE is discovery,
 			// not a second route.
-			await Promise.all([
+			const tasks = [
 				this.#runBidis(),
 				this.#runUnis(early),
 				this.#runDatagrams(),
 				this.#publisher.runPublishNamespaces(),
-			]);
+			];
+			// Fail loud on a publication our grant never covers, once the peer has answered the
+			// credential we presented at setup.
+			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered()));
+			await Promise.all(tasks);
 		} catch (err) {
 			if (!this.#closed) {
 				console.error("fatal error running connection", err);
@@ -362,18 +411,19 @@ export class Connection implements Established {
 					Cluster.negotiated(this.#cluster),
 				);
 
-				// We always declare that advertisements to us must be solicited (MoQ
-				// Solicit), and writing the option at all proves the peer implements the
-				// extension, whichever value it chose. It also cannot have advertised
-				// before reading our SETUP, since our SETUP is what says whether
+				// Unless we declined it, we declare that advertisements to us must be
+				// solicited (MoQ Solicit), and writing the option at all proves the peer
+				// implements the extension, whichever value it chose. It also cannot have
+				// advertised before reading our SETUP, since our SETUP is what says whether
 				// advertising unasked is allowed. So this is a bug in the peer, and a
-				// silent one on both sides if we tolerate it.
+				// silent one on both sides if we tolerate it. Without our declaration an
+				// unasked announce is what we invited.
 				//
 				// Draft-14/15 are exempt: they have no inline NAMESPACE, so a
 				// PUBLISH_NAMESPACE request is also how a peer answers our
 				// SUBSCRIBE_NAMESPACE there, and the message alone does not say which.
 				const legacy = this.#session.version === Version.DRAFT_14 || this.#session.version === Version.DRAFT_15;
-				if (this.#solicit !== undefined && !legacy) {
+				if (this.#declaredSolicit && this.#solicit !== undefined && !legacy) {
 					console.error(
 						`unsolicited publish_namespace from a peer that implements MoQ Solicit: broadcast=${msg.trackNamespace}`,
 					);
@@ -382,6 +432,12 @@ export class Connection implements Established {
 				}
 
 				await this.#subscriber.runPublishNamespace(msg, stream);
+				break;
+			}
+			case BigInt(AuthMessage.id): {
+				// Only a peer that negotiated MoQ Auth may send one.
+				if (!this.#auth.negotiated) throw new ProtocolViolation("AUTH without MoQ Auth");
+				await this.#auth.serve(stream);
 				break;
 			}
 			case BigInt(Publish.id): {
