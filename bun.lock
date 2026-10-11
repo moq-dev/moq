@@ -219,7 +219,6 @@
         "@moq/qmux": "^0.3.3",
         "@moq/signals": "workspace:*",
         "async-mutex": "^0.5.0",
-        "bowser": "^2.14.1",
         "uuid": "^14.0.2",
       },
       "devDependencies": {
@@ -399,9 +398,12 @@
     "test/video": {
       "name": "@moq/video-test",
       "dependencies": {
+        "@moq/hang": "workspace:*",
+        "@moq/net": "workspace:*",
         "@moq/publish": "workspace:*",
         "@moq/signals": "workspace:*",
         "@moq/video": "workspace:*",
+        "@moq/watch": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "^1.4.2",
@@ -1087,8 +1089,6 @@
     "blake3-wasm": ["blake3-wasm@2.1.5", "", {}, "sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g=="],
 
     "boolbase": ["boolbase@1.0.0", "", {}, "sha512-JZOSA7Mo9sNGB8+UjSgzdLtokWAky1zbztM3WRLCbZ70/3cTANmQmOdR7y2g+J0e2WXywy1yS468tY+IruqEww=="],
-
-    "bowser": ["bowser@2.14.1", "", {}, "sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg=="],
 
     "brace-expansion": ["brace-expansion@5.0.12", "", { "dependencies": { "balanced-match": "^4.0.2" } }, "sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ=="],
 

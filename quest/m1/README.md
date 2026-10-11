@@ -40,6 +40,9 @@ Added 2026-10-10: controlled time ranks just above the hard fork, since the
 switch, the reliability quests that test on mocked time, and the relay
 bench all require its crate.
 
+Added 2026-10-10 by maintainer priority: HTTP fetch stats, ranked just above
+session outcomes, and embedder refusals inside session outcomes.
+
 ## Required
 
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
@@ -73,7 +76,6 @@ bench all require its crate.
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
 - [Kotlin wrapper POMs](/quest/m1/kt-ffi-pom.md) - Maven builds of `dev.moq:moq` resolve a published moq-ffi instead of the missing `0.0.0-dev`
-- [Installable moq-gst](/quest/m1/gst-brew-path.md) - `brew install moq-gst` installs the plugin from the tarball's `lib/gstreamer-1.0/`, and the Nix package carries `x264enc`, `avenc_aac`, and `avdec_h264`
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [moq.sh deploys from CI](/quest/m1/moq-sh-deploy.md) - the first `release` run of the moq.sh workflow deploys with the Workers Editor token
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
@@ -118,7 +120,8 @@ bench all require its crate.
 - [Viewer up-switch](/quest/m1/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms
-- [Session outcomes](/quest/m1/session-outcomes.md) - the relay's session stats count refusals by reason and ends by kind, per root and tier
+- [HTTP fetch stats](/quest/m1/http-fetch-stats.md) - each HTTP `/fetch` counts one `requests` and its bytes under the token's tier and root, not a session
+- [Session outcomes](/quest/m1/session-outcomes.md) - the relay's session stats count refusals by reason and ends by kind, per root and tier, including refusals an embedder records on its stats handle
 - [Typed refusal reason](/quest/m1/refusal-reason.md) - an auth server's 403 names the reason (including `expired`) and the root and tier, so the relay's session outcomes count and attribute refusals
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - catalog rendition keys become IDs unique across video and audio, with an optional `track` name, so one catalog lists renditions from several broadcasts
 - [Media stats](/quest/m1/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
@@ -179,7 +182,6 @@ bench all require its crate.
 - [FLV and MKV export delay](/quest/m1/export-delay.md) - FLV and MKV interleave through the shared jitter buffer on a fixed delay, breaking the CLI once
 - [Release profile](/quest/m1/release-profile.md) - every release build gets fat LTO, one codegen unit, and stripping from the workspace profile instead of three script exports
 - [Size report](/quest/m1/size-report.md) - a nightly job reports every shipped artifact's size, native and JS, and alerts when one grows
-- [JS bundle trims](/quest/m1/js-bundle-trims.md) - no bowser, split pako, and lazy qmux and captions
 - [Bindings size profile](/quest/m1/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [Go mirror delivery](/quest/m1/go-mirror-delivery.md) - the Go binding's staticlibs stop growing git history by ~210 MiB per release
 - [Dart on iOS](/quest/m1/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can

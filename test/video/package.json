@@ -8,7 +8,10 @@
 	"dependencies": {
 		"@moq/publish": "workspace:*",
 		"@moq/signals": "workspace:*",
-		"@moq/video": "workspace:*"
+		"@moq/video": "workspace:*",
+		"@moq/hang": "workspace:*",
+		"@moq/net": "workspace:*",
+		"@moq/watch": "workspace:*"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.2",
