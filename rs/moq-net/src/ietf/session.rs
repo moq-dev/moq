@@ -2385,6 +2385,7 @@ mod tests {
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
+			extensions: Default::default(),
 		})
 		.unwrap()
 		.0

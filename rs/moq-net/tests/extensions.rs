@@ -52,7 +52,9 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 	let mut live = false;
 	while let Some(event) = announced.try_next() {
 		match event {
-			moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) => {
+			moq_net::announce::Event::Start(update)
+			| moq_net::announce::Event::Update(update)
+			| moq_net::announce::Event::Restart(update) => {
 				live |= update.prefix.as_str() == path;
 			}
 			moq_net::announce::Event::End(update) => {
