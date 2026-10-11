@@ -36,10 +36,14 @@ Decided 2026-10-10, planning the follow-ups of moqsrc's restart work
   every pad. The catalog producer exists only during a run (`READY` to
   `PAUSED`), so each run reserves for the pads that exist when it starts
   (`start_session`), and a pad requested mid-run reserves at once.
-- A pad admitted while a run starts must land in exactly one of those sets:
-  reserve in `confirm_admission`, under the control lock `start_session`
-  takes, rather than after `add_pad`, so a pad added after `start_session`
-  enumerated `sink_pads` still reserves before the first snapshot.
+- A pad admitted while a run starts must not miss the gate. `request_new_pad`
+  counts the admission under the control lock before `add_pad`, so
+  `start_session` can run in between and miss the pad in `sink_pads`, and a
+  sibling can publish the first snapshot before the pad confirms. So the
+  reservation follows the admission: `start_session` also reserves one slot
+  per outstanding admission (`control.admissions`), a mid-run request
+  reserves when it counts its admission, and `confirm_admission` hands that
+  slot to the pad while `cancel_admission` drops it.
 
 Decided 2026-10-11 by the maintainer, in #5189:
 
@@ -60,7 +64,8 @@ Decided 2026-10-11 by the maintainer, in #5189:
 Tests: a `moqsink` whose audio pad gets caps after its video pad's first
 buffer publishes one first catalog listing both; a pad that is released,
 ends without caps, or fails its caps lets the first catalog publish; a pad
-requested while the run starts is listed; and a `moqsrc` following that
+requested while the run starts is listed even when a sibling resolves before
+that pad confirms; and a `moqsrc` following that
 `moqsink` across a restart keeps both pads without EOS.
 
 ## Related
