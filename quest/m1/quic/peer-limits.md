@@ -13,8 +13,8 @@ stay small so one client cannot reserve a relay's memory.
 The in-tree `moq-quic` `Connection` (`rs/moq-quic/src/connection/mod.rs`)
 already exposes runtime `set_max_concurrent_streams`, `set_receive_window`,
 and `set_send_window`; a raise queues `MAX_STREAMS` and `MAX_DATA` on the next
-packet, and a shrink is a debt paid as the peer consumes credit. The core
-needs no change; the work waits only for
+packet, and a shrink is a debt paid as the peer consumes credit. The existing
+setters provide this seam; the transport integration waits for
 [the fork switch](/quest/m1/quic/fork/README.md), so moq-tokio and moq-uring
 run on `moq-quic` instead of `moq-noq`.
 
@@ -34,6 +34,12 @@ surface with the QUIC values rather than adding its own.
   workers too.
 - Refuse a `peer` value below the client default rather than silently
   shrinking.
+
+The [receive-memory plan](/quest/m1/quic/receive-memory.md) requires client
+and peer memory allowances to fit the largest supported encoded unit,
+including framing. Preserve that validation and retained-credit accounting
+when applying runtime limits; wider stream counts must not create a second
+unbounded assembly pool.
 
 Tests: a cluster session sees the raised `MAX_STREAMS` after SETUP and a
 viewer session does not; the io_uring path applies the same values; a

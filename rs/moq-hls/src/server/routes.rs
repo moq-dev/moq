@@ -393,6 +393,39 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_encoded_dash_rendition_as_one_segment() {
+		let parsed = |path| {
+			let route = Route::parse(path)?;
+			let rendition = match &route.resource {
+				Resource::Media { rendition, .. }
+				| Resource::Init { rendition, .. }
+				| Resource::Segment { rendition, .. }
+				| Resource::SegmentAt { rendition, .. } => rendition.clone(),
+				Resource::Master | Resource::Manifest => return None,
+			};
+			Some((route.broadcast, rendition))
+		};
+
+		// The manifest for broadcast `live` and rendition `video/1080p` emits these paths.
+		// Unencoded, the same name is broadcast `live/video`, rendition `1080p`.
+		let cases = [
+			("/live/video/video%2F1080p/init.0123abcd.mp4", "video/1080p"),
+			("/live/video/video%2F1080p/seg/ab12cd34.t2000.m4s", "video/1080p"),
+			("/live/video/cam%3F1/init.0123abcd.mp4", "cam?1"),
+			("/live/video/cam%231/media.m3u8", "cam#1"),
+			("/live/audio/100%25/init.0123abcd.mp4", "100%"),
+			("/live/video/price%249/seg/ab12cd34.t0.m4s", "price$9"),
+		];
+		for (path, rendition) in cases {
+			assert_eq!(parsed(path), Some(("live".into(), rendition.into())), "{path}");
+		}
+		assert_eq!(
+			parsed("/live/video/video/1080p/init.0123abcd.mp4"),
+			Some(("live/video".into(), "1080p".into()))
+		);
+	}
+
+	#[test]
 	fn parses_all_resource_routes() {
 		let resource = |path| Route::parse(path).map(|route| route.resource);
 		assert_eq!(resource("/project/live/master.m3u8"), Some(Resource::Master));

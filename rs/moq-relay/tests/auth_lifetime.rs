@@ -1346,3 +1346,25 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
+
+/// The auth server sees the accepted transport, independent of negotiated MoQ ALPN.
+#[tokio::test]
+async fn quic_and_webtransport_report_distinct_auth_transports() {
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let (addr, relay) = spawn_quic_relay(build_auth(script.spawn().await), None).await;
+	for (scheme, expected) in [("moql", "quic"), ("https", "webtransport")] {
+		let path = format!("/transport/{scheme}");
+		let url: url::Url = format!("{scheme}://127.0.0.1:{}{path}", addr.port()).parse().unwrap();
+		let connections = connect_and_round_trip(&url).await;
+		let seen = script.seen.lock().unwrap();
+		let request = seen
+			.iter()
+			.find(|r| r.event == Event::Connect && r.path == path)
+			.unwrap_or_else(|| panic!("auth connect for {path}: {seen:?}"));
+		assert_eq!(request.transport.as_str(), expected, "{scheme}");
+		assert!(request.alpn.as_ref().is_some_and(|alpn| alpn.starts_with("moq-lite-")));
+		drop(connections);
+	}
+	relay.abort();
+	let _ = relay.await;
+}

@@ -71,9 +71,10 @@ guarantee and the selected legacy best-effort behavior.
 ## Required
 
 - [Source pin](/quest/m0/broadcast-epoch/source-pin.md) - exporters share their resolved catalog handle
-- [JS consume identity](/quest/m0/broadcast-epoch/js-consume-identity.md) - JS resolves the actual serving identity
 
 ## Related
+
+- [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - JS resolves the actual serving identity
 
 - [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - held handles cannot emit unpinned requests after retirement
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - the adjacent optional wire-track field
