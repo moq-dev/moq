@@ -40,6 +40,16 @@ These land with the next breaking release, not the 2026-09-23 train.
   the same two flags. In Rust, moq-mux's `ts::Export::resume` is
   `ts::Export::follow`, `Source::returned` is gone, and `ts::Follower` follows a
   path's announcements the way both exports do.
+- **moq-mux's `Source` is built from the resolved catalog broadcast.**
+  `Source::new(origin, path)` is `Source::new(origin, broadcast)`: resolve the
+  broadcast first (`origin.request_broadcast(path, None)`), and its path is
+  where catalog references resolve from. `Source::broadcast()` returns that
+  broadcast without awaiting. Every later request for a path, siblings
+  included, stays on the broadcast the source first held there and fails once
+  it ends, rather than reaching a replacement; `bind` included. Build a new
+  `Source` to follow a new instance. moq-hls's `Broadcaster::new` no longer
+  awaits or fails, and a rendition whose sibling broadcast ends now ends its
+  playlist instead of rebinding.
 - **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
   catalog codec string and dimensions are enough, `moq export fmp4` writes an
   `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,
