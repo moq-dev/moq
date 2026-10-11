@@ -10,7 +10,8 @@ and 15, which cannot update a namespace, and REQUEST_UPDATE for either from
 by the session's grant first; when that does not cover it, by the token on the
 request; with neither it is refused `UNAUTHORIZED`. The token's grant covers
 only the request it rode on, never joins the session union, and ends with that
-request. On any other request the token is ignored.
+request. A joining FETCH can use its named subscription's authorization;
+it does not independently admit a token. On other requests the token is ignored.
 
 ## Plan
 
@@ -30,6 +31,15 @@ Decided, so review does not relitigate them:
   `requests()` consumer a non-empty token is refused `Unsupported`.
 - **Scope.** Honored on SUBSCRIBE, PUBLISH_NAMESPACE, and an update renewing
   one, SUBSCRIBE_UPDATE included; ignored on every other request (2026-10-05).
+- **Joining FETCH** (decided 2026-10-10). A join inherits its named
+  subscription's effective authorization, confined to the pinned track and
+  allowed range. Observe live renewal, revoke, expiry and the session ceiling;
+  a dependent join ends when its subscription ends and cannot prolong that
+  grant. Do not clone a one-time grant snapshot or add it to the session union.
+  Standalone FETCH tokens remain ignored. Test token-only joins on drafts
+  14-19 and their termination, plus native fill on newer drafts. This fixes
+  #5148's saved-namespace join constructing a session-only gate after a
+  request-token-only SUBSCRIBE succeeds.
 - **Refused renewal** follows drafts 16 section 9.11.1 and 18 section 10.9.1:
   REQUEST_ERROR ends only that request, with PUBLISH_DONE `UPDATE_FAILED` for
   a subscription. A namespace ends with a closed stream from 17, and with
