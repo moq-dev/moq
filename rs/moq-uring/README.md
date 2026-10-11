@@ -119,7 +119,7 @@ Unit tests use 128 SQ entries and 512 CQ entries instead of the production
 256/2048 geometry. Integration tests still exercise production rings.
 The nextest group allows four ring tests per invocation.
 
-The Rust test recipes use `sh/rs/nextest.sh`: local Linux shells raise their
+The Rust recipes that run nextest use `sh/rs/nextest.sh`: local Linux shells raise their
 soft locked-memory limit to the host's hard limit, while GitHub-hosted jobs
 raise both to 64 MiB before launching nextest. A NixOS self-hosted runner
 should set `serviceConfig.LimitMEMLOCK = "64M"` on its runner service.

@@ -224,7 +224,7 @@ jobs:
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
-        # `gh test` exercises the release tooling, which no pull request runs.
+        # `gh test` exercises workflow and release tooling, which no pull request runs.
         recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test"]
     steps:
       - name: Free disk space
