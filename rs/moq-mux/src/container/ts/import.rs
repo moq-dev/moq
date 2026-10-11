@@ -49,6 +49,11 @@ use moq_net::Timestamp;
 /// fails is dropped and counted in [`stats::Snapshot::crc_error`]; the last good table stays
 /// in force.
 ///
+/// With the `mpegts` catalog extension, the initial catalog waits for a two-second PCR
+/// measurement window. This hold applies to every subscriber of the broadcast.
+/// A variable-rate window publishes without a rate; EOF releases a shorter input too.
+/// Imports without that extension do not wait for a rate measurement.
+///
 /// The selected container applies only to decoded media renditions. Verbatim tracks in the
 /// `mpegts` catalog section continue to use the legacy Hang container.
 pub struct Import<E: catalog::Catalog = ()> {
@@ -61,7 +66,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// final. A one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
 	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
-	/// Hold TS rate metadata until one PCR measurement window, independently of decoder readiness.
+	/// Hold the whole catalog until one PCR measurement window, independently of decoder readiness.
 	mux_rate_reservation: Option<crate::catalog::Reserved<E>>,
 
 	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
