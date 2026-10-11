@@ -1042,7 +1042,7 @@ export class Subscriber {
 		const { epoch, valid } = consumed;
 		const cancel = new AbortController();
 		void group.closed.then((err) => cancel.abort(err ?? new StreamError(StreamCode.Cancel)));
-		const signal = AbortSignal.any([valid, cancel.signal]);
+		const signal = valid ? AbortSignal.any([valid, cancel.signal]) : cancel.signal;
 		const answered = this.#trackInfo(broadcast, epoch, track, signal);
 		// Only the properties are needed, so the TRACK stream closes however the wait ends.
 		answered.then(

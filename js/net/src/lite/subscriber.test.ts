@@ -1344,14 +1344,14 @@ test.each(["initial", "track", "fetch", "body"] as const)(
 test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 	"a retired epochless handle refuses new metadata on %s",
 	async (version) => {
-		const { quic, streams } = fakeSession();
+		const { quic, streams, opened } = fakeSession();
 		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 		const announced = subscriber.announced();
-		await drainUntil(() => streams.length === 1);
+		await opened(0);
 		const send = async (encode: (writer: Writer) => Promise<void>) => {
 			const writer = new Writer(
 				new WritableStream<Uint8Array>({
-					write: (chunk) => streams[0].inbound.enqueue(chunk),
+					write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
 				}),
 				version,
 			);
@@ -1377,18 +1377,8 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 			encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
 		);
 		await announced.next();
-		let settled = false;
-		const result = track.info().then(
-			(info) => {
-				settled = true;
-				return info;
-			},
-			(err: unknown) => {
-				settled = true;
-				return err;
-			},
-		);
-		await drainUntil(() => settled || streams.length === 2);
+		const result = track.info().catch((err: unknown) => err);
+		await Promise.race([result, opened(1)]);
 		// The unfixed implementation asks B and accepts its metadata.
 		if (streams.length === 2) await answerTrackInfo(streams[1], version);
 		expect(await result).toBeInstanceOf(Error);
@@ -1403,17 +1393,17 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 test.each(["track", "fetch", "open"] as const)(
 	"retirement settles coalesced fetches during %s setup",
 	async (stage) => {
-		const { quic, streams } = fakeSession(stage === "open" ? [1] : []);
+		const { quic, streams, opened } = fakeSession(stage === "open" ? [1] : []);
 		const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
 		const retired = new AbortController();
 		const consumed = { id: 1, valid: retired.signal };
 		const path = Path.from("room");
 		const first = subscriber.fetchGroup(path, "video", 0, {}, consumed).catch((err: unknown) => err);
 		const second = subscriber.fetchGroup(path, "video", 0, {}, consumed).catch((err: unknown) => err);
-		await drainUntil(() => streams.length === 1);
+		await opened(0);
 		if (stage !== "track") {
 			await answerTrackInfo(streams[0], Version.DRAFT_06);
-			await drainUntil(() => streams.length === 2);
+			await opened(1);
 		}
 		const cause = new Error("broadcast instance retired");
 		retired.abort(cause);
@@ -1427,15 +1417,15 @@ test.each(["track", "fetch", "open"] as const)(
 );
 
 test("retirement preserves an accepted fetch and its coalesced reads", async () => {
-	const { quic, streams } = fakeSession();
+	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
 	const retired = new AbortController();
 	const consumed = { id: 1, valid: retired.signal };
 	const path = Path.from("room");
 	const fetch = subscriber.fetchGroup(path, "video", 0, {}, consumed);
-	await drainUntil(() => streams.length === 1);
+	await opened(0);
 	await answerTrackInfo(streams[0], Version.DRAFT_06);
-	await drainUntil(() => streams.length === 2);
+	await opened(1);
 	await streams[1].reading;
 	streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("old!")]));
 	const first = await fetch;
@@ -1535,10 +1525,10 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 	"pending metadata cancels on selection change and a live fallback can request again on %s",
 	async (version) => {
-		const { quic, streams } = fakeSession();
+		const { quic, streams, opened } = fakeSession();
 		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 		const announced = subscriber.announced();
-		await drainUntil(() => streams.length === 1);
+		await opened(0);
 		const peer = new Writer(
 			new WritableStream<Uint8Array>({
 				write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
@@ -1555,7 +1545,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 			.track("pending")
 			.info()
 			.catch((err: unknown) => err);
-		await drainUntil(() => streams.length === 2);
+		await opened(1);
 		await streams[1].reading;
 		await encodeAnnounceBroadcast(peer, { status: "active", suffix: job, hops: [PUBLISHER_B] }, version);
 		await announced.next();
@@ -1570,7 +1560,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 		);
 		await announced.next();
 		const info = held.track("after").info();
-		await drainUntil(() => streams.length === 3);
+		await opened(2);
 		await answerTrackInfo(streams[2], version);
 		expect((await info).priority).toBe(0);
 		held.close();
