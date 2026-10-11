@@ -3,7 +3,7 @@ import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
 import { Error as NetError, Path, StreamCode } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
 
@@ -446,13 +446,13 @@ export class Broadcast {
 
 	/**
 	 * Select a whole contribution, opening its catalog only while the caller owns this effect.
+	 * An absent entry leaves the child disabled; adding or replacing it updates the child.
 	 * Wire the returned broadcast into a media source inside a nested effect. Its rendition
 	 * IDs stay local to that broadcast, so they never replace the parent catalog's IDs.
 	 *
 	 * ```ts
 	 * effects.run((effect) => {
 	 *   const child = broadcast.contribution(effect, "extra");
-	 *   if (!child) return;
 	 *   const source = new Video.Source({ broadcast: child, supported: Video.Decoder.supported });
 	 *   effect.cleanup(() => source.close());
 	 *   const decoder = new Video.Decoder({ source, sync });
@@ -461,16 +461,19 @@ export class Broadcast {
 	 * });
 	 * ```
 	 */
-	contribution(effect: Effect, id: string): Broadcast | undefined {
-		const catalog = effect.get(this.out.catalog);
-		const entry = catalog?.contributions?.[id];
-		if (!entry || !Object.hasOwn(catalog?.contributions ?? {}, id)) return undefined;
-		const name = Path.tryResolve(effect.get(this.in.name), entry.broadcast);
-		if (name === undefined) throw new Catalog.EscapingBroadcast(entry.broadcast);
+	contribution(effect: Effect, id: string): Broadcast {
+		const selected = effect.computed((run) => {
+			const catalog = run.get(this.out.catalog);
+			const entry = catalog?.contributions?.[id];
+			if (!entry || !Object.hasOwn(catalog?.contributions ?? {}, id)) return undefined;
+			const name = Path.tryResolve(run.get(this.in.name), entry.broadcast);
+			if (name === undefined) throw new Catalog.EscapingBroadcast(entry.broadcast);
+			return name;
+		});
 		const child = new Broadcast({
 			origin: this.in.origin,
-			name,
-			enabled: this.in.enabled,
+			name: new Derived([selected], (name) => name ?? Path.empty()),
+			enabled: new Derived([selected, this.in.enabled], (name, enabled) => name !== undefined && enabled),
 			announced: this.in.announced,
 		});
 		effect.cleanup(() => child.close());

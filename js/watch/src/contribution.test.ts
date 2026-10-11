@@ -1,7 +1,7 @@
 import { expect, it } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import { Origin, Path } from "@moq/net";
-import { Effect } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
 
@@ -68,7 +68,7 @@ it("lists contributions without demand and keeps selected rendition IDs in their
 			frames?.close();
 			original?.close();
 		}
-		expect(source.contribution(selection, "unknown")).toBeUndefined();
+		expect(source.contribution(selection, "unknown").in.enabled.peek()).toBe(false);
 		const absent = origin.dynamic(Path.from("room/absent.hang"));
 		selection.cleanup(() => absent.close());
 		const requests = absent.requested();
@@ -97,4 +97,64 @@ it("refuses malformed and escaping contribution entries", () => {
 	}
 	const catalog = Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "../../escape" } } });
 	expect(() => Catalog.checkResolvable(catalog, Path.from("room/main.hang"))).toThrow(Catalog.EscapingBroadcast);
+});
+
+it("keeps a reactive selection through unrelated catalog updates and follows replacement and removal", async () => {
+	const origin = new Origin.Producer();
+	const main = origin.createBroadcast(Path.from("room/main.hang"));
+	main.announce();
+	const first = origin.createBroadcast(Path.from("room/first.hang"));
+	const second = origin.createBroadcast(Path.from("room/second.hang"));
+	for (const publisher of [first, second]) {
+		publisher.announce();
+		publisher.createTrack(Catalog.TRACK).writeFrame({ payload: new TextEncoder().encode("{}") });
+	}
+	const catalog = new Signal(Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./first.hang" } } }));
+	const parent = new Broadcast({
+		origin,
+		name: Path.from("room/main.hang"),
+		catalogFormat: "manual",
+		catalog,
+		announced: false,
+	});
+	const selected = new Signal<Broadcast | undefined>(undefined);
+	let selections = 0;
+	const owner = new Effect((effect) => {
+		selections += 1;
+		effect.set(selected, parent.contribution(effect, "extra"));
+	});
+	try {
+		const child = await selected.changed();
+		if (!child) throw new Error("selection did not create a child");
+		await child.out.catalog.changed();
+		const active = child.out.active.peek();
+		let withdrawals = 0;
+		const dispose = first.demand().used.subscribe((used) => {
+			if (!used) withdrawals += 1;
+		});
+		owner.cleanup(dispose);
+		catalog.set(
+			Catalog.RootSchema.parse({
+				contributions: { extra: { broadcast: "./first.hang" }, other: { broadcast: "./other.hang" } },
+				metadata: "changed",
+			}),
+		);
+		await parent.out.catalog.changed();
+		// The next selected-path update fences the unrelated update without a timer or flush count.
+		catalog.set(Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./second.hang" } } }));
+		await second.demand().used.changed();
+		expect(selections).toBe(1);
+		expect(selected.peek()).toBe(child);
+		expect(active?.path).toBe(Path.from("room/first.hang"));
+		expect(child.out.active.peek()?.path).toBe(Path.from("room/second.hang"));
+		expect(withdrawals).toBe(1);
+		catalog.set(Catalog.RootSchema.parse({}));
+		await second.demand().unused();
+		expect(child.in.enabled.peek()).toBe(false);
+		expect(selections).toBe(1);
+	} finally {
+		owner.close();
+		parent.close();
+		origin.close();
+	}
 });
