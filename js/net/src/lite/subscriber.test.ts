@@ -459,18 +459,6 @@ async function probeBytes(probes: Probe[], version: Version): Promise<Uint8Array
 	return out;
 }
 
-/** Bound on the microtask turns we will spend waiting for the decode loop. */
-const MAX_DRAIN_TURNS = 1000;
-
-/** Yield until `predicate` holds, rather than guessing a fixed number of turns. */
-async function drainUntil(predicate: () => boolean): Promise<void> {
-	for (let i = 0; i < MAX_DRAIN_TURNS; i++) {
-		if (predicate()) return;
-		await Promise.resolve();
-	}
-	throw new Error("probe messages never drained");
-}
-
 /**
  * Drive `Subscriber.runProbe` over a canned script and return what the probe signal
  * held once the last message had been applied.
@@ -496,7 +484,7 @@ async function runProbeScript(version: Version, probes: Probe[], initial: ProbeS
 	readableController.enqueue(await probeBytes(probes, version));
 
 	const last = probes[probes.length - 1];
-	await drainUntil(() => signal.peek().estimatedRecvRate === last.bitrate);
+	while (signal.peek().estimatedRecvRate !== last.bitrate) await signal.changed();
 	const snapshot = signal.peek();
 
 	readableController.close();
@@ -839,6 +827,8 @@ interface FakeStream {
 	aborted: Promise<unknown>;
 	// Resolves once the subscriber FINs its side.
 	finished: Promise<void>;
+	// Resolves on the first write, even if it stalls.
+	writing: Promise<void>;
 	// Every chunk the subscriber wrote.
 	written: Uint8Array[];
 	// Hands the stream to the subscriber, for an open the session was told to park.
@@ -850,16 +840,23 @@ interface FakeStream {
 // writes to those numbered in `stall` never get credit.
 function fakeSession(park: number[] = [], stall: number[] = []) {
 	const streams: FakeStream[] = [];
+	const count = new Signal(0);
+	async function opened(index: number): Promise<FakeStream> {
+		while (streams.length <= index) await count.changed();
+		return streams[index];
+	}
 	const quic = {
 		createBidirectionalStream: () => {
 			let inbound!: ReadableStreamDefaultController<Uint8Array>;
 			let onRead!: () => void;
 			let onAbort!: (reason: unknown) => void;
 			let onFinish!: () => void;
+			let onWrite!: () => void;
 			let release!: () => void;
 			const reading = new Promise<void>((resolve) => (onRead = resolve));
 			const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
 			const finished = new Promise<void>((resolve) => (onFinish = resolve));
+			const writing = new Promise<void>((resolve) => (onWrite = resolve));
 			const stalled = stall.includes(streams.length);
 			// No high water mark, so pull() means the subscriber is blocked on a read.
 			const readable = new ReadableStream<Uint8Array>(
@@ -875,18 +872,30 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 			const writable = new WritableStream<Uint8Array>({
 				write: (chunk) => {
 					written.push(new Uint8Array(chunk));
-					return stalled ? new Promise<void>(() => {}) : undefined;
+					onWrite();
+					return new Promise<void>((resolve) => {
+						if (stalled) return;
+						// Transport credit can arrive in a task, outside the microtask queue.
+						const channel = new MessageChannel();
+						channel.port1.onmessage = () => {
+							channel.port1.close();
+							channel.port2.close();
+							resolve();
+						};
+						channel.port2.postMessage(null);
+					});
 				},
 				close: () => onFinish(),
 				abort: (reason) => void onAbort(reason),
 			});
 			const opened = new Promise((resolve) => (release = () => resolve({ readable, writable })));
 			if (!park.includes(streams.length)) release();
-			streams.push({ inbound, reading, aborted, finished, written, release });
+			streams.push({ inbound, reading, aborted, finished, writing, written, release });
+			count.set(streams.length);
 			return opened;
 		},
 	} as unknown as WebTransport;
-	return { quic, streams };
+	return { quic, streams, opened };
 }
 
 async function answerTrackInfo(stream: FakeStream): Promise<void> {
@@ -917,7 +926,7 @@ test.each([
 	["the FETCH, on a session error", "fetch", new Error("session died")],
 	["a stream slot for the FETCH", "open", undefined],
 ] as const)("closing the subscriber rejects a fetch waiting on %s", async (_, stage, cause) => {
-	const { quic, streams } = fakeSession(stage === "open" ? [1] : []);
+	const { quic, streams, opened } = fakeSession(stage === "open" ? [1] : []);
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	let settled = false;
@@ -932,12 +941,12 @@ test.each([
 		},
 	);
 
-	await drainUntil(() => streams.length === 1);
+	await opened(0);
 	if (stage === "track") {
 		await streams[0].reading;
 	} else {
 		await answerTrackInfo(streams[0]);
-		await drainUntil(() => streams.length === 2);
+		await opened(1);
 		if (stage === "fetch") await streams[1].reading;
 	}
 	expect(settled).toBe(false);
@@ -960,23 +969,18 @@ test.each([
 ] as const)("a %s that times out leaves nothing behind", async (_, version, parked) => {
 	jest.useFakeTimers();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
-	const { quic, streams } = fakeSession(parked ? [0] : []);
+	const { quic, streams, opened } = fakeSession(parked ? [0] : []);
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	try {
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
-		await drainUntil(() => streams.length === 1);
+		await opened(0);
 		if (!parked) await streams[0].reading;
 
 		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS);
-		await drainUntil(() => track.closed.peek() !== undefined);
+		await track.closed;
 
-		let aborted = false;
-		void streams[0].aborted.then(() => {
-			aborted = true;
-		});
 		if (parked) streams[0].release();
-		await drainUntil(() => aborted);
-		expect(aborted).toBe(true);
+		await streams[0].aborted;
 		expect(streams.length).toBe(1);
 
 		// A GROUP for a forgotten id is ignored without touching its stream.
@@ -1000,28 +1004,23 @@ test.each([
 test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE sends nothing on it", async () => {
 	jest.useFakeTimers();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
-	const { quic, streams } = fakeSession([1]);
+	const { quic, streams, opened } = fakeSession([1]);
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 	try {
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
-		await drainUntil(() => streams.length === 1);
+		await opened(0);
 		await streams[0].reading;
 		// TRACK_INFO lands halfway, so the SUBSCRIBE open's own deadline is still ahead when the
 		// setup deadline fires.
 		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS / 2);
 		await answerTrackInfo(streams[0]);
-		await drainUntil(() => streams.length === 2);
+		await opened(1);
 
 		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS / 2);
-		await drainUntil(() => track.closed.peek() !== undefined);
+		await track.closed;
 
-		let aborted = false;
-		void streams[1].aborted.then(() => {
-			aborted = true;
-		});
 		streams[1].release();
-		await drainUntil(() => aborted);
-		expect(aborted).toBe(true);
+		await streams[1].aborted;
 		expect(streams[1].written).toEqual([]);
 	} finally {
 		subscriber.close();
@@ -1035,23 +1034,18 @@ test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE
 test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its TRACK stream", async () => {
 	jest.useFakeTimers();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
-	const { quic, streams } = fakeSession([], [1]);
+	const { quic, streams, opened } = fakeSession([], [1]);
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 	try {
 		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
-		await drainUntil(() => streams.length === 1);
+		await opened(0);
 		await streams[0].reading;
 		await answerTrackInfo(streams[0]);
-		await drainUntil(() => streams.length === 2 && streams[1].written.length > 0);
+		await (await opened(1)).writing;
 
-		let finished = false;
-		void streams[0].finished.then(() => {
-			finished = true;
-		});
 		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS);
-		await drainUntil(() => track.closed.peek() !== undefined);
-		await drainUntil(() => finished);
-		expect(finished).toBe(true);
+		await track.closed;
+		await streams[0].finished;
 	} finally {
 		subscriber.close();
 		warn.mockRestore();
@@ -1072,7 +1066,7 @@ test("a fetch started after the subscriber closes rejects without opening a stre
 // The grant watch is armed before the first check, so a shrink while TRACK_INFO is still in
 // flight refuses the subscription rather than opening a SUBSCRIBE the grant no longer covers.
 test("a grant that shrinks while the subscription sets up refuses it", async () => {
-	const { quic, streams } = fakeSession();
+	const { quic, streams, opened } = fakeSession();
 	const scoped = (prefix: string): Grant => ({
 		publish: new Path.Patterns([]),
 		subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
@@ -1092,7 +1086,7 @@ test("a grant that shrinks while the subscription sets up refuses it", async () 
 	const next = track.nextGroup().catch((err: unknown) => err);
 
 	// Parked on TRACK_INFO when the grant shrinks, which ends the TRACK exchange too.
-	await drainUntil(() => streams.length === 1);
+	await opened(0);
 	await streams[0].reading;
 	grant.set(scoped("other"));
 
@@ -1120,16 +1114,16 @@ test("an already-aborted fetch rejects without opening a stream", async () => {
 // Coalesced fetches share one FETCH stream. An abort releases only that caller's share; the
 // stream is cancelled once the last sharer leaves, before its FETCH is sent if it can be.
 test("one of two fetch sharers aborting leaves the other's fetch", async () => {
-	const { quic, streams } = fakeSession();
+	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	const controller = new AbortController();
 	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: controller.signal });
 	const b = subscriber.fetchGroup(Path.from("room"), "video", 0);
 
-	await drainUntil(() => streams.length === 1);
+	await opened(0);
 	await answerTrackInfo(streams[0]);
-	await drainUntil(() => streams.length === 2);
+	await opened(1);
 	await streams[1].reading;
 
 	const cause = new Error("gone");
@@ -1153,7 +1147,7 @@ test.each([
 	["the TRACK_INFO", "track"],
 	["the FETCH", "fetch"],
 ] as const)("the last fetch sharer aborting during %s cancels it", async (_, stage) => {
-	const { quic, streams } = fakeSession();
+	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	const first = new AbortController();
@@ -1161,11 +1155,11 @@ test.each([
 	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: first.signal });
 	const b = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: second.signal });
 
-	await drainUntil(() => streams.length === 1);
+	await opened(0);
 	await streams[0].reading;
 	if (stage === "fetch") {
 		await answerTrackInfo(streams[0]);
-		await drainUntil(() => streams.length === 2);
+		await opened(1);
 		await streams[1].reading;
 	}
 
@@ -1191,15 +1185,15 @@ test.each([
 // last sharer left either revives it or starts a fresh one, never joins the cancelled one.
 test("a fetch after the last sharer left is never failed with the cancelled one", async () => {
 	for (let depth = 0; depth < 32; depth++) {
-		const { quic, streams } = fakeSession();
+		const { quic, streams, opened } = fakeSession();
 		const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 		const controller = new AbortController();
 		const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: controller.signal });
 		void a.catch(() => undefined);
-		await drainUntil(() => streams.length === 1);
+		await opened(0);
 		await answerTrackInfo(streams[0]);
-		await drainUntil(() => streams.length === 2);
+		await opened(1);
 		await streams[1].reading;
 
 		controller.abort(new Error("gone"));
@@ -1210,7 +1204,7 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 		// An empty-group FIN accepts whichever FETCH the late caller is waiting on.
 		if (streams.length > 2) {
 			await answerTrackInfo(streams[2]);
-			await drainUntil(() => streams.length === 4);
+			await opened(3);
 			await streams[3].reading;
 			streams[3].inbound.close();
 		} else {
@@ -1230,15 +1224,15 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 // instance's is evicted), a fresh one for the path opens its own FETCH rather than reading the
 // old one's, even while the old FETCH is still open.
 test("a fresh consume never joins a fetch an earlier one opened", async () => {
-	const { quic, streams } = fakeSession();
+	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 	const room = Path.from("room");
 
 	const old = subscriber.consume(room);
 	const fetch = old.track("video").fetchGroup(0);
-	await drainUntil(() => streams.length === 1);
+	await opened(0);
 	await answerTrackInfo(streams[0]);
-	await drainUntil(() => streams.length === 2);
+	await opened(1);
 	await streams[1].reading;
 	streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("head")]));
 	const group = await fetch;
@@ -1250,7 +1244,7 @@ test("a fresh consume never joins a fetch an earlier one opened", async () => {
 		.track("video")
 		.fetchGroup(0)
 		.catch(() => {});
-	await drainUntil(() => streams.length === 3);
+	await opened(2);
 
 	group.close();
 	fresh.close();
@@ -1260,13 +1254,13 @@ test("a fresh consume never joins a fetch an earlier one opened", async () => {
 // A reader leaving partway through a fetched group cancels the FETCH: the truncated group
 // must not end clean, as a FIN would make it read whole.
 test("the last reader leaving mid-response cancels the fetch", async () => {
-	const { quic, streams } = fakeSession();
+	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0);
-	await drainUntil(() => streams.length === 1);
+	await opened(0);
 	await answerTrackInfo(streams[0]);
-	await drainUntil(() => streams.length === 2);
+	await opened(1);
 	await streams[1].reading;
 
 	// One frame of the group: a zero timestamp delta, then the sized payload.
@@ -1285,10 +1279,10 @@ test("the last reader leaving mid-response cancels the fetch", async () => {
 // reader means the whole request has reached the wire, without a clock-based settle.
 test("consumes resolve the serving prefix and pin its epoch", async () => {
 	const version = Version.DRAFT_07;
-	const { quic, streams } = fakeSession();
+	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const announced = subscriber.announced();
-	await drainUntil(() => streams.length === 1);
+	await opened(0);
 	const peer = new Writer(
 		new WritableStream<Uint8Array>({
 			write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
@@ -1306,7 +1300,7 @@ test("consumes resolve the serving prefix and pin its epoch", async () => {
 		.track("video")
 		.info()
 		.catch(() => {});
-	await drainUntil(() => streams.length === 2);
+	await opened(1);
 	await streams[1].reading;
 	const reader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[1].written)), version);
 	expect(await reader.u53()).toBe(StreamId.Track);
@@ -1322,7 +1316,7 @@ test("consumes resolve the serving prefix and pin its epoch", async () => {
 		.track("video")
 		.info()
 		.catch(() => {});
-	await drainUntil(() => streams.length === 3);
+	await opened(2);
 	await streams[2].reading;
 	const freshReader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[2].written)), version);
 	await freshReader.u53();
