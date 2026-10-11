@@ -67,6 +67,8 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 carries an untimed track in both languages; lite-05/06 write send time
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - the moq.pro dashboard hosts the worklets and calls `assets()` after the release
+- [TS pair acquisition](/quest/m1/ts-pair-acquisition.md) - fix the clean baseline and prove the grader's controls before #5328 enables its scheduled hard gate
+- [Initial catalog routing](/quest/m1/initial-catalog-routing.md) - a usable fallback does not strand initial catalog acquisition with a spurious Unroutable
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [END_OF_TRACK placement](/quest/m1/ietf-end-of-track-placement.md) - END_OF_TRACK rides the upstream's Location, and Rust's header stops claiming END_OF_GROUP
 - [Plan: a public model](/quest/m1/model-public-surface.md) - every crate-private model item is made public or unnecessary, so a custom publisher or subscriber builds from the public model alone
