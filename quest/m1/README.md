@@ -62,7 +62,8 @@ session outcomes, and embedder refusals inside session outcomes.
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [lite-07 Live flag](/quest/m1/lite-live.md) - a separate `Live` field on lite-07 SUBSCRIBE, so merged floors never starve a subscriber; late lower groups build on it
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges in either order and replaces FETCH; relays fill misses by range, including over moq-transport
-- [Cross-relay bursts re-run](/quest/m1/cross-relay-bursts.md) - condition: the #4349 reporter re-runs their A/B/C comparison against current cdn.moq.pro
+- [Reproduce cross-node announce flapping](/quest/m1/cross-node-flapping.md) - a clean close reaches a client on another node as one retraction, checked by a 3+ relay drill on main
+- [Fronts abort instead of dropping](/quest/m1/front-abort-codes.md) - a closed or withdrawn broadcast ends subscriptions with Unroutable or Cancel, never internal error
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 carries an untimed track in both languages; lite-05/06 write send time
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - the moq.pro dashboard hosts the worklets and calls `assets()` after the release
