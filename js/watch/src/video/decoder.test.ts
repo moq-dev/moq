@@ -509,10 +509,28 @@ it("clears a video failure when a source without video is selected while hidden"
 		playback.enabled.set(false);
 		await microtasks();
 		expect(playback.decoder.out.error.peek()).toBe(failure);
-		// An audio-only broadcast advertises no video rendition.
+		// Another broadcast, one advertising no video rendition.
+		playback.republishCatalog();
 		playback.catalog.set({});
 		await microtasks();
 		expect(playback.decoder.out.error.peek()).toBeUndefined();
+	} finally {
+		playback.close();
+	}
+});
+
+it("keeps a video failure while the same rendition is muted by its publisher", async () => {
+	const playback = await guardedPlayback("legacy", []);
+	try {
+		const failure = new DOMException("invalid encoded video", "EncodingError");
+		playback.fail(failure);
+		await microtasks();
+		playback.catalog.set({});
+		await microtasks();
+		playback.switchRendition("video");
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		expect(playback.codecs).toBe(1);
 	} finally {
 		playback.close();
 	}

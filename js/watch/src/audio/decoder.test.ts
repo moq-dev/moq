@@ -204,9 +204,11 @@ async function play(initial: Delay) {
 	});
 	const catalog = new Signal<Catalog.Root>({ audio: { renditions: { audio } } });
 	const enabled = new Signal(true);
+	// The catalog broadcast's instance, identified by its `closed` handle.
+	const active = new Signal({ closed: {} });
 	const broadcast = new Signal<Broadcast | undefined>({
 		in: { enabled },
-		out: { catalog },
+		out: { catalog, active },
 		relativeBroadcast,
 	} as unknown as Broadcast);
 
@@ -240,6 +242,11 @@ async function play(initial: Delay) {
 		play,
 		// Remove the rendition from the catalog, then restore it.
 		remove: () => catalog.set({}),
+		// Point the player at another broadcast, one without audio.
+		leave: () => {
+			active.set({ closed: {} });
+			catalog.set({});
+		},
 		// Keep the rendition in the catalog with `enabled: false`, as a muted publisher does.
 		disable: () =>
 			catalog.set({
@@ -583,10 +590,27 @@ describe("fatal decoder errors", () => {
 			playback.decoding.set(false);
 			await microtasks();
 			expect(playback.error.peek()).toBe(failure);
-			// A video-only broadcast advertises no audio rendition.
-			playback.remove();
+			playback.leave();
 			await microtasks();
 			expect(playback.error.peek()).toBeUndefined();
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("keeps the failure while the same rendition is muted by its publisher", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const failure = new DOMException("invalid encoded audio", "EncodingError");
+			codecErrors.at(-1)?.(failure);
+			await microtasks();
+			playback.disable();
+			await microtasks();
+			playback.restore();
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			expect(playback.codecs()).toBe(1);
 		} finally {
 			playback.close();
 		}

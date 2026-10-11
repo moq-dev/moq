@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
-import { nextMedia, subscribeMedia } from "../media";
+import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
@@ -138,7 +138,7 @@ export class Decoder {
 	#instance?: Moq.Broadcast.Consumer["closed"];
 
 	#signals = new Effect();
-	#failed?: { instance: unknown; track: string; identity: string };
+	#failed?: Failure;
 
 	// The catalog fields that require a replacement subscription or decoder.
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
@@ -333,7 +333,8 @@ export class Decoder {
 
 		// A failure belongs to its source: selecting another clears it, even while muted or paused.
 		const failed = this.#failed;
-		if (failed && (failed.instance !== active?.closed || failed.track !== track || failed.identity !== key)) {
+		const selected = broadcast && failed ? effect.get(broadcast.out.active)?.closed : undefined;
+		if (failed && failureMoved(failed, { broadcast: selected, media: active?.closed, track, identity: key })) {
 			this.#failed = undefined;
 			this.#out.error.set(undefined);
 		}
@@ -353,7 +354,12 @@ export class Decoder {
 		effect.run((inner) => {
 			const error = inner.get(failure);
 			if (!error) return;
-			this.#failed = { instance: active.closed, track, identity: key };
+			this.#failed = {
+				broadcast: broadcast.out.active.peek()?.closed,
+				media: active.closed,
+				track,
+				identity: key,
+			};
 			this.#out.error.set(error);
 			attempt?.close();
 		});

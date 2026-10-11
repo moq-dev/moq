@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
-import { nextMedia, subscribeMedia } from "../media";
+import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import {
@@ -108,7 +108,7 @@ export class Decoder {
 
 	#signals = new Effect();
 	#selected?: DecoderTrack;
-	#failed?: { instance: unknown; track: string; identity: string };
+	#failed?: Failure;
 
 	#clearCurrentFrame(): void {
 		this.#out.frame.update((prev) => {
@@ -185,7 +185,8 @@ export class Decoder {
 
 		// A failure belongs to its source: selecting another clears it, even while disabled.
 		const failed = this.#failed;
-		if (failed && (failed.instance !== active?.closed || failed.track !== track || failed.identity !== key)) {
+		const selected = broadcast && failed ? effect.get(broadcast.out.active)?.closed : undefined;
+		if (failed && failureMoved(failed, { broadcast: selected, media: active?.closed, track, identity: key })) {
 			this.#failed = undefined;
 			this.#out.error.set(undefined);
 		}
@@ -319,7 +320,12 @@ export class Decoder {
 	#recordError(track: DecoderTrack, error: Error): void {
 		// An outgoing failure must not replace the selected rendition's failure latch.
 		if (track !== this.#selected && this.#selected?.error.peek()) return;
-		this.#failed = { instance: track.broadcast.closed, track: track.track, identity: track.identity };
+		this.#failed = {
+			broadcast: this.source.in.broadcast.peek()?.out.active.peek()?.closed,
+			media: track.broadcast.closed,
+			track: track.track,
+			identity: track.identity,
+		};
 		this.#out.error.set(error);
 	}
 
