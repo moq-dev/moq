@@ -1076,7 +1076,7 @@ where
 	}
 }
 
-/// Stop a refused data stream, propagating ID overflow to session teardown.
+/// Stop a refused data stream, propagating a session-scoped error to session teardown.
 fn stop_on_error<R: crate::transport::poll::RecvStream>(
 	reader: &mut Reader<R, Version>,
 	res: Result<(), Error>,
@@ -1084,8 +1084,9 @@ fn stop_on_error<R: crate::transport::poll::RecvStream>(
 	let Err(err) = res else {
 		return Ok(());
 	};
-	// An overflowing delta is a protocol violation, unlike an unsupported gap.
-	if matches!(err, Error::Decode(DecodeError::BoundsExceeded)) {
+	// An overflowing object ID is a protocol violation, unlike an unsupported gap or a
+	// malformed object that costs only its stream.
+	if matches!(err, Error::Session(_)) {
 		return Err(err);
 	}
 
@@ -1332,11 +1333,13 @@ mod tests {
 	use crate::model::ProduceTest;
 
 	#[test]
-	fn object_overflow_is_session_fatal_but_an_unsupported_gap_is_not() {
+	fn object_overflow_is_session_fatal_but_a_stream_error_is_not() {
 		let mut reader = Reader::new(crate::lite::test_transport::PendingRecv, Version::Draft22);
-		let err = stop_on_error(&mut reader, Err(Error::Decode(DecodeError::BoundsExceeded))).unwrap_err();
+		let err = stop_on_error(&mut reader, Err(SessionError::ProtocolViolation.into())).unwrap_err();
 		assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation);
 		assert!(stop_on_error(&mut reader, Err(Error::Unsupported)).is_ok());
+		// A malformed property overflows too, but costs only its stream.
+		assert!(stop_on_error(&mut reader, Err(Error::Decode(DecodeError::BoundsExceeded))).is_ok());
 	}
 
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {

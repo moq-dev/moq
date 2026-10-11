@@ -2990,7 +2990,7 @@ where
 			}
 			Err(
 				err @ (Error::Unsupported
-				| Error::Decode(DecodeError::BoundsExceeded)
+				| Error::Session(SessionError::ProtocolViolation)
 				| Error::Decode(DecodeError::MessageTooLarge { .. })),
 			) => {
 				let _ = producer.abort(err.clone());
@@ -7466,7 +7466,7 @@ fn next_object_id(prior: Option<u64>, delta: u64, start: u64) -> Result<u64, Err
 		Some(prior) => prior
 			.checked_add(delta)
 			.and_then(|id| id.checked_add(1))
-			.ok_or(Error::Decode(crate::coding::DecodeError::BoundsExceeded))?,
+			.ok_or(Error::Session(SessionError::ProtocolViolation))?,
 	};
 
 	let expected = prior.map_or(start, |prior| prior.saturating_add(1));
@@ -7525,7 +7525,10 @@ mod object_id_tests {
 	/// rather than something to wrap.
 	#[test]
 	fn rejects_an_overflow() {
-		assert!(next_object_id(Some(u64::MAX), 0, 0).is_err());
+		assert!(matches!(
+			next_object_id(Some(u64::MAX), 0, 0),
+			Err(Error::Session(SessionError::ProtocolViolation))
+		));
 	}
 }
 
@@ -8075,7 +8078,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 		let result = h.subscriber.clone().recv_group(&mut stream).await;
 		assert!(
-			matches!(result, Err(Error::Decode(DecodeError::BoundsExceeded))),
+			matches!(result, Err(Error::Session(crate::SessionError::ProtocolViolation))),
 			"{result:?}"
 		);
 	}
