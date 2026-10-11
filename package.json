@@ -3,10 +3,10 @@
 	"version": "0.0.0",
 	"devDependencies": {
 		"@babel/parser": "^8.0.6",
-		"@biomejs/biome": "^2.5.14",
+		"@biomejs/biome": "^2.5.15",
 		"concurrently": "^10.0.5",
 		"markdown-extensions": "^2.0.0",
-		"publint": "^0.3.24",
+		"publint": "^0.3.25",
 		"remark-cli": "^12.0.1",
 		"remark-frontmatter": "^5.0.0",
 		"remark-lint-list-item-indent": "^4.0.1",

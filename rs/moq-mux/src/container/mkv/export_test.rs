@@ -42,7 +42,7 @@ async fn export_header_roundtrip_vp9_opus() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream);
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream);
 
 	// First `next()` should give us the header (EBML + Segment-start + Info + Tracks).
 	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -270,7 +270,7 @@ async fn export_header_roundtrip_mp3() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream);
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream);
 
 	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -349,7 +349,7 @@ async fn export_waits_for_catalog_before_header() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap();
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream);
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream);
 
 	// next() must remain pending (timing out), not surface a "no catalog
 	// snapshot" error from a vacuously-ready empty track set.
@@ -385,7 +385,7 @@ async fn export_derives_video_geometry_before_header() {
 		.unwrap();
 	live.track.finish().unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
 	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
@@ -421,7 +421,7 @@ async fn export_emits_blocks_for_each_frame() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream)
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream)
 		// Use per-frame clustering so each frame is observable as its own
 		// Cluster chunk; batching is exercised in a dedicated test below.
 		.with_fragment_duration(std::time::Duration::ZERO)
@@ -501,7 +501,7 @@ async fn export_rejects_cmaf_track() {
 		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
 	let result = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out");
@@ -526,7 +526,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	live.track.finish().unwrap();
 	live.catalog.finish().unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await)
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::ZERO);
 	let mut exported: Vec<u8> = Vec::new();
 
@@ -662,7 +662,7 @@ async fn export_fragment_duration_batches_blocks() {
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
 		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream)
+	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream)
 		.with_fragment_duration(std::time::Duration::from_secs(2))
 		.with_max_delay(RECORDING_MAX_DELAY);
 	let mut exported: Vec<u8> = Vec::new();
@@ -705,7 +705,7 @@ async fn zero_fragment_duration_emits_without_successor() {
 	let mut live = Live::avc3();
 	live.track.write(video_frame(0, true)).unwrap();
 
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await)
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::ZERO);
 	let header = chunk_now(&mut exporter).await;
 	let cluster = chunk_now(&mut exporter).await;
@@ -719,7 +719,7 @@ async fn reconfigured_zero_duration_drains_open_cluster() {
 	live.track.write(video_frame(33_000, false)).unwrap();
 
 	// Default per-GOP clustering: both frames land in one open cluster.
-	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
 	let header = chunk_now(&mut exporter).await;
 	tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next())
 		.await

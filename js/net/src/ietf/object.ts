@@ -371,13 +371,7 @@ export class Frame {
 		// and imquic sends both.
 		if (status === GROUP_END) return new Frame();
 
-		if (flags.hasEnd) {
-			// Empty frame
-			if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
-		} else if (status === 0) {
-			// TODO status === 0 should be an empty frame, but moq-rs seems to be sending it incorrectly on group end.
-			return new Frame();
-		}
+		if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
 
 		throw new Error(`Unsupported object status: ${status}`);
 	}
