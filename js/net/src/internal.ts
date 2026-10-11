@@ -9,7 +9,7 @@ import type { Dispose, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
-import type { Route } from "./hop.ts";
+import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
@@ -258,4 +258,33 @@ export function spreadHash(path: string, hops: readonly bigint[]): bigint {
 		}
 	}
 	return hash;
+}
+
+/** Covering prefixes, most specific first, including the empty root. */
+export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
+	for (;;) {
+		yield path;
+		if (path === "") return;
+		const slash = path.lastIndexOf("/");
+		path = (slash < 0 ? "" : path.slice(0, slash)) as Path.Valid;
+	}
+}
+
+/** Prefer newer epochs, identified publishers, then lower static cost. */
+export function compareRoutes(a: Route, b: Route): number {
+	if (a.epoch !== b.epoch) {
+		if (a.epoch === undefined) return 1;
+		if (b.epoch === undefined) return -1;
+		return a.epoch > b.epoch ? -1 : 1;
+	}
+	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
+}
+
+/** Order same-prefix routes by preference, hop count, and the origin's stable spread hash. */
+export function compareRouteCandidates(path: Path.Valid, a: Route, b: Route): number {
+	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+	if (order !== 0) return order;
+	const ha = spreadHash(path, a.hops);
+	const hb = spreadHash(path, b.hops);
+	return ha < hb ? -1 : ha > hb ? 1 : 0;
 }

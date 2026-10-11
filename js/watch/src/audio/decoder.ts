@@ -491,7 +491,8 @@ export class Decoder {
 				await ring.wait(frame.timestamp as Time.Micro);
 
 				const chunk = new EncodedAudioChunk({
-					type: frame.keyframe ? "key" : "delta",
+					// WebCodecs audio chunks are key even inside a MoQ group.
+					type: "key",
 					data: frame.payload,
 					timestamp: frame.timestamp,
 				});
@@ -597,7 +598,8 @@ export class Decoder {
 				if (decoder.state === "closed") break;
 				decoder.decode(
 					new EncodedAudioChunk({
-						type: frame.keyframe ? "key" : "delta",
+						// WebCodecs audio chunks are key even inside a MoQ group.
+						type: "key",
 						data: frame.payload,
 						timestamp: frame.timestamp,
 					}),

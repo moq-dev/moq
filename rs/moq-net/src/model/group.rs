@@ -156,7 +156,7 @@ pub(crate) struct GroupState {
 	// written so far.
 	pub(crate) cache: u64,
 
-	// Mirrors `cache` into the track's shared cache pool, so the group's bytes count
+	// Bills payload and frame-slot growth to the track's shared cache pool, so its bytes count
 	// against the byte budget tracks evict toward.
 	charge: cache::Charge,
 
@@ -316,6 +316,14 @@ impl GroupState {
 			|| self.cache.saturating_add(extra_bytes) > MAX_CACHE_BYTES
 	}
 
+	/// Reserve the next completed frame, returning growth not covered by the fixed overhead.
+	fn reserve_frame(&mut self) -> u64 {
+		let before = self.frames.capacity().saturating_sub(FRAME_SLOTS);
+		self.frames.reserve(1);
+		let after = self.frames.capacity().saturating_sub(FRAME_SLOTS);
+		((after - before) * size_of::<Frame>()) as u64
+	}
+
 	/// Charge the in-flight frame's bytes written since its last charge, as a write access.
 	///
 	/// Returns the coarse tick it stamped, like [`cache::Charge::add`].
@@ -328,12 +336,17 @@ impl GroupState {
 			None => 0,
 		};
 		self.cache += written;
-		self.charge.add(written)
+		let slots = if self.partial.is_some() {
+			self.reserve_frame()
+		} else {
+			0
+		};
+		self.charge.add(written + slots)
 	}
 
 	/// Drop the cached frames (and any in-flight tail) and release their pool charge.
 	fn release(&mut self) {
-		self.frames.clear();
+		self.frames = VecDeque::new();
 		self.partial = None;
 		self.cache = 0;
 		self.charge.clear();
@@ -567,7 +580,8 @@ impl Producer {
 			return Err(self.abort_too_large(state));
 		}
 		state.cache += size;
-		let now = state.charge.add(size);
+		let slots = state.reserve_frame();
+		let now = state.charge.add(size + slots);
 		state.frames.push_back(Frame { timestamp, payload });
 		state.next_index = next_index;
 		state.committed = state.next_index;
@@ -630,7 +644,8 @@ impl Producer {
 			frame.timestamp = on_track(frame.timestamp, self.track.timescale).expect("timestamp scale checked above");
 			let size = frame.payload.len() as u64;
 			state.cache += size;
-			now = state.charge.add(size);
+			let slots = state.reserve_frame();
+			now = state.charge.add(size + slots);
 			state.stamp(frame.timestamp);
 			latest = frame.timestamp;
 			state.frames.push_back(frame);
@@ -1974,6 +1989,50 @@ mod test {
 		drop(producer);
 		assert!(!demand.is_used());
 		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Dropped))));
+	}
+
+	#[test]
+	fn frame_capacity_growth_is_charged_and_released() {
+		for mode in 0..3 {
+			let pool = cache::Pool::unbounded();
+			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+			let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
+			for _ in 0..FRAME_SLOTS {
+				group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap();
+			}
+			let before = pool.used();
+			match mode {
+				0 => group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap(),
+				1 => {
+					let mut buffer = frame::Buffer::<1>::new();
+					buffer
+						.push(Frame {
+							timestamp: Some(Timestamp::ZERO),
+							payload: bytes::Bytes::new(),
+						})
+						.unwrap();
+					group.write_frames(&mut buffer).unwrap();
+				}
+				_ => {
+					let frame = group
+						.create_frame(frame::Info {
+							size: 0,
+							timestamp: Some(Timestamp::ZERO),
+						})
+						.unwrap();
+					frame.finish().unwrap();
+				}
+			}
+			let capacity = group.state.read().frames.capacity();
+			assert!(capacity > FRAME_SLOTS);
+			assert_eq!(
+				pool.used() - before,
+				((capacity - FRAME_SLOTS) * size_of::<Frame>()) as u64
+			);
+			let consumer = group.consume();
+			group.abort(Error::Cancel).unwrap();
+			assert_eq!(consumer.cursor.state.read().frames.capacity(), 0);
+		}
 	}
 
 	/// [`FRAME_SLOTS`] is std's rounding, not ours, so measure it: a larger real value
