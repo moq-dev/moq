@@ -7,9 +7,9 @@ description: TOML reference for moq-relay
 
 `moq-relay relay.toml`. Every key is also a CLI flag and environment variable
 that joins the section and key: `listen.tls.cert` is `--listen-tls-cert` /
-`MOQ_LISTEN_TLS_CERT`. Two exceptions: `listen.bind` is spelled `--listen` /
-`MOQ_LISTEN`, and `listen.extensions` is TOML only. Precedence is CLI, then
-env, then file, then defaults.
+`MOQ_LISTEN_TLS_CERT`. The exceptions: `listen.bind` is spelled `--listen` /
+`MOQ_LISTEN`, and `listen.extensions` and `connect.extensions` are TOML only.
+Precedence is CLI, then env, then file, then defaults.
 `moq-relay --help` lists every flag.
 
 ## \[listen]
@@ -168,6 +168,8 @@ tls.cert = "relay.pem"               # Present a client certificate (mTLS to pee
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
+extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
+extensions.solicit = false           # Decline MoQ Solicit. Both default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
