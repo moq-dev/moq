@@ -309,7 +309,7 @@ in
   # User-facing flake output. Bundles the plugin with wrapped gstreamer
   # tools so a single `nix shell .#moq-gst` gives you gst-inspect-1.0 /
   # gst-launch-1.0 that already know about the moq plugin plus the usual
-  # base/good/bad plugin set, matching the "install a plugin and the
+  # base/good/bad/ugly/libav plugin set, matching the "install a plugin and the
   # standard tools find it" UX. `nix shell` (unlike nix-shell / nix
   # develop) doesn't run nixpkgs setup-hooks, so a bare lib/gstreamer-1.0
   # directory in $out isn't enough on its own.
@@ -323,6 +323,8 @@ in
         "${final.gst_all_1.gst-plugins-base}/lib/gstreamer-1.0"
         "${final.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0"
         "${final.gst_all_1.gst-plugins-bad}/lib/gstreamer-1.0"
+        "${final.gst_all_1.gst-plugins-ugly}/lib/gstreamer-1.0"
+        "${final.gst_all_1.gst-libav}/lib/gstreamer-1.0"
       ];
     in
     final.symlinkJoin {
@@ -335,6 +337,10 @@ in
         for tool in gst-inspect-1.0 gst-launch-1.0; do
           makeWrapper "${final.gst_all_1.gstreamer.bin}/bin/$tool" "$out/bin/$tool" \
             --suffix GST_PLUGIN_SYSTEM_PATH_1_0 : "${pluginPaths}"
+        done
+        export GST_REGISTRY="$TMPDIR/gst-registry.bin"
+        for element in moq x264enc avenc_aac avdec_h264; do
+          $out/bin/gst-inspect-1.0 "$element" > /dev/null
         done
       '';
       meta.mainProgram = "gst-inspect-1.0";
