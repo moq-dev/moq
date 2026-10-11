@@ -127,6 +127,20 @@ test("createTrack answers a queued request", async () => {
 	expect(await pulled).toBeUndefined();
 });
 
+test("createTrack with invalid info rejects the queued request it answers", async () => {
+	const broadcast = new BroadcastProducer();
+	const pulled = wireOf(broadcast).requested();
+	const subscriber = broadcast.track("media").subscribe();
+
+	expect(() => broadcast.createTrack("media", { priority: 256 })).toThrow();
+	expect(await subscriber.closed).toBeInstanceOf(Error);
+
+	// The refused request no longer holds the name.
+	broadcast.createTrack("media");
+	broadcast.close();
+	expect(await pulled).toBeUndefined();
+});
+
 test("createTrack does not take over a request a handler already pulled", async () => {
 	const broadcast = new BroadcastProducer();
 	const pulled = wireOf(broadcast).requested();

@@ -244,19 +244,19 @@ export class Request {
 
 	/**
 	 * Accept the request, committing the track's immutable {@link Info}. Throws, rejecting the
-	 * request, if the broadcast cannot remember another track name's sequences.
+	 * request, if `info` is invalid or the broadcast cannot remember another track name's
+	 * sequences.
 	 */
 	accept(info: Partial<Info> = {}): Producer {
 		this.#pending.delete(this);
-		let sequence: TrackSequence;
 		try {
-			sequence = this.#sequences.admit(this.name);
+			bindProducerSequence(this.#producer, this.#sequences.admit(this.name));
+			return this.#producer.accept(info);
 		} catch (err) {
+			// Refused, so its subscribers see the error instead of waiting on an open request.
 			this.#producer.close(err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
-		bindProducerSequence(this.#producer, sequence);
-		return this.#producer.accept(info);
 	}
 
 	/** Reject the request, closing the track optionally with an error. */
