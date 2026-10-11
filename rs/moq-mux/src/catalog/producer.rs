@@ -1208,6 +1208,8 @@ mod test {
 			config.role = role;
 			config.lang = Some("es-419".into());
 			config.label = Some("Español".into());
+			config.jitter = Some(std::time::Duration::from_millis(7));
+			config.delay = Some(std::time::Duration::from_millis(11));
 			config.container = Container::Loc;
 			let mut catalog = hang::Catalog::<()>::default();
 			catalog.text.insert("text", config.clone()).unwrap();

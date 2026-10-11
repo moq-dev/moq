@@ -139,3 +139,20 @@ test("custom roles map only when the codec identifies text", () => {
 	const text = toHang({ tracks: [{ name: "text", packaging: "legacy", role: "commentary", codec: "utf8" }] });
 	expect(text.text?.renditions.text?.role).toBe("commentary");
 });
+
+test("unsupported optional text packaging keeps playable audio and video", () => {
+	const tracks = [
+		{ name: "video", packaging: "loc", role: "video", codec: "vp09.00.10.08" },
+		{ name: "audio", packaging: "loc", role: "audio", codec: "opus", samplerate: 48000, channelConfig: "2" },
+	];
+	for (const role of ["caption", "subtitle", "commentary"]) {
+		const catalog = toHang({ tracks: [...tracks, { name: "text", packaging: "future", role, codec: "vtt" }] });
+		expect(catalog.video?.renditions.video?.codec).toBe("vp09.00.10.08");
+		expect(catalog.audio?.renditions.audio?.codec).toBe("opus");
+		expect(catalog.text).toBeUndefined();
+	}
+});
+
+test("a text track with supported packaging still requires its codec", () => {
+	expect(() => toHang({ tracks: [{ name: "text", packaging: "loc", role: "caption" }] })).toThrow("missing codec");
+});

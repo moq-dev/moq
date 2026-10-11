@@ -35,6 +35,10 @@ pub enum Error {
 	#[error("MSF audio track {0:?} missing codec")]
 	MissingAudioCodec(String),
 
+	/// The track's packaging cannot be converted without discarding it.
+	#[error("MSF track {name:?} has unsupported packaging {packaging:?}")]
+	UnsupportedPackaging { name: String, packaging: String },
+
 	#[error("MSF text track {0:?} missing codec")]
 	MissingTextCodec(String),
 

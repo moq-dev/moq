@@ -119,7 +119,8 @@ export function toHang(msf: Msf.Catalog): Catalog.Root {
 		) {
 			if (!track.codec) throw new Error(`MSF text track ${track.name} missing codec`);
 			const info = toContainer(track);
-			if (!info) throw new Error(`MSF text track ${track.name} has unsupported packaging`);
+			// A player selects usable renditions; an optional unsupported track cannot invalidate A/V.
+			if (!info) continue;
 			textRenditions[track.name] = {
 				format: track.codec,
 				role: track.role,

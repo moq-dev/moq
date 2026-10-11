@@ -95,9 +95,10 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 /// Each MSF track is mapped onto a `hang::Catalog` rendition based on its [`moq_msf::Role`]:
 /// video tracks become [`VideoConfig`] entries, audio tracks become [`AudioConfig`] entries.
 /// Caption and subtitle tracks become text renditions; custom roles do too when their codec
-/// identifies text. Tracks with no role, sign language, audio description, other custom roles,
-/// or with packaging other than [`moq_msf::Packaging::Loc`],
-/// [`moq_msf::Packaging::Cmaf`], or [`moq_msf::Packaging::Legacy`] are skipped with a warning.
+/// identifies text. Unsupported text packaging is an error so a gateway cannot silently lose it.
+/// Tracks with no role, sign language, audio description, other custom roles, and audio/video
+/// with packaging other than [`moq_msf::Packaging::Loc`], [`moq_msf::Packaging::Cmaf`], or
+/// [`moq_msf::Packaging::Legacy`] are skipped with a warning.
 ///
 /// [`moq_msf::Packaging::Loc`] and [`moq_msf::Packaging::Legacy`] map to their own containers:
 /// they carry the same codec payload but frame it differently.
@@ -147,14 +148,16 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Catal
 				}
 			},
 			moq_msf::Role::Caption | moq_msf::Role::Subtitle => {
-				if let Some(config) = text_config_from_msf(track)? {
-					catalog.text.renditions.insert(track.name.clone(), config);
-				}
+				catalog
+					.text
+					.renditions
+					.insert(track.name.clone(), text_config_from_msf(track)?);
 			}
 			moq_msf::Role::Unknown(_) if matches!(track.codec.as_deref(), Some("vtt" | "ttml" | "utf8")) => {
-				if let Some(config) = text_config_from_msf(track)? {
-					catalog.text.renditions.insert(track.name.clone(), config);
-				}
+				catalog
+					.text
+					.renditions
+					.insert(track.name.clone(), text_config_from_msf(track)?);
 			}
 			other => {
 				tracing::warn!(track = %track.name, role = %other, "skipping MSF track with unsupported role");
@@ -168,9 +171,8 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Catal
 /// Decode the [`Container`] for a track based on its packaging and `init_data`.
 ///
 /// Returns `Ok(None)` when the packaging is unsupported (e.g. `MediaTimeline`,
-/// `EventTimeline`, or an unknown variant). The caller skips these tracks with a warning
-/// rather than failing the whole catalog, since unsupported packaging is a downstream
-/// pipeline limitation, not a malformed catalog.
+/// `EventTimeline`, or an unknown variant). Text conversion refuses it to prevent silent
+/// loss; audio/video callers retain their existing skip policy.
 ///
 /// Returns `Err` when a CMAF track is missing or has malformed `init_data`. This is an
 /// intentional hard error: a CMAF rendition is unusable without its `ftyp+moov` init
@@ -221,10 +223,12 @@ fn legacy_description(track: &moq_msf::Track) -> Result<Option<bytes::Bytes>> {
 	}
 }
 
-fn text_config_from_msf(track: &moq_msf::Track) -> Result<Option<TextConfig>> {
-	let Some(container) = container_from_msf(track)? else {
-		return Ok(None);
-	};
+fn text_config_from_msf(track: &moq_msf::Track) -> Result<TextConfig> {
+	// A gateway must not silently delete text that its output is expected to preserve.
+	let container = container_from_msf(track)?.ok_or_else(|| Error::UnsupportedPackaging {
+		name: track.name.clone(),
+		packaging: track.packaging.to_string(),
+	})?;
 	let codec = track
 		.codec
 		.as_deref()
@@ -237,7 +241,7 @@ fn text_config_from_msf(track: &moq_msf::Track) -> Result<Option<TextConfig>> {
 	config.container = container;
 	config.jitter = track.jitter;
 	config.delay = track.delay;
-	Ok(Some(config))
+	Ok(config)
 }
 
 fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> {
@@ -483,6 +487,27 @@ mod test {
 		track.bitrate = Some(128_000);
 		track.render_group = Some(1);
 		track
+	}
+
+	#[test]
+	fn unsupported_text_packaging_is_refused_instead_of_lost() {
+		for packaging in [
+			moq_msf::Packaging::MediaTimeline,
+			moq_msf::Packaging::EventTimeline,
+			moq_msf::Packaging::Unknown("future".into()),
+		] {
+			for role in [
+				moq_msf::Role::Caption,
+				moq_msf::Role::Subtitle,
+				moq_msf::Role::Unknown("commentary".into()),
+			] {
+				let mut track = moq_msf::Track::new("text", packaging.clone());
+				track.role = Some(role);
+				track.codec = Some("vtt".into());
+				let error = from_msf(&moq_msf::Catalog::<()>::new(vec![track])).unwrap_err();
+				assert!(matches!(error, crate::Error::Msf(Error::UnsupportedPackaging { .. })));
+			}
+		}
 	}
 
 	#[test]
