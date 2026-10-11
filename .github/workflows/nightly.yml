@@ -325,6 +325,7 @@ jobs:
         run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}
       - name: Audio quality
+        if: ${{ !cancelled() }}
         run: nix develop --command just test audio-quality --enforce --capture
         shell: bash -leo pipefail {0}
         env:

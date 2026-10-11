@@ -1,5 +1,5 @@
 /** Run the publisher backlog sweep inside Chromium, including a timer-starvation assertion. */
-import { chromium } from "playwright";
+import { type Browser, chromium } from "playwright";
 
 const build = await Bun.build({ entrypoints: [`${import.meta.dir}/serve-browser-entry.ts`], target: "browser" });
 if (!build.success) throw new AggregateError(build.logs, "browser benchmark failed to bundle");
@@ -13,8 +13,9 @@ const server = Bun.serve({
 					headers: { "Content-Type": "text/html" },
 				}),
 });
-const browser = await chromium.launch({ channel: "chromium", headless: true });
+let browser: Browser | undefined;
 try {
+	browser = await chromium.launch({ channel: "chromium", headless: true });
 	const page = await browser.newPage();
 	page.on("pageerror", (error) => console.log("browser error:", error));
 	await page.goto(`http://localhost:${server.port}`);
@@ -54,6 +55,6 @@ try {
 					throw new Error(`${protocol} starved browser timers for the entire backlog`);
 			}
 } finally {
-	await browser.close();
 	server.stop(true);
+	await browser?.close();
 }
