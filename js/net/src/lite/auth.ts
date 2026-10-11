@@ -134,11 +134,11 @@ export class AuthError {
 
 	static async #decode(r: Reader): Promise<AuthError> {
 		const code = await r.u53();
-		const size = await r.u53();
-		if (size > MAX_REASON) {
+		const size = await r.u62();
+		if (size > BigInt(MAX_REASON)) {
 			throw new ProtocolViolation("AUTH_ERROR reason exceeds 8,192 bytes");
 		}
-		const bytes = await r.read(size);
+		const bytes = await r.read(Number(size));
 		try {
 			return new AuthError(code, decodeUtf8(bytes));
 		} catch (cause) {

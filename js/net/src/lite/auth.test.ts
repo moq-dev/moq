@@ -166,14 +166,14 @@ async function assertSessionViolation(reader: Reader) {
 }
 
 test("malformed AUTH_ERROR reasons close their session", async () => {
-	for (const reason of [new Uint8Array([0xff]), new Uint8Array(8193).fill(0x61)]) {
+	for (const reason of [new Uint8Array([0xff]), new Uint8Array(8193).fill(0x61), 1n << 53n]) {
 		const reader = await roundTrip(async (w) => {
 			await Message.encode(
 				w,
 				async (body) => {
 					await body.u53(SessionCode.Unauthorized);
-					await body.u53(reason.byteLength);
-					await body.write(reason);
+					await body.u62(typeof reason === "bigint" ? reason : BigInt(reason.byteLength));
+					if (typeof reason !== "bigint") await body.write(reason);
 				},
 				{ id: AuthError.id },
 			);
