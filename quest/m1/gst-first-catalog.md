@@ -39,11 +39,15 @@ Decided 2026-10-10, planning the follow-ups of moqsrc's restart work
 - A pad admitted while a run starts must not miss the gate. `request_new_pad`
   counts the admission under the control lock before `add_pad`, so
   `start_session` can run in between and miss the pad in `sink_pads`, and a
-  sibling can publish the first snapshot before the pad confirms. So the
-  reservation follows the admission: `start_session` also reserves one slot
-  per outstanding admission (`control.admissions`), a mid-run request
-  reserves when it counts its admission, and `confirm_admission` hands that
-  slot to the pad while `cancel_admission` drops it.
+  sibling can publish the first snapshot before the pad confirms. So key the
+  slot by pad, not by a count: each pad's lifecycle holds at most one
+  reservation, and filling it is idempotent. The control state tracks
+  admitted-but-unconfirmed pads instead of only `control.admissions`;
+  `start_session` fills the slot of every pad in `sink_pads` or that set, a
+  mid-run request fills it when it is admitted, and `cancel_admission` or
+  release drops it. A pad already visible in `sink_pads`, or whose CAPS
+  arrived through a reentrant `child_added` handler, is then never reserved
+  twice.
 
 Decided 2026-10-11 by the maintainer, in #5189:
 
@@ -71,8 +75,9 @@ buffer publishes one first catalog listing both; a pad that is released,
 ends without caps, fails its caps, or ends after caps but before its config
 lets the first catalog publish while a sibling streams; a pad requested while
 the run starts is listed even when a sibling resolves before that pad
-confirms; and a `moqsrc` following that `moqsink` across a restart keeps
-both pads without EOS.
+confirms, and reserved once even when it is already in `sink_pads`; and a
+`moqsrc` following that `moqsink` across a restart keeps both pads without
+EOS.
 
 ## Related
 
