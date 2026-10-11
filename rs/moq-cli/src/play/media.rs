@@ -79,11 +79,6 @@ impl<O: Output> Media<O> {
 					let Some(event) = event else { return Ok(()) };
 					let announce = match event {
 						AnnounceEvent::Start(announce) | AnnounceEvent::Restart(announce) => announce,
-						// The same instance, which what is playing rides out. With nothing
-						// playing, it is the path served again after a gap the announcements
-						// folded away (a covering route of one epoch arriving as the exact one
-						// went), so play it.
-						AnnounceEvent::Update(announce) if playing.is_none() => announce,
 						AnnounceEvent::Update(_) => continue,
 						AnnounceEvent::End(_) => {
 							tracing::info!(broadcast = %self.broadcast, "offline, waiting for it to return");
@@ -774,10 +769,10 @@ mod tests {
 	}
 
 	/// A covering route of the same epoch that arrives as the exact route goes, both
-	/// before the player looks, reaches it as an update: the announcements never show
-	/// the path unserved. A player with nothing playing still plays it.
+	/// before the player looks, is the path served again after a gap. A player with
+	/// nothing playing plays it.
 	#[tokio::test]
-	async fn an_update_while_idle_plays_the_route() {
+	async fn a_covering_route_after_a_gap_plays_while_idle() {
 		tokio::time::pause();
 
 		const OLD: f32 = 0.25;
@@ -815,6 +810,53 @@ mod tests {
 			"the idle player never played the covering route"
 		);
 		drop((served, served_catalog));
+	}
+
+	/// The exact route goes while the old run still holds its delay, and a covering
+	/// route of the same epoch takes over. Playback reaches the covering route, whether
+	/// the announcements show the gap (a restart) or the origin rides it out (the same
+	/// run carrying on).
+	#[tokio::test]
+	async fn a_handoff_to_a_covering_route_plays_on_while_draining() {
+		tokio::time::pause();
+
+		const OLD: f32 = 0.25;
+		const NEW: f32 = 0.5;
+		let origin = moq_tokio::origin::spawn();
+		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+
+		// One instance, served by the exact route and mirrored behind a covering one.
+		let (exact, exact_catalog, mut old) = publish(&origin, route.clone());
+		let mut mirror = moq_net::broadcast::Info::new().produce();
+		let mirror_catalog = catalog::Producer::new(&mut mirror, Default::default()).unwrap();
+		let mut copy = rendition(&mirror, &mirror_catalog, "audio");
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(500), recorder.clone()).run());
+		for index in 0..50 {
+			old.write(packet(index, OLD)).unwrap();
+			copy.write(packet(index, OLD)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+
+		exact.unannounce();
+		let pool = origin.dynamic("", route).unwrap();
+		let consumer = mirror.consume();
+		tokio::spawn(async move {
+			while let Ok(request) = pool.requested_broadcast().await {
+				request.accept(consumer.clone());
+			}
+		});
+		for index in 50..60 {
+			copy.write(packet(index, NEW)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+
+		settle(player, &recorder).await;
+		assert!(
+			played(&recorder, NEW).0 > Duration::ZERO,
+			"the player never reached the covering route"
+		);
+		drop((mirror, mirror_catalog, copy, exact, exact_catalog, old));
 	}
 
 	/// Re-pricing the same instance is an update, which playback rides through on

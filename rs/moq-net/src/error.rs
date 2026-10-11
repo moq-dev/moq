@@ -189,6 +189,11 @@ pub enum StreamError {
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 
+	/// The grant does not cover this subscription, fetch, or announcement, or no longer
+	/// does. Unlike [`SessionError::Unauthorized`], the session stays up.
+	#[error("unauthorized")]
+	Unauthorized,
+
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	#[error("app code={0}")]
 	App(u16),
@@ -221,6 +226,7 @@ impl StreamError {
 			Self::FrameTooLarge => 0x38,
 			Self::TimestampMismatch => 0x39,
 			Self::NotFetchable => 0x3a,
+			Self::Unauthorized => 0x3b,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -253,6 +259,7 @@ impl StreamError {
 			0x38 => Self::FrameTooLarge,
 			0x39 => Self::TimestampMismatch,
 			0x3a => Self::NotFetchable,
+			0x3b => Self::Unauthorized,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -598,6 +605,8 @@ impl From<&Error> for StreamError {
 			Error::FrameTooLarge => Self::FrameTooLarge,
 			Error::GroupTooLarge => Self::GroupTooLarge,
 			Error::TimestampMismatch => Self::TimestampMismatch,
+			// Losing access ends this stream, not the session.
+			Error::Unauthorized => Self::Unauthorized,
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
 			// Our own parse failure is, from the peer's side, a malformed track.
@@ -612,8 +621,7 @@ impl From<&Error> for StreamError {
 			// A stream refused on its own is not a session failure, so it does not claim
 			// SESSION_CLOSED; there is no stream-scoped PROTOCOL_VIOLATION to send instead.
 			Error::UnexpectedStream => Self::Internal,
-			Error::Unauthorized
-			| Error::Version
+			Error::Version
 			| Error::UnknownAlpn(_)
 			| Error::TooManyParameters
 			| Error::GoawayTimeout
@@ -704,6 +712,7 @@ mod tests {
 			StreamError::FrameTooLarge,
 			StreamError::TimestampMismatch,
 			StreamError::NotFetchable,
+			StreamError::Unauthorized,
 			StreamError::App(7),
 		];
 		for err in registered {
@@ -722,6 +731,7 @@ mod tests {
 			(StreamError::FrameTooLarge, 0x38),
 			(StreamError::TimestampMismatch, 0x39),
 			(StreamError::NotFetchable, 0x3a),
+			(StreamError::Unauthorized, 0x3b),
 		] {
 			assert_eq!(err.to_code(), code, "{err:?} moved off its assigned code");
 		}
@@ -761,7 +771,7 @@ mod tests {
 
 		// Registered stream codes survive the hop unchanged.
 		for code in [
-			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a,
+			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
 		] {
 			let relayed = StreamError::from(&Error::from(StreamError::from_code(code)));
 			assert_eq!(relayed.to_code(), code, "stream {code:#x} changed across a relay");
