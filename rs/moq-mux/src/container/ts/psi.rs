@@ -262,6 +262,13 @@ impl<'a> PesStart<'a> {
 		anyhow::ensure!(pts_flag || !dts_flag, "PES DTS without a PTS");
 		let header_len = usize::from(payload[8]);
 		let optional = payload.get(9..9 + header_len).context("PES header truncated")?;
+		let data_len = match packet_len {
+			0 => None,
+			len => Some(
+				len.checked_sub(3 + header_len)
+					.context("PES packet length shorter than its header")?,
+			),
+		};
 
 		let (pts, dts) = match (pts_flag, dts_flag) {
 			(false, _) => (None, None),
@@ -275,9 +282,7 @@ impl<'a> PesStart<'a> {
 			stream_id,
 			pts,
 			dts,
-			data_len: Some(packet_len)
-				.filter(|&len| len != 0)
-				.and_then(|len| len.checked_sub(3 + header_len)),
+			data_len,
 			data: &payload[9 + header_len..],
 		})
 	}
@@ -406,6 +411,23 @@ mod test {
 		assert_eq!(pes.pts, Some(0));
 		assert_eq!(pes.data_len, Some(4));
 		assert_eq!(pes.data, b"mp2!");
+	}
+
+	#[test]
+	fn bounded_pes_length_refuses_a_header_overrun() {
+		// The length includes the three fixed bytes and all optional header bytes.
+		for packet_len in 1..8 {
+			let payload = [0, 0, 1, 0xc0, 0, packet_len, 0x80, 0x80, 5, 0x21, 0, 1, 0, 1];
+			assert!(PesStart::parse(&payload).is_err(), "accepted PES length {packet_len}");
+		}
+	}
+
+	#[test]
+	fn bounded_pes_can_have_an_empty_payload() {
+		let payload = [0, 0, 1, 0xc0, 0, 8, 0x80, 0x80, 5, 0x21, 0, 1, 0, 1];
+		let pes = PesStart::parse(&payload).unwrap();
+		assert_eq!(pes.data_len, Some(0));
+		assert!(pes.data.is_empty());
 	}
 
 	#[test]

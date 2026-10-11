@@ -86,22 +86,28 @@ jobs:
       # browser client can launch headless Chromium. interop.sh's own
       # `playwright install` then no-ops.
       - name: Playwright Chromium
+        id: setup
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
 
+      # Each suite reports independently after setup, while a failed step still fails the job.
       - name: Optional publisher retention
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test max-age
         shell: bash -leo pipefail {0}
 
       - name: Harness regressions
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test harness
         shell: bash -leo pipefail {0}
 
       - name: Subscription termination interop
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test bare-fin
         shell: bash -leo pipefail {0}
 
       - name: Interop (full matrix)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test interop --all
         shell: bash -leo pipefail {0}
         env:
@@ -112,7 +118,7 @@ jobs:
       # Registry installs and the release matrix run only on main, nightly or
       # on demand: a break only needs catching before the next release.
       - name: Released wire compatibility
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
         run: nix develop --command just test wire-compat
         shell: bash -leo pipefail {0}
         env:
@@ -120,6 +126,7 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: Interop negative control
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test interop-negative
         shell: bash -leo pipefail {0}
         env:
@@ -128,6 +135,7 @@ jobs:
       # Browser-to-browser media QA: presented frame progress, audible tone, audio/video skew, and
       # the publication lifecycle, plus the negative controls that prove each assertion can fail.
       - name: Media output and lifecycle
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test media
         shell: bash -leo pipefail {0}
         env:
@@ -136,6 +144,7 @@ jobs:
       # Round-trips a PCR-paced TS through a relay and checks the subscriber's
       # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
       - name: TS compliance
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test ts
         shell: bash -leo pipefail {0}
         env:
@@ -145,6 +154,7 @@ jobs:
       # so the export has to spread it over the slots before its DTS and still keep
       # the constant-rate schedule.
       - name: TS keyframe bursts
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test ts --bitrate 2000000
         shell: bash -leo pipefail {0}
         env:
@@ -154,6 +164,7 @@ jobs:
       # source sends pictures most of a second ahead of their decode time, and the
       # export has to as well without overflowing the receiver's buffers.
       - name: TS broadcast-sized CPB
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test ts --hrd
         shell: bash -leo pipefail {0}
         env:
@@ -162,6 +173,7 @@ jobs:
       # The same video beside four audio PIDs in a multiplex faster than its Rx: each slot
       # has to interleave the video with the rest, or its transport buffer overflows.
       - name: TS multiplex above the video's Rx
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test ts --headroom
         shell: bash -leo pipefail {0}
         env:
@@ -170,6 +182,7 @@ jobs:
       # The same round-trip over an open-GOP clip: every leading picture after a
       # recovery point must come back, in decode order.
       - name: TS open GOP
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test ts --open-gop
         shell: bash -leo pipefail {0}
         env:
@@ -178,6 +191,7 @@ jobs:
       # Builds the sparse-EPG and pending-version fixtures and round-trips
       # them, asserting the schedule survives and pending sections are dropped.
       - name: EIT fixtures
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test ts-eit
         shell: bash -leo pipefail {0}
         env:
@@ -186,6 +200,7 @@ jobs:
       # The T-STD model must pass a broadcast capture and fail the same capture
       # delivered too slowly, too early, or in a burst.
       - name: T-STD controls
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test ts-tstd
         shell: bash -leo pipefail {0}
 

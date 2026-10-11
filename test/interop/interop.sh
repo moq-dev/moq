@@ -549,13 +549,19 @@ else
     sed -e "s|:4443\"|:${PORT}\"|g" -e "s|http://127.0.0.1:4440/|${AUTH_URL}|" \
         "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
 fi
-harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$HARNESS_RUN/relay.toml"
+# Connection spans and clean closes must survive an inherited warn-only filter.
+harness_spawn relay "$HARNESS_RUN/relay.log" env \
+    "RUST_LOG=${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info" \
+    "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
     sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
     exit 1
 fi
 harness_endpoint relay "$URL"
+
+# shellcheck source-path=SCRIPTDIR source=relay-log.sh
+source "$INTEROP_DIR/relay-log.sh"
 
 # ── tokens ──────────────────────────────────────────────────────────────────
 # Print the relay URL carrying a fresh token; the arguments are `moq auth sign`'s
@@ -700,58 +706,6 @@ stop_publisher() {
 # The relay log line the next connection starts on.
 relay_next_line() {
     echo $(($(wc -l <"$HARNESS_RUN/relay.log") + 1))
-}
-
-# The relay log from line FROM on, without its ANSI colors.
-relay_log_since() {
-    tail -n +"$1" "$HARNESS_RUN/relay.log" | sed 's/\x1b\[[0-9;]*m//g'
-}
-
-# Print each relay connection that appears from log line FROM on, with how it closed: the
-# relay's close error, "ended" for a close without one, or "open" while it hasn't closed yet.
-# The patterns follow the relay's `conn{id=...}` span and its `connection closed` log
-# (`rs/moq-relay/src/relay.rs`). Only connections opened in the window count, so a straggler
-# from an earlier round closing here isn't blamed on this one.
-relay_connections() {
-    relay_log_since "$1" | awk '
-        match($0, /conn\{id=[0-9]+ /) {
-            id = substr($0, RSTART + 8, RLENGTH - 9)
-            if (!(id in state)) { state[id] = "open"; order[++n] = id }
-        }
-        match($0, /connection closed id=[0-9]+/) {
-            id = substr($0, RSTART + 21, RLENGTH - 21)
-            if (id in state) {
-                rest = substr($0, RSTART + RLENGTH)
-                state[id] = sub(/^ err=/, "", rest) ? rest : "ended"
-            }
-        }
-        END { for (i = 1; i <= n; i++) print order[i], state[order[i]] }
-    '
-}
-
-# Fail the round for every relay connection it opened that idled out rather than closed.
-#
-# The relay times a silent peer out after its 10 s QUIC idle timeout, which can land long
-# after the cell that stalled finished. Every client closes its session on the way out, so
-# each close shows up at once, and an idle-out is a real stall that a reconnect would
-# otherwise hide behind a slow cell. A connection still open after the idle timeout is about
-# to idle out, so it fails the same way.
-check_idle_outs() {
-    local pub="$1" from="$2" deadline=$((SECONDS + 15)) id reason role failed=0
-    # Plain grep, not -q: under pipefail an early exit fails the pipeline on SIGPIPE.
-    while relay_connections "$from" | grep ' open$' >/dev/null && ((SECONDS < deadline)); do
-        sleep 0.2
-    done
-    while read -r id reason; do
-        [[ "$reason" == "open" || "$reason" == *"timed out"* ]] || continue
-        # The relay subscribes upstream only on the publisher's connection.
-        role=subscriber
-        relay_log_since "$from" | grep "conn{id=$id .*::subscriber: subscribe started" >/dev/null && role=publisher
-        echo "  FAIL  $pub round: relay connection $id ($role) idled out instead of closing ($reason)"
-        relay_log_since "$from" | grep -E "conn\{id=$id |connection closed id=$id " | sed 's/^/        /'
-        failed=1
-    done < <(relay_connections "$from")
-    ((failed == 0)) || overall=1
 }
 
 # Run a native-JS subscriber and judge it by the "received N bytes" marker it
