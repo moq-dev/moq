@@ -164,6 +164,10 @@ Never block the executor. A continuation or resumed coroutine that calls
 which deadlocks. `moq::inline_executor` runs a continuation right where the
 future completed, which is the executor thread.
 
+## Track demand
+
+Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+
 ## Shutdown
 
 `moq::shutdown()` stops the `moq-ffi` runtime thread, then the executor.
@@ -192,8 +196,3 @@ Everything else maps one to one onto the
 header is the reference; every method carries its doc comment.
 
 - Source: [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq); `just cpp check` builds, installs, and tests it locally
-
-A dynamic track request exposes `demand()` (`Demand()` in Go). Obtain it before
-accepting the request to watch subscribers through the handoff to its producer;
-wait for it to become unused before stopping expensive production. The watch is
-weak and ends when the track closes or the request is rejected.
