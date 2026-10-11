@@ -30,8 +30,8 @@ struct Incoming {
 	live: u64,
 	/// Requests retired since the last grant.
 	retired: u64,
-	/// The highest accepted ID, including requests that already retired.
-	last: Option<RequestId>,
+	/// The next ID the peer must use, including requests that already retired.
+	next: RequestId,
 }
 
 #[derive(Clone)]
@@ -62,7 +62,7 @@ impl Control {
 			sent: max,
 			live: 0,
 			retired: 0,
-			last: None,
+			next: RequestId(u64::from(client)),
 		});
 		self
 	}
@@ -76,21 +76,24 @@ impl Control {
 	///
 	/// Closes the session with TOO_MANY_REQUESTS when the ID is at or past the
 	/// MAX_REQUEST_ID we advertised, or its live requests exceed the window.
-	/// Reused or decreasing IDs close with INVALID_REQUEST_ID even after retirement.
+	/// Non-sequential IDs close with INVALID_REQUEST_ID even after retirement.
 	/// `None` when the peer's requests are not flow controlled.
 	pub fn accept(&self, id: RequestId) -> Result<Option<RequestPermit>, Error> {
 		let mut state = self.state.lock();
 		let Some(incoming) = &mut state.incoming else {
 			return Ok(None);
 		};
-		if incoming.last.is_some_and(|last| id <= last) {
-			return Err(SessionError::InvalidRequestId.into());
-		}
-		if id.0 >= incoming.max || incoming.live >= incoming.window {
+		if id.0 >= incoming.max {
 			tracing::warn!(id = %id, max = incoming.max, live = incoming.live, "peer exceeded MAX_REQUEST_ID");
 			return Err(SessionError::TooManyRequests.into());
 		}
-		incoming.last = Some(id);
+		if id != incoming.next {
+			return Err(SessionError::InvalidRequestId.into());
+		}
+		if incoming.live >= incoming.window {
+			return Err(SessionError::TooManyRequests.into());
+		}
+		incoming.next.increment();
 		incoming.live += 1;
 		Ok(Some(RequestPermit(self.clone())))
 	}
@@ -211,11 +214,47 @@ mod tests {
 	/// An ID remains spent after its request ends, across every request type.
 	#[test]
 	fn retired_or_lower_request_ids_are_refused() {
-		for (first, later) in [(0, 0), (4, 2)] {
+		for later in [0, 2] {
 			let control = Control::new(None, false).with_window(8, false);
-			drop(control.accept(RequestId(first)).unwrap());
+			for id in [0, 2, 4] {
+				drop(control.accept(RequestId(id)).unwrap());
+			}
 			let err = control.accept(RequestId(later)).err().expect("spent ID refused");
 			assert_eq!(SessionError::from(&err).to_code(), 0x4);
+		}
+	}
+
+	#[test]
+	fn a_duplicate_is_invalid_even_when_the_window_is_full() {
+		for client in [false, true] {
+			let control = Control::new(None, client).with_window(1, client);
+			let id = RequestId(u64::from(client));
+			let _held = control.accept(id).unwrap();
+			assert!(matches!(
+				control.accept(id),
+				Err(Error::Session(SessionError::InvalidRequestId))
+			));
+		}
+	}
+
+	/// The first ID and every subsequent request must be exactly the next in sequence.
+	#[test]
+	fn skipped_and_wrong_parity_request_ids_are_refused() {
+		for client in [false, true] {
+			let first = u64::from(client);
+			for prefix in [0, 1, 2] {
+				for gap in [2, 4, 1] {
+					let control = Control::new(None, client).with_window(8, client);
+					for index in 0..prefix {
+						drop(control.accept(RequestId(first + 2 * index)).unwrap());
+					}
+					let err = control
+						.accept(RequestId(first + 2 * prefix + gap))
+						.err()
+						.expect("non-sequential ID refused");
+					assert_eq!(SessionError::from(&err), SessionError::InvalidRequestId);
+				}
+			}
 		}
 	}
 

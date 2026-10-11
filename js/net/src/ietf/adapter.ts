@@ -146,7 +146,7 @@ export class ControlStreamAdapter implements Session {
 	// by the IDs they spent and goes out as one MAX_REQUEST_ID.
 	#peerWindow: bigint;
 	#peerMax: bigint;
-	#peerLast: bigint | undefined;
+	#peerNext: bigint;
 	#open = new Set<bigint>();
 	#retired = 0n;
 	#granting = false;
@@ -177,6 +177,7 @@ export class ControlStreamAdapter implements Session {
 		this.#maxRequestId = maxRequestId;
 		this.#peerWindow = window;
 		this.#peerMax = initialMaxRequestId(!client, window);
+		this.#peerNext = client ? 1n : 0n;
 		this.#requestId = client ? 0n : 1n;
 		this.#client = client;
 	}
@@ -486,11 +487,11 @@ export class ControlStreamAdapter implements Session {
 
 	#admitHeld(requestId: bigint): void {
 		this.#checkPeer(requestId);
-		if (this.#peerLast !== undefined && requestId <= this.#peerLast) {
-			this.#refuse(SessionCode.InvalidRequestId, "request id was already spent");
+		if (requestId !== this.#peerNext) {
+			this.#refuse(SessionCode.InvalidRequestId, "request id is not next in sequence");
 		}
 		this.#checkLive();
-		this.#peerLast = requestId;
+		this.#peerNext += 2n;
 		this.#open.add(requestId);
 	}
 

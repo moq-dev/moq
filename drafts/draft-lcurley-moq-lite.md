@@ -284,7 +284,7 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x3   | PROTOCOL_VIOLATION | The peer violated this specification. |
 | ------- | ------------- | ----------- |
-|  0x4   | INVALID_REQUEST_ID | A moq-transport request ID was reused, decreased, or had the wrong parity; moq-lite has no request IDs. |
+|  0x4   | INVALID_REQUEST_ID | A moq-transport request ID was reused, skipped, decreased, or had the wrong parity; moq-lite has no request IDs. |
 | ------- | ------------- | ----------- |
 |  0x6   | KEY_VALUE_FORMATTING_ERROR | A key-value pair was malformed, or repeated more than allowed. |
 | ------- | ------------- | ----------- |
