@@ -91,6 +91,9 @@ export class Sync {
 
 	#media = new Signal<{ target: Getter<Time.Milli | undefined> }[]>([]);
 
+	// A reset invalidates waits even if a new frame restores the same reference in one turn.
+	#generation = new Signal(0);
+
 	#signals = new Effect();
 
 	constructor(props?: Inputs<SyncInput>) {
@@ -197,6 +200,7 @@ export class Sync {
 	// in buffered mode (typically alongside flushing the audio buffer) so the new content
 	// plays from its own first frame instead of inheriting the previous reference.
 	reset(): void {
+		this.#generation.update((generation) => generation + 1);
 		this.#out.reference.set(undefined);
 		this.#late.clear();
 	}
@@ -209,12 +213,13 @@ export class Sync {
 		return Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), this.#out.delay.peek());
 	}
 
-	// Sleep until it's time to render this frame.
-	async wait(timestamp: Time.Milli): Promise<void> {
+	/** Wait until this frame can present, returning false if a clock reset invalidates it. */
+	async wait(timestamp: Time.Milli): Promise<boolean> {
+		const generation = this.#generation.peek();
 		// A zero delay still sleeps: the sleep comes from the reference, which holds an early frame
 		// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
 		// Peek the input, not `out.instant`, which lags a same-turn change until effects flush.
-		if (this.in.delay.peek() === "instant") return;
+		if (this.in.delay.peek() === "instant") return true;
 
 		const reference = this.#out.reference.peek();
 		if (reference === undefined) {
@@ -222,8 +227,9 @@ export class Sync {
 		}
 
 		for (;;) {
+			if (this.#generation.peek() !== generation) return false;
 			// Switching to "instant" wakes the sleep below, so frames parked here leave.
-			if (this.in.delay.peek() === "instant") return;
+			if (this.in.delay.peek() === "instant") return true;
 
 			// Sleep until it's time to decode the next frame.
 			// NOTE: This function runs in parallel for each frame.
@@ -231,33 +237,34 @@ export class Sync {
 			const ref = Time.Milli.sub(now, timestamp);
 
 			const currentRef = this.#out.reference.peek();
-			if (currentRef === undefined) return;
+			if (currentRef === undefined) return false;
 
 			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#out.delay.peek());
-			if (sleep <= 0) return;
+			if (sleep <= 0) return true;
 
 			// Skip setTimeout for small sleeps; the timer resolution (~4ms) would overshoot.
-			if (sleep < 5) return;
+			if (sleep < 5) return true;
 
-			if (await this.#sleep(sleep)) return;
+			await this.#sleep(sleep);
 		}
 	}
 
-	// Sleeps for `ms`, or returns false early once anything the sleep was computed from changes.
+	// Sleeps for `ms`, or wakes early once the clock or its generation changes.
 	// Releases every listener either way: frames sleep once each, so a listener left on a signal
 	// that never changes would pile up for the life of the player.
-	#sleep(ms: number): Promise<boolean> {
+	#sleep(ms: number): Promise<void> {
 		return new Promise((resolve) => {
-			const wake = (ok: boolean) => {
+			const wake = () => {
 				clearTimeout(timer);
 				for (const dispose of disposes) dispose();
-				resolve(ok);
+				resolve();
 			};
-			const timer = setTimeout(() => wake(true), ms);
+			const timer = setTimeout(wake, ms);
 			const disposes = [
-				this.in.delay.changed(() => wake(false)),
-				this.#out.delay.changed(() => wake(false)),
-				this.#out.reference.changed(() => wake(false)),
+				this.#generation.changed(wake),
+				this.in.delay.changed(wake),
+				this.#out.delay.changed(wake),
+				this.#out.reference.changed(wake),
 			];
 		});
 	}

@@ -399,7 +399,7 @@ class DecoderTrack {
 					}
 
 					// Returns immediately when the latency is "instant".
-					const ok = await effect.race(this.sync.wait(timestamp).then(() => true));
+					const ok = await effect.race(this.sync.wait(timestamp));
 					if (!ok) return;
 					if (generation !== this.#discontinuity) return; // the playhead moved while waiting
 

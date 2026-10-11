@@ -45,7 +45,7 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { type CaptureState, FAULTS, leakedPlayerStarted, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
+import { type CaptureState, FAULTS, leakedPlayerStarted, reachesLive, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
 import * as Pattern from "./src/pattern";
 import { resumeSkew } from "./src/resume";
 
@@ -226,8 +226,14 @@ async function waitForLive(
 			lag = fixture.frameId - state.frameId;
 			first ??= lag;
 			moved = frame !== undefined && state.frameId !== frame;
+			const live = reachesLive({
+				previous: frame,
+				source: fixture.frameId,
+				sample: state,
+				bound: LIVE_LAG_FRAMES,
+			});
 			frame = state.frameId;
-			if (moved && lag <= LIVE_LAG_FRAMES) return { first, lag, after: Date.now() - since };
+			if (live) return { first, lag, after: Date.now() - since };
 		}
 		await sleep(POLL_INTERVAL_MS);
 	}

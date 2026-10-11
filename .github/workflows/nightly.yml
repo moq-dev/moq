@@ -137,6 +137,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js catalog-bench
 
+      - name: JS playback clock reset fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js sync-bench
+
       # Times Effect create and close beside a bare `new Error()`. No threshold: it only
       # has to keep running, and its numbers track the creation stack's cost.
       - name: JS signals effect benchmark

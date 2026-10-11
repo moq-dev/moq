@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { type Delay, Sync } from "./sync";
@@ -124,7 +124,7 @@ describe("auto delay", () => {
 describe("wait", () => {
 	it("returns at once when constructed instant, before effects flush", async () => {
 		const sync = new Sync({ delay: "instant" });
-		await sync.wait(Time.Milli.zero);
+		expect(await sync.wait(Time.Milli.zero)).toBe(true);
 		sync.close();
 	});
 
@@ -158,4 +158,33 @@ describe("wait", () => {
 		await waiting;
 		sync.close();
 	});
+});
+
+it("a reset invalidates waits even when the next frame restores the same reference", async () => {
+	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
+	const timer = spyOn(globalThis, "setTimeout").mockImplementation(
+		(() => 1 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
+	);
+	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const sync = new Sync({ delay: Time.Milli(1000) });
+	try {
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		sync.received(Time.Milli(0));
+		let valid: boolean | undefined;
+		const waiting = sync.wait(Time.Milli(0)).then((result) => {
+			valid = result;
+		});
+		const reference = sync.out.reference.peek();
+		sync.reset();
+		sync.received(Time.Milli(0));
+		expect(sync.out.reference.peek()).toBe(reference);
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(valid).toBe(false);
+		await waiting;
+	} finally {
+		sync.close();
+		clear.mockRestore();
+		timer.mockRestore();
+		now.mockRestore();
+	}
 });

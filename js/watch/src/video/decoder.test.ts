@@ -5,7 +5,7 @@ import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { type Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { Sync } from "../sync";
+import { type Delay, Sync } from "../sync";
 import { Decoder } from "./decoder";
 import { Source } from "./source";
 
@@ -266,12 +266,14 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		mediaProducer.close();
 	};
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay: "instant" });
+	const delay = new Signal<Delay>("instant");
+	const sync = new Sync({ delay });
 	const enabled = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled });
 	await microtasks();
 	return {
 		decoder,
+		delay,
 		enabled,
 		catalog,
 		submitted,
@@ -463,3 +465,34 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 }
+
+it("a shared audio clock reset cannot present a parked video frame", async () => {
+	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
+	const timer = spyOn(globalThis, "setTimeout").mockImplementation(
+		(() => 1 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
+	);
+	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const reads: Read[] = [];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		playback.enabled.set(false);
+		playback.delay.set(Time.Milli(1000));
+		await microtasks();
+		reads.push(sample(0, 0), sample(0, 100_000, 0, false));
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.submitted).toEqual([0, 100_000]);
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+		// Audio can reset the shared reference while this video's own container
+		// discontinuity remains unchanged.
+		playback.sync.reset();
+		await microtasks();
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+	} finally {
+		playback.close();
+		await microtasks();
+		clear.mockRestore();
+		timer.mockRestore();
+		now.mockRestore();
+	}
+});
