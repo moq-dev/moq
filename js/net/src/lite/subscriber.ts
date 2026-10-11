@@ -1,12 +1,23 @@
-import { type Dispose, type GetPromise, race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
+import type { Grant } from "../auth.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import type * as Epoch from "../epoch.ts";
-import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
+import {
+	closeReason,
+	controlTimeout,
+	error,
+	ProtocolViolation,
+	reason,
+	StreamCode,
+	StreamError,
+	sessionCause,
+	unauthorized,
+} from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -79,6 +90,18 @@ function supportsTrackStream(version: Version): boolean {
 	}
 }
 
+// What a subscription has set up so far, so a revocation (or a timeout) can reach it at
+// any stage.
+interface SubscribeSetup {
+	stream?: Stream;
+	track?: Stream;
+	producer?: track.Producer;
+	// Ends a setup still running once the deadline passed or the grant was revoked.
+	cancel: AbortController;
+	// Set once our grant stops covering the broadcast.
+	revoked?: Error;
+}
+
 /**
  * What a consumed broadcast captured when it was opened: the epoch it asks for, and its own id.
  * Fetches are shared only within one consume, so a fresh consume for a replaced instance never
@@ -128,20 +151,6 @@ interface SubscribeEntry {
 // two report the same thing, where the default 0 would tell the peer it closed cleanly.
 const PROTOCOL_VIOLATION_CODE = 15;
 
-// WebTransport rejects a close reason over 1024 bytes of UTF-8 by throwing, so a reason
-// built from peer-supplied data has to be bounded before it gets there. A broadcast path
-// is peer-supplied and long enough to reach this on its own.
-const MAX_CLOSE_REASON = 1024;
-
-// The longest prefix of `text` that fits a close reason. `encodeInto` stops on a whole
-// code point, so `read` never lands mid-character the way slicing bytes would.
-function closeReason(text: string): string {
-	const encoder = new TextEncoder();
-	const buf = new Uint8Array(MAX_CLOSE_REASON);
-	const { read } = encoder.encodeInto(text, buf);
-	return text.slice(0, read);
-}
-
 export class Subscriber {
 	#quic: WebTransport;
 
@@ -161,10 +170,6 @@ export class Subscriber {
 	#consumes = new BroadcastCache();
 	#consumeNext = 0;
 
-	// The epoch each live advertisement named, by path. A consumed broadcast captures it
-	// once and asks for it on every request, so a later epoch never feeds an older handle.
-	#epochs = new Map<Path.Valid, Epoch.Valid>();
-
 	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, epoch, track, sequence].
 	// Concurrent (or repeat, while still open) fetchGroup() calls for the same group of one consume
 	// share one FETCH stream and each get an independent mirror; the entry is evicted once the
@@ -183,6 +188,11 @@ export class Subscriber {
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
+
+	// Our grant: a subscription it stops covering is cancelled. Undefined until the peer
+	// answers, and forever on a version without AUTH, which allows everything.
+	#grant?: Getter<Grant | undefined>;
+
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
@@ -191,6 +201,7 @@ export class Subscriber {
 	 * @param probe - Optional sink for the peer's PROBE estimates
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
 	 * @param goaway - Settles when the peer sends GOAWAY
+	 * @param grant - The union of our tokens' grants, which bounds what we subscribe to
 	 *
 	 * @internal
 	 */
@@ -201,6 +212,7 @@ export class Subscriber {
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
 		goaway?: GetPromise<Drain>,
+		grant?: Getter<Grant | undefined>,
 	) {
 		this.#quic = quic;
 		this.version = version;
@@ -208,6 +220,7 @@ export class Subscriber {
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
 		this.#goaway = goaway;
+		this.#grant = grant;
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
@@ -220,6 +233,12 @@ export class Subscriber {
 	// draining session must not win selection, however cheap the path it advertises.
 	#cost(cost?: Cost): Cost {
 		return this.#goingAway() ? DRAIN_COST : (cost ?? Cost.zero);
+	}
+
+	// Whether our grant no longer lets us subscribe to `broadcast`.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant?.peek();
+		return grant !== undefined && !grant.subscribe.matches(broadcast);
 	}
 
 	/**
@@ -265,6 +284,21 @@ export class Subscriber {
 			return;
 		}
 
+		// Every advertisement the peer currently has live, keyed by suffix (at most one
+		// per path is current, and every announce on this stream shares `prefix`).
+		//
+		// An advertisement skipped locally as a reflected loop is recorded with
+		// `live: false`: the peer numbered it and will retract it regardless of what we
+		// made of it, so its path is not free. Dropping it from the map instead would let
+		// a later announce take the path, and the skipped one's `endedId` would then
+		// retract that one's state.
+		type Advertisement = {
+			live: boolean;
+			route: Route;
+			captures: Path.Pattern[] | undefined;
+		};
+		const advertised = new Map<Path.Valid, Advertisement>();
+
 		let stopDrain: Dispose | undefined;
 		try {
 			// Send the announce interest.
@@ -282,21 +316,6 @@ export class Subscriber {
 				// stay off this hop and are never forwarded.
 				responderOrigin = ok.hop;
 			}
-
-			// Every advertisement the peer currently has live, keyed by suffix (at most one
-			// per path is current, and every announce on this stream shares `prefix`).
-			//
-			// An advertisement skipped locally as a reflected loop is recorded with
-			// `live: false`: the peer numbered it and will retract it regardless of what we
-			// made of it, so its path is not free. Dropping it from the map instead would let
-			// a later announce take the path, and the skipped one's `endedId` would then
-			// retract that one's state.
-			type Advertisement = {
-				live: boolean;
-				route: Route;
-				captures: Path.Pattern[] | undefined;
-			};
-			const advertised = new Map<Path.Valid, Advertisement>();
 
 			switch (this.version) {
 				case Version.DRAFT_01:
@@ -319,6 +338,7 @@ export class Subscriber {
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { live, route, captures });
 						if (!live) continue;
+						this.#consumes.announce(path, announced, route);
 						console.debug(`announced: broadcast=${path} active=true`);
 						announced.append({ prefix: path, captures, kind: "start", route });
 					}
@@ -340,6 +360,7 @@ export class Subscriber {
 					const route = { ...ad.route, cost: DRAIN_COST };
 					if (routesEqual(ad.route, route)) continue;
 					advertised.set(path, { ...ad, route });
+					this.#consumes.announce(path, announced, route);
 					announced.append({ prefix: path, captures: ad.captures, kind: "update", route });
 				}
 			};
@@ -432,16 +453,15 @@ export class Subscriber {
 					throw new ProtocolViolation(`duplicate announce for ${path}`);
 				}
 
-				// Retract the path: forget the advertisement, drop the shared consume entry so a
-				// later announce subscribes fresh rather than cloning the dead generation's tracks,
-				// and tell the consumer. A no-op for an advertisement never surfaced, which is
+				// Retract this interest's advertisement so new consumes resolve the remaining
+				// serving instance, and tell the consumer. A no-op for an advertisement never surfaced, which is
 				// what an id retiring a skipped announce resolves to.
 				const retract = () => {
 					const previous = advertised.get(path);
 					advertised.delete(path);
-					this.#epochs.delete(path);
+					this.#consumes.withdraw(path, announced);
 					if (!previous?.live) return;
-					this.#consumes.evict(path);
+
 					console.debug(`announced: broadcast=${path} active=false`);
 					announced.append({
 						prefix: path,
@@ -507,10 +527,8 @@ export class Subscriber {
 				// the next consume subscribes fresh, while the handles already out keep theirs.
 				const previous = advertised.get(path);
 				if (restart && previous?.live) {
-					this.#consumes.evict(path);
 					advertised.set(path, { live: true, route, captures });
-					if (epoch) this.#epochs.set(path, epoch);
-					else this.#epochs.delete(path);
+					this.#consumes.announce(path, announced, route, true);
 					console.debug(`announced: broadcast=${path} restart=true epoch=${epoch}`);
 					announced.append({ prefix: path, captures, kind: "restart", route });
 					continue;
@@ -520,9 +538,9 @@ export class Subscriber {
 				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE. It updates the
 				// route in place, so a forwarder re-prices without retracting.
 				if (previous?.live) {
-					// Even from another publisher: the path still names the same broadcast, so
-					// the shared consume stays.
+					// An update preserves the advertisement identity, including on epochless drafts.
 					advertised.set(path, { live: true, route, captures });
+					this.#consumes.announce(path, announced, route);
 					console.debug(`announced: broadcast=${path} rerouted`);
 					if (!routesEqual(previous.route, route)) {
 						announced.append({ prefix: path, captures, kind: "update", route });
@@ -531,8 +549,7 @@ export class Subscriber {
 				}
 
 				advertised.set(path, { live: true, route, captures });
-				if (epoch) this.#epochs.set(path, epoch);
-				else this.#epochs.delete(path);
+				this.#consumes.announce(path, announced, route);
 
 				console.debug(`announced: broadcast=${path} active=true epoch=${epoch}`);
 				announced.append({ prefix: path, captures, kind: "start", route });
@@ -554,7 +571,8 @@ export class Subscriber {
 				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: closeReason(reason(e)) });
 			}
 		} finally {
-			// Releases this interest's routes on a session that never drains.
+			// Release only this interest's routes. Existing consumers remain pinned.
+			for (const path of advertised.keys()) this.#consumes.withdraw(path, announced);
 			stopDrain?.();
 		}
 	}
@@ -562,7 +580,7 @@ export class Subscriber {
 	/**
 	 * Consumes a broadcast from the connection.
 	 *
-	 * Deduplicated per path: repeat calls for the same still-live path share one reference-counted
+	 * Deduplicated per serving instance: repeat calls for the same path share one reference-counted
 	 * broadcast (and one upstream subscription). The shared broadcast closes once every caller has
 	 * closed its handle, so callers close normally.
 	 *
@@ -570,14 +588,17 @@ export class Subscriber {
 	 * @returns A Broadcast instance
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
-		return this.#consumes.get(path) ?? this.#consumes.insert(path, this.#createConsume(path));
+		const instance = this.#consumes.instance(path);
+		return (
+			this.#consumes.get(path, instance) ??
+			this.#consumes.insert(path, instance, this.#createConsume(path, instance.route.epoch))
+		);
 	}
 
-	#createConsume(path: Path.Valid): broadcast.Consumer {
+	#createConsume(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer {
 		// A consumed broadcast resolves info() and fetchGroup() over the wire by reaching
 		// back into this Subscriber (see ConsumeBroadcast below), rather than the wire
 		// installing callbacks on the broadcast.
-		const epoch = this.#epochs.get(path);
 		const consumer = new ConsumeBroadcast(this, path, { epoch, id: this.#consumeNext++ });
 
 		void (async () => {
@@ -599,6 +620,37 @@ export class Subscriber {
 			request.reject(new Error(EMPTY_RANGE));
 			return;
 		}
+		const refused = unauthorized(broadcast);
+		// Armed before the first check and held to the end, so a shrink while the
+		// subscription sets up is never missed: it resets whatever reached the wire.
+		const state: SubscribeSetup = { cancel: new AbortController() };
+		const disposeGrant = this.#grant?.subscribe(() => {
+			if (state.revoked || !this.#denied(broadcast)) return;
+			state.revoked = refused;
+			console.debug(`subscribe revoked: id=${id} broadcast=${broadcast} track=${request.name}`);
+			state.cancel.abort(refused);
+			state.producer?.close(refused);
+			state.stream?.abort(refused);
+		});
+		try {
+			if (this.#denied(broadcast)) {
+				request.reject(refused);
+				return;
+			}
+			await this.#serveSubscribe(id, broadcast, epoch, request, state);
+		} finally {
+			disposeGrant?.();
+		}
+	}
+
+	async #serveSubscribe(
+		id: bigint,
+		broadcast: Path.Valid,
+		epoch: Epoch.Valid | undefined,
+		request: track.Request,
+		state: SubscribeSetup,
+	) {
+		const subscription = request.subscription;
 
 		// `timescale` stays undefined until TRACK_INFO (or, on older drafts,
 		// implicit defaults) resolves it; runGroup blocks on it before decoding.
@@ -622,9 +674,6 @@ export class Subscriber {
 		// so the timeout path can close them if they finish opening after the deadline,
 		// and `cancel` ends a setup still running once the deadline passed, resetting
 		// its TRACK stream so a peer that never answers can't hold one per attempt.
-		const state: { stream?: Stream; track?: Stream; cancel: AbortController } = {
-			cancel: new AbortController(),
-		};
 		const setup = this.#openSubscribe(state, msg, request, id, timescale);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
@@ -637,8 +686,10 @@ export class Subscriber {
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			// The setup outlived its deadline waiting for the first response: a control
-			// timeout, not content that arrived late.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
+			// timeout, not content that arrived late. A revocation says so instead.
+			const e =
+				state.revoked ??
+				(err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err));
 			state.cancel.abort(e);
 			request.reject(e);
 			this.#subscribes.delete(id);
@@ -729,7 +780,7 @@ export class Subscriber {
 	// SUBSCRIBE_OK). Older drafts carry no per-track properties, so they resolve to
 	// defaults and just drain SUBSCRIBE_OK.
 	async #openSubscribe(
-		state: { stream?: Stream; track?: Stream; cancel: AbortController },
+		state: SubscribeSetup,
 		msg: Subscribe,
 		request: track.Request,
 		id: bigint,
@@ -771,6 +822,7 @@ export class Subscriber {
 			held: state.track,
 		};
 		this.#subscribes.set(id, entry);
+		state.producer = producer;
 
 		state.stream = await Stream.open(this.#quic, { version: this.version });
 		// The deadline passed while the open waited: the late-setup handler resets the stream, so

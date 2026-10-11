@@ -20,14 +20,13 @@ Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
 - Decided in the 2026-10-05 audit: perf quests that edit moq-uring's QUIC
-  driver (#3122, Run to quiescence) Require the
+  driver (Run to quiescence) Require the
   [hard fork](/quest/m1/quic/fork/README.md), so their before and after are
   measured on `moq-quic` instead of being invalidated by the switch.
 - `moq-uring`'s only backend is noq. Every profile names its backend. The
   historical quiche-flavor numbers cited in
   [Run to quiescence](/quest/m1/perf/uring-quiescence.md) and
-  [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md)
-  are re-measured on noq.
+  [moq-uring on moq-time](/quest/m1/time/uring.md) are re-measured on noq.
 - Cross-thread wakeups are already cheap: one futex word per worker, at most
   one `futex(FUTEX_WAKE)` per park cycle, wake bursts coalesce through the
   `kio::Tasks` bitset. No eventfd, no MSG_RING, by design (`SINGLE_ISSUER`).
@@ -61,6 +60,10 @@ one recipe with capture modes; #3199 moved to m2 beside 3200, since it is an
 equally unmeasured ring micro-opt; cache shard was deleted, since #5031's
 profile shows no pool contention.
 
+Decided 2026-10-10: #3122's per-turn clock read merged into
+[moq-uring on moq-time](/quest/m1/time/uring.md), where the worker's turn
+sample becomes its `moq-time` clock; it keeps #3122's measurement bar.
+
 ## Required
 
 - [Performance comparisons](/quest/m1/performance-comparisons.md) - the noise estimate every "within noise" verdict here depends on
@@ -72,5 +75,8 @@ profile shows no pool contention.
 - [Announce replay](/quest/m1/perf/announce-replay.md) - the initial announce set replays in linear time, so joins don't slow with the route count
 - [Demand aggregate](/quest/m1/perf/demand-aggregate.md) - a track subscribe, leave, or preference update no longer walks every reader of the track
 - [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
-- [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
 - [Remove moq-uring copies](/quest/m1/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, after the fork
+
+## Related
+
+- [moq-uring on moq-time](/quest/m1/time/uring.md) - one clock read per worker turn, formerly #3122

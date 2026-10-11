@@ -10,7 +10,7 @@ use crate::{
 use super::{
 	Control, Message, Publisher, Subscriber, Version, active_count,
 	adapter::ControlStreamAdapter,
-	cluster, hidden, peer, solicit,
+	auth, cluster, hidden, peer, solicit,
 	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
@@ -72,6 +72,11 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// twice. `None` when [`Self::peer_setup_stream`] is.
 	pub peer_declared: Option<peer::Peer>,
 
+	/// The session's auth handle, created before [`start`] so a server can take the
+	/// peer's token requests during its handshake. Supports AUTH exactly when the
+	/// version can negotiate it; the peer's SETUP decides whether it does.
+	pub auth: crate::auth::Handle,
+
 	/// Uni streams that arrived before that pre-read SETUP (see [`PeerSetup::early`]),
 	/// classified by the session before it accepts any more.
 	pub early_unis: Vec<Reader<S::RecvStream, crate::Version>>,
@@ -119,6 +124,7 @@ where
 		authority,
 		peer_setup_stream,
 		peer_declared,
+		auth,
 		early_unis,
 	} = config;
 
@@ -127,6 +133,19 @@ where
 	// A moq-transport client MUST send an empty New Session URI: it cannot tell a
 	// server to open connections (draft-19 sect 10.4).
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
+
+	// What the peer's connection credential earns by default, from the caller's real
+	// handles before the empty-half defaulting below.
+	let peer_grant = auth::peer_grant(publish.as_ref(), subscribe.as_ref());
+
+	// Present the connection's own credential (the empty token) right away, so both
+	// sides learn their grant without waiting on the app. Draft-17+ only; the peer's
+	// SETUP then decides whether it is ever sent.
+	// A handle that already knows the peer declined (a gated server accept) refuses it.
+	let setup_token = match auth::supported(version) {
+		true => auth.present(bytes::Bytes::new(), true).ok(),
+		false => None,
+	};
 
 	// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`: the
 	// scope is what we may ask for, and it is not the origin's root.
@@ -157,6 +176,13 @@ where
 	let setup_seen = crate::session::Setup::Ietf(peer_setup.clone());
 
 	let driver = async move {
+		// Held for the life of the session.
+		let _setup_token = setup_token;
+		// Released on any exit, so nothing waits on a token the session will never answer.
+		let _auth_close = AuthClose(auth.clone());
+		// Decided once, before any Auth request can be accepted: the app took the requests
+		// before running the driver, or the session answers itself.
+		let _ = auth.acceptor();
 		// Our own Hop ID, taken from whichever origin the caller actually supplied so
 		// every session out of this process stamps the same one and cross-session loop
 		// detection works. Read BEFORE the placeholders below: their ids are random and
@@ -184,6 +210,7 @@ where
 				let control = Control::new(request_id_max, client).with_window(limits.requests(), client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
+				// No AUTH on these drafts, but a limit still reaches both halves.
 				let mut publisher = Publisher::new(
 					runtime.clone(),
 					adapter.clone(),
@@ -192,7 +219,8 @@ where
 					peer_hop,
 					peer_setup.clone(),
 					version,
-				);
+				)
+				.with_auth(auth.clone());
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
@@ -210,7 +238,8 @@ where
 					version,
 					tasks.clone(),
 					goaway.going_away.clone(),
-				);
+				)
+				.with_auth(auth.clone());
 				subscriber.announces = announces;
 
 				// GOAWAY send task: draft-14-16 carry GOAWAY on the shared control
@@ -263,6 +292,8 @@ where
 					dispatch_session,
 					publisher.clone(),
 					subscriber.clone(),
+					peer_setup.clone(),
+					None,
 					version
 				)));
 				let mut datagrams = std::pin::pin!(err_only(run_datagrams(adapter.clone(), subscriber.clone())));
@@ -354,6 +385,20 @@ where
 				};
 
 				let control = Control::new(None, client);
+				// Only the dialing side fails loud on a publication outside its grant: a
+				// server's publish origin is everything the peer may read, not what it
+				// intends to push.
+				let enforce = {
+					let auth = auth.clone();
+					let origin = publish.clone();
+					let session = session.clone();
+					async move {
+						match client {
+							true => enforce_grant(auth, origin, session).await,
+							false => std::future::pending().await,
+						}
+					}
+				};
 				let mut publisher = Publisher::new(
 					runtime.clone(),
 					session.clone(),
@@ -362,7 +407,8 @@ where
 					peer_hop,
 					peer_setup.clone(),
 					version,
-				);
+				)
+				.with_auth(auth.clone());
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
@@ -372,7 +418,7 @@ where
 					runtime.clone(),
 					session.clone(),
 					subscribe,
-					control,
+					control.clone(),
 					peer_hop,
 					peer_setup.clone(),
 					self_origin,
@@ -380,7 +426,24 @@ where
 					version,
 					tasks,
 					goaway.going_away.clone(),
+				)
+				.with_auth(auth.clone());
+
+				// Our tokens, one Auth request each, once the peer's SETUP negotiates it.
+				let present = auth::run_present(
+					runtime.clone(),
+					session.clone(),
+					control.clone(),
+					auth.clone(),
+					peer_setup.clone(),
+					version,
+					goaway.going_away.clone(),
 				);
+				let serve = auth::Serve {
+					runtime: runtime.clone(),
+					handle: auth.clone(),
+					peer_grant,
+				};
 				subscriber.announces = announces;
 
 				let sub_ns_session = session.clone();
@@ -418,10 +481,14 @@ where
 					session.clone(),
 					publisher.clone(),
 					subscriber.clone(),
+					peer_setup.clone(),
+					Some(serve),
 					version
 				)));
 				let mut datagrams = std::pin::pin!(err_only(run_datagrams(session.clone(), subscriber.clone())));
 				let mut goaway_recv = std::pin::pin!(err_only(goaway_recv));
+				let mut present = std::pin::pin!(present);
+				let mut enforce = std::pin::pin!(err_only(enforce));
 				let mut setup = std::pin::pin!(setup);
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
 				// see `Publisher::run_publish_namespaces`.
@@ -465,6 +532,11 @@ where
 					if let Poll::Ready(err) = waiter.poll_future(goaway_recv.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
+					// Presenting tokens never ends the session.
+					let _ = waiter.poll_future(present.as_mut());
+					if let Poll::Ready(err) = waiter.poll_future(enforce.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
 					if waiter.poll_future(setup.as_mut()).is_ready() {
 						return Poll::Ready(Ok(()));
 					}
@@ -480,6 +552,12 @@ where
 					Poll::Pending
 				})
 				.await;
+				// Before this arm's Auth serve tasks drop, so each settles with the
+				// session's error rather than a bare cancel.
+				auth.close(match &res {
+					Ok(()) => Error::Cancel,
+					Err(err) => err.clone(),
+				});
 				if closing.load(std::sync::atomic::Ordering::Relaxed) {
 					subscriber.close();
 				} else if let Err(err) = &res {
@@ -489,6 +567,11 @@ where
 				res
 			}
 		};
+
+		auth.close(match &res {
+			Ok(()) => Error::Cancel,
+			Err(err) => err.clone(),
+		});
 
 		match &res {
 			Err(err @ Error::Transport(_)) => {
@@ -621,6 +704,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
 		hidden: hidden::from_setup(params, version),
+		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
 	})
 }
@@ -659,6 +743,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
 	solicit::into_setup(&mut parameters, version);
 	hidden::into_setup(&mut parameters, version);
+	auth::into_setup(&mut parameters, version);
 	active_count::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
@@ -1011,6 +1096,9 @@ async fn run_dispatch<S>(
 	session: S,
 	publisher: Publisher<S>,
 	mut subscriber: Subscriber<S>,
+	peer_setup: peer::PeerSetup,
+	// Answers the peer's Auth requests, on the versions that can negotiate them.
+	serve: Option<auth::Serve>,
 	version: Version,
 ) -> Result<(), Error>
 where
@@ -1022,82 +1110,120 @@ where
 	// costs a handshake round rather than blocking.
 	let peer = subscriber.peer().await;
 
+	// An AUTH from a peer that did not negotiate MoQ Auth is an unknown request, which
+	// falls through to the protocol violation below.
+	let serve = match peer_setup.get().await.auth {
+		true => serve,
+		false => None,
+	};
+
 	// From the same slot, so this costs nothing extra: it decides whether an unsolicited
 	// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
 	let declared = subscriber.solicit().await;
 
 	let mut tasks = TaskSet::owned();
-	let mut accept = session.clone();
-	loop {
-		let mut stream = tasks
-			.drive(|waiter| {
-				let mut cx = waiter.context();
-				Stream::poll_accept(&mut accept, version, &mut cx)
-			})
-			.await?;
+	// Each AUTH serve task settles `Issued::closed` from whatever the auth handle
+	// holds when it drops, and the first reason wins. So the error that ends the
+	// session has to reach the handle while `tasks` is still alive, or every grant
+	// reports a bare cancel instead. `None` when the peer never negotiated AUTH,
+	// which leaves no serve task to settle.
+	let handle = serve.as_ref().map(|serve| serve.handle.clone());
 
-		// The intermediate results live outside the poll closure, so a Pending
-		// mid-header resumes where it left off.
-		let mut hdr_id: Option<u64> = None;
-		let header = tasks
-			.drive(|waiter| {
-				let mut cx = waiter.context();
-				let id = match hdr_id {
-					Some(id) => id,
-					None => *hdr_id.insert(std::task::ready!(stream.reader.poll_varint(&mut cx))?),
-				};
-				let body = std::task::ready!(stream.reader.poll_decode::<ietf::Body>(&mut cx))?;
-				std::task::Poll::Ready(Ok::<_, Error>((id, body)))
-			})
-			.await;
-		// Same tolerance as `run_unis`: a request stream that dies before its header
-		// is the peer abandoning that request, not the session. Anything else, a
-		// header that does not parse included, still fails the session.
-		let (id, data) = match header {
-			Ok(header) => header,
-			Err(err) if died_before_header(&err) => {
-				tracing::debug!(%err, "dropping bidi stream that died before its header");
-				continue;
-			}
-			Err(err) => return Err(err),
-		};
+	// Scoped so `tasks` outlives the close below: the loop borrows it, so it only
+	// drops once this block's future is done.
+	let res: Result<(), Error> = async {
+		let mut accept = session.clone();
+		loop {
+			let mut stream = tasks
+				.drive(|waiter| {
+					let mut cx = waiter.context();
+					Stream::poll_accept(&mut accept, version, &mut cx)
+				})
+				.await?;
 
-		match id {
-			// Draft-16 moved SUBSCRIBE_NAMESPACE to its own stream, past the control stream
-			// that admits every other request, but it still takes a request ID from the
-			// MAX_REQUEST_ID window. Held until the request ends, like the rest.
-			ietf::SubscribeNamespaceLegacy::ID if version == Version::Draft16 => {
-				let request_id = RequestId::decode(&mut crate::coding::Decoder::new(&data.0, version.into()), version)?;
-				let permit = publisher.control.accept(request_id)?;
-				let task = publisher.handle_stream(id, data, stream)?;
-				tasks.push(
-					async move {
-						let _permit = permit;
-						task.await
+			// The intermediate results live outside the poll closure, so a Pending
+			// mid-header resumes where it left off.
+			let mut hdr_id: Option<u64> = None;
+			let header = tasks
+				.drive(|waiter| {
+					let mut cx = waiter.context();
+					let id = match hdr_id {
+						Some(id) => id,
+						None => *hdr_id.insert(std::task::ready!(stream.reader.poll_varint(&mut cx))?),
+					};
+					let body = std::task::ready!(stream.reader.poll_decode::<ietf::Body>(&mut cx))?;
+					std::task::Poll::Ready(Ok::<_, Error>((id, body)))
+				})
+				.await;
+			// Same tolerance as `run_unis`: a request stream that dies before its header
+			// is the peer abandoning that request, not the session. Anything else, a
+			// header that does not parse included, still fails the session.
+			let (id, data) = match header {
+				Ok(header) => header,
+				Err(err) if died_before_header(&err) => {
+					tracing::debug!(%err, "dropping bidi stream that died before its header");
+					continue;
+				}
+				Err(err) => return Err(err),
+			};
+
+			match id {
+				// Draft-16 moved SUBSCRIBE_NAMESPACE to its own stream, past the control stream
+				// that admits every other request, but it still takes a request ID from the
+				// MAX_REQUEST_ID window. Held until the request ends, like the rest.
+				ietf::SubscribeNamespaceLegacy::ID if version == Version::Draft16 => {
+					let request_id =
+						RequestId::decode(&mut crate::coding::Decoder::new(&data.0, version.into()), version)?;
+					let permit = publisher.control.accept(request_id)?;
+					let task = publisher.handle_stream(id, data, stream)?;
+					tasks.push(
+						async move {
+							let _permit = permit;
+							task.await
+						}
+						.maybe_boxed(),
+					);
+				}
+				// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
+				// 0x11 legacy), SubscribeTracks, TrackStatus
+				ietf::Subscribe::ID
+				| ietf::Fetch::ID
+				| ietf::SubscribeNamespace::ID
+				| ietf::SubscribeNamespaceLegacy::ID
+				| ietf::SUBSCRIBE_TRACKS_ID
+				| ietf::TrackStatus::ID => {
+					tasks.push(publisher.handle_stream(id, data, stream)?);
+				}
+				// Subscriber handles: Publish, PublishNamespace
+				ietf::Publish::ID | ietf::PublishNamespace::ID => {
+					tasks.push(subscriber.handle_stream(id, data, stream, peer, declared)?);
+				}
+				auth::Auth::ID if let Some(serve) = &serve => {
+					let mut data = data.decoder(version);
+					let msg = auth::Auth::decode_msg(&mut data, version)?;
+					if !data.is_empty() {
+						return Err(Error::WrongSize);
 					}
-					.maybe_boxed(),
-				);
-			}
-			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
-			// 0x11 legacy), SubscribeTracks, TrackStatus
-			ietf::Subscribe::ID
-			| ietf::Fetch::ID
-			| ietf::SubscribeNamespace::ID
-			| ietf::SubscribeNamespaceLegacy::ID
-			| ietf::SUBSCRIBE_TRACKS_ID
-			| ietf::TrackStatus::ID => {
-				tasks.push(publisher.handle_stream(id, data, stream)?);
-			}
-			// Subscriber handles: Publish, PublishNamespace
-			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				tasks.push(subscriber.handle_stream(id, data, stream, peer, declared)?);
-			}
-			_ => {
-				tracing::warn!(id, "unexpected bidi stream type");
-				return Err(Error::UnexpectedStream);
+					tasks.push(serve.clone().run(stream, msg, version));
+				}
+				_ => {
+					tracing::warn!(id, "unexpected bidi stream type");
+					return Err(Error::UnexpectedStream);
+				}
 			}
 		}
 	}
+	.await;
+
+	// Every error exit above drops the AUTH serve tasks in `tasks`, so the session's
+	// error has to land on the handle first. The driver closes it again with the same
+	// error, which then does nothing.
+	if let Some(handle) = &handle
+		&& let Err(err) = &res
+	{
+		handle.close(err.clone());
+	}
+	res
 }
 
 /// Monitor the peer's SETUP stream for a GOAWAY, surfacing it through
@@ -1159,6 +1285,38 @@ async fn run_goaway<R: crate::transport::poll::RecvStream>(
 
 		tracing::warn!(id, "unexpected message after GOAWAY on the SETUP stream; ignoring");
 	}
+}
+
+/// Closes the auth handle when the session driver ends without finishing, releasing
+/// anything still waiting on a token.
+struct AuthClose(crate::auth::Handle);
+
+impl Drop for AuthClose {
+	fn drop(&mut self) {
+		self.0.close(Error::Cancel);
+	}
+}
+
+/// Close the session when our origin announces a broadcast our grant never covered,
+/// instead of leaving it to wait for a subscription that never comes. See
+/// [`crate::auth::Enforce`].
+async fn enforce_grant<S: crate::transport::poll::Session>(
+	auth: crate::auth::Handle,
+	origin: origin::Consumer,
+	mut session: S,
+) -> Result<(), Error> {
+	let mut announced = origin.announced();
+	let mut check = crate::auth::Enforce::default();
+	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
+		return Ok(());
+	};
+	tracing::error!(broadcast = %origin.absolute(&path), "publishing outside our grant; closing the session");
+	let err = Error::Unauthorized;
+	session.close(
+		SessionError::from(&err).to_code(),
+		&crate::auth::unauthorized_reason(&path),
+	);
+	Err(err)
 }
 
 #[cfg(test)]
@@ -1240,6 +1398,7 @@ mod tests {
 				},
 				..Default::default()
 			}),
+			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
 		})
 		.expect("start the session");
@@ -1294,6 +1453,7 @@ mod tests {
 			peer_setup_stream: None,
 			// The requests wait on the peer's SETUP (MoQ Hidden).
 			peer_declared: Some(peer::Peer::default()),
+			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
 		})
 		.expect("start the session");
@@ -1367,6 +1527,7 @@ mod tests {
 				solicit,
 				..Default::default()
 			}),
+			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
 		})
 		.expect("start the session");
@@ -1450,6 +1611,7 @@ mod tests {
 			authority: None,
 			peer_setup_stream: None,
 			peer_declared,
+			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
 		})
 		.expect("start the session");
@@ -1503,6 +1665,113 @@ mod tests {
 			1,
 			"no unsolicited PUBLISH_NAMESPACE"
 		);
+	}
+
+	/// The AUTH message type as it leads an Auth request on the draft-18 wire.
+	fn auth_type() -> Vec<u8> {
+		let mut buf = Vec::new();
+		crate::coding::Encoder::new(&mut buf, Version::Draft18.into())
+			.varint(auth::Auth::ID)
+			.unwrap();
+		buf
+	}
+
+	/// A publishing draft-18 session with AUTH available locally, against a peer that
+	/// declared `auth`. Everything the session needs to keep running is held here.
+	struct AuthSession {
+		handle: crate::auth::Handle,
+		log: crate::lite::test_transport::Log,
+		_origin: crate::origin::Producer,
+		_cam: crate::AnnounceProducer,
+		_gate: kio::Producer<bool>,
+		_goaway: crate::goaway::Handle,
+		_driver: moq_net_sim::JoinHandle<Result<(), Error>>,
+	}
+
+	fn auth_session(auth: bool) -> AuthSession {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
+
+		let gate = kio::Producer::new(true);
+		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+
+		let handle = crate::auth::Handle::new(true);
+		let (driver, goaway, _) = start(Config {
+			runtime: crate::time::Clock::sim(),
+			session,
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish: Some(origin.consume()),
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version: Version::Draft18,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer {
+				auth,
+				..Default::default()
+			}),
+			auth: handle.clone(),
+			early_unis: Vec::new(),
+		})
+		.expect("start the session");
+		AuthSession {
+			handle,
+			log,
+			_origin: origin,
+			_cam: cam,
+			_gate: gate,
+			_goaway: goaway,
+			_driver: moq_net_sim::spawn(driver),
+		}
+	}
+
+	/// A peer that never offered MoQ Auth sees no Auth request, the session keeps
+	/// working, and every token fails as unsupported rather than hanging.
+	#[moq_net_sim::test]
+	async fn a_peer_without_auth_sees_no_auth_request() {
+		let session = auth_session(false);
+		let (handle, log) = (&session.handle, &session.log);
+
+		let err = moq_net_sim::timeout(std::time::Duration::from_secs(1), handle.add("token"))
+			.await
+			.expect("unsupported promptly")
+			.err()
+			.expect("no AUTH on this session");
+		assert!(matches!(err, Error::Unsupported), "{err:?}");
+		assert_eq!(handle.grant().peek(), None, "no grant without the extension");
+
+		for _ in 0..ANNOUNCE_TURNS {
+			if occurrences(log, b"solo-cam") > 0 {
+				break;
+			}
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
+		assert_eq!(occurrences(log, b"solo-cam"), 1, "the session stopped advertising");
+		assert_eq!(
+			occurrences(log, &auth_type()),
+			0,
+			"sent AUTH to a peer that never offered it"
+		);
+	}
+
+	/// A peer that offered it gets the connection's own credential right away.
+	#[moq_net_sim::test]
+	async fn a_negotiating_peer_gets_the_setup_token() {
+		let session = auth_session(true);
+		let log = &session.log;
+		for _ in 0..ANNOUNCE_TURNS {
+			if occurrences(log, &auth_type()) > 0 {
+				break;
+			}
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
+		assert_eq!(occurrences(log, &auth_type()), 1, "one AUTH for the setup token");
 	}
 
 	/// The declared Hop ID must be the caller's own origin, whichever half carries it.
@@ -1561,6 +1830,7 @@ mod tests {
 			// Pre-settled, so nothing waits on a SETUP the dead stream will never
 			// carry and the dispatch loop actually runs.
 			peer_declared: Some(peer::Peer::default()),
+			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
 		})
 		.expect("start the session");
@@ -1600,6 +1870,7 @@ mod tests {
 				authority: Some(String::from_utf8(AUTHORITY.to_vec()).unwrap()),
 				peer_setup_stream: None,
 				peer_declared: Some(peer::Peer::default()),
+				auth: crate::auth::Handle::new(false),
 				early_unis: Vec::new(),
 			})
 			.expect("start the session");
@@ -1910,6 +2181,7 @@ mod tests {
 					authority: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer::Peer::default()),
+					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
 				})
 				.unwrap();
@@ -1975,6 +2247,7 @@ mod tests {
 					authority: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer::Peer::default()),
+					auth: crate::auth::Handle::new(false),
 					early_unis: Vec::new(),
 					limits: Default::default(),
 				})
@@ -2075,6 +2348,7 @@ mod tests {
 			authority: None,
 			peer_setup_stream: None,
 			peer_declared: None,
+			auth: crate::auth::Handle::new(false),
 			early_unis: Vec::new(),
 		})
 		.expect("start the session");
