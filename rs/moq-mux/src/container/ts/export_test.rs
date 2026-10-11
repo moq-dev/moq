@@ -7650,7 +7650,10 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 	let origin = crate::source::produce_origin();
 	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
 	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let mut follower = follower(&origin).await.with_stitch(true);
+	let mut follower = follower(&origin)
+		.await
+		.with_stitch(true)
+		.with_linger(Duration::from_secs(10));
 
 	// Replaced, but the replacement's catalog request is never answered before it goes.
 	let second = origin.publish("live", route()).unwrap();
@@ -8040,4 +8043,75 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	finish((exact, catalog));
 	let end = follower.next().await;
 	assert!(matches!(end, Ok(None)), "no replacement: {end:?}");
+}
+
+/// Both the catalog subscription and its first snapshot share the restart's linger bound.
+#[tokio::test(start_paused = true)]
+async fn a_midstream_stitch_catalog_expires_at_the_linger() {
+	for snapshot in [false, true] {
+		for linger in [Duration::ZERO, Duration::from_secs(10)] {
+			let origin = crate::source::produce_origin();
+			let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+			let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
+			let second = origin
+				.publish(
+					"live",
+					moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+				)
+				.unwrap();
+			let _unanswered = second.dynamic();
+			let _silent = snapshot.then(|| second.create_track(hang::Catalog::DEFAULT_NAME, None).unwrap());
+			let waiter = kio::Waiter::noop();
+			if !linger.is_zero() {
+				assert!(follower.poll_next(&waiter).is_pending());
+				tokio::time::advance(linger - Duration::from_millis(1)).await;
+				assert!(follower.poll_next(&waiter).is_pending());
+				tokio::time::advance(Duration::from_millis(1)).await;
+			}
+			let std::task::Poll::Ready(Err(err)) = follower.poll_next(&waiter) else {
+				panic!("replacement catalog wait must fail at the linger, snapshot={snapshot}, linger={linger:?}");
+			};
+			assert!(err.to_string().contains("live"), "{err}");
+			assert!(err.to_string().contains("catalog"), "{err}");
+		}
+	}
+}
+
+/// A catalog ready before the bound completes the switch, including zero linger.
+#[tokio::test(start_paused = true)]
+async fn a_midstream_stitch_catalog_within_linger_clears_the_bound() {
+	for linger in [Duration::ZERO, Duration::from_secs(10)] {
+		let origin = crate::source::produce_origin();
+		let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+		let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
+		let epoch = moq_net::Epoch::mint();
+		let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
+		let waiter = kio::Waiter::noop();
+		if !linger.is_zero() {
+			assert!(follower.poll_next(&waiter).is_pending());
+			tokio::time::advance(linger - Duration::from_millis(1)).await;
+		}
+		std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
+		// Resolve the local async serving path so zero linger sees an already available
+		// subscription and snapshot, rather than a request still parked on the driver.
+		let broadcast = origin
+			.consume()
+			.request_broadcast("live", Some(epoch.clone()))
+			.await
+			.unwrap();
+		let mut available = crate::catalog::Consumer::<()>::new(&broadcast, crate::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap();
+		use crate::catalog::Stream;
+		kio::wait(|waiter| available.poll_next(waiter)).await.unwrap().unwrap();
+		let next = follower.poll_next(&waiter);
+		assert!(next.is_pending(), "{next:?}, linger={linger:?}");
+		assert!(follower.export().cataloged());
+		assert_eq!(follower.export().instance(), Some(&epoch));
+		tokio::time::advance(Duration::from_secs(20)).await;
+		assert!(
+			follower.poll_next(&waiter).is_pending(),
+			"the first snapshot clears the bound"
+		);
+	}
 }

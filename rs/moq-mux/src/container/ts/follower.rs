@@ -87,6 +87,8 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	closed: bool,
 	linger: Duration,
 	stitch: bool,
+	/// A mid-stream replacement must supply its first catalog by this instant.
+	switching: Option<Instant>,
 	timer: Option<Pin<Box<web_async::time::Sleep>>>,
 }
 
@@ -111,6 +113,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			closed: false,
 			linger: Duration::ZERO,
 			stitch: false,
+			switching: None,
 			timer: None,
 		};
 		// Take the start naming the route the export resolved now, before anything else can
@@ -128,14 +131,16 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	/// Wait up to `linger` for the same instance to return once the broadcast ends. Defaults to
 	/// [`Duration::ZERO`].
 	///
-	/// It bounds the whole return, up to the returned catalog's first snapshot.
+	/// It bounds the whole return, and a mid-stream stitch from its restart to the
+	/// replacement catalog's first snapshot. Zero requires an already available catalog.
 	pub fn with_linger(mut self, linger: Duration) -> Self {
 		self.linger = linger;
 		self
 	}
 
 	/// Follow another publisher instance taking the path, as a full program switch (see
-	/// [`Export::follow`]). Defaults to `false`.
+	/// [`Export::follow`]). Defaults to `false`. Its first catalog must arrive within
+	/// [`with_linger`](Self::with_linger), including when the old instance is still live.
 	pub fn with_stitch(mut self, stitch: bool) -> Self {
 		self.stitch = stitch;
 		self
@@ -170,6 +175,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					// instance until it ends, unless asked to switch at once.
 					if self.stitch && matches!(self.serving, Serving::Other(_)) {
 						tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
+						self.switching = Some(Instant::now() + self.linger);
 						self.state = State::Following {
 							resolving: self.resolve(),
 							settling,
@@ -180,6 +186,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					let next = self.export.poll_next(waiter);
 					if self.export.cataloged() {
 						settling = None;
+						self.switching = None;
 					}
 					let end = match next {
 						Poll::Ready(Ok(Some(frame))) => {
@@ -189,6 +196,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						Poll::Ready(Ok(None)) => Ok(()),
 						Poll::Ready(Err(err)) => Err(err),
 						Poll::Pending => {
+							self.check_switch(waiter)?;
 							if let Some((end, deadline)) = &settling
 								&& self.elapsed(waiter, *deadline)
 							{
@@ -277,6 +285,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 								}
 								tracing::warn!(path = %self.path, %err, "broadcast went before it resolved, still waiting");
 								self.serving = Serving::Gone;
+								self.switching = None;
 								self.state = match (live, settling) {
 									(false, Some((end, deadline))) => State::Settling {
 										end,
@@ -300,6 +309,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						self.state = State::Running { settling };
 						continue;
 					}
+					self.check_switch(waiter)?;
 					if let Some((end, deadline)) = &settling
 						&& self.elapsed(waiter, *deadline)
 					{
@@ -386,6 +396,21 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				tracing::warn!(path = %self.path, %err, linger = ?self.linger, "broadcast ended, waiting for it to return")
 			}
 		}
+	}
+
+	/// Refuse a replacement that has not supplied its catalog within the configured linger.
+	fn check_switch(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
+		if let Some(deadline) = self.switching
+			&& self.elapsed(waiter, deadline)
+		{
+			return Err(anyhow::anyhow!(
+				"replacement broadcast `{}` did not serve its catalog within {:?}",
+				self.path,
+				self.linger
+			)
+			.into());
+		}
+		Ok(())
 	}
 
 	/// Whether `at` has come, registering `waiter` to wake then if not.
