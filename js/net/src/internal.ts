@@ -12,7 +12,7 @@ import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from
 import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import type { Groups, Producer, Request, Subscriber } from "./track.ts";
+import type { Groups, Location, Producer, Request, Subscriber } from "./track.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
@@ -136,6 +136,10 @@ export interface TrackRequestOptions {
 
 /** Hooks assigned in static blocks by the owning class. */
 export const hooks: {
+	/** Declare the exact wire terminal without changing the public group-only finish API. */
+	endTrack: (producer: Producer, position: Location) => void;
+	/** Read the exact terminal retained independently of the replay window. */
+	trackTerminal: (subscriber: Subscriber) => Location | undefined;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/** Access the existing producer while a request awaits immutable wire metadata. */
@@ -190,6 +194,12 @@ export const hooks: {
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 } = {
+	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	trackTerminal: () => {
+		throw new Error("track.ts not loaded");
+	},
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");
 	},

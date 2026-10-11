@@ -2232,3 +2232,33 @@ test("an explicit start holds on an untimed track, and nothing there is stale", 
 	const replay = producer.subscribe({ groups: { start: { included: 0 } } });
 	expect(drain(replay)).toEqual([0, 1, 2, 3, 4]);
 });
+
+test("exact wire terminal survives eviction and a filtered late reader", () => {
+	const clock = mockCacheTime(10_000);
+	const producer = new TrackProducer("video").accept({});
+	try {
+		hooks.endTrack(producer, { group: 5, frame: 5 });
+		const group = new GroupProducer(5);
+		producer.writeGroup(group);
+		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		group.close();
+		producer.close();
+		clock.advance(10_000 + CACHE_WINDOW_MS + 1);
+		const reader = producer.subscribe().withGroups({ end: { excluded: 5 } });
+		expect(reader.largest()).toBeUndefined();
+		expect(hooks.trackTerminal(reader)).toEqual({ group: 5, frame: 5 });
+		expect(reader.final()).toBe(6);
+		reader.close();
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
+test("an exact wire terminal cannot be replaced by another object", () => {
+	const producer = new TrackProducer("video").accept({});
+	hooks.endTrack(producer, { group: 5, frame: 5 });
+	hooks.endTrack(producer, { group: 5, frame: 5 });
+	expect(() => hooks.endTrack(producer, { group: 5, frame: 4 })).toThrow("conflicting track terminal");
+	producer.close();
+});

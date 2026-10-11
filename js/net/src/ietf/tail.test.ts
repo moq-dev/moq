@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
@@ -176,6 +177,18 @@ test("END_OF_TRACK at object 0 ends the track before its group, which never exis
 	expect((await reader.recvGroup())?.sequence).toBe(0);
 	expect(await reader.recvGroup()).toBeUndefined();
 	expect(reader.final()).toBe(2);
+});
+
+test("a standalone END_OF_TRACK at object 5 preserves its terminal group", async () => {
+	const { subscriber, reader, done } = await subscribed();
+	const end = groupStream(subscriber, 5);
+	end.write(new Uint8Array([5, 0, 0x4]));
+	end.finish();
+	await end.handled;
+	expect(reader.final()).toBe(6);
+	expect(hooks.trackTerminal(reader)).toEqual({ group: 5, frame: 5 });
+	await done(TRACK_ENDED, 1n);
+	expect(await reader.recvGroup()).toBeUndefined();
 });
 
 test("a group at or past the END_OF_TRACK aborts the track", async () => {

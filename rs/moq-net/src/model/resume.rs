@@ -326,7 +326,14 @@ impl Subscriber {
 
 	/// Poll for the track's declared final sequence.
 	pub(crate) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		self.reader().poll_finished(waiter)
+		self.reader()
+			.poll_terminal(waiter)
+			.map(|end| end.map(|end| end.group + u64::from(end.frame != 0)))
+	}
+
+	/// Poll for the serving copy's exact terminal position.
+	pub(crate) fn poll_terminal(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
+		self.reader().poll_terminal(waiter)
 	}
 
 	/// Poll for where the serving copy's live feed starts; see
@@ -696,7 +703,7 @@ impl Reader {
 		self.poll_end(waiter, |copy| copy.datagrams_done.clone())
 	}
 
-	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+	fn poll_terminal(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		self.sync(waiter);
 		let groups = self.groups;
 		let concluded = self.route.end();
@@ -706,7 +713,7 @@ impl Reader {
 		let serving = self.generation;
 		if let Some(copy) = self.copies.last_mut().filter(|copy| Some(copy.generation) == serving) {
 			match copy.poll_ready(groups, waiter) {
-				Poll::Ready(Ok(sub)) => match sub.poll_finished(waiter) {
+				Poll::Ready(Ok(sub)) => match sub.poll_terminal(waiter) {
 					Poll::Ready(Ok(fin)) => return Poll::Ready(Ok(fin)),
 					// The copy failed: only the end of the track if no front replaces it.
 					Poll::Ready(Err(err)) if concluded.is_some() => return Poll::Ready(Err(err)),
@@ -1121,6 +1128,26 @@ mod test {
 
 	fn ts(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
+	}
+
+	#[test]
+	fn a_route_preserves_the_exact_terminal_position() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut source = copy();
+		routes.serve(source.consume());
+		let mut sub = subscribe(&logical, Duration::ZERO);
+		assert!(sub.poll_terminal(&kio::Waiter::noop()).is_pending());
+		let terminal = Position { group: 5, frame: 5 };
+		source.end_at(terminal).unwrap();
+		assert_eq!(
+			sub.poll_terminal(&kio::Waiter::noop()).map(|result| result.unwrap()),
+			Poll::Ready(terminal)
+		);
+		assert_eq!(
+			sub.poll_finished(&kio::Waiter::noop()).map(|result| result.unwrap()),
+			Poll::Ready(6)
+		);
 	}
 
 	#[test]

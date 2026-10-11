@@ -12,7 +12,7 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
-import type { Subscriber as TrackSubscriber } from "../track.ts";
+import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -155,6 +155,8 @@ interface Target {
 
 /** What {@link Publisher.runGroup} needs to serve one group. */
 interface RunGroup {
+	/** The source retaining the exact terminal independently of cached groups. */
+	track: TrackSubscriber;
 	/** The subscription's request ID, doubling as the track alias. */
 	requestId: bigint;
 
@@ -186,7 +188,7 @@ interface RunGroup {
 }
 
 /** How many data streams a subscription opened, fill streams included. */
-type StreamCount = { opened: number };
+type StreamCount = { opened: number; terminalSent?: boolean };
 
 /** What {@link Publisher.runFill} needs to serve one subscription's backfill. */
 interface RunFill {
@@ -563,6 +565,7 @@ export class Publisher {
 					}
 
 					const task = this.#runGroup({
+						track,
 						requestId: msg.requestId,
 						group,
 						timescale,
@@ -631,8 +634,8 @@ export class Publisher {
 
 			// Draft 14 on has no end location in PUBLISH_DONE: an END_OF_TRACK object is what
 			// tells the subscriber where the track ended.
-			const final = track.final();
-			if (ended && !publishError && final !== undefined) {
+			const final = hooks.trackTerminal(track);
+			if (ended && !publishError && final !== undefined && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
 					final,
@@ -696,7 +699,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
+		const { requestId, track, group, timescale, publisherPriority, slice, unsubscribed, streams } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -772,6 +775,18 @@ export class Publisher {
 					}
 				}
 
+				const terminal = hooks.trackTerminal(track);
+				if (terminal?.group === group.sequence && terminal.frame === next) {
+					await new Frame({ endOfTrack: true }).encode(
+						stream,
+						header.flags,
+						timescale,
+						this.#session.version,
+						first ? next : 0,
+					);
+					streams.terminalSent = true;
+				}
+
 				stream.close();
 			} catch (err: unknown) {
 				stream.reset(error(err));
@@ -823,16 +838,10 @@ export class Publisher {
 		}
 	}
 
-	/**
-	 * Mark the track's end with an END_OF_TRACK object on its own stream, at object 0 of the
-	 * group that will never exist.
-	 *
-	 * The last group's stream has usually finished before the track ends, so the marker cannot
-	 * ride on it. A failure only costs the subscriber the early boundary.
-	 */
+	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
-		final: number;
+		final: TrackLocation;
 		publisherPriority: number;
 		unsubscribed: Promise<void>;
 		streams: StreamCount;
@@ -846,7 +855,7 @@ export class Publisher {
 		try {
 			const header = new GroupMessage({
 				trackAlias: requestId,
-				groupId: final,
+				groupId: final.group,
 				subGroupId: 0,
 				publisherPriority,
 				flags: {
@@ -855,11 +864,11 @@ export class Publisher {
 					hasSubgroupObject: false,
 					hasEnd: false,
 					hasPriority: true,
-					firstObject: true,
+					firstObject: final.frame === 0,
 				},
 			});
 			await header.encode(stream, version);
-			await new Frame({ endOfTrack: true }).encode(stream, header.flags, Timescale.MILLI, version);
+			await new Frame({ endOfTrack: true }).encode(stream, header.flags, Timescale.MILLI, version, final.frame);
 			stream.close();
 		} catch (err: unknown) {
 			stream.reset(error(err));

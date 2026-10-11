@@ -365,6 +365,7 @@ class TrackState {
 	 * Rust `final_sequence`.
 	 */
 	final = new Signal<number | undefined>(undefined);
+	terminal?: Location;
 	closed = new Once<Error | null>();
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
@@ -545,6 +546,7 @@ export class Producer {
 	}
 
 	static {
+		hooks.endTrack = (producer, position) => producer.#end(position);
 		bindProducerSequence = (producer, sequence) => {
 			producer.#sequence = sequence;
 		};
@@ -685,6 +687,7 @@ export class Producer {
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 
 		sink.received.set(this.#received);
+		sink.terminal = this.#state.terminal;
 		sink.final.set(this.#state.final.peek());
 		if (closed !== undefined) {
 			closeTrackState(sink, closed instanceof Error ? closed : undefined);
@@ -990,6 +993,24 @@ export class Producer {
 		this.#declareFinal(final);
 	}
 
+	#end(position: Location): void {
+		const { group, frame } = position;
+		if (!Number.isSafeInteger(group) || group < 0 || !Number.isSafeInteger(frame) || frame < 0) {
+			throw new RangeError("invalid track terminal");
+		}
+		const terminal = this.#state.terminal;
+		if (terminal) {
+			if (terminal.group !== group || terminal.frame !== frame) throw new Error("conflicting track terminal");
+			return;
+		}
+		const final = group + Number(frame !== 0);
+		const declared = this.#state.final.peek();
+		if (declared !== undefined && declared !== final) throw new Error("conflicting track end");
+		if (declared === undefined) this.finishAt(final);
+		this.#state.terminal = { group, frame };
+		for (const sink of this.#sinks) sink.terminal = this.#state.terminal;
+	}
+
 	#declareFinal(final: number): void {
 		this.#state.final.set(final);
 		for (const sink of this.#sinks) sink.final.set(final);
@@ -1216,6 +1237,11 @@ export class Subscriber {
 
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
+		hooks.trackTerminal = (subscriber) => {
+			const state = subscriber.#state;
+			const final = state.final.peek();
+			return state.terminal ?? (final === undefined ? undefined : { group: final, frame: 0 });
+		};
 		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.exemptFetch = (subscriber) => {

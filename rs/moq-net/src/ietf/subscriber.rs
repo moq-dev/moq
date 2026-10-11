@@ -2961,8 +2961,16 @@ where
 		};
 		let (producer, start) = match opened {
 			Opened::Group(producer, start) => (producer, start),
-			// No object at or past object 0 of this group exists, so neither does the group.
-			Opened::EndOfTrack => return end_track(&mut track, group.group_id),
+			// A standalone terminal carries a Location, not a payload group.
+			Opened::EndOfTrack(object) => {
+				return end_track(
+					&mut track,
+					track::Position {
+						group: group.group_id,
+						frame: object,
+					},
+				);
+			}
 		};
 
 		// Guarded: this handler can be dropped at any await below, and a group producer
@@ -3008,9 +3016,15 @@ where
 				let _ = producer.finish();
 			}
 			// No object past this group's last one exists, so the track ends after it.
-			Ok(Ended::Track) => {
+			Ok(Ended::Track(object)) => {
 				let _ = producer.finish();
-				return end_track(&mut track, group.group_id.saturating_add(1));
+				return end_track(
+					&mut track,
+					track::Position {
+						group: group.group_id,
+						frame: object,
+					},
+				);
 			}
 		}
 
@@ -3080,13 +3094,10 @@ where
 /// received is the publisher breaking its own end, which no later group can repair. A
 /// marker that lands after the subscription already ended (its grace expired) changes
 /// nothing.
-fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
-	if track.final_sequence().is_some() {
-		return Ok(());
-	}
+fn end_track(track: &mut track::Producer, end: track::Position) -> Result<(), Error> {
 	// Lower groups may still be on the wire, behind the one that carried the end.
-	if let Err(err) = track.finish_at_pending(end) {
-		tracing::warn!(%err, end, "invalid END_OF_TRACK");
+	if let Err(err) = track.end_at(end) {
+		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
 	}
@@ -3097,8 +3108,8 @@ fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
 enum Opened {
 	/// The group producer the stream writes into, and the Object ID it starts at.
 	Group(group::Producer, u64),
-	/// The stream's first object is an END_OF_TRACK at object 0: the group does not exist.
-	EndOfTrack,
+	/// A standalone terminal marker, which creates no payload group.
+	EndOfTrack(u64),
 }
 
 /// How a subgroup stream ended cleanly.
@@ -3107,7 +3118,7 @@ enum Ended {
 	/// The stream finished, or carried an explicit end of group.
 	Group,
 	/// It carried an END_OF_TRACK after the group's last object.
-	Track,
+	Track(u64),
 }
 
 /// Object status: no object at or past this location in the group exists (draft-14, 15).
@@ -3147,8 +3158,8 @@ where
 {
 	/// The group producer this subgroup stream writes into, and the Object ID it starts at.
 	///
-	/// The first object is peeked before any producer exists, since an END_OF_TRACK at
-	/// object 0 means the group does not exist at all. Normally the stream then starts the
+	/// The first object is peeked before any producer exists, since a standalone
+	/// END_OF_TRACK carries no payload group. Normally the stream then starts the
 	/// group. While a fill is outstanding it may instead be the tail of the group the fill
 	/// fetch stream began, which the first Object ID decides.
 	async fn open_group(
@@ -3187,8 +3198,8 @@ where
 				return Err(err);
 			}
 		};
-		if first.is_some_and(|first| first.id == 0 && first.end_of_track) {
-			return Ok(Opened::EndOfTrack);
+		if let Some(first) = first.filter(|first| first.end_of_track) {
+			return Ok(Opened::EndOfTrack(first.id));
 		}
 
 		// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
@@ -4412,7 +4423,8 @@ impl GroupIngest {
 					} else if status == END_OF_TRACK {
 						// Defined on every implemented draft, whether or not the header marks
 						// the group's end.
-						self.phase = IngestPhase::Finished(Ended::Track);
+						self.phase =
+							IngestPhase::Finished(Ended::Track(self.prior_object.expect("status follows object ID")));
 					} else {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
@@ -8224,6 +8236,19 @@ mod stitch_tests {
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"last");
 		assert!(group.read_frame().await.unwrap().is_none(), "the group is finished");
 		assert!(consumer.recv_group().await.unwrap().is_none(), "then the track ends");
+	}
+
+	#[moq_net_sim::test]
+	async fn a_standalone_end_of_track_preserves_a_nonzero_object() {
+		let mut marker = tail_stream(5, 5, &[]);
+		for value in [5u64, 0, 0, END_OF_TRACK] {
+			Encoder::new(&mut marker, VERSION.into()).varint(value).unwrap();
+		}
+		let h = Harness::new(Fill::Done, vec![marker]);
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		assert_eq!(h.track.final_sequence(), Some(6));
+		assert_eq!(h.track.latest(), None, "a terminal marker creates no payload group");
 	}
 
 	/// A group at or past the end an END_OF_TRACK declared contradicts that end, which no

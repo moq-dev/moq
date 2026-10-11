@@ -279,6 +279,8 @@ pub(crate) struct TrackState {
 
 	// The sequence number at which the track was finalized.
 	final_sequence: Option<u64>,
+	// Exact wire terminal, retained independently of the replay cache.
+	terminal: Option<Position>,
 
 	// Nothing more can arrive: the last producer dropped after a declared boundary,
 	// or the receiving session closed locally without declaring an end.
@@ -1995,6 +1997,30 @@ impl Producer {
 	pub(crate) fn finish_at_pending(&mut self, final_sequence: u64) -> Result<()> {
 		let mut state = self.modify()?;
 		state.set_final(final_sequence)?;
+		state.tail_pending = true;
+		Ok(())
+	}
+
+	/// Preserve an exact wire terminal while lower group streams are still in flight.
+	pub(crate) fn end_at(&mut self, position: Position) -> Result<()> {
+		let mut state = self.modify()?;
+		let boundary = position
+			.group
+			.checked_add(u64::from(position.frame != 0))
+			.ok_or(coding::BoundsExceeded)?;
+		if let Some(terminal) = state.terminal {
+			return if terminal == position {
+				Ok(())
+			} else {
+				Err(Error::ProtocolViolation)
+			};
+		}
+		match state.final_sequence {
+			Some(final_sequence) if final_sequence != boundary => return Err(Error::ProtocolViolation),
+			Some(_) => {}
+			None => state.set_final(boundary)?,
+		}
+		state.terminal = Some(position);
 		state.tail_pending = true;
 		Ok(())
 	}
@@ -4278,6 +4304,18 @@ impl Subscriber {
 			Poll::Ready(Ok(largest)) => Poll::Ready(largest),
 			Poll::Ready(Err(state)) => Poll::Ready(state.largest()),
 			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Read the exact wire terminal, falling back to a locally declared group boundary.
+	pub(crate) fn poll_terminal(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.poll(waiter, |state| {
+				state
+					.poll_finished()
+					.map(|end| end.map(|end| state.terminal.unwrap_or(Position::group(end))))
+			}),
+			Inner::Resume(resume, _) => resume.poll_terminal(waiter),
 		}
 	}
 
@@ -7737,6 +7775,48 @@ mod test {
 		assert!(producer.finish_at(6).is_err());
 		assert!(producer.create_group(group::Info { sequence: 4 }).is_ok());
 		assert!(producer.create_group(group::Info { sequence: 6 }).is_err());
+	}
+
+	#[test]
+	fn exact_terminal_survives_eviction_and_filtered_readers() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		let terminal = Position { group: 5, frame: 5 };
+		producer.end_at(terminal).unwrap();
+		let mut group = producer.create_group(group::Info { sequence: 5 }).unwrap();
+		for _ in 0..5 {
+			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		}
+		group.finish().unwrap();
+		let consumer = producer.consume();
+		producer.set_tail_pending(false);
+		drop(producer);
+		// Date the last activity before advancing the cache clock past expiry.
+		pool.sweep();
+		pool.step(Duration::from_secs(2));
+		pool.sweep();
+		assert!(consumer.peek_group(5).is_none(), "payload cache expired");
+		let mut sub = consumer.subscribe(replay()).now_or_never().unwrap().unwrap();
+		sub.end_at(Bound::Excluded(5));
+		assert_eq!(
+			sub.poll_terminal(&kio::Waiter::noop()).map(|result| result.unwrap()),
+			Poll::Ready(terminal)
+		);
+		assert_eq!(
+			sub.poll_finished(&kio::Waiter::noop()).map(|result| result.unwrap()),
+			Poll::Ready(6)
+		);
+	}
+
+	#[test]
+	fn an_exact_terminal_cannot_be_replaced_with_a_different_object() {
+		let mut producer = track_producer("test", None);
+		producer.end_at(Position { group: 5, frame: 5 }).unwrap();
+		producer.end_at(Position { group: 5, frame: 5 }).unwrap();
+		assert!(matches!(
+			producer.end_at(Position { group: 5, frame: 4 }),
+			Err(Error::ProtocolViolation)
+		));
 	}
 
 	#[test]

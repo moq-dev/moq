@@ -4,7 +4,7 @@ use std::{
 	ops::Bound,
 	sync::{
 		Arc,
-		atomic::{AtomicU64, AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 	},
 	task::{Poll, ready},
 	time::Duration,
@@ -2817,6 +2817,13 @@ where
 	}
 }
 
+/// The terminal shared by a subscription's group writers.
+#[derive(Default)]
+struct Terminal {
+	position: std::sync::Mutex<Option<track::Position>>,
+	sent: AtomicBool,
+}
+
 /// Serves a track's groups, one machine per group, with unlimited concurrency.
 struct TrackServe<S: crate::transport::poll::Session> {
 	session: S,
@@ -2833,7 +2840,8 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	/// Group streams opened, shared with the group machines.
 	opened: Arc<AtomicU64>,
 	/// The track's exclusive end, once its groups ran out because it finished.
-	end: Option<u64>,
+	end: Option<track::Position>,
+	terminal: Arc<Terminal>,
 	/// Serve the track's datagrams too, as OBJECT_DATAGRAMs. Off when the transport has no
 	/// datagrams; there is no stream fallback.
 	datagrams: bool,
@@ -2879,6 +2887,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			draining: false,
 			opened: Default::default(),
 			end: None,
+			terminal: Default::default(),
 			budget: kio::coop::Budget::new(32),
 		}
 	}
@@ -2908,45 +2917,47 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 	/// Where the track ends, when the subscription ran to that end rather than stopping at
 	/// its own range first.
-	fn end(&self) -> Option<u64> {
+	fn end(&self) -> Option<track::Position> {
 		let end = self.end?;
-		let reached = self.range.end.is_none_or(|last| last.group.saturating_add(1) >= end);
+		if self.terminal.sent.load(Ordering::Relaxed) {
+			return None;
+		}
+		let reached = self
+			.range
+			.end
+			.is_none_or(|last| last.group.saturating_add(1) >= end.group.saturating_add(u64::from(end.frame != 0)));
 		reached.then_some(end)
 	}
 
-	/// Mark the track's end with an END_OF_TRACK object on its own stream, at object 0 of
-	/// the group that will never exist.
-	///
-	/// The last group's stream has usually finished before the track ends, so the marker
-	/// cannot ride on it. Like a group stream, it counts toward PUBLISH_DONE once open,
-	/// since a reset can still deliver its header.
-	async fn write_end_of_track(&mut self, end: u64, priority: u8) -> Result<(), Error> {
+	/// Send the original terminal on a separate stream when its group already sent FIN.
+	async fn write_end_of_track(&mut self, end: track::Position, priority: u8) -> Result<(), Error> {
 		let mut stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx))
 			.await
 			.map_err(Error::from_transport)?;
 		self.opened.fetch_add(1, Ordering::Relaxed);
 		stream.set_priority(priority.into());
-
 		let mut writer = Writer::new(stream, self.version);
 		writer.buffer(&ietf::GroupHeader {
 			track_alias: self.request_id.0,
-			group_id: end,
+			group_id: end.group,
 			sub_group_id: 0,
 			publisher_priority: super::priority::to_wire(self.track.info().priority),
 			flags: ietf::GroupFlags {
 				has_end: false,
+				first_object: end.frame == 0,
 				..Default::default()
 			},
 		})?;
-		// Object ID delta 0, then an empty object whose status is END_OF_TRACK.
-		writer.buffer_varint(0)?;
+		writer.buffer_varint(end.frame)?;
 		writer.buffer_varint(0)?;
 		writer.varint(END_OF_TRACK).await?;
-		// PUBLISH_DONE follows once this closes, like every other data stream.
 		writer.close().await
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Poll::Ready(Ok(end)) = self.track.poll_terminal(waiter) {
+			*self.terminal.position.lock().expect("terminal poisoned") = Some(end);
+		}
 		if self.draining {
 			return self.children.poll(waiter).map(Ok);
 		}
@@ -3007,14 +3018,15 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 							self.version,
 							slice,
 						)
-						.counted(self.opened.clone()),
+						.counted(self.opened.clone())
+						.terminal(self.terminal.clone()),
 					);
 				}
 				Poll::Ready(Ok(None)) => {
 					// Datagrams written before the track finished still go out.
 					self.poll_datagrams(waiter);
 					self.draining = true;
-					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
+					if let Poll::Ready(Ok(end)) = self.track.poll_terminal(waiter) {
 						self.end = Some(end);
 					}
 					return self.children.poll(waiter).map(Ok);
@@ -3098,6 +3110,8 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	timescale: Option<Timescale>,
 	version: Version,
 	object_delta: u64,
+	terminal: Option<Arc<Terminal>>,
+	marked: bool,
 	state: GroupState<S>,
 	/// A long cached group drains a slice per poll, so its siblings still run.
 	budget: kio::coop::Budget,
@@ -3161,9 +3175,16 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			timescale,
 			version,
 			object_delta,
+			terminal: None,
+			marked: false,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
 		}
+	}
+
+	fn terminal(mut self, terminal: Arc<Terminal>) -> Self {
+		self.terminal = Some(terminal);
+		self
 	}
 
 	/// Count this group's stream into `opened` once it opens.
@@ -3303,7 +3324,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										*batch_pos = 0;
 										continue;
 									}
-									Poll::Ready(Ok(_)) => break 'serve Ok(()),
+									// Finish through the common EOF path so a terminal status
+									// follows batched frames just as it follows streamed frames.
+									Poll::Ready(Ok(_)) => {}
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => {}
 								}
@@ -3325,7 +3348,28 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 											*frame = Some(next);
 										}
 									}
-									Poll::Ready(Ok(None)) => break 'serve Ok(()),
+									Poll::Ready(Ok(None)) => {
+										if !self.marked
+											&& self
+												.terminal
+												.as_ref()
+												.and_then(|terminal| {
+													*terminal.position.lock().expect("terminal poisoned")
+												})
+												.is_some_and(|end| {
+													end.group == self.msg.group_id && end.frame == self.group.index()
+												}) {
+											writer.buffer_varint(std::mem::take(&mut self.object_delta))?;
+											if self.msg.flags.has_extensions {
+												writer.buffer_varint(0)?;
+											}
+											writer.buffer_varint(0)?;
+											writer.buffer_varint(END_OF_TRACK)?;
+											self.marked = true;
+											continue;
+										}
+										break 'serve Ok(());
+									}
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
 								}
@@ -3340,7 +3384,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						Ok(()) => {
 							let mut writer = writer;
 							match writer.finish() {
-								Ok(()) => self.state = GroupState::Closed { writer },
+								Ok(()) => {
+									if self.marked
+										&& let Some(terminal) = &self.terminal
+									{
+										terminal.sent.store(true, Ordering::Relaxed);
+									}
+									self.state = GroupState::Closed { writer };
+								}
 								Err(err) => return Poll::Ready(Err(err)),
 							}
 						}
@@ -3463,7 +3514,7 @@ mod group_priority_test {
 			ServeRange::default(),
 			None,
 		);
-		serve.write_end_of_track(0, 0).await.unwrap();
+		serve.write_end_of_track(track::Position::group(0), 0).await.unwrap();
 		let bytes = log.writes.lock().unwrap().clone();
 		let mut decoder = crate::coding::Decoder::new(&bytes, Version::Draft22.into());
 		let header = ietf::GroupHeader::decode(&mut decoder, Version::Draft22).unwrap();
@@ -3471,6 +3522,75 @@ mod group_priority_test {
 			!header.flags.has_end,
 			"END_OF_TRACK does not end a group that never existed"
 		);
+	}
+
+	#[moq_net_sim::test]
+	async fn exact_end_of_track_survives_the_final_group_fin() {
+		use crate::lite::test_transport::Sent;
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for finished in [false, true] {
+				let log = crate::lite::test_transport::Log::default();
+				let mut track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "test", None);
+				let mut group = track.create_group(group::Info { sequence: 5 }).unwrap();
+				for _ in 0..5 {
+					group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+				}
+				let mut serve = TrackServe::new(
+					SinkSession::new(log.clone()),
+					track.subscribe(None),
+					RequestId(0),
+					version,
+					ServeRange::default(),
+					None,
+				);
+				assert!(serve.poll(&kio::Waiter::noop()).is_pending());
+				if finished {
+					group.clone().finish().unwrap();
+					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
+					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
+				}
+				track.end_at(track::Position { group: 5, frame: 5 }).unwrap();
+				track.set_tail_pending(false);
+				if !finished {
+					group.finish().unwrap();
+				}
+				kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+				if let Some(end) = serve.end() {
+					serve.write_end_of_track(end, 0).await.unwrap();
+				}
+				assert_eq!(serve.opened(), if finished { 2 } else { 1 });
+				let marker_stream = usize::from(finished);
+				let bytes: Vec<u8> = log
+					.trail()
+					.into_iter()
+					.filter_map(|(id, event)| match event {
+						Sent::Write(bytes) if id == marker_stream => Some(bytes),
+						_ => None,
+					})
+					.flatten()
+					.collect();
+				let mut bytes = bytes::Bytes::from(bytes);
+				let header = crate::coding::decode_buf(&mut bytes, version, ietf::GroupHeader::decode).unwrap();
+				assert_eq!(header.group_id, 5);
+				assert_eq!(header.flags.has_end, !finished);
+				if !finished {
+					for _ in 0..5 {
+						assert_eq!(&bytes.split_to(3)[..], &[0, 1, b'x']);
+					}
+				}
+				assert_eq!(&bytes[..], &[if finished { 5 } else { 0 }, 0, END_OF_TRACK as u8]);
+			}
+		}
 	}
 
 	/// The model's `Subscription::priority` is higher-first ("higher values preempt
