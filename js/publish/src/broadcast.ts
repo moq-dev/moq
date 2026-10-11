@@ -87,8 +87,8 @@ export class Broadcast {
 	// A static network track is exposed here only while at least one subscriber uses it.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
 
-	// The kind each rendition name was first registered as, for the broadcast's whole life.
-	readonly #kinds = new Map<string, Kind>();
+	// The kind of each rendition track in the current network broadcast. A new one starts over.
+	#kinds = new Map<string, Kind>();
 
 	#signals = new Effect();
 
@@ -139,7 +139,6 @@ export class Broadcast {
 		if (previous !== undefined && previous !== kind) {
 			throw new Error(`rendition ${name} was registered as ${previous}, not ${kind}`);
 		}
-		this.#kinds.set(name, kind);
 
 		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
 		this.#tracks.set(name, track);
@@ -251,8 +250,11 @@ export class Broadcast {
 		// group sequence under the same epoch. Rendition tracks by name, so registering a name
 		// again finds its track; the catalog's stay out of reach of a colliding rendition.
 		const tracks = new Map<string, Moq.Track.Producer>();
+		const kinds = new Map<string, Kind>();
+		this.#kinds = kinds;
 		effect.cleanup(() => {
 			for (const track of tracks.values()) track.close();
+			if (this.#kinds === kinds) this.#kinds = new Map();
 		});
 
 		let serving = false;
@@ -306,6 +308,7 @@ export class Broadcast {
 						Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),
 					);
 					tracks.set(rendition.name, track);
+					kinds.set(rendition.name, rendition.kind);
 				}
 				const served = track;
 				inner.run((demand) => {

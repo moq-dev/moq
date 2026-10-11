@@ -255,6 +255,27 @@ test("a rendition keeps its track across rendition changes", async () => {
 	broadcast.close();
 });
 
+test("a rendition name may change kind on a new network broadcast", async () => {
+	const name = new Signal(Path.from("one.hang"));
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name });
+	const video = broadcast.video("x");
+	await settle();
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+	const subscriber = net.track("x").subscribe();
+	await settle();
+	video.close();
+	expect(() => broadcast.audio("x")).toThrow("registered as video");
+
+	// A new network broadcast holds no track for the name, so any kind may take it.
+	name.set(Path.from("two.hang"));
+	await settle();
+	expect(() => broadcast.audio("x")).not.toThrow();
+
+	subscriber.close();
+	broadcast.close();
+});
+
 test("a rendition whose track closed gets a replacement", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
 	const video = broadcast.video("video");
