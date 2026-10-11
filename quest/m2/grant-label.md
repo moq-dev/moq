@@ -47,7 +47,12 @@ Decided 2026-10-10 by maintainer priority, extended 2026-10-11:
   today. Generalize `stats::Session::set_tier` into one `(tier, label)` retag
   rather than adding a second method, and call it from `Lease::ended`
   (`rs/moq-relay/src/auth.rs`). Bytes counted before the change stay under
-  the old label; bytes after go to the new one.
+  the old label; bytes after go to the new one, including writes through a
+  meter handed out before the retag. A meter therefore carries the session's
+  own counters, never a label: the retag folds the session's totals so far
+  into the old `(tier, label)` row, and later writes accrue toward the new
+  one. The per-path rows keep today's rule, where a meter stays on the tier
+  its group started under.
 - **Defaults on both sides.** An older relay ignores the field (`Grant` does
   not deny unknown fields) and counts under the grant's root; access is
   unchanged, so that degrades to today's accounting, not to a wider scope.
@@ -58,7 +63,8 @@ Decided 2026-10-10 by maintainer priority, extended 2026-10-11:
   refused; a re-checked grant with a new label moves later presence and bytes
   there and leaves earlier bytes under the old one, mirroring
   `set_tier_moves_presence` and `set_tier_moves_subsequent_traffic`
-  (`rs/moq-net/src/stats.rs`); an invalid label is refused.
+  (`rs/moq-net/src/stats.rs`), and a meter retained across the retag writes
+  under the new label; an invalid label is refused.
 - Update `doc/concept/stats.md`, `doc/bin/relay/auth.md`,
   `doc/lib/rs/moq-auth.md`, and `doc/lib/js/auth.md`.
 
