@@ -21,8 +21,9 @@ tables.
 The PAT and the PMT share one TBsys: it takes PIDs 0 to 3 and the selected
 program's PMT PID (ISO 13818-1 2.4.2.3). One PAT and PMT pair (376 B) fits. At
 25 Mb/s, two pairs back to back deliver 752 B in about 180 µs, of which about
-23 B drains, peaking near 729 B; three peak near 1090 B. Two distinct pairs fit
-only about 1.9 ms apart, at any mux rate.
+23 B drains, peaking near 729 B; three peak near 1090 B. At high rates two
+distinct pairs fit only about 1.9 ms apart; pacing derives the spacing from
+simulated occupancy at the actual mux rate.
 
 - Start from the author's narrower diff on #5207
   (https://github.com/moq-dev/moq/pull/5207#discussion_r4239051134): drop a run
@@ -51,8 +52,9 @@ only about 1.9 ms apart, at any mux rate.
   TBsys but overflows Bsys. The AAC tune-in test still passes.
 - `test/ts/compliance.py` gains a hard-severity system-buffer check: for each
   program, one TBsys fed by PIDs 0 to 3 and that program's PMT PID, draining
-  into one Bsys, both checked for overflow. Its `tstd` check models only
-  elementary streams today. Other SI (NIT, SDT, EIT) and SCTE-35 never enter
-  TBsys. Every existing TS arm still passes.
+  into one Bsys, both checked for overflow, and TBsys for emptying at least
+  once a second (2.4.2.6), with a negative control for each. Its `tstd` check
+  models only elementary streams today. Other SI (NIT, SDT, EIT) and SCTE-35
+  never enter TBsys. Every existing TS arm still passes.
 
 Public API: none. Wire: none.
