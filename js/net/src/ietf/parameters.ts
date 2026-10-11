@@ -143,7 +143,7 @@ export class SetupOptions {
 				i++;
 
 				if (id % 2n === 0n) {
-					if (KNOWN_SETUP_OPTIONS.includes(id) && params.vars.has(id)) {
+					if (id !== SetupOption.MaxRequestId && KNOWN_SETUP_OPTIONS.includes(id) && params.vars.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();

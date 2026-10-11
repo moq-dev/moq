@@ -121,7 +121,9 @@ impl Decode<Version> for Parameters {
 					if abs % 2 == 0 {
 						let kind = ParameterVarInt::from(abs);
 						// Unknown SETUP options may repeat, but their values must still decode.
-						if !matches!(kind, ParameterVarInt::Unknown(_)) && vars.contains_key(&kind) {
+						if !matches!(kind, ParameterVarInt::Unknown(_) | ParameterVarInt::MaxRequestId)
+							&& vars.contains_key(&kind)
+						{
 							return Err(DecodeError::Duplicate);
 						}
 						vars.insert(kind, u64::decode(&mut r, version)?);
@@ -599,6 +601,36 @@ mod tests {
 	use super::super::Filter;
 	use super::*;
 	use bytes::{Buf, Bytes, BytesMut};
+
+	#[test]
+	fn setup_retired_max_request_id_may_repeat() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let bytes: &[u8] = match version {
+				Version::Draft14 | Version::Draft15 => &[2, 2, 1, 2, 2],
+				Version::Draft16 => &[2, 2, 1, 0, 2],
+				_ => &[2, 1, 0, 2],
+			};
+			let result = Parameters::decode(&mut &bytes[..], version);
+			match version {
+				Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+					assert!(matches!(result, Err(DecodeError::Duplicate)))
+				}
+				_ => {
+					result.expect("retired SETUP option is unknown");
+				}
+			}
+		}
+	}
 
 	#[test]
 	fn setup_allows_repeated_unknown_options() {

@@ -1998,3 +1998,28 @@ for (const version of [
 		await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow();
 	});
 }
+
+for (const version of [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	test(`SETUP ${version}: retired MAX_REQUEST_ID may repeat`, async () => {
+		const bytes = new Uint8Array(
+			version <= Version.DRAFT_15
+				? [2, 2, 1, 2, 2]
+				: version === Version.DRAFT_16
+					? [2, 2, 1, 0, 2]
+					: [2, 1, 0, 2],
+		);
+		const decoded = SetupOptions.decode(new Reader(undefined, bytes, version), version);
+		if (version <= Version.DRAFT_16) await expect(decoded).rejects.toThrow(/duplicate/);
+		else await decoded;
+	});
+}
