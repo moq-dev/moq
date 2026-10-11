@@ -490,13 +490,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						}
 					}
 				}
-				MatroskaSpec::BlockDuration(value) => {
-					duration = Some(
-						value
-							.checked_mul(self.timestamp_scale_ns)
-							.ok_or(Error::TimestampOverflow)?,
-					)
-				}
+				MatroskaSpec::BlockDuration(value) => duration = Some(*value),
 				_ => {}
 			}
 		}
@@ -550,11 +544,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if track.kind == TrackKind::Text && block.laced {
 			return Err(Error::InvalidSubtitle("laced subtitles are unsupported").into());
 		}
-		let duration = block
-			.duration
-			.or(track.default_duration)
-			.map(Timestamp::from_nanos)
-			.transpose()?;
+		let duration = if track.kind == TrackKind::Text {
+			let duration = block
+				.duration
+				.map(|value| {
+					value
+						.checked_mul(self.timestamp_scale_ns)
+						.ok_or(Error::TimestampOverflow)
+				})
+				.transpose()?;
+			duration
+				.or(track.default_duration)
+				.map(Timestamp::from_nanos)
+				.transpose()?
+		} else {
+			None
+		};
 		let payload = if track.kind == TrackKind::Text {
 			let duration = duration.ok_or(Error::InvalidSubtitle("missing cue duration"))?;
 			let end = timestamp.checked_add(duration)?;
