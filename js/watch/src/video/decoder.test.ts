@@ -613,6 +613,44 @@ it("a shared audio clock reset cannot present a parked video frame", async () =>
 		playback.sync.reset();
 		await microtasks();
 		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+		// The next utterance anchors the clock past the parked frame's deadline.
+		playback.sync.received(Time.Milli(2000));
+		await microtasks();
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+	} finally {
+		playback.close();
+		await microtasks();
+		clear.mockRestore();
+		timer.mockRestore();
+		now.mockRestore();
+	}
+});
+
+it("a reset drops a parked video frame even when the next anchor restores the reference", async () => {
+	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
+	const timers: Array<() => void> = [];
+	const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void) => {
+		timers.push(fn);
+		return timers.length as unknown as ReturnType<typeof setTimeout>;
+	}) as unknown as typeof setTimeout);
+	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const reads: Read[] = [];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		playback.enabled.set(false);
+		playback.delay.set(Time.Milli(1000));
+		await microtasks();
+		reads.push(sample(0, 0), sample(0, 100_000, 0, false));
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.submitted).toEqual([0, 100_000]);
+		// In one turn, so the reference never visibly changes and the parked sleep keeps its timer.
+		playback.sync.reset();
+		playback.sync.received(Time.Milli(0));
+		await microtasks();
+		for (const fn of timers.splice(0)) fn();
+		await microtasks();
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
 	} finally {
 		playback.close();
 		await microtasks();

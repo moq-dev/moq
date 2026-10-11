@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { type Delay, Sync } from "./sync";
@@ -124,7 +124,7 @@ describe("auto delay", () => {
 describe("wait", () => {
 	it("returns at once when constructed instant, before effects flush", async () => {
 		const sync = new Sync({ delay: "instant" });
-		expect(await sync.wait(Time.Milli.zero)).toBe(true);
+		await sync.wait(Time.Milli.zero);
 		sync.close();
 	});
 
@@ -147,44 +147,25 @@ describe("wait", () => {
 		sync.close();
 	});
 
-	it("wakes a sleeping wait on reset", async () => {
+	it("holds a sleeping wait across a reset until the next frame re-anchors", async () => {
 		const sync = new Sync({ delay: 10_000 as Time.Milli });
 		await flush();
-		sync.received(Time.Milli.now());
+		const timestamp = Time.Milli.now();
+		sync.received(timestamp);
 
-		const waiting = sync.wait(Time.Milli.now());
+		let woke = false;
+		const waiting = sync.wait(timestamp).then(() => {
+			woke = true;
+		});
 		await flush();
 		sync.reset();
+		await flush();
+		expect(woke).toBe(false);
+
+		// The next frame anchors far enough ahead that this one is overdue.
+		sync.received(Time.Milli.add(timestamp, Time.Milli(20_000)));
 		await waiting;
+		expect(woke).toBe(true);
 		sync.close();
 	});
-});
-
-it("a reset invalidates waits even when the next frame restores the same reference", async () => {
-	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
-	const timer = spyOn(globalThis, "setTimeout").mockImplementation(
-		(() => 1 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
-	);
-	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
-	const sync = new Sync({ delay: Time.Milli(1000) });
-	try {
-		for (let i = 0; i < 10; i++) await Promise.resolve();
-		sync.received(Time.Milli(0));
-		let valid: boolean | undefined;
-		const waiting = sync.wait(Time.Milli(0)).then((result) => {
-			valid = result;
-		});
-		const reference = sync.out.reference.peek();
-		sync.reset();
-		sync.received(Time.Milli(0));
-		expect(sync.out.reference.peek()).toBe(reference);
-		for (let i = 0; i < 10; i++) await Promise.resolve();
-		expect(valid).toBe(false);
-		await waiting;
-	} finally {
-		sync.close();
-		clear.mockRestore();
-		timer.mockRestore();
-		now.mockRestore();
-	}
 });

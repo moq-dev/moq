@@ -72,11 +72,6 @@ signals-bench:
     bun install --frozen-lockfile
     bun signals/bench/effect.ts
 
-# Sweep shared-clock reset over independent players and parked frames.
-sync-bench:
-    bun install --frozen-lockfile
-    bun watch/bench/sync.ts
-
 # Bundle the worklets with Vite, webpack, esbuild, and Bun, and load them in Chromium, with and
 # without a strict CSP. Manual only: it installs webpack and launches a browser.
 worklet-matrix:

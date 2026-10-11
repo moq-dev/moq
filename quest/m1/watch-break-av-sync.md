@@ -43,10 +43,12 @@ the offset negative control on its unrelated audio-tone completeness floor
 
 Astra iteration reproduced a related shared-clock defect with mocked time: when
 an audio reset cleared the reference, `Sync.wait` returned normally and the video
-decoder presented its parked frame. The candidate gives resets a private
-generation and returns a boolean from `Sync.wait`; video discards invalidated
-waits. This also covers reset and re-anchor in one microtask. Focused regressions
-fail before and pass after the fix.
+decoder presented its parked frame. Decided 2026-10-11 (no public API change):
+`Sync.wait` stays `Promise<void>` and holds a parked wait across a reset until
+the next frame re-anchors the clock. Video drops a frame whose wait spanned a
+reset, keyed on an `@internal` reset epoch (stripped from the published types),
+which also covers a reset and same-value re-anchor in one turn. Focused
+regressions fail before and pass after the fix.
 
 The media harness now keeps early-resume grading active until audio is running
 and unstalled. A moving silent preview no longer ends that grading. Existing
@@ -56,7 +58,3 @@ This does not yet establish the cause of the original 1.6-second reattach sample
 Keep the quest until real-media evidence connects that failure to the fixed path
 or independently demonstrates that it is resolved. Frames already waiting for
 presentation are covered; queued WebCodecs outputs need separate evidence.
-
-Public API candidate: `Sync.wait` returns `Promise<boolean>` instead of
-`Promise<void>`; callers must honor false. Recommend this normal cancellation
-result over an exception or a public generation counter. Wire: unchanged.
