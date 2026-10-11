@@ -37,7 +37,3 @@ were immediately decodable.
   length-prefixed path; and a real clip generated with x264
   `intra-refresh=1` added as a second round-trip in `test/ts/run.sh` next to
   the closed-GOP one, asserting the catalog `warmup` and the group count.
-
-## Required
-
-- [Catalog warmup](/quest/m1/catalog-warmup.md) - the field import writes

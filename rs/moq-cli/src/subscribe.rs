@@ -1,6 +1,8 @@
 use std::time::Duration;
 
+use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
+use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::select;
 use tokio::io::AsyncWriteExt;
@@ -182,6 +184,9 @@ pub struct SubscribeArgs {
 	/// How long to wait for the broadcast to come back after it ends (TS only).
 	pub linger: Duration,
 
+	/// Follow another publisher instance replacing the broadcast, as a program switch (TS only).
+	pub stitch: bool,
+
 	/// Cap the output duration: publisher groups by default for fMP4, video GOPs for MKV.
 	pub fragment_duration: Option<Duration>,
 
@@ -240,15 +245,26 @@ impl SubscribeArgs {
 
 /// Exports one broadcast from the Origin to stdout in the requested format.
 pub struct Subscribe {
+	origin: moq_net::origin::Consumer,
+	path: moq_net::PathOwned,
 	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
 }
 
 impl Subscribe {
-	/// Wrap the broadcast + resolved settings; [`run`](Self::run) drives it.
-	pub fn new(source: moq_mux::Source, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
-		Self { source, catalog, args }
+	/// Export the broadcast at `path` on `origin` with the resolved settings; [`run`](Self::run)
+	/// drives it.
+	pub fn new(origin: moq_net::origin::Consumer, path: &str, catalog: CatalogFormat, args: SubscribeArgs) -> Self {
+		let path = moq_net::Path::new(path).to_owned();
+		let source = moq_mux::Source::new(origin.clone(), &path);
+		Self {
+			origin,
+			path,
+			source,
+			catalog,
+			args,
+		}
 	}
 
 	/// Build the catalog stream, narrowed by the rendition selection flags. The
@@ -338,13 +354,18 @@ impl Subscribe {
 	async fn run_ts(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
+		self.origin.routed(&self.path).await.with_context(|| {
+			format!(
+				"broadcast `{}` is outside the session's scope, or the origin closed before it was announced",
+				self.path
+			)
+		})?;
+
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
 		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
 		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
 		// selects the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
-		let source = self.source.clone();
-		let mut broadcast = source.broadcast().await?;
 		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
 			.with_delay(self.args.max_delay);
@@ -355,8 +376,11 @@ impl Subscribe {
 		// A TS byte stream carries no per-frame timing, so delivery time is the only
 		// carrier of each frame's spacing (#2984). The export lays each slice of the PCR
 		// grid out at its time on its own clock, which follows the source's, so each is
-		// written as it comes.
-		let linger = self.args.linger;
+		// written as it comes. The path's announcements carry it across the broadcast's
+		// returns, as they drive a player.
+		let mut ts = moq_mux::container::ts::Follower::new(ts)?
+			.with_linger(self.args.linger)
+			.with_stitch(self.args.stitch);
 		// Reports a track that stops reaching the output while the rest keeps flowing,
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
@@ -371,52 +395,31 @@ impl Subscribe {
 				"TS export release clock"
 			);
 		};
-		loop {
-			let end = loop {
-				let frame = match ts.next().await {
-					Ok(Some(frame)) => frame,
-					Ok(None) => break Ok(()),
-					Err(err) => break Err(err),
-				};
-				stdout.write_all(&frame.payload).await?;
-				stdout.flush().await?;
+		let end = loop {
+			let frame = match ts.next().await {
+				Ok(Some(frame)) => frame,
+				Ok(None) => break Ok(()),
+				Err(err) => break Err(err),
+			};
+			stdout.write_all(&frame.payload).await?;
+			stdout.flush().await?;
 
-				if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
-					sampled = tokio::time::Instant::now();
-					let stats = ts.stats();
-					if (stats.dropped, stats.out_of_tolerance) != reported {
-						reported = (stats.dropped, stats.out_of_tolerance);
-						release(&stats);
-					}
-					log.sample(stats.into());
+			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
+				sampled = tokio::time::Instant::now();
+				let stats = ts.export().stats();
+				if (stats.dropped, stats.out_of_tolerance) != reported {
+					reported = (stats.dropped, stats.out_of_tolerance);
+					release(&stats);
 				}
-			};
-
-			release(&ts.stats());
-
-			// An end waits out the linger, and on expiry the last one is the result: a
-			// clean catalog finish exits 0, a drop or any other failure exits 1.
-			if linger.is_zero() {
-				return Ok(end?);
+				log.sample(stats.into());
 			}
-			// A failure ends the broadcast only if the broadcast goes too. One that stays
-			// up cannot return, so the failure is the export's own and exits now.
-			if let Err(err) = &end
-				&& !closes_within(&broadcast, CLOSE_GRACE.min(linger)).await
-			{
-				tracing::warn!(%err, "export failed with the broadcast still up, so not lingering");
-				return Ok(end?);
+		};
+		release(&ts.export().stats());
+		match end {
+			Err(err @ moq_mux::Error::Replaced(_)) => {
+				Err(anyhow::Error::from(err).context("pass --stitch to follow a replacement as a program switch"))
 			}
-			match &end {
-				Ok(()) => tracing::info!(?linger, "broadcast finished, waiting for it to return"),
-				Err(err) => tracing::warn!(%err, ?linger, "broadcast ended, waiting for it to return"),
-			}
-			let Some(returned) = resume_within(&source, &broadcast, &mut ts, linger).await? else {
-				tracing::info!(?linger, "broadcast did not return");
-				return Ok(end?);
-			};
-			broadcast = returned;
-			tracing::info!("broadcast returned, resuming");
+			end => Ok(end?),
 		}
 	}
 
@@ -436,101 +439,5 @@ impl Subscribe {
 		}
 
 		Ok(())
-	}
-}
-
-/// How long an export failure waits for its broadcast to close before it counts as the export's own.
-///
-/// A killed publisher's tracks can error just before its broadcast closes, so the two need not
-/// land together.
-const CLOSE_GRACE: Duration = Duration::from_secs(1);
-
-/// Whether `broadcast` closes within `grace`.
-async fn closes_within(broadcast: &hang::moq_net::broadcast::Consumer, grace: Duration) -> bool {
-	tokio::time::timeout(grace, broadcast.closed()).await.is_ok()
-}
-
-/// Wait up to `linger` for the `ended` broadcast to return and `ts` to resume on it.
-///
-/// The linger bounds the whole return, catalog subscription included: a returned
-/// broadcast whose catalog never resolves must not hold the export past it. `None`
-/// when it did not return in time.
-async fn resume_within(
-	source: &moq_mux::Source,
-	ended: &hang::moq_net::broadcast::Consumer,
-	ts: &mut moq_mux::container::ts::Export<moq_mux::container::ts::Ext>,
-	linger: Duration,
-) -> anyhow::Result<Option<hang::moq_net::broadcast::Consumer>> {
-	let resume = async {
-		let returned = source.returned(ended).await?;
-		ts.resume().await?;
-		anyhow::Ok(returned)
-	};
-	match tokio::time::timeout(linger, resume).await {
-		Ok(returned) => Ok(Some(returned?)),
-		Err(_) => Ok(None),
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	/// A broadcast that stays up is not closing, however long the grace.
-	#[tokio::test(start_paused = true)]
-	async fn a_live_broadcast_does_not_close_within_the_grace() {
-		let (origin, driver) = hang::moq_net::origin::Producer::new(Default::default());
-		tokio::spawn(hang::moq_net::time::run(driver));
-		let _live = origin.publish("live", Default::default()).unwrap();
-		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
-
-		let start = tokio::time::Instant::now();
-		assert!(!closes_within(&broadcast, CLOSE_GRACE).await);
-		assert_eq!(start.elapsed(), CLOSE_GRACE);
-	}
-
-	/// A broadcast that closes just after its tracks fail is still an end.
-	#[tokio::test(start_paused = true)]
-	async fn a_close_just_after_the_failure_is_an_end() {
-		let (origin, driver) = hang::moq_net::origin::Producer::new(Default::default());
-		tokio::spawn(hang::moq_net::time::run(driver));
-		let live = origin.publish("live", Default::default()).unwrap();
-		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
-
-		let gap = CLOSE_GRACE / 4;
-		tokio::spawn(async move {
-			tokio::time::sleep(gap).await;
-			drop(live);
-		});
-		let start = tokio::time::Instant::now();
-		assert!(closes_within(&broadcast, CLOSE_GRACE).await);
-		assert_eq!(start.elapsed(), gap);
-	}
-
-	/// A broadcast that returns but never serves its catalog gives up at the linger,
-	/// rather than waiting on the catalog past it.
-	#[tokio::test(start_paused = true)]
-	async fn a_return_without_a_catalog_expires_with_the_linger() {
-		let (origin, driver) = hang::moq_net::origin::Producer::new(Default::default());
-		tokio::spawn(hang::moq_net::time::run(driver));
-		let source = moq_mux::Source::new(origin.consume(), "live");
-
-		let mut first = origin.publish("live", Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut first, Default::default()).unwrap();
-		let ended = source.broadcast().await.unwrap();
-		let mut ts = moq_mux::container::ts::Export::with_ts(source.clone(), CatalogFormat::Hang)
-			.await
-			.unwrap();
-		drop((first, catalog));
-
-		// Back, but its catalog request is never answered.
-		let second = origin.publish("live", Default::default()).unwrap();
-		let _unanswered = second.dynamic();
-
-		let linger = Duration::from_secs(10);
-		let start = tokio::time::Instant::now();
-		let resumed = resume_within(&source, &ended, &mut ts, linger).await.unwrap();
-		assert!(resumed.is_none(), "a return that never resumes is no return");
-		assert_eq!(start.elapsed(), linger);
 	}
 }

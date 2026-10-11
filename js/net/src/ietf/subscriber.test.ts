@@ -1,4 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
+import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
@@ -6,6 +7,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Tail } from "../tail.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
@@ -796,6 +798,8 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	});
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(advert, request);
+	// A writer may yield a task before the rejection assertion below.
+	void handler.catch(() => {});
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "start" });
 
 	const peer = await nextStream(pair.client);
@@ -803,6 +807,16 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	await peer.writer.u53(PublishNamespace.id);
 	await advert.encode(peer.writer, VERSION);
 
+	// The malformed request can reject while the writer yields a browser task.
+	await new Promise<void>((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
 	await expect(handler).rejects.toThrow(ProtocolViolation);
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
 });
@@ -1490,6 +1504,51 @@ test("a group that claims its first object must start at zero", async () => {
 	track.close();
 });
 
+for (const [name, firstObject, bytes] of [
+	["the first object ID", false, []],
+	["the first object", true, []],
+	["the first payload after peeking object zero", false, [0]],
+] as const) {
+	test(`unsubscribing stops a subgroup stalled before ${name}`, async () => {
+		const { subscriber, track } = await subscribeTrack();
+		const opened = Promise.withResolvers<Tail>();
+		const open = Tail.prototype.open;
+		const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, sequence) {
+			opened.resolve(this);
+			return open.call(this, sequence);
+		});
+		const cancelled = jest.fn();
+		let controller: ReadableStreamDefaultController<Uint8Array>;
+		const readable = new ReadableStream<Uint8Array>({
+			start(value) {
+				controller = value;
+			},
+			cancel: cancelled,
+		});
+		const reader = new Reader(readable, new Uint8Array(bytes), VERSION);
+		const header = new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 3,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: groupFlags(firstObject),
+		});
+		const handled = subscriber.handleGroup(header, reader);
+		onTestFinished(async () => {
+			track.close();
+			if (cancelled.mock.calls.length === 0) controller.close();
+			await handled;
+			opening.mockRestore();
+		});
+		const tail = await opened.promise;
+		track.close();
+		await handled;
+		expect(cancelled).toHaveBeenCalledTimes(1);
+		// A completed handler must also release the live Tail entry, not just stop its reader.
+		await tail.settle(() => true, new Once<null>());
+	});
+}
+
 test("every object in a chunk reaches the reader before it wakes", async () => {
 	const { subscriber, track } = await subscribeTrack();
 
@@ -1708,4 +1767,46 @@ test("an object datagram is a datagram group", async () => {
 		),
 	).toBeInstanceOf(ProtocolViolation);
 	track.close();
+});
+
+test("a more specific epochless announcement replaces the consumed source", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	const announced = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
+	const pool = Path.from("pool");
+	const job = Path.from("pool/job");
+	const broadStream = await Stream.open(pair.server, { version: VERSION });
+	const broad = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: pool }),
+		broadStream,
+	);
+	await announced.next();
+	const broadPeer = await nextStream(pair.client);
+	if (!broadPeer) throw new Error("no broad publish stream");
+	await broadPeer.reader.u53();
+	await RequestOk.decode(broadPeer.reader, VERSION);
+	const held = subscriber.consume(job);
+	const specificStream = await Stream.open(pair.server, { version: VERSION });
+	const specific = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 2n, trackNamespace: job }),
+		specificStream,
+	);
+	await announced.next();
+	const specificPeer = await nextStream(pair.client);
+	if (!specificPeer) throw new Error("no specific publish stream");
+	await specificPeer.reader.u53();
+	await RequestOk.decode(specificPeer.reader, VERSION);
+	const fresh = subscriber.consume(job);
+	expect(fresh.closed).not.toBe(held.closed);
+	expect(held.closed.peek()).toBeUndefined();
+	specificPeer.close();
+	await specific;
+	await announced.next();
+	const fallback = subscriber.consume(job);
+	expect(fallback.closed).toBe(held.closed);
+	broadPeer.close();
+	await broad;
+	for (const consumer of [held, fresh, fallback]) consumer.close();
+	announced.close();
 });
