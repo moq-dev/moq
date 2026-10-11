@@ -25,3 +25,4 @@ half; this line is lite and the model only.
 ## Related
 
 - [Sans-IO IETF session](/quest/m2/rs2ts-sans-io-ietf.md) - the moq-transport session, deferred to m2
+- [Controlled time](/quest/m1/time/README.md) - ambient time stays behind the `async` feature; the core takes explicit instants

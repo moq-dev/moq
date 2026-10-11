@@ -62,4 +62,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Claim-served epochs](/quest/m1/claim-epochs.md) - prevents the splice on lite-07 by naming the instance
+- [Announcement takeover](/quest/m1/announce-takeover.md) - proves continuity when a lazy job gains an independent announcement; a replacement never takes over its predecessor's content

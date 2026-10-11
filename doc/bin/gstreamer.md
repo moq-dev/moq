@@ -53,6 +53,7 @@ into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that
 resolves timed text (`qtdemux` on a 3GPP timed-text track) can feed the pad
 directly. A cue with no duration is dropped rather than left on screen.
 
+Audio packets share groups of at least 20 ms while forwarding as they arrive.
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
 [LOC](/concept/standard#loc) instead of the legacy hang container,

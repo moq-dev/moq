@@ -95,8 +95,8 @@ pub struct Consumer<F: Container> {
 	// Increments on a declared marker, an unproven delivered hole, and a latency skip.
 	discontinuity: u64,
 
-	// Increments on a declared marker only: the publisher restarted its timeline.
-	restarts: u64,
+	// Increments on a declared marker only: the publisher paused or broke its timeline forward.
+	markers: u64,
 
 	// Exclusive audio endpoint delivered before terminal codec packets.
 	end: Option<Timestamp>,
@@ -143,7 +143,7 @@ impl<F: Container> Consumer<F> {
 			floor: None,
 			presented_end: None,
 			discontinuity: 0,
-			restarts: 0,
+			markers: 0,
 			end: None,
 		}
 	}
@@ -157,11 +157,12 @@ impl<F: Container> Consumer<F> {
 		self.discontinuity
 	}
 
-	/// A counter that increments only when the publisher declared a marker group: its
-	/// timeline restarted. A hole or a latency skip moves the playhead
-	/// ([`Self::discontinuity`]) but the timeline carries on, so this stays put.
-	pub(crate) fn restarts(&self) -> u64 {
-		self.restarts
+	/// A counter that increments only when the publisher declared a marker group: a pause or
+	/// a forward break in its timeline, since a rewind is refused. A hole or a latency skip
+	/// moves the playhead ([`Self::discontinuity`]) but the timeline carries on, so this
+	/// stays put.
+	pub(crate) fn markers(&self) -> u64 {
+		self.markers
 	}
 
 	/// The exclusive audio endpoint delivered before terminal codec packets.
@@ -313,7 +314,7 @@ impl<F: Container> Consumer<F> {
 						self.note_group_edge();
 						if marker {
 							self.bump_playhead();
-							self.restarts += 1;
+							self.markers += 1;
 						}
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
@@ -403,7 +404,7 @@ impl<F: Container> Consumer<F> {
 				if hole || had_marker {
 					self.bump_playhead();
 				}
-				self.restarts += u64::from(had_marker);
+				self.markers += u64::from(had_marker);
 				let new_current = self.pending.front().map(|g| g.sequence).unwrap();
 
 				tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
@@ -920,10 +921,10 @@ mod tests {
 		assert_eq!(consumer.discontinuity(), 1);
 	}
 
-	/// A missing group moves the playhead, but the timeline carries on: it is not a restart.
+	/// A missing group moves the playhead, but the timeline carries on: it is not a marker.
 	/// A declared marker is both.
 	#[tokio::test]
-	async fn only_a_marker_restarts_the_timeline() {
+	async fn only_a_marker_breaks_the_timeline() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(2)));
@@ -939,10 +940,10 @@ mod tests {
 		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
 		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(1_000_000));
 		assert_eq!(consumer.discontinuity(), 1, "the hole moves the playhead");
-		assert_eq!(consumer.restarts(), 0, "but the timeline carried on");
+		assert_eq!(consumer.markers(), 0, "but the timeline carried on");
 		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(2_000_000));
 		assert_eq!(consumer.discontinuity(), 2);
-		assert_eq!(consumer.restarts(), 1, "the marker declares a restart");
+		assert_eq!(consumer.markers(), 1, "the marker declares a break");
 	}
 
 	#[tokio::test]
@@ -1351,7 +1352,7 @@ mod tests {
 		assert_eq!(
 			consumer.discontinuity(),
 			1,
-			"a drained marker still declares the encoder restart"
+			"a drained marker still declares the encoder's break"
 		);
 		group0.finish().unwrap();
 	}
