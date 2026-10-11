@@ -14,6 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
+import { type Arrival, recordArrival } from "../arrivals";
 import { base64ToBytes } from "../base64";
 import { nextMedia, subscribeMedia } from "../media";
 
@@ -54,6 +55,8 @@ export interface Stats {
 }
 
 type DecoderOutput = {
+	/** Recent ingress diagnostics, bounded to 30 seconds and 4096 frames. */
+	arrivals: Signal<readonly Arrival[]>;
 	// The current frame to render.
 	frame: Signal<VideoFrame | undefined>;
 
@@ -80,6 +83,7 @@ export class Decoder {
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
+		arrivals: new Signal<readonly Arrival[]>([]),
 		frame: new Signal<VideoFrame | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
@@ -196,6 +200,7 @@ export class Decoder {
 		// it to catch up to the old picture would freeze video until it passed the old timestamps,
 		// so switch at once and re-anchor the clock. A rendition switch within one instance, or a
 		// switch to another path, still waits.
+		if (this.#instance && this.#instance.closed !== active.closed) this.#out.arrivals.set([]);
 		const republished = this.#instance?.path === active.path && this.#instance.closed !== active.closed;
 		this.#instance = { path: active.path, closed: active.closed };
 		if (republished) this.sync.reset();
@@ -260,6 +265,7 @@ export class Decoder {
 			});
 		});
 		effect.proxy(this.#out.buffered, active.buffered);
+		effect.proxy(this.#out.arrivals, active.arrivals);
 		effect.proxy(this.#spread, active.spread);
 	}
 
@@ -328,6 +334,7 @@ class DecoderTrack {
 	config: DecoderConfig;
 	catalog: Getter<Catalog.Root | undefined>;
 	stats: Signal<Stats | undefined>;
+	arrivals = new Signal<readonly Arrival[]>([]);
 
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
@@ -489,9 +496,10 @@ class DecoderTrack {
 				}));
 				if (stale) continue;
 
-				// Mark that we received this frame right now.
+				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-				this.sync.received(timestamp, "video");
+				const late = this.sync.received(timestamp, "video", frame.arrival);
+				recordArrival(this.arrivals, { timestamp, arrival: frame.arrival, late, skipped: next.skipped });
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -569,9 +577,10 @@ class DecoderTrack {
 				}));
 				if (stale) continue;
 
-				// Mark that we received this frame right now.
+				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
-				this.sync.received(timestamp, "video");
+				const late = this.sync.received(timestamp, "video", frame.arrival);
+				recordArrival(this.arrivals, { timestamp, arrival: frame.arrival, late, skipped: next.skipped });
 
 				// Track decode buffer (see #runLegacy: bridge on the consumer's continuity signal,
 				// never on group adjacency, which proves nothing about the timeline).

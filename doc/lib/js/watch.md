@@ -140,7 +140,11 @@ const player = new Watch.Player({
 
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
 to change later, such as `muted` or `delay`. `Player` is the pipeline inside
-`<moq-watch>`; its parts are exported for custom composition.
+`<moq-watch>`; its parts are exported for custom composition. The audio and video
+decoders expose a recent `arrivals` window for timeline overlays. It keeps transport
+ingress timestamps through buffering and distinguishes late frames from latency
+skips. Read the window as a snapshot, since reactive updates can coalesce; it is
+bounded history rather than a cumulative statistics source.
 
 ## Buffered playback
 

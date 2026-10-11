@@ -4,7 +4,7 @@ import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq
 
 import type { Format } from "./format";
 import { Jitter } from "./jitter";
-import type { BufferedRanges, Frame } from "./types";
+import type { BufferedRanges, ReceivedFrame } from "./types";
 
 /** Options for constructing a {@link Consumer}; the obsolete `maxAge` prop is refused. */
 export interface ConsumerProps {
@@ -23,7 +23,7 @@ export interface ConsumerProps {
 
 interface Group {
 	consumer: Moq.Group.Consumer;
-	frames: Frame[]; // decode order
+	frames: ReceivedFrame[]; // decode order
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
 	start?: Time.Micro; // First decoded timestamp
@@ -87,6 +87,7 @@ export class Consumer {
 	// sits. Only the consumer can know this, which is why next() reports it instead of leaving
 	// callers to guess from group numbers.
 	#gap = false;
+	#skipped = false;
 	// The first media timestamp of the latest delivered group, and its predecessor's start.
 	// Endpoints and later frames can overlap the next group without moving this floor.
 	#start?: { group: number; timestamp: Time.Micro };
@@ -199,7 +200,8 @@ export class Consumer {
 						this.#jitter.observe(arrival, Moq.Time.Milli.fromMicro(sample.timestamp));
 						this.#spread.set(this.#jitter.measured);
 					}
-					const frame: Frame = {
+					const frame: ReceivedFrame = {
+						arrival,
 						payload: sample.payload,
 						timestamp: sample.timestamp,
 						// Protocol invariant: groups always start at a keyframe.
@@ -362,6 +364,7 @@ export class Consumer {
 			if (marker || !ptsContiguous(first.end ?? this.#presentedEnd, nextStart)) {
 				hole = true;
 			}
+			if (!marker && (!first.empty || !first.done)) this.#skipped = true;
 			first.consumer.close();
 			first.frames.length = 0;
 			skipped++;
@@ -462,10 +465,12 @@ export class Consumer {
 	 */
 	async next(): Promise<
 		| {
-				frame: Frame | undefined;
+				frame: ReceivedFrame | undefined;
 				group: number;
 				discontinuity: number;
 				continuous: boolean;
+				/** Whether latency enforcement skipped content before this media frame. */
+				skipped: boolean;
 				end?: Time.Micro;
 		  }
 		| undefined
@@ -514,6 +519,7 @@ export class Consumer {
 						if (!startup && (skipHole || ended !== undefined) && !contiguous && !empty)
 							this.#markPlayhead();
 						if (!contiguous) this.#gap = true;
+						if (!startup && skipHole && !contiguous && !empty) this.#skipped = true;
 						this.#active = head.consumer.sequence;
 					}
 				}
@@ -536,6 +542,7 @@ export class Consumer {
 							group: seq,
 							discontinuity: this.#discontinuity,
 							continuous: this.#continuesDelivery(seq),
+							skipped: false,
 							end,
 						};
 					}
@@ -553,7 +560,9 @@ export class Consumer {
 						throw this.#error;
 					}
 					this.#updateBuffered();
-					return { frame, group: seq, discontinuity: this.#discontinuity, continuous };
+					const skipped = this.#skipped;
+					this.#skipped = false;
+					return { frame, group: seq, discontinuity: this.#discontinuity, continuous, skipped };
 				}
 
 				// Check if the group is done and then remove it. A group is removable only
@@ -585,6 +594,7 @@ export class Consumer {
 							// A marker carries no content of its own, so this just reports whether
 							// the group it closes was itself reached without a gap.
 							continuous: this.#continuesDelivery(seq),
+							skipped: false,
 						};
 					}
 				}

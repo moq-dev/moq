@@ -81,3 +81,8 @@ build:
 wasm:
     cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target web --out-name moq --out-dir wasm/dist "${CARGO_TARGET_DIR:-../target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
+
+# Sweep decoder count and retained arrival frames independently.
+arrivals-bench:
+    bun install --frozen-lockfile
+    bun watch/bench/arrivals.ts

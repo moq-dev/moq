@@ -76,7 +76,13 @@ function frame(): Read {
 		group: 0,
 		discontinuity: 0,
 		continuous: true,
-		frame: { timestamp: Time.Micro(frameTimestamp), payload: new Uint8Array([1]), keyframe: true },
+		skipped: false,
+		frame: {
+			arrival: Time.Milli.now(),
+			timestamp: Time.Micro(frameTimestamp),
+			payload: new Uint8Array([1]),
+			keyframe: true,
+		},
 	};
 }
 
@@ -230,6 +236,7 @@ async function play(initial: Delay) {
 		push,
 		enabled,
 		context: decoder.out.context,
+		arrivals: decoder.out.arrivals,
 		play,
 		// Remove the rendition from the catalog, then restore it.
 		remove: () => catalog.set({}),
@@ -279,6 +286,11 @@ it("decodes an audio packet inside a group after a playhead discontinuity", asyn
 		playback.push(next);
 		await microtasks();
 		expect(playback.inserted()).toContain(next.frame.timestamp);
+		expect(playback.arrivals.peek().at(-1)).toMatchObject({
+			timestamp: Time.Milli.fromMicro(next.frame.timestamp),
+			arrival: next.frame.arrival,
+			skipped: false,
+		});
 	} finally {
 		playback.close();
 		await microtasks();

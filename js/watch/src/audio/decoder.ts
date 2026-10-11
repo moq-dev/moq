@@ -13,6 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { type Arrival, recordArrival } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { nextMedia, subscribeMedia } from "../media";
@@ -44,6 +45,8 @@ export type DecoderProps = Inputs<DecoderInput> & {
 };
 
 type DecoderOutput = {
+	/** Recent ingress diagnostics, bounded to 30 seconds and 4096 frames. */
+	arrivals: Signal<readonly Arrival[]>;
 	context: Signal<AudioContext | undefined>;
 
 	// The root of the audio graph, which can be used for custom visualizations.
@@ -92,6 +95,7 @@ export class Decoder {
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
+		arrivals: new Signal<readonly Arrival[]>([]),
 		context: new Signal<AudioContext | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 		sampleRate: new Signal<number | undefined>(undefined),
@@ -340,6 +344,7 @@ export class Decoder {
 		// Every handle to one instance shares `closed`, so it identifies the instance where the
 		// handle itself does not.
 		if (this.#instance !== undefined && this.#instance !== active.closed) {
+			this.#out.arrivals.set([]);
 			this.#ring.peek()?.reset();
 			this.#decodeBuffered.set([]);
 			this.sync.reset();
@@ -445,9 +450,10 @@ export class Decoder {
 				const { frame } = next;
 				if (!frame) continue;
 
-				// Mark that we received this frame right now.
+				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-				this.sync.received(timestamp, "audio");
+				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				recordArrival(this.#out.arrivals, { timestamp, arrival: frame.arrival, late, skipped: next.skipped });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -548,7 +554,8 @@ export class Decoder {
 				if (!frame) continue;
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
-				this.sync.received(timestamp, "audio");
+				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				recordArrival(this.#out.arrivals, { timestamp, arrival: frame.arrival, late, skipped: next.skipped });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);

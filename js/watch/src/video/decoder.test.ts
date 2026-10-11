@@ -179,7 +179,8 @@ function sample(group: number, timestamp: number, discontinuity = 0, keyframe = 
 		group,
 		discontinuity,
 		continuous: true,
-		frame: { timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe },
+		skipped: false,
+		frame: { arrival: Time.Milli.now(), timestamp: Time.Micro(timestamp), payload: new Uint8Array([1]), keyframe },
 	};
 }
 
@@ -408,7 +409,7 @@ it("clears the picture once no rendition is selectable", async () => {
 
 // A late marker from older history raises a discontinuity without making older groups newer.
 function marker(group: number, end: number, discontinuity: number): Read {
-	return { group, discontinuity, continuous: false, frame: undefined, end: Time.Micro(end) };
+	return { group, discontinuity, continuous: false, skipped: false, frame: undefined, end: Time.Micro(end) };
 }
 
 for (const kind of ["legacy", "cmaf"] as const) {
@@ -423,6 +424,11 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		]);
 		try {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
+			expect(playback.decoder.out.arrivals.peek().map((entry) => entry.timestamp)).toEqual([
+				Time.Milli(1),
+				Time.Milli(1.1),
+				Time.Milli(1.2),
+			]);
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
 		} finally {

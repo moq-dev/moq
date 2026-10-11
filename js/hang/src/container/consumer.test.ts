@@ -1529,7 +1529,10 @@ test("Consumer reports a marker group as a playhead event", async () => {
 	expect(reset?.frame).toBeUndefined();
 	expect(reset?.discontinuity).toBe(1);
 	expect(reset?.continuous).toBe(false);
-	expect((await nextFrame(consumer))?.discontinuity).toBe(1);
+	expect(reset?.skipped).toBe(false);
+	const afterMarker = await nextFrame(consumer);
+	expect(afterMarker?.discontinuity).toBe(1);
+	expect(afterMarker?.skipped).toBe(false);
 
 	consumer.close();
 });
@@ -1567,6 +1570,7 @@ test("Consumer latency skip bumps playhead generation once", async () => {
 	const resumed = await nextFrame(consumer);
 	expect(resumed?.frame?.timestamp).toBe(100_000 as Time.Micro);
 	expect(resumed?.discontinuity).toBe(1);
+	expect(resumed?.skipped).toBe(true);
 
 	consumer.close();
 });
