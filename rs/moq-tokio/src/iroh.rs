@@ -546,8 +546,7 @@ mod tests {
 
 	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat.
 	///
-	/// iroh's builder starts at 5s and used to ignore `quic.keep_alive`. The
-	/// setter cannot store `None`, so a disabled interval is not asserted here.
+	/// The setter cannot store `None`, so a disabled interval is not asserted here.
 	#[test]
 	fn keep_alive_interval_follows_resolved_config() {
 		for interval in [std::time::Duration::from_secs(3), std::time::Duration::from_millis(500)] {
