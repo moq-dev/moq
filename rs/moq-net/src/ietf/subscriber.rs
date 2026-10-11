@@ -8318,7 +8318,13 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.end(), Some(track::Position { group: SEQUENCE, frame: 1 }));
+		assert_eq!(
+			h.track.end(),
+			Some(track::Position {
+				group: SEQUENCE,
+				frame: 1
+			})
+		);
 
 		let mut group = consumer.recv_group().await.unwrap().expect("the group arrives");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"last");

@@ -144,7 +144,9 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 		group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
 		group.finish().unwrap();
 	}
-	track.finish_at(moq_net::track::Position::group(final_sequence)).unwrap();
+	track
+		.finish_at(moq_net::track::Position::group(final_sequence))
+		.unwrap();
 	drop(track);
 
 	if final_sequence > 0 {

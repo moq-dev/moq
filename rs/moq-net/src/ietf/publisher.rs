@@ -3419,8 +3419,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					// Only an acknowledged marker spares the standalone one: a stream reset
 					// after its FIN may never deliver it.
 					if res.is_ok()
-						&& self.marked
-						&& let Some(terminal) = &self.terminal
+						&& self.marked && let Some(terminal) = &self.terminal
 					{
 						terminal.sent.store(true, Ordering::Relaxed);
 					}
@@ -3640,7 +3639,10 @@ mod group_priority_test {
 				assert!(terminal.sent.load(Ordering::Relaxed), "an acknowledged marker was sent");
 				continue;
 			}
-			assert!(futures::poll!(serving.as_mut()).is_pending(), "the FIN is unacknowledged");
+			assert!(
+				futures::poll!(serving.as_mut()).is_pending(),
+				"the FIN is unacknowledged"
+			);
 			let written = log.writes.lock().unwrap().clone();
 			assert!(
 				written.ends_with(&[0, 0, END_OF_TRACK as u8]),
@@ -3654,7 +3656,10 @@ mod group_priority_test {
 				.unwrap();
 			edge.finish().unwrap();
 			assert!(matches!(futures::poll!(serving.as_mut()), Poll::Ready(Err(Error::Old))));
-			assert!(!terminal.sent.load(Ordering::Relaxed), "a reset marker leaves the fallback");
+			assert!(
+				!terminal.sent.load(Ordering::Relaxed),
+				"a reset marker leaves the fallback"
+			);
 		}
 	}
 

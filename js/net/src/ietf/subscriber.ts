@@ -1206,7 +1206,9 @@ export class Subscriber {
 					// through its group and carries none of it, so drop it like any headless
 					// stream. Drafts 14-17 cannot clear the bit, so there it is an empty group.
 					if (!producer && !group.flags.firstObject) {
-						console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+						console.debug(
+							`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`,
+						);
 						stream.stop(new Error("a group must start at object 0"));
 						return;
 					}

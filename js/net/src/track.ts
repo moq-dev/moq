@@ -1007,12 +1007,14 @@ export class Producer {
 	// boundary it falls just before. Mirrors the Rust `finish_at_pending`.
 	#endPending(end: Location): void {
 		const declared = this.#state.end.peek();
-		if (declared === undefined) return this.finishAt(end);
-		if (declared.group === end.group && declared.frame === end.frame) return;
-		if (declared.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.group) {
-			throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
+		if (declared === undefined) {
+			this.finishAt(end);
+		} else if (declared.group !== end.group || declared.frame !== end.frame) {
+			if (declared.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.group) {
+				throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
+			}
+			this.#declareEnd(end);
 		}
-		this.#declareEnd(end);
 	}
 
 	#declareEnd(end: Location): void {
@@ -1606,7 +1608,10 @@ export class Subscriber {
 			// (its frames remain buffered), so keep waiting for a cap raise. Only a
 			// drained track reports finished.
 			const end = this.#state.end.peek();
-			if (!groups[0] && (closed !== undefined || this.#complete() || (end !== undefined && start >= finalSequence(end)))) {
+			if (
+				!groups[0] &&
+				(closed !== undefined || this.#complete() || (end !== undefined && start >= finalSequence(end)))
+			) {
 				return undefined;
 			}
 

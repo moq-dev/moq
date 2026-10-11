@@ -1460,7 +1460,13 @@ test.each([
 		new Reader(undefined, new Uint8Array(), version),
 	);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: groupFlags(true) }),
+		new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 4,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: groupFlags(true),
+		}),
 		new Reader(undefined, encodeObjects([0]), version),
 	);
 
