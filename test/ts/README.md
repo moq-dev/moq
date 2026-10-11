@@ -419,7 +419,7 @@ clock. PAT, declared PMTs, and every observed non-clock table must each have at
 least eight emissions **on both legs**, with at least 90% agreement. Missing or
 sparse tables fail rather than quietly becoming report-only. TDT/TOT remains
 informational because its content follows wall-clock time; `--strict` grades it
-as well. `--source` also requires the source's SI tables, catching loss on both legs. These checks do not diagnose a process timer from cadence alone.
+as well. `--source` also requires the source's SI tables and PAT-declared PMTs, catching loss on both legs. These checks do not diagnose a process timer from cadence alone.
 
 | Option | Meaning |
 |---|---|

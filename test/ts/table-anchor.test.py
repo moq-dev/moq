@@ -14,8 +14,10 @@ PKT, PMT, VIDEO = fixtures.packet, 0x1000, 0x100
 CLOCK = 27_000_000
 
 
-def capture(path, *, start=0, phase=0, drift=0, loss=None, interleave=False, bootstrap=False, wrap=False):
-    pat = fixtures.section(0, 1, bytes.fromhex("0001f000"))
+def capture(
+    path, *, start=0, phase=0, drift=0, loss=None, interleave=False, bootstrap=False, wrap=False, extra_program=False
+):
+    pat = fixtures.section(0, 1, bytes.fromhex("0001f0000002f001" if extra_program else "0001f000"))
     pmt = fixtures.section(2, 1, bytes.fromhex("e100f0001be100f000"))
     sdt = fixtures.section(0x42, 1, bytes.fromhex("0001ff"))
     # A packet per millisecond; PCR every 25 packets, independently of tables/PES.
@@ -36,6 +38,8 @@ def capture(path, *, start=0, phase=0, drift=0, loss=None, interleave=False, boo
                 pid, payload, pusi = 0, b"\0" + pat, True
             elif at % 500 == 3:
                 pid, payload, pusi = PMT, b"\0" + pmt, True
+            elif extra_program and at % 500 == 4:
+                pid, payload, pusi = 0x1001, b"\0" + fixtures.section(2, 2, bytes.fromhex("e100f0001be100f000")), True
             elif at in events:
                 pid, payload, pusi = events[at], b"\0" + sdt, True
             elif at % 20 == 10:
@@ -53,6 +57,32 @@ def capture(path, *, start=0, phase=0, drift=0, loss=None, interleave=False, boo
 
 
 class Controls(unittest.TestCase):
+    def test_source_declared_program(self):
+        with tempfile.TemporaryDirectory(prefix="ts-pair-source-") as directory:
+            directory = Path(directory)
+            source, output, report = directory / "source.ts", directory / "output.ts", directory / "report.json"
+            capture(source, extra_program=True)
+            capture(output)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).with_name("table-anchor.py")),
+                    str(output),
+                    str(output),
+                    "--source",
+                    str(source),
+                    "--report-json",
+                    str(report),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            missing = next(row for row in json.loads(report.read_text())["tables"] if row["pid"] == 0x1001)
+            self.assertTrue(missing["graded"])
+            self.assertFalse(missing["ok"])
+            self.assertEqual((missing["a"], missing["b"]), (0, 0))
+
     def test_controls(self):
         with tempfile.TemporaryDirectory(prefix="ts-pair-controls-") as directory:
             directory = Path(directory)

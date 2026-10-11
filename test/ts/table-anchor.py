@@ -238,6 +238,8 @@ def main():
     args = ap.parse_args()
     try:
         pmts = pmt_pids(args.a) | pmt_pids(args.b)
+        if args.source:
+            pmts |= pmt_pids(args.source)
         if not pmts:
             raise ValueError("no PAT program mapping")
         expected = {pid_of(pkt) for pkt in packets(args.source) if pid_of(pkt) in WELL_KNOWN} if args.source else set()
