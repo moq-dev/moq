@@ -101,7 +101,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
 - [Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md) - a lite acceptor answers AUTH_ERROR NOT_SUPPORTED after a grant too, with a lite session code for `Error::Unsupported`
 - [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
-- [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Request-token decode](/quest/m1/auth/request-token-decode.md) - an
@@ -128,6 +127,7 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Malformed grant](https://github.com/moq-dev/moq/pull/5256) - a malformed or
   non-canonical grant pattern, or an out-of-range `Expires`, closes the
   session with PROTOCOL_VIOLATION in Rust and JS
+- [JS fetch grant watch](https://github.com/moq-dev/moq/pull/5260) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 
 - [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's node-bound credential,
   built on this line's relay tokens
