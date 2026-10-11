@@ -1443,8 +1443,9 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
  * in-progress group: drop it, keep the subscription, and deliver the next group, which
  * starts at object 0. A gap after an object was delivered still fails that group.
  */
-test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", async () => {
-	const version = Version.DRAFT_16;
+test.each([Version.DRAFT_14, Version.DRAFT_16])("draft %s drops a subgroup that starts mid-group", async (version) => {
+	const warning = spyOn(console, "warn").mockImplementation(() => {});
+	onTestFinished(() => warning.mockRestore());
 	const { subscriber, track } = await subscribeTrack({ version });
 
 	// The header cannot say otherwise on this draft: decode reports firstObject.
@@ -1458,6 +1459,7 @@ test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", asyn
 	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
 	expect(track.latest()).toBeUndefined();
 	expect(track.closed.peek()).toBeUndefined();
+	expect(warning).not.toHaveBeenCalled();
 
 	const whole = groupFlags(true);
 	await subscriber.handleGroup(
@@ -1478,6 +1480,7 @@ test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", asyn
 	expect(gapped?.sequence).toBe(5);
 	expect(await gapped?.readString()).toBe("object 0");
 	await expect(gapped?.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
+	expect(warning).toHaveBeenCalledWith(expect.stringContaining("object IDs must start at 0"));
 	expect(track.closed.peek()).toBeUndefined();
 
 	ordered.close();

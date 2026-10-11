@@ -31,6 +31,7 @@ check:
     bun run --filter='*' --elide-lines=0 check
     bun biome check
     just build
+    just dist-imports
 
 # Validate the Worker deploy bundles outside the Bun workspace.
 workers:
@@ -81,3 +82,13 @@ build:
 wasm:
     cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target web --out-name moq --out-dir wasm/dist "${CARGO_TARGET_DIR:-../target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
+
+# Ensure the built public libraries can load without browser globals.
+dist-imports:
+    bun -e 'await import("./watch/dist/index.js"); await import("./publish/dist/index.js")'
+
+# Compare eager and cold lazy WebSocket fallback setup in Chromium.
+qmux-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project net/bench/tsconfig.json
+    bun net/bench/qmux.ts

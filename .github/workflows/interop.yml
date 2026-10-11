@@ -21,6 +21,8 @@ on:
       - "rs/moq-tokio/tests/max_age.rs"
       # The TS/IRD compliance harness runs in the same job (see below).
       - "test/ts/**"
+      # The live TS round trip also checks stdin ingestion keeps up with its source.
+      - "rs/moq-cli/src/publish.rs"
       # The interop job also depends on the recipe that invokes it and the
       # workspace membership that links the JS clients to source.
       - "test/justfile"
