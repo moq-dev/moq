@@ -4206,8 +4206,7 @@ impl Subscriber {
 	/// neither cursor moves the other. A new timed subscriber skips the buffered prefix older
 	/// than its max delay behind the highest timestamp; untimed subscribers keep the whole
 	/// buffer. Later arrival-order delivery is unchanged, and any outside its group range
-	/// are skipped. A consumer that falls too far
-	/// behind silently loses the oldest datagrams.
+	/// are skipped. A consumer that falls too far behind silently loses the oldest datagrams.
 	///
 	/// Returns `Poll::Ready(Ok(Some(datagram)))` when one is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
