@@ -184,7 +184,7 @@ function feed() {
 	};
 }
 
-async function play(initial: Delay) {
+async function play(initial: Delay, buffered = false, cmaf = false) {
 	const push = feed();
 	const truncate = spyOn(SharedRingBuffer.prototype, "truncate");
 	const reset = spyOn(SharedRingBuffer.prototype, "reset");
@@ -193,12 +193,21 @@ async function play(initial: Delay) {
 	let producer = new Moq.Broadcast.Producer();
 	let consumer = producer.consume();
 	const relativeBroadcast = mock(() => consumer);
-	const audio = Catalog.AudioConfigSchema.parse({
+	let audio = Catalog.AudioConfigSchema.parse({
 		codec: "opus",
 		container: { kind: "legacy" },
 		sampleRate: 48_000,
 		numberOfChannels: 2,
 	});
+	if (cmaf) {
+		audio = Catalog.AudioConfigSchema.parse({
+			...audio,
+			container: {
+				kind: "cmaf",
+				init: Buffer.from(Container.Cmaf.createAudioInitSegment(audio)).toString("base64"),
+			},
+		});
+	}
 	const catalog = new Signal<Catalog.Root>({ audio: { renditions: { audio } } });
 	const enabled = new Signal(true);
 	const broadcast = new Signal<Broadcast | undefined>({
@@ -209,7 +218,7 @@ async function play(initial: Delay) {
 
 	const delay = new Signal<Delay>(initial);
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay });
+	const sync = new Sync({ delay, buffer: Time.Milli(buffered ? 1000 : 0) });
 	const decoder = new Decoder({ source, sync });
 	await microtasks();
 
@@ -533,3 +542,22 @@ describe("Decoder across a rendition's absence", () => {
 		}
 	});
 });
+
+for (const cmaf of [false, true]) {
+	it(`settles a buffered ${cmaf ? "CMAF" : "legacy"} rendition change with a stationary playhead`, async () => {
+		const playback = await play(Time.Milli(100), true, cmaf);
+		try {
+			await playback.play(20);
+			const before = playback.codecs();
+			expect(before).toBe(1);
+			// Nothing reads the ring, as with a muted AudioContext. Decode is held upstream.
+			expect(playback.inserted().length).toBeLessThan(20);
+			playback.restore({ description: "4f707573486561640102000080bb0000000000" });
+			await microtasks();
+			expect(playback.codecs()).toBe(before + 1);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+}

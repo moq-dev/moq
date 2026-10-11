@@ -8,6 +8,7 @@
  */
 import "./gpu.ts";
 import "@moq/publish/element";
+import "@moq/watch/element";
 import { Signal } from "@moq/signals";
 import * as Video from "@moq/video";
 

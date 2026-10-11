@@ -402,6 +402,7 @@
         "@moq/publish": "workspace:*",
         "@moq/signals": "workspace:*",
         "@moq/video": "workspace:*",
+        "@moq/watch": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "^1.4.2",
