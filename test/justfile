@@ -82,6 +82,10 @@ drill *args:
 # `--replays` grades only the recorded traces, in seconds, as PRs touching the player do.
 # See audio-quality/README.md.
 
+# Play through a private Linux null device using the shipped headless binary.
+native-play:
+    ./native-play/run.sh
+
 # Grade browser audio playout over an impaired path.
 [positional-arguments]
 audio-quality *args:

@@ -44,8 +44,12 @@ it grades is done on the jitter target line.
 The draft routes `moq play --no-video` through an async event receiver instead
 of constructing winit or a wgpu surface. It still opens the production
 moq-audio Engine and uses the same Media tasks. Native playback tests cover
-the actual dispatch and transport-error propagation, and the existing native
-playback suite passes.
+the actual dispatch and transport-error propagation. `just test native-play`
+also drives the shipped binary through a private clocked PulseAudio null sink
+via the production ALSA/cpal backend, observes PCM at its monitor, and checks
+clean Ctrl-C shutdown without a display. It fails when dispatch is forced back
+through the original windowed path and runs in nightly. This proves the
+headless prerequisite, not the full quality lane.
 
 The metric lane remains unfinished. The native driver exposes device failures
 and sink writes, not the browser schema's rendered quantum, short-quantum,
