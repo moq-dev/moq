@@ -1,11 +1,17 @@
 /** Sweep observers against routes for one route update, and against tracks for one demand edge. */
 
+import { Signal } from "@moq/signals";
+import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
 import * as Epoch from "../src/epoch.ts";
-import { Route } from "../src/hop.ts";
+import { HopSchema, Route } from "../src/hop.ts";
+import { Subscriber } from "../src/lite/subscriber.ts";
+import { TrackInfo } from "../src/lite/track.ts";
+import { Version } from "../src/lite/version.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
+import { Writer } from "../src/stream.ts";
 
 const routeCounts = [8, 32, 128];
 const observerCounts = [1, 8, 32];
@@ -120,6 +126,77 @@ for (const pinned of [false, true]) {
 			for (const request of [...requests, ...background]) request.close();
 			origin.close();
 		}
+	}
+}
+
+// Grant updates touch every live fetch, with pattern lookup as the independent table axis.
+const info: Uint8Array[] = [];
+const writer = new Writer(
+	new WritableStream<Uint8Array>({
+		write: (chunk) => {
+			info.push(new Uint8Array(chunk));
+		},
+	}),
+	Version.DRAFT_05,
+);
+await new TrackInfo({}).encode(writer, Version.DRAFT_05);
+writer.close();
+await writer.closed;
+const quic = {
+	createBidirectionalStream: async () => {
+		let inbound!: ReadableStreamDefaultController<Uint8Array>;
+		let first = true;
+		return {
+			readable: new ReadableStream<Uint8Array>({
+				start: (controller) => {
+					inbound = controller;
+				},
+			}),
+			writable: new WritableStream<Uint8Array>({
+				write: (chunk) => {
+					if (!first) return;
+					first = false;
+					if (chunk[0] === 6) {
+						for (const bytes of info) inbound.enqueue(bytes);
+						inbound.close();
+					} else if (chunk[0] === 3) inbound.enqueue(Uint8Array.of(0, 1, 42));
+					else throw new Error("unexpected benchmark stream");
+				},
+			}),
+		};
+	},
+} as unknown as WebTransport;
+console.log("auth,patterns,fetches,grant_update_us");
+for (const patternCount of [8, 32, 128]) {
+	for (const fetchCount of [1, 8, 32]) {
+		const subscribe = new Path.Patterns([
+			Path.Pattern.subtree("room"),
+			...Array.from({ length: patternCount - 1 }, (_, i) => Path.Pattern.literal(`other/${i}`)),
+		]);
+		const grant = new Signal<Grant | undefined>({ publish: new Path.Patterns(), subscribe });
+		const subscriber = new Subscriber(
+			quic,
+			Version.DRAFT_05,
+			HopSchema.parse(1n),
+			undefined,
+			undefined,
+			undefined,
+			grant,
+		);
+		const groups = await Promise.all(
+			Array.from({ length: fetchCount }, (_, i) => subscriber.fetchGroup(Path.from(`room/${i}`), "video", 0)),
+		);
+		const start = performance.now();
+		for (let i = 0; i < 1024; i++) {
+			grant.set({ publish: new Path.Patterns(), subscribe, expires: i });
+			await Promise.resolve();
+		}
+		console.log(`fetch,${patternCount},${fetchCount},${(((performance.now() - start) * 1000) / 1024).toFixed(2)}`);
+		for (const group of groups) {
+			if (group.closed.peek() !== undefined) throw new Error("allowed fetch ended");
+			group.close();
+		}
+		subscriber.close();
 	}
 }
 

@@ -79,6 +79,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 	retired_stats: BTreeMap<u16, stats::Stream>,
 	/// Damaged packets, PES, or access units refused, cumulative across PID remaps.
 	damaged: BTreeMap<u16, u64>,
+	damage_log: super::damage::Log,
 	/// Access units per elementary stream, timed on the program clock.
 	liveness: Liveness,
 	/// In-progress PES reassembly, keyed by elementary PID.
@@ -168,6 +169,7 @@ impl<E: catalog::Catalog> Import<E> {
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
 			damaged: BTreeMap::new(),
+			damage_log: Default::default(),
 			liveness: Liveness::default(),
 			pending: HashMap::new(),
 			health: Health::default(),
@@ -230,6 +232,7 @@ impl<E: catalog::Catalog> Import<E> {
 	/// now completes. The buffer is fully consumed; a trailing partial packet
 	/// (< 188 bytes) is retained for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+		self.damage_log.flush(web_async::time::Instant::now());
 		self.scratch.extend_from_slice(data);
 
 		// Route one whole packet at a time, so a PMT is parsed (and any PID it declares
@@ -774,7 +777,7 @@ impl<E: catalog::Catalog> Import<E> {
 			None => {}
 		}
 		*self.damaged.entry(pid.as_u16()).or_default() += 1;
-		tracing::warn!(pid = pid.as_u16(), error = %err, "dropped a damaged TS unit");
+		self.damage_log.record(pid.as_u16(), err);
 		Ok(())
 	}
 
@@ -3332,6 +3335,91 @@ pub(super) mod test {
 			"an unconfirmed frame does not prove sync was regained"
 		);
 		assert_eq!(stats.unconfirmed, 1, "the unvouched publication is counted separately");
+	}
+
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn damaged_unit_warnings_are_aggregated_per_pid() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pid = Pid::new(0x61).unwrap();
+		let peer = Pid::new(0x62).unwrap();
+		let error = anyhow::anyhow!("broken PES");
+		for _ in 0..3 {
+			import.damage(pid, &error).unwrap();
+		}
+		import.damage(peer, &error).unwrap();
+		logs_assert(|lines| {
+			let first = lines
+				.iter()
+				.filter(|line| line.contains("dropped a damaged TS unit"))
+				.count();
+			if first == 2 {
+				Ok(())
+			} else {
+				Err(format!("expected one warning per PID, got {first}"))
+			}
+		});
+
+		tokio::time::advance(super::stats::Log::INTERVAL).await;
+		import.decode(&[]).unwrap();
+		logs_assert(|lines| {
+			let summary: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("TS damaged-unit summary"))
+				.collect();
+			if summary.len() == 1 && summary[0].contains("pid=97 ") && summary[0].contains("count=2") {
+				Ok(())
+			} else {
+				Err(format!("expected two additional drops on PID 97, got {summary:?}"))
+			}
+		});
+		import.damage(pid, &error).unwrap();
+		import.damage(pid, &error).unwrap();
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&0x61].damaged, 5);
+		drop(import);
+		logs_assert(|lines| {
+			let first = lines
+				.iter()
+				.filter(|line| line.contains("dropped a damaged TS unit"))
+				.count();
+			let summary = lines
+				.iter()
+				.filter(|line| line.contains("TS damaged-unit summary"))
+				.count();
+			if (first, summary) == (3, 2) {
+				Ok(())
+			} else {
+				Err(format!("expected new burst and final summary, got {first}/{summary}"))
+			}
+		});
+	}
+
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn abort_summarizes_the_final_damage_burst() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pid = Pid::new(0x61).unwrap();
+		let error = anyhow::anyhow!("broken PES");
+		for _ in 0..3 {
+			import.damage(pid, &error).unwrap();
+		}
+		import.abort(moq_net::Error::Cancel);
+		logs_assert(|lines| {
+			let summary: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("TS damaged-unit summary"))
+				.collect();
+			if summary.len() == 1 && summary[0].contains("count=2") {
+				Ok(())
+			} else {
+				Err(format!("expected the aborted burst's two drops, got {summary:?}"))
+			}
+		});
 	}
 
 	#[test]

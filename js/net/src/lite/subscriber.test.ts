@@ -1169,9 +1169,9 @@ test.each([
 	expect(((await b.catch((err: unknown) => err)) as Error).message).toBe("second");
 
 	if (stage === "track") {
-		// The TRACK_INFO still completes, but no FETCH is sent for the abandoned group.
-		await answerTrackInfo(streams[0]);
-		for (let i = 0; i < 100; i++) await Promise.resolve();
+		// The abandoned TRACK exchange is reset promptly; no FETCH is sent.
+		const err = fromTransport(await streams[0].aborted) as StreamError;
+		expect(err.code).toBe(StreamCode.Cancel);
 		expect(streams.length).toBe(1);
 	} else {
 		const err = fromTransport(await streams[1].aborted) as StreamError;
@@ -1274,6 +1274,71 @@ test("the last reader leaving mid-response cancels the fetch", async () => {
 
 	subscriber.close();
 });
+
+test.each(["initial", "track", "fetch", "body"] as const)(
+	"a revoked grant refuses a fetch during %s",
+	async (stage) => {
+		const { quic, streams, opened } = fakeSession();
+		const scoped = (prefix: string): Grant => ({
+			publish: new Path.Patterns(),
+			subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
+		});
+		const grant = new Signal<Grant | undefined>(scoped(stage === "initial" ? "other" : "room"));
+		const subscriber = new Subscriber(
+			quic,
+			Version.DRAFT_05,
+			HopSchema.parse(1n),
+			undefined,
+			undefined,
+			undefined,
+			grant,
+		);
+		let result: unknown;
+		const pending = subscriber.fetchGroup(Path.from("room/cam"), "video", 0).then(
+			(group) => {
+				result = group;
+				return group;
+			},
+			(err: unknown) => {
+				result = err;
+				return err;
+			},
+		);
+		try {
+			if (stage !== "initial") {
+				await opened(0);
+				await streams[0].reading;
+				if (stage !== "track") {
+					await answerTrackInfo(streams[0]);
+					await opened(1);
+					await streams[1].reading;
+				}
+				if (stage === "body") {
+					streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("head")]));
+					await pending;
+				}
+				grant.set(scoped("other"));
+			}
+			if (stage === "body") {
+				const group = result as Awaited<ReturnType<Subscriber["fetchGroup"]>>;
+				await group.closed;
+				expect(group.closed.peek()).toBeInstanceOf(StreamError);
+				expect((group.closed.peek() as StreamError).code).toBe(StreamCode.Unauthorized);
+				const reset = fromTransport(await streams[1].aborted) as StreamError;
+				expect(reset.code).toBe(StreamCode.Unauthorized);
+				group.close();
+			} else {
+				await pending;
+				expect(result).toBeInstanceOf(StreamError);
+				expect((result as StreamError).code).toBe(StreamCode.Unauthorized);
+				if (stage === "initial") expect(streams).toHaveLength(0);
+			}
+		} finally {
+			subscriber.close();
+			await pending;
+		}
+	},
+);
 
 // Drive discovery and inspect the TRACK request before answering it. Waiting for the
 // reader means the whole request has reached the wire, without a clock-based settle.

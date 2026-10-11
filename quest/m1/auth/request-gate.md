@@ -50,5 +50,5 @@ and dependent joining FETCH. Keep graceful terminal messages.
 
 ## Related
 
-- [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - the outgoing
+- [JS fetch grant watch](https://github.com/moq-dev/moq/pull/5260) - the outgoing
   side: a JS `fetchGroup` this session issued ends when its path leaves the grant

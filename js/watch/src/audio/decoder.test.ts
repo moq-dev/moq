@@ -90,10 +90,12 @@ const globals = [
 ] as const;
 const originals = new Map<string, PropertyDescriptor | undefined>();
 let codecs = 0;
+let codecErrors: AudioDecoderInit["error"][] = [];
 
 beforeEach(() => {
 	frameTimestamp = 0;
 	codecs = 0;
+	codecErrors = [];
 	contexts = [];
 	moduleLoaded = Promise.resolve();
 	for (const name of globals) originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -104,6 +106,7 @@ beforeEach(() => {
 		readonly init: AudioDecoderInit;
 		constructor(init: AudioDecoderInit) {
 			this.init = init;
+			codecErrors.push(init.error);
 			codecs++;
 		}
 		configure() {
@@ -201,16 +204,20 @@ async function play(initial: Delay) {
 	});
 	const catalog = new Signal<Catalog.Root>({ audio: { renditions: { audio } } });
 	const enabled = new Signal(true);
+	// The catalog broadcast's instance, identified by its `closed` handle.
+	const active = new Signal({ closed: {} });
 	const broadcast = new Signal<Broadcast | undefined>({
 		in: { enabled },
-		out: { catalog },
+		out: { catalog, active },
 		relativeBroadcast,
 	} as unknown as Broadcast);
 
 	const delay = new Signal<Delay>(initial);
 	const source = new Source({ broadcast, supported: async () => true });
 	const sync = new Sync({ delay });
-	const decoder = new Decoder({ source, sync });
+	// The decoder's own switch, which a mute or pause turns off.
+	const decoding = new Signal(true);
+	const decoder = new Decoder({ source, sync, enabled: decoding });
 	await microtasks();
 
 	// Enough frames to get past the legacy decoder's warm-up, so a handover would truncate.
@@ -229,10 +236,17 @@ async function play(initial: Delay) {
 		delay,
 		push,
 		enabled,
+		decoding,
 		context: decoder.out.context,
+		error: decoder.out.error,
 		play,
 		// Remove the rendition from the catalog, then restore it.
 		remove: () => catalog.set({}),
+		// Point the player at another broadcast, one without audio.
+		leave: () => {
+			active.set({ closed: {} });
+			catalog.set({});
+		},
 		// Keep the rendition in the catalog with `enabled: false`, as a muted publisher does.
 		disable: () =>
 			catalog.set({
@@ -528,6 +542,75 @@ describe("Decoder across a rendition's absence", () => {
 
 			// Everything past the legacy warm-up reaches the ring, none of it dropped for want of one.
 			expect(playback.inserted()).toEqual(timestamps.slice(3));
+		} finally {
+			playback.close();
+		}
+	});
+});
+
+describe("fatal decoder errors", () => {
+	it("releases audio subscriptions and retains the failure until the source changes", async () => {
+		const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const before = close.mock.calls.length;
+			const failure = new DOMException("invalid encoded audio", "EncodingError");
+			codecErrors.at(-1)?.(failure);
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			expect(close.mock.calls.length).toBeGreaterThan(before);
+			playback.decoding.set(false);
+			await microtasks();
+			playback.decoding.set(true);
+			await microtasks();
+			const attempts = playback.subscriptions();
+			expect(playback.error.peek()).toBe(failure);
+			expect(playback.codecs()).toBe(1);
+			playback.remove();
+			await microtasks();
+			playback.replace();
+			playback.restore();
+			await microtasks();
+			expect(playback.error.peek()).toBeUndefined();
+			expect(playback.subscriptions()).toBeGreaterThan(attempts);
+		} finally {
+			playback.close();
+			close.mockRestore();
+		}
+	});
+
+	it("clears the failure when a source without audio is selected while muted", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const failure = new DOMException("invalid encoded audio", "EncodingError");
+			codecErrors.at(-1)?.(failure);
+			await microtasks();
+			playback.decoding.set(false);
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			playback.leave();
+			await microtasks();
+			expect(playback.error.peek()).toBeUndefined();
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("keeps the failure while the same rendition is muted by its publisher", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const failure = new DOMException("invalid encoded audio", "EncodingError");
+			codecErrors.at(-1)?.(failure);
+			await microtasks();
+			playback.disable();
+			await microtasks();
+			playback.restore();
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			expect(playback.codecs()).toBe(1);
 		} finally {
 			playback.close();
 		}
