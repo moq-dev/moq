@@ -548,7 +548,9 @@ impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
 			// reply, this token earns nothing here.
 			Error::Stream(_) | Error::Decode(crate::DecodeError::Short) if !answered => Error::Unsupported,
 			// A malformed grant is the peer breaking the session protocol, not refusing a token.
-			Error::Decode(crate::DecodeError::InvalidValue) => Error::ProtocolViolation,
+			Error::Decode(crate::DecodeError::InvalidValue | crate::DecodeError::InvalidString(_)) => {
+				Error::ProtocolViolation
+			}
 			err => err,
 		};
 		match &err {
@@ -935,13 +937,18 @@ mod tests {
 
 	#[moq_net_sim::test]
 	async fn malformed_auth_ok_closes_the_session() {
-		for pattern in ["*/**", "/room", &vec!["room"; 33].join("/")] {
+		for pattern in [
+			b"*/**".as_slice(),
+			b"/room",
+			vec!["room"; 33].join("/").as_bytes(),
+			b"\xff",
+		] {
 			let mut script = Vec::new();
 			let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
 			w.varint(0).unwrap();
 			let prefix = w.prefix_varint();
 			w.varint(1).unwrap();
-			w.string(pattern).unwrap();
+			w.bytes(pattern).unwrap();
 			w.varint(0).unwrap();
 			w.varint(0).unwrap();
 			w.fill(prefix).unwrap();
