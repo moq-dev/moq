@@ -57,4 +57,3 @@ contracts remain with the broader alignment planning.
 - [Pair gate review](https://github.com/moq-dev/moq/pull/5328#discussion_r4243103700) - a known-failing baseline would generate daily alerts
 - [TS roadmap #5327](https://github.com/moq-dev/moq/pull/5327) - owns the broader redundant alignment planning
 - [Deterministic TS legs](/quest/m2/ts-hitless.md) - packet identity requires a separate contract and proof
-- [Initial catalog routing](/quest/m1/initial-catalog-routing.md) - distinct acquisition failure found by the same validation work
