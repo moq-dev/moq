@@ -215,6 +215,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
 
+      - name: TS scheduler benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-ts-schedule --test
+
       - name: RTMP chunk-stream benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-rtmp --test

@@ -279,14 +279,14 @@ elif [[ -n "$HRD$HEADROOM" ]]; then
         # A broadcast feed's audio beside it: three MPEG-1 Layer II PIDs and an AC-3 one, in a
         # multiplex faster than the video's Rx (10.8 Mb/s). Only then can video packets arrive
         # faster than its transport buffer drains, so each slot has to interleave them with
-        # the audio and the nulls (moq-dev/moq#5142). At 192 kb/s an AC-3 frame stays within
-        # a third of the 2,592-byte buffer ffmpeg's ATSC carriage gives it.
+        # the audio and the nulls (moq-dev/moq#5142). At 640 kb/s the AC-3 frame nearly fills
+        # ATSC's 2,592-byte buffer, so the next frame needs its exact decode-time release.
         AUDIO=(-map 0:v)
         for k in 1 2 3 4; do
             INPUTS+=(-f lavfi -i "sine=frequency=$((330 * k)):sample_rate=48000")
             AUDIO+=(-map "$k:a")
         done
-        AUDIO+=(-ac 2 -c:a mp2 -b:a 192k -c:a:3 ac3)
+        AUDIO+=(-ac 2 -c:a mp2 -b:a 192k -c:a:3 ac3 -b:a:3 640k)
     fi
     ffmpeg -y -hide_banner -loglevel error \
         "${INPUTS[@]}" \

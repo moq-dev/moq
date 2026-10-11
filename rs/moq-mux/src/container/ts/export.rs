@@ -1810,8 +1810,7 @@ impl<E: catalog::Catalog> Export<E> {
 			es_info,
 		};
 
-		self.schedule.set_buffer(0, Buffer::SYSTEM);
-		self.schedule.set_buffer(pmt_pid, Buffer::SYSTEM);
+		self.schedule.set_tables(pmt_pid);
 		self.schedule.set_clock(pcr_pid);
 		for track in self.tracks.values() {
 			self.liveness.register(track.pid);
@@ -1985,7 +1984,15 @@ impl<E: catalog::Catalog> Export<E> {
 			self.schedule.set_buffer(pid, buffer);
 		}
 		let by = decode.as_nanos().saturating_sub(track.drain().as_nanos());
-		self.schedule.push(pid, by, out, keyframe);
+		self.schedule.push(
+			pid,
+			super::schedule::Timing {
+				by,
+				decode: decode.as_nanos(),
+			},
+			out,
+			keyframe,
+		)?;
 		Ok(())
 	}
 

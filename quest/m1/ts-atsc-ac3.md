@@ -50,3 +50,23 @@ partial output is the same coarse timing, not a separate bug.
   448 kb/s frame (2,688 B) failing with both sizes named. Raise the
   `--headroom` arm's AC-3 (`test/ts/run.sh`) from 192 to 640 kb/s, the worst
   case, so CI grades it under strict `tstd` on every run.
+
+### Remaining unknown-rate startup
+
+The exact packet scheduler now carries 384/448/512/640 kb/s in constant-rate
+mode, including exact decoder removal, packet deadlines and transport-buffer
+pacing. Oversized access units fail when pushed. The 640 kb/s headroom capture
+preserves 20.5 seconds from a 20.06-second source, but strict T-STD still finds
+124 AC-3 B overflows, all between PCR times 1.528 and 2.403 seconds. No overflow
+occurs afterward. The first padded interval in that same capture starts at PCR
+2.424956 seconds, after the last overflow. Import measures the catalog mux rate over two seconds; until
+then export uses the unchanged unpadded scheduler. A deterministic unknown-rate
+probe independently exceeds 2,592 bytes at every tested rate from 384 kb/s up.
+
+Keep this quest open. Recommend adaptive padding for the unknown-rate interval,
+coordinated with exact decoder windows while preserving the 25 ms PCR grid.
+Alternatively, require a known mux rate and explicitly refuse this unsupported
+mode, which changes the export contract. Extra PCR grid points conflict with the
+chosen plan. Holding the initial catalog is separately tracked and must also
+handle finite-source withdrawal; importing that unfinished change would not
+establish this quest's all-mode guarantee.

@@ -50,3 +50,7 @@ tracing-test = { workspace = true, features = ["no-env-filter"] }
 [[bench]]
 name = "catalog"
 harness = false
+
+[[bench]]
+name = "ts_schedule"
+harness = false

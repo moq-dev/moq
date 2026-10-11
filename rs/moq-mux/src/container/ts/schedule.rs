@@ -1,6 +1,7 @@
 //! Lays a TS export's packets onto its PCR grid.
 
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::time::Duration;
 
 use mpeg2ts::ts::TsPacket;
@@ -131,12 +132,22 @@ impl SystemBuffer {
 	}
 }
 
+/// The last transport arrival and the decoder removal, in nanoseconds.
+#[derive(Clone, Copy)]
+pub(super) struct Timing {
+	/// When the last packet must enter the transport buffer.
+	pub by: u128,
+	/// When the decoder removes this unit.
+	pub decode: u128,
+}
+
 /// One access unit's packets, with the tables muxed ahead of it, still to go out.
 struct Unit {
 	/// The elementary stream it carries, whose buffers bound it.
 	pid: u16,
-	/// The last slot its packets may ride: the one that ends by its decode time.
+	/// The coarse deadline used by release windows and unpadded admission.
 	due: u128,
+	timing: Timing,
 	/// The slot after the unit pushed before it, which it may go out from even without a
 	/// window: nothing pushed later can be due sooner.
 	start: u128,
@@ -173,6 +184,18 @@ fn pid(packet: &[u8]) -> u16 {
 	u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])
 }
 
+fn payload(packet: &[u8]) -> &[u8] {
+	if packet[3] & 0x10 == 0 {
+		return &[];
+	}
+	let start = if packet[3] & 0x20 != 0 {
+		5 + usize::from(packet[4])
+	} else {
+		4
+	};
+	&packet[start..]
+}
+
 /// One grid slot's worth of output.
 pub(super) struct Slot {
 	pub index: u128,
@@ -188,10 +211,13 @@ pub(super) struct Slot {
 	pub units: Vec<u16>,
 	/// The most packets a slot admission lets each bounded PID carry.
 	pub caps: HashMap<u16, usize>,
+	/// Exact positions of the media packets in a padded slot, counting the opening clock.
+	positions: Option<Vec<usize>>,
 }
 
 impl Slot {
-	/// The whole slot, opening with its `clock` packet, interleaved by smooth weighted
+	/// The whole slot, opening with its `clock` packet. Padded slots use the exact
+	/// positions planned against receiver buffers. Unpadded slots use smooth weighted
 	/// round-robin: each PID (the clock packet counted on its own) and the null packets take
 	/// positions in proportion to their count, as evenly as they can, every PID keeping its
 	/// own order.
@@ -209,7 +235,21 @@ impl Slot {
 	/// delayed PIDs can still keep within their own transport buffers ([`Self::caps`]).
 	pub fn layout(&self, clock: &[u8], pmt_pid: u16, null: &[u8]) -> Vec<u8> {
 		let packets = self.packets.as_chunks::<{ TsPacket::SIZE }>().0;
-		let mut tables = VecDeque::new();
+		if let Some(positions) = &self.positions {
+			let mut out = Vec::with_capacity((1 + packets.len() + self.nulls) * TsPacket::SIZE);
+			out.extend_from_slice(clock);
+			for (&position, packet) in positions.iter().zip(packets) {
+				while out.len() / TsPacket::SIZE < position {
+					out.extend_from_slice(null);
+				}
+				out.extend_from_slice(packet);
+			}
+			while out.len() / TsPacket::SIZE < 1 + packets.len() + self.nulls {
+				out.extend_from_slice(null);
+			}
+			return out;
+		}
+				let mut tables = VecDeque::new();
 		// Each PID's packets in mux order: the clock's PID first, then the rest as they appear.
 		let mut lanes: Vec<(u16, VecDeque<usize>)> = vec![(pid(clock), VecDeque::new())];
 		for (i, packet) in packets.iter().enumerate() {
@@ -330,14 +370,13 @@ impl Slot {
 /// Packs muxed access units onto the PCR grid.
 ///
 /// Each slot's packets go earliest deadline first across PIDs, each PID in its own order, and
-/// each unit as soon as its PID's buffers in a receiver admit it: no more of a PID's packets
-/// in a slot than its transport buffer passes on, and no more bytes than its decoder buffer
-/// has room for until the units in it decode. A unit may go out up to the `window` before
+/// each unit as soon as its PID's buffers in a receiver admit it. Padded output checks
+/// transport occupancy and decoder removal at exact packet positions. A unit may go out up to the `window` before
 /// its due slot, which keeps that far ahead of a heavy passage, so the output trails the
 /// decode times by the window.
 ///
 /// With a multiplex rate each slot carries exactly what the rate allows, padded with null
-/// packets, and a unit that is not complete by its due slot fails the export rather than
+/// packets, and a unit that is not complete by its exact deadline fails the export rather than
 /// arrive late. Each slot's PCR is the time of its own first byte at the rate, so it matches
 /// its byte position exactly, and how many packets a slot carries and the PCR it opens with
 /// are functions of the slot alone, so two exporters of a broadcast lay a slot alike. Without a rate the stream is unpadded, its PCRs on the grid,
@@ -360,8 +399,12 @@ pub(super) struct Schedule {
 	buffers: HashMap<u16, Buffer>,
 	/// The PID every slot's clock packet rides on, from [`Self::set_clock`].
 	clock: Option<u16>,
-	/// Units sent into a decoder buffer: their PID, due slot and bytes held.
+	/// The PMT's PID, which shares TBsys with the PAT, from [`Self::set_tables`].
+	pmt: Option<u16>,
+	/// Units sent into a decoder buffer: their PID, decode nanoseconds and bytes held.
 	decoding: VecDeque<(u16, u128, usize)>,
+	/// When each transport buffer's last admitted packet finishes leaving it.
+	transport: HashMap<u16, i128>,
 	/// Every source has ended, so a unit that misses its deadline is the tail going out late
 	/// rather than an output that cannot keep up.
 	ended: bool,
@@ -378,7 +421,9 @@ impl Schedule {
 			last: None,
 			buffers: HashMap::new(),
 			clock: None,
+			pmt: None,
 			decoding: VecDeque::new(),
+			transport: HashMap::new(),
 			ended: false,
 		}
 	}
@@ -399,23 +444,64 @@ impl Schedule {
 		self.buffers.insert(pid, buffer);
 	}
 
+	/// Hold the program tables, the PAT and the PMT on `pmt_pid`, to the one TBsys they share.
+	pub fn set_tables(&mut self, pmt_pid: u16) {
+		self.buffers.insert(0, Buffer::SYSTEM);
+		self.buffers.insert(pmt_pid, Buffer::SYSTEM);
+		self.pmt = Some(pmt_pid);
+	}
+
+	/// The transport buffer `pid`'s packets enter: TBsys for the program tables the export
+	/// writes, else its own.
+	fn transport_buffer(&self, pid: u16) -> u16 {
+		match pid == 0 || self.pmt == Some(pid) {
+			true => 0,
+			false => pid,
+		}
+	}
+
 	/// Count every slot's clock packet, which rides on `pid`, against that PID's transport
-	/// buffer, as long as the PID keeps a packet a slot for its media.
+	/// buffer. Unpadded admission retains at least one media packet per slot.
 	pub fn set_clock(&mut self, pid: u16) {
 		self.clock = Some(pid);
 	}
 
 	/// Queue an access unit on `pid` (whole TS packets, the tables muxed ahead of it first)
-	/// whose last byte has to arrive by `by` nanoseconds: its decode time, less what the
-	/// receiver needs to pass the last packet on.
-	pub fn push(&mut self, pid: u16, by: u128, packets: Vec<u8>, keyframe: bool) {
-		let due = slot(by);
-		self.horizon = self.horizon.max(Some(due));
+	/// with its exact transport deadline and decoder removal time.
+	pub fn push(&mut self, pid: u16, timing: Timing, packets: Vec<u8>, keyframe: bool) -> anyhow::Result<()> {
+		let due = slot(timing.by);
+		if !self.ended
+			&& let Some(size) = self.buffers.get(&pid).and_then(|buffer| buffer.size)
+		{
+			let bytes: usize = packets
+				.as_chunks::<{ TsPacket::SIZE }>()
+				.0
+				.iter()
+				.filter(|packet| self::pid(*packet) == pid)
+				.map(|packet| payload(packet).len())
+				.sum();
+			let headers: usize = packets
+				.as_chunks::<{ TsPacket::SIZE }>()
+				.0
+				.iter()
+				.filter(|packet| self::pid(*packet) == pid && packet[1] & 0x40 != 0)
+				.map(|packet| payload(packet))
+				.filter(|body| body.starts_with(&[0, 0, 1]) && body.len() >= 9)
+				.map(|body| 9 + usize::from(body[8]))
+				.sum();
+			let elementary = bytes.saturating_sub(headers);
+			anyhow::ensure!(
+				bytes <= size,
+				"MPEG-TS access unit on PID {pid} has {elementary} payload bytes ({bytes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
+			);
+		}
+		self.horizon = self.horizon.max(Some(timing.by.div_ceil(PCR_INTERVAL.as_nanos())));
 		let start = self.last.map_or(due, |last| (last + 1).min(due));
 		self.last = Some(due);
 		self.units.push_back(Unit {
 			pid,
 			due,
+			timing,
 			start,
 			packets,
 			sent: 0,
@@ -423,6 +509,7 @@ impl Schedule {
 			late: self.next.is_some_and(|next| due < next),
 			held: 0,
 		});
+		Ok(())
 	}
 
 	/// Whether a unit is still to go out.
@@ -443,6 +530,7 @@ impl Schedule {
 	pub fn clear(&mut self) {
 		self.units.clear();
 		self.decoding.clear();
+		self.transport.clear();
 		self.next = None;
 		self.horizon = None;
 		self.last = None;
@@ -498,35 +586,19 @@ impl Schedule {
 			return Ok(None);
 		}
 		self.next = Some(index + 1);
+		if let Some(rate) = self.rate {
+			return self.padded(index, rate).map(Some);
+		}
 
-		let (take, nulls, pcr) = match self.rate {
-			Some(rate) => {
-				let allowed = (packets_before(index + 1, rate) - packets_before(index, rate)).max(1);
-				let take = self.admit(index, allowed as usize - 1);
-				if let Some(unit) = self.missed(index, &take)
-					&& !self.ended
-				{
-					anyhow::bail!(
-						"MPEG-TS output missed a decode deadline on PID {} at {rate} b/s; raise the delay or the multiplex rate",
-						unit.pid,
-					);
+		let mut take = self.admit(index, usize::MAX);
+		for (unit, take) in self.units.iter_mut().zip(take.iter_mut()) {
+			if unit.due <= index && *take < unit.remaining() {
+				if self.buffers.get(&unit.pid).is_some_and(|buffer| buffer.size.is_some()) {
+					unit.held += unit.packets_on(unit.sent + *take..unit.count(), unit.pid) * PAYLOAD;
 				}
-				let media: usize = take.iter().sum();
-				(take, allowed as usize - 1 - media, rate_pcr(index, rate))
+				*take = unit.remaining();
 			}
-			None => {
-				let mut take = self.admit(index, usize::MAX);
-				for (unit, take) in self.units.iter_mut().zip(take.iter_mut()) {
-					if unit.due <= index && *take < unit.remaining() {
-						if self.buffers.get(&unit.pid).is_some_and(|buffer| buffer.size.is_some()) {
-							unit.held += unit.packets_on(unit.sent + *take..unit.count(), unit.pid) * PAYLOAD;
-						}
-						*take = unit.remaining();
-					}
-				}
-				(take, 0, grid_pcr(index))
-			}
-		};
+		}
 
 		let mut packets = Vec::new();
 		let mut keyframe = false;
@@ -547,14 +619,14 @@ impl Schedule {
 			unit.sent += take;
 		}
 		for unit in self.units.iter().filter(|unit| unit.remaining() == 0 && unit.held > 0) {
-			self.decoding.push_back((unit.pid, unit.due, unit.held));
+			self.decoding.push_back((unit.pid, unit.timing.decode, unit.held));
 		}
 		self.units.retain(|unit| unit.remaining() > 0);
 		Ok(Some(Slot {
 			index,
-			pcr: pcr as u64,
+			pcr: grid_pcr(index) as u64,
 			packets,
-			nulls,
+			nulls: 0,
 			keyframe,
 			units,
 			caps: self
@@ -562,7 +634,182 @@ impl Schedule {
 				.iter()
 				.map(|(&pid, buffer)| (pid, buffer.per_slot()))
 				.collect(),
+			positions: None,
 		}))
+	}
+
+	/// Plan the packets and null positions together, against the actual transport clock.
+	/// Decoder removal and the delivery deadline stay exact even between PCR grid points.
+	fn padded(&mut self, index: u128, rate: u64) -> anyhow::Result<Slot> {
+		let first = packets_before(index, rate);
+		let count = (packets_before(index + 1, rate) - first).max(1) as usize;
+		let time = |position: usize| {
+			((first + position as u128) * TsPacket::SIZE as u128 * 8 * 1_000_000_000 / u128::from(rate)) as i128
+				- PCR_INTERVAL.as_nanos() as i128
+		};
+		let mut out = Slot {
+			index,
+			pcr: rate_pcr(index, rate) as u64,
+			packets: Vec::new(),
+			nulls: count - 1,
+			keyframe: false,
+			units: Vec::new(),
+			caps: HashMap::new(),
+			positions: Some(Vec::new()),
+		};
+		if let Some(pid) = self.clock
+			&& let Some(buffer) = self.buffers.get(&pid)
+		{
+			let duration = (TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate));
+			let free = self.transport.entry(pid).or_insert(time(0));
+			*free = (*free).max(time(0)) + duration as i128;
+		}
+		// One head per PID preserves decode order without walking all future units at every
+		// transport position. Removal events keep occupancy work proportional to units.
+		let mut lanes: Vec<VecDeque<usize>> = Vec::new();
+		let mut lane_by_pid = HashMap::new();
+		let mut occupancy: HashMap<u16, usize> = HashMap::new();
+		let mut removals = Vec::new();
+		self.decoding.retain(|&(_, decode, _)| decode as i128 > time(0));
+		for &(pid, decode, held) in &self.decoding {
+			*occupancy.entry(pid).or_default() += held;
+			removals.push((decode, pid, None, held));
+		}
+		for (i, unit) in self.units.iter().enumerate() {
+			let lane = *lane_by_pid.entry(unit.pid).or_insert_with(|| {
+				lanes.push(VecDeque::new());
+				lanes.len() - 1
+			});
+			lanes[lane].push_back(i);
+			if unit.timing.decode as i128 > time(0) {
+				*occupancy.entry(unit.pid).or_default() += unit.held;
+				removals.push((unit.timing.decode, unit.pid, Some(i), 0));
+			}
+		}
+		removals.sort_by_key(|event| event.0);
+		let mut removals = removals.into_iter().peekable();
+		let mut ready: BinaryHeap<Reverse<(u128, usize)>> = lanes
+			.iter()
+			.enumerate()
+			.filter_map(|(lane, units)| {
+				let unit = &self.units[*units.front()?];
+				(self.release(unit) <= index).then_some(Reverse((unit.timing.by, lane)))
+			})
+			.collect();
+		let mut waiting: BinaryHeap<Reverse<(i128, usize)>> = BinaryHeap::new();
+		let mut position = 1;
+		while position < count {
+			let now = time(position);
+			while let Some((_, pid, unit, held)) = removals.next_if(|event| event.0 as i128 <= now) {
+				let held = unit.map_or(held, |i| std::mem::take(&mut self.units[i].held));
+				*occupancy.get_mut(&pid).unwrap() -= held;
+			}
+			while waiting.peek().is_some_and(|Reverse((at, _))| *at <= now) {
+				let Reverse((_, lane)) = waiting.pop().unwrap();
+				ready.push(Reverse((self.units[*lanes[lane].front().unwrap()].timing.by, lane)));
+			}
+			let mut emitted = false;
+			while let Some(Reverse((_, lane))) = ready.pop() {
+				let i = *lanes[lane].front().unwrap();
+				let unit = &self.units[i];
+				let packet = &unit.packets[unit.sent * TsPacket::SIZE..(unit.sent + 1) * TsPacket::SIZE];
+				let pid = self::pid(packet);
+				let buffer = self.buffers.get(&pid);
+				let duration = buffer.map_or(0, |buffer| {
+					(TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate))
+				});
+				let tb = self.transport_buffer(pid);
+				let free = self.transport.get(&tb).copied().unwrap_or(now).max(now);
+				let done = free + duration as i128;
+				if let Some(buffer) = buffer {
+					let capacity = 512 * 8 * 1_000_000_000 / u128::from(buffer.rate);
+					if done - now > capacity as i128 {
+						let ready = done - capacity as i128;
+						waiting.push(Reverse((ready, lane)));
+						continue;
+					}
+					// The next slot's mandatory clock packet must fit even at a full media PID.
+					if self.clock == Some(pid) && done > time(count) + capacity as i128 - duration as i128 {
+						continue;
+					}
+				}
+				let held = if pid == unit.pid && buffer.is_some_and(|buffer| buffer.size.is_some()) {
+					payload(packet).len()
+				} else {
+					0
+				};
+				if let Some(size) = buffer.and_then(|buffer| buffer.size)
+					&& !(self.ended && (unit.timing.decode as i128) < now)
+					&& occupancy.get(&pid).copied().unwrap_or(0) + held > size
+				{
+					if let Some(event) = removals.peek() {
+						let ready = event.0 as i128;
+						waiting.push(Reverse((ready, lane)));
+					}
+					continue;
+				}
+				if !self.ended && !unit.late && pid == unit.pid && done > unit.timing.decode as i128 {
+					anyhow::bail!(
+						"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s; raise the delay or the multiplex rate"
+					);
+				}
+				self.transport.insert(tb, done);
+				out.positions.as_mut().unwrap().push(position);
+				out.packets.extend_from_slice(packet);
+				out.nulls -= 1;
+				let unit = &mut self.units[i];
+				if unit.sent == 0 {
+					out.keyframe |= unit.keyframe;
+					if unit.packets_on(0..unit.count(), unit.pid) > 0 {
+						out.units.push(unit.pid);
+					}
+				}
+				unit.sent += 1;
+				if unit.timing.decode as i128 > now {
+					unit.held += held;
+					*occupancy.entry(unit.pid).or_default() += held;
+				}
+				if unit.remaining() == 0 {
+					lanes[lane].pop_front();
+				}
+				if let Some(&i) = lanes[lane].front() {
+					let unit = &self.units[i];
+					if self.release(unit) <= index {
+						ready.push(Reverse((unit.timing.by, lane)));
+					}
+				}
+				emitted = true;
+				break;
+			}
+			if emitted {
+				position += 1;
+			} else if let Some(Reverse((next, _))) = waiting.peek() {
+				// Nothing can use intervening null positions. Jump to the first packet at the
+				// receiver event instead of scanning the multiplex rate's worth of padding.
+				let absolute = (*next + PCR_INTERVAL.as_nanos() as i128).max(0) as u128;
+				let packet = (absolute * u128::from(rate)).div_ceil(TsPacket::SIZE as u128 * 8 * 1_000_000_000);
+				position = (packet.saturating_sub(first) as usize).max(position + 1);
+			} else {
+				break;
+			}
+		}
+		let end = time(count);
+		if !self.ended
+			&& let Some(unit) = self
+				.units
+				.iter()
+				.find(|unit| !unit.late && unit.timing.by as i128 <= end && unit.remaining() > 0)
+		{
+			anyhow::bail!(
+				"MPEG-TS output missed a decode deadline on PID {} at {rate} b/s; raise the delay or the multiplex rate",
+				unit.pid
+			);
+		}
+		for unit in self.units.iter().filter(|unit| unit.remaining() == 0 && unit.held > 0) {
+			self.decoding.push_back((unit.pid, unit.timing.decode, unit.held));
+		}
+		self.units.retain(|unit| unit.remaining() > 0);
+		Ok(out)
 	}
 
 	/// How many of each unit's packets slot `index` carries, at most `budget` in all.
@@ -570,10 +817,11 @@ impl Schedule {
 	/// Earliest deadline first across PIDs. A PID whose unit stops short (its buffers full,
 	/// or not yet released) takes nothing more this slot, so each keeps its own order.
 	fn admit(&mut self, index: u128, mut budget: usize) -> Vec<usize> {
-		// A unit due in slot k decodes during slot k + 1, so its bytes leave the decoder
-		// buffer once that slot is past.
+		// Unpadded layout has no exact packet clock until the slot is assembled, so it
+		// retains units until their decode instant is behind the opening grid point.
 		let mut occupancy: HashMap<u16, usize> = HashMap::new();
-		self.decoding.retain(|&(_, due, _)| due + 1 >= index);
+		self.decoding
+			.retain(|&(_, decode, _)| decode >= index.saturating_sub(1) * PCR_INTERVAL.as_nanos());
 		for &(pid, _, held) in &self.decoding {
 			*occupancy.entry(pid).or_default() += held;
 		}
@@ -646,16 +894,6 @@ impl Schedule {
 		}
 		take
 	}
-
-	/// The first unit due by slot `index` that `take` leaves incomplete, unless it was already
-	/// late when pushed.
-	fn missed(&self, index: u128, take: &[usize]) -> Option<&Unit> {
-		self.units
-			.iter()
-			.zip(take)
-			.find(|(unit, take)| !unit.late && unit.due <= index && unit.sent + **take < unit.count())
-			.map(|(unit, _)| unit)
-	}
 }
 
 #[cfg(test)]
@@ -669,6 +907,13 @@ mod tests {
 		packet[2] = pid;
 		packet[3] = 0x10;
 		packet.repeat(count)
+	}
+
+	fn timing(ms: u128) -> Timing {
+		Timing {
+			by: self::ms(ms),
+			decode: self::ms(ms),
+		}
 	}
 
 	fn ms(ms: u128) -> u128 {
@@ -696,13 +941,85 @@ mod tests {
 		slots
 	}
 
+	/// Check actual wire positions against the receiver's transport buffer, clock included.
+	fn checked_transport(schedule: &mut Schedule, clock: u8) -> usize {
+		let rate = schedule.rate.unwrap();
+		let rx = schedule.buffers[&1].rate;
+		let mut null = unit(0, 1);
+		(null[1], null[2]) = (0x1f, 0xff);
+		let (mut fill, mut previous, mut sent) = (0.0f64, None::<f64>, 0);
+		while let Some(slot) = schedule.next(None).unwrap() {
+			sent += slot
+				.packets
+				.as_chunks::<{ TsPacket::SIZE }>()
+				.0
+				.iter()
+				.filter(|packet| pid(*packet) == 1)
+				.count();
+			for (position, packet) in slot.layout(&unit(clock, 1), 100, &null).chunks(188).enumerate() {
+				let at = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * 1504.0 / rate as f64;
+				if let Some(previous) = previous {
+					fill = (fill - (at - previous) * rx as f64 / 8.0).max(0.0);
+				}
+				previous = Some(at);
+				if pid(packet) == 1 {
+					fill += 188.0;
+				}
+				assert!(fill <= 512.001, "PID1 transport buffer holds {fill} bytes");
+			}
+		}
+		sent
+	}
+
+	/// Distinct tune-in tables keep their copies and still fit TBsys, which the PAT and PMT
+	/// share.
+	#[test]
+	fn system_packets_are_paced_with_media_admission() {
+		for pids in [3u8, 4, 8] {
+			for count in [10, 100] {
+				for rate in [25_000_000, 50_000_000, 100_000_000] {
+					let mut schedule = Schedule::new(Duration::from_millis(200));
+					schedule.set_rate(Some(rate));
+					schedule.set_clock(1);
+					schedule.set_tables(100);
+					for pid in 1..=pids {
+						schedule.set_buffer(u16::from(pid), VIDEO);
+						let packets = [unit(0, 1), unit(100, 1), unit(pid, count)].concat();
+						schedule.push(u16::from(pid), timing(1_000), packets, true).unwrap();
+					}
+					let (mut fill, mut previous, mut tables) = (0.0f64, None::<f64>, [0; 2]);
+					while let Some(slot) = schedule.next(None).unwrap() {
+						for (position, packet) in slot.layout(&unit(1, 1), 100, &[0xff; 188]).chunks(188).enumerate() {
+							let at = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * 1504.0 / rate as f64;
+							if let Some(previous) = previous {
+								fill = (fill - (at - previous) * 125_000.0).max(0.0);
+							}
+							previous = Some(at);
+							for (i, system_pid) in [0, 100].into_iter().enumerate() {
+								if pid(packet) == system_pid {
+									fill += 188.0;
+									tables[i] += 1;
+								}
+							}
+							assert!(
+								fill <= 512.001,
+								"{pids} PIDs x {count} packets at {rate}: TBsys holds {fill} bytes"
+							);
+						}
+					}
+					assert_eq!(tables, [usize::from(pids); 2]);
+				}
+			}
+		}
+	}
+
 	/// A unit goes out a window ahead of its due slot, as soon as it is released.
 	#[test]
 	fn a_unit_goes_out_as_soon_as_it_is_released() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
 		schedule.set_rate(Some(RATE));
 		schedule.set_buffer(1, VIDEO);
-		schedule.push(1, ms(1_000), unit(1, 3), true);
+		schedule.push(1, timing(1_000), unit(1, 3), true).unwrap();
 		let slots = drain(&mut schedule);
 		assert_eq!(slots[0].0, 36, "a window ahead of its due slot");
 		assert_eq!(slots[0].1[&1], 3);
@@ -717,7 +1034,7 @@ mod tests {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
 		schedule.set_rate(Some(RATE));
 		schedule.set_buffer(1, VIDEO);
-		schedule.push(1, ms(1_000), unit(1, 100), true);
+		schedule.push(1, timing(1_000), unit(1, 100), true).unwrap();
 		let sent: Vec<_> = drain(&mut schedule)
 			.into_iter()
 			.map(|(index, per_pid, _)| (index, per_pid.get(&1).copied().unwrap_or(0)))
@@ -731,7 +1048,7 @@ mod tests {
 		let mut schedule = Schedule::new(Duration::from_millis(50));
 		schedule.set_rate(Some(RATE));
 		schedule.set_buffer(1, VIDEO);
-		schedule.push(1, ms(1_000), unit(1, 200), true);
+		schedule.push(1, timing(1_000), unit(1, 200), true).unwrap();
 		let err = std::iter::from_fn(|| schedule.next(None).transpose()).find_map(Result::err);
 		assert!(err.is_some(), "a burst past the window must fail the export");
 	}
@@ -743,7 +1060,7 @@ mod tests {
 		let mut schedule = Schedule::new(Duration::from_millis(50));
 		schedule.set_rate(Some(RATE));
 		schedule.set_buffer(1, VIDEO);
-		schedule.push(1, ms(1_000), unit(1, 200), true);
+		schedule.push(1, timing(1_000), unit(1, 200), true).unwrap();
 		schedule.set_ended(true);
 		let sent: usize = drain(&mut schedule)
 			.into_iter()
@@ -764,8 +1081,8 @@ mod tests {
 			size: Some(10 * PAYLOAD),
 		};
 		schedule.set_buffer(1, small);
-		schedule.push(1, ms(1_000), unit(1, 11), true);
 		schedule.set_ended(true);
+		schedule.push(1, timing(1_000), unit(1, 11), true).unwrap();
 		let mut sent = 0;
 		for _ in 0..100 {
 			let Some(slot) = schedule.next(None).unwrap() else {
@@ -784,8 +1101,8 @@ mod tests {
 		schedule.set_rate(Some(RATE));
 		schedule.set_buffer(1, VIDEO);
 		schedule.set_buffer(2, VIDEO);
-		schedule.push(1, ms(1_100), unit(1, 39), true);
-		schedule.push(2, ms(1_000), unit(2, 39), false);
+		schedule.push(1, timing(1_100), unit(1, 39), true).unwrap();
+		schedule.push(2, timing(1_000), unit(2, 39), false).unwrap();
 		let sent: Vec<_> = drain(&mut schedule)
 			.into_iter()
 			.filter(|(_, per_pid, _)| !per_pid.is_empty())
@@ -807,11 +1124,9 @@ mod tests {
 		};
 		schedule.set_buffer(1, audio);
 		for at in 0..20 {
-			schedule.push(1, ms(1_000 + at), unit(1, 4), false);
+			schedule.push(1, timing(1_000 + at), unit(1, 4), false).unwrap();
 		}
-		for (index, per_pid, _) in drain(&mut schedule) {
-			assert!(per_pid.get(&1).copied().unwrap_or(0) <= 32, "slot {index}: {per_pid:?}");
-		}
+		assert_eq!(checked_transport(&mut schedule, 9), 80);
 	}
 
 	/// The clock packet opening every slot rides its PID's transport buffer too, so that PID
@@ -828,20 +1143,16 @@ mod tests {
 		schedule.set_buffer(1, audio);
 		schedule.set_clock(1);
 		for at in 0..20 {
-			schedule.push(1, ms(1_000 + at), unit(1, 4), false);
+			schedule.push(1, timing(1_000 + at), unit(1, 4), false).unwrap();
 		}
-		let most = drain(&mut schedule)
-			.into_iter()
-			.map(|(_, per_pid, _)| per_pid.get(&1).copied().unwrap_or(0))
-			.max();
-		assert_eq!(most, Some(31));
+		assert_eq!(checked_transport(&mut schedule, 1), 80);
 	}
 
 	/// A PID whose transport buffer passes on a single packet a slot still carries one of its
 	/// own beside the clock packet, so its units finish on time and the stream ends.
 	#[test]
 	fn a_one_packet_pid_still_progresses_beside_the_clock() {
-		let mut schedule = Schedule::new(Duration::from_millis(100));
+		let mut schedule = Schedule::new(Duration::from_millis(500));
 		schedule.set_rate(Some(RATE));
 		// 76.8 kb/s: one packet a slot.
 		let slow = Buffer {
@@ -850,18 +1161,30 @@ mod tests {
 		};
 		schedule.set_buffer(1, slow);
 		schedule.set_clock(1);
-		schedule.push(1, ms(1_000), unit(1, 4), true);
-		schedule.push(1, ms(1_200), unit(1, 4), false);
-		let mut sent = Vec::new();
-		for _ in 0..100 {
-			let Some(slot) = schedule.next(None).unwrap() else {
-				break;
-			};
-			sent.push(slot.packets.len() / TsPacket::SIZE);
-		}
-		assert!(sent.iter().all(|&n| n <= 1), "one packet a slot: {sent:?}");
-		assert_eq!(sent.iter().sum::<usize>(), 8, "both units go out");
+		schedule.push(1, timing(1_000), unit(1, 4), true).unwrap();
+		schedule.push(1, timing(1_400), unit(1, 4), false).unwrap();
+		assert_eq!(checked_transport(&mut schedule, 1), 8, "both units go out");
 		assert!(schedule.is_empty(), "and the stream ends");
+	}
+
+	#[test]
+	fn an_overloaded_clock_pid_fails_instead_of_overflowing_its_transport_buffer() {
+		let mut schedule = Schedule::new(Duration::from_millis(100));
+		schedule.set_rate(Some(RATE));
+		schedule.set_clock(1);
+		schedule.set_buffer(
+			1,
+			Buffer {
+				rate: 76_800,
+				size: Some(100_000),
+			},
+		);
+		schedule.push(1, timing(1_000), unit(1, 4), false).unwrap();
+		schedule.push(1, timing(1_200), unit(1, 4), false).unwrap();
+		let error = std::iter::from_fn(|| schedule.next(None).transpose())
+			.find_map(Result::err)
+			.unwrap();
+		assert!(error.to_string().contains("decode deadline"), "{error}");
 	}
 
 	/// A PID never holds more in its decoder buffer than it has: the next unit waits for the
@@ -876,15 +1199,165 @@ mod tests {
 			size: Some(10 * PAYLOAD),
 		};
 		schedule.set_buffer(1, small);
-		schedule.push(1, ms(1_000), unit(1, 8), true);
-		schedule.push(1, ms(1_100), unit(1, 8), false);
+		schedule.push(1, timing(1_000), unit(1, 8), true).unwrap();
+		schedule.push(1, timing(1_100), unit(1, 8), false).unwrap();
 		let sent: Vec<_> = drain(&mut schedule)
 			.into_iter()
 			.filter_map(|(index, per_pid, _)| per_pid.get(&1).map(|&n| (index, n)))
 			.collect();
 		// The first unit goes at once; the second fills what is left, then the rest once the
 		// first decodes in slot 41.
-		assert_eq!(sent, [(32, 8), (36, 2), (42, 6)]);
+		assert_eq!(sent, [(32, 8), (36, 2), (41, 6)]);
+	}
+
+	/// Packetize a PES with exactly `bytes` elementary bytes and adaptation stuffing.
+	fn audio(bytes: usize) -> Vec<u8> {
+		let mut pes = vec![0; 14 + bytes];
+		pes[..9].copy_from_slice(&[0, 0, 1, 0xbd, 0, 0, 0x80, 0x80, 5]);
+		let mut out = Vec::new();
+		for (index, body) in pes.chunks(PAYLOAD).enumerate() {
+			let mut packet = [0xff; TsPacket::SIZE];
+			packet[..4].copy_from_slice(&[0x47, if index == 0 { 0x40 } else { 0 }, 1, 0x10]);
+			if body.len() < PAYLOAD {
+				packet[3] |= 0x20;
+				packet[4] = (PAYLOAD - body.len() - 1) as u8;
+			}
+			packet[TsPacket::SIZE - body.len()..].copy_from_slice(body);
+			out.extend(packet);
+		}
+		out
+	}
+
+	#[test]
+	fn an_oversized_ac3_frame_names_both_sizes_at_admission() {
+		let mut schedule = Schedule::new(Duration::from_millis(200));
+		schedule.set_buffer(
+			1,
+			Buffer {
+				rate: 2_000_000,
+				size: Some(2_592),
+			},
+		);
+		let error = schedule
+			.push(1, timing(1_000), audio(2_688), false)
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("2688"), "{error}");
+		assert!(error.contains("2592"), "{error}");
+		assert!(!schedule.queued(), "refusal must not partially queue a unit");
+		for bytes in [2_304, 2_436] {
+			schedule.push(1, timing(1_000), audio(bytes), false).unwrap();
+		}
+	}
+
+	#[test]
+	fn freed_decoder_room_is_used_after_the_exact_in_slot_instant() {
+		let mut schedule = Schedule::new(Duration::from_millis(200));
+		schedule.set_rate(Some(25_000_000));
+		schedule.set_buffer(
+			1,
+			Buffer {
+				rate: 2_000_000,
+				size: Some(2 * PAYLOAD),
+			},
+		);
+		schedule
+			.push(
+				1,
+				Timing {
+					by: ms(1_006),
+					decode: ms(1_007),
+				},
+				unit(1, 2),
+				false,
+			)
+			.unwrap();
+		schedule
+			.push(
+				1,
+				Timing {
+					by: ms(1_038),
+					decode: ms(1_039),
+				},
+				unit(1, 2),
+				false,
+			)
+			.unwrap();
+		let mut sent = Vec::new();
+		while let Some(slot) = schedule.next(None).unwrap() {
+			for &position in slot.positions.as_ref().unwrap() {
+				sent.push(slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * 1504.0 / 25_000_000.0);
+			}
+		}
+		assert_eq!(sent.len(), 4);
+		assert!(sent[1] < 1.007);
+		assert!(sent[2] >= 1.007 && sent[2] < 1.025, "exact release: {sent:?}");
+	}
+
+	/// The ATSC buffer holds each legal 48 kHz AC-3 frame until its own decode instant.
+	#[test]
+	fn atsc_ac3_frames_finish_at_every_high_bitrate() {
+		for bitrate in [384_000usize, 448_000, 512_000, 640_000] {
+			let mut schedule = Schedule::new(Duration::from_millis(200));
+			schedule.set_rate(Some(25_000_000));
+			schedule.set_buffer(
+				1,
+				Buffer {
+					rate: 2_000_000,
+					size: Some(2_592),
+				},
+			);
+			let bytes = bitrate / 8 * 32 / 1_000;
+			let packets = (bytes + 14).div_ceil(PAYLOAD);
+			for frame in 0..64 {
+				schedule
+					.push(
+						1,
+						Timing {
+							by: ms(999 + frame * 32),
+							decode: ms(1_000 + frame * 32),
+						},
+						audio(bytes),
+						false,
+					)
+					.unwrap();
+			}
+			let mut sent = 0;
+			let mut frames = 0;
+			let mut held = [0usize; 64];
+			let mut free = 0.0f64;
+			while let Some(slot) = schedule
+				.next(None)
+				.unwrap_or_else(|error| panic!("{bitrate} b/s: {error}"))
+			{
+				for (&position, packet) in slot
+					.positions
+					.as_ref()
+					.unwrap()
+					.iter()
+					.zip(slot.packets.as_chunks::<{ TsPacket::SIZE }>().0)
+				{
+					let at = slot.pcr as f64 / SYSTEM_CLOCK as f64 + position as f64 * 1504.0 / 25_000_000.0;
+					if packet[1] & 0x40 != 0 {
+						frames += 1;
+					}
+					let frame = frames - 1;
+					free = free.max(at) + 1504.0 / 2_000_000.0;
+					let decode = 1.0 + frame as f64 * 0.032;
+					assert!(free <= decode + 1e-7, "{bitrate} frame{frame}: {free} > {decode}");
+					held[frame] += payload(packet).len();
+					let occupancy: usize = held
+						.iter()
+						.enumerate()
+						.filter(|(i, _)| 1.0 + *i as f64 * 0.032 > at)
+						.map(|(_, held)| held)
+						.sum();
+					assert!(occupancy <= 2_592, "{bitrate} at{at}: decoder holds{occupancy}");
+					sent += 1;
+				}
+			}
+			assert_eq!(sent, 64 * packets);
+		}
 	}
 
 	/// A PID with no decoder buffer to respect goes out only in the slot before its own.
@@ -892,7 +1365,7 @@ mod tests {
 	fn an_unbounded_pid_goes_just_before_it_is_due() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
 		schedule.set_rate(Some(RATE));
-		schedule.push(7, ms(1_000), unit(7, 2), false);
+		schedule.push(7, timing(1_000), unit(7, 2), false).unwrap();
 		let sent: Vec<_> = drain(&mut schedule)
 			.into_iter()
 			.filter_map(|(index, per_pid, _)| per_pid.get(&7).map(|&n| (index, n)))
@@ -912,7 +1385,7 @@ mod tests {
 		schedule.set_rate(Some(rate));
 		schedule.set_buffer(1, VIDEO);
 		for at in 0..40 {
-			schedule.push(1, ms(1_000 + 25 * at), unit(1, 1), false);
+			schedule.push(1, timing(1_000 + 25 * at), unit(1, 1), false).unwrap();
 		}
 		let mut laid = 0u128;
 		let mut first = None;
@@ -937,8 +1410,8 @@ mod tests {
 	fn a_rate_takes_over_from_the_next_slot() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
 		schedule.set_buffer(1, VIDEO);
-		schedule.push(1, ms(1_000), unit(1, 8), true);
-		schedule.push(1, ms(1_100), unit(1, 100), false);
+		schedule.push(1, timing(1_000), unit(1, 8), true).unwrap();
+		schedule.push(1, timing(1_100), unit(1, 100), false).unwrap();
 		// Unpadded, both go out as soon as they are released, a window ahead.
 		let first: Vec<_> = std::iter::from_fn(|| schedule.next(Some(slot(ms(1_100)))).unwrap())
 			.map(|slot| (slot.index, slot.packets.len() / TsPacket::SIZE, slot.nulls))
@@ -966,8 +1439,8 @@ mod tests {
 				size: Some(100_000),
 			},
 		);
-		schedule.push(1, ms(1_000), unit(1, 50), true);
-		schedule.push(1, ms(1_100), unit(1, 4), false);
+		schedule.push(1, timing(1_000), unit(1, 50), true).unwrap();
+		schedule.push(1, timing(1_100), unit(1, 4), false).unwrap();
 		let sent: Vec<_> = drain(&mut schedule)
 			.into_iter()
 			.map(|(index, per_pid, nulls)| (index, per_pid.get(&1).copied().unwrap_or(0), nulls))
@@ -996,6 +1469,7 @@ mod tests {
 			keyframe: false,
 			units: vec![],
 			caps: HashMap::new(),
+			positions: None,
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -1033,6 +1507,7 @@ mod tests {
 			keyframe: true,
 			units: vec![1, 3],
 			caps: HashMap::new(),
+			positions: None,
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -1091,6 +1566,7 @@ mod tests {
 				keyframe: true,
 				units: vec![video.into()],
 				caps: HashMap::from([(video.into(), Buffer { rate: RX, size: None }.per_slot())]),
+				positions: None,
 			};
 			let mut null = unit(0, 1);
 			(null[1], null[2]) = (0x1f, 0xff);
@@ -1142,6 +1618,7 @@ mod tests {
 			keyframe: true,
 			units: vec![1, 2],
 			caps: HashMap::from([(1, a.per_slot()), (2, b.per_slot())]),
+			positions: None,
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
