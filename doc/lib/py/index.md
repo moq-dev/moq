@@ -94,13 +94,10 @@ one to one; the API reference has the names.
 - **Decoded frames hold decoder buffers.** Drop each frame from `decode_video` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await session.shutdown()` gives finished tracks up to one second to deliver and raises if they did not. `cancel(code)` closes at once. Finish or abort live tracks first.
 - **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero.
+- **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 
 ## Reference
 
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
-
-Error variants carrying a diagnostic expose a named `message` payload (`Message`
-in Go); structured protocol errors expose `details` (`Details` in Go). Their
-display text and error classification stay the same.

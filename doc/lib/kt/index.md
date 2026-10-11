@@ -75,13 +75,10 @@ one to one; the API reference has the names.
 - **Decoded frames hold decoder buffers.** `close()` each frame from `decodeVideo` promptly (or `use { }` it), or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** Suspending `moq.shutdown()` gives finished tracks up to one second to deliver and throws if they did not. `Moq.close()`, and so `use { }`, cancels at once. Finish or abort live tracks first.
 - **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero.
+- **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 
 ## Reference
 
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [`kt/`](https://github.com/moq-dev/moq/tree/main/kt); `just kt check` builds and tests locally
 - Artifacts: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq), [dev.moq:moq-ffi](https://central.sonatype.com/artifact/dev.moq/moq-ffi)
-
-Error variants carrying a diagnostic expose a named `message` payload (`Message`
-in Go); structured protocol errors expose `details` (`Details` in Go). Their
-display text and error classification stay the same.

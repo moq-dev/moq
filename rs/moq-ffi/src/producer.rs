@@ -41,7 +41,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 		}
 		if let Some(ticks) = info.timescale {
 			let scale = moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec {
-				message: format!("invalid timescale: {ticks}"),
+				reason: format!("invalid timescale: {ticks}"),
 			})?;
 			out = out.with_timescale(scale);
 		}
@@ -64,7 +64,7 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 			.map(|age| u64::try_from(age.as_micros()))
 			.transpose()
 			.map_err(|_| MoqError::Codec {
-				message: "track max_age duration overflow".into(),
+				reason: "track max_age duration overflow".into(),
 			})?;
 		Ok(Self {
 			priority: info.priority,

@@ -19,7 +19,7 @@ pub fn moq_log_level(level: String) -> Result<(), MoqError> {
 
 	if INITIALIZED.swap(true, Ordering::SeqCst) {
 		return Err(MoqError::Log {
-			message: "logging already initialized".into(),
+			reason: "logging already initialized".into(),
 		});
 	}
 
@@ -27,7 +27,7 @@ pub fn moq_log_level(level: String) -> Result<(), MoqError> {
 		.init()
 		.inspect_err(|_| INITIALIZED.store(false, Ordering::SeqCst))
 		.map_err(|err| MoqError::Log {
-			message: err.to_string(),
+			reason: err.to_string(),
 		})?;
 
 	Ok(())

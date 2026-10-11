@@ -154,7 +154,7 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 /// Error returned by all UniFFI-exported functions.
 ///
 /// Exports `Display`, which the bindings surface as the error's string form.
-/// Diagnostic payloads are named `message`; structured protocol failures use `details`.
+/// Diagnostic payloads are named `reason`; structured protocol failures use `details`.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi::export(Display)]
 #[non_exhaustive]
@@ -164,47 +164,47 @@ pub enum MoqError {
 	Protocol { details: MoqProtocolError },
 
 	/// The underlying QUIC/WebTransport connection failed.
-	#[error("transport: {message}")]
-	Transport { message: String },
+	#[error("transport: {reason}")]
+	Transport { reason: String },
 
 	/// A local failure without a session or stream code.
-	#[error("internal: {message}")]
-	Internal { message: String },
+	#[error("internal: {reason}")]
+	Internal { reason: String },
 
-	#[error("{message}")]
-	Media { message: String },
+	#[error("{reason}")]
+	Media { reason: String },
 
-	#[error("{message}")]
-	Mux { message: String },
+	#[error("{reason}")]
+	Mux { reason: String },
 
-	#[error("{message}")]
-	JsonTrack { message: String },
+	#[error("{reason}")]
+	JsonTrack { reason: String },
 
 	// Native codec errors, behind the optional `audio`/`video` features.
 	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
-	#[error("{message}")]
-	Audio { message: String },
+	#[error("{reason}")]
+	Audio { reason: String },
 
 	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
-	#[error("{message}")]
-	Video { message: String },
+	#[error("{reason}")]
+	Video { reason: String },
 
-	#[error("url: {message}")]
-	Url { message: String },
+	#[error("url: {reason}")]
+	Url { reason: String },
 
 	#[error("timestamp overflow")]
 	TimeOverflow,
 
-	#[error("log level: {message}")]
-	LogLevel { message: String },
+	#[error("log level: {reason}")]
+	LogLevel { reason: String },
 
 	// Only the native path spawns onto a runtime, so only it can fail to join.
 	#[cfg(not(target_arch = "wasm32"))]
-	#[error("task: {message}")]
-	Task { message: String },
+	#[error("task: {reason}")]
+	Task { reason: String },
 
-	#[error("json: {message}")]
-	Json { message: String },
+	#[error("json: {reason}")]
+	Json { reason: String },
 
 	#[error("cancelled")]
 	Cancelled,
@@ -219,20 +219,20 @@ pub enum MoqError {
 	#[error("busy")]
 	Busy,
 
-	#[error("connect: {message}")]
-	Connect { message: String },
+	#[error("connect: {reason}")]
+	Connect { reason: String },
 
-	#[error("bind: {message}")]
-	Bind { message: String },
+	#[error("bind: {reason}")]
+	Bind { reason: String },
 
-	#[error("reject: {message}")]
-	Reject { message: String },
+	#[error("reject: {reason}")]
+	Reject { reason: String },
 
 	#[error("already responded")]
 	AlreadyResponded,
 
-	#[error("codec: {message}")]
-	Codec { message: String },
+	#[error("codec: {reason}")]
+	Codec { reason: String },
 
 	#[error("unauthorized")]
 	Unauthorized,
@@ -263,30 +263,30 @@ pub enum MoqError {
 	AlreadyCommitted,
 
 	/// A route carried an invalid hop id or too many hops.
-	#[error("invalid route: {message}")]
-	InvalidRoute { message: String },
+	#[error("invalid route: {reason}")]
+	InvalidRoute { reason: String },
 
 	/// A path pattern was empty, had a doubled slash, or used a reserved segment form.
-	#[error("invalid pattern: {message}")]
-	InvalidPattern { message: String },
+	#[error("invalid pattern: {reason}")]
+	InvalidPattern { reason: String },
 
 	/// A catalog rendition named another broadcast, but this consumer came from a standalone
 	/// broadcast rather than an origin, so there is nothing to resolve the reference against.
-	#[error("unresolvable broadcast reference: {message}")]
-	UnresolvableBroadcast { message: String },
+	#[error("unresolvable broadcast reference: {reason}")]
+	UnresolvableBroadcast { reason: String },
 
-	#[error("log: {message}")]
-	Log { message: String },
+	#[error("log: {reason}")]
+	Log { reason: String },
 
 	/// A configuration record held a value the constructor cannot use.
-	#[error("config: {message}")]
-	Config { message: String },
+	#[error("config: {reason}")]
+	Config { reason: String },
 }
 
 impl From<moq_net::Error> for MoqError {
 	fn from(err: moq_net::Error) -> Self {
 		match err {
-			moq_net::Error::Transport(message) => Self::Transport { message },
+			moq_net::Error::Transport(message) => Self::Transport { reason: message },
 			moq_net::Error::NotFound | moq_net::Error::NotFetchable => Self::NotFound,
 			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
@@ -311,7 +311,7 @@ impl From<moq_net::Error> for MoqError {
 					moq_net::StreamError::Internal | moq_net::StreamError::Session(_)
 				) {
 					Self::Internal {
-						message: other.to_string(),
+						reason: other.to_string(),
 					}
 				} else {
 					Self::Protocol {
@@ -328,7 +328,7 @@ impl From<hang::Error> for MoqError {
 		match err {
 			hang::Error::Moq(err) => err.into(),
 			err => Self::Media {
-				message: err.to_string(),
+				reason: err.to_string(),
 			},
 		}
 	}
@@ -344,7 +344,7 @@ impl From<moq_mux::Error> for MoqError {
 				.find_map(|err| err.downcast_ref::<moq_net::Error>())
 				.map(|err| err.clone().into())
 				.unwrap_or_else(|| Self::Mux {
-					message: err.to_string(),
+					reason: err.to_string(),
 				}),
 		}
 	}
@@ -355,7 +355,7 @@ impl From<moq_json::Error> for MoqError {
 		match err {
 			moq_json::Error::Net(err) => err.into(),
 			err => Self::JsonTrack {
-				message: err.to_string(),
+				reason: err.to_string(),
 			},
 		}
 	}
@@ -365,7 +365,7 @@ impl From<moq_json::Error> for MoqError {
 impl From<moq_audio::Error> for MoqError {
 	fn from(err: moq_audio::Error) -> Self {
 		Self::Audio {
-			message: err.to_string(),
+			reason: err.to_string(),
 		}
 	}
 }
@@ -374,7 +374,7 @@ impl From<moq_audio::Error> for MoqError {
 impl From<moq_video::Error> for MoqError {
 	fn from(err: moq_video::Error) -> Self {
 		Self::Video {
-			message: err.to_string(),
+			reason: err.to_string(),
 		}
 	}
 }
@@ -392,7 +392,7 @@ macro_rules! from_message {
 		$(
 			impl From<$ty> for MoqError {
 				fn from(err: $ty) -> Self {
-					Self::$variant { message: err.to_string() }
+					Self::$variant { reason: err.to_string() }
 				}
 			}
 		)*

@@ -593,7 +593,7 @@ async fn raw_audio_codec_default_frame() {
 
 	assert_eq!(MoqAudioCodec::aac().codec(), moq_audio::encode::Codec::Aac);
 	let aac = broadcast.encode_audio("aac".into(), input(), output(MoqAudioCodec::aac()), None);
-	let Err(MoqError::Audio { message }) = aac else {
+	let Err(MoqError::Audio { reason: message }) = aac else {
 		panic!("no platform AAC encoder on this host");
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
@@ -611,7 +611,7 @@ async fn raw_audio_codec_default_frame() {
 		resampled,
 		None,
 	);
-	let Err(MoqError::Audio { message }) = aac else {
+	let Err(MoqError::Audio { reason: message }) = aac else {
 		panic!("no platform AAC encoder on this host");
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
@@ -1990,7 +1990,7 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
 	match consumer.resolve(Some("./source".into())).await {
-		Err(MoqError::UnresolvableBroadcast { message: reference }) => assert_eq!(reference, "source"),
+		Err(MoqError::UnresolvableBroadcast { reason: reference }) => assert_eq!(reference, "source"),
 		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
 		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
 	}

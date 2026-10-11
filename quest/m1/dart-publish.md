@@ -32,6 +32,7 @@ Public API: none. Wire: none.
 
 - [Codecs](/quest/m1/ffi-shape/codec.md) - settle the audio and video binding API before publishing
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - include the epoch rename in the same breaking release
+- [Named error fields](/quest/m1/ffi-shape/error-fields.md) - include named error payloads in the same breaking release
 
 ## Related
 

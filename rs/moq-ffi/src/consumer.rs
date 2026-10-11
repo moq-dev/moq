@@ -120,7 +120,7 @@ impl MoqBroadcastConsumer {
 		};
 
 		let origin = self.origin.clone().ok_or_else(|| MoqError::UnresolvableBroadcast {
-			message: reference.as_str().to_string(),
+			reason: reference.as_str().to_string(),
 		})?;
 
 		let source = moq_mux::Source::new(origin, &self.inner.info().path);

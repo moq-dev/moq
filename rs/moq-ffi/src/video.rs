@@ -654,7 +654,7 @@ impl MoqVideoDecodedFrame {
 				.map(|rgba| rgba.into_data()),
 		}
 		.map_err(|err| MoqError::Codec {
-			message: err.to_string(),
+			reason: err.to_string(),
 		})
 	}
 

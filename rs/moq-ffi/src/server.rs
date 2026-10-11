@@ -109,7 +109,7 @@ async fn serve(
 		Ok(listener) => listener,
 		Err(err) => {
 			let _ = bound.send(Err(MoqError::Bind {
-				message: format!("{err}"),
+				reason: format!("{err}"),
 			}));
 			return;
 		}
@@ -120,7 +120,7 @@ async fn serve(
 		}
 		Err(err) => {
 			let _ = bound.send(Err(MoqError::Bind {
-				message: format!("{err}"),
+				reason: format!("{err}"),
 			}));
 			listener.close().await;
 			return;
@@ -154,7 +154,7 @@ impl ServerState {
 		let mut listen = moq_tokio::listen::Config::default();
 		if let Some(bind) = config.bind {
 			let parsed = bind.parse().map_err(|_| MoqError::Config {
-				message: format!("invalid bind address: {bind}"),
+				reason: format!("invalid bind address: {bind}"),
 			})?;
 			listen.bind = Some(parsed);
 		}
@@ -183,7 +183,7 @@ impl ServerState {
 	) -> Result<String, MoqError> {
 		if self.requests.is_some() {
 			return Err(MoqError::Bind {
-				message: "already listening".into(),
+				reason: "already listening".into(),
 			});
 		}
 		let (bound, addr) = tokio::sync::oneshot::channel();
@@ -201,7 +201,7 @@ impl ServerState {
 				.clone()
 				.init(self.quic.clone())
 				.map_err(|err| MoqError::Bind {
-					message: format!("{err}"),
+					reason: format!("{err}"),
 				})?;
 			let certificates = server.certificates();
 			let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -222,7 +222,7 @@ impl ServerState {
 
 	async fn accept(&mut self) -> Result<Option<Arc<MoqRequest>>, MoqError> {
 		let requests = self.requests.as_mut().ok_or_else(|| MoqError::Bind {
-			message: "not listening; call listen() first".into(),
+			reason: "not listening; call listen() first".into(),
 		})?;
 		match requests.queue.recv().await {
 			Some(request) => Ok(Some(MoqRequest::new(
@@ -281,7 +281,7 @@ impl MoqServer {
 	pub fn cert_fingerprints(&self) -> Result<Vec<String>, MoqError> {
 		let state = self.task.configure()?;
 		let requests = state.requests.as_ref().ok_or_else(|| MoqError::Bind {
-			message: "not listening; call listen() first".into(),
+			reason: "not listening; call listen() first".into(),
 		})?;
 		Ok(requests.certificates.fingerprints())
 	}
@@ -469,7 +469,7 @@ impl MoqRequest {
 					.ok()
 					.await
 					.map_err(|err| MoqError::Connect {
-						message: format!("{err}"),
+						reason: format!("{err}"),
 					})?;
 				Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
 			})
@@ -492,7 +492,7 @@ impl MoqRequest {
 					code => moq_tokio::server::Reject::App(code),
 				};
 				request.reject(reject).await.map_err(|err| MoqError::Reject {
-					message: format!("{err}"),
+					reason: format!("{err}"),
 				})?;
 				Ok(())
 			})
