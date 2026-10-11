@@ -60,7 +60,6 @@ replaces both: the rule is timestamp arithmetic on the group start.
 
 ## Required
 
-- [Catalog warmup](/quest/m1/catalog-warmup.md) - the field this reads
 - [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust signal this keys on
 
 ## Related
