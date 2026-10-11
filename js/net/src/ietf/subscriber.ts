@@ -1269,6 +1269,7 @@ export class Subscriber {
 				stream.stop(new Error("a group must start at object 0"));
 				return;
 			}
+			if (e instanceof ObjectIdGap) console.warn(`unsupported object gap: ${reason(e)}`);
 			if (e instanceof ProtocolViolation || (e instanceof StreamError && e.code === StreamCode.MalformedTrack)) {
 				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);

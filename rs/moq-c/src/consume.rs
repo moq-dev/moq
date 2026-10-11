@@ -62,7 +62,7 @@ async fn resolve(
 	};
 
 	let origin = origin.ok_or_else(|| Error::UnresolvableBroadcast(reference.as_str().to_string()))?;
-	let source = moq_mux::Source::new(origin, &broadcast.info().path);
+	let source = moq_mux::Source::new(origin, broadcast);
 	Ok(source.resolve(Some(&reference.borrow())).await?)
 }
 
@@ -421,6 +421,9 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
+		if !config.enabled {
+			return Err(moq_net::Error::NotFound.into());
+		}
 		let name = name.clone();
 		// Consume with the container the catalog actually advertises (Legacy / Cmaf / Loc)
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
@@ -482,6 +485,9 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
+		if !config.enabled {
+			return Err(moq_net::Error::NotFound.into());
+		}
 		let name = name.clone();
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
 		let reference = config.broadcast.clone();

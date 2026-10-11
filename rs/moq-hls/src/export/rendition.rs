@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 
 use super::playlist::{Segment, Snapshot};
 use super::spans::{Content, Spans};
-use super::upstream::Upstream;
 use super::{mpd, segments};
 use crate::Result;
 
@@ -99,7 +98,7 @@ struct Run {
 	/// The window [`resets`](segments::Producer::resets) during which a listed segment started
 	/// where a player can, so the master keeps advertising the rendition even once a GOP past
 	/// [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts that segment. Stale once the window
-	/// is cleared (a new generation, a timeline skip or rewind, a replaced sibling publisher).
+	/// is cleared (a new generation, a timeline skip or rewind, an ended sibling).
 	startable: Option<u64>,
 }
 
@@ -109,84 +108,91 @@ enum Config {
 	Audio(AudioConfig),
 }
 
-/// The broadcast serving this rendition's media, rebound when a sibling publisher is replaced.
+/// The broadcast serving this rendition's media. A sibling that ends ends the rendition: it is
+/// never rebound onto whatever serves the path next.
 struct Media {
 	handle: Mutex<Handle>,
-	/// When set, a Dropped sibling is rebound through this source rather than keeping the
-	/// replaced publisher's rows listed.
+	/// The source and reference a sibling is bound through, to re-issue a bind that failed
+	/// before it ever resolved.
 	sibling: Option<(moq_mux::Source, moq_net::path::RelativeOwned)>,
 }
 
 struct Handle {
 	binding: Arc<moq_mux::Binding>,
-	/// Skip incoming timeline rows until the current bind resolves (set when a sibling is rebound).
-	waiting: bool,
+	/// The bound sibling ended, so the rendition lists nothing more.
+	ended: bool,
 }
 
 impl Media {
-	fn bind(upstream: &Upstream, rel: Option<&moq_net::path::RelativeOwned>) -> moq_mux::Result<Self> {
+	fn bind(source: &moq_mux::Source, rel: Option<&moq_net::path::RelativeOwned>) -> moq_mux::Result<Self> {
 		Ok(Self {
 			handle: Mutex::new(Handle {
-				binding: Arc::new(upstream.bind(rel)?),
-				waiting: false,
+				binding: Arc::new(source.bind(rel)?),
+				ended: false,
 			}),
-			sibling: sibling(upstream, rel),
+			sibling: sibling(source, rel),
 		})
 	}
 
-	/// Drop listed rows and rebind when a sibling publisher has been replaced; return whether
-	/// incoming timeline rows should be listed.
+	/// Whether incoming timeline rows should be listed: not once the bound sibling ended.
 	fn admits(&self, window: &segments::Producer) -> bool {
 		self.sync(window);
-		!self.handle.lock().expect("media lock poisoned").waiting
+		!self.handle.lock().expect("media lock poisoned").ended
 	}
 
-	/// Drop listed rows and rebind when a sibling publisher has been replaced; return the
-	/// binding those rows belong to. Fetch from this handle, not a later `sync`: a replacement
-	/// that lands between a range lookup and `track` would otherwise serve the old groups.
+	/// End the window when a bound sibling has ended; return the binding listed rows belong to.
 	fn sync(&self, window: &segments::Producer) -> Arc<moq_mux::Binding> {
+		self.poll_sync(&kio::Waiter::noop(), window)
+	}
+
+	/// [`sync`](Self::sync), registering `waiter` to wake when the sibling resolves or ends, so a
+	/// waiter on the window learns of an end that nothing else touches the rendition for.
+	fn poll_sync(&self, waiter: &kio::Waiter, window: &segments::Producer) -> Arc<moq_mux::Binding> {
 		let Some((source, rel)) = &self.sibling else {
 			return self.handle.lock().expect("media lock poisoned").binding.clone();
 		};
 		let mut handle = self.handle.lock().expect("media lock poisoned");
-		match handle.binding.poll_broadcast(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(broadcast)) if broadcast.is_closed() => {
-				// The bound sibling ended, and a broadcast end carries no cause, so a rival
-				// publisher looks the same as a clean VOD end. Rows listed for it must not
-				// be served from the replacement.
-				window.clear();
-				if let Ok(next) = source.bind(Some(rel)) {
-					handle.binding = Arc::new(next);
+		let mut reissued = false;
+		loop {
+			match handle.binding.poll_broadcast(waiter) {
+				Poll::Ready(Ok(broadcast)) if !handle.ended && broadcast.poll_closed(waiter).is_ready() => {
+					// A broadcast end carries no cause, so a clean end and a replacement look the
+					// same. Either way its rows can no longer be fetched, and a new instance only
+					// comes with a new catalog instance, so the playlist ends here.
+					tracing::error!(broadcast = %rel, "rendition's sibling broadcast ended; ending its playlist");
+					handle.ended = true;
+					window.clear();
+					window.end();
 				}
-				handle.waiting = true;
-			}
-			Poll::Ready(Ok(_)) => handle.waiting = false,
-			Poll::Ready(Err(_)) => {
-				// Binding never retries a failed request. Re-issue so a publisher that
-				// appears after this Unroutable can still recover the rendition. Do not
-				// set waiting: an initial Unroutable (announce still in flight) must
-				// still list the catalog's rows.
-				if let Ok(next) = source.bind(Some(rel)) {
-					handle.binding = Arc::new(next);
+				// Binding never retries a failed request. Re-issue it, once per poll, so a sibling
+				// still being announced binds once it is, and poll the new one. Only a bind that
+				// never resolved fails, and the source pins every one that did, so this never
+				// re-resolves a sibling.
+				Poll::Ready(Err(_)) if !reissued => {
+					reissued = true;
+					if let Ok(next) = source.bind(Some(rel)) {
+						handle.binding = Arc::new(next);
+						continue;
+					}
 				}
+				_ => {}
 			}
-			Poll::Pending => {}
+			return handle.binding.clone();
 		}
-		handle.binding.clone()
 	}
 }
 
 /// A catalog `broadcast` reference that names a different path than the catalog itself.
 fn sibling(
-	upstream: &Upstream,
+	source: &moq_mux::Source,
 	rel: Option<&moq_net::path::RelativeOwned>,
 ) -> Option<(moq_mux::Source, moq_net::path::RelativeOwned)> {
-	let target = upstream.source.resolve_reference(rel)?;
-	if upstream.source.resolve_reference(None).as_ref() == Some(&target) {
+	let target = source.resolve_reference(rel)?;
+	if source.resolve_reference(None).as_ref() == Some(&target) {
 		return None;
 	}
 	Some((
-		upstream.source.clone(),
+		source.clone(),
 		rel.cloned().unwrap_or_else(moq_net::path::Relative::empty),
 	))
 }
@@ -257,7 +263,7 @@ pub struct Rendition {
 	/// Feeds [`spans`](Self::spans); aborted when the rendition drops.
 	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
 	/// The broadcast serving this rendition's media. A sibling is bound when the rendition is
-	/// created and rebound if that publisher is replaced (see [`Upstream::bind`]).
+	/// created, and ends the rendition when it ends.
 	media: Media,
 	/// The current publisher run: the embedder's label every segment URL carries (see
 	/// [`Broadcaster::set_generation`](super::Broadcaster::set_generation)) and the init, built
@@ -324,7 +330,7 @@ impl Rendition {
 	pub(crate) fn video(
 		name: String,
 		config: &VideoConfig,
-		upstream: &Upstream,
+		source: &moq_mux::Source,
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
@@ -341,9 +347,9 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new()),
 			spans: Arc::new(Spans::new()),
-			catalog: upstream.broadcast.clone(),
+			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media: Media::bind(upstream, config.broadcast.as_ref())?,
+			media: Media::bind(source, config.broadcast.as_ref())?,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
 		})
@@ -354,7 +360,7 @@ impl Rendition {
 	pub(crate) fn audio(
 		name: String,
 		config: &AudioConfig,
-		upstream: &Upstream,
+		source: &moq_mux::Source,
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
@@ -371,9 +377,9 @@ impl Rendition {
 			clock,
 			live: Arc::new(segments::Producer::new()),
 			spans: Arc::new(Spans::new()),
-			catalog: upstream.broadcast.clone(),
+			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media: Media::bind(upstream, config.broadcast.as_ref())?,
+			media: Media::bind(source, config.broadcast.as_ref())?,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
 		})
@@ -535,8 +541,14 @@ impl Rendition {
 
 	/// Poll until this rendition has a renderable media playlist.
 	pub(crate) fn poll_playable(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.media.sync(&self.live);
+		self.poll_media(waiter);
 		self.live.poll_playable(waiter)
+	}
+
+	/// End the window if the bound sibling ended, registering `waiter` to wake when it does, and
+	/// return the binding this rendition's media is fetched through now.
+	pub(crate) fn poll_media(&self, waiter: &kio::Waiter) -> Arc<moq_mux::Binding> {
+		self.media.poll_sync(waiter, &self.live)
 	}
 
 	/// Render this rendition's media playlist from the current timeline window, or `None` when
@@ -667,7 +679,7 @@ impl Rendition {
 		if self.kind == Kind::Audio {
 			return self.poll_playable(waiter);
 		}
-		self.media.sync(&self.live);
+		self.poll_media(waiter);
 		if self.run().startable == Some(self.live.resets()) {
 			return self.poll_playable(waiter);
 		}
@@ -797,11 +809,6 @@ impl Rendition {
 				Muxer::audio(&config)?
 			}
 		})
-	}
-
-	/// The binding this rendition's media is fetched through now.
-	pub(crate) fn binding(&self) -> Arc<moq_mux::Binding> {
-		self.media.sync(&self.live)
 	}
 
 	/// Subscribe to the media track on `binding` once it resolves: `None` when it never will.

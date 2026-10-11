@@ -68,14 +68,10 @@ upgrade notes inline. The [identity guide](/quest/m1/identity-guide.md)
 consolidates the behavior separately. Explain both the strong epoch-aware
 guarantee and the selected legacy best-effort behavior.
 
-## Required
-
-- [Source pin](/quest/m0/broadcast-epoch/source-pin.md) - exporters share their resolved catalog handle
-
 ## Related
 
+- [Source pin](https://github.com/moq-dev/moq/pull/5252) - exporters share their resolved catalog handle
 - [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - JS resolves the actual serving identity
-
 - [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - held handles cannot emit unpinned requests after retirement
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - the adjacent optional wire-track field
 - [Catalog track identity](/quest/m1/catalog-tracks.md) - catalog updates cannot redefine a track's content
