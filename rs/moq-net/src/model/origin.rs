@@ -5235,6 +5235,12 @@ mod tests {
 			let weak = request.weak();
 			let accepted = request.routes(routes.consume()).accept(None);
 			let mut io = TrackIo {
+				ready: Arc::new(TrackReady {
+					name: "catalog.json".into(),
+					queue: kio::Queue::new(),
+					queued: AtomicBool::new(false),
+				}),
+				park: Default::default(),
 				request: None,
 				accepted: Some(accepted),
 				weak,
