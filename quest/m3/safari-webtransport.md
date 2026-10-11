@@ -22,7 +22,7 @@ this.
 - Update `doc/lib/js/index.md`.
 - The gate needs the Safari version, and the iOS or iPadOS WebKit version
   for the iOS browsers, out of the user-agent check. If
-  [JS bundle trims](/quest/m1/js-bundle-trims.md) has replaced bowser in the
+  [JS bundle trims](https://github.com/moq-dev/moq/pull/5267) has replaced bowser in the
   same file by then, its check exposes that version rather than a yes/no
   WebKit flag (decided 2026-10-08).
 
@@ -36,4 +36,4 @@ this.
 
 ## Related
 
-- [JS bundle trims](/quest/m1/js-bundle-trims.md) - replaces bowser in the same `browser.ts` user-agent check
+- [JS bundle trims](https://github.com/moq-dev/moq/pull/5267) - replaces bowser in the same `browser.ts` user-agent check

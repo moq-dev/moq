@@ -19,6 +19,10 @@ import {
 	writeLeadingOnes,
 	writeQuic,
 } from "./util/varint.ts";
+import { Budget } from "./util/yield.ts";
+
+// Sharing the slice across writers bounds concurrent groups and subscriber fanout too.
+const writeBudget = new Budget();
 
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
@@ -772,6 +776,8 @@ export class Writer {
 		await this.#writer.write(v).catch((err: unknown) => {
 			throw fromTransport(err, { version: asIetf(this.version) });
 		});
+		const pause = writeBudget.poll();
+		if (pause !== undefined) await pause;
 	}
 
 	async string(str: string) {

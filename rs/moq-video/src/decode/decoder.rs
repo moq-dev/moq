@@ -565,11 +565,13 @@ mod tests {
 			.unwrap();
 		producer.finish().unwrap();
 
-		let catalog = moq_mux::catalog::Consumer::<()>::new(&source.consume(), moq_mux::catalog::CatalogFormat::Hang)
+		let broadcast = origin.consume().request_broadcast("test", None).await.unwrap();
+		let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap();
-		let mut export = moq_mux::container::fmp4::Export::new(moq_mux::Source::new(origin.consume(), "test"), catalog)
-			.with_max_delay(std::time::Duration::from_secs(30));
+		let mut export =
+			moq_mux::container::fmp4::Export::new(moq_mux::Source::new(origin.consume(), broadcast), catalog)
+				.with_max_delay(std::time::Duration::from_secs(30));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 

@@ -34,9 +34,10 @@ use objc2_video_toolbox::{
 	VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty, kVTCompressionPropertyKey_AllowFrameReordering,
 	kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ColorPrimaries,
 	kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
-	kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
-	kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
-	kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
+	kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kVTCompressionPropertyKey_ProfileLevel,
+	kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_TransferFunction,
+	kVTCompressionPropertyKey_YCbCrMatrix, kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
+	kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
 use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
@@ -64,10 +65,15 @@ pub(crate) struct VideoToolbox {
 	framerate_numerator: i32,
 	framerate_denominator: i64,
 	frame_index: i64,
+	applied: Applied,
 }
 
 impl VideoToolbox {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self::new(config)?))
+	}
+
+	fn new(config: &Config) -> Result<Self, Error> {
 		// backend::open only routes codecs this backend advertises, so the match is
 		// exhaustive; a new Codec variant won't compile here until it's handled.
 		let codec_type = match config.codec {
@@ -82,33 +88,47 @@ impl VideoToolbox {
 		});
 		let refcon = (&mut *sink as *mut Sink).cast::<c_void>();
 
-		let mut session_ptr: *mut VTCompressionSession = ptr::null_mut();
-		let status = unsafe {
-			VTCompressionSession::create(
-				None,
-				config.width as i32,
-				config.height as i32,
-				codec_type,
-				None,
-				None,
-				None,
-				Some(output_callback),
-				refcon,
-				NonNull::new(&mut session_ptr).unwrap(),
-			)
-		};
-		let session = NonNull::new(session_ptr)
-			.filter(|_| status == 0)
-			.map(|p| unsafe { CFRetained::from_raw(p) })
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("VTCompressionSessionCreate failed: {status}")))?;
+		let mut preset = config.preset;
+		let (session, applied) = loop {
+			let mut session_ptr: *mut VTCompressionSession = ptr::null_mut();
+			let status = unsafe {
+				VTCompressionSession::create(
+					None,
+					config.width as i32,
+					config.height as i32,
+					codec_type,
+					None,
+					None,
+					None,
+					Some(output_callback),
+					refcon,
+					NonNull::new(&mut session_ptr).unwrap(),
+				)
+			};
+			let session = NonNull::new(session_ptr)
+				.filter(|_| status == 0)
+				.map(|p| unsafe { CFRetained::from_raw(p) })
+				.ok_or_else(|| Error::Codec(anyhow::anyhow!("VTCompressionSessionCreate failed: {status}")))?;
 
-		set_bool(&session, unsafe { kVTCompressionPropertyKey_RealTime }, true)?;
-		// Low latency: no frame reordering / B-frames.
-		set_bool(
-			&session,
-			unsafe { kVTCompressionPropertyKey_AllowFrameReordering },
-			false,
-		)?;
+			// Every preset forbids reordering. A failure here cannot be fixed by downgrading.
+			set_bool(
+				&session,
+				unsafe { kVTCompressionPropertyKey_AllowFrameReordering },
+				false,
+			)?;
+			match apply_preset(&session, preset) {
+				Ok(applied) => break (session, applied),
+				Err(error) => {
+					preset = match preset {
+						Preset::Quality => Preset::Balanced,
+						Preset::Balanced => Preset::LowLatency,
+						Preset::LowLatency => return Err(error),
+					};
+					tracing::debug!(?error, ?preset, "VideoToolbox preset refused; trying lower preset");
+					// Discard partial settings before trying the next preset.
+				}
+			}
+		};
 		let profile = unsafe {
 			match config.codec {
 				Codec::H265 => kVTProfileLevel_HEVC_Main_AutoLevel,
@@ -172,14 +192,15 @@ impl VideoToolbox {
 		);
 		let framerate_numerator = i32::try_from(config.framerate.numerator())
 			.map_err(|_| Error::Codec(anyhow::anyhow!("VideoToolbox frame-rate numerator exceeds i32")))?;
-		Ok(Box::new(Self {
+		Ok(Self {
 			session,
 			sink,
 			force_keyframe,
 			framerate_numerator,
 			framerate_denominator: i64::from(config.framerate.denominator()),
 			frame_index: 0,
-		}))
+			applied,
+		})
 	}
 }
 
@@ -274,11 +295,31 @@ impl Backend for VideoToolbox {
 	}
 
 	fn applied(&self) -> Applied {
-		// Both are set with a checked `VTSessionSetProperty`, so a session that
-		// opened has them. VideoToolbox gets no distinct Balanced or Quality
-		// mapping until one is measured on Apple hardware.
-		Applied::new(Preset::LowLatency, "real-time, no frame reordering")
+		self.applied.clone()
 	}
+}
+
+fn apply_preset(session: &VTCompressionSession, preset: Preset) -> Result<Applied, Error> {
+	set_bool(
+		session,
+		unsafe { kVTCompressionPropertyKey_RealTime },
+		preset == Preset::LowLatency,
+	)?;
+	let controls = match preset {
+		Preset::LowLatency => "real-time, no frame reordering",
+		Preset::Balanced | Preset::Quality => {
+			set_bool(
+				session,
+				unsafe { kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality },
+				preset == Preset::Balanced,
+			)?;
+			match preset {
+				Preset::Balanced => "non-real-time, speed priority, no frame reordering",
+				_ => "non-real-time, quality priority, no frame reordering",
+			}
+		}
+	};
+	Ok(Applied::new(preset, controls))
 }
 
 /// C callback VideoToolbox invokes (synchronously, from `complete_frames`) for
@@ -470,4 +511,136 @@ fn set_number(session: &VTCompressionSession, key: &CFString, value: i32) -> Res
 
 fn clamp_i32(value: u64) -> i32 {
 	value.min(i32::MAX as u64) as i32
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::frame::I420;
+	use objc2_video_toolbox::VTSessionCopyProperty;
+
+	struct Probe(CFRetained<VTCompressionSession>);
+
+	impl Drop for Probe {
+		fn drop(&mut self) {
+			unsafe { self.0.invalidate() };
+		}
+	}
+
+	fn read_bool(session: &VTCompressionSession, key: &CFString) -> bool {
+		let mut value: *mut CFType = ptr::null_mut();
+		let status = unsafe { VTSessionCopyProperty(session, key, None, (&mut value as *mut *mut CFType).cast()) };
+		assert_eq!(status, 0);
+		let value = unsafe { CFRetained::from_raw(NonNull::new(value).unwrap()) };
+		let yes = unsafe { kCFBooleanTrue }.unwrap();
+		let no = unsafe { kCFBooleanFalse }.unwrap();
+		assert!(&*value == yes.as_ref() || &*value == no.as_ref());
+		&*value == yes.as_ref()
+	}
+
+	#[test]
+	fn presets_reach_the_session_without_buffering_frames() {
+		for codec in [Codec::H264, Codec::H265] {
+			for preset in [Preset::LowLatency, Preset::Balanced, Preset::Quality] {
+				let config = Config {
+					codec,
+					preset,
+					..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+				};
+				// Determine which controls this host accepts independently of the production fallback.
+				let candidates: &[Preset] = match preset {
+					Preset::Quality => &[Preset::Quality, Preset::Balanced, Preset::LowLatency],
+					Preset::Balanced => &[Preset::Balanced, Preset::LowLatency],
+					Preset::LowLatency => &[Preset::LowLatency],
+				};
+				let expected = candidates
+					.iter()
+					.copied()
+					.find(|&candidate| {
+						// A refused property may mutate the session, so each candidate starts fresh.
+						let codec_type = match codec {
+							Codec::H264 => kCMVideoCodecType_H264,
+							Codec::H265 => kCMVideoCodecType_HEVC,
+						};
+						let mut session_ptr = ptr::null_mut();
+						let status = unsafe {
+							VTCompressionSession::create(
+								None,
+								config.width as i32,
+								config.height as i32,
+								codec_type,
+								None,
+								None,
+								None,
+								None,
+								ptr::null_mut(),
+								NonNull::new(&mut session_ptr).unwrap(),
+							)
+						};
+						assert_eq!(status, 0, "{codec:?} {candidate:?} probe session creation failed");
+						let probe = Probe(unsafe {
+							CFRetained::from_raw(NonNull::new(session_ptr).expect("probe session is null"))
+						});
+						set_bool(
+							&probe.0,
+							unsafe { kVTCompressionPropertyKey_AllowFrameReordering },
+							false,
+						)
+						.expect("probe must support disabling frame reordering");
+						let realtime = set_bool(
+							&probe.0,
+							unsafe { kVTCompressionPropertyKey_RealTime },
+							candidate == Preset::LowLatency,
+						);
+						if candidate == Preset::LowLatency {
+							realtime.expect("probe must support the lowest preset");
+							true
+						} else {
+							realtime
+								.and_then(|()| {
+									set_bool(
+										&probe.0,
+										unsafe { kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality },
+										candidate == Preset::Balanced,
+									)
+								})
+								.is_ok()
+						}
+					})
+					.expect("probe must accept at least one preset");
+				let mut encoder = VideoToolbox::new(&config).unwrap();
+				assert_eq!(encoder.applied().preset, Some(expected), "{codec:?} {preset:?}");
+				let size = config.size();
+				for index in 0..3 {
+					let timestamp = moq_net::Timestamp::from_micros(index * 33_333).unwrap();
+					let frame = Frame::new(
+						Surface::I420(I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap()),
+						timestamp,
+					);
+					let packets = encoder.encode(&frame, index == 1).unwrap();
+					assert_eq!(packets.len(), 1, "{codec:?} {preset:?}");
+					assert_eq!(packets[0].timestamp, timestamp);
+					if index <= 1 {
+						assert!(packets[0].keyframe);
+					}
+				}
+				assert!(!read_bool(&encoder.session, unsafe {
+					kVTCompressionPropertyKey_AllowFrameReordering
+				}));
+				assert_eq!(
+					read_bool(&encoder.session, unsafe { kVTCompressionPropertyKey_RealTime }),
+					expected == Preset::LowLatency
+				);
+				if expected != Preset::LowLatency {
+					assert_eq!(
+						read_bool(&encoder.session, unsafe {
+							kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality
+						}),
+						expected == Preset::Balanced
+					);
+				}
+				assert!(encoder.finish().unwrap().is_empty());
+			}
+		}
+	}
 }

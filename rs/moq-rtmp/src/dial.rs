@@ -227,7 +227,8 @@ impl<S: Stream> Client<S> {
 		let queued = std::mem::take(&mut self.work);
 		self.drain(queued).await?;
 
-		let source = moq_mux::Source::new(origin, path);
+		let broadcast = origin.request_broadcast(path, None).await?;
+		let source = moq_mux::Source::new(origin, broadcast);
 		let catalog = source
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await

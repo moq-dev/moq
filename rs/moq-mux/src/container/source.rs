@@ -56,7 +56,7 @@ impl VideoTransform {
 enum SourceState {
 	/// Waiting for the target broadcast (the catalog broadcast, or a cross-broadcast
 	/// reference) to resolve; the track (by name) is subscribed once it does.
-	Requesting(kio::Pending<moq_net::origin::Requesting>, String),
+	Requesting(crate::Binding, String),
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
@@ -329,7 +329,7 @@ impl ExportSource {
 				let SourceState::Requesting(pending, name) = &self.state else {
 					unreachable!("just matched Requesting");
 				};
-				(ready!(pending.poll_ok(waiter))?, name.clone())
+				(ready!(pending.poll_broadcast(waiter))?, name.clone())
 			};
 			// A zero budget asks only for the newest group.
 			let max_delay = match self.live {
@@ -534,7 +534,7 @@ mod tests {
 	#[tokio::test]
 	async fn escaping_reference_skips_the_rendition() {
 		let live = Live::avc3();
-		let source = live.source();
+		let source = live.source().await;
 		let max_delay = std::time::Duration::ZERO;
 
 		let escaping = |result: Result<Option<ExportSource>, crate::Error>, what: &str| match result {
@@ -564,7 +564,7 @@ mod tests {
 	#[tokio::test]
 	async fn legal_reference_keeps_the_rendition() {
 		let live = Live::avc3();
-		let source = live.source();
+		let source = live.source().await;
 		let max_delay = std::time::Duration::ZERO;
 
 		for reference in [None, Some(""), Some("./source"), Some("sub"), Some(".")] {
@@ -583,7 +583,7 @@ mod tests {
 	async fn latency_is_sent_with_the_initial_subscription() {
 		let live = Live::avc3();
 		let max_delay = std::time::Duration::from_secs(10);
-		let mut export = ExportSource::for_video(&live.source(), live.track.name(), &video(None), max_delay)
+		let mut export = ExportSource::for_video(&live.source().await, live.track.name(), &video(None), max_delay)
 			.unwrap()
 			.expect("fixture should produce a video rendition");
 
