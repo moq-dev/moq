@@ -47,5 +47,5 @@ older reader ignores and a newer one defaults to zero.
   stats are HTTP's only byte account
 - [Session outcomes](/quest/m1/session-outcomes.md) - the session counters
   `requests` sits beside
-- [Grant stats label](/quest/m2/grant-label.md) - requests count under a
-  grant's label like sessions do
+- [Grant stats label](/quest/m2/grant-label.md) - once it lands, a fetch's
+  `requests` and bytes also count under the grant's label
