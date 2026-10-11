@@ -241,7 +241,7 @@ web-transport-iroh = "0.8.1"
 web-transport-moq = { version = "2.0.4", default-features = false }
 web-transport-proto = "0.6"
 web-transport-trait = "0.5"
-web-transport-wasm = "0.7"
+web-transport-wasm = "0.8"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
 zeroize = { version = "1", features = ["derive"] }
 

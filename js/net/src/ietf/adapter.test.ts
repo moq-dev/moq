@@ -17,10 +17,22 @@ test("draft-14 TRACK_STATUS_OK cannot be routed as NAMESPACE_DONE", async () => 
 	const control = await Stream.open(pair.server, { version: Version.DRAFT_14 });
 	const adapter = new ControlStreamAdapter(pair.server, control, Version.DRAFT_14, 100n, true);
 	const running = adapter.run();
+	// A writer may yield a task before the rejection assertion below.
+	void running.catch(() => {});
 	const peer = await Stream.accept(pair.client, Version.DRAFT_14);
 	if (!peer) throw new Error("no control stream");
 	await peer.writer.u53(0x0e);
 	await peer.writer.u16(0);
+	// The adapter may reject while the writer yields a browser task.
+	await new Promise<void>((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
 	await expect(running).rejects.toThrow("unexpected message 0x0e");
 });
 
@@ -214,6 +226,8 @@ test("a server adapter rejects a client GOAWAY that names a redirect", async () 
 	const control = await Stream.open(pair.server, { version: VERSION });
 	const adapter = new ControlStreamAdapter(pair.server, control, VERSION, 100n, false);
 	const running = adapter.run();
+	// A writer may yield a task before the rejection assertion below.
+	void running.catch(() => {});
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("no control stream");
 
@@ -235,6 +249,8 @@ test("a second GOAWAY on the control stream closes the session", async () => {
 	const control = await Stream.open(pair.server, { version: VERSION });
 	const adapter = new ControlStreamAdapter(pair.server, control, VERSION, 100n, true);
 	const running = adapter.run();
+	// A writer may yield a task before the rejection assertion below.
+	void running.catch(() => {});
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("no control stream");
 

@@ -400,6 +400,12 @@ impl MoqTrackRequest {
 		Ok(request.name().to_string())
 	}
 
+	/// Watch this track's subscribers, including after the request is accepted.
+	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
+	}
+
 	/// Create a handler for uncached group fetches before accepting this track.
 	///
 	/// Obtain and retain this handle before `accept()` when the track itself was

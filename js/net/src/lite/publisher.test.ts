@@ -740,6 +740,38 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 	}
 });
 
+// Pre-06 an absent Group Start is the latest group. An update that drops a named floor
+// re-pins there, so a group created below it afterwards is not served.
+test("lite draft-05: an update dropping the floor re-pins to the latest group", async () => {
+	const sub = await servedSubscription({ startGroup: 0 });
+	try {
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+
+		await replayUpdate({ priority: 0 }).encode(sub.client.writer, Version.DRAFT_05);
+		await flush();
+		sub.serve(0);
+		sub.serve(3);
+		expect(await sub.servedSequence()).toBe(3);
+	} finally {
+		await sub.close();
+	}
+});
+
+// On an empty track the re-pin has no latest group to name, so the first group the
+// track produces is served, even below the dropped floor.
+test("lite draft-05: an update dropping the floor on an empty track serves the next group", async () => {
+	const sub = await servedSubscription({ startGroup: 5 });
+	try {
+		await replayUpdate({ priority: 0 }).encode(sub.client.writer, Version.DRAFT_05);
+		await flush();
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+	} finally {
+		await sub.close();
+	}
+});
+
 // Lite-06 encodes a floor of group 0 as 0, including a subscribe that omitted Group Start.
 // That is a floor, so a later group 0 is still served.
 test("lite draft-06: an omitted group start still serves a group below the first one", async () => {
@@ -773,7 +805,8 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 		sub.release();
 		expect(await sub.servedSequence()).toBe(1);
 		while (ranges.mock.calls.length === 0) await flush();
-		expect(lastGroups(ranges)).toEqual({ start: undefined, end: { included: 0 } });
+		// Dropping the named floor re-pins to the latest group, as an unfloored SUBSCRIBE does.
+		expect(lastGroups(ranges)).toEqual({ start: { included: 1 }, end: { included: 0 } });
 	} finally {
 		ranges.mockRestore();
 		sub.release();

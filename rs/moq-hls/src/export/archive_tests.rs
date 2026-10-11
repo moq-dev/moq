@@ -316,8 +316,7 @@ impl Replay {
 			tokio::task::yield_now().await;
 		}
 
-		let source = moq_mux::Source::new(origin.consume(), "rec");
-		let broadcaster = Broadcaster::new(source, config).await.unwrap();
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "rec").await, config);
 		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.expect("a rendition becomes playable");

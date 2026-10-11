@@ -798,6 +798,8 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	});
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(advert, request);
+	// A writer may yield a task before the rejection assertion below.
+	void handler.catch(() => {});
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "start" });
 
 	const peer = await nextStream(pair.client);
@@ -805,6 +807,16 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	await peer.writer.u53(PublishNamespace.id);
 	await advert.encode(peer.writer, VERSION);
 
+	// The malformed request can reject while the writer yields a browser task.
+	await new Promise<void>((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
 	await expect(handler).rejects.toThrow(ProtocolViolation);
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
 });
@@ -1431,8 +1443,9 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
  * in-progress group: drop it, keep the subscription, and deliver the next group, which
  * starts at object 0. A gap after an object was delivered still fails that group.
  */
-test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", async () => {
-	const version = Version.DRAFT_16;
+test.each([Version.DRAFT_14, Version.DRAFT_16])("draft %s drops a subgroup that starts mid-group", async (version) => {
+	const warning = spyOn(console, "warn").mockImplementation(() => {});
+	onTestFinished(() => warning.mockRestore());
 	const { subscriber, track } = await subscribeTrack({ version });
 
 	// The header cannot say otherwise on this draft: decode reports firstObject.
@@ -1446,6 +1459,7 @@ test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", asyn
 	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
 	expect(track.latest()).toBeUndefined();
 	expect(track.closed.peek()).toBeUndefined();
+	expect(warning).not.toHaveBeenCalled();
 
 	const whole = groupFlags(true);
 	await subscriber.handleGroup(
@@ -1466,6 +1480,7 @@ test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", asyn
 	expect(gapped?.sequence).toBe(5);
 	expect(await gapped?.readString()).toBe("object 0");
 	await expect(gapped?.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
+	expect(warning).toHaveBeenCalledWith(expect.stringContaining("object IDs must start at 0"));
 	expect(track.closed.peek()).toBeUndefined();
 
 	ordered.close();
@@ -1798,3 +1813,36 @@ test("a more specific epochless announcement replaces the consumed source", asyn
 	for (const consumer of [held, fresh, fallback]) consumer.close();
 	announced.close();
 });
+
+for (const version of [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	test(`status zero without the end bit delivers an empty object and continues (${version})`, async () => {
+		const { subscriber, track } = await subscribeTrack({ version });
+		onTestFinished(() => track.close());
+		const message = new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 0,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: { ...groupFlags(true), hasEnd: false },
+		});
+		// Empty normal object, a nonempty successor, then explicit group end.
+		await subscriber.handleGroup(
+			message,
+			new Reader(undefined, new Uint8Array([0, 0, 0, 0, 1, 42, 0, 0, 3]), version),
+		);
+		const group = await track.ordered().nextGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array());
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([42]));
+		expect(await group?.readFrame()).toBeUndefined();
+	});
+}
