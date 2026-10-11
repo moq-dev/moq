@@ -100,14 +100,21 @@ beforeEach(() => {
 
 	class Codec {
 		state = "configured";
+		needsKey = true;
 		readonly init: AudioDecoderInit;
 		constructor(init: AudioDecoderInit) {
 			this.init = init;
 			codecs++;
 		}
-		configure() {}
-		reset() {}
-		decode(chunk: { timestamp: number }) {
+		configure() {
+			this.needsKey = true;
+		}
+		reset() {
+			this.needsKey = true;
+		}
+		decode(chunk: { timestamp: number; type: EncodedAudioChunkType }) {
+			if (this.needsKey && chunk.type !== "key") throw new DOMException("key chunk required", "DataError");
+			this.needsKey = false;
 			this.init.output(new FakeData(chunk.timestamp) as unknown as AudioData);
 		}
 		close() {
@@ -116,8 +123,10 @@ beforeEach(() => {
 	}
 	const chunk = class {
 		readonly timestamp: number;
+		readonly type: EncodedAudioChunkType;
 		constructor(init: EncodedAudioChunkInit) {
 			this.timestamp = init.timestamp;
+			this.type = init.type;
 		}
 	};
 
@@ -218,6 +227,7 @@ async function play(initial: Delay) {
 
 	return {
 		delay,
+		push,
 		enabled,
 		context: decoder.out.context,
 		play,
@@ -257,6 +267,23 @@ async function play(initial: Delay) {
 		},
 	};
 }
+
+it("decodes an audio packet inside a group after a playhead discontinuity", async () => {
+	const playback = await play(Time.Milli(100));
+	try {
+		await playback.play();
+		const next = frame();
+		next.discontinuity = 1;
+		if (!next.frame) throw new Error("missing test frame");
+		next.frame.keyframe = false;
+		playback.push(next);
+		await microtasks();
+		expect(playback.inserted()).toContain(next.frame.timestamp);
+	} finally {
+		playback.close();
+		await microtasks();
+	}
+});
 
 describe("Decoder across a broadcast disable", () => {
 	it("releases the graph when its broadcast is disabled and rebuilds on return", async () => {
