@@ -368,6 +368,9 @@ impl MoqAudioConsumer {
 }
 
 fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::AudioConfig, MoqError> {
+	if !catalog_audio.enabled {
+		return Err(MoqError::NotFound);
+	}
 	let codec = catalog_audio.codec.parse().map_err(|_| MoqError::Unsupported)?;
 	// What moq-audio's decoder opens. It rejects the rest itself, so this is only
 	// here to report an unusable rendition as a plain Unsupported rather than a
@@ -439,6 +442,15 @@ mod tests {
 			enabled: true,
 			container: MoqContainer::Legacy,
 		}
+	}
+
+	#[test]
+	fn audio_config_refuses_disabled_renditions() {
+		let mut config = catalog_audio("opus");
+		config.enabled = false;
+		assert!(matches!(audio_config(config.clone()), Err(MoqError::NotFound)));
+		config.enabled = true;
+		assert!(audio_config(config).is_ok());
 	}
 
 	#[test]

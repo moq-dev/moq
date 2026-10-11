@@ -17,6 +17,24 @@ import type { Delay, Sync } from "./sync";
 import type * as Text from "./text";
 import type * as Video from "./video";
 
+function parseUrl(value: string | null): URL | undefined {
+	if (!value) return undefined;
+	try {
+		return new URL(value);
+	} catch {
+		console.warn(`moq-watch: invalid url="${value}", expected an absolute URL`);
+		return undefined;
+	}
+}
+
+function parseVolume(value: string | null): number {
+	if (!value?.trim()) return 0.5;
+	const volume = Number(value);
+	if (volume >= 0 && volume <= 1) return volume;
+	console.warn(`moq-watch: invalid volume="${value}", expected a number from 0 to 1`);
+	return 0.5;
+}
+
 const OBSERVED = [
 	"url",
 	"name",
@@ -116,6 +134,10 @@ export default class MoqWatch extends HTMLElement {
 
 	/** Headless playback pipeline behind this element. */
 	readonly player: Player;
+	/** Fatal media decode failure; select another source to clear it. */
+	get error() {
+		return this.player.error;
+	}
 
 	// The broadcast being watched.
 	broadcast: Broadcast;
@@ -385,13 +407,13 @@ export default class MoqWatch extends HTMLElement {
 		}
 
 		if (name === "url") {
-			this.connection.url.set(newValue ? new URL(newValue) : undefined);
+			this.connection.url.set(parseUrl(newValue));
 		} else if (name === "name") {
 			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "paused") {
 			this.controls.paused.set(parseBoolean(newValue, false));
 		} else if (name === "volume") {
-			const volume = newValue ? Number.parseFloat(newValue) : 0.5;
+			const volume = parseVolume(newValue);
 			this.controls.volume.set(volume);
 		} else if (name === "muted") {
 			this.controls.muted.set(parseBoolean(newValue, false));

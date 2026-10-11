@@ -573,6 +573,8 @@ struct Advertised {
 
 #[derive(Clone)]
 pub(super) struct Subscriber<S: crate::transport::poll::Session> {
+	// Scoped to a minted source on the clone that serves its requests.
+	validity: crate::model::broadcast::RequestValidity,
 	// Arms the track-alias and request-id timeouts.
 	runtime: crate::time::Clock,
 	session: S,
@@ -698,6 +700,7 @@ where
 			auth: crate::auth::Handle::new(false),
 			frames: Default::default(),
 			announces: Default::default(),
+			validity: Default::default(),
 		}
 	}
 
@@ -1795,6 +1798,17 @@ where
 			// The handler exists before the requester sees the source, so a track it asks
 			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
 			let dynamic = source.dynamic();
+			let validity = self
+				.state
+				.lock()
+				.broadcasts
+				.get(&path)
+				.filter(|entry| entry.generation == generation)
+				.and_then(|entry| entry.dynamic.as_ref())
+				.map(|route| crate::model::broadcast::RequestValidity::for_source(route, request.path()))
+				.unwrap_or_else(|| {
+					crate::model::broadcast::RequestValidity::token(Some(kio::Producer::new(()).consume()))
+				});
 			request.accept(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
@@ -1805,12 +1819,14 @@ where
 				.lock()
 				.broadcasts
 				.get(&path)
+				.filter(|entry| entry.generation == generation)
 				.map(|entry| entry.live.consume());
 			if route.is_none() {
 				source.close();
 			}
 
-			let this = self.clone();
+			let mut this = self.clone();
+			this.validity = validity;
 			broadcasts.push(async move {
 				if let Err(err) = this.run_broadcast(requested.borrow(), source, dynamic, route).await {
 					tracing::debug!(%err, "error running broadcast");
@@ -1974,6 +1990,7 @@ where
 		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
+		let validity = self.validity.start();
 		let subscription = target.subscription();
 		let start = subscription.as_ref().and_then(|s| s.start);
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
@@ -1990,7 +2007,10 @@ where
 			}
 		};
 
-		let request_id = match self.control.next_request_id(&self.runtime).await {
+		// Retirement cancels only the wait for an ID. On drafts 14-16 the peer grants
+		// MAX_REQUEST_ID credit back only for requests it receives, so an allocated ID is
+		// always sent; the response wait below cancels it if the source retired meanwhile.
+		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
 			Ok(id) => id,
 			Err(err) => {
 				target.fail(err);
@@ -2091,15 +2111,24 @@ where
 			Gone,
 		}
 
+		let mut retired = false;
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
 			loop {
 				let setup = kio::wait(|waiter| {
+					let response = waiter.poll_future(response.as_mut());
+					if let Poll::Ready(Err(err)) = response {
+						return Poll::Ready(Setup::Response(Err(err)));
+					}
+					if let Err(err) = validity.check(waiter) {
+						retired = true;
+						return Poll::Ready(Setup::Response(Err(err)));
+					}
 					// An answer that has already arrived wins over the local terminals. Both can
 					// be ready in one poll, and taking abandonment there would discard a response
 					// the publisher has already sent: if it was a rejection, the request is gone
 					// and cancelling it names a dead id back at a peer entitled to object.
-					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+					if let Poll::Ready(res) = response {
 						return Poll::Ready(Setup::Response(res));
 					}
 					let mut state = self.state.lock();
@@ -2182,6 +2211,9 @@ where
 			}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
+				if retired {
+					self.cancel_subscribe(stream, request_id).await;
+				}
 				if let Some(pending) = self.take_pending(request_id) {
 					pending.reject(err.clone());
 				}
@@ -2386,6 +2418,8 @@ where
 										fill.end();
 									}
 								}
+								// The tail settled, so readers may end at an END_OF_TRACK's boundary.
+								track.set_tail_pending(false);
 								// A no-op once an END_OF_TRACK declared the end.
 								let _ = track.finish();
 							}
@@ -2777,7 +2811,9 @@ where
 		track_name: &str,
 		request: track::Request,
 	) -> Option<Idle> {
-		let request_id = match self.control.next_request_id(&self.runtime).await {
+		let validity = self.validity.start();
+		// An allocated ID is always sent, as in `subscribe_once`.
+		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
 			Ok(id) => id,
 			Err(err) => {
 				request.reject(err);
@@ -2817,6 +2853,9 @@ where
 			let mut response = std::pin::pin!(self.read_track_status_response(&mut stream));
 			loop {
 				let res = kio::wait(|waiter| {
+					if let Err(err) = validity.check(waiter) {
+						return Poll::Ready(Some(Err(err)));
+					}
 					// An answer that already arrived wins over abandonment.
 					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
 						return Poll::Ready(Some(res));
@@ -3001,7 +3040,11 @@ where
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = producer.abort(err);
 			}
-			Err(err @ Error::Decode(DecodeError::MessageTooLarge { .. })) => {
+			Err(
+				err @ (Error::Unsupported
+				| Error::Session(SessionError::ProtocolViolation)
+				| Error::Decode(DecodeError::MessageTooLarge { .. })),
+			) => {
 				let _ = producer.abort(err.clone());
 				// Return the refusal to the dispatcher so it sends STOP_SENDING.
 				return Err(err);
@@ -3097,7 +3140,8 @@ fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
 	if track.final_sequence().is_some() {
 		return Ok(());
 	}
-	if let Err(err) = track.finish_at(end) {
+	// Lower groups may still be on the wire, behind the one that carried the end.
+	if let Err(err) = track.finish_at_pending(end) {
 		tracing::warn!(%err, end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
@@ -3210,14 +3254,19 @@ where
 		// has a hole at the front. Drop it before a group exists and resume at the next
 		// group, the same as a publisher that no longer holds the head.
 		//
+		// Drafts 14-17 have no FIRST_OBJECT bit, so only a non-zero first ID marks the
+		// hole there; a stream with no object is an empty group.
+		//
 		// A fill we asked for is the exception: its fetch stream is carrying the head
 		// this tail stitches onto. So is the group a resumed subscription asked to start
 		// partway through, whose head came from another route.
-		if !header.flags.first_object
-			&& !fill.read().outstanding()
-			&& resume.is_none()
-			&& first.is_none_or(|first| first.id != 0)
-		{
+		let headless = match self.version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				first.is_some_and(|first| first.id != 0)
+			}
+			_ => !header.flags.first_object && first.is_none_or(|first| first.id != 0),
+		};
+		if headless && !fill.read().outstanding() && resume.is_none() {
 			tracing::debug!(
 				track_alias = %header.track_alias,
 				group = %header.group_id,
@@ -3746,11 +3795,13 @@ where
 		request: group::Request,
 		timescale: Option<Timescale>,
 	) {
+		let validity = self.validity.start();
 		let sequence = request.sequence();
 		let start = request.frame_start();
 		let draft20 = Filter::is_draft20(self.version);
 
-		let fetch_id = match self.control.next_request_id(&self.runtime).await {
+		// An allocated ID is always sent, as in `subscribe_once`.
+		let fetch_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
 			Ok(id) => id,
 			Err(err) => return request.reject(err),
 		};
@@ -3813,13 +3864,22 @@ where
 			Ok::<_, Error>(())
 		}
 		.await;
+		let mut retired = false;
 		let res = match res {
 			Err(err) => Some(Err(err)),
 			Ok(()) => {
 				let mut response = std::pin::pin!(self.read_group_fetch_response(&mut stream));
 				kio::wait(|waiter| {
+					let response = waiter.poll_future(response.as_mut());
+					if let Poll::Ready(Err(err)) = response {
+						return Poll::Ready(Some(Err(err)));
+					}
+					if let Err(err) = validity.check(waiter) {
+						retired = true;
+						return Poll::Ready(Some(Err(err)));
+					}
 					// A refusal retires the peer's request, so it wins over abandonment.
-					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+					if let Poll::Ready(res) = response {
 						return Poll::Ready(Some(res));
 					}
 					request.demand().poll_unused(waiter).map(|_| None)
@@ -3839,7 +3899,11 @@ where
 			Some(Err(err)) => {
 				tracing::debug!(%err, group = sequence, "group fetch refused");
 				request.reject(err);
-				let _ = stream.writer.close().await;
+				if retired {
+					self.cancel_group_fetch(stream, fetch_id).await;
+				} else {
+					let _ = stream.writer.close().await;
+				}
 				return;
 			}
 		};
@@ -5362,12 +5426,10 @@ mod tests {
 		);
 	}
 
-	/// A retraction does not disturb subscriptions already in flight, and one whose
-	/// SUBSCRIBE_OK has not arrived yet is in flight too: the publisher may already be
-	/// serving it. The broadcast ending in that window must not abort the track or cancel
-	/// the subscription.
+	/// An unanswered epochless request cannot prove which instance the peer resolved.
+	/// Retiring its source cancels it even while the caller keeps its demand.
 	#[moq_net_sim::test]
-	async fn a_retraction_before_subscribe_ok_keeps_the_subscription() {
+	async fn a_retirement_before_subscribe_ok_refuses_the_subscription() {
 		const VERSION: Version = Version::Draft16;
 
 		// A peer that accepts the stream and then says nothing at all.
@@ -5389,6 +5451,9 @@ mod tests {
 			Default::default(),
 		);
 
+		let route = kio::Producer::new(());
+		subscriber.validity = crate::model::broadcast::RequestValidity::token(Some(route.consume()));
+
 		let producer = crate::broadcast::Info::default().produce();
 		let mut dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -5403,27 +5468,108 @@ mod tests {
 
 		// Let the SUBSCRIBE go out, then retract the broadcast before any response.
 		settle().await;
-		producer.close();
-		settle().await;
+		drop(route);
+		serving.await.unwrap();
+		assert!(matches!(subscription.await, Err(Error::Unroutable)));
+		assert!(occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0);
+		assert_eq!(log.stops(), vec![crate::ietf::error::CANCELLED]);
+	}
 
-		assert!(
-			!serving.is_finished(),
-			"a retraction ended a subscription still in flight"
-		);
-		assert_eq!(
-			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
-			0,
-			"a retraction must not cancel a subscription still in flight",
-		);
+	#[derive(Clone, Copy, Debug)]
+	enum Allocated {
+		Subscribe,
+		TrackStatus,
+		GroupFetch,
+	}
 
-		// The reader leaving is still what ends it.
-		drop(subscription);
-		drop(track);
-		drop(consumer);
-		moq_net_sim::timeout(std::time::Duration::from_secs(1), serving)
-			.await
-			.expect("run_subscribe parked after its reader left")
-			.unwrap();
+	/// Drafts 14-16 return MAX_REQUEST_ID credit only for requests the peer receives, so a
+	/// source retiring after its request ID was allocated must still send that request,
+	/// then cancel it if the draft can. Skipping it would leak the credit for good.
+	#[moq_net_sim::test]
+	async fn a_retirement_after_allocation_still_sends_the_request() {
+		const VERSION: Version = Version::Draft16;
+
+		for kind in [Allocated::Subscribe, Allocated::TrackStatus, Allocated::GroupFetch] {
+			// Every request write parks until the gate opens, after the retirement.
+			let gate = kio::Producer::new(false);
+			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let mut subscriber = Subscriber::new(
+				crate::time::Clock::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				VERSION,
+				tasks,
+				Default::default(),
+			);
+			let route = kio::Producer::new(());
+			subscriber.validity = crate::model::broadcast::RequestValidity::token(Some(route.consume()));
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let _subscription = track.subscribe(None);
+			let request = dynamic.requested_track().await.expect("no track requested");
+
+			let mut fetch = None;
+			let serving = match kind {
+				Allocated::Subscribe => moq_net_sim::spawn(async move {
+					subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+				}),
+				Allocated::TrackStatus => moq_net_sim::spawn(async move {
+					assert!(
+						subscriber
+							.track_status(&Path::new("broadcast"), "video", request)
+							.await
+							.is_none()
+					);
+				}),
+				Allocated::GroupFetch => {
+					let track = track::Producer::new(
+						std::sync::Arc::new(crate::broadcast::Info::default()),
+						"video",
+						track::Info::default().with_timescale(None),
+					);
+					let requested = track.dynamic();
+					let mut pending = Box::pin(track.consume().fetch_group(0, None));
+					assert!(futures::poll!(pending.as_mut()).is_pending());
+					let group = requested.requested_group().await.expect("group request");
+					fetch = Some((track, pending));
+					moq_net_sim::spawn(subscriber.run_group_fetch(
+						Path::new("broadcast").to_owned(),
+						"video".into(),
+						group,
+						None,
+					))
+				}
+			};
+
+			// The ID is allocated and its request parked mid-write when the source retires.
+			settle().await;
+			drop(route);
+			settle().await;
+			let Ok(mut open) = gate.write() else {
+				panic!("gate closed")
+			};
+			*open = true;
+			drop(open);
+			serving.await.unwrap();
+			drop(fetch);
+
+			let expected = match kind {
+				Allocated::Subscribe => vec![ietf::Subscribe::ID, ietf::Unsubscribe::ID],
+				Allocated::TrackStatus => vec![ietf::TrackStatus::ID],
+				Allocated::GroupFetch => vec![ietf::Fetch::ID, ietf::FetchCancel::ID],
+			};
+			assert_eq!(control_message_types(&log, VERSION), expected, "{kind:?}");
+		}
 	}
 
 	/// The control messages that actually reached the wire, by type id.
@@ -7487,7 +7633,7 @@ fn next_object_id(prior: Option<u64>, delta: u64, start: u64) -> Result<u64, Err
 		Some(prior) => prior
 			.checked_add(delta)
 			.and_then(|id| id.checked_add(1))
-			.ok_or(Error::Decode(crate::coding::DecodeError::BoundsExceeded))?,
+			.ok_or(Error::Session(SessionError::ProtocolViolation))?,
 	};
 
 	let expected = prior.map_or(start, |prior| prior.saturating_add(1));
@@ -7546,7 +7692,10 @@ mod object_id_tests {
 	/// rather than something to wrap.
 	#[test]
 	fn rejects_an_overflow() {
-		assert!(next_object_id(Some(u64::MAX), 0, 0).is_err());
+		assert!(matches!(
+			next_object_id(Some(u64::MAX), 0, 0),
+			Err(Error::Session(SessionError::ProtocolViolation))
+		));
 	}
 }
 
@@ -8066,6 +8215,82 @@ mod stitch_tests {
 
 		tailing.await.expect("tail");
 		settled.await;
+	}
+
+	/// A gap is refused without swallowing the error the stream dispatcher needs.
+	#[moq_net_sim::test]
+	async fn a_gapped_object_leaves_the_track_flowing() {
+		let mut gapped = tail_stream(SEQUENCE, 0, &[b"head"]);
+		crate::coding::Encoder::new(&mut gapped, VERSION.into())
+			.varint(1u64)
+			.unwrap();
+		let h = Harness::new(Fill::Done, vec![gapped, tail_stream(SEQUENCE + 1, 0, &[b"ok"])]);
+		let mut consumer = h.track.subscribe(None);
+		let mut stream = h.stream().await;
+		let result = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(result, Err(Error::Unsupported)), "{result:?}");
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		assert_eq!(read_group(&mut consumer).await.1[0].1, b"ok");
+		assert!(h.session.log.closes().is_empty());
+	}
+
+	#[moq_net_sim::test]
+	async fn an_overflowing_object_id_reaches_session_teardown() {
+		let mut bytes = tail_stream(SEQUENCE, 0, &[b"head"]);
+		crate::coding::Encoder::new(&mut bytes, VERSION.into())
+			.varint(u64::MAX)
+			.unwrap();
+		let h = Harness::new(Fill::Done, vec![bytes]);
+		let mut stream = h.stream().await;
+		let result = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(
+			matches!(result, Err(Error::Session(crate::SessionError::ProtocolViolation))),
+			"{result:?}"
+		);
+	}
+
+	/// Drafts without FIRST_OBJECT still identify a headless stream by its first ID.
+	#[moq_net_sim::test]
+	async fn old_drafts_drop_a_headless_group_before_creating_it() {
+		for version in [Version::Draft14, Version::Draft16] {
+			let scripts = [2u64, 0]
+				.into_iter()
+				.enumerate()
+				.map(|(index, first)| {
+					let mut bytes = Vec::new();
+					ietf::GroupHeader {
+						track_alias: ALIAS,
+						group_id: SEQUENCE + index as u64,
+						sub_group_id: 0,
+						publisher_priority: 0,
+						flags: ietf::GroupFlags {
+							first_object: true,
+							..Default::default()
+						},
+					}
+					.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
+					.unwrap();
+					let mut encoder = crate::coding::Encoder::new(&mut bytes, version.into());
+					encoder.varint(first).unwrap();
+					encoder.varint(1u64).unwrap();
+					bytes.push(42);
+					bytes
+				})
+				.collect();
+			let mut h = Harness::with_timescale(Fill::Done, scripts, None);
+			h.subscriber.version = version;
+			let mut consumer = h.track.subscribe(None);
+			let mut stream = h.stream().await.with_version(version);
+			assert!(matches!(
+				h.subscriber.clone().recv_group(&mut stream).await,
+				Err(Error::Unsupported)
+			));
+			assert_eq!(h.track.latest(), None);
+			let mut stream = h.stream().await.with_version(version);
+			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+			assert_eq!(read_group(&mut consumer).await, (SEQUENCE + 1, vec![(None, vec![42])]));
+		}
 	}
 
 	/// A subgroup 1 stream costs only itself: the track's subgroup 0 stream still arrives.
@@ -9622,6 +9847,7 @@ mod joining_fetch_tests {
 	#[derive(Clone, Copy, PartialEq, Eq)]
 	enum FetchStage {
 		Unanswered,
+		Retired,
 		Accepted,
 		Receiving,
 		Complete,
@@ -9636,7 +9862,7 @@ mod joining_fetch_tests {
 		let complete = matches!(stage, FetchStage::Complete | FetchStage::CompleteReset);
 		let session = ScriptedSession::new(Vec::new());
 		let (tasks, _task_set) = TaskSet::new();
-		let subscriber = Subscriber::new(
+		let mut subscriber = Subscriber::new(
 			crate::time::Clock::sim(),
 			session.clone(),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
@@ -9649,6 +9875,8 @@ mod joining_fetch_tests {
 			tasks,
 			Default::default(),
 		);
+		let route = kio::Producer::new(());
+		subscriber.validity = crate::model::broadcast::RequestValidity::token(Some(route.consume()));
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
@@ -9669,13 +9897,20 @@ mod joining_fetch_tests {
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		let slot = subscriber.state.lock().group_fetches[&RequestId(1)].clone();
 
-		if stage == FetchStage::Unanswered {
-			drop(fetch);
+		if matches!(stage, FetchStage::Unanswered | FetchStage::Retired) {
+			if stage == FetchStage::Retired {
+				drop(route);
+			} else {
+				drop(fetch);
+			}
 			assert!(
 				futures::poll!(run.as_mut()).is_ready(),
 				"{version:?}: unanswered FETCH stays alive"
 			);
-			assert!(matches!(outcome.read().rejected, Some(Error::Cancel)));
+			assert!(matches!(
+				outcome.read().rejected,
+				Some(Error::Cancel | Error::Unroutable)
+			));
 		} else {
 			session.push(&message_bytes(
 				ietf::FetchOk::ID,
@@ -9801,6 +10036,13 @@ mod joining_fetch_tests {
 			assert_eq!(session.log.resets(), [crate::ietf::error::CANCELLED]);
 		}
 		assert!(subscriber.state.lock().group_fetches.is_empty(), "request retired");
+	}
+
+	#[moq_net_sim::test]
+	async fn a_retired_group_fetch_before_fetch_ok_is_cancelled() {
+		for version in JOINING_DRAFTS {
+			abandon_group_fetch(version, FetchStage::Retired).await;
+		}
 	}
 
 	#[moq_net_sim::test]
