@@ -547,14 +547,17 @@ for (const cmaf of [false, true]) {
 	it(`settles a buffered ${cmaf ? "CMAF" : "legacy"} rendition change with a stationary playhead`, async () => {
 		const playback = await play(Time.Milli(100), true, cmaf);
 		try {
-			await playback.play(20);
+			const timestamps = await playback.play(20);
 			const before = playback.codecs();
 			expect(before).toBe(1);
 			// Nothing reads the ring, as with a muted AudioContext. Decode is held upstream.
-			expect(playback.inserted().length).toBeLessThan(20);
+			const held = timestamps.find((timestamp) => !playback.inserted().includes(timestamp));
+			expect(held).toBeDefined();
 			playback.restore({ description: "4f707573486561640102000080bb0000000000" });
 			await microtasks();
 			expect(playback.codecs()).toBe(before + 1);
+			// Releasing the retired loop's wait must not decode the frame it held.
+			expect(playback.inserted()).not.toContain(held);
 		} finally {
 			playback.close();
 			await microtasks();

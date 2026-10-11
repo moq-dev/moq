@@ -4,7 +4,7 @@ mock.module("./audio/capture-worklet.ts?worklet", () => ({ default: async () => 
 
 mock.module("./video/capture-worker.ts?worklet", () => ({ default: async () => "blob:worker" }));
 
-test("an invalid URL attribute warns and clears the publish URL", () => {
+test("an invalid URL attribute warns and clears the publish URL", async () => {
 	const originalElement = globalThis.HTMLElement;
 	const originalRegistry = globalThis.customElements;
 	const registry = new Map<string, CustomElementConstructor>();
@@ -16,10 +16,10 @@ test("an invalid URL attribute warns and clears the publish URL", () => {
 		get: (name: string) => registry.get(name),
 	} as unknown as CustomElementRegistry;
 
-	const Element = require("./element").default;
 	const set = mock(() => {});
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	try {
+		const { default: Element } = await import("./element");
 		expect(() =>
 			Element.prototype.attributeChangedCallback.call({ connection: { url: { set } } }, "url", null, "http://["),
 		).not.toThrow();
