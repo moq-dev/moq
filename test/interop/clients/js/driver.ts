@@ -24,6 +24,7 @@ import {
 	pageUrl,
 	pause,
 	readPlayerState,
+	readResources,
 	SELECTORS,
 	serve,
 	sleep,
@@ -31,6 +32,22 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
+
+/** Remove the page's players, which closes their sessions, and wait until every transport has. */
+async function closeSessions(page: Page): Promise<void> {
+	await page
+		.evaluate(() => {
+			for (const el of document.querySelectorAll("moq-watch, moq-publish")) el.remove();
+		})
+		.catch(() => {});
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) {
+		const live = await readResources(page).catch(() => undefined);
+		if (!live || live.transports === 0) return;
+		await sleep(POLL_INTERVAL_MS);
+	}
+	console.error("a session was still open 5 s after its player was removed");
+}
 
 const { positionals, values } = parseArgs({
 	allowPositionals: true,
@@ -99,7 +116,9 @@ try {
 
 	if (role === "publish") {
 		console.error(`publishing ${broadcast} (fake camera + microphone) to ${url}`);
-		await new Promise(() => {}); // stream until the orchestrator kills us
+		// Stream until the orchestrator stops us.
+		await new Promise((resolve) => process.once("SIGTERM", resolve));
+		code = 0;
 	} else {
 		const start = Date.now();
 		const startupDeadline = start + timeoutMs;
@@ -170,6 +189,12 @@ try {
 } finally {
 	// `code` is 0 only when the role's checks all passed, so it decides whether the trace is kept.
 	await finishTraces(code !== 0);
+	// Close every session before the browser: closing it, or even the page, can end them without
+	// a close, leaving the relay to time them out.
+	for (const page of browser.contexts().flatMap((context) => context.pages())) {
+		await closeSessions(page);
+		await page.close().catch(() => {});
+	}
 	await browser.close().catch(() => {});
 	server.stop();
 }

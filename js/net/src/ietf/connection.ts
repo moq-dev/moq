@@ -1,16 +1,19 @@
 import { type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
+import type * as Auth from "../auth.ts";
+import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
-import type * as Path from "../path.ts";
+import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
+import { AuthMessage, supported as authSupported, IetfAuthWire } from "./auth.ts";
 import * as Cluster from "./cluster.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
@@ -54,10 +57,19 @@ export class Connection implements Established {
 	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
+	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Established.auth}. */
+	get auth(): Auth.Auth {
+		return this.#auth;
+	}
+
+	// Our tokens and grants, and the answers to the peer's (MoQ Auth).
+	#auth: AuthSession;
+
 	// The established WebTransport session.
 	#quic: WebTransport;
 
-	// Whether this side opened the session. Only a server may name a redirect.
+	// Whether this side opened the session. Only a server may name a redirect, and only
+	// the dialing side fails loud on a publication its grant does not cover.
 	#client: boolean;
 
 	// Session abstraction: adapter for v14-v16, native for v17.
@@ -106,6 +118,7 @@ export class Connection implements Established {
 		solicit,
 		hidden = false,
 		cluster,
+		auth = false,
 		early = [],
 		requestWindow,
 	}: {
@@ -131,6 +144,8 @@ export class Connection implements Established {
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
 		 */
 		cluster?: Cluster.Hops;
+		/** Whether the peer's SETUP offered MoQ Auth (draft-17+). */
+		auth?: boolean;
 		/** Uni streams that arrived before the peer's SETUP, type unread (v17+). */
 		early?: Reader[];
 		/** Requests the peer may hold open on drafts 14 to 16, the window our SETUP advertised (default `REQUEST_WINDOW`). */
@@ -165,6 +180,25 @@ export class Connection implements Established {
 			});
 		}
 
+		// What the peer's connection credential earns by default: publishing anything to us,
+		// since we consume on demand, and subscribing to whatever we publish.
+		const session = this.#session;
+		this.#auth = new AuthSession({
+			wire:
+				auth && authSupported(version)
+					? new IetfAuthWire({
+							openBi: async () => session.openBi(),
+							nextRequestId: () => session.nextRequestId(),
+							version,
+						})
+					: undefined,
+			peerGrant: {
+				publish: new Path.Patterns([Path.Pattern.all()]),
+				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
+			},
+		});
+		this.#client = client;
+
 		this.#publisher = new Publisher({
 			quic: this.#quic,
 			session: this.#session,
@@ -172,6 +206,8 @@ export class Connection implements Established {
 			requiresSolicitation: solicit ?? false,
 			hidden,
 			cluster,
+			grant: this.#auth.grant,
+			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;
 		this.#cluster = cluster;
@@ -182,6 +218,7 @@ export class Connection implements Established {
 			hidden,
 			solicit,
 			goaway: this.#goaway,
+			grant: this.#auth.grant,
 		});
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
@@ -215,6 +252,8 @@ export class Connection implements Established {
 		this.#closed = true;
 		this.#publisher.close();
 
+		this.#auth.close();
+
 		// Before the session, whose own close would send a clean code first.
 		try {
 			this.#quic.close(info);
@@ -237,12 +276,16 @@ export class Connection implements Established {
 			// solicited; otherwise it pushes PUBLISH_NAMESPACE. On draft-16 and later a
 			// SUBSCRIBE_NAMESPACE stream is filled either way. A NAMESPACE is discovery,
 			// not a second route.
-			await Promise.all([
+			const tasks = [
 				this.#runBidis(),
 				this.#runUnis(early),
 				this.#runDatagrams(),
 				this.#publisher.runPublishNamespaces(),
-			]);
+			];
+			// Fail loud on a publication our grant never covers, once the peer has answered the
+			// credential we presented at setup.
+			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered()));
+			await Promise.all(tasks);
 		} catch (err) {
 			if (!this.#closed) {
 				console.error("fatal error running connection", err);
@@ -382,6 +425,12 @@ export class Connection implements Established {
 				}
 
 				await this.#subscriber.runPublishNamespace(msg, stream);
+				break;
+			}
+			case BigInt(AuthMessage.id): {
+				// Only a peer that negotiated MoQ Auth may send one.
+				if (!this.#auth.negotiated) throw new ProtocolViolation("AUTH without MoQ Auth");
+				await this.#auth.serve(stream);
 				break;
 			}
 			case BigInt(Publish.id): {
