@@ -1813,3 +1813,36 @@ test("a more specific epochless announcement replaces the consumed source", asyn
 	for (const consumer of [held, fresh, fallback]) consumer.close();
 	announced.close();
 });
+
+for (const version of [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	test(`status zero without the end bit delivers an empty object and continues (${version})`, async () => {
+		const { subscriber, track } = await subscribeTrack({ version });
+		onTestFinished(() => track.close());
+		const message = new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 0,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: { ...groupFlags(true), hasEnd: false },
+		});
+		// Empty normal object, a nonempty successor, then explicit group end.
+		await subscriber.handleGroup(
+			message,
+			new Reader(undefined, new Uint8Array([0, 0, 0, 0, 1, 42, 0, 0, 3]), version),
+		);
+		const group = await track.ordered().nextGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array());
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([42]));
+		expect(await group?.readFrame()).toBeUndefined();
+	});
+}

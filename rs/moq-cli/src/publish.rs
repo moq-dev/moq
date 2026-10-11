@@ -753,12 +753,19 @@ pub(crate) mod tests {
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
 		drain(
-			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
+			Export::with_ts(resolved(&origin, "cli").await, CatalogFormat::Hang)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),
 		)
 		.await
+	}
+
+	/// A source for the broadcast at `path`, resolved through `origin`.
+	async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
+		let consumer = origin.consume();
+		let broadcast = consumer.request_broadcast(path, None).await.unwrap();
+		moq_mux::Source::new(consumer, broadcast)
 	}
 
 	/// The export's delay, long enough to reach the ancillary tracks: these tests publish a
@@ -804,7 +811,7 @@ pub(crate) mod tests {
 		// Subscribe side: the same `with_ts` call `run_ts` makes, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), format)
+			Export::with_ts(resolved(&origin, "cli").await, format)
 				.await
 				.unwrap()
 				.with_delay(RECORDING_MAX_AGE),

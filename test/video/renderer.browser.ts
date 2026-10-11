@@ -120,6 +120,42 @@ test("<moq-publish> swaps its canvas when the GPU is lost and keeps previewing t
 	}
 }, 60_000);
 
+test("invalid player and publisher attributes fall back without browser errors", async () => {
+	const page = await open();
+	const errors: string[] = [];
+	const warnings: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "warning") warnings.push(message.text());
+	});
+	try {
+		const report = await page.evaluate(async () => {
+			const watch = document.createElement("moq-watch");
+			const publish = document.createElement("moq-publish");
+			watch.setAttribute("visible", "always");
+			watch.setAttribute("paused", "");
+			document.body.append(watch, publish);
+			for (const element of [watch, publish]) {
+				element.setAttribute("url", "https://example.invalid/");
+				element.setAttribute("url", "http://[");
+			}
+			watch.setAttribute("volume", "0.75");
+			watch.setAttribute("volume", "foo");
+			await Promise.resolve();
+			const result = { watch: watch.url, publish: publish.url, volume: watch.volume };
+			watch.remove();
+			publish.remove();
+			return result;
+		});
+		expect(report).toEqual({ watch: undefined, publish: undefined, volume: 0.5 });
+		expect(errors).toEqual([]);
+		expect(warnings.filter((message) => message.includes("invalid url="))).toHaveLength(2);
+		expect(warnings.filter((message) => message.includes("invalid volume="))).toHaveLength(1);
+	} finally {
+		await page.close();
+	}
+});
+
 test("captions load on selection and tear down across switches and close", async () => {
 	const page = await open();
 	await page.evaluate(() => window.startCaptions());
