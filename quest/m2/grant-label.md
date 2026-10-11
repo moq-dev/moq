@@ -32,7 +32,14 @@ Decided 2026-10-10 by maintainer priority, extended 2026-10-11:
   rows as today. Each session also counts its sent and received bytes in its
   own counters, which no other session touches, and a snapshot or report
   folds them into the `(tier, label)` row, with a closed session's totals
-  folded in when it drops. A write therefore adds no shared atomic. Add a
+  folded in when it drops. A write therefore adds no shared atomic. Reads
+  rebuild a row and never consume deltas: the row's finalized total (closed
+  sessions and retag checkpoints) plus each live session's counters minus the
+  base its last retag recorded. A retag holds the session's lock while it
+  loads the counters once, adds them less the base to the old row's
+  finalized total, and records them as the new base, and a read takes the
+  same lock per session. A concurrent write lands on one side of that single
+  load, so it counts exactly once, under the old label or the new. Add a
   write-path benchmark to `rs/moq-net/benches/stats.rs` showing no
   regression against today's per-path bump, and sweep the fold over sessions
   and labels so its cost shows as a slope.
