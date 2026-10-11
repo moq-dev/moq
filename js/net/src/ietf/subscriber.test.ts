@@ -17,7 +17,7 @@ import { ObjectDatagram } from "./datagram.ts";
 import { encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
 import type { Properties } from "./properties.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
-import { RequestError, RequestOk } from "./request.ts";
+import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -1846,3 +1846,94 @@ for (const version of [
 		expect(await group?.readFrame()).toBeUndefined();
 	});
 }
+
+// Retirement before allocation spends nothing; retirement after allocation drains that request.
+test.each(["waiting", "allocated"] as const)(
+	"legacy retirement while %s keeps subsequent request IDs contiguous",
+	async (phase) => {
+		const version = Version.DRAFT_15;
+		const pair = createMockTransportPair(ALPN.DRAFT_15);
+		const control = await Stream.open(pair.server, { version });
+		const session = new ControlStreamAdapter(pair.server, control, version, phase === "waiting" ? 0n : 4n, true);
+		const running = session.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+		const entered = Promise.withResolvers<void>();
+		const allocated = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		const allocate = session.nextRequestId.bind(session);
+		const intercepted = spyOn(session, "nextRequestId").mockImplementationOnce(async (signal) => {
+			entered.resolve();
+			const id = await allocate(signal);
+			allocated.resolve();
+			await resume.promise;
+			return id;
+		});
+		const subscriber = new Subscriber({ session });
+		const announced = subscriber.announced();
+		const path = Path.from("room");
+		const held = subscriber.consume(path);
+		const old = held
+			.track("video")
+			.info()
+			.then(
+				() => undefined,
+				(err: unknown) => err,
+			);
+		await entered.promise;
+		if (phase === "allocated") await allocated.promise;
+
+		const source = createMockTransportPair(ALPN.DRAFT_15);
+		const sourceStream = await Stream.open(source.server, { version });
+		const sourcePeer = await Stream.accept(source.client, version);
+		if (!sourcePeer) throw new Error("no announcement stream");
+		const advertising = subscriber.runPublishNamespace(
+			new PublishNamespace({ requestId: 1n, trackNamespace: path }),
+			sourceStream,
+		);
+		let fresh: ReturnType<Subscriber["consume"]> | undefined;
+		try {
+			expect(await sourcePeer.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(sourcePeer.reader, version);
+			await announced.next();
+			resume.resolve();
+			expect(await old).toBeInstanceOf(Error);
+			if (phase === "waiting") {
+				await peer.writer.u53(MaxRequestId.id);
+				await new MaxRequestId({ requestId: 4n }).encode(peer.writer, version);
+			} else {
+				expect(await peer.reader.u53()).toBe(Subscribe.id);
+				const canceled = await Subscribe.decode(peer.reader, version);
+				expect(canceled.requestId).toBe(0n);
+				expect(await peer.reader.u53()).toBe(Unsubscribe.id);
+				expect((await Unsubscribe.decode(peer.reader, version)).requestId).toBe(0n);
+			}
+			fresh = subscriber.consume(path);
+			const info = fresh
+				.track("video")
+				.info()
+				.catch((err: unknown) => err);
+			expect(await peer.reader.u53()).toBe(Subscribe.id);
+			const request = await Subscribe.decode(peer.reader, version);
+			expect(request.requestId).toBe(phase === "waiting" ? 0n : 2n);
+			await peer.writer.u53(SubscribeOk.id);
+			await new SubscribeOk({
+				requestId: request.requestId,
+				trackAlias: request.requestId,
+				properties: {},
+			}).encode(peer.writer, version);
+			expect(await info).not.toBeInstanceOf(Error);
+		} finally {
+			intercepted.mockRestore();
+			resume.resolve();
+			fresh?.close();
+			held.close();
+			announced.close();
+			sourcePeer.close();
+			await advertising;
+			peer.close();
+			session.close();
+			void running;
+		}
+	},
+);
