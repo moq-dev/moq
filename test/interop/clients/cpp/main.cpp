@@ -88,9 +88,16 @@ T until(moq::Future<T> future, Clock::time_point deadline, const char *what) {
 
 // The session owns its connection; the client that made it can go.
 std::shared_ptr<moq::Session> connect(const std::string &url, Clock::time_point deadline) {
-    auto client = moq::Client::init();
-    ok(client->set_tls_verify(false), "set_tls_verify");
+    moq::ClientConfig config;
+    config.tls.insecure = true;
+    auto client = ok(moq::Client::init(config), "client init");
     return until(client->connect(url), deadline, "connect");
+}
+
+// Closes the session and waits for the close to reach the relay. `cancel` would return at
+// once, and stopping the runtime right after it can leave the relay to time the connection out.
+void close_session(const std::shared_ptr<moq::Session> &session) {
+    until(session->shutdown(), Clock::now() + std::chrono::seconds(5), "session shutdown");
 }
 
 // Feeds the encoder a real-time tone until `stop` is set.
@@ -120,7 +127,10 @@ int publish(const std::string &url, const std::string &path) {
 
     // Hold the producer for the lifetime of the publish loop; close() unpublishes.
     auto broadcast = ok(session->publish()->create_broadcast(path), "create_broadcast");
-    auto media = ok(broadcast->publish_video_stream({moq::VideoFormat::kAvc3, {}}), "publish_video_stream");
+    auto media = ok(
+        moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
+        "video stream producer"
+    );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
     output.frame_duration_us = AUDIO_FRAME_DURATION_US;
     auto audio = ok(
@@ -157,7 +167,7 @@ int publish(const std::string &url, const std::string &path) {
     ok(audio->finish(), "audio finish");
     ok(media->finish(), "video finish");
     ok(broadcast->close(), "broadcast close");
-    session->cancel(0);
+    close_session(session);
     moq::shutdown();
     return 0;
 }
@@ -173,7 +183,7 @@ int subscribe(const std::string &url, const std::string &path, double timeout) {
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
     // demand) may announce video in a later update rather than the first snapshot, so wait
     // for a catalog that actually has a video track.
-    auto catalogs = until(consumer->subscribe_catalog(), deadline, "subscribe_catalog");
+    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer), deadline, "catalog consumer");
     std::optional<moq::Catalog> catalog;
     while (!catalog || catalog->video.empty()) {
         catalog = until(catalogs->next(), deadline, "catalog");
@@ -185,7 +195,10 @@ int subscribe(const std::string &url, const std::string &path, double timeout) {
 
     moq::Subscription subscription;
     subscription.max_delay_us = MAX_DELAY_US;
-    auto media = until(consumer->subscribe_media(name, video.container, subscription), deadline, "subscribe_media");
+    auto media = until(
+        moq::MediaContainerConsumer::subscribe(consumer, {name, video.container, subscription}), deadline,
+        "container consumer"
+    );
 
     size_t total = 0;
     while (total == 0) {
@@ -199,7 +212,7 @@ int subscribe(const std::string &url, const std::string &path, double timeout) {
         fail("no frame data received");
     }
     std::printf("received %zu bytes from \"%s\"\n", total, path.c_str());
-    session->cancel(0);
+    close_session(session);
     moq::shutdown();
     return 0;
 }

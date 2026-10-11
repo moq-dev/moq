@@ -28,7 +28,6 @@ on:
     # request.
     workflows:
       - apt-repo
-      - Back-merge
       - Cache
       - Cachix
       - Check
@@ -44,7 +43,7 @@ on:
       - Platform
       - Quest
       - release-brew
-      - Release C++
+      - Release Cpp
       - Release Dart
       - Release Dart FFI
       - Release Go
@@ -60,6 +59,7 @@ on:
       - release-winget
       - rpm-repo
       - Swift
+      - Video
     types:
       - completed
 

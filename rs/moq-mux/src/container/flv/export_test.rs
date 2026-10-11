@@ -153,7 +153,7 @@ async fn export_roundtrips_through_import() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_export(exporter, importer).await;
 
 	// The export must be a real FLV stream.
@@ -191,7 +191,7 @@ async fn export_emits_sequence_headers_and_frames() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = open_export(crate::source::announced(&consumer))
+	let exporter = open_export(crate::source::announced(&consumer).await)
 		.await
 		.with_max_delay(RECORDING_MAX_DELAY);
 	let exported = drain_export(exporter, importer).await;
@@ -273,7 +273,7 @@ async fn export_roundtrips_enhanced() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -337,7 +337,7 @@ async fn export_roundtrips_mp3() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_export(exporter, importer).await;
 
 	// The audio is muxed as a legacy SoundFormat 2 (MP3) tag, no sequence header.
@@ -391,7 +391,7 @@ async fn export_roundtrips_av1() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_export(exporter, importer).await;
 	let tags = parse_tags(&exported);
 
@@ -447,7 +447,7 @@ async fn export_roundtrips_ac3() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_export(exporter, importer).await;
 	let tags = parse_tags(&exported);
 	assert!(
@@ -482,7 +482,7 @@ async fn export_roundtrips_eac3() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_export(exporter, importer).await;
 	let tags = parse_tags(&exported);
 	assert!(
@@ -628,7 +628,7 @@ async fn drain_to_end<S: crate::catalog::Stream>(mut exporter: Export<S>, keepal
 async fn export_multitrack_roundtrips_all_renditions() {
 	let (consumer, descriptions, keepalive) = build_multitrack_broadcast();
 
-	let exporter = open_export(crate::source::announced(&consumer))
+	let exporter = open_export(crate::source::announced(&consumer).await)
 		.await
 		.with_multitrack(true);
 	let exported = drain_to_end(exporter, keepalive).await;
@@ -687,7 +687,7 @@ async fn export_multitrack_roundtrips_all_renditions() {
 async fn export_without_multitrack_keeps_best_rendition() {
 	let (consumer, descriptions, keepalive) = build_multitrack_broadcast();
 
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_to_end(exporter, keepalive).await;
 
 	// No multitrack framing: the single video track is a legacy AVC tag.
@@ -780,7 +780,7 @@ async fn export_without_multitrack_keeps_best_audio_rendition() {
 	}
 
 	catalog.finish().unwrap();
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_to_end(exporter, (producer, catalog, tracks)).await;
 
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
@@ -830,7 +830,7 @@ async fn export_picks_the_best_selected_rendition() {
 	let select = crate::select::Broadcast::default()
 		.video(crate::select::Video::default().name(small))
 		.audio(crate::select::Audio::default());
-	let source = crate::source::announced(&consumer);
+	let source = crate::source::announced(&consumer).await;
 	let catalog = source
 		.catalog::<()>(crate::catalog::CatalogFormat::Hang)
 		.await
@@ -888,7 +888,7 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 
-	let mut exporter = open_export(crate::source::announced(&consumer)).await;
+	let mut exporter = open_export(crate::source::announced(&consumer).await).await;
 	assert!(
 		tokio::time::timeout(Duration::from_millis(100), exporter.next())
 			.await
@@ -1012,7 +1012,7 @@ async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 
-	let mut exporter = open_export(crate::source::announced(&consumer)).await;
+	let mut exporter = open_export(crate::source::announced(&consumer).await).await;
 	assert!(
 		tokio::time::timeout(Duration::from_millis(100), exporter.next())
 			.await
@@ -1102,7 +1102,7 @@ async fn export_preserves_timestamps() {
 	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -1183,7 +1183,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	audio.finish().unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = open_export(crate::source::announced(&consumer)).await;
+	let exporter = open_export(crate::source::announced(&consumer).await).await;
 	let exported = drain_exporter_chunks(exporter, 6).await;
 	let tags = parse_tags(&exported);
 
@@ -1275,7 +1275,7 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	video.write(frame(0, &[0, 0, 0, 1, 0x65], true)).unwrap();
 	audio.write(frame(0, &[0xde, 0xad], true)).unwrap();
 
-	let mut exporter = open_export(crate::source::announced(&consumer))
+	let mut exporter = open_export(crate::source::announced(&consumer).await)
 		.await
 		.with_max_delay(RECORDING_MAX_DELAY);
 	let mut exported = Vec::new();

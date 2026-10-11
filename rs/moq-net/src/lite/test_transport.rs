@@ -459,10 +459,13 @@ impl SinkSession {
 
 	/// Hold unidirectional stream opens until `gate` grants stream credit.
 	pub fn gated_open_uni(gate: kio::Consumer<bool>) -> Self {
-		Self {
-			uni_open_gate: Some(gate),
-			..Default::default()
-		}
+		Self::default().with_open_uni_gate(gate)
+	}
+
+	/// Also hold unidirectional stream opens until `gate` grants stream credit.
+	pub fn with_open_uni_gate(mut self, gate: kio::Consumer<bool>) -> Self {
+		self.uni_open_gate = Some(gate);
+		self
 	}
 }
 

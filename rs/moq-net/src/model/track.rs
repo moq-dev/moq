@@ -292,14 +292,19 @@ pub(crate) struct TrackState {
 	// or the receiving session closed locally without declaring an end.
 	sealed: bool,
 
+	// A wire subscription declared the end ahead of the group streams below it, which
+	// QUIC may deliver in any order: readers wait for its tail to settle, or for the
+	// last producer to go, rather than end at the boundary with groups still to arrive.
+	tail_pending: bool,
+
 	// No producer remains (aborted, sealed, or dropped), so nothing protects the live
 	// edge any longer: the pool's idle expiry reclaims it like every other group, and a
 	// stale consumer cannot pin the cache.
 	closed: bool,
 
 	// The first sequence the live feed serves, once the publisher declared one
-	// (the wire's SUBSCRIBE_START). Lower groups never arrive on their own; a
-	// fetch can still create them.
+	// (the wire's SUBSCRIBE_START). Lower groups are not waited for, though one
+	// may still arrive late or be fetched.
 	start_sequence: Option<u64>,
 
 	// Whether `start_sequence` is only the floor a subscription asked for, still
@@ -816,6 +821,56 @@ impl TrackState {
 			.is_some_and(|reach| matches!(live.timestamp.checked_sub(reach), Ok(age) if Duration::from(age) >= budget))
 	}
 
+	/// [`Self::drifted`] under `cap`, parking `waiter` on exactly what else can move the
+	/// verdict: the successor's first frame or abort, the edge's abort, and the edge
+	/// crossing the deadline. Parking on every track change instead wakes each of N parked reads per append.
+	///
+	/// The caller parks on a group landing above `sequence` first, in the way that fits
+	/// whether this track holds it.
+	fn poll_drifted(&self, sequence: u64, cap: Option<u64>, budget: Duration, waiter: &kio::Waiter) -> bool {
+		let reach = loop {
+			// An abort can change reach even after the successor is stamped.
+			// Register before judging, so a racing abort is observed or wakes us.
+			// An abort only closes the group, never touching the track, so one that
+			// landed before registering must re-select or the replacement goes unwatched.
+			let successor = loop {
+				let successor = self.first_servable(sequence.saturating_add(1), cap);
+				match successor {
+					Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
+					successor => break successor,
+				}
+			};
+			// Unbounded until a group lands above, or the successor presents its first frame.
+			let Some(successor) = successor else {
+				return false;
+			};
+			if let Some(reach) = successor.timestamp() {
+				break reach;
+			}
+			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
+				return false;
+			}
+		};
+		// Registered before the edge is resolved, so a write crossing the deadline is
+		// either seen here or wakes us.
+		self.cache.wakes().watch_deadline(reach, budget, waiter);
+		loop {
+			let edge = self.drift_edge(cap);
+			// The edge's abort presents nothing and never touches the track, yet hands the
+			// edge to a lower group that may already sit past the deadline. Watch it, and
+			// re-resolve if it already landed. Terminates: an aborted group is never the
+			// edge again, so each pass resolves a lower one.
+			if let Some(live) = edge.presentation
+				&& let Some(slot) = self.lookup.get(&live.sequence)
+				&& slot.group.poll_closed(waiter).is_ready()
+				&& slot.group.is_aborted()
+			{
+				continue;
+			}
+			return self.drifted(sequence, &edge, budget);
+		}
+	}
+
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
 	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]), not an
 	/// end-of-stream. The handler side (a rejection, or no [`Dynamic`] at all) lives
@@ -1319,6 +1374,22 @@ impl TrackState {
 		}
 	}
 
+	/// Group `sequence` once cached, `None` once the feed starts past it or ends before it,
+	/// and pending while it still may land.
+	fn landing(&self, sequence: u64) -> Poll<Option<group::Consumer>> {
+		if let Some(slot) = self.lookup.get(&sequence)
+			&& !slot.is_aborted()
+		{
+			return Poll::Ready(Some(slot.serving().consume()));
+		}
+		match self.start_sequence.is_some_and(|start| start > sequence)
+			|| self.final_sequence.is_some_and(|fin| fin <= sequence)
+		{
+			true => Poll::Ready(None),
+			false => Poll::Pending,
+		}
+	}
+
 	/// Record the declared first sequence of the live feed, replacing any earlier
 	/// declaration: the signal is scoped to the current subscription's demand,
 	/// which may legitimately move in either direction. `None` clears it (the
@@ -1358,17 +1429,61 @@ impl TrackState {
 		let reached = self.sealed
 			|| self
 				.final_sequence
-				.is_some_and(|fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin);
+				.is_some_and(|fin| self.edge() >= fin && !self.withholds(fin) && !self.awaits_tail(fin));
 		reached && (self.abort.is_none() || self.settled)
+	}
+
+	/// One past the highest sequence produced: where the live edge stands against the end.
+	fn edge(&self) -> u64 {
+		self.max_sequence.map_or(0, |max| max.saturating_add(1))
+	}
+
+	/// Whether a group below `fin` is still withheld from readers until its first frame
+	/// lands (see [`Producer::receive_group`]): the end is not reached before it shows, or
+	/// readers would end without it.
+	fn withholds(&self, fin: u64) -> bool {
+		self.lookup.range(..fin).any(|(_, slot)| slot.pending)
+	}
+
+	/// Whether a group below `fin` the wire subscription still owes has yet to arrive:
+	/// a sequence from where the feed starts up to the end with nothing cached. Only
+	/// such a hole holds readers, so a tail with nothing missing ends them at once.
+	///
+	/// Judged by the cache, so an evicted group or a datagram also reads as a hole until
+	/// the session settles the tail. That only delays the end: an abort stops the wait.
+	fn awaits_tail(&self, fin: u64) -> bool {
+		// Nothing arrives after an abort, so a hole left then is final.
+		if !self.tail_pending || self.abort.is_some() {
+			return false;
+		}
+		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
+		// groups count. Without a declared start, the lowest one stands in for it.
+		let floor = match self.start_sequence {
+			Some(start) => start,
+			None if self.start_pending => return true,
+			None => match self.lookup.iter().find(|(_, slot)| slot.visible) {
+				Some((&first, _)) => first,
+				None => return fin > 0,
+			},
+		}
+		.min(fin);
+		let arrived = self.lookup.range(floor..fin).filter(|(_, slot)| slot.visible).count();
+		(arrived as u64) < fin - floor
 	}
 
 	/// Whether the declared end is reached and every cached group below it finished,
 	/// so nothing the end promised is still in flight.
+	///
+	/// Decided as an abort lands, which ends any wait for the tail: a hole the cache
+	/// cannot tell from an evicted group does not turn a delivered track into a failure.
 	fn is_settled(&self) -> bool {
 		let Some(fin) = self.final_sequence else {
 			return false;
 		};
-		self.is_complete() && self.lookup.range(..fin).all(|(_, slot)| slot.group.is_finished())
+		let reached = self.sealed || self.edge() >= fin;
+		reached
+			&& (self.abort.is_none() || self.settled)
+			&& self.lookup.range(..fin).all(|(_, slot)| slot.group.is_finished())
 	}
 
 	/// Where a replacement route should pick this track up: one past the last frame
@@ -1881,10 +1996,35 @@ impl Producer {
 		self.modify()?.set_final(final_sequence)
 	}
 
+	/// [`Self::finish_at`] for a wire subscription that may still owe groups below the end.
+	///
+	/// The boundary and the pending tail land in one write: a reader that saw the end
+	/// without the tail would end at a hole the wire is still filling.
+	pub(crate) fn finish_at_pending(&mut self, final_sequence: u64) -> Result<()> {
+		let mut state = self.modify()?;
+		state.set_final(final_sequence)?;
+		state.tail_pending = true;
+		Ok(())
+	}
+
+	/// Whether a wire subscription still owes group streams below the declared end.
+	///
+	/// While pending, readers do not end at the boundary: a lower group's stream may
+	/// arrive after a higher one. The session clears it once its tail settles; the last
+	/// producer going ends readers regardless.
+	pub(crate) fn set_tail_pending(&self, pending: bool) {
+		if self.state.read().tail_pending == pending {
+			return;
+		}
+		if let Ok(mut state) = self.modify() {
+			state.tail_pending = pending;
+		}
+	}
+
 	/// Declare the first group the live feed serves (the wire's SUBSCRIBE_START,
 	/// or the start the subscription itself requested): groups below `sequence`
-	/// will never arrive on their own, so a reader waiting for one fails over
-	/// instead of stalling. A fetch can still retrieve them.
+	/// are not waited for, so a reader waiting for one fails over instead of
+	/// stalling. One may still arrive late, and a fetch can still retrieve them.
 	///
 	/// Scoped to the current subscription's demand, so a later declaration
 	/// replaces this one in either direction: a re-subscription may start
@@ -2888,19 +3028,9 @@ impl Consumer {
 	/// cached, `None` once the feed will not deliver it (it went past it, starts past it,
 	/// or ended), and pending while it still may.
 	pub(crate) fn poll_group(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
-		let res = self.state.poll(waiter, |state| {
-			if let Some(slot) = state.lookup.get(&sequence)
-				&& !slot.is_aborted()
-			{
-				return Poll::Ready(Some(slot.serving().consume()));
-			}
-			let passed = state.max_sequence.is_some_and(|newest| newest > sequence)
-				|| state.start_sequence.is_some_and(|start| start > sequence)
-				|| state.final_sequence.is_some_and(|fin| fin <= sequence);
-			match passed {
-				true => Poll::Ready(None),
-				false => Poll::Pending,
-			}
+		let res = self.state.poll(waiter, |state| match state.landing(sequence) {
+			Poll::Pending if state.max_sequence.is_some_and(|newest| newest > sequence) => Poll::Ready(None),
+			landed => landed,
 		});
 		match res {
 			Poll::Ready(Ok(group)) => Poll::Ready(group),
@@ -2909,19 +3039,27 @@ impl Consumer {
 		}
 	}
 
+	/// [`Self::poll_group`], except a newer group is no verdict: QUIC does not order
+	/// streams, so this one may still land behind it. Pending until it is cached, or the
+	/// feed starts past it or ends before it.
+	pub(crate) fn poll_landed(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
+		match self.state.poll(waiter, |state| state.landing(sequence)) {
+			Poll::Ready(Ok(group)) => Poll::Ready(group),
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
 	/// Poll for group `sequence` falling a full `budget` behind this track's live edge,
 	/// as a reader would judge it, whether the track holds it or not; see
-	/// `TrackState::is_stale`. Pending for good once the track closes.
+	/// `TrackState::drifted`. Parks in this track's expiry index, so only a change that can
+	/// make the group stale, or land it here, wakes it. Pending for good once the track closes.
 	pub(crate) fn poll_stale(&self, sequence: u64, budget: Duration, waiter: &kio::Waiter) -> Poll<()> {
-		let res = self.state.poll(waiter, |state| {
-			match state.drifted(sequence, &state.drift_edge(None), budget) {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		});
-		match res {
-			Poll::Ready(Ok(())) => Poll::Ready(()),
-			_ => Poll::Pending,
+		let state = self.state.read();
+		state.cache.wakes().watch_held(sequence, waiter);
+		match state.poll_drifted(sequence, None, budget, waiter) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
 		}
 	}
 
@@ -3560,38 +3698,8 @@ impl group::Expiry for GroupExpiry {
 
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
-		let wakes = state.cache.wakes();
-		// Park on exactly what can move the verdict: a group landing above this one, the
-		// successor's first frame or abort, and the edge crossing the deadline. Parking on
-		// every track change instead wakes each of N parked reads per append.
-		wakes.watch_landing(self.sequence, waiter);
-		let reach = loop {
-			// An abort can change reach even after the successor is stamped.
-			// Register before judging, so a racing abort is observed or wakes us.
-			// An abort only closes the group, never touching the track, so one that
-			// landed before registering must re-select or the replacement goes unwatched.
-			let successor = loop {
-				let successor = state.first_servable(self.sequence.saturating_add(1), cap);
-				match successor {
-					Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
-					successor => break successor,
-				}
-			};
-			// Unbounded until a group lands above, or the successor presents its first frame.
-			let Some(successor) = successor else {
-				return false;
-			};
-			if let Some(reach) = successor.timestamp() {
-				break reach;
-			}
-			if successor.poll_started(waiter).is_pending() || successor.timestamp().is_none() {
-				return false;
-			}
-		};
-		// Registered before the edge is resolved, so a write crossing the deadline is
-		// either seen here or wakes us.
-		wakes.watch_deadline(reach, budget, waiter);
-		state.is_stale(self.sequence, &state.drift_edge(cap), budget)
+		state.cache.wakes().watch_landing(self.sequence, waiter);
+		state.poll_drifted(self.sequence, cap, budget, waiter) && state.lookup.contains_key(&self.sequence)
 	}
 }
 
@@ -6363,6 +6471,49 @@ mod test {
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}
 
+	/// An aborted edge hands the edge to a group between it and the successor, and neither
+	/// the abort nor that group's first frame touches the track, so the read must still wake.
+	#[test]
+	fn a_parked_read_watches_its_edge_abort() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		append_at(&mut producer, 1000); // the successor bounds the head's reach
+		let mut between = producer.append_group().unwrap();
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		edge.finish().unwrap();
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0);
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		edge.abort(Error::Cancel).unwrap();
+		between
+			.write_frame(Timestamp::from_millis(10_000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the edge's abort, then a new edge below it, lost the wakeup"
+		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
 	/// An aborted successor hands the reach to the next group, which sits below the edge
 	/// and so is watched only because the read re-selects its successor.
 	#[test]
@@ -6413,6 +6564,44 @@ mod test {
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}
 
+	/// A rewound edge's abort hands the edge back to a lower group that already presented
+	/// past the deadline. No frame write crosses it afterwards, and the abort never touches
+	/// the track, so only the read watching the edge's abort sees the head go stale.
+	#[test]
+	fn a_parked_read_watches_its_rewound_edge_abort() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		append_at(&mut producer, 1000); // the successor bounds the head's reach
+		append_at(&mut producer, 10_000); // past the deadline, but below the edge
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		edge.finish().unwrap();
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0, "the rewound edge keeps the head within budget");
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		edge.abort(Error::Cancel).unwrap();
+		assert!(woken.load(Ordering::SeqCst), "the edge's abort lost its wakeup");
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
 	/// A received group's frames present while it is hidden, so a parked read they wake
 	/// still sees the older edge and parks again. Revealing the group has to wake it once
 	/// more, though the read sits below the group's nearest shown predecessor.
@@ -6454,6 +6643,72 @@ mod test {
 		assert!(woken.load(Ordering::SeqCst), "the reveal wakes the expired read");
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// A route can declare the end, then land every group's header before its first frame.
+	/// Those groups are withheld until their frames land, so the end is not reached before
+	/// they show: a reader ending at the boundary would never see them.
+	#[test]
+	fn a_withheld_group_holds_the_end() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
+		producer.finish_at(2).unwrap();
+		let mut received: Vec<_> = (0..2)
+			.map(|sequence| producer.receive_group(group::Info { sequence }).unwrap())
+			.collect();
+		assert!(
+			subscriber.recv_group().now_or_never().is_none(),
+			"the end waits for the withheld groups"
+		);
+
+		for group in &mut received {
+			group
+				.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+				.unwrap();
+			producer.reveal_group(group);
+		}
+		assert_eq!(subscriber.assert_group().sequence, 0);
+		assert_eq!(subscriber.assert_group().sequence, 1);
+		assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A withheld group whose stream ends with no frame, cleanly or reset, shows when it
+	/// ends, which wakes a reader parked on the end.
+	#[moq_net_sim::test]
+	async fn a_withheld_group_that_ends_empty_releases_the_end() {
+		for abort in [false, true] {
+			let mut producer = track_producer("test", None);
+			let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
+			producer.finish_at(1).unwrap();
+			let group = producer.receive_group(group::Info { sequence: 0 }).unwrap();
+			let handle = group.clone();
+
+			let first = {
+				let mut next = std::pin::pin!(subscriber.recv_group());
+				assert!(
+					futures::poll!(next.as_mut()).is_pending(),
+					"the end waits for the group"
+				);
+				match abort {
+					true => group.abort(Error::Cancel).unwrap(),
+					false => group.finish().unwrap(),
+				}
+				producer.reveal_group(&handle);
+				moq_net_sim::timeout(Duration::from_secs(1), next)
+					.await
+					.expect("the reveal wakes the reader")
+					.unwrap()
+			};
+
+			match abort {
+				// A reset group shows nothing, so the reader ends.
+				true => assert!(first.is_none()),
+				false => {
+					assert_eq!(first.expect("the empty group").sequence, 0);
+					assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
+				}
+			}
+		}
 	}
 
 	/// The ordinary live case, at the default real-time budget: 2s GOPs produced one at
@@ -7593,6 +7848,116 @@ mod test {
 			ordered.next_group().now_or_never().unwrap(),
 			Err(Error::Timeout)
 		));
+	}
+
+	/// A wire subscription's pending tail holds readers at a hole below the end, since a
+	/// lower group's stream may arrive after a higher one, until the hole fills or the tail
+	/// settles. The last producer going ends them regardless.
+	#[moq_net_sim::test]
+	async fn a_pending_tail_holds_readers_at_a_hole() {
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(None);
+		// The wire declares where the feed starts.
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(3).unwrap();
+		let _high = producer.create_group(group::Info { sequence: 2 }).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 2);
+		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
+
+		// The late lower groups are delivered, then the full tail ends the reader.
+		let _low = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 0);
+		assert!(arrival.recv_group().now_or_never().is_none(), "group 1 is still owed");
+		let _mid = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+
+		// A settled tail ends readers at the boundary, hole and all.
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(2).unwrap();
+		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
+		assert!(arrival.recv_group().now_or_never().is_none());
+		producer.set_tail_pending(false);
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+
+		// So does the last producer going.
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(2).unwrap();
+		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
+		drop(producer);
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A fetched copy of a group the live feed still owes never reaches an arrival-order
+	/// reader, so it does not fill the hole: the reader waits for the live group.
+	#[moq_net_sim::test]
+	async fn a_fetched_group_does_not_fill_a_pending_tail() {
+		let mut producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let mut arrival = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(2).unwrap();
+		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
+
+		let _pending = consumer.fetch_group(0, None);
+		let req = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		req.accept(None).unwrap().finish().unwrap();
+		assert!(
+			arrival.recv_group().now_or_never().is_none(),
+			"the live group 0 is still owed"
+		);
+	}
+
+	/// An abort ends the wait for a pending tail. Whatever reached the end finished, so
+	/// readers end cleanly: the cache cannot tell a hole from a group it already evicted.
+	#[moq_net_sim::test]
+	async fn an_abort_ends_a_pending_tail_cleanly() {
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(2).unwrap();
+		let high = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		high.finish().unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
+		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
+
+		producer.abort(Error::Dropped).unwrap();
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// The wire's end can land after the highest group, with lower groups still owed. A
+	/// reader already past that group stays held at the hole: the end never shows without
+	/// its pending tail.
+	#[moq_net_sim::test]
+	async fn an_end_after_the_highest_group_holds_the_reader() {
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		let _high = producer.create_group(group::Info { sequence: 2 }).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 2);
+		assert!(arrival.recv_group().now_or_never().is_none());
+
+		producer.finish_at_pending(3).unwrap();
+		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
+		assert!(
+			matches!(producer.finish_at_pending(2), Err(Error::Closed)),
+			"a second end is refused"
+		);
+		assert_eq!(producer.final_sequence(), Some(3), "the first end stands");
+
+		for sequence in [0, 1] {
+			let _low = producer.create_group(group::Info { sequence }).unwrap();
+			assert_eq!(arrival.assert_group().sequence, sequence);
+		}
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
 	/// An abort before the declared end settled wins over it: the boundary was reached,

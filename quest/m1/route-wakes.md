@@ -51,7 +51,7 @@ Decisions:
   paths.
 - A serving front follows the best route among those it may resume across
   (decided 2026-10-04, replacing Stay; narrowed 2026-10-07 after #4942 and
-  [Restart](/quest/m0/broadcast-epoch/restart.md)): routes with its epoch. A
+  Restart): routes with its epoch. A
   front resolved without one, or replaced by a newer epoch, stays on its route
   for its subscribers until that route goes and never splices onto another
   (maintainer, 2026-10-08); new requests take a fresh front on the winner

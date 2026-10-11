@@ -5,8 +5,8 @@
 //! - [`snapshot`]: **lossy**. One value updated over time; a consumer only gets the most recent
 //!   one. Older values are superseded and dropped.
 //! - [`stream`]: **lossless**. An ordered append-log of self-contained payloads, delivered in order
-//!   with nothing superseded. Bounded by the group cache: see [`stream`] for what that costs a
-//!   consumer that falls behind.
+//!   with nothing superseded. Bounded by the group budget: see [`stream`] for what happens once
+//!   it is spent.
 //!
 //! Pick [`snapshot`] when consumers care about "what is the value now" (a poster image, a
 //! serialized state blob) and [`stream`] when they care about every payload (an event log, a
@@ -138,6 +138,16 @@ impl Encoder {
 	pub fn with_level(level: u32) -> Self {
 		// `false`: raw DEFLATE, no zlib header/trailer, matching `deflate-raw` on the browser side.
 		Self(Box::new(Compress::new(flate2::Compression::new(level.min(9)), false)))
+	}
+
+	/// The most bytes [`frame`](Self::frame) can return for a payload of `len` bytes, at any level
+	/// and whatever the window already holds.
+	///
+	/// zlib's `deflateBound` for its default window and memory level, which both this crate and the
+	/// browser's pako use: incompressible input falls back to stored blocks, 5 bytes per 16 KiB. The
+	/// constant covers the block headers and the flush, whose fixed 4-byte marker is stripped anyway.
+	pub const fn bound(len: u64) -> u64 {
+		len + (len >> 12) + (len >> 14) + (len >> 25) + 13
 	}
 
 	/// Compress the next frame's `payload`, returning its slice of the stream: the DEFLATE bytes minus
@@ -378,6 +388,29 @@ mod test {
 				.frame(&enc.frame(frame))
 				.unwrap_or_else(|err| panic!("{len} byte frame: {err}"));
 			assert!(got == frame, "{len} byte frame corrupted");
+		}
+	}
+
+	/// The bound holds for incompressible input, the worst case, at sizes straddling the 16 KiB
+	/// block boundary, and on a window already primed by earlier frames.
+	#[test]
+	fn bound_covers_incompressible_frames() {
+		let lens = [1, 2, 100, 16_383, 16_384, 16_385, 65_535, 65_536, 1 << 20, 3 << 20];
+		// Each frame is fresh noise; a repeat would match the window instead.
+		let noise = noise(lens.iter().sum());
+		let mut rest = noise.as_slice();
+
+		let mut enc = Encoder::new();
+		for len in lens {
+			let (frame, next) = rest.split_at(len);
+			rest = next;
+			let slice = enc.frame(frame);
+			let bound = Encoder::bound(len as u64);
+			assert!(
+				slice.len() as u64 <= bound,
+				"{len} raw bytes deflated to {}, past the bound {bound}",
+				slice.len()
+			);
 		}
 	}
 

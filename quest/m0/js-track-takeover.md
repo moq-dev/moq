@@ -2,13 +2,17 @@
 
 ## Goal
 
-In `@moq/net`, `createTrack` and `insertTrack` on a name with a queued or
+In `@moq/net`, `createTrack` on a name with a queued or
 pending request answer that request and continue the name's group and
 datagram sequences, as Rust's `create_track` does, instead of throwing
 `duplicate track`. The per-name sequence map stays bounded without forgetting
 sequences that were written within the broadcast.
 
 ## Plan
+
+Reconciled 2026-10-10: `insertTrack` cannot take over a request-owned
+producer and remains out of scope. Its already-decided deletion belongs to
+[Drop insertTrack](/quest/m1/js-insert-track.md), after this release fix.
 
 Decided 2026-10-08: moved to m0, since
 [publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md)

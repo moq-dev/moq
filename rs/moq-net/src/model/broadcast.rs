@@ -527,6 +527,57 @@ impl Drop for Alive {
 	}
 }
 
+/// Whether a path request still names the source that handed out its track.
+#[derive(Clone, Default)]
+pub(crate) enum RequestValidity {
+	#[default]
+	Unrestricted,
+	Route(kio::Consumer<()>),
+	Selected(std::sync::Arc<crate::model::origin_impl::Selection>),
+}
+
+impl RequestValidity {
+	pub(crate) fn token(route: Option<kio::Consumer<()>>) -> Self {
+		route.map(Self::Route).unwrap_or_default()
+	}
+
+	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+		route
+			.request_validity(path)
+			.map(|selected| Self::Selected(std::sync::Arc::new(selected)))
+			.unwrap_or_else(|| Self::Route(kio::Producer::new(()).consume()))
+	}
+
+	/// Capture one selection period so a pending request never revives after a replacement.
+	pub(crate) fn start(&self) -> Self {
+		match self {
+			Self::Selected(selected) => Self::Route(selected.current()),
+			other => other.clone(),
+		}
+	}
+
+	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
+		match self {
+			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
+			Self::Selected(_) => self.start().check(waiter),
+			_ => Ok(()),
+		}
+	}
+
+	pub(crate) async fn run<T>(
+		&self,
+		future: impl std::future::Future<Output = Result<T, crate::Error>>,
+	) -> Result<T, crate::Error> {
+		let validity = self.start();
+		let mut future = std::pin::pin!(future);
+		kio::wait(|waiter| {
+			validity.check(waiter)?;
+			waiter.poll_future(future.as_mut())
+		})
+		.await
+	}
+}
+
 #[cfg(test)]
 #[allow(missing_docs)] // test-only assertion helpers
 impl Producer {

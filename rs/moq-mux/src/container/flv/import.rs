@@ -68,6 +68,10 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// other importers, until they finish too).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
+	/// The stream's timestamp base: the first media frame anchors it, and every frame shifts by its
+	/// offset onto the catalog clock.
+	timebase: crate::catalog::Timebase<E>,
+
 	/// Accumulated unparsed input. Whole tags are drained out; a trailing partial
 	/// tag is retained for the next [`decode`](Self::decode) call.
 	buffer: BytesMut,
@@ -102,6 +106,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			catalog: reserved.producer(),
 			container,
+			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			header_seen: false,
@@ -463,9 +468,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			tracing::debug!("video frame before sequence header, dropping");
 			return Ok(());
 		}
-		let timestamp = Timestamp::from_millis(pts_ms as u64)?;
-		// The first frame is live on arrival, anchored before the reservation below publishes.
-		self.catalog.anchor(timestamp)?;
+		// The first frame anchors the stream before the reservation below publishes.
+		let timestamp = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
@@ -487,9 +491,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			tracing::debug!("audio frame before config, dropping");
 			return Ok(());
 		}
-		let timestamp = Timestamp::from_millis(timestamp)?;
-		// The first frame is live on arrival, anchored before the reservation below publishes.
-		self.catalog.anchor(timestamp)?;
+		// The first frame anchors the stream before the reservation below publishes.
+		let timestamp = self.timebase.shift(Timestamp::from_millis(timestamp)?)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;

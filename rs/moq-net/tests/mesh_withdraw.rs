@@ -25,6 +25,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 enum Kind {
 	Start,
 	Update,
+	Restart,
 	End,
 }
 
@@ -48,6 +49,7 @@ fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, 
 			let (kind, announce) = match event {
 				announce::Event::Start(announce) => (Kind::Start, announce),
 				announce::Event::Update(announce) => (Kind::Update, announce),
+				announce::Event::Restart(announce) => (Kind::Restart, announce),
 				announce::Event::End(announce) => (Kind::End, announce),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {

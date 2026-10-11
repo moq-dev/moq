@@ -82,6 +82,7 @@ pub struct Config {
 /// The internal (ops) service: a plain-HTTP server over the node's stats
 /// registry ([`moq_net::stats::Registry`]).
 pub struct Internal {
+	timeout: Option<std::time::Duration>,
 	config: Config,
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
@@ -121,6 +122,7 @@ impl Internal {
 			None => Vec::new(),
 		};
 		Self {
+			timeout: moq_tokio::listen::Config::default().resolved_timeout(),
 			config,
 			stats,
 			nodes: None,
@@ -133,6 +135,11 @@ impl Internal {
 			listener: None,
 			addr: None,
 		}
+	}
+
+	pub(crate) fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+		self.timeout = timeout;
+		self
 	}
 
 	/// Bind the configured listener now, so [`addr`](Self::addr) reports an ephemeral port before serving.
@@ -260,7 +267,12 @@ impl Internal {
 	/// resolves), so it drops cleanly into a `select!` as a disabled no-op -
 	/// mirroring how the relay treats other optional services.
 	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
-		let Internal { listener, health, .. } = self.bind()?;
+		let Internal {
+			listener,
+			health,
+			timeout,
+			..
+		} = self.bind()?;
 		let Some(listener) = listener else {
 			std::future::pending::<()>().await;
 			return Ok(());
@@ -270,9 +282,13 @@ impl Internal {
 		// that single top-level layer, matching `Web::serve` / `Cluster::run`.
 		// No accept-time work: the ops router never hands a connection to qmux, so
 		// capturing a descriptor per health check would spend one for nothing.
-		crate::listener::server(listener, health, DefaultAcceptor::new())?
-			.serve(app.into_make_service())
-			.await?;
+		crate::listener::server(
+			listener,
+			crate::listener::Config { health, timeout },
+			DefaultAcceptor::new(),
+		)?
+		.serve(app.into_make_service())
+		.await?;
 		Ok(())
 	}
 
@@ -703,7 +719,9 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::Start(route)
+			| moq_net::announce::Event::Update(route)
+			| moq_net::announce::Event::Restart(route) => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}

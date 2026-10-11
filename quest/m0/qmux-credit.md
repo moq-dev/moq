@@ -61,4 +61,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - replaces these stream maps later
-- [moq.pro: edge-to-core qmux](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/edge-core/qmux-credit.md) - the long-lived cluster links that need this

@@ -10,7 +10,7 @@ export const Version = {
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
 	/// Work-in-progress lite-07, only negotiated when explicitly offered.
-	/// Adds the ANNOUNCE_REQUEST hidden opt-in and the publisher epoch.
+	/// Adds the ANNOUNCE_REQUEST hidden opt-in, the publisher epoch, and the Auth Stream.
 	DRAFT_07: 0xff0dad07,
 } as const;
 
@@ -65,6 +65,25 @@ export function hasDatagrams(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether either endpoint may open an Auth Stream (0x7) to present a token and learn its
+ * grant. Added in lite-07.
+ */
+export function hasAuth(version: Version): boolean {
+	// Explicitly list older versions so future versions default to carrying AUTH.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin from each hop chain. */
 export function hasAnnounceOk(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-05+ announce behavior.
@@ -79,10 +98,10 @@ export function hasAnnounceOk(version: Version): boolean {
 	}
 }
 
-/** Whether the version can replace an advertisement in place rather than retracting and
- * re-announcing it. Added in lite-05 as a duplicate ANNOUNCE; lite-06 gave it a message of
+/** Whether the version can update an advertisement's metadata in place rather than retracting
+ * and re-announcing it. Added in lite-05 as a duplicate ANNOUNCE; lite-06 gave it a message of
  * its own (ANNOUNCE_UPDATE) and made the duplicate a violation. */
-export function restartSupported(version: Version): boolean {
+export function updateSupported(version: Version): boolean {
 	// Explicitly list older versions so future versions default to supported.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -96,8 +115,8 @@ export function restartSupported(version: Version): boolean {
 }
 
 /** Whether announcements carry implicit announce ids: each `active` assigns the next
- * per-stream ordinal, and `ended`/`restart` reference that id instead of repeating the
- * path. Added in lite-06. */
+ * per-stream ordinal, and `ended`/`update`/`restart` reference that id instead of repeating
+ * the path. Added in lite-06. */
 export function hasAnnounceId(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-06+ announce behavior.
 	switch (version) {
@@ -254,6 +273,24 @@ export function hasStreamCount(version: Version): boolean {
  * since a transport ACK does not say the application read the tail.
  */
 export function waitsForSubscriberFin(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether the announce stream has ANNOUNCE_RESTART: another publisher instance replacing an
+ * advertisement in place. Added in lite-07. Older versions send an ANNOUNCE_END then an
+ * ANNOUNCE_START. */
+export function hasAnnounceRestart(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

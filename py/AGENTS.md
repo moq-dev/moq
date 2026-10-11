@@ -7,7 +7,7 @@ The `/py` uv workspace. Extends the root `AGENTS.md` and `rs/moq-ffi/AGENTS.md`.
 
 # moq-rs
 
-`moq/__init__.py` is the single public surface and defines `__all__`. Modules map to roles; keep names aligned with `rs/moq-net`.
+`moq/__init__.py` is the public surface for the moq-net root and defines `__all__`; each layer above it is a public submodule (`moq.json`) with its own `__all__`. Modules map to roles; keep names aligned with the Rust crate they mirror.
 
 # Conventions
 

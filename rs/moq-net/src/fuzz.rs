@@ -204,7 +204,7 @@ impl AnnounceWriter {
 					cost: Default::default(),
 				}
 			}
-			Announced::Update(id, hops) => lite::AnnounceBroadcast::Restart {
+			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
 				hops: self.encoder.update(*id, hops.clone()),
 				cost: Default::default(),
@@ -260,7 +260,7 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 			lite::AnnounceBroadcast::Active { suffix, hops, .. } => decoder
 				.start(suffix, hops)
 				.map(|(suffix, hops)| Announced::Start(suffix, hops)),
-			lite::AnnounceBroadcast::Restart { id, hops, .. } => {
+			lite::AnnounceBroadcast::Update { id, hops, .. } => {
 				decoder.update(id, hops).map(|(_, hops)| Announced::Update(id, hops))
 			}
 			lite::AnnounceBroadcast::EndedId { id } => decoder.end(id).map(|_| Announced::End(id)),
@@ -1173,6 +1173,24 @@ impl std::error::Error for NoError {}
 impl crate::transport::Error for NoError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
+	}
+}
+
+/// A source-selection watch for the private request-lifetime benchmark.
+pub struct RequestValidity(crate::model::broadcast::RequestValidity);
+
+impl RequestValidity {
+	/// Watch which instance this route's peer selects for a path.
+	pub fn new(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
+	}
+
+	/// Capture the lifetime of one pending request.
+	pub fn start(&self) -> kio::Consumer<()> {
+		match self.0.start() {
+			crate::model::broadcast::RequestValidity::Route(route) => route,
+			_ => unreachable!("a source watch always captures a route lease"),
+		}
 	}
 }
 
