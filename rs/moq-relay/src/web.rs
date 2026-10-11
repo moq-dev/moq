@@ -173,8 +173,9 @@ pub(crate) struct WebState {
 	/// like a QUIC one.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
 	pub(crate) sessions: crate::session::Registry,
-	/// How long a connection has to send its request headers, and a WebSocket its
-	/// MoQ SETUP; `None` waits forever.
+	/// How long a connection may sit with no complete request in flight (TLS
+	/// handshake and partial headers included), and a WebSocket wait for its MoQ
+	/// SETUP; `None` waits forever.
 	pub(crate) timeout: Option<std::time::Duration>,
 }
 
@@ -314,8 +315,9 @@ impl Web {
 		self
 	}
 
-	/// Bound how long a connection may take to send its HTTP request headers, and a
-	/// WebSocket its MoQ SETUP after the upgrade; `None`, or a timeout past the
+	/// Close a connection that sits this long with no complete request in flight,
+	/// including one stalled in its TLS handshake or headers or idle in keep-alive,
+	/// and bound a WebSocket's MoQ SETUP after the upgrade; `None`, or a timeout past the
 	/// clock's range, waits forever. Defaults to the
 	/// [`moq_tokio::listen::Config::resolved_timeout`] default.
 	pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
