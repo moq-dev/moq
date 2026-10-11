@@ -168,4 +168,18 @@ describe("wait", () => {
 		expect(woke).toBe(true);
 		sync.close();
 	});
+
+	it("releases a wait parked across a reset when closed", async () => {
+		const sync = new Sync({ delay: 10_000 as Time.Milli });
+		await flush();
+		const timestamp = Time.Milli.now();
+		sync.received(timestamp);
+
+		const waiting = sync.wait(timestamp);
+		await flush();
+		sync.reset();
+		await flush();
+		sync.close();
+		await waiting;
+	});
 });

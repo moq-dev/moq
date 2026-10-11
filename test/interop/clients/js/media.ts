@@ -195,6 +195,9 @@ const framesToMs = (frames: number) => Math.round((frames * 1000) / Pattern.FPS)
  * playback runs: a player delayed seconds behind live still shows a near-live preview first.
  * Audio must also have left preroll, just as in measurePlayback: a new preview can replace an old
  * one while the audio buffer is still filling, so a changed canvas alone does not prove playback.
+ *
+ * A `resumed` player gets the full timeout to start moving again, and the catch-up window opens at
+ * its first advancing frame. Every audible advancing pair before live is graded for A/V sync.
  */
 async function waitForLive(
 	publisher: Page,
@@ -204,12 +207,14 @@ async function waitForLive(
 	assertion: string,
 	resumed = false,
 ): Promise<{ first: number; lag: number; after: number }> {
-	const since = Date.now();
+	let since = Date.now();
+	let started = !resumed;
+	const startup = since + timeoutMs;
 	let first: number | undefined;
 	let lag: number | undefined;
 	let frame: number | undefined;
 	let moved = false;
-	while (Date.now() < since + LATE_CATCHUP_MS) {
+	while (Date.now() < (started ? since + LATE_CATCHUP_MS : startup)) {
 		throwPageErrors(publisherErrors);
 		throwPageErrors(playerErrors);
 		const [fixture, state] = await Promise.all([readFixtureState(publisher), readPlayerState(player)]).catch(
@@ -228,6 +233,10 @@ async function waitForLive(
 			lag = fixture.frameId - state.frameId;
 			first ??= lag;
 			moved = frame !== undefined && state.frameId !== frame;
+			if (moved && !started) {
+				started = true;
+				since = Date.now();
+			}
 			const live = reachesLive({
 				previous: frame,
 				source: fixture.frameId,
@@ -244,7 +253,7 @@ async function waitForLive(
 	throw new Failure(
 		assertion,
 		`${moved ? "still" : "held a frame"} ${lag === undefined ? "?" : framesToMs(lag)}ms behind the fixture ` +
-			`${LATE_CATCHUP_MS}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback`,
+			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback`,
 	);
 }
 

@@ -93,6 +93,9 @@ export class Sync {
 
 	#epoch = 0;
 
+	// Releases parked waits, which may otherwise sleep forever on a reference that never returns.
+	#closed = new Signal(false);
+
 	#signals = new Effect();
 
 	constructor(props?: Inputs<SyncInput>) {
@@ -235,8 +238,8 @@ export class Sync {
 		}
 
 		for (;;) {
-			// Switching to "instant" wakes the sleep below, so frames parked here leave.
-			if (this.in.delay.peek() === "instant") return;
+			// Switching to "instant" or closing wakes the sleep below, so frames parked here leave.
+			if (this.in.delay.peek() === "instant" || this.#closed.peek()) return;
 
 			// Sleep until it's time to decode the next frame.
 			// NOTE: This function runs in parallel for each frame.
@@ -274,6 +277,7 @@ export class Sync {
 				this.in.delay.changed(() => wake(false)),
 				this.#out.delay.changed(() => wake(false)),
 				this.#out.reference.changed(() => wake(false)),
+				this.#closed.changed(() => wake(false)),
 			];
 		});
 	}
@@ -288,6 +292,7 @@ export class Sync {
 	}
 
 	close() {
+		this.#closed.set(true);
 		this.#signals.close();
 	}
 }
