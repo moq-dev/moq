@@ -27,7 +27,7 @@ Public API: none. Wire: none.
 ## Required
 
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - the real-browser harness and artifact conventions
-- [Generated lite](/quest/m1/rs2ts/lite.md) - the implementation being compared
+- [Generated lite session](/quest/m2/rs2ts-session.md) - the implementation being compared
 
 ## Related
 

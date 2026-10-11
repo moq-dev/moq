@@ -7,7 +7,8 @@ forked from quinn (see [the fork](/quest/m1/quic/fork/README.md) for why
 quinn and not noq). One core serves the tokio backend, the thread-per-core
 `moq-uring` backend, and qmux; iroh stays on upstream noq. The features are
 BBR correctness, reliable stream resets, hierarchical stream scheduling with
-per-broadcast fairness, wider limits for relay peers, and endpoint sharding.
+per-broadcast fairness, bounded incomplete-message memory, wider limits for
+relay peers, and endpoint sharding.
 Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
 stream state machine, and the experiments (the egress profile, ECN
 measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); media
@@ -56,9 +57,19 @@ consumes them. Decided 2026-10-08: L4S and careful resume moved on to m3,
 and GCC shrank to a receive-timestamps spike, since none has a consumer.
 The BBR app-limited fixes land in `moq-quic` without waiting for the switch.
 
+Decided in the 2026-10-10 receive-memory plan: native message assembly holds
+connection credit until complete-unit handoff, while stream credit advances
+on reads with a very large configurable default. MoQ recovers under assembly
+pressure with receiver STOP_SENDING, including against JavaScript senders.
+The memory allowance must fit the largest supported encoded unit. Control
+streams have highest priority but are not immune to cancellation. Completed
+cache limits remain separate; bitrate pacing composes with this memory cap.
+
 ## Required
 
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn in-tree as `moq-quic`, with BBR3 and lazy stream slots, and MoQ switched onto it
+- [Retain connection credit](/quest/m1/quic/receive-credit.md) - native receivers own connection credit independently of stream reads
+- [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
 - [BBR idle burst](/quest/m1/quic/bbr-app-limited.md) - a fork regression proves a burst after a long idle is paced at the learned bandwidth, closing #4219
 - [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md) - partial polls count, local send caps do not, receiver credit is pinned
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,

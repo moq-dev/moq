@@ -193,6 +193,8 @@ const framesToMs = (frames: number) => Math.round((frames * 1000) / Pattern.FPS)
  * Only a frame that moved since the last reading counts. The player paints the first frame it decodes
  * as a preview and holds it until its sync delay comes up, so a held frame says nothing about where
  * playback runs: a player delayed seconds behind live still shows a near-live preview first.
+ * Audio must also have left preroll, just as in measurePlayback: a new preview can replace an old
+ * one while the audio buffer is still filling, so a changed canvas alone does not prove playback.
  */
 async function waitForLive(
 	publisher: Page,

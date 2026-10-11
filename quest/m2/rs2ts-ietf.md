@@ -19,6 +19,6 @@ its no-downgrade go/no-go in the [rs2ts line](/quest/m1/rs2ts/README.md).
 
 ## Required
 
-- [Generated lite](/quest/m1/rs2ts/lite.md) - the pipeline this reuses
+- [Generated lite session](/quest/m2/rs2ts-session.md) - the pipeline this reuses
 - [Sans-IO IETF session](/quest/m2/rs2ts-sans-io-ietf.md) - the session shape it translates
 - [IETF parameters](/quest/m2/rs2ts-ietf-params.md) - the concrete parameter codec it translates
