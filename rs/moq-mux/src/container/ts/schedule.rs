@@ -82,13 +82,8 @@ impl Buffer {
 	/// the slot, less one, but at least one. Even laid out evenly, the packets bunch a little
 	/// where one slot meets the next, and the slack drains that off.
 	fn per_slot(&self) -> usize {
-		self.passes().saturating_sub(1).max(1)
-	}
-
-	/// The packets its transport buffer passes on within a slot.
-	fn passes(&self) -> usize {
 		let bits = u128::from(self.rate) * PCR_INTERVAL.as_nanos() / 1_000_000_000;
-		(bits / (TsPacket::SIZE as u128 * 8)) as usize
+		(bits / (TsPacket::SIZE as u128 * 8)).saturating_sub(1).max(1) as usize
 	}
 }
 
@@ -191,8 +186,8 @@ pub(super) struct Slot {
 	pub keyframe: bool,
 	/// The PID of each access unit whose first packet rides in the slot.
 	pub units: Vec<u16>,
-	/// How many packets a slot each bounded PID's transport buffer passes on.
-	pub passes: HashMap<u16, usize>,
+	/// The most packets a slot admission lets each bounded PID carry.
+	pub caps: HashMap<u16, usize>,
 }
 
 impl Slot {
@@ -211,7 +206,7 @@ impl Slot {
 	/// The tables share one [`SystemBuffer`]. Where the next table would overflow it, a null
 	/// takes the position instead, so a PMT spanning several packets goes out at the buffer's
 	/// rate, as long as the slot has nulls to spare and the delayed PIDs can still keep within
-	/// their own transport buffers ([`Self::passes`]).
+	/// their own transport buffers ([`Self::caps`]).
 	pub fn layout(&self, clock: &[u8], pmt_pid: u16, null: &[u8]) -> Vec<u8> {
 		let packets = self.packets.as_chunks::<{ TsPacket::SIZE }>().0;
 		let mut tables = VecDeque::new();
@@ -269,15 +264,17 @@ impl Slot {
 			if let Some(table) = table {
 				// A null spaces a table that would overflow TBsys, and the rest of the slot is
 				// laid out afresh around it, so no PID's packets bunch up to make up the time.
-				// The stall must leave every PID the time to go no faster than its transport
-				// buffer passes packets on. Otherwise the table goes out regardless.
+				// The stall must leave every PID spread no denser over the rest of the slot than
+				// admission holds it to over a whole one. Otherwise the table goes out
+				// regardless.
 				let room = || {
-					// Positions left after the stall, the remaining nulls among them.
-					let after = left as usize - 1 + tables.len();
+					// The round-robin's positions left after the stall; the tables still to go
+					// lead the PIDs they delay, so lend them no time.
+					let after = left as usize - 1;
 					lanes.iter().all(|(pid, lane)| {
-						self.passes
+						self.caps
 							.get(pid)
-							.is_none_or(|&passes| lane.len() * positions <= passes * after)
+							.is_none_or(|&cap| lane.len() * positions <= cap * after)
 					})
 				};
 				if !system.fits() && nulls > 0 && room() {
@@ -556,10 +553,10 @@ impl Schedule {
 			nulls,
 			keyframe,
 			units,
-			passes: self
+			caps: self
 				.buffers
 				.iter()
-				.map(|(&pid, buffer)| (pid, buffer.passes()))
+				.map(|(&pid, buffer)| (pid, buffer.per_slot()))
 				.collect(),
 		}))
 	}
@@ -994,7 +991,7 @@ mod tests {
 			nulls: 416 - 1 - media,
 			keyframe: false,
 			units: vec![],
-			passes: HashMap::new(),
+			caps: HashMap::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -1031,7 +1028,7 @@ mod tests {
 			nulls: 2,
 			keyframe: true,
 			units: vec![1, 3],
-			passes: HashMap::new(),
+			caps: HashMap::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -1041,8 +1038,9 @@ mod tests {
 
 	/// A PAT and a multi-packet PMT go out at TBsys's rate rather than in a burst, spaced by
 	/// nulls and still in order ahead of the keyframe muxed after them. The video they delay
-	/// always keeps within its own transport buffer: where spacing a five-packet PMT would
-	/// leave the video too little time, the rest of the tables go out regardless.
+	/// always keeps within its own transport buffer: where spacing the tables would leave the
+	/// video too little time (a five-packet PMT, or video near its admission cap), the rest of
+	/// the tables go out regardless.
 	#[test]
 	fn the_tables_go_out_at_the_system_buffer_rate() {
 		// The peak fill of a 512-byte transport buffer fed by `pids` and drained at `rx` b/s, over
@@ -1069,6 +1067,7 @@ mod tests {
 			(332, 1, 50, &[][..], 3, true),
 			(416, 111, 300, others, 3, true),
 			(416, 111, 300, others, 5, false),
+			(416, 111, 352, others, 3, false),
 		] {
 			let mut packets = unit(0, 1);
 			for part in 0..parts {
@@ -1087,7 +1086,7 @@ mod tests {
 				packets,
 				keyframe: true,
 				units: vec![video.into()],
-				passes: HashMap::from([(video.into(), Buffer { rate: RX, size: None }.passes())]),
+				caps: HashMap::from([(video.into(), Buffer { rate: RX, size: None }.per_slot())]),
 			};
 			let mut null = unit(0, 1);
 			(null[1], null[2]) = (0x1f, 0xff);
