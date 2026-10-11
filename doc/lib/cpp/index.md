@@ -164,6 +164,10 @@ Never block the executor. A continuation or resumed coroutine that calls
 which deadlocks. `moq::inline_executor` runs a continuation right where the
 future completed, which is the executor thread.
 
+## Disabled renditions
+
+Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+
 ## Track demand
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
