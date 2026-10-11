@@ -572,7 +572,7 @@ struct SiTrack {
 enum SiState {
 	/// Waiting for the catalog broadcast to resolve; the track (by name) is
 	/// subscribed once it does.
-	Requesting(kio::Pending<moq_net::origin::Requesting>, String),
+	Requesting(crate::Binding, String),
 	/// Waiting for the subscription to resolve.
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved subscription, reading snapshot groups.
@@ -628,7 +628,7 @@ impl SiTrack {
 				let SiState::Requesting(pending, name) = &self.state else {
 					unreachable!("just matched Requesting");
 				};
-				match pending.poll_ok(waiter) {
+				match pending.poll_broadcast(waiter) {
 					Poll::Ready(Ok(broadcast)) => Ok((broadcast, name.clone())),
 					Poll::Ready(Err(err)) => Err(err),
 					Poll::Pending => return,
@@ -756,13 +756,12 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	async fn build(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		let broadcast = source.broadcast().await?;
+		let broadcast = source.broadcast();
 		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
 		Ok(Self::build_with(source, &broadcast, catalog_format, catalog))
 	}
 
-	/// Export `broadcast`, the one at `source`'s path, from its subscribed `catalog`, pinning
-	/// every later request for that path to its instance.
+	/// Export `broadcast`, the one `source` holds at its path, from its subscribed `catalog`.
 	fn build_with(
 		source: crate::Source,
 		broadcast: &moq_net::broadcast::Consumer,
@@ -771,7 +770,7 @@ impl<E: catalog::Catalog> Export<E> {
 	) -> Self {
 		let instance = broadcast.info().epoch.clone();
 		Self {
-			source: source.pinned(instance.clone()),
+			source,
 			catalog: Some(catalog),
 			catalog_format,
 			cataloged: false,
@@ -1506,6 +1505,12 @@ impl<E: catalog::Catalog> Export<E> {
 		catalog: crate::catalog::Consumer<E>,
 	) -> Result<(), crate::Error> {
 		let same = self.instance.is_some() && broadcast.info().epoch == self.instance;
+		// The same instance keeps its siblings, but the old broadcast's routes are gone. Another
+		// one has its own siblings to resolve.
+		match same {
+			true => self.source.pin(broadcast),
+			false => self.source = self.source.switched(broadcast),
+		}
 		if !same || self.psi.is_none() {
 			let mut next = Self::build_with(self.source.clone(), broadcast, self.catalog_format, catalog);
 			next.replay = self.replay;

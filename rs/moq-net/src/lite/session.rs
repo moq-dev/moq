@@ -547,6 +547,10 @@ impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
 			// that takes no tokens in band refuses the same way: either way, before any
 			// reply, this token earns nothing here.
 			Error::Stream(_) | Error::Decode(crate::DecodeError::Short) if !answered => Error::Unsupported,
+			// A malformed grant is the peer breaking the session protocol, not refusing a token.
+			Error::Decode(crate::DecodeError::InvalidValue | crate::DecodeError::InvalidString(_)) => {
+				Error::ProtocolViolation
+			}
 			err => err,
 		};
 		match &err {
@@ -927,6 +931,79 @@ mod tests {
 		)
 		.await
 		.expect("the session outlived a malformed AUTH_ERROR");
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
+	}
+
+	#[moq_net_sim::test]
+	async fn malformed_auth_ok_closes_the_session() {
+		for pattern in [
+			b"*/**".as_slice(),
+			b"/room",
+			vec!["room"; 33].join("/").as_bytes(),
+			b"\xff",
+		] {
+			let mut script = Vec::new();
+			let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
+			w.varint(0).unwrap();
+			let prefix = w.prefix_varint();
+			w.varint(1).unwrap();
+			w.bytes(pattern).unwrap();
+			w.varint(0).unwrap();
+			w.varint(0).unwrap();
+			w.fill(prefix).unwrap();
+			assert_malformed_reply_closes(script).await;
+		}
+		let mut script = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
+		w.varint(0).unwrap();
+		let prefix = w.prefix_varint();
+		w.varint(0).unwrap();
+		w.varint(0).unwrap();
+		w.varint(1 << 53).unwrap();
+		w.fill(prefix).unwrap();
+		assert_malformed_reply_closes(script).await;
+	}
+
+	#[moq_net_sim::test]
+	async fn malformed_auth_error_reasons_close_the_session() {
+		for reason in [vec![0xff], vec![b'a'; 8193]] {
+			let mut script = Vec::new();
+			let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
+			w.varint(1).unwrap();
+			let prefix = w.prefix_varint();
+			w.varint(SessionError::Unauthorized.to_code().into()).unwrap();
+			w.bytes(&reason).unwrap();
+			w.fill(prefix).unwrap();
+			assert_malformed_reply_closes(script).await;
+		}
+	}
+
+	async fn assert_malformed_reply_closes(script: Vec<u8>) {
+		let transport = ScriptedSession::per_stream(vec![script]);
+		let log = transport.log.clone();
+		let start = start(Config {
+			runtime: crate::time::Clock::sim(),
+			client: true,
+			limits: Default::default(),
+			session: transport,
+			setup_stream: None,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			version: Version::Lite07,
+			our_setup: Setup::default(),
+			peer_setup: None,
+			auth: crate::auth::Handle::new(true),
+		})
+		.unwrap();
+		let mut driver = start.driver;
+		let res = moq_net_sim::timeout(
+			std::time::Duration::from_secs(10),
+			kio::wait(|waiter| driver.poll(waiter)),
+		)
+		.await
+		.expect("the session outlived a malformed AUTH reply");
 		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
 		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
 	}

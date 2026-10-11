@@ -2517,14 +2517,18 @@ test.each([
 	const same = origin.consume().request(path);
 	await settle();
 	expect(same.active.peek()?.epoch).toBe(from);
+	const pinned = origin.consume().request(path, { epoch: from });
 
-	// Another epoch, or none, is another instance: the requests on the old one end.
+	// Another epoch, or none, is another instance: resolved requests keep the old one.
 	dynamic.update({ ...dynamic.route, epoch: to });
 	expect(await announced.next()).toMatchObject({ prefix, kind: "restart" });
 	await settle();
-	expect(held.active.peek()).toBeUndefined();
-	expect(held.unroutable.peek()).toBe(true);
-	expect(same.active.peek()).toBeUndefined();
+	expect(held.active.peek()).toBe(resolved);
+	expect(held.closed.peek()).toBeUndefined();
+	expect(held.unroutable.peek()).toBe(false);
+	expect(same.active.peek()?.epoch).toBe(from);
+	expect(pinned.active.peek()?.epoch).toBe(from);
+	expect(pinned.unroutable.peek()).toBe(false);
 
 	// The subscription already open stays on the old answer.
 	oldTrack.appendGroup().close();
@@ -2545,15 +2549,77 @@ test.each([
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
 	expect((await forwarded?.recvGroup())?.sequence).toBe(7);
 
+	// Existing request handles can still subscribe, but never join the new answer.
+	const retained = held.active.peek()?.track("video").subscribe();
+	expect((await retained?.recvGroup())?.sequence).toBe(1);
+	oldTrack.appendGroup().close();
+	expect((await retained?.recvGroup())?.sequence).toBe(2);
+	expect(held.active.peek()).toBe(resolved);
+
+	// Retracting the new claim does not retract the resolved old request.
+	dynamic.close();
+	await settle();
+	expect(held.active.peek()).toBe(resolved);
+	expect(held.closed.peek()).toBeUndefined();
+	retained?.close();
 	await requests.return?.();
 	sticky?.close();
 	subscription?.close();
 	forwarded?.close();
-	for (const handle of [held, same, fresh]) handle.close();
+	for (const handle of [held, same, pinned, fresh]) handle.close();
 	old.close();
 	next.close();
 	dynamic.close();
 	announced.close();
+	origin.close();
+});
+
+test("an epoch update does not retain an answer that already closed", async () => {
+	const origin = new Producer();
+	const path = Path.from("live/cam");
+	const dynamic = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const requests = dynamic.requested();
+	const held = origin.consume().request(path);
+	const old = new BroadcastProducer();
+	(await requests.next()).value?.accept(old);
+	old.close();
+	// The server's closure callback has not removed the answer yet.
+	dynamic.update({ epoch: NEWER });
+	try {
+		expect(held.closed.peek()).toBeInstanceOf(Error);
+		expect(held.active.peek()).toBeUndefined();
+		const fresh = origin.consume().request(path);
+		const next = new BroadcastProducer();
+		(await requests.next()).value?.accept(next);
+		expect(fresh.active.peek()?.epoch).toBe(NEWER);
+		fresh.close();
+		next.close();
+	} finally {
+		held.close();
+		await requests.return?.();
+		dynamic.close();
+		origin.close();
+	}
+});
+
+test("an unread resolved request retains its broadcast until its last handle closes", async () => {
+	const origin = new Producer();
+	const path = Path.from("live/cam");
+	const dynamic = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const requests = dynamic.requested();
+	const held = origin.consume().request(path);
+	const old = new BroadcastProducer();
+	(await requests.next()).value?.accept(old);
+	// Change epochs before the active getter or its subscription can clone the answer.
+	dynamic.update({ epoch: NEWER });
+	expect(old.closed.peek()).toBeUndefined();
+	expect(held.active.peek()?.epoch).toBe(EPOCH);
+	held.close();
+	await old.closed;
+	expect(held.active.peek()).toBeUndefined();
+	await requests.return?.();
+	dynamic.close();
+	old.close();
 	origin.close();
 });
 
@@ -2602,7 +2668,7 @@ test("an update does not override route selection: another claim at the epoch ke
 	expect(held.active.peek()?.epoch).toBe(EPOCH);
 
 	// The first claim drops the epoch, so the second, still at it, outranks it: the
-	// request on the epoch moves to the second's answer rather than ending.
+	// resolved request keeps its answer, and new requests go through the second claim.
 	first.update({ ...first.route, epoch: undefined });
 	const fresh = origin.consume().request(path);
 	const replacement = new BroadcastProducer();

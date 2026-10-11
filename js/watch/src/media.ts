@@ -40,3 +40,26 @@ export async function nextMedia(consumer: Container.Consumer) {
 		return undefined;
 	}
 }
+
+/** The source a fatal decode failure belongs to. @internal */
+export interface Failure {
+	/** The catalog broadcast's instance. */
+	broadcast: unknown;
+	/** The instance of the broadcast the rendition reads. */
+	media: unknown;
+	track: string;
+	identity: string;
+}
+
+/**
+ * Whether the selection moved off a failed source. A rendition that is only unavailable (muted by
+ * its publisher, or its broadcast override offline) keeps the failure, so it is not retried.
+ *
+ * @internal
+ */
+export function failureMoved(failure: Failure, selection: Partial<Failure>): boolean {
+	if (selection.broadcast !== failure.broadcast) return true;
+	if (selection.track === undefined || selection.identity === undefined) return false;
+	if (selection.track !== failure.track || selection.identity !== failure.identity) return true;
+	return selection.media !== undefined && selection.media !== failure.media;
+}

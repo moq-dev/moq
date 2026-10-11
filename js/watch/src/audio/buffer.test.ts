@@ -39,9 +39,29 @@ describe("SharedAudioBuffer", () => {
 			]);
 
 		// Open, a frame this far ahead of the playhead is held.
-		expect(await settles(buffer.wait(10_000_000 as Time.Micro))).toBe(false);
+		expect(await settles(buffer.wait(10_000_000 as Time.Micro, new AbortController().signal))).toBe(false);
 
 		buffer.close();
-		expect(await settles(buffer.wait(10_000_000 as Time.Micro))).toBe(true);
+		expect(await settles(buffer.wait(10_000_000 as Time.Micro, new AbortController().signal))).toBe(true);
+	});
+
+	// A decode loop retired mid-wait (a rendition change while the playhead is parked) must not leave
+	// its waiter queued, or every such change strands one more for the life of the buffer.
+	it("releases a gated wait when its signal aborts", async () => {
+		const worklet = { port: { postMessage: () => {} } } as unknown as AudioWorkletNode;
+		const buffer = createAudioBuffer(worklet, 1, 1000, 100, true);
+		try {
+			buffer.insert(0 as Time.Micro, [new Float32Array(200)]);
+			const controller = new AbortController();
+			const wait = buffer.wait(10_000_000 as Time.Micro, controller.signal);
+			await Promise.resolve();
+			expect(Bun.peek.status(wait)).toBe("pending");
+
+			controller.abort();
+			expect(Bun.peek.status(wait)).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(10_000_000 as Time.Micro, controller.signal))).toBe("fulfilled");
+		} finally {
+			buffer.close();
+		}
 	});
 });

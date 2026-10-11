@@ -26,10 +26,25 @@ class Backpressure {
 		this.#headroom = headroom;
 	}
 
-	wait(timestamp: Time.Micro, playhead: Time.Micro): Promise<void> {
-		if (!this.#enabled) return Promise.resolve();
+	wait(timestamp: Time.Micro, playhead: Time.Micro, signal: AbortSignal): Promise<void> {
+		if (!this.#enabled || signal.aborted) return Promise.resolve();
 		if (playhead >= ((timestamp - this.#headroom) | 0)) return Promise.resolve();
-		return new Promise((resolve) => this.#waiters.push({ timestamp, resolve }));
+		return new Promise((resolve) => {
+			// An aborted wait drops its waiter, so a retired decode loop leaves nothing queued here.
+			const abort = () => {
+				this.#waiters = this.#waiters.filter((w) => w !== waiter);
+				resolve();
+			};
+			const waiter = {
+				timestamp,
+				resolve: () => {
+					signal.removeEventListener("abort", abort);
+					resolve();
+				},
+			};
+			signal.addEventListener("abort", abort, { once: true });
+			this.#waiters.push(waiter);
+		});
 	}
 
 	// Resolve every waiter the playhead has reached. Thresholds are recomputed live so a changed
@@ -97,8 +112,9 @@ export interface AudioBuffer {
 	 * applies backpressure: it stays pending while decoding `timestamp` would run more than the latency
 	 * floor ahead of the playhead, so the caller holds the (encoded) frame instead of decoding it too
 	 * far ahead of the floor-sized ring. Resolves immediately when not buffered (the ring bounds itself).
+	 * Resolves early, releasing the wait, once `signal` aborts.
 	 */
-	wait(timestamp: Time.Micro): Promise<void>;
+	wait(timestamp: Time.Micro, signal: AbortSignal): Promise<void>;
 
 	/** Current playback timestamp (derived from reader position). */
 	readonly timestamp: Getter<Time.Micro>;
@@ -224,13 +240,13 @@ class SharedAudioBuffer implements AudioBuffer {
 		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
 	}
 
-	wait(timestamp: Time.Micro): Promise<void> {
+	wait(timestamp: Time.Micro, signal: AbortSignal): Promise<void> {
 		// Stalled = still filling the floor (bootstrap, an underrun the reader re-stalled on, or an
 		// explicit reset): let frames through so the ring refills to the floor. This is the single
 		// re-buffer path; the ring un-stalls itself on the insert that reaches the floor, so the
 		// gate closes again within one frame rather than draining the whole lookahead.
 		if (this.#ring.stalled) return Promise.resolve();
-		return this.#backpressure.wait(timestamp, this.#ring.timestamp);
+		return this.#backpressure.wait(timestamp, this.#ring.timestamp, signal);
 	}
 
 	close(): void {
@@ -316,13 +332,13 @@ class PostAudioBuffer implements AudioBuffer {
 		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
 	}
 
-	wait(timestamp: Time.Micro): Promise<void> {
+	wait(timestamp: Time.Micro, signal: AbortSignal): Promise<void> {
 		// Stalled = still filling the floor (bootstrap, an underrun the reader re-stalled on, or an
 		// explicit reset): let frames through so the ring refills to the floor. See SharedAudioBuffer.
 		if (this.#stalled.peek()) return Promise.resolve();
 		// Uses the worklet-reported playhead, which lags by a state-message interval; the floor's
 		// headroom covers that. The worklet still drops the oldest if a frame slips through.
-		return this.#backpressure.wait(timestamp, this.#timestamp.peek());
+		return this.#backpressure.wait(timestamp, this.#timestamp.peek(), signal);
 	}
 
 	close(): void {
