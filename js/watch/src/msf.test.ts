@@ -156,3 +156,13 @@ test("unsupported optional text packaging keeps playable audio and video", () =>
 test("a text track with supported packaging still requires its codec", () => {
 	expect(() => toHang({ tracks: [{ name: "text", packaging: "loc", role: "caption" }] })).toThrow("missing codec");
 });
+
+test("unsupported text packaging is skipped before its codec is required", () => {
+	const catalog = toHang({ tracks: [{ name: "text", packaging: "future", role: "caption" }] });
+	expect(catalog.text).toBeUndefined();
+});
+
+test("a text track named __proto__ is kept as a rendition", () => {
+	const catalog = toHang({ tracks: [{ name: "__proto__", packaging: "loc", role: "caption", codec: "vtt" }] });
+	expect(Object.keys(catalog.text?.renditions ?? {})).toEqual(["__proto__"]);
+});
