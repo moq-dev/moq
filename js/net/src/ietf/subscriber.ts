@@ -24,7 +24,7 @@ import { type Cursor, Reader, type Stream, UnexpectedEnd } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Milli, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { ANNOUNCES, SlotMap, Slots } from "../util/limits.ts";
+import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -190,6 +190,7 @@ export class Subscriber {
 		solicit,
 		goaway,
 		grant,
+		limits = LIMITS,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -205,10 +206,12 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
+		/** How many live requests the peer may hold. */
+		limits?: Limits;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
-		this.#announced = new SlotMap(new Slots(ANNOUNCES, { quic, reason: "too many announcements" }));
+		this.#announced = new SlotMap(new Slots(limits.announces, { quic, reason: "too many announcements" }));
 		this.#cluster = cluster;
 		this.#hidden = hidden;
 		this.#solicit = solicit;

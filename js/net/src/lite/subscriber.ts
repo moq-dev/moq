@@ -27,7 +27,7 @@ import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
-import { ANNOUNCES, SlotMap, Slots } from "../util/limits.ts";
+import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -205,6 +205,7 @@ export class Subscriber {
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
 	 * @param goaway - Settles when the peer sends GOAWAY
 	 * @param grant - The union of our tokens' grants, which bounds what we subscribe to
+	 * @param limits - How many live requests the peer may hold
 	 *
 	 * @internal
 	 */
@@ -216,9 +217,10 @@ export class Subscriber {
 		peerSetup?: Signal<Setup | undefined>,
 		goaway?: GetPromise<Drain>,
 		grant?: Getter<Grant | undefined>,
+		limits: Limits = LIMITS,
 	) {
 		this.#quic = quic;
-		this.#announces = new Slots(ANNOUNCES, { quic, reason: "too many announcements" });
+		this.#announces = new Slots(limits.announces, { quic, reason: "too many announcements" });
 		this.version = version;
 		this.hop = hop;
 		this.#probe = probe;

@@ -14,7 +14,7 @@ import { type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
-import { Slots, SUBSCRIPTIONS } from "../util/limits.ts";
+import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -283,6 +283,7 @@ export class Publisher {
 		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
 		ready = Promise.resolve(),
+		limits = LIMITS,
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -300,9 +301,11 @@ export class Publisher {
 		grant?: Getter<Grant | undefined>;
 		/** Resolves once the setup tokens are answered (MoQ Auth). */
 		ready?: Promise<void>;
+		/** How many live requests the peer may hold. */
+		limits?: Limits;
 	}) {
 		this.#quic = quic;
-		this.#subscriptions = new Slots(SUBSCRIPTIONS, { quic, reason: "too many subscriptions" });
+		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
 		this.#grant = grant;
 		this.#ready = ready;
 		this.#session = session;

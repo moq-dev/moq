@@ -1,9 +1,15 @@
 import { Session, SessionCode } from "../error.ts";
 
-/** The most advertisements a peer may hold live on one session, as moq-net defaults. @internal */
-export const ANNOUNCES = 100_000;
-/** The most subscriptions a peer may hold live on one session, as moq-net defaults. @internal */
-export const SUBSCRIPTIONS = 10_000;
+/** How many live requests a peer may hold on one session, as moq-net's `session::Limits`. @internal */
+export interface Limits {
+	/** Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us. */
+	announces: number;
+	/** Subscriptions the peer may hold on our broadcasts, a TRACK stream sharing one with its SUBSCRIBE. */
+	subscriptions: number;
+}
+
+/** moq-net's default limits. @internal */
+export const LIMITS: Readonly<Limits> = Object.freeze({ announces: 100_000, subscriptions: 10_000 });
 
 /** A session's count of live peer requests, which closes the session past its cap. @internal */
 export class Slots {

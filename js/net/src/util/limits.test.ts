@@ -1,10 +1,9 @@
 import { expect, mock, test } from "bun:test";
 import { SessionCode } from "../error.ts";
-import { ANNOUNCES, Interests, SlotMap, Slots, SUBSCRIPTIONS } from "./limits.ts";
+import { Interests, LIMITS, SlotMap, Slots } from "./limits.ts";
 
 test("the session defaults match moq-net", () => {
-	expect(ANNOUNCES).toBe(100_000);
-	expect(SUBSCRIPTIONS).toBe(10_000);
+	expect(LIMITS).toEqual({ announces: 100_000, subscriptions: 10_000 });
 });
 
 test("a full budget closes the session, and released slots can be used again", () => {

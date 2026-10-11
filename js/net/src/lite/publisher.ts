@@ -14,7 +14,7 @@ import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
-import { Interests, Slots, SUBSCRIPTIONS } from "../util/limits.ts";
+import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -424,6 +424,7 @@ export class Publisher {
 	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
 	 * @param auth - The union of our tokens' grants, which bounds what we publish, and when the
 	 *   setup tokens are answered
+	 * @param limits - How many live requests the peer may hold
 	 *
 	 * @internal
 	 */
@@ -433,9 +434,10 @@ export class Publisher {
 		hop: Hop,
 		publish?: OriginConsumer,
 		auth?: { grant: Getter<Grant | undefined>; ready: Promise<void> },
+		limits: Limits = LIMITS,
 	) {
 		this.#quic = quic;
-		this.#interests = new Interests(new Slots(SUBSCRIPTIONS, { quic, reason: "too many subscriptions" }));
+		this.#interests = new Interests(new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" }));
 		this.#grant = auth?.grant;
 		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
