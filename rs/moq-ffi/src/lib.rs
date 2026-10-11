@@ -38,19 +38,19 @@ pub mod video;
 
 uniffi::setup_scaffolding!("moq");
 
-/// Stop the runtime thread before the host runtime goes away.
+/// Stop the runtime workers before the host runtime goes away.
 ///
 /// Every task is dropped, so a call parked on the runtime resolves `Cancelled` and so does any
 /// later one; the handles stay safe to use and drop. This is for process exit, not a reset.
 ///
-/// It exists because the runtime thread calls back into the host to wake an awaiting future,
+/// It exists because the runtime workers call back into the host to wake an awaiting future,
 /// and CPython (before 3.14) terminates a foreign thread that touches the interpreter once
 /// finalization has begun, by `pthread_exit`, whose forced unwind cannot pass through Rust
 /// frames and aborts the process. The Python binding calls this from `atexit`, which runs
-/// before finalization, so the thread finishes its current callback and never starts another.
+/// before finalization, so every worker finishes its current callback and never starts another.
 /// A plain C symbol rather than a uniffi export: no other binding kills threads this way.
 ///
-/// Call it from a host thread. A callback running on the runtime thread would wait on itself.
+/// Call it from a host thread. A callback running on a runtime worker would wait on itself.
 #[cfg(not(target_arch = "wasm32"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_ffi_shutdown() {
