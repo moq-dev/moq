@@ -18,8 +18,10 @@ ranges can't be expressed on an older upstream wire, subscribe from group 0
 and filter locally; lite-03 to 05 must send an explicit group 0, since the
 codec folds 0 to absent (`encode_start_group`), which they read as the latest
 group. moq-transport's relative offsets differ by one: draft-20
-`Relative(0)` is the next group and `Relative(1)` the current one, so a
-`Relative(n)` start maps to draft-20 `Relative(n + 1)`. Live keeps today's
+`Relative(0)` is the next group and `Relative(1)` the current one, so an
+open-ended `Relative(n)..` maps to draft-20 `Relative(n + 1)`. That filter
+has no end, so a range with a bounded end resolves both bounds against the
+Largest Object and goes upstream as an absolute range. Live keeps today's
 join, `NextObject` plus a `Relative(1)` fill on draft-20+ or a relative
 joining FETCH on older drafts (`ietf::subscriber::subscribe_join`), so the
 current group's existing prefix still arrives. A relative end resolves
