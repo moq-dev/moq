@@ -730,3 +730,43 @@ async fn history_after_expiry(finished: bool) {
 	let _ = serving.await;
 	let _ = driver.await;
 }
+
+/// Retention prunes a recording's first timeline objects, so history mode refuses it before
+/// listing anything rather than starting from a later checkpoint.
+#[tokio::test(start_paused = true)]
+async fn history_mode_refuses_a_retained_recording() {
+	let recording = bounded_segments(12).await;
+	for track in recording.timelines().values() {
+		for segment in 0..4 {
+			let key = moq_archive::Key::segments(track, segment).unwrap();
+			recording.store.delete(&key).await.unwrap();
+		}
+	}
+	let replay = Replay::open_with(
+		&recording,
+		64 * 1024 * 1024,
+		durable(),
+		Config {
+			history: true,
+			..Config::default()
+		},
+	)
+	.await;
+	for (kind, name) in [(Kind::Video, "360p"), (Kind::Video, "1080p"), (Kind::Audio, "audio")] {
+		let snapshot = replay.rendition(kind, name).snapshot();
+		assert!(
+			snapshot.segments.is_empty(),
+			"{name} listed {} segments",
+			snapshot.segments.len()
+		);
+		assert!(snapshot.finished, "{name} playlist must end");
+	}
+
+	let broadcast = replay._origin.consume().request_broadcast("rec", None).await.unwrap();
+	let reference = Arc::new((Kind::Video, "1080p".to_string()));
+	let fanout = renditions::Producer::new(Config::default().window).fanout();
+	let err = history::watch(&broadcast, &durable(), &reference, &fanout)
+		.await
+		.unwrap_err();
+	assert!(matches!(err, crate::Error::HistoryPruned(_)), "{err}");
+}

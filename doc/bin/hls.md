@@ -41,7 +41,8 @@ A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
 same window as a live broadcast by default. `export::Config::history` includes
 earlier timeline groups even after replay-cache eviction: the exporter FETCHes
 missing groups from the Reader's stored timeline objects before following live
-edits. Missing or unreadable stored history ends that export with an error.
+edits. Missing or unreadable stored history ends that export with an error,
+and so does a recording whose start was pruned by retention.
 
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers. See `moq export hls --help`.

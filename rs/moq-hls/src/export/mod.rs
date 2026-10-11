@@ -88,7 +88,8 @@ pub struct Config {
 	/// the window, since their segments leave the relay cache.
 	///
 	/// Durable history reads retained timeline groups from the beginning, including records older
-	/// than the checkpoint a live join receives. Live playlists keep their bounded join.
+	/// than the checkpoint a live join receives. Live playlists keep their bounded join. A
+	/// recording whose start was pruned by retention is refused with [`crate::Error::HistoryPruned`].
 	pub history: bool,
 }
 

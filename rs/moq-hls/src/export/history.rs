@@ -37,7 +37,14 @@ pub(super) async fn watch(
 			let mut group = if head.as_ref().is_some_and(|group| group.sequence == next) {
 				head.take().unwrap()
 			} else {
-				track.fetch_group(next, None).await?
+				match track.fetch_group(next, None).await {
+					Ok(group) => group,
+					// Retention prunes a recording's start, which this path cannot list from yet.
+					Err(moq_net::Error::NotFound) if next == 0 => {
+						return Err(crate::Error::HistoryPruned(name.clone()));
+					}
+					Err(err) => return Err(err.into()),
+				}
 			};
 			let mut decoded = decoder.group();
 			while let Some(frame) = group.read_frame().await? {
