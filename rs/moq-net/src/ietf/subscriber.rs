@@ -2988,7 +2988,11 @@ where
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = producer.abort(err);
 			}
-			Err(err @ Error::Decode(DecodeError::MessageTooLarge { .. })) => {
+			Err(
+				err @ (Error::Unsupported
+				| Error::Session(SessionError::ProtocolViolation)
+				| Error::Decode(DecodeError::MessageTooLarge { .. })),
+			) => {
 				let _ = producer.abort(err.clone());
 				// Return the refusal to the dispatcher so it sends STOP_SENDING.
 				return Err(err);
@@ -3198,14 +3202,19 @@ where
 		// has a hole at the front. Drop it before a group exists and resume at the next
 		// group, the same as a publisher that no longer holds the head.
 		//
+		// Drafts 14-17 have no FIRST_OBJECT bit, so only a non-zero first ID marks the
+		// hole there; a stream with no object is an empty group.
+		//
 		// A fill we asked for is the exception: its fetch stream is carrying the head
 		// this tail stitches onto. So is the group a resumed subscription asked to start
 		// partway through, whose head came from another route.
-		if !header.flags.first_object
-			&& !fill.read().outstanding()
-			&& resume.is_none()
-			&& first.is_none_or(|first| first.id != 0)
-		{
+		let headless = match self.version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				first.is_some_and(|first| first.id != 0)
+			}
+			_ => !header.flags.first_object && first.is_none_or(|first| first.id != 0),
+		};
+		if headless && !fill.read().outstanding() && resume.is_none() {
 			tracing::debug!(
 				track_alias = %header.track_alias,
 				group = %header.group_id,
@@ -7457,7 +7466,7 @@ fn next_object_id(prior: Option<u64>, delta: u64, start: u64) -> Result<u64, Err
 		Some(prior) => prior
 			.checked_add(delta)
 			.and_then(|id| id.checked_add(1))
-			.ok_or(Error::Decode(crate::coding::DecodeError::BoundsExceeded))?,
+			.ok_or(Error::Session(SessionError::ProtocolViolation))?,
 	};
 
 	let expected = prior.map_or(start, |prior| prior.saturating_add(1));
@@ -7516,7 +7525,10 @@ mod object_id_tests {
 	/// rather than something to wrap.
 	#[test]
 	fn rejects_an_overflow() {
-		assert!(next_object_id(Some(u64::MAX), 0, 0).is_err());
+		assert!(matches!(
+			next_object_id(Some(u64::MAX), 0, 0),
+			Err(Error::Session(SessionError::ProtocolViolation))
+		));
 	}
 }
 
@@ -8036,6 +8048,82 @@ mod stitch_tests {
 
 		tailing.await.expect("tail");
 		settled.await;
+	}
+
+	/// A gap is refused without swallowing the error the stream dispatcher needs.
+	#[moq_net_sim::test]
+	async fn a_gapped_object_leaves_the_track_flowing() {
+		let mut gapped = tail_stream(SEQUENCE, 0, &[b"head"]);
+		crate::coding::Encoder::new(&mut gapped, VERSION.into())
+			.varint(1u64)
+			.unwrap();
+		let h = Harness::new(Fill::Done, vec![gapped, tail_stream(SEQUENCE + 1, 0, &[b"ok"])]);
+		let mut consumer = h.track.subscribe(None);
+		let mut stream = h.stream().await;
+		let result = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(result, Err(Error::Unsupported)), "{result:?}");
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		assert_eq!(read_group(&mut consumer).await.1[0].1, b"ok");
+		assert!(h.session.log.closes().is_empty());
+	}
+
+	#[moq_net_sim::test]
+	async fn an_overflowing_object_id_reaches_session_teardown() {
+		let mut bytes = tail_stream(SEQUENCE, 0, &[b"head"]);
+		crate::coding::Encoder::new(&mut bytes, VERSION.into())
+			.varint(u64::MAX)
+			.unwrap();
+		let h = Harness::new(Fill::Done, vec![bytes]);
+		let mut stream = h.stream().await;
+		let result = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(
+			matches!(result, Err(Error::Session(crate::SessionError::ProtocolViolation))),
+			"{result:?}"
+		);
+	}
+
+	/// Drafts without FIRST_OBJECT still identify a headless stream by its first ID.
+	#[moq_net_sim::test]
+	async fn old_drafts_drop_a_headless_group_before_creating_it() {
+		for version in [Version::Draft14, Version::Draft16] {
+			let scripts = [2u64, 0]
+				.into_iter()
+				.enumerate()
+				.map(|(index, first)| {
+					let mut bytes = Vec::new();
+					ietf::GroupHeader {
+						track_alias: ALIAS,
+						group_id: SEQUENCE + index as u64,
+						sub_group_id: 0,
+						publisher_priority: 0,
+						flags: ietf::GroupFlags {
+							first_object: true,
+							..Default::default()
+						},
+					}
+					.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
+					.unwrap();
+					let mut encoder = crate::coding::Encoder::new(&mut bytes, version.into());
+					encoder.varint(first).unwrap();
+					encoder.varint(1u64).unwrap();
+					bytes.push(42);
+					bytes
+				})
+				.collect();
+			let mut h = Harness::with_timescale(Fill::Done, scripts, None);
+			h.subscriber.version = version;
+			let mut consumer = h.track.subscribe(None);
+			let mut stream = h.stream().await.with_version(version);
+			assert!(matches!(
+				h.subscriber.clone().recv_group(&mut stream).await,
+				Err(Error::Unsupported)
+			));
+			assert_eq!(h.track.latest(), None);
+			let mut stream = h.stream().await.with_version(version);
+			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+			assert_eq!(read_group(&mut consumer).await, (SEQUENCE + 1, vec![(None, vec![42])]));
+		}
 	}
 
 	/// A subgroup 1 stream costs only itself: the track's subgroup 0 stream still arrives.

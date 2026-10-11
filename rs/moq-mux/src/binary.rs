@@ -790,7 +790,7 @@ mod test {
 		#[tokio::test]
 		async fn roundtrips_through_a_catalog_consumer() {
 			let (mut broadcast, catalog) = catalog();
-			let source = crate::source::announced(&broadcast.consume());
+			let source = crate::source::announced(&broadcast.consume()).await;
 			let mut consumer = catalog.consume().unwrap();
 
 			let mut telemetry = catalog

@@ -89,6 +89,13 @@ jobs:
           tar -xzf "dist/moq-gst-v${VERSION}-${TARGET}.tar.gz" -C dist/
           just rs gst-smoke "dist/moq-gst-v${VERSION}-${TARGET}/lib/gstreamer-1.0"
 
+      - name: Test Homebrew formula against tarball
+        if: runner.os == 'macOS'
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: just gh gst-formula "$VERSION" "$TARGET" dist
+
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
