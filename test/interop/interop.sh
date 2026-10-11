@@ -1066,7 +1066,13 @@ PYCODE
     then
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
-        echo "  PASS  CLI FETCH (group 0; 262144 bytes)"
+        if grep -qx 'tail acknowledged' "$HARNESS_RUN/$name-pub.log"; then
+            echo "  PASS  CLI FETCH (group 0; 262144 bytes)"
+        else
+            echo "  FAIL  CLI FETCH (publisher did not acknowledge)"
+            overall=1
+            cat "$HARNESS_RUN/$name-pub.log"
+        fi
     else
         echo "  FAIL  CLI FETCH"
         overall=1
