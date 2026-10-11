@@ -59,6 +59,7 @@ on:
       - release-winget
       - rpm-repo
       - Swift
+      - TS
       - Video
     types:
       - completed

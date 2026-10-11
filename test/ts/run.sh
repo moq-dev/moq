@@ -29,7 +29,7 @@
 # checks can see *when* the exporter handed the bytes over. pcr-timing.py reads
 # the subscriber's stdout a packet at a time and stamps each read, so it grades
 # release timing and byte position alongside the values. Nightly runs this arm
-# (.github/workflows/nightly.yml); it is not a per-PR gate, because it needs a
+# (.github/workflows/ts.yml); it is not a per-PR gate, because it needs a
 # real-time window to measure at all.
 #
 # `--pair` changes the rig rather than the analyzer: it subscribes twice to one
@@ -46,6 +46,8 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 # Run directory, reserved ports, and process-group ownership. See test/README.md.
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$DIR/../lib/harness.sh"
+# shellcheck source-path=SCRIPTDIR source=process.sh
+source "$DIR/process.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries the
 # source capture, mux rate, EIT fixture, and analyzer thresholds this run used,
@@ -196,7 +198,7 @@ require_tools() {
     done
     # ffmpeg + cargo are only needed for the round-trip, not for --analyze-only.
     if [[ -z "$ANALYZE_ONLY" ]]; then
-        for t in cargo ffmpeg curl timeout; do have "$t" || missing+=("$t"); done
+        for t in cargo ffmpeg ffprobe curl timeout; do have "$t" || missing+=("$t"); done
     fi
     # The EIT fixture reads the service triplet out of the stream and may need to pad a
     # stuffing-free clip to make room for the table.
@@ -214,9 +216,10 @@ analyze() {
     # Single source of truth for the verdict: compliance.py runs the TSDuck
     # tools itself and prints the PASS/WARN/FAIL summary. A second argument is
     # the source TS, which enables the duration-fidelity check (round-trip only).
-    local ref=()
+    local ref=() report=()
+    [[ -n "${HARNESS_RUN:-}" ]] && report=(--report-json "$HARNESS_RUN/compliance.json")
     [[ -n "${2:-}" ]] && ref=(--reference "$2")
-    python3 "$DIR/compliance.py" --ts "$1" ${ref[@]+"${ref[@]}"} $STRICT ${PASSTHRU[@]+"${PASSTHRU[@]}"}
+    python3 "$DIR/compliance.py" --ts "$1" ${ref[@]+"${ref[@]}"} ${report[@]+"${report[@]}"} $STRICT ${PASSTHRU[@]+"${PASSTHRU[@]}"}
 }
 
 require_tools
@@ -235,6 +238,9 @@ fi
 # Only the round-trip stands anything up, so `--analyze-only` above needs no run
 # directory, no reserved port, and nothing to reap.
 harness_begin ts "$RERUN"
+ffmpeg -version >"$HARNESS_RUN/ffmpeg-version.txt"
+ffprobe -version >"$HARNESS_RUN/ffprobe-version.txt"
+tsp --version >"$HARNESS_RUN/tsduck-version.txt" 2>&1
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
@@ -427,7 +433,7 @@ echo "### publishing PCR-paced TS -> $BROADCAST"
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 publish() {
     # shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
-    timeout -k 3 $((DURATION + 20)) bash -c '
+    timeout -k 3 $((DURATION + 20)) bash -o pipefail -c '
         tsp -I file "$1" -P regulate --pcr-synchronous --wait-min 5 |
             "$2" --connect "$3" --broadcast "$4" import ts
     ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST"
@@ -435,17 +441,17 @@ publish() {
 harness_spawn pub "$HARNESS_RUN/pub.log" publish
 PUB_PID="$HARNESS_PID"
 
-# Keep the publisher's exit status: `timeout` returns 124 when it had to kill a
-# stalled `moq import ts`, non-zero/non-124 means the import itself errored. Both
-# explain a truncated capture, so surface it alongside the logs on failure.
-harness_wait "$PUB_PID" && PUB_RC=0 || PUB_RC=$?
-
 # shellcheck disable=SC2329  # invoked from multiple failure paths below
 dump_logs() {
-    echo "  publisher exit status: $PUB_RC" >&2
+    cat "$HARNESS_RUN/process-status.log" >&2 || true
     sed 's/^/  pub: /' "$HARNESS_RUN/pub.log" >&2 || true
     sed 's/^/  sub: /' "$HARNESS_RUN/sub.log" >&2 || true
 }
+
+if ! ts_wait "$PUB_PID" publisher; then
+    dump_logs
+    exit 1
+fi
 
 # ── live: the grader owns the verdict ───────────────────────────────────────
 if [[ -n "$LIVE" ]]; then
@@ -458,16 +464,13 @@ if [[ -n "$LIVE" ]]; then
     read -r EXPORT_RC GRADE_RC <"$HARNESS_RUN/timing.rc"
     echo
     cat "$HARNESS_RUN/timing.out"
-    # 124 is `timeout` reaching the end of the window, which is how the exporter is
-    # meant to stop; SIGPIPE (141) is the grader closing the pipe on its own window.
-    # Anything else ended the stream under the grader, so say so: it graded a
-    # shorter window than it was asked for, and the report alone doesn't show that.
-    # Not fatal, because the grader's verdict on what it did see is still the
-    # verdict, and a short window can only make the sample smaller, not kinder.
-    if [[ "$EXPORT_RC" -ne 0 && "$EXPORT_RC" -ne 124 && "$EXPORT_RC" -ne 141 ]]; then
+    # SIGPIPE is expected when the live grader closes a completed measurement
+    # window. A timeout or another failure is not a successful export.
+    if [[ "$EXPORT_RC" -ne 0 && "$EXPORT_RC" -ne 141 ]]; then
         echo >&2
-        echo "warning: the exporter exited $EXPORT_RC before the window closed" >&2
-        sed 's/^/  sub: /' "$HARNESS_RUN/sub.log" >&2 || true
+        echo "error: the exporter exited $EXPORT_RC before the window closed" >&2
+        dump_logs
+        exit 1
     fi
     if [[ "$GRADE_RC" -ne 0 ]]; then
         echo >&2
@@ -475,23 +478,15 @@ if [[ -n "$LIVE" ]]; then
         dump_logs
         exit "$GRADE_RC"
     fi
-    # The grader's verdict is not the whole run. It grades whatever reached it, and
-    # the sample floor only rejects a window that came up short: a publisher that
-    # dies late still leaves enough behind to pass every check. That is a broken
-    # round-trip reported as a good one, so the publisher's own status is a gate
-    # too. 124 is `timeout` killing a stalled `moq import ts`, which is a failure
-    # of the same kind rather than a clean end, so it is not excused here.
-    if [[ "$PUB_RC" -ne 0 ]]; then
-        echo >&2
-        echo "error: the publisher exited $PUB_RC; the graded stream is not a whole round-trip" >&2
-        dump_logs
-        exit 1
-    fi
     exit 0
 fi
 
-sleep 3
-harness_reap "$SUB_PID"
+# Let the exporter drain to EOF within its existing timeout. Killing it after a
+# sleep can both truncate a valid tail and conceal an earlier process failure.
+if ! ts_wait "$SUB_PID" exporter; then
+    dump_logs
+    exit 1
+fi
 
 if [[ ! -s "$SUB_TS" ]]; then
     echo "error: subscriber captured no data" >&2
@@ -501,7 +496,11 @@ fi
 
 # ── pair: the two captures are the measurement ──────────────────────────────
 if [[ -n "$PAIR" ]]; then
-    harness_reap "$SUB_B_PID"
+    if ! ts_wait "$SUB_B_PID" exporter-b; then
+        dump_logs
+        cat "$HARNESS_RUN/sub-b.log" >&2
+        exit 1
+    fi
     if [[ ! -s "$SUB_B_TS" ]]; then
         echo "error: the second subscriber captured no data" >&2
         sed 's/^/  sub-b: /' "$HARNESS_RUN/sub-b.log" >&2 || true
@@ -510,19 +509,11 @@ if [[ -n "$PAIR" ]]; then
     fi
     echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') + $(wc -c <"$SUB_B_TS" | tr -d ' ') bytes -> comparing table anchors"
     echo
-    if ! python3 "$DIR/table-anchor.py" "$SUB_TS" "$SUB_B_TS" $STRICT \
+    if ! python3 "$DIR/table-anchor.py" "$SUB_TS" "$SUB_B_TS" --report-json "$HARNESS_RUN/table-anchor.json" $STRICT \
         ${PASSTHRU[@]+"${PASSTHRU[@]}"}; then
         echo >&2
         echo "error: table anchor analysis failed (see round-trip logs below)" >&2
         sed 's/^/  sub-b: /' "$HARNESS_RUN/sub-b.log" >&2 || true
-        dump_logs
-        exit 1
-    fi
-    # As in --live: a grader can only speak for what reached it, so a publisher that
-    # died mid-run must not be reported as a clean pair.
-    if [[ "$PUB_RC" -ne 0 ]]; then
-        echo >&2
-        echo "error: the publisher exited $PUB_RC; the graded pair is not a whole round-trip" >&2
         dump_logs
         exit 1
     fi
@@ -534,6 +525,15 @@ if [[ -n "$CAPTURE_OUT" ]]; then
 fi
 
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
+
+# The initial decoded-content profile is the generated closed-GOP H.264/AAC
+# pair. Other arms retain their specific structural/model oracles until their
+# acquisition and decoder-priming contracts are covered by fixtures.
+if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM" ]]; then
+    python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"
+else
+    echo "decoded-content comparison: not covered for this profile"
+fi
 
 # Which SI survived the round-trip. Informational: the exporter rebuilds SI from the
 # catalog, so a PID the import path does not route simply is not there, and that is a
@@ -580,7 +580,7 @@ fi
 # capture goes through pcr-timing.py as well. Its hard checks gate here as they do under
 # --live, and so does pcr-schedule when the rate is known (SCHEDULE).
 echo
-if ! python3 "$DIR/pcr-timing.py" "$SUB_TS" ${SCHEDULE[@]+"${SCHEDULE[@]}"} $STRICT; then
+if ! python3 "$DIR/pcr-timing.py" "$SUB_TS" --report-json "$HARNESS_RUN/pcr-timing.json" ${SCHEDULE[@]+"${SCHEDULE[@]}"} $STRICT; then
     echo >&2
     echo "error: PCR timing analysis failed (see round-trip logs below)" >&2
     dump_logs
@@ -595,11 +595,7 @@ if [[ ${#SCHEDULE[@]} -gt 0 ]]; then
     echo
     echo "### PCR accuracy (tsp -P pcrverify, +/-500 ns at ${BITRATE} b/s)"
     SKIP=$((3 * BITRATE / 8 / 188))
-    tsp -I file "$SUB_TS" -P skip "$SKIP" -P pcrverify --bitrate "$BITRATE" --absolute --jitter-max 13 \
-        -O drop >"$HARNESS_RUN/pcrverify.log" 2>&1 || true
-    VERDICT=$(grep -E "PCR OK, " "$HARNESS_RUN/pcrverify.log" | tail -1)
-    echo "  ${VERDICT:-no verdict}"
-    if [[ ! "$VERDICT" =~ ([0-9,]+)\ PCR\ OK,\ 0\ with ]]; then
+    if ! python3 "$DIR/accuracy.py" "$SUB_TS" --bitrate "$BITRATE" --skip "$SKIP" --log "$HARNESS_RUN/pcrverify.log"; then
         echo >&2
         echo "error: PCRs stray from their byte position (see $HARNESS_RUN/pcrverify.log)" >&2
         dump_logs
