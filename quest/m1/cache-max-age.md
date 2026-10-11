@@ -126,7 +126,7 @@ encoding change; Max Age semantics in the lite draft change.
 
 ## Related
 
-- [lite-07 Live flag](/quest/m1/lite-live.md) - its untimed `Live` start (the latest group) follows this rule instead: replay what is not stale
+- [Model ranges](/quest/m1/subscribe-ranges/model.md) - an untimed `Absolute(0)..` range follows this rule: replay what is not stale
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors the failover rule in JS
 - [Generated @moq/net](/quest/m1/rs2ts/README.md) - retires js/net's hand-written model
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - applies the shared rule to historical requests and reconciles native IETF retention clocks
