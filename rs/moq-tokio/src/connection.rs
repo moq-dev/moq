@@ -869,32 +869,22 @@ impl Connection {
 					let (ended, tenure) = loop {
 						let next = run_session(shared, &session, &mut draining, &mut upgrade).await;
 						let tenure = connected.elapsed();
-						#[cfg(all(feature = "websocket", feature = "noq"))]
-						let next = if tenure < initial
-							&& upgrade.is_some() && let Next::Ended(Ended::Closed(result)) = next
-						{
+						let transport = match next {
 							// A short-lived fallback has not won the race against the QUIC
 							// attempt we already started. Its existing connect deadline bounds
 							// this wait, including in one-shot mode.
-							shared.clear_session();
-							match finish_upgrade(shared, &mut upgrade, &mut draining).await {
-								Ok((next, transport)) => Next::Upgraded(next, transport),
-								Err(quic) => Next::Ended(Ended::Closed(Err(crate::client::race_error(
-									quic,
-									result.err().unwrap_or_else(|| moq_net::Error::Cancel.into()),
-								)))),
+							#[cfg(all(feature = "websocket", feature = "noq"))]
+							Next::Ended(Ended::Closed(closed)) if tenure < initial && upgrade.is_some() => {
+								match finish_upgrade(shared, &mut upgrade, &mut draining, closed).await {
+									Ok((next, transport)) => {
+										session = next;
+										transport
+									}
+									Err(err) => break (Ended::Closed(Err(err)), tenure),
+								}
 							}
-						} else {
-							next
-						};
-						match next {
 							Next::Ended(ended) => break (ended, tenure),
 							Next::Upgraded(next, transport) => {
-								tracing::info!(peer = %Endpoint(&url), %transport, "upgraded from WebSocket");
-								// UDP gets through after all, so the next dial gives QUIC its head start.
-								#[cfg(feature = "websocket")]
-								crate::websocket::forget(&url);
-
 								// The same handover as a peer's GOAWAY, initiated by us: the new session
 								// is live, and the old one serves until its routes splice over at a group
 								// boundary or the cap closes it.
@@ -910,13 +900,18 @@ impl Connection {
 									old.retire();
 								}
 								draining = Some(Draining::new(old, goaway.handover, &shared.state));
-								// Score the WebSocket tenure like any session's, so a QUIC session that
-								// drops right away retries in a fresh window, not one that opened
-								// before WebSocket served.
-								retry.settle(tenure, initial);
-								connected = tokio::time::Instant::now();
+								transport
 							}
-						}
+						};
+						tracing::info!(peer = %Endpoint(&url), %transport, "upgraded from WebSocket");
+						// UDP gets through after all, so the next dial gives QUIC its head start.
+						#[cfg(feature = "websocket")]
+						crate::websocket::forget(&url);
+						// Score the WebSocket tenure like any session's, so a QUIC session that
+						// drops right away retries in a fresh window, not one that opened
+						// before WebSocket served.
+						retry.settle(tenure, initial);
+						connected = tokio::time::Instant::now();
 					};
 					// Any upgrade still coming up is dropped with the session it was replacing.
 					shared.upgrading(None);
@@ -1537,18 +1532,33 @@ async fn run_session(
 	.await
 }
 
-/// Finish a dial after its fallback closes, still enforcing the predecessor's handover cap.
+/// Finish a closed fallback's pending dial, still enforcing the predecessor's handover
+/// cap, and install it as the live session. Nothing serves in between, so unlike an
+/// upgrade there is no fallback to send GOAWAY or drain. A failed dial folds both
+/// arms' errors as the original race does.
 #[cfg(all(feature = "websocket", feature = "noq"))]
 async fn finish_upgrade(
 	shared: &Shared,
 	upgrade: &mut Option<crate::client::Upgrade>,
 	draining: &mut Option<Draining>,
+	closed: crate::Result<()>,
 ) -> crate::Result<(moq_net::Session, crate::Transport)> {
-	kio::wait(|waiter| {
+	shared.clear_session();
+	let finished = kio::wait(|waiter| {
 		poll_draining(draining, waiter);
 		poll_upgrade(shared, upgrade, waiter)
 	})
-	.await
+	.await;
+	match finished {
+		Ok((session, transport)) => {
+			shared.connected(&session, transport);
+			Ok((session, transport))
+		}
+		Err(quic) => Err(crate::client::race_error(
+			quic,
+			closed.err().unwrap_or_else(|| moq_net::Error::Cancel.into()),
+		)),
+	}
 }
 
 /// Drive a pending upgrade, `Ready` with the QUIC session once the peer's SETUP arrives.
@@ -2571,7 +2581,7 @@ mod tests {
 		));
 		let deadline = draining.as_ref().unwrap().deadline.deadline();
 		let waiter = kio::Waiter::noop();
-		let mut finishing = std::pin::pin!(finish_upgrade(&shared, &mut upgrade, &mut draining));
+		let mut finishing = std::pin::pin!(finish_upgrade(&shared, &mut upgrade, &mut draining, Ok(())));
 		assert!(waiter.poll_future(finishing.as_mut()).is_pending());
 		assert!(shared.state.consume().read().predecessor.is_some());
 		// Await the paused clock's timer driver, not only its clock adjustment.
@@ -2581,6 +2591,51 @@ mod tests {
 			shared.state.consume().read().predecessor.is_none(),
 			"pending QUIC kept the predecessor past its cap"
 		);
+	}
+
+	/// A closed fallback's dial takes over with nothing to drain, so a close racing
+	/// the takeover cannot wait on the dead fallback and return its error.
+	#[cfg(all(feature = "tcp", feature = "websocket", feature = "noq"))]
+	#[tokio::test]
+	async fn closed_fallback_takes_over_without_a_predecessor() {
+		let (mut server, url) = live().await;
+		let client = client().with_reconnect(false);
+		let mut held = Vec::new();
+		let mut sessions = Vec::new();
+		for _ in 0..2 {
+			let (connection, request) = tokio::join!(client.connect(url.clone()).established(), server.accept());
+			let connection = connection.unwrap();
+			sessions.push(connection.state.read().session.clone().unwrap());
+			held.push((connection, request.unwrap().ok().await.unwrap()));
+		}
+		let quic = sessions.pop().unwrap();
+		let fallback = sessions.pop().unwrap();
+
+		let shared = shared();
+		shared.connected(&fallback, crate::Transport::WebSocket);
+		fallback.abort(moq_net::Error::Unauthorized);
+		let handshake: crate::client::Handshake = Box::pin(async move { Ok(quic) });
+		let mut upgrade = Some(crate::client::Upgrade::new(
+			Box::pin(async move { Ok(handshake) }),
+			crate::Transport::WebTransport,
+		));
+		let mut draining = None;
+		let closed = Err(moq_net::Error::Unauthorized.into());
+		let (_, transport) = finish_upgrade(&shared, &mut upgrade, &mut draining, closed)
+			.await
+			.unwrap();
+		assert_eq!(transport, crate::Transport::WebTransport);
+
+		// The state a close woken by `Connected` reads.
+		let state = shared.state.consume();
+		let state = state.read();
+		assert_eq!(state.status, Some(Status::Connected));
+		assert_eq!(state.transport, Some(crate::Transport::WebTransport));
+		assert!(
+			state.predecessor.is_none(),
+			"the closed fallback was published as a predecessor"
+		);
+		assert!(draining.is_none());
 	}
 
 	/// The upgrade reports [`Status::Migrating`] while the MoQ handshake runs on the
@@ -2971,9 +3026,14 @@ mod tests {
 					.expect("pending QUIC dial never took over")
 					.expect("connection ended before pending QUIC dial");
 			}
-			let (transport, _) = fallback.accept().await;
+			let (transport, _quic) = fallback.accept().await;
 			assert_eq!(transport, crate::Transport::WebTransport);
 			assert_eq!(connection.epoch(), 2);
+			// The dead fallback's error does not leak into closing the QUIC session.
+			tokio::time::timeout(UPGRADE_WAIT, connection.close())
+				.await
+				.expect("close never finished")
+				.expect("close returned the closed fallback's error");
 		}
 	}
 
