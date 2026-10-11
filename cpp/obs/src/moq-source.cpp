@@ -672,16 +672,13 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 	const auto decoded = track->video_decoder ? moq_source_decode_frame(*track->video_decoder, **result)
 						  : moq_source_decode_audio_frame(*track->audio_decoder, **result);
 	if (decoded == Decoded::Failed) {
-		if (track == conn->pending_video) {
-			conn->pending_video.reset();
+		if (track == conn->pending_video || track == conn->pending_audio) {
+			moq_source_discard_candidate(conn, track);
 			return;
 		}
-		if (track == conn->pending_audio) {
-			conn->pending_audio.reset();
-			return;
-		}
+		// Stop only the failed audio track, so a pending replacement can still take over.
 		if (track == conn->audio) {
-			moq_source_clear_audio_locked(ctx);
+			conn->audio.reset();
 			return;
 		}
 	} else if (decoded == Decoded::Ready) {

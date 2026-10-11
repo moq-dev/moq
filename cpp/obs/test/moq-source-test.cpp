@@ -15,6 +15,7 @@
 // not part of the plugin build.
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -82,13 +83,27 @@ std::atomic<int> g_audio_frame_unrefs{0};
 // The bmalloc/bfree balance, so a frame buffer that outlives its decoder shows up
 // as a leak.
 std::atomic<long> g_live_allocs{0};
+
+// Candidate resolve and subscribe failures, logged under the source lock as the candidate
+// is released, so taking that lock afterwards observes the release.
+std::mutex g_candidate_mutex;
+std::condition_variable g_candidate_failed;
+int g_candidate_failures = 0;
 } // namespace
 
 extern "C" {
 
 // Deliberately silent: stdio locking would create happens-before edges between
-// the test thread and the source's worker and mask the races we're after.
-void blog(int, const char *, ...) {}
+// the test thread and the source's worker and mask the races we're after. Only a
+// candidate's resolve or subscribe failure synchronizes, so a scenario can wait on it.
+void blog(int, const char *format, ...)
+{
+	if (!strstr(format, "Failed to resolve") && !strstr(format, "Failed to subscribe"))
+		return;
+	std::lock_guard<std::mutex> lock(g_candidate_mutex);
+	g_candidate_failures++;
+	g_candidate_failed.notify_all();
+}
 
 void *bmalloc(size_t size)
 {
@@ -707,6 +722,55 @@ int main()
 				      : "video waits for decoded output");
 	}
 
+	// A malformed packet on the active audio track stops only that track; the pending
+	// replacement still takes over without another catalog update.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_audio > 0; }));
+		g_candidate_decode = 3;
+		moq::AudioInit init{};
+		init.format = moq::AudioFormat::kOpus;
+		init.data = TestOpusHead();
+		auto replacement = TestOk(
+			moq::MediaTrackProducer::audio(publisher.broadcast,
+						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
+			"replacement audio");
+		auto write = [&] {
+			TestOk(replacement->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, 1'000'000'000}),
+			       "replacement frame");
+			TestOk(replacement->cut(), "replacement audio cut");
+		};
+		CHECK(publisher.WriteUntil([&] {
+			write();
+			return g_candidate_attempts > 0;
+		}));
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			auto conn = ctx->connection;
+			auto active = conn->audio;
+			auto pending = conn->pending_audio;
+			CHECK(active && pending);
+			g_audio_send_result = AVERROR_INVALIDDATA;
+			moq::MediaFrame malformed{};
+			malformed.timestamp_us = 1;
+			moq_source_on_frame(ctx, conn, active, std::optional<moq::MediaFrame>(malformed));
+			g_audio_send_result = 0;
+			CHECK(!conn->audio);
+			CHECK(conn->pending_audio == pending);
+		}
+		g_candidate_decode = 0;
+		CHECK(publisher.WriteUntil([&] {
+			write();
+			return g_last_audio_timestamp == 1'000'000'000'000;
+		}));
+		destroySource(source);
+	}
+	report("failed active audio keeps pending replacement");
+
 	// The public publishing wrapper cannot author a sibling-reference catalog, so deliver
 	// that snapshot directly; resolution and subscription still cross the real relay.
 	for (bool sibling : {false, true}) {
@@ -728,15 +792,24 @@ int main()
 		snapshot->video.clear();
 		snapshot->video.emplace("!unavailable", config);
 		auto *ctx = static_cast<moq_source *>(source);
+		int failures = 0;
+		{
+			std::lock_guard<std::mutex> lock(g_candidate_mutex);
+			failures = g_candidate_failures;
+		}
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
 			moq_source_subscribe_video(ctx, ctx->connection, *snapshot);
 			CHECK(ctx->connection->pending_video != nullptr);
 		}
-		CHECK(WaitFor([&] {
+		{
+			std::unique_lock<std::mutex> lock(g_candidate_mutex);
+			g_candidate_failed.wait(lock, [&] { return g_candidate_failures > failures; });
+		}
+		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
-			return ctx->connection && !ctx->connection->pending_video;
-		}));
+			CHECK(ctx->connection && !ctx->connection->pending_video);
+		}
 		const int frames = g_output_frames;
 		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
 		destroySource(source);
