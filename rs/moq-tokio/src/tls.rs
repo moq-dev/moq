@@ -90,7 +90,7 @@ pub enum Error {
 	)]
 	DisableVerifyWithTrust,
 
-	/// The configured host name override is not a valid DNS name or IP address.
+	/// A TLS server name, from the URL host or the host name override, is not a valid DNS name or IP address.
 	#[error("invalid TLS host name: {0}")]
 	InvalidHostName(String),
 
@@ -632,6 +632,14 @@ struct ConnectDeprecated {
 	client_host_name: Option<String>,
 }
 
+/// Refuse a TLS server name no handshake can use, so a dial fails before it connects rather than on every retry.
+pub(crate) fn server_name(name: &str) -> Result<()> {
+	match rustls::pki_types::ServerName::try_from(name) {
+		Ok(_) => Ok(()),
+		Err(_) => Err(Error::InvalidHostName(name.to_string())),
+	}
+}
+
 /// The last valid contents of a set of custom root files.
 ///
 /// Quiche consumes concrete DER roots per connection, while rustls consumes a
@@ -956,7 +964,7 @@ impl Connect {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
 		if let Some(name) = &self.host_name {
-			rustls::pki_types::ServerName::try_from(name.as_str()).map_err(|_| Error::InvalidHostName(name.clone()))?;
+			server_name(name)?;
 		}
 		let reloadable_roots = cfg!(feature = "watch")
 			&& matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty());

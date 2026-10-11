@@ -350,6 +350,10 @@ impl NoqClient {
 		};
 		let port = url.port().unwrap_or(443);
 
+		// Use the configured host_name override for SNI + cert verification, else the URL host.
+		let host_name = self.host_name.clone().unwrap_or(host);
+		crate::tls::server_name(&host_name)?;
+
 		// Resolve, adapted to the local socket's family; the dial below races the
 		// answers Happy Eyeballs style as they land, so neither a broken family nor a
 		// lookup still waiting on its AAAA record can stall the connect.
@@ -410,9 +414,6 @@ impl NoqClient {
 		config.transport_config(self.transport.clone());
 
 		tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting");
-
-		// Use the configured host_name override for SNI + cert verification, else the URL host.
-		let host_name = self.host_name.clone().unwrap_or(host);
 
 		// Race only the QUIC handshake: the winner alone performs the WebTransport
 		// CONNECT below, so the server sees a single request no matter how many

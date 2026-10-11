@@ -35,6 +35,10 @@ pub enum Error {
 	#[error("missing hostname")]
 	MissingHostname,
 
+	/// The TLS server name could not be used.
+	#[error(transparent)]
+	Tls(#[from] crate::tls::Error),
+
 	/// The URL scheme can't carry WebSocket. Only `http`, `https`, `ws`, and `wss` work.
 	#[error("unsupported URL scheme for WebSocket: {0}")]
 	UnsupportedScheme(String),
@@ -324,6 +328,15 @@ pub(crate) async fn connect(
 	let key = won_key(&url)?;
 	let (host, port) = key.clone();
 
+	// A secure dial presents this name on every attempt; the override was checked when the client was built.
+	if needs_tls && tls_host_name.is_none() {
+		match url.host() {
+			// URL brackets delimit IPv6 literals, but aren't part of the TLS server name.
+			Some(url::Host::Ipv6(ip)) => crate::tls::server_name(&ip.to_string())?,
+			_ => crate::tls::server_name(&host)?,
+		}
+	}
+
 	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
 	// unless we've already had to fall back to WebSockets for this server.
 	// TODO if let chain
@@ -476,6 +489,7 @@ impl Error {
 			| Self::UnsupportedScheme(_)
 			| Self::BuildRequest(_)
 			| Self::ProtocolHeader(_)
+			| Self::Tls(_)
 			| Self::ConnectRejected(_) => true,
 			Self::Failover(failures) => {
 				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
