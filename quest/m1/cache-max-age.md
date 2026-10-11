@@ -94,8 +94,12 @@ Facts, and work carried over:
   until the track ends; the replaced copy's lease stays alive too. The wall
   term convicts it. Settle what "nothing pending" means against the recovery
   fetch (`a_pending_recovery_fetch_does_not_disable_expiry`), so a fetch
-  about to fill the group isn't cut short. A FETCH reader has no budget and
-  stays as it is.
+  about to fill the group is still subject to its reader's deadline. Do not
+  make a pending fetch disable expiry. Decided in the 2026-10-10 audit:
+  FETCH also obeys publisher max-age and an optional reader max-delay;
+  omission uses the publisher's limit alone. This supersedes the old FETCH
+  exemption. [FETCH max-delay](/quest/m1/fetch-max-delay.md) owns that API,
+  request propagation and per-reader enforcement, building on this rule.
 - Start resolution: the untimed model starts an untimed track at the latest
   group (`TrackState::untimed_start`). Replace that special case with the
   normal rule, replaying the cached groups that aren't stale. Until then a
@@ -126,3 +130,4 @@ encoding change; Max Age semantics in the lite draft change.
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors the failover rule in JS
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - relay memory past the expiry window, in the same cache
 - [Generated @moq/net](/quest/m1/rs2ts/README.md) - retires js/net's hand-written model
+- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - applies the shared rule to historical requests and reconciles native IETF retention clocks
