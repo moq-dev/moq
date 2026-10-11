@@ -69,7 +69,8 @@ vector the 2026-09-30 cache-tiers audit kept:
 - **Multi-CDN by link preference.** A node may rank its links (moq.pro
   primary, Cloudflare secondary) ahead of the metric, so metrics from
   different operators are never compared; a CDN that speaks no ROUTE is just
-  a link. See [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md).
+  a link. Landed as `origin::Producer::with_preference` and
+  `Producer.withPreference`; see [multiple CDNs](/doc/concept/moq-lite.md#multiple-cdns).
 - **Metric on the wire, cost policy local.** One additive metric on ROUTE,
   where each hop adds its link cost plus one so it strictly increases; the
   origin's per-prefix cost rides ANNOUNCE untouched (`transcode/**` at 10 and
@@ -133,7 +134,6 @@ Once every child has landed:
 
 ## Required
 
-- [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md) - an endpoint holds sessions to several CDNs, uses its preferred one, and fails over to the next
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - moq.pro's simulator compares the route layer with path vector before the wire is written
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - ROUTE per origin node and path-less ANNOUNCE on one stream, loop-free by Babel feasibility
 
