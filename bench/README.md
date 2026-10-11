@@ -69,3 +69,30 @@ work.
 
 Benchmark output is informational and machine-specific. Crashes, zero delivery,
 and invalid samples still fail the command.
+
+BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
+alternating base/current order. Startup remains outside the final five-second
+throughput window. `MOQ_BENCH_ARTIFACTS` chooses the evidence parent (default
+`target/bench/runs`), which must be outside the repository, or git-ignored and
+outside `bench/`; each invocation retains a new run directory even on failure.
+It contains raw load/host JSONL, process diagnostics, Criterion statistics,
+execution order, source revision and tracked dirty patch, tool/build/machine
+metadata, workload files, complete stdout/stderr, and a separate copy of untracked
+source files.
+
+Each comparison reports the median of the paired percentage deltas, their median
+absolute deviation and range, and flags fewer than three observations or a sign
+that varies across pairs. MAD is descriptive dispersion, not a confidence
+interval; three rounds cannot establish a small improvement. Timing remains
+informational. Loss and latency are explicitly lifetime statistics; throughput
+and CPU use the same load-window boundaries. On Linux, one host sampler observes
+both the relay and the generator, then stops the generator after the measurement
+ends. CPU counters are linearly interpolated between the surrounding 500 ms
+samples; this is a sampled estimate, not an exact accounting boundary. Raw
+per-thread samples and CPU rates for threads present at both boundaries are
+retained; short-lived threads remain represented in process CPU totals.
+
+Generator CPU is reported beside relay CPU because sharing a loopback host can
+hide a relay improvement behind generator saturation. CPU efficiency remains
+withheld until offered load and delivery/loss are comparable. Zero-baseline
+metrics retain absolute deltas when their percentage ratio is undefined.

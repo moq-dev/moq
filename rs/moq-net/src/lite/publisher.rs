@@ -3244,8 +3244,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// cursor that was already at 0 stays where the first served group put it.
 		// No fresh SUBSCRIBE_START follows: the subscriber clears its permanent-miss
 		// floor on the same update, so both sides have to change together.
-		// Pre-06 an absent start means the latest group, which `position_cursor`
-		// already applied.
+		// Pre-06 an absent start means the latest group: see the re-pin below.
 		let lowered = match upd.start_group {
 			Some(start_group) => Some(start_group),
 			None if floored && self.ctx.version.resolves_start() => Some(0),
@@ -3266,6 +3265,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				}
 				self.start = Some(resolved.min(start));
 			}
+		} else if requested.is_some() && !self.ctx.version.resolves_start() {
+			// `position_cursor` pins an unfloored SUBSCRIBE to the latest group, so an
+			// update that drops a named floor re-pins there too. On an empty track the
+			// next group is the latest, whatever its sequence.
+			self.track.start_at(self.track.latest().unwrap_or(0));
 		}
 		self.track
 			.end_at(upd.end_group.map_or(Bound::Unbounded, Bound::Included));
@@ -4566,6 +4570,71 @@ mod serve_group_test {
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(writer, &log, version).await, [(1, 4)]);
+	}
+
+	/// Pre-06 an absent Group Start is the latest group, so an update that drops a named
+	/// floor re-pins the cursor there: a group created below it afterwards is not served.
+	#[moq_net_sim::test]
+	async fn a_pre06_update_dropping_the_floor_repins_to_the_latest_group() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_start(track::Position::group(0))
+				.with_max_delay(Duration::from_secs(60)),
+		);
+		let (mut run, mut writer, _log) = lite_run(Version::Lite05, SinkSession::new(Log::default()), subscriber);
+		let mut settle = |run: &mut TrackRun<SinkSession>| {
+			let res = kio::wait(|waiter| run.poll(&mut writer, waiter)).now_or_never();
+			assert!(res.is_none(), "the run ended");
+			run.ctx.opens.opened.load(Ordering::Relaxed)
+		};
+
+		write_group(&mut track, 7, 7);
+		assert_eq!(settle(&mut run), 1);
+
+		run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_delay: Duration::from_secs(60),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		write_group(&mut track, 5, 5);
+		assert_eq!(settle(&mut run), 1, "served a group below the latest");
+
+		write_group(&mut track, 8, 8);
+		assert_eq!(settle(&mut run), 2);
+	}
+
+	/// On an empty track the re-pin has no latest group to name, so the first group the
+	/// track produces is served, even below the dropped floor.
+	#[moq_net_sim::test]
+	async fn a_pre06_update_dropping_the_floor_on_an_empty_track_serves_the_next_group() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_start(track::Position::group(5))
+				.with_max_delay(Duration::from_secs(60)),
+		);
+		let (mut run, mut writer, _log) = lite_run(Version::Lite05, SinkSession::new(Log::default()), subscriber);
+		run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_delay: Duration::from_secs(60),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+
+		write_group(&mut track, 0, 0);
+		let res = kio::wait(|waiter| run.poll(&mut writer, waiter)).now_or_never();
+		assert!(res.is_none(), "the run ended");
+		assert_eq!(
+			run.ctx.opens.opened.load(Ordering::Relaxed),
+			1,
+			"group 0 was not served"
+		);
 	}
 
 	/// A gap older than the subscriber's grace is one it no longer waits for, so the run loop
