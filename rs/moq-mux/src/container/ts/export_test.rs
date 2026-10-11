@@ -7665,13 +7665,15 @@ async fn a_follower_stitches_onto_the_next_replacement_when_one_goes_before_it_r
 		"resolving the replacement"
 	);
 	drop((second, unanswered));
-	let third = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut third = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	std::ops::DerefMut::deref_mut(&mut third.1.modify().unwrap());
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"following the next replacement"
 	);
+	assert!(follower.export().cataloged(), "the replacement served its catalog");
 
 	// Once the first instance is gone too, the third one's end ends the export.
 	finish(first);
@@ -8114,4 +8116,107 @@ async fn a_midstream_stitch_catalog_within_linger_clears_the_bound() {
 			"the first snapshot clears the bound"
 		);
 	}
+}
+
+/// A stitch onto a replacement that goes before it resolves leaves the export awaiting its
+/// current replacement's catalog, by that replacement's own deadline.
+#[tokio::test(start_paused = true)]
+async fn a_nested_stitch_keeps_the_pending_catalog_deadline() {
+	let origin = crate::source::produce_origin();
+	let linger = Duration::from_secs(10);
+	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
+	let start = tokio::time::Instant::now();
+
+	// Switched onto a replacement whose catalog never delivers a snapshot.
+	let _second = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	assert!(
+		tokio::time::timeout(Duration::from_secs(2), follower.next())
+			.await
+			.is_err(),
+		"awaiting the replacement's catalog"
+	);
+
+	// Replaced again, but that one's catalog request is never answered before it goes.
+	let third = origin
+		.publish(
+			"live",
+			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+		)
+		.unwrap();
+	let unanswered = third.dynamic();
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"resolving the next replacement"
+	);
+	drop((third, unanswered));
+
+	let end = tokio::time::timeout(linger * 3, follower.next())
+		.await
+		.expect("the second replacement's deadline still bounds it");
+	let err = end.expect_err("a replacement without a catalog fails");
+	assert!(err.to_string().contains("catalog"), "{err}");
+	assert_eq!(start.elapsed(), linger);
+}
+
+/// A replacement whose catalog closes before its first snapshot fails the stitch, rather than
+/// ending the export cleanly.
+#[tokio::test(start_paused = true)]
+async fn a_midstream_stitch_catalog_closed_without_a_snapshot_fails() {
+	let origin = crate::source::produce_origin();
+	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut follower = follower(&origin)
+		.await
+		.with_stitch(true)
+		.with_linger(Duration::from_secs(10));
+
+	let (_second, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"awaiting the replacement's catalog"
+	);
+
+	catalog.finish().unwrap();
+	drop(catalog);
+	let end = tokio::time::timeout(Duration::from_secs(30), follower.next())
+		.await
+		.expect("the closed catalog ends the export");
+	let err = end.expect_err("a replacement without a catalog fails");
+	assert!(err.to_string().contains("catalog"), "{err}");
+}
+
+/// A snapshot that arrives after the deadline, before the follower polls again, is too late.
+#[tokio::test(start_paused = true)]
+async fn a_midstream_stitch_catalog_after_the_linger_fails() {
+	let origin = crate::source::produce_origin();
+	let linger = Duration::from_secs(10);
+	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
+	let epoch = moq_net::Epoch::mint();
+	let (_second, mut catalog) = publish_bare(&origin, Some(&epoch));
+	let waiter = kio::Waiter::noop();
+	assert!(follower.poll_next(&waiter).is_pending());
+
+	tokio::time::advance(linger).await;
+	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
+	// Deliver the snapshot through the local serving path, so it is ready on the next poll.
+	let broadcast = origin
+		.consume()
+		.request_broadcast("live", Some(epoch.clone()))
+		.await
+		.unwrap();
+	let mut available = crate::catalog::Consumer::<()>::new(&broadcast, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	use crate::catalog::Stream;
+	kio::wait(|waiter| available.poll_next(waiter)).await.unwrap().unwrap();
+
+	let std::task::Poll::Ready(Err(err)) = follower.poll_next(&waiter) else {
+		panic!("a snapshot after the linger must not count");
+	};
+	assert!(err.to_string().contains("catalog"), "{err}");
 }

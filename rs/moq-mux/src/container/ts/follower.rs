@@ -35,12 +35,25 @@ enum Serving {
 	Other(Option<moq_net::Epoch>),
 }
 
+/// A first catalog snapshot the export awaits, since a subscribed catalog that never answers is
+/// no return or switch.
+struct Awaiting {
+	/// When the linger runs out.
+	deadline: Instant,
+	missing: Missing,
+}
+
+/// What a catalog still missing at the deadline means.
+enum Missing {
+	/// A return that never resumed: the export ends as it did before it.
+	Return(crate::Result<()>),
+	/// A replacement switched to mid-stream that never served its catalog: a failure.
+	Switch,
+}
+
 enum State<E: catalog::Catalog> {
-	/// Exporting. A return carries how the export ended and when the linger runs out until its
-	/// catalog delivers a snapshot, since a subscribed catalog that never answers is no return.
-	Running {
-		settling: Option<(crate::Result<()>, Instant)>,
-	},
+	/// Exporting, until the deadline when its catalog is yet to deliver a snapshot.
+	Running { awaiting: Option<Awaiting> },
 	/// The export ended with `end`, waiting for the announcements to say what follows.
 	Settling {
 		end: crate::Result<()>,
@@ -52,10 +65,10 @@ enum State<E: catalog::Catalog> {
 	/// Resolving the instance serving the path now, to carry the export on into it.
 	Following {
 		resolving: Resolving<E>,
-		/// How the export ended and when the linger runs out, as in `Running` or `Settling`.
-		settling: Option<(crate::Result<()>, Instant)>,
-		/// The export is still running, a stitch mid-stream, so it carries on if the switch does not.
-		live: bool,
+		/// Bounds the resolution and then the catalog's first snapshot.
+		awaiting: Awaiting,
+		/// Where the export carries on, bound and all, if the instance goes before it resolves.
+		fallback: Box<State<E>>,
 	},
 	/// Nothing follows.
 	Done,
@@ -87,8 +100,6 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	closed: bool,
 	linger: Duration,
 	stitch: bool,
-	/// A mid-stream replacement must supply its first catalog by this instant.
-	switching: Option<Instant>,
 	timer: Option<Pin<Box<web_async::time::Sleep>>>,
 }
 
@@ -103,7 +114,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		let epoch = export.instance().cloned();
 		let mut follower = Self {
 			export,
-			state: State::Running { settling: None },
+			state: State::Running { awaiting: None },
 			announced,
 			path,
 			epoch,
@@ -113,7 +124,6 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			closed: false,
 			linger: Duration::ZERO,
 			stitch: false,
-			switching: None,
 			timer: None,
 		};
 		// Take the start naming the route the export resolved now, before anything else can
@@ -166,44 +176,67 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	}
 
 	fn poll_state(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
+		// A deadline that passed between polls ends the wait before a late snapshot can count.
+		// Within one poll a ready catalog still makes it, which zero linger relies on.
+		let awaiting = match &self.state {
+			State::Running { awaiting } => awaiting.as_ref(),
+			State::Following { awaiting, .. } => Some(awaiting),
+			State::Settling { .. } | State::Done => None,
+		};
+		if awaiting.is_some_and(|awaiting| Instant::now() >= awaiting.deadline) {
+			let (State::Running {
+				awaiting: Some(awaiting),
+			}
+			| State::Following { awaiting, .. }) = std::mem::replace(&mut self.state, State::Done)
+			else {
+				unreachable!("only a running or following state awaits a catalog");
+			};
+			return Poll::Ready(self.expire(awaiting));
+		}
+
 		loop {
 			match std::mem::replace(&mut self.state, State::Done) {
 				State::Done => return Poll::Ready(Ok(None)),
-				State::Running { mut settling } => {
+				State::Running { mut awaiting } => {
 					self.poll_announced(waiter);
 					// Subscriptions are sticky, so a replacement leaves the export on the old
 					// instance until it ends, unless asked to switch at once.
 					if self.stitch && matches!(self.serving, Serving::Other(_)) {
 						tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
-						self.switching = Some(Instant::now() + self.linger);
 						self.state = State::Following {
 							resolving: self.resolve(),
-							settling,
-							live: true,
+							awaiting: Awaiting {
+								deadline: Instant::now() + self.linger,
+								missing: Missing::Switch,
+							},
+							fallback: Box::new(State::Running { awaiting }),
 						};
 						continue;
 					}
 					let next = self.export.poll_next(waiter);
 					if self.export.cataloged() {
-						settling = None;
-						self.switching = None;
+						awaiting = None;
 					}
 					let end = match next {
 						Poll::Ready(Ok(Some(frame))) => {
-							self.state = State::Running { settling };
+							self.state = State::Running { awaiting };
 							return Poll::Ready(Ok(Some(frame)));
 						}
-						Poll::Ready(Ok(None)) => Ok(()),
+						// A switch whose catalog closed before its first snapshot never served one.
+						Poll::Ready(Ok(None)) => match awaiting {
+							Some(Awaiting {
+								missing: Missing::Switch,
+								..
+							}) => Err(self.missing_catalog()),
+							_ => Ok(()),
+						},
 						Poll::Ready(Err(err)) => Err(err),
 						Poll::Pending => {
-							self.check_switch(waiter)?;
-							if let Some((end, deadline)) = &settling
-								&& self.elapsed(waiter, *deadline)
+							if let Some(awaiting) = awaiting.take_if(|awaiting| self.elapsed(waiter, awaiting.deadline))
 							{
-								tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
-								return Poll::Ready(end.clone().map(|()| None));
+								return Poll::Ready(self.expire(awaiting));
 							}
-							self.state = State::Running { settling };
+							self.state = State::Running { awaiting };
 							return Poll::Pending;
 						}
 					};
@@ -251,8 +284,15 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					if follow {
 						self.state = State::Following {
 							resolving: self.resolve(),
-							settling: Some((end, deadline)),
-							live: false,
+							fallback: Box::new(State::Settling {
+								end: end.clone(),
+								grace: None,
+								deadline,
+							}),
+							awaiting: Awaiting {
+								deadline,
+								missing: Missing::Return(end),
+							},
 						};
 						continue;
 					}
@@ -265,8 +305,8 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				}
 				State::Following {
 					mut resolving,
-					settling,
-					live,
+					awaiting,
+					fallback,
 				} => {
 					// Announcements wait until the export is on the instance they describe.
 					if let Poll::Ready(resolved) = waiter.poll_future(resolving.as_mut()) {
@@ -274,8 +314,9 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 							Ok(resolved) => resolved,
 							// An instance that went before it resolved is no return or switch yet.
 							// Until the next announcement says otherwise, nothing serves the path:
-							// a stitch stays on the export it has, and a return keeps lingering.
-							// A refusal from an instance still up fails loud instead.
+							// a stitch stays on the export it has, still awaiting what it was, and a
+							// return keeps lingering. A refusal from an instance still up fails loud
+							// instead.
 							Err(err) => {
 								if !matches!(
 									err,
@@ -285,15 +326,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 								}
 								tracing::warn!(path = %self.path, %err, "broadcast went before it resolved, still waiting");
 								self.serving = Serving::Gone;
-								self.switching = None;
-								self.state = match (live, settling) {
-									(false, Some((end, deadline))) => State::Settling {
-										end,
-										grace: None,
-										deadline,
-									},
-									(_, settling) => State::Running { settling },
-								};
+								self.state = *fallback;
 								continue;
 							}
 						};
@@ -306,20 +339,18 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 							epoch = self.epoch.as_ref().map(tracing::field::display),
 							"exporting broadcast"
 						);
-						self.state = State::Running { settling };
+						self.state = State::Running {
+							awaiting: Some(awaiting),
+						};
 						continue;
 					}
-					self.check_switch(waiter)?;
-					if let Some((end, deadline)) = &settling
-						&& self.elapsed(waiter, *deadline)
-					{
-						tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
-						return Poll::Ready(end.clone().map(|()| None));
+					if self.elapsed(waiter, awaiting.deadline) {
+						return Poll::Ready(self.expire(awaiting));
 					}
 					self.state = State::Following {
 						resolving,
-						settling,
-						live,
+						awaiting,
+						fallback,
 					};
 					return Poll::Pending;
 				}
@@ -398,19 +429,24 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		}
 	}
 
-	/// Refuse a replacement that has not supplied its catalog within the configured linger.
-	fn check_switch(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
-		if let Some(deadline) = self.switching
-			&& self.elapsed(waiter, deadline)
-		{
-			return Err(anyhow::anyhow!(
-				"replacement broadcast `{}` did not serve its catalog within {:?}",
-				self.path,
-				self.linger
-			)
-			.into());
+	/// How a wait for the catalog's first snapshot ends once the linger runs out.
+	fn expire(&self, awaiting: Awaiting) -> crate::Result<Option<Frame>> {
+		match awaiting.missing {
+			Missing::Return(end) => {
+				tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
+				end.map(|()| None)
+			}
+			Missing::Switch => Err(self.missing_catalog()),
 		}
-		Ok(())
+	}
+
+	fn missing_catalog(&self) -> crate::Error {
+		anyhow::anyhow!(
+			"replacement broadcast `{}` did not serve its catalog within {:?}",
+			self.path,
+			self.linger
+		)
+		.into()
 	}
 
 	/// Whether `at` has come, registering `waiter` to wake then if not.
