@@ -22,6 +22,7 @@ default:
 # which this recipe installs, as the interop and wasm harnesses do.
 harness:
     ./lib/harness.test.sh
+    cd .. && bun test test/interop/compat/resolve.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
     cd interop/clients/js && bun test ./harness.browser.ts ./src/contract.test.ts
@@ -29,8 +30,8 @@ harness:
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
-# browser publish; everyone subscribes (incl. native node/bun JS, the moq-c C
-# client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
+# browser + C++ publish; everyone subscribes (incl. native node/bun JS, the
+# moq-c C client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
 # and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
@@ -39,6 +40,11 @@ harness:
 interop *args:
     just rs test -p moq-net --lib varint_interop ietf_datagram_interop --run-ignored all
     ./interop/interop.sh "$@"
+
+# Nightly main vs newest installable registry releases: tokens, moq-lite session
+# versions, decoded catalogs/containers, and group FETCH. See interop/README.md.
+wire-compat:
+    ./interop/compat.sh
 
 # Negative control: no publisher, every subscriber must time out (proves the
 
@@ -140,6 +146,12 @@ drain *args:
 [positional-arguments]
 wasm *args:
     ./wasm/run.sh "$@"
+
+# The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
+video:
+    cd .. && bun install --frozen-lockfile
+    cd video && bunx playwright install chromium
+    cd video && bun test ./renderer.browser.ts
 
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:

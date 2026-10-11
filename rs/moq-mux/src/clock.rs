@@ -3,8 +3,7 @@
 //! Create one [`Clock`] per broadcast and hand copies to every producer: because they share a
 //! timeline, frames captured at the same instant get the same timestamp, keeping concurrently
 //! produced tracks (e.g. audio and video capture on separate threads) in sync. It is `Copy`, so
-//! handing it out is cheap. A copy is a snapshot, though: beside a container importer, which
-//! re-anchors the catalog's clock on its first frame, read the catalog's clock at write time instead.
+//! handing it out is cheap. Taking the catalog's clock fixes it, so a copy never goes stale.
 //!
 //! The clock also owns the broadcast's wall mapping, advertised at the catalog root as
 //! `clock: { wall, timescale }`: `wall` is the wall-clock time of PTS zero in
@@ -12,8 +11,9 @@
 //! timestamp's wall time as `wall + pts` after converting it into this timescale. A discontinuity
 //! marker is a delivery event, not a new epoch, and a system-clock adjustment never retimes it.
 //!
-//! A container importer publishes its stream's own timestamps, so it places the mapping instead:
-//! its first timestamp is live on arrival (see [`Config::with_clock`](crate::catalog::Config::with_clock)).
+//! A container importer publishes its stream's own timestamps. The first to receive a frame before
+//! anything fixes the clock places the mapping so that frame is live on arrival; any other shifts
+//! onto the clock (see [`catalog::Timebase`](crate::catalog::Timebase)).
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -31,18 +31,23 @@ fn monotonic(at: Instant) -> crate::Result<web_async::time::Instant> {
 	}
 }
 
+/// Microseconds from the moq epoch (2020) to `wall`, negative before it.
+fn moq_micros(wall: SystemTime) -> i128 {
+	let moq_epoch = MOQ_EPOCH_UNIX_MILLIS as i128 * 1000;
+	match wall.duration_since(SystemTime::UNIX_EPOCH) {
+		Ok(after) => after.as_micros() as i128 - moq_epoch,
+		Err(before) => -(before.duration().as_micros() as i128) - moq_epoch,
+	}
+}
+
 /// The catalog clock for PTS zero at `wall`.
 fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
-	let unix_micros = wall
-		.duration_since(SystemTime::UNIX_EPOCH)
-		.map(|d| d.as_micros())
-		.map_err(|_| hang::Error::InvalidWall(0))?;
-	let moq_epoch_micros = MOQ_EPOCH_UNIX_MILLIS as u128 * 1000;
 	// A time before 2020 cannot be named on the wire; refuse it rather than advertise 2020.
-	if unix_micros < moq_epoch_micros {
+	let micros = moq_micros(wall);
+	if micros < 0 {
 		return Err(hang::Error::InvalidWall(0).into());
 	}
-	let wall = u64::try_from(unix_micros - moq_epoch_micros).unwrap_or(u64::MAX);
+	let wall = u64::try_from(micros).unwrap_or(u64::MAX);
 	if wall > MAX_SAFE_INTEGER {
 		return Err(hang::Error::InvalidWall(wall).into());
 	}
@@ -55,11 +60,6 @@ fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 ///
 /// Copies share the timeline and the wall mapping, so handing them to several producers keeps
 /// the broadcast on one clock.
-///
-/// A copy goes stale when a container importer's first frame re-anchors the catalog's clock (see
-/// [`Config::with_clock`](crate::catalog::Config::with_clock)): it keeps mapping onto the old
-/// timeline, misaligning everything it captures. To [`capture`](Self::capture) beside an importer,
-/// use [`catalog::Producer::clock`](crate::catalog::Producer::clock) read at write time.
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
 	/// A monotonic instant, and what the clock read then in micros.
@@ -112,6 +112,33 @@ impl Clock {
 			reading: u64::try_from(since.as_micros()).map_err(|_| unmappable())?,
 			wall: wall_clock(zero).map_err(|_| unmappable())?,
 		})
+	}
+
+	/// A clock on which `pts` is the instant `wall`: a source that knows when its timestamps
+	/// happened places them there rather than at their arrival.
+	///
+	/// Refuses a mapping whose PTS zero lands before the moq epoch (2020) or after now.
+	pub(crate) fn placed(pts: Duration, wall: SystemTime) -> crate::Result<Self> {
+		let unmappable = |why: &str| crate::Error::UnmappableTimestamp(format!("{pts:?} at {wall:?} {why}"));
+		let zero = wall
+			.checked_sub(pts)
+			.ok_or_else(|| unmappable("puts PTS zero before 2020"))?;
+		let (instant, now) = (web_async::time::Instant::now(), SystemTime::now());
+		let reading = now
+			.duration_since(zero)
+			.map_err(|_| unmappable("puts PTS zero after now"))?;
+		Ok(Self {
+			instant,
+			reading: u64::try_from(reading.as_micros()).map_err(|_| unmappable("overflows the clock"))?,
+			wall: wall_clock(zero).map_err(|_| unmappable("puts PTS zero before 2020"))?,
+		})
+	}
+
+	/// What this clock reads at `wall`, in microseconds: negative before PTS zero.
+	///
+	/// Pure in the stored mapping, like [`wall_clock`](Self::wall_clock).
+	pub(crate) fn reading(&self, wall: SystemTime) -> i128 {
+		moq_micros(wall) - self.wall.wall.as_micros() as i128
 	}
 
 	/// The current timestamp on this clock.

@@ -14,10 +14,9 @@ it with REQUEST_OK or REQUEST_ERROR, and a refused d14 update ends the
 subscription with INTERNAL_ERROR. Remaining (maintainer, 2026-10-07, from
 #4961 and #5011):
 
-- JS: #5011 routes updates to their target, but the d14-16 publisher never
-  reads the subscribe stream again, so an unread update keeps the stream from
-  reporting closed and a later UNSUBSCRIBE is lost. Read framed messages and
-  apply updates as Rust now does. Rebase #5011 onto that or fold it in.
+- JS: #5011 routes updates to their target, and the d14-16 publisher reads
+  and discards them so a later UNSUBSCRIBE still closes the stream. Apply them
+  as Rust now does.
 - Drafts 15 and 16: an update aimed at a namespace or fetch request is
   skipped with no REQUEST_OK or REQUEST_ERROR; answer it.
 - Draft 14: every field is mandatory, so a narrowed start or end group looks

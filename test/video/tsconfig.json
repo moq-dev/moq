@@ -1,0 +1,8 @@
+{
+	"extends": "../../js/tsconfig.json",
+	"compilerOptions": {
+		"types": ["bun", "vite/client"],
+		"noEmit": true
+	},
+	"include": ["renderer.browser.ts", "src", "../../js/common/worklet.d.ts"]
+}

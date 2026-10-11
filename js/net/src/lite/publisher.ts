@@ -14,7 +14,7 @@ import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
-import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import type { Fetch } from "./fetch.ts";
@@ -34,6 +34,7 @@ import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./tra
 import {
 	hasAnnounceId,
 	hasAnnounceOk,
+	hasAnnounceRestart,
 	hasDatagrams,
 	hasLargest,
 	hasProbeRtt,
@@ -460,12 +461,12 @@ export class Publisher {
 		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
 
-		// Keyed by suffix, valued by identity plus route, so a republish diffs as
-		// ended-then-active and a re-price as a restart.
+		// Keyed by suffix, valued by identity plus route, so a republish diffs as a restart
+		// and a re-price as an update.
 		let active = new Map<Path.Valid, Advertised>();
 
-		// Lite06+: announce ids. Every active we send implicitly assigns the next
-		// per-stream ordinal; ended/restart reference the id instead of repeating the path.
+		// Lite06+: announce ids. Every active we send implicitly assigns the next per-stream
+		// ordinal; ended/update/restart reference the id instead of repeating the path.
 		let nextAnnounceId = 0n;
 		const announceIds = new Map<Path.Valid, bigint>();
 
@@ -479,7 +480,7 @@ export class Publisher {
 		const onWire = (route: Route): Route => (hasRouteCost(this.version) ? route : { ...route, cost: Cost.zero });
 
 		const announce = async (suffix: Path.Valid, route: Route) => {
-			console.debug(`announce: broadcast=${suffix} active=true`);
+			console.debug(`announce: broadcast=${suffix} active=true epoch=${route.epoch}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
@@ -488,7 +489,7 @@ export class Publisher {
 			);
 		};
 
-		const restart = async (suffix: Path.Valid, route: Route) => {
+		const update = async (suffix: Path.Valid, route: Route) => {
 			if (!hasAnnounceId(this.version)) {
 				await retract(suffix);
 				await announce(suffix, route);
@@ -499,10 +500,26 @@ export class Publisher {
 				await announce(suffix, route);
 				return;
 			}
-			console.debug(`announce: broadcast=${suffix} restart=true`);
+			console.debug(`announce: broadcast=${suffix} update=true`);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "restart", id, hops: wireHops(route), cost: route.cost },
+				{ status: "update", id, hops: wireHops(route), cost: route.cost },
+				this.version,
+			);
+		};
+
+		// Another publisher instance: ANNOUNCE_RESTART on lite-07, an end and a start before it.
+		const restart = async (suffix: Path.Valid, route: Route) => {
+			const id = announceIds.get(suffix);
+			if (id === undefined || !hasAnnounceRestart(this.version)) {
+				await retract(suffix);
+				await announce(suffix, route);
+				return;
+			}
+			console.debug(`announce: broadcast=${suffix} restart=true epoch=${route.epoch}`);
+			await encodeAnnounceBroadcast(
+				stream.writer,
+				{ status: "restart", id, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
 				this.version,
 			);
 		};
@@ -615,18 +632,17 @@ export class Publisher {
 
 				const updated = visible(latest);
 
-				for (const [suffix, snap] of active) {
-					const cur = updated.get(suffix);
-					// A new epoch is another broadcast, even from the same entry.
-					if (!cur || cur.identity !== snap.identity || cur.route.epoch !== snap.route.epoch)
-						await retract(suffix);
+				for (const suffix of active.keys()) {
+					if (!updated.has(suffix)) await retract(suffix);
 				}
 				for (const [suffix, snap] of updated) {
 					const prev = active.get(suffix);
-					if (!prev || prev.identity !== snap.identity || prev.route.epoch !== snap.route.epoch) {
+					if (!prev) {
 						await announce(suffix, snap.route);
-					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
+					} else if (!sameInstance(prev, snap)) {
 						await restart(suffix, snap.route);
+					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
+						await update(suffix, snap.route);
 					}
 				}
 
@@ -1086,13 +1102,17 @@ export class Publisher {
 
 				if (emitRange && !startSent) {
 					startSent = true;
-					// SUBSCRIBE_START promises nothing below this sequence will be delivered.
-					// Arrival-order serving could later surface a straggler below the first
-					// group, so pin the floor to what was announced.
-					hooks.replaceGroups(track, {
-						start: { included: group.sequence },
-						end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
-					});
+					// SUBSCRIBE_START names the first group served now. A later group at or
+					// above an explicit floor is still delivered, so the cursor stays put.
+					// A pre-06 subscribe that named no group is the exception: an absent
+					// Group Start is the latest group, and this sequence becomes the floor.
+					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
+					if (bounds.startGroup === undefined && !resolvesStart(this.version)) {
+						hooks.replaceGroups(track, {
+							start: { included: group.sequence },
+							end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
+						});
+					}
 					if (
 						!(await controls.response(
 							encodeSubscribeResponse(
@@ -1143,11 +1163,19 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
-		if (this.#denied(msg.broadcast)) {
+		const hold = new AbortController();
+		// Armed before the first check and held until the answer is acknowledged, so a grant
+		// that shrinks while the answer is blocked on flow control resets it, never sends it.
+		const watch = this.#watch(msg.broadcast, () => {
+			console.debug(`track info revoked: broadcast=${msg.broadcast} track=${msg.track}`);
+			hold.abort();
+			stream.writer.reset(unauthorized(msg.broadcast));
+		});
+		if (watch.revoked()) {
+			watch.dispose();
 			stream.writer.reset(unauthorized(msg.broadcast));
 			return;
 		}
-		const hold = new AbortController();
 		// Watched from the start, so a requester leaving while the reply is still blocked on
 		// flow control lets go of the track too.
 		void stream.reader.done().then(
@@ -1166,8 +1194,7 @@ export class Publisher {
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
-			// The grant may have narrowed while the broadcast and its track resolved.
-			if (this.#denied(msg.broadcast)) throw unauthorized(msg.broadcast);
+			if (watch.revoked()) throw unauthorized(msg.broadcast);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.close();
@@ -1176,6 +1203,8 @@ export class Publisher {
 			hold.abort();
 			console.debug(`track unknown: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.reset(error(err));
+		} finally {
+			watch.dispose();
 		}
 	}
 

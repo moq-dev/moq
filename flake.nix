@@ -353,6 +353,49 @@
           doCheck = false;
         };
 
+        # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
+        # nixpkgs, so build it from source; without it `just check` skips the
+        # cpp module, which MOQ_STRICT turns into a failure in CI.
+        #
+        # Like uniffi-bindgen-go, the tag pairs the generator's version with the
+        # uniffi release it reads, so it moves with the `uniffi` dependency in
+        # rs/moq-ffi/Cargo.toml. Five other places name the same tag and must be
+        # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
+        # cpp/moq/README.md, .github/workflows/cpp.yml,
+        # .github/workflows/obs.yml, and .github/workflows/release-cpp.yml.
+        #
+        # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
+        # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
+        # and the fork adds `error_style = "expected"`, which cpp/moq/uniffi.toml
+        # turns on. Its tags add a `-kixelated.N` pre-release so they never
+        # collide with upstream's. Move back upstream once one tags both.
+        uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "uniffi-bindgen-cpp";
+          version = "0.11.0-kixelated.4+v0.32.2";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "kixelated";
+            repo = "uniffi-bindgen-cpp";
+            rev = "v${version}";
+            hash = "sha256-pmk9M5Wt6DYlXZYPjJ2Nn0tbDi1ve3wCH0Lel9xomCY=";
+          };
+
+          cargoHash = "sha256-/DRrwhJiKFCzibiJU2D3QaBM3XTmieRgUNc7tHDiGXI=";
+
+          # The workspace's other member is the fixture crate, which pulls the
+          # uniffi examples in from git; build only the generator.
+          buildAndTestSubdir = "bindgen";
+
+          # The upstream tests generate fixtures and compile them with CMake,
+          # which is a lot of build for a binary we only invoke.
+          doCheck = false;
+        };
+
+        # C++ binding generator; CMake comes from rustDeps and the compiler from stdenv.
+        cppDeps = [
+          uniffi-bindgen-cpp
+        ];
+
         # Dart bindings plus the pinned external generator.
         dartDeps = [
           pkgs.dart
@@ -468,7 +511,7 @@
             moq-gst
             ;
 
-          inherit uniffi-bindgen-dart;
+          inherit uniffi-bindgen-cpp uniffi-bindgen-dart;
 
           # The quest CLI alone, so quest.yml can validate the tree without
           # realising the whole dev shell.
@@ -516,6 +559,7 @@
             ++ obsDeps
             ++ ktDeps
             ++ goDeps
+            ++ cppDeps
             ++ dartDeps
             ++ devTools
             ++ [ quest-cli ];

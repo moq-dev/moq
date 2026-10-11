@@ -75,7 +75,7 @@ const url = new URL("https://relay.example/room");
 // Short enough to watch, long enough that a handover visibly overlaps the replacement.
 const handover = Time.Milli(200);
 
-test("an empty GOAWAY migrates without unrouting the path", async () => {
+test("an empty GOAWAY migrates, ending the request on the old session's broadcast", async () => {
 	const { dials, origin } = fleet();
 	const broadcast = origin.createBroadcast(Path.from("cam"));
 	broadcast.announce();
@@ -94,12 +94,7 @@ test("an empty GOAWAY migrates without unrouting the path", async () => {
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
 		const first = reload.established.peek();
-
-		// Record every moment the path had no route, from here on.
-		let gaps = 0;
-		const stop = watched.active.subscribe((active) => {
-			if (active === undefined) gaps++;
-		});
+		const served = watched.active.peek();
 
 		const drained = dials[0];
 		if (!drained) throw new Error("no first dial");
@@ -112,13 +107,17 @@ test("an empty GOAWAY migrates without unrouting the path", async () => {
 		expect(drained.closed).toBe(false);
 		expect(reload.status.peek()).toBe("connected");
 
-		// The old session closes at the handover cap, and the path never went unrouted.
+		// Without an epoch the new session's route is another publisher instance: the request
+		// stays on the old session's broadcast until that closes at the handover cap, then ends
+		// rather than moving, and a fresh request resolves the new session.
+		expect(watched.active.peek()).toBe(served);
 		await waitUntil(() => drained.closed, handover * 10);
-		await settle();
-		expect(watched.active.peek()).not.toBeUndefined();
-		expect(gaps).toBe(0);
+		await waitUntil(() => watched.closed.peek() !== undefined);
+		expect(watched.active.peek()).toBeUndefined();
+		const fresh = consume.request(Path.from("cam"), { announced: true });
+		await waitUntil(() => fresh.active.peek() !== undefined);
+		fresh.close();
 		expect(dials.length).toBe(2);
-		stop();
 	} finally {
 		watched.close();
 		reload.close();

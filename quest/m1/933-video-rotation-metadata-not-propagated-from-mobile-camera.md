@@ -11,7 +11,7 @@ sideways.
 ## Plan
 
 The rest of #933 is done: the renderer applies `catalog.video.rotation`
-(`#render` in `js/watch/src/video/renderer.ts`) and file import rotates stored footage
+(`@moq/video`, `js/video/src/presentation.ts`) and file import rotates stored footage
 (`rotator` in `js/publish/src/source/file.ts`). Live camera capture never sets
 the field.
 
@@ -23,6 +23,10 @@ the field.
   change.
 - Wire the signal through `<moq-publish>` beside `#flip`
   (`js/publish/src/element.ts`).
+- Pass it to the `<canvas>` preview's `presentation` beside `flip`
+  (`js/publish/src/preview.ts`), swapping the display size for a quarter turn.
+  The preview already draws through the shared rotation code; decided in #5138
+  to wait for this setting rather than add a preview-only rotation.
 - `demo/web` sets neither `flip` nor `rotation`, so nothing changes there.
 
 Additive on `@moq/publish`, so it lands on main.

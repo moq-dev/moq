@@ -76,7 +76,10 @@ each as its own broadcast (`event.hang` becomes `event/1.hang`,
 `event/2.hang`). A damaged packet is dropped on its own PID, so video freezes
 until its next keyframe while the other tracks carry on. The importer also
 logs feed health (stalled streams, TR 101 290 errors) without changing what it
-publishes. FLV covers H.264 + AAC.
+publishes. `--passthrough` publishes the multiplex whole instead, every packet
+in order on one [`m2ts`](/concept/hang#transport-streams) track with every
+program aboard, for what demultiplexing cannot carry, such as a scrambled
+service; `export ts` does not read it. FLV covers H.264 + AAC.
 
 ## Export
 
@@ -124,8 +127,17 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing. Playback is behind the `play` feature, since it pulls in
-windowing and audio-device dependencies:
+the one playing.
+
+The broadcast's announcement is its online signal, followed until the window
+closes. Playback starts when the name is announced. A
+[restarted publisher](#publisher-runs) starts it over on the new run, with a
+fresh catalog, decoders, and clock. When the announcement ends, what is playing
+finishes and the player waits for the name to return. The log names each run's
+epoch. A catalog with nothing this build can play still ends the player.
+
+Playback is behind the `play` feature, since it pulls in windowing and
+audio-device dependencies:
 
 ```bash
 cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
@@ -239,13 +251,13 @@ Each run of `moq` announces a fresh
 The RTMP, SRT, and WHIP ingests mint one per connection instead, and
 `import ts --program all` one per program.
 
-Epochs cross a connection only on moq-lite 07, which is opt-in. There, a
-restarted process takes the name at once, as long as its host's clock is not
-behind the old run's: subscriptions to the old run end with
-`Unroutable`, and a viewer's next subscribe reaches the new run instead of
-waiting for its group numbers to catch up. On older versions and moq-transport
-the relay sees no epoch and keeps a subscription on the route it first resolved
-through, so viewers of a restarted process wait until the old session closes.
+A restarted process takes the name at once: viewers see the broadcast restart,
+and their next subscribe reaches the new run instead of waiting for its group
+numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
+opt-in, and order by the host's clock there, so a host whose clock runs behind
+the old run's waits for it to close. Older versions and moq-transport carry no
+epoch, so a restart from another session is the newest route at an equal cost,
+or a better one.
 
 On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them

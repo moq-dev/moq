@@ -57,6 +57,8 @@ pub struct MockConnectOptions {
 	pub client_extensions: moq_net::setup::Extensions,
 	/// The extensions the server offers.
 	pub server_extensions: moq_net::setup::Extensions,
+	/// The price the client puts on the link, when not the default.
+	pub cost: Option<u64>,
 }
 
 impl MockConnectOptions {
@@ -72,6 +74,7 @@ impl MockConnectOptions {
 			server_limits: None,
 			client_extensions: Default::default(),
 			server_extensions: Default::default(),
+			cost: None,
 		}
 	}
 }
@@ -105,6 +108,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	let mut client = Client::new()
 		.with_versions(opts.version.into())
 		.with_extensions(opts.client_extensions);
+	if let Some(cost) = opts.cost {
+		client = client.with_cost(cost);
+	}
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}

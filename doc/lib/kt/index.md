@@ -13,6 +13,12 @@ cancellation that reaches the native consumer. It pulls in `dev.moq:moq-ffi`,
 which carries the native binaries for Android (arm64-v8a, armeabi-v7a,
 x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 
+`dev.moq.media` owns catalogs, encoded imports, and container consumers. `TrackProducer.audio`
+/ `.video` take a broadcast, a `Named` or `Requested` target, and an init record.
+`CatalogProducer(broadcast)` holds its broadcast weakly and fails with `Closed` after it closes.
+Construct readers with `CatalogConsumer.subscribe`, `ContainerConsumer.subscribe`, or
+`ContainerGroupConsumer.fetch`.
+
 ```kotlin ignore
 dependencies {
     implementation("dev.moq:moq:<version>")   // latest: see the badge above
@@ -22,15 +28,16 @@ dependencies {
 
 ```kotlin
 import dev.moq.*
+import dev.moq.media.*
 
 // Subscribe. The Flow is live, so run it in its own coroutine.
-Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
-    moq.announcements(AnnounceConfig(prefix = "live/", filter = "*/camera")).collect { event ->
+Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = listOf("ca.pem")))).use { moq ->
+    moq.announced(AnnounceConfig(prefix = "live/", filter = "*/camera")).updates().collect { event ->
         if (event !is AnnounceEventStart) return@collect // Update or End
         // Prefixes stay origin-relative; captures reports what each wildcard matched.
         println(event.announce.captures)
         val broadcast = moq.requestBroadcast(event.announce.prefix)
-        println(broadcast.catalog())
+        println(catalog(broadcast))
     }
 }
 ```
@@ -40,7 +47,7 @@ Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq 
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = moq.createBroadcast("my-stream.hang")
-    val audio = broadcast.publishAudio(AudioInit(format = AudioFormat.OPUS, data = opusInit))
+    val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusInit))
     audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))
     audio.cut() // audio has no keyframes, so this is what gives it groups
 

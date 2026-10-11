@@ -1001,7 +1001,7 @@ async fn spawn_subscribe_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 /// handshake instead of being accepted and silently carrying no media. The client
 /// advertises `Role::Publisher` in its SETUP (derived from `with_publisher`), and the
 /// relay closes the session because the token has no publish scope. This is the
-/// regression guard for moq.pro#338: before the role hint, this connection was
+/// regression guard for the role hint: before it, this connection was
 /// accepted and the publisher streamed into a dropped session forever.
 #[tokio::test]
 async fn subscribe_only_public_rejects_publisher_role() {
@@ -1114,7 +1114,9 @@ async fn connect_once(
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::Start(route)
+		| moq_net::announce::Event::Update(route)
+		| moq_net::announce::Event::Restart(route) => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

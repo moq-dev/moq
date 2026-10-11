@@ -17,6 +17,10 @@
 //! a complete snapshot (one frame per sub-table, sections concatenated verbatim);
 //! frames apply in order with later-wins by sub-table identity, and a joiner reads
 //! only the newest group.
+//!
+//! [`Passthrough`] is the other shape: it publishes the multiplex whole, every packet
+//! verbatim on one track named by the hang catalog's `m2ts` section, for what
+//! demultiplexing cannot carry (TS-level scrambling, PSI and SI as authored).
 
 mod adts;
 mod export;
@@ -36,8 +40,10 @@ mod catalog;
 pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, SiEntry, Track, Verbatim};
 pub use export::Export;
 pub use import::*;
+pub use passthrough::Passthrough;
 pub use programs::Programs;
 
+pub mod passthrough;
 pub mod stats;
 
 #[cfg(test)]
@@ -46,3 +52,5 @@ mod export_test;
 mod export_timing_test;
 #[cfg(test)]
 mod import_test;
+#[cfg(test)]
+mod passthrough_test;

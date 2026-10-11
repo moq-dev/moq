@@ -1,5 +1,5 @@
 import type * as broadcast from "./broadcast.ts";
-import type * as Path from "./path.ts";
+import * as Path from "./path.ts";
 
 /**
  * Per-path dedup cache for consumed broadcasts, shared by the moq-lite and moq-ietf
@@ -42,9 +42,11 @@ export class BroadcastCache {
 	}
 
 	/**
-	 * Stop sharing the broadcast cached for `path`, so the next request subscribes fresh.
+	 * Stop sharing the broadcasts cached at or beneath `path`, so the next request subscribes fresh.
 	 *
-	 * Call when the path's advertisement goes away. A handle only leaves the cache on its own
+	 * Call when the advertisement for `path` goes away or is replaced. It covered every path
+	 * beneath it, so those go too, even one a more specific advertisement also covers: that costs
+	 * a duplicate subscription, never a stale one. A handle only leaves the cache on its own
 	 * once *every* holder has closed it, so one holder outliving the publisher (a second
 	 * watcher, or a caller consuming the path directly) would otherwise keep the dead
 	 * generation's cached tracks alive and hand them to whoever consumes the path next.
@@ -59,6 +61,8 @@ export class BroadcastCache {
 	 * duplicate subscription rather than risk handing out a dead one.
 	 */
 	evict(path: Path.Valid): void {
-		this.#cache.delete(path);
+		for (const cached of this.#cache.keys()) {
+			if (Path.hasPrefix(path, cached)) this.#cache.delete(cached);
+		}
 	}
 }

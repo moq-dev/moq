@@ -721,9 +721,12 @@ pub enum moq_announce_kind {
 	MOQ_ANNOUNCE_KIND_UPDATE = 1,
 	/// No route covers the prefix any more.
 	MOQ_ANNOUNCE_KIND_END = 2,
+	/// Another publisher instance now serves the prefix: drop what was resolved under
+	/// it and request afresh.
+	MOQ_ANNOUNCE_KIND_RESTART = 3,
 }
 
-/// An announce event from an origin: a route starting, updating, or ending.
+/// An announce event from an origin: a route starting, updating, ending, or restarting.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_event {
@@ -1245,8 +1248,9 @@ pub unsafe extern "C" fn moq_session_connect(
 /// Returns immediately: zero on success, or a negative code if the session is
 /// unknown or already closing. Does NOT free `user_data`. The
 /// [moq_session_connect] `on_status` callback still fires once more with a
-/// terminal `0` (or a negative error), and that final callback is where
-/// `user_data` should be released. Safe to call from any thread, including from
+/// terminal `0` (or a negative error) once the close has reached the peer, after
+/// at most a second of draining, and that final callback is where `user_data`
+/// should be released. Safe to call from any thread, including from
 /// within `on_status`.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_session_close(session: u32) -> i32 {

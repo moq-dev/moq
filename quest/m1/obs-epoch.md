@@ -21,5 +21,4 @@ release gate waits only on `moqsink`.
 
 ## Required
 
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin publishes through the generated C++
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi exposes epochs

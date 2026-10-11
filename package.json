@@ -37,6 +37,7 @@
 		"js/hang",
 		"js/loc",
 		"js/msf",
+		"js/video",
 		"js/watch",
 		"js/publish",
 		"js/room",
@@ -49,6 +50,7 @@
 		"test/interop/clients/js",
 		"test/interop/clients/js-native",
 		"test/drain",
+		"test/video",
 		"test/wasm"
 	]
 }

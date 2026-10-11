@@ -298,6 +298,21 @@ function extractAudioSpecificConfig(esds: Uint8Array): Uint8Array | undefined {
 	return undefined;
 }
 
+/** `sample_is_non_sync_sample`, bit 16 of the ISO/IEC 14496-12 sample flags. */
+const NON_SYNC = 0x0001_0000;
+
+/** `sample_depends_on == 1`: the sample references others. */
+const DEPENDS_ON_OTHERS = 0x0100_0000;
+
+/**
+ * Whether sample flags describe a sync sample: `sample_is_non_sync_sample` clear and not declared to
+ * reference other samples, the rule ffmpeg applies and `moq-mux` mirrors. Flags that say nothing
+ * (zero) describe a sync sample.
+ */
+function isSync(flags: number): boolean {
+	return (flags & (NON_SYNC | DEPENDS_ON_OTHERS)) === 0;
+}
+
 /**
  * Parse a data segment (moof + mdat) to extract raw samples.
  *
@@ -425,10 +440,9 @@ export function decodeDataSegment(
 			ptss.push(decodeTime + compositionOffset);
 			const duration = Math.round((sampleDuration * 1_000_000) / init.timescale);
 
-			// Check if keyframe (sample_is_non_sync_sample flag is bit 16)
-			// If flag is 0, treat as keyframe for safety. Audio never reports one: every
-			// audio sample is a sync sample, and the group start is the consumer's to mark.
-			const keyframe = init.kind === "video" && (sampleFlags === 0 || (sampleFlags & 0x00010000) === 0);
+			// Audio never reports a keyframe: every audio sample is a sync sample, and the group
+			// start is the consumer's to mark.
+			const keyframe = init.kind === "video" && isSync(sampleFlags);
 
 			// Set below, once the earliest presentation time is known.
 			samples.push({ data, timestamp: 0, keyframe, duration });

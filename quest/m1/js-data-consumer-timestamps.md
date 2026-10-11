@@ -9,8 +9,8 @@ video playhead reaches it. Mirrors
 
 ## Plan
 
-Requested by OneTooMany, whose web frontend shows KLV and MAVLink telemetry
-beside video and today reads raw frames to recover the timestamps.
+A web frontend showing KLV or MAVLink telemetry beside video has to read raw
+frames today to recover the timestamps.
 
 Decided (2026-10-01): `next()` and the async iterator yield `@moq/net`'s
 `Timed<T>` (`{ value, at? }`), the type the producers take.

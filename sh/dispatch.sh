@@ -53,7 +53,7 @@ fi
 # The impact map: a module is in scope when a changed path matches its
 # pattern. An empty pattern is a repository-wide lint that runs on every diff.
 declare -A scope=(
-    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/(audio-quality|interop)/clients/js|test/wasm/|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/(audio-quality|interop)/clients/js|test/(wasm|video)/|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
@@ -74,9 +74,12 @@ declare -A scope=(
     [swift]='^(swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
-    # The plugin calls moq-c through its generated header, and flake.nix owns
+    # The package links moq-c's native-libs lists, and compiles its doc samples.
+    [cpp]='^(cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
+    # The plugin and its tests call through the bindings generated from cpp/moq
+    # and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
     # the libobs headers it compiles against.
-    [obs_compile]='^(cpp/obs/|sh/obs/|rs/moq-c/|flake\.nix$)'
+    [obs_compile]='^(cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)'
     # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
     # nixpkgs, and the last moves on a flake.lock bump alone.
     [obs]='^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)'
@@ -107,7 +110,8 @@ declare -A tools=(
     [swift]=''
     [go]='cargo go uniffi-bindgen-go'
     [dart]='cargo dart uniffi_bindgen_dart'
-    [obs_compile]='cargo jq pkg-config'
+    [cpp]='cargo cmake c++ uniffi-bindgen-cpp'
+    [obs_compile]='cargo cmake pkg-config uniffi-bindgen-cpp'
     [obs]='clang-format cmake gersemi jq'
     [flake]='nix'
     [markdown]='bun'
@@ -119,7 +123,7 @@ declare -A tools=(
 )
 
 case "$action" in
-    check | ci-check) modules=(js workers moq_sh drafts rs bench quest drill py kt swift go dart obs_compile obs flake markdown shell toml nix justfile gh) ;;
+    check | ci-check) modules=(js workers moq_sh drafts rs bench quest drill py kt swift go dart cpp obs_compile obs flake markdown shell toml nix justfile gh) ;;
     fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
     ci-test) modules=(js rs py) ;;
 esac

@@ -786,8 +786,11 @@ async fn serve_connection(
 	// and the shutdown broadcast on the shared runtime.
 	let shutdown = serve.shutdown.clone();
 	serve.tokio.spawn(async move {
-		if let Err(err) = crate::connection::supervise(session, lease, shutdown, registration).await {
-			tracing::warn!(id, %err, "connection closed");
+		match crate::connection::supervise(session, lease, shutdown, registration).await {
+			// A lease or shutdown ending the session closes it too: logged, so every
+			// accepted connection pairs with its end.
+			Ok(()) => tracing::info!(id, "connection closed"),
+			Err(err) => tracing::warn!(id, %err, "connection closed"),
 		}
 	});
 

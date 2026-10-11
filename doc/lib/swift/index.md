@@ -12,6 +12,12 @@ consumer, `Sendable` handles, and `Task` cancellation that reaches the native
 side. It depends on `MoqFFI`, which ships a prebuilt XCFramework with arm64
 slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 
+`Media` owns catalogs, encoded-media importers, and container consumers.
+`Media.TrackProducer.audio` / `.video` take a broadcast, an init record, and a
+`.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
+updates catalog properties and sections without keeping the broadcast open.
+Its writes fail after closing or releasing the broadcast.
+
 ```swift ignore
 dependencies: [
     .package(url: "https://github.com/moq-dev/moq-swift", from: "<version>"),   // latest: see the badge above
@@ -25,7 +31,7 @@ targets: [
 import Moq
 
 // Subscribe. The sequence is live, so run it in its own Task.
-let client = Client()
+let client = try Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
@@ -33,7 +39,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
     // Prefixes stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
-    for try await catalog in try await broadcast.subscribeCatalog() {
+    for try await catalog in try await Media.CatalogConsumer.subscribe(broadcast: broadcast) {
         print(catalog)
     }
 }
@@ -43,7 +49,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 // Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox).
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 let broadcast = try session.publish.createBroadcast(path: "my-stream.hang")
-let audio = try broadcast.publishAudio(format: .opus, initData: opusInit)
+let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
 try audio.writeFrame(packet, timestampUs: 20_000)
 try audio.cut() // audio has no keyframes, so this is what gives it groups
 

@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
-# Type-check every plugin source and unit test, without linking or an obs-deps
-# download.
+# Type-check every plugin source and unit test, without linking the plugin or an
+# obs-deps download.
 #
 # This is the gate to run in a worktree. `just obs build` needs the
-# multi-hundred-MB obs-deps bundle (macOS/Windows) and a full cargo build, per
-# worktree; this needs neither, because the dev shell carries all three header
-# sets: libobs pinned to the same OBS release buildspec.json downloads (see
-# `obs-headers` in flake.nix), Qt6, and ffmpeg. CI links the real thing on Linux
-# (.github/workflows/obs.yml).
+# multi-hundred-MB obs-deps bundle (macOS/Windows); this doesn't, because the dev
+# shell carries the OBS-side header sets: libobs pinned to the same OBS release
+# buildspec.json downloads (see `obs-headers` in flake.nix), Qt6, and ffmpeg. The
+# moq headers are generated, so it builds rs/moq-ffi to render them. CI links the
+# real thing on Linux (.github/workflows/obs.yml).
 #
 # It compiles the Qt sources too, which the CMake build only does when
 # ENABLE_QT and ENABLE_FRONTEND_API are on, so the definitions they gate on are
 # set here to match.
 #
-# test/ is in scope because each test file defines the moq-c entry points the
-# plugin calls, so a signature that drifts from the generated moq.h is a
-# conflicting C declaration. Catching that needs only headers, which is why it
-# belongs here: `just obs ci` finds the same drift, but only where obs.yml's
-# path filter reaches, and `just obs test` is manual.
+# test/ is in scope because the tests drive the plugin through the same
+# generated moq headers, so an API that drifts under them fails here rather than
+# only where obs.yml's path filter reaches; `just obs test` is manual.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -40,7 +38,7 @@ for pkgs in "Qt6Widgets Qt6Gui Qt6Core" "libavcodec libavutil libswscale libswre
     fi
 done
 
-# Assign first so a failure in `_includes` still aborts under `set -e`,
+# Assign first so a failure in includes.sh still aborts under `set -e`,
 # then split on newlines only: an include path may contain spaces.
 includes_raw=$("$here/includes.sh")
 includes=()
@@ -50,7 +48,7 @@ qt=$(pkg-config --cflags Qt6Widgets Qt6Gui Qt6Core)
 ffmpeg=$(pkg-config --cflags libavcodec libavutil libswscale libswresample)
 
 # MOQ_VERSION_STRING only reaches a label in the dock, so any value
-# type-checks the same; CMake stamps the real moq-c version.
+# type-checks the same; CMake stamps the real moq-cpp version.
 status=0
 for source in src/*.cpp test/*.cpp; do
     # shellcheck disable=SC2086
