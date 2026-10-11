@@ -97,7 +97,7 @@ declare -A scope=(
 # front, because there a skip is indistinguishable from a pass. swift needs
 # none: it skips off macOS by design, and swift.yml is its real gate.
 declare -A tools=(
-    [js]='bun python3'
+    [js]='bun python3 cargo wasm-bindgen'
     [workers]='bun'
     [moq_sh]='dash'
     [rs]='cargo jq'
