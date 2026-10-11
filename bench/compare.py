@@ -47,18 +47,22 @@ def reduce(pairs):
     return result
 
 
+def load(directory, workload):
+    """Pair base/current summaries in numeric round order, matching execution-order.tsv."""
+    rounds = {label: {path.name for path in (directory / "relay" / label).glob("round-*")} for label in ("base", "current")}
+    if rounds["base"] != rounds["current"]:
+        raise ValueError(f"unpaired rounds: base {sorted(rounds['base'])}, current {sorted(rounds['current'])}")
+    return [{label: json.loads((directory / "relay" / label / name / workload / "summary.json").read_text())
+             for label in ("base", "current")}
+            for name in sorted(rounds["base"], key=lambda name: int(name.removeprefix("round-")))]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()
     for workload in ("video", "fanout"):
-        pairs = []
-        rounds = sorted((args.directory / "relay/base").glob("round-*"))
-        for base in rounds:
-            current = args.directory / "relay/current" / base.name
-            pairs.append({label: json.loads((path / workload / "summary.json").read_text())
-                          for label, path in (("base", base), ("current", current))})
-        result = reduce(pairs)
+        result = reduce(load(args.directory, workload))
         (args.directory / f"comparison-{workload}.json").write_text(json.dumps(result, indent=2) + "\n")
         print(workload + ": " + json.dumps(result))
 

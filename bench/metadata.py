@@ -16,7 +16,8 @@ def command(*args):
 (out / "dirty.patch").write_bytes(subprocess.check_output(["git", "diff", "--binary", "HEAD"]))
 untracked = []
 for name in subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).decode().split('\0'):
-    if not name or Path(name).resolve().is_relative_to(out.parent.resolve()):
+    # run.sh keeps the evidence outside the repository or git-ignored, so it never appears here.
+    if not name:
         continue
     target = out / "untracked" / name
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -29,8 +30,7 @@ metadata = {"untracked": untracked, "revision": command("git", "rev-parse", "HEA
  "environment": {key: value for key, value in os.environ.items() if key.startswith(("MOQ_BENCH_", "CARGO_PROFILE_")) or key in ("RUSTFLAGS", "CARGO_BUILD_TARGET", "CARGO_BUILD_RUSTFLAGS", "TOKIO_WORKER_THREADS", "LD_PRELOAD", "MALLOC_CONF", "GLIBC_TUNABLES", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER")},
  "profile": "release", "features": "default + moq-relay/io-uring,moq-bench/uring" if mode == "--runtime" else "default",
  "mode": mode, "runtime_workers": sys.argv[4] if len(sys.argv) > 4 else None,
- "runtime_rounds": sys.argv[5] if len(sys.argv) > 5 else None,
- "comparison_rounds": int(os.environ.get("MOQ_BENCH_RUNTIME_ROUNDS", "3")),
+ "rounds": int(sys.argv[5]) if len(sys.argv) > 5 else None,
  "allocator": "system by build; preload and allocator tunables are recorded in environment",
  "workload": {"startup": "2s", "duration": "10s", "report": "500ms"}}
 (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")

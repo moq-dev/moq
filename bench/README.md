@@ -73,11 +73,12 @@ and invalid samples still fail the command.
 BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
 throughput window. `MOQ_BENCH_ARTIFACTS` chooses the evidence parent (default
-`target/bench/runs`); each invocation retains a new run directory even on failure.
+`target/bench/runs`), which must be outside the repository, or git-ignored and
+outside `bench/`; each invocation retains a new run directory even on failure.
 It contains raw load/host JSONL, process diagnostics, Criterion statistics,
 execution order, source revision and tracked dirty patch, tool/build/machine
 metadata, workload files, complete stdout/stderr, and a separate copy of untracked
-source files. The artifact destination itself is excluded from that copy.
+source files.
 
 Each comparison reports the median of the paired percentage deltas, their median
 absolute deviation and range, and flags fewer than three observations or a sign

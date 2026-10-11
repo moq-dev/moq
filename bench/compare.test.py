@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 spec = importlib.util.spec_from_file_location("compare", Path(__file__).with_name("compare.py"))
@@ -53,6 +55,30 @@ class Paired(unittest.TestCase):
         p['current']['loss_pct'] = 2
         metric = compare.reduce([p] * 3)['metrics']['loss_pct']
         self.assertEqual(metric['paired_absolute_deltas'], [2, 2, 2])
+
+
+class Load(unittest.TestCase):
+    def write(self, root, label, rounds):
+        for index in rounds:
+            path = root / "relay" / label / f"round-{index}" / "video"
+            path.mkdir(parents=True)
+            (path / "summary.json").write_text(json.dumps({"round": index}))
+
+    def test_numeric_round_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for label in ("base", "current"):
+                self.write(root, label, [1, 2, 10])
+            pairs = compare.load(root, "video")
+        self.assertEqual([p["base"]["round"] for p in pairs], [1, 2, 10])
+
+    def test_unpaired_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, "base", [1, 2])
+            self.write(root, "current", [1, 2, 3])
+            with self.assertRaises(ValueError):
+                compare.load(root, "video")
 
 
 unittest.main()

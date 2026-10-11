@@ -9,13 +9,18 @@ set -euo pipefail
 # workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
 
 MODE=${1:-}
+ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
+if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
+    printf 'MOQ_BENCH_RUNTIME_ROUNDS must be a positive integer, got %q\n' "$ROUNDS" >&2
+    exit 1
+fi
+ROUNDS=$((10#$ROUNDS))
 case $MODE in
     --audio)
         BASE=
         ;;
     --runtime)
         BASE=
-        RUNTIME_ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
         RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
         if [[ -z $RUNTIME_WORKERS ]]; then
             RUNTIME_WORKERS=$(getconf _NPROCESSORS_ONLN)
@@ -23,15 +28,10 @@ case $MODE in
                 RUNTIME_WORKERS=256
             fi
         fi
-        if [[ ! $RUNTIME_ROUNDS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_ROUNDS < 1)); then
-            printf 'runtime benchmark rounds must be a positive integer, got %q\n' "$RUNTIME_ROUNDS" >&2
-            exit 1
-        fi
         if [[ ! $RUNTIME_WORKERS =~ ^[0-9]+$ ]] || ((10#$RUNTIME_WORKERS < 1 || 10#$RUNTIME_WORKERS > 256)); then
             printf 'runtime benchmark workers must be an integer from 1 to 256, got %q\n' "$RUNTIME_WORKERS" >&2
             exit 1
         fi
-        RUNTIME_ROUNDS=$((10#$RUNTIME_ROUNDS))
         RUNTIME_WORKERS=$((10#$RUNTIME_WORKERS))
         ;;
     *)
@@ -48,6 +48,14 @@ CURRENT_TARGET=$TARGET/current
 
 ARTIFACTS=${MOQ_BENCH_ARTIFACTS:-$TARGET/runs}
 mkdir -p "$ARTIFACTS"
+ARTIFACTS=$(cd "$ARTIFACTS" && pwd -P)
+# Each run copies bench/ and untracked sources, so it must land in neither.
+if [[ $ARTIFACTS/ == "$ROOT"/bench/* ]] ||
+    { [[ $ARTIFACTS/ == "$ROOT"/* ]] && ! git -C "$ROOT" check-ignore -q "$ARTIFACTS"; }; then
+    printf 'MOQ_BENCH_ARTIFACTS must be outside the repository, or git-ignored and outside bench/: %s\n' \
+        "$ARTIFACTS" >&2
+    exit 1
+fi
 RUN=$(mktemp -d "$ARTIFACTS/run.XXXXXX")
 printf 'Benchmark evidence: %s\n' "$RUN"
 WORKTREE=
@@ -91,14 +99,9 @@ STDOUT_PID=$!
 exec 2> >(tee "$RUN/stderr.log" >&4)
 STDERR_PID=$!
 
-python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "${RUNTIME_ROUNDS:-}"
+python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
 cp -R "$ROOT/bench/workloads" "$RUN/workloads"
 cp -R "$ROOT/bench" "$RUN/harness"
-ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
-if [[ ! $ROUNDS =~ ^[1-9][0-9]*$ ]]; then
-    echo 'MOQ_BENCH_RUNTIME_ROUNDS must be a positive integer' >&2
-    exit 1
-fi
 
 export CRITERION_HOME=$RUN/criterion
 
@@ -324,7 +327,7 @@ print_runtime_comparison() {
         done
     done
 
-    printf '\nRuntime comparison (%d workers, median of %d rounds)\n' "$RUNTIME_WORKERS" "$RUNTIME_ROUNDS"
+    printf '\nRuntime comparison (%d workers, median of %d rounds)\n' "$RUNTIME_WORKERS" "$ROUNDS"
     printf 'tokio-shared uses %d runtime threads; worker modes use %d data threads plus one control thread.\n' \
         "$RUNTIME_WORKERS" "$RUNTIME_WORKERS"
     printf '%-13s %-16s %10s %8s %7s %8s %8s %9s %9s %9s %9s %7s\n' \
@@ -454,13 +457,13 @@ run_runtime_comparison() {
     local round workload offset index runtime
     for workload in video fanout video-heavy fanout-heavy; do
         printf '\nRelay runtime workload: %s\n' "$workload"
-        for ((round = 1; round <= RUNTIME_ROUNDS; round++)); do
+        for ((round = 1; round <= ROUNDS; round++)); do
             # Rotate the order so thermal drift and other time-dependent noise do
             # not consistently favor the same runtime.
             offset=$(((round - 1) % ${#runtimes[@]}))
             for ((index = 0; index < ${#runtimes[@]}; index++)); do
                 runtime=${runtimes[$(((index + offset) % ${#runtimes[@]}))]}
-                printf '  round %d/%d: %s\n' "$round" "$RUNTIME_ROUNDS" "$runtime"
+                printf '  round %d/%d: %s\n' "$round" "$ROUNDS" "$runtime"
                 run_workload "$runtime/round-$round" "$CURRENT_TARGET/release/moq-relay" \
                     "$workload" "$runtime" "$RUNTIME_WORKERS"
             done
