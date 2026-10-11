@@ -16,7 +16,26 @@ pub struct Follow {
 	announced: AnnounceConsumer,
 	path: PathOwned,
 	/// Every route standing over the path.
-	covering: Vec<Announce>,
+	covering: Vec<Standing>,
+	/// How many events the cursor has delivered.
+	taken: u64,
+	/// What `taken` was when the cursor last ran dry, so held no end.
+	dry: u64,
+	/// Nothing has been reported serving the path since the last end.
+	idle: bool,
+}
+
+/// A route standing over the followed path.
+///
+/// The cursor delivers by prefix, not in order, so a route's end may have happened before
+/// another prefix's start that it delivers first. Taking an event for a prefix proves no end
+/// was queued there yet, so any route that started before that take stood before its end.
+struct Standing {
+	announce: Announce,
+	/// When its start was taken.
+	since: u64,
+	/// When its latest event was taken.
+	seen: u64,
 }
 
 impl Follow {
@@ -25,6 +44,9 @@ impl Follow {
 			announced,
 			path,
 			covering: Vec::new(),
+			taken: 0,
+			dry: 0,
+			idle: true,
 		}
 	}
 
@@ -40,11 +62,13 @@ impl Follow {
 	/// beneath it) starts on the route serving the path rather than starting and restarting.
 	/// Once something serves it, each change comes through on its own: an end followed by a
 	/// start is a gap that ended any request on the old route, even when both routes carry one
-	/// epoch.
+	/// epoch. A route whose start came after the serving route's last event, with the cursor
+	/// never running dry in between, may have arrived after its end, so taking over from it is
+	/// reported as that gap.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
-		if self.serving().is_none() {
+		if self.idle {
 			let ended = loop {
-				match self.announced.poll_next(waiter) {
+				match self.poll_announced(waiter) {
 					Poll::Ready(Some(event)) => {
 						self.fold(event);
 					}
@@ -52,28 +76,43 @@ impl Follow {
 					Poll::Pending => break false,
 				}
 			};
-			return match (self.serving().cloned(), ended) {
-				(Some(serving), _) => Poll::Ready(Some(AnnounceEvent::Start(serving))),
+			return match (self.serving().map(|standing| standing.announce.clone()), ended) {
+				(Some(serving), _) => {
+					self.idle = false;
+					Poll::Ready(Some(AnnounceEvent::Start(serving)))
+				}
 				(None, true) => Poll::Ready(None),
 				(None, false) => Poll::Pending,
 			};
 		}
 
 		loop {
-			let Some(event) = ready!(self.announced.poll_next(waiter)) else {
+			let Some(event) = ready!(self.poll_announced(waiter)) else {
 				return Poll::Ready(None);
 			};
 			if let Some(event) = self.fold(event) {
+				self.idle = matches!(event, AnnounceEvent::End(_));
 				return Poll::Ready(Some(event));
 			}
 		}
 	}
 
+	/// The cursor's next event, counting what it delivers and when it runs dry.
+	fn poll_announced(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
+		let poll = self.announced.poll_next(waiter);
+		match poll {
+			Poll::Ready(Some(_)) => self.taken += 1,
+			Poll::Pending => self.dry = self.taken,
+			Poll::Ready(None) => {}
+		}
+		poll
+	}
+
 	/// The most specific route covering the path, which is the one a request resolves.
-	fn serving(&self) -> Option<&Announce> {
+	fn serving(&self) -> Option<&Standing> {
 		self.covering
 			.iter()
-			.max_by_key(|announce| announce.prefix.as_str().len())
+			.max_by_key(|standing| standing.announce.prefix.as_str().len())
 	}
 
 	/// Apply one route's event, returning what it means for the path, if anything.
@@ -86,27 +125,43 @@ impl Follow {
 			return None;
 		}
 		let prefix = announce.prefix.clone();
-		let before = self.serving().cloned();
+		let before = self
+			.serving()
+			.map(|standing| (standing.announce.clone(), standing.seen));
 
-		self.covering.retain(|standing| standing.prefix != prefix);
-		let restart = match event {
-			AnnounceEvent::End(_) => false,
-			AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) => {
-				self.covering.push(announce);
-				false
-			}
-			AnnounceEvent::Restart(announce) => {
-				self.covering.push(announce);
-				true
-			}
+		let standing = self
+			.covering
+			.iter()
+			.position(|standing| standing.announce.prefix == prefix)
+			.map(|index| self.covering.swap_remove(index).since);
+		let (announce, since, restart) = match event {
+			AnnounceEvent::End(_) => (None, None, false),
+			AnnounceEvent::Start(announce) => (Some(announce), None, false),
+			AnnounceEvent::Update(announce) => (Some(announce), standing, false),
+			AnnounceEvent::Restart(announce) => (Some(announce), standing, true),
 		};
+		if let Some(announce) = announce {
+			self.covering.push(Standing {
+				announce,
+				since: since.unwrap_or(self.taken),
+				seen: self.taken,
+			});
+		}
 
-		let after = self.serving().cloned();
+		let after = self
+			.serving()
+			.map(|standing| (standing.announce.clone(), standing.since));
 		match (before, after) {
 			(None, None) => None,
-			(None, Some(after)) => Some(AnnounceEvent::Start(after)),
-			(Some(before), None) => Some(AnnounceEvent::End(before)),
-			(Some(before), Some(after)) if before.prefix != after.prefix => {
+			(None, Some((after, _))) => Some(AnnounceEvent::Start(after)),
+			(Some((before, _)), None) => Some(AnnounceEvent::End(before)),
+			// The serving route ended, and the one left may have started after it did.
+			(Some((before, seen)), Some((after, since)))
+				if before.prefix == prefix && before.prefix != after.prefix && since > self.dry.max(seen) =>
+			{
+				Some(AnnounceEvent::End(before))
+			}
+			(Some((before, _)), Some((after, _))) if before.prefix != after.prefix => {
 				let same = before.route.epoch.is_some() && before.route.epoch == after.route.epoch;
 				Some(match same {
 					true => AnnounceEvent::Update(after),
@@ -114,9 +169,9 @@ impl Follow {
 				})
 			}
 			// A route less specific than the serving one changed, which no request sees.
-			(Some(_), Some(after)) if after.prefix != prefix => None,
-			(Some(_), Some(after)) if restart => Some(AnnounceEvent::Restart(after)),
-			(Some(_), Some(after)) => Some(AnnounceEvent::Update(after)),
+			(Some(_), Some((after, _))) if after.prefix != prefix => None,
+			(Some(_), Some((after, _))) if restart => Some(AnnounceEvent::Restart(after)),
+			(Some(_), Some((after, _))) => Some(AnnounceEvent::Update(after)),
 		}
 	}
 }
@@ -217,10 +272,36 @@ mod tests {
 		let mut follow = origin.consume().follow("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
+		// Both land before the follower reads again, and the cursor delivers the prefix's start
+		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		let _pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
+
+		// A prefix standing while the path's route goes takes over in place.
+		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
+		drop(exact);
+		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
+	}
+
+	/// A prefix that started before the serving route's last change stood before the route's
+	/// end, so it takes over in place even when the cursor never ran dry in between.
+	#[moq_net_sim::test]
+	async fn follow_hands_over_to_a_prefix_that_started_before_the_last_change() {
+		let origin = Hop::new(1).unwrap().produce();
+		let exact = origin.publish("pool/job", route(&Epoch::mint())).unwrap();
+		let mut follow = origin.consume().follow("pool/job").unwrap();
+		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
+
+		let epoch = Epoch::mint();
+		let _pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		exact.announce(route(&epoch)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
+
+		drop(exact);
+		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 	}
 
 	/// Without an epoch nothing says two routes serve the same bytes.

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use moq_mux::catalog::hang::Extra;
 
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
-use crate::demand::MoqTrackDemand;
+use crate::demand::{MoqGroupDemand, MoqTrackDemand};
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::MoqFrame;
@@ -339,6 +339,12 @@ impl MoqGroupRequest {
 	/// The consumer's delivery priority for this fetch.
 	pub fn priority(&self) -> u8 {
 		self.priority
+	}
+
+	/// A handle that watches whether any caller still wants this group.
+	pub fn demand(&self) -> Result<Arc<MoqGroupDemand>, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqGroupDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
 	/// Accept the request and return a producer for filling the fetched group.

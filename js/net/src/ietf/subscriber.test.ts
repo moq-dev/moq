@@ -1709,3 +1709,45 @@ test("an object datagram is a datagram group", async () => {
 	).toBeInstanceOf(ProtocolViolation);
 	track.close();
 });
+
+test("a more specific epochless announcement replaces the consumed source", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	const announced = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
+	const pool = Path.from("pool");
+	const job = Path.from("pool/job");
+	const broadStream = await Stream.open(pair.server, { version: VERSION });
+	const broad = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: pool }),
+		broadStream,
+	);
+	await announced.next();
+	const broadPeer = await nextStream(pair.client);
+	if (!broadPeer) throw new Error("no broad publish stream");
+	await broadPeer.reader.u53();
+	await RequestOk.decode(broadPeer.reader, VERSION);
+	const held = subscriber.consume(job);
+	const specificStream = await Stream.open(pair.server, { version: VERSION });
+	const specific = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 2n, trackNamespace: job }),
+		specificStream,
+	);
+	await announced.next();
+	const specificPeer = await nextStream(pair.client);
+	if (!specificPeer) throw new Error("no specific publish stream");
+	await specificPeer.reader.u53();
+	await RequestOk.decode(specificPeer.reader, VERSION);
+	const fresh = subscriber.consume(job);
+	expect(fresh.closed).not.toBe(held.closed);
+	expect(held.closed.peek()).toBeUndefined();
+	specificPeer.close();
+	await specific;
+	await announced.next();
+	const fallback = subscriber.consume(job);
+	expect(fallback.closed).toBe(held.closed);
+	broadPeer.close();
+	await broad;
+	for (const consumer of [held, fresh, fallback]) consumer.close();
+	announced.close();
+});

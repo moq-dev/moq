@@ -2242,7 +2242,20 @@ test("draft-20: the subscriber leaving ends a fill still reading its group", asy
 
 		// The fill is parked on a group that is never going to close on its own, so this only
 		// settles once the subscriber leaving cancels it.
-		const reading = readFill(fill);
+		const [data, observed] = fill.tee();
+		const reading = readFill(data);
+		// Opening the stream precedes fetching the group. Observe an actual object so the
+		// cancellation tests a fill reading its open group, even when header writes yield.
+		const reader = new Reader(observed, undefined, V20);
+		expect(await reader.u53()).toBe(FetchHeader.type);
+		await FetchHeader.decode(reader, V20);
+		const flags = await reader.u53();
+		if (flags & 0x08) await reader.u53();
+		if (flags & 0x04) await reader.u53();
+		if (flags & 0x10) await reader.u8();
+		if (flags & 0x20) await reader.read(await reader.u53());
+		expect(new TextDecoder().decode(await reader.read(await reader.u53()))).toBe("0.0");
+		reader.stop(new Error("observation complete"));
 		client.close();
 
 		// A reset discards what the peer has not acknowledged, so the objects already written
