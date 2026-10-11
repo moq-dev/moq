@@ -1,91 +1,122 @@
 import { Session, SessionCode } from "../error.ts";
 
-/** The default maximum number of live advertisements on one session. @internal */
+/** The most advertisements a peer may hold live on one session, as moq-net defaults. @internal */
 export const ANNOUNCES = 100_000;
-/** The default maximum number of live subscriptions on one session. @internal */
+/** The most subscriptions a peer may hold live on one session, as moq-net defaults. @internal */
 export const SUBSCRIPTIONS = 10_000;
 
-/** A live-resource budget that closes its session when the peer exceeds it. @internal */
+/** A session's count of live peer requests, which closes the session past its cap. @internal */
 export class Slots {
-	#count = 0;
-	#limit: number;
+	#live = 0;
+	#max: number;
 	#quic?: WebTransport;
+	#reason: string;
 
-	constructor(limit: number, quic?: WebTransport) {
-		this.#limit = limit;
+	constructor(max: number, { quic, reason }: { quic?: WebTransport; reason: string }) {
+		this.#max = max;
 		this.#quic = quic;
+		this.#reason = reason;
 	}
 
+	/** Take one slot, or close the session with TOO_MANY_REQUESTS and throw at the cap. */
 	acquire() {
-		if (this.#count === this.#limit) {
-			const error = new Session(SessionCode.TooManyRequests, { reason: "too many live requests" });
-			this.#quic?.close({ closeCode: error.code, reason: error.message });
-			throw error;
+		if (this.#live >= this.#max) {
+			const err = new Session(SessionCode.TooManyRequests, { reason: this.#reason });
+			this.#quic?.close({ closeCode: err.code, reason: this.#reason });
+			throw err;
 		}
-		this.#count += 1;
+		this.#live += 1;
 	}
 
+	/** Give back `count` slots. */
 	release(count = 1) {
-		this.#count -= count;
+		this.#live -= count;
+	}
+}
+
+/** A map whose every entry holds one slot, as moq-net charges each live advertisement. @internal */
+export class SlotMap<K, V> extends Map<K, V> {
+	#slots: Slots;
+
+	constructor(slots: Slots) {
+		super();
+		this.#slots = slots;
+	}
+
+	override set(key: K, value: V): this {
+		if (!this.has(key)) this.#slots.acquire();
+		return super.set(key, value);
+	}
+
+	override delete(key: K): boolean {
+		if (!super.delete(key)) return false;
+		this.#slots.release();
+		return true;
+	}
+
+	override clear() {
+		this.#slots.release(this.size);
+		super.clear();
 	}
 }
 
 type Kind = "track" | "subscribe";
-type Entry = { track: number; subscribe: number };
+type Counts = { track: number; subscribe: number };
 
-/** Charges paired TRACK and SUBSCRIBE interests once, matching moq-net. @internal */
+/**
+ * A session's subscription cap, charged per track as moq-net does.
+ *
+ * A TRACK stream held open and the SUBSCRIBE that follows it are one interest in the track,
+ * so a track costs the larger of its two counts: a peer at the cap can still subscribe to
+ * the tracks it holds.
+ *
+ * @internal
+ */
 export class Interests {
 	#slots: Slots;
-	#paths = new Map<string, Map<string, Entry>>();
+	#tracks = new Map<string, Map<string, Counts>>();
 
 	constructor(slots: Slots) {
 		this.#slots = slots;
 	}
 
-	acquire(path: string, track: string, kind: Kind) {
-		let tracks = this.#paths.get(path);
-		const entry = tracks?.get(track) ?? { track: 0, subscribe: 0 };
-		// For each name the cost is max(TRACKs, SUBSCRIBEs), not their sum.
-		if (entry[kind] >= entry[kind === "track" ? "subscribe" : "track"]) this.#slots.acquire();
-		entry[kind] += 1;
+	/** Charge one request for `broadcast`'s `track` until the returned handle is released. */
+	acquire(broadcast: string, track: string, kind: Kind): Interest {
+		let tracks = this.#tracks.get(broadcast);
+		const counts = tracks?.get(track) ?? { track: 0, subscribe: 0 };
+		if (counts[kind] >= counts[kind === "track" ? "subscribe" : "track"]) this.#slots.acquire();
+		counts[kind] += 1;
 		if (!tracks) {
 			tracks = new Map();
-			this.#paths.set(path, tracks);
+			this.#tracks.set(broadcast, tracks);
 		}
-		tracks.set(track, entry);
-		return new Interest({ interests: this, path, track, kind });
+		tracks.set(track, counts);
+		return new Interest(() => this.#release(broadcast, track, kind));
 	}
 
-	release(path: string, track: string, kind: Kind) {
-		const tracks = this.#paths.get(path);
-		const entry = tracks?.get(track);
-		if (!tracks || !entry) throw new Error("interest already released");
-		const before = Math.max(entry.track, entry.subscribe);
-		entry[kind] -= 1;
-		if (Math.max(entry.track, entry.subscribe) < before) this.#slots.release();
-		if (entry.track === 0 && entry.subscribe === 0) {
+	#release(broadcast: string, track: string, kind: Kind) {
+		const tracks = this.#tracks.get(broadcast);
+		const counts = tracks?.get(track);
+		if (!tracks || !counts) throw new Error("interest already released");
+		if (counts[kind] > counts[kind === "track" ? "subscribe" : "track"]) this.#slots.release();
+		counts[kind] -= 1;
+		if (counts.track === 0 && counts.subscribe === 0) {
 			tracks.delete(track);
-			if (tracks.size === 0) this.#paths.delete(path);
+			if (tracks.size === 0) this.#tracks.delete(broadcast);
 		}
 	}
 }
 
-/** One held interest, released at most once. @internal */
-class Interest {
-	#interests?: Interests;
-	#path: string;
-	#track: string;
-	#kind: Kind;
+/** One charged request, released at most once. @internal */
+export class Interest {
+	#release?: () => void;
 
-	constructor({ interests, path, track, kind }: { interests: Interests; path: string; track: string; kind: Kind }) {
-		this.#interests = interests;
-		this.#path = path;
-		this.#track = track;
-		this.#kind = kind;
+	constructor(release: () => void) {
+		this.#release = release;
 	}
 
 	release() {
-		this.#interests?.release(this.#path, this.#track, this.#kind);
-		this.#interests = undefined;
+		this.#release?.();
+		this.#release = undefined;
 	}
 }

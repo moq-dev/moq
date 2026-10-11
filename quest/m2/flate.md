@@ -19,15 +19,17 @@ already owns the per-group window a caller could otherwise desynchronize.
 Bind those track modes, not the bare codec: a `frame()` call across the FFI
 boundary invites the window desync the track modes exist to prevent.
 
-Today moq-ffi publishes flate tracks through `publish_flate_snapshot` and
-`publish_flate_stream` on the broadcast. #4519 replaces those with
-`MoqFlate*Producer` constructors that wrap a track producer, as `json` does.
+The `MoqFlate*Producer` constructors landed in #4519. Reconciled 2026-10-10:
+[Publish timestamps](/quest/m1/publish-timestamp.md) owns missing producer
+wrappers, including Python and Go. This quest owns the remaining consumers
+and interop coverage; it does not wait for unrelated FFI-shape children.
 What remains:
 
 - moq-ffi has no consume side for flate tracks. Add consumers mirroring the
   `json` ones so each wrapper can read what it writes.
-- Each wrapper (Python, Swift, Kotlin, Go, Dart) gains a `flate` namespace in
-  the same place and shape as its `json` one.
+- Add consumers to each wrapper's `flate` namespace, following `json` and
+  the timestamp-preserving `next()` / `latest()` contract. Do not duplicate
+  the producer work owned by publish-timestamp.
 - Document in `doc/lib/{py,swift,kt,go,dart}` beside the JSON entry.
 - Tests: a round trip in each wrapper that has tests, and one cross-language
   check that a wrapper-published group decodes with `@moq/flate`. Run
@@ -39,4 +41,4 @@ routed, and cached like any other.
 
 ## Required
 
-- [FFI shape](/quest/m1/ffi-shape/README.md) - lands the `json` namespace pattern and the `MoqFlate*Producer` constructors this follows
+- [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - establishes the consumer contract these new bindings use

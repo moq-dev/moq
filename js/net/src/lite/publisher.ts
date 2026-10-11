@@ -1,13 +1,15 @@
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
+import type { Grant } from "../auth.ts";
+import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import { error, NotFound, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
+import { error, NotFound, ProtocolViolation, reason, StreamCode, StreamError, unauthorized } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
-import type * as Path from "../path.ts";
+import * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
@@ -366,7 +368,6 @@ function positionCursor(track: track.Subscriber, version: Version, startGroup: n
  * @internal
  */
 export class Publisher {
-	#interests: Interests;
 	#withdrawal = new Withdrawal();
 
 	// Served SUBSCRIBE, FETCH, and TRACK requests, from dispatch until they end, which a
@@ -384,6 +385,9 @@ export class Publisher {
 
 	#quic: WebTransport;
 
+	// Subscriptions and open TRACK streams the peer holds live on this session.
+	#interests: Interests;
+
 	// The one writer for the outbound datagram stream (getWriter locks it), acquired once at
 	// construction when this version + transport carry datagrams, released in close(). Its
 	// presence is the gate: undefined means datagrams aren't served on this connection. All
@@ -394,6 +398,15 @@ export class Publisher {
 	#advertised: Getter<Advertisements | undefined>;
 
 	#publish?: OriginConsumer;
+
+	// Our grant: only what it lets us publish is announced and served, and a shrink
+	// withdraws what it no longer covers. Undefined until the peer answers, and forever on a
+	// version without AUTH, which allows everything.
+	#grant?: Getter<Grant | undefined>;
+
+	// Resolves once the tokens this session presented at setup are answered, so nothing is
+	// announced before the grant it would be checked against.
+	#ready: Promise<void>;
 
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
@@ -409,12 +422,22 @@ export class Publisher {
 	 * @param version - Negotiated protocol version
 	 * @param origin - Hop id shared with the Subscriber
 	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
+	 * @param auth - The union of our tokens' grants, which bounds what we publish, and when the
+	 *   setup tokens are answered
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, hop: Hop, publish?: OriginConsumer) {
+	constructor(
+		quic: WebTransport,
+		version: Version,
+		hop: Hop,
+		publish?: OriginConsumer,
+		auth?: { grant: Getter<Grant | undefined>; ready: Promise<void> },
+	) {
 		this.#quic = quic;
-		this.#interests = new Interests(new Slots(SUBSCRIPTIONS, quic));
+		this.#interests = new Interests(new Slots(SUBSCRIPTIONS, { quic, reason: "too many subscriptions" }));
+		this.#grant = auth?.grant;
+		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
 		this.hop = hop;
 		const origin = publish && wireOf(publish);
@@ -521,24 +544,56 @@ export class Publisher {
 			await encodeAnnounceBroadcast(stream.writer, { status: "endedId", id }, this.version);
 		};
 
-		// Subscribe BEFORE writing anything: every encode below awaits the wire, and a publish
-		// landing in that window only notifies the listeners already registered. One created
-		// afterwards would sleep through it, leaving the change unannounced until something
-		// unrelated moved.
-		// TODO Make a better helper within Signals.
-		let dispose!: Dispose;
-		let changed = new Promise<Advertisements | undefined>((resolve) => {
-			dispose = this.#advertised.changed(resolve);
-		});
-
 		// A hidden route stays off the wire unless the request opted in.
 		const carries = (covered: Path.Valid) => msg.hidden || !hiddenBelow(msg.prefix, covered);
 
+		// What the peer currently sees: the table under the prefix, less whatever our grant
+		// does not let us publish.
+		const visible = (table: Advertisements): Map<Path.Valid, Advertised> => {
+			const out = presented(msg.prefix, table, carries);
+			const grant = this.#grant?.peek();
+			if (grant) {
+				for (const suffix of [...out.keys()]) {
+					if (!grant.publish.matches(Path.join(msg.prefix, suffix))) out.delete(suffix);
+				}
+			}
+			return out;
+		};
+
+		// Subscribe BEFORE writing anything: every encode below awaits the wire, and a publish
+		// landing in that window only notifies the listeners already registered. One created
+		// afterwards would sleep through it, leaving the change unannounced until something
+		// unrelated moved. A grant change re-diffs the same way, withdrawing what it no longer
+		// covers and announcing what it now does.
+		// TODO Make a better helper within Signals.
+		let dispose: Dispose = () => {};
+		const arm = () =>
+			new Promise<"changed">((resolve) => {
+				const table = this.#advertised.changed(() => resolve("changed"));
+				const grant = this.#grant?.changed(() => resolve("changed"));
+				dispose = () => {
+					table();
+					grant?.();
+				};
+			});
+		let changed = arm();
+
 		try {
+			// Nothing is announced before the grant it would be checked against. A local close
+			// meanwhile finishes the stream with nothing announced.
+			const ready = this.#ready.then(() => "ready" as const);
+			if ((await race([ready, stream.reader.closed, this.#withdrawal.closing])) !== "ready") {
+				if (this.#withdrawal.closing.peek()) {
+					stream.close();
+					await stream.writer.closed;
+				}
+				return;
+			}
+
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
-			for (const [name, snap] of presented(msg.prefix, initial, carries)) {
+			for (const [name, snap] of visible(initial)) {
 				active.set(name, snap);
 			}
 
@@ -570,22 +625,17 @@ export class Publisher {
 			}
 
 			for (;;) {
-				const advertised = await race([changed, stream.reader.closed, this.#withdrawal.closing]);
+				const woke = await race([changed, stream.reader.closed, this.#withdrawal.closing]);
 				dispose();
-				if (!advertised || advertised === true) break;
+				if (woke !== "changed") break;
 
 				// Re-arm before reading, so an advertise that lands while we write is not lost.
-				changed = new Promise<Advertisements | undefined>((resolve) => {
-					dispose = this.#advertised.changed(resolve);
-				});
+				changed = arm();
 
 				const latest = this.#advertised.peek();
 				if (!latest) break;
 
-				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of presented(msg.prefix, latest, carries)) {
-					updated.set(name, snap);
-				}
+				const updated = visible(latest);
 
 				for (const suffix of active.keys()) {
 					if (!updated.has(suffix)) await retract(suffix);
@@ -621,25 +671,74 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		// Charged before anything else, as in Rust. A peer past the cap loses the session.
 		const interest = this.#interests.acquire(msg.broadcast, msg.track, "subscribe");
+		// Serve only what our grant lets us publish, and stop once it no longer does. The
+		// watch is armed before the first check and held to the end, so a shrink while the
+		// broadcast resolves is never missed.
+		const revoked = unauthorized(msg.broadcast);
+		let serving: track.Subscriber | undefined;
+		const watch = this.#watch(msg.broadcast, () => {
+			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${msg.track}`);
+			serving?.close(revoked);
+			stream.abort(revoked);
+		});
 		try {
-			await this.#runSubscribe(msg, stream);
+			await this.#serveSubscribe(msg, stream, watch, (track) => {
+				serving = track;
+			});
 		} finally {
+			watch.dispose();
 			interest.release();
 		}
 	}
 
-	async #runSubscribe(msg: Subscribe, stream: Stream) {
+	// Watch whether our grant still lets us publish `broadcast`, calling `onRevoke` once
+	// it does not. Arm it before the request's first check.
+	#watch(broadcast: Path.Valid, onRevoke: () => void): { revoked: () => boolean; dispose: () => void } {
+		let revoked = false;
+		const dispose =
+			this.#grant?.subscribe(() => {
+				if (revoked || !this.#denied(broadcast)) return;
+				revoked = true;
+				onRevoke();
+			}) ?? (() => {});
+		return { revoked: () => revoked || this.#denied(broadcast), dispose };
+	}
+
+	async #serveSubscribe(
+		msg: Subscribe,
+		stream: Stream,
+		watch: { revoked: () => boolean },
+		serving: (track: track.Subscriber) => void,
+	) {
+		// Checked before resolving, so a denied request never reaches the origin.
+		if (watch.revoked()) {
+			stream.writer.reset(unauthorized(msg.broadcast));
+			return;
+		}
+
+		// The requester leaving while the broadcast and track resolve ends the request, as
+		// Rust polls the requester throughout, so a cancelled subscription gives back its
+		// charge instead of holding it until the track is answered, which may be never. A
+		// subscriber's close (STOP_SENDING) and its abort (RESET_STREAM) both land here.
+		const left = new AbortController();
+		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
+		const leave = () => left.abort(cancel);
+		void race([stream.reader.closed, stream.writer.closed]).then(leave, leave);
+
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
 				this.#publish &&
 				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
+					(await untilAborted(wireOf(this.#publish).demand(msg.broadcast, msg.epoch), left.signal)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
 		}
+		// Revoked while the broadcast resolved: the watch already reset the stream.
+		if (watch.revoked()) return;
 		if (!front) {
 			console.debug(`publish unknown: broadcast=${msg.broadcast}`);
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
@@ -655,6 +754,7 @@ export class Publisher {
 				end: endGroup === undefined ? undefined : { excluded: endGroup },
 			},
 		});
+		serving(track);
 		positionCursor(track, this.version, msg.startGroup);
 		hooks.replaceGroups(track, { end: endGroup === undefined ? undefined : { excluded: endGroup } });
 
@@ -677,7 +777,7 @@ export class Publisher {
 				// they always agree. Awaiting info() also surfaces a rejected track
 				// (accept never called, track closed) as an error here, which resets the
 				// stream.
-				const info = await track.info();
+				const info = await untilAborted(track.info(), left.signal);
 				timescale = wireTimescale(info);
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
@@ -737,7 +837,8 @@ export class Publisher {
 			await Promise.all([datagrams, controls.decoding, finished && acknowledged(stream.writer)]);
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
+			if (e === cancel) console.debug(`publish cancelled: broadcast=${msg.broadcast} track=${track.name}`);
+			else console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
 			track.close(e);
 			stream.abort(e);
 			await Promise.all([datagrams, controls?.decoding]);
@@ -752,6 +853,34 @@ export class Publisher {
 	async runFetch(msg: Fetch, stream: Stream) {
 		if (!supportsTrackStream(this.version)) {
 			stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
+			return;
+		}
+		// Like a subscription, the fetch holds its watch until the last frame: a group can stay
+		// open as long as its track, so a check at accept alone would keep serving after a shrink.
+		const revoked = unauthorized(msg.broadcast);
+		let fetched: group.Consumer | undefined;
+		const watch = this.#watch(msg.broadcast, () => {
+			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+			fetched?.close(revoked);
+			stream.abort(revoked);
+		});
+		try {
+			await this.#serveFetch(msg, stream, watch, (group) => {
+				fetched = group;
+			});
+		} finally {
+			watch.dispose();
+		}
+	}
+
+	async #serveFetch(
+		msg: Fetch,
+		stream: Stream,
+		watch: { revoked: () => boolean },
+		serving: (group: group.Consumer) => void,
+	) {
+		if (watch.revoked()) {
+			stream.writer.reset(unauthorized(msg.broadcast));
 			return;
 		}
 
@@ -770,6 +899,8 @@ export class Publisher {
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
 			return;
 		}
+		// Revoked while the broadcast resolved: the watch already reset the stream.
+		if (watch.revoked()) return;
 
 		// The subscriber opened this stream, so its send order only ranked the request. Rank the
 		// response here, on the same scale as the group streams it competes with.
@@ -791,6 +922,12 @@ export class Publisher {
 				hold.abort();
 			}
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+			serving(group);
+			// Revoked while the group resolved: the watch already reset the stream.
+			if (watch.revoked()) {
+				group.close(unauthorized(msg.broadcast));
+				return;
+			}
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
 				start: msg.startFrame,
@@ -896,8 +1033,17 @@ export class Publisher {
 						case "update": {
 							const update = control.update;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
+							// `positionCursor` pins an unfloored pre-06 SUBSCRIBE to the latest
+							// group, so an update that drops a named floor re-pins there too. On
+							// an empty track the next group is the latest, whatever its sequence.
+							const start =
+								update.startGroup === undefined &&
+								bounds.startGroup !== undefined &&
+								!resolvesStart(this.version)
+									? (track.latest() ?? 0)
+									: update.startGroup;
 							hooks.replaceGroups(track, {
-								start: update.startGroup === undefined ? undefined : { included: update.startGroup },
+								start: start === undefined ? undefined : { included: start },
 								end: update.endGroup === undefined ? undefined : { included: update.endGroup },
 							});
 							bounds.startGroup = update.startGroup;
@@ -1044,9 +1190,24 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
+		// Charged before anything else and held with the track, as in Rust. A peer past the
+		// cap loses the session.
 		const interest = this.#interests.acquire(msg.broadcast, msg.track, "track");
 		const hold = new AbortController();
 		hold.signal.addEventListener("abort", () => interest.release(), { once: true });
+		// Armed before the first check and held until the answer is acknowledged, so a grant
+		// that shrinks while the answer is blocked on flow control resets it, never sends it.
+		const watch = this.#watch(msg.broadcast, () => {
+			console.debug(`track info revoked: broadcast=${msg.broadcast} track=${msg.track}`);
+			hold.abort();
+			stream.writer.reset(unauthorized(msg.broadcast));
+		});
+		if (watch.revoked()) {
+			watch.dispose();
+			hold.abort();
+			stream.writer.reset(unauthorized(msg.broadcast));
+			return;
+		}
 		// Watched from the start, so a requester leaving while the reply is still blocked on
 		// flow control lets go of the track too.
 		void stream.reader.done().then(
@@ -1065,6 +1226,7 @@ export class Publisher {
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
+			if (watch.revoked()) throw unauthorized(msg.broadcast);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.close();
@@ -1073,7 +1235,15 @@ export class Publisher {
 			hold.abort();
 			console.debug(`track unknown: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.reset(error(err));
+		} finally {
+			watch.dispose();
 		}
+	}
+
+	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant?.peek();
+		return grant !== undefined && !grant.publish.matches(broadcast);
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
@@ -1401,6 +1571,17 @@ export class Publisher {
 			console.warn("probe stream error", err);
 			stream.close();
 		}
+	}
+
+	/**
+	 * Close the session when our origin publishes a broadcast our grant does not cover;
+	 * see {@link enforceGrant}.
+	 *
+	 * @internal
+	 */
+	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
+		if (!this.#grant) return;
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
 	}
 
 	/**

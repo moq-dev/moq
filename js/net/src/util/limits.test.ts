@@ -1,6 +1,6 @@
 import { expect, mock, test } from "bun:test";
 import { SessionCode } from "../error.ts";
-import { ANNOUNCES, Interests, Slots, SUBSCRIPTIONS } from "./limits.ts";
+import { ANNOUNCES, Interests, SlotMap, Slots, SUBSCRIPTIONS } from "./limits.ts";
 
 test("the session defaults match moq-net", () => {
 	expect(ANNOUNCES).toBe(100_000);
@@ -9,21 +9,32 @@ test("the session defaults match moq-net", () => {
 
 test("a full budget closes the session, and released slots can be used again", () => {
 	const close = mock(() => {});
-	const slots = new Slots(2, { close } as unknown as WebTransport);
+	const slots = new Slots(2, { quic: { close } as unknown as WebTransport, reason: "too many tests" });
 	slots.acquire();
 	slots.acquire();
 	slots.release();
 	slots.acquire();
-	expect(() => slots.acquire()).toThrow("too many live requests");
-	expect(close).toHaveBeenCalledWith({
-		closeCode: SessionCode.TooManyRequests,
-		reason: "remote error: 7 (too many live requests)",
-	});
+	expect(() => slots.acquire()).toThrow("too many tests");
+	expect(close).toHaveBeenCalledWith({ closeCode: SessionCode.TooManyRequests, reason: "too many tests" });
+});
+
+test("a slot map charges each key once and releases on delete and clear", () => {
+	const map = new SlotMap<string, number>(new Slots(2, { reason: "full" }));
+	map.set("a", 1);
+	map.set("a", 2);
+	map.set("b", 1);
+	expect(() => map.set("c", 1)).toThrow("full");
+	expect(map.has("c")).toBe(false);
+	map.delete("a");
+	map.delete("a");
+	map.set("c", 1);
+	map.clear();
+	map.set("d", 1);
+	map.set("e", 1);
 });
 
 test.each(["track", "subscribe"] as const)("paired interests release the right charge when %s ends first", (first) => {
-	const slots = new Slots(2);
-	const interests = new Interests(slots);
+	const interests = new Interests(new Slots(2, { reason: "full" }));
 	const track = interests.acquire("broadcast", "video", "track");
 	const subscribe = interests.acquire("broadcast", "video", "subscribe");
 	const other = interests.acquire("broadcast", "audio", "subscribe");
@@ -41,7 +52,7 @@ test.each(["track", "subscribe"] as const)("paired interests release the right c
 });
 
 test("duplicate interests count individually, and a failed acquisition leaves no charge", () => {
-	const interests = new Interests(new Slots(2));
+	const interests = new Interests(new Slots(2, { reason: "full" }));
 	const tracks = [interests.acquire("path", "track", "track"), interests.acquire("path", "track", "track")];
 	const subscribes = [
 		interests.acquire("path", "track", "subscribe"),

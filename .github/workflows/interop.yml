@@ -21,6 +21,8 @@ on:
       - "rs/moq-tokio/tests/max_age.rs"
       # The TS/IRD compliance harness runs in the same job (see below).
       - "test/ts/**"
+      # The live TS round trip also checks stdin ingestion keeps up with its source.
+      - "rs/moq-cli/src/publish.rs"
       # The interop job also depends on the recipe that invokes it and the
       # workspace membership that links the JS clients to source.
       - "test/justfile"
@@ -153,6 +155,14 @@ jobs:
       # export has to as well without overflowing the receiver's buffers.
       - name: TS broadcast-sized CPB
         run: nix develop --command just test ts --hrd
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # The same video beside four audio PIDs in a multiplex faster than its Rx: each slot
+      # has to interleave the video with the rest, or its transport buffer overflows.
+      - name: TS multiplex above the video's Rx
+        run: nix develop --command just test ts --headroom
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs

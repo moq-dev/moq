@@ -49,11 +49,8 @@ about 22 s with skip-aheads on the way down.
   88 to 275 ms/s drift the issue reported stand unconfirmed. If drift survives,
   the suspects are `writeFrame` opening a group per audio frame under
   WebTransport stream credit and the main-thread task queue delivering encoder
-  output. The first suspect is now owned by
-  [audio group duration](/quest/m1/audio-group-duration.md), which defaults
-  `groupDuration` to 20 ms. A/B the default against a group of 100 ms or so
-  in the same run; once that quest lands, the baseline is 20 ms groups, not a
-  group per frame.
+  output. Audio now defaults `groupDuration` to 20 ms. A/B that default
+  against a group of 100 ms or so in the same run.
 
 Decided 2026-10-08: moves to m1 with the rest of the line. The estimator
 defaults on and only this manual proof is left, so it no longer gates a
@@ -61,5 +58,4 @@ release.
 
 ## Related
 
-- [Audio group duration](/quest/m1/audio-group-duration.md) - owns the group-per-frame suspect and changes this run's A/B baseline
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces

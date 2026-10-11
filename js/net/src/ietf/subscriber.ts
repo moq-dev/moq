@@ -1,5 +1,6 @@
-import { type GetPromise, race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
+import type { Grant } from "../auth.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
@@ -13,6 +14,7 @@ import {
 	StreamCode,
 	Stream as StreamError,
 	sessionCause,
+	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
@@ -22,7 +24,7 @@ import { type Cursor, Reader, type Stream, UnexpectedEnd } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Milli, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { ANNOUNCES, Slots } from "../util/limits.ts";
+import { ANNOUNCES, SlotMap, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -116,7 +118,6 @@ function sees(filter: Filter, path: Path.Valid): boolean {
  * @internal
  */
 export class Subscriber {
-	#announceSlots: Slots;
 	#session: Session;
 	#localClose = false;
 
@@ -151,8 +152,9 @@ export class Subscriber {
 	// PUBLISH_NAMESPACE and an inline NAMESPACE answering our own SUBSCRIBE_NAMESPACE are
 	// two messages about one source, which the MoQ Solicit draft requires us to tolerate.
 	// Counting them is what keeps the second from duplicating the announce and the first
-	// to end from retracting what the other still holds.
-	#announced = new Map<Path.Valid, { count: number; route: Route }>();
+	// to end from retracting what the other still holds. Each path holds one of the
+	// session's announce slots, however many advertisements reference it.
+	#announced: SlotMap<Path.Valid, { count: number; route: Route }>;
 
 	// Any consumers that want each new announcement, keyed by their local filter.
 	#announcedConsumers = new Map<announce.Producer, Filter>();
@@ -166,6 +168,9 @@ export class Subscriber {
 
 	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
 	#goaway?: GetPromise<Drain>;
+	// Our grant (MoQ Auth): a subscription it stops covering is cancelled. Undefined until
+	// the peer answers, which allows everything.
+	#grant?: Getter<Grant | undefined>;
 
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
@@ -184,6 +189,7 @@ export class Subscriber {
 		hidden = false,
 		solicit,
 		goaway,
+		grant,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -197,17 +203,20 @@ export class Subscriber {
 		solicit?: boolean;
 		/** Settles when the peer sends GOAWAY. */
 		goaway?: GetPromise<Drain>;
+		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
+		grant?: Getter<Grant | undefined>;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
-		this.#announceSlots = new Slots(ANNOUNCES, quic);
+		this.#announced = new SlotMap(new Slots(ANNOUNCES, { quic, reason: "too many announcements" }));
 		this.#cluster = cluster;
 		this.#hidden = hidden;
 		this.#solicit = solicit;
 		this.#goaway = goaway;
+		this.#grant = grant;
 		// A draining peer usually stops publishing namespaces, so reprice from the signal
 		// itself. Waiting for another message would leave the route primary until close.
-		if (goaway) void goaway.then(() => this.#drainAnnounced());
+		void goaway?.then(() => this.#drainAnnounced());
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
@@ -229,6 +238,12 @@ export class Subscriber {
 		for (const [path, info] of this.#announced) {
 			this.#updateAnnounce(path, info.route);
 		}
+	}
+
+	// Whether our grant no longer lets us subscribe to `broadcast`. No grant yet allows it.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant?.peek();
+		return grant !== undefined && !grant.subscribe.matches(broadcast);
 	}
 
 	/**
@@ -301,8 +316,9 @@ export class Subscriber {
 			if (this.#goingAway()) this.#updateAnnounce(path, existing.route);
 			return;
 		}
-		this.#announceSlots.acquire();
-		this.#announced.set(path, { count: 1, route });
+		const entry = { count: 1, route };
+		this.#announced.set(path, entry);
+		this.#consumes.announce(path, entry, route);
 
 		console.debug(`announced: broadcast=${path} active=true`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
@@ -323,6 +339,7 @@ export class Subscriber {
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;
+		this.#consumes.announce(path, existing, route);
 		console.debug(`announced: broadcast=${path} rerouted`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
@@ -343,11 +360,10 @@ export class Subscriber {
 		}
 
 		this.#announced.delete(path);
-		this.#announceSlots.release();
 
 		// The path is gone, so stop sharing its broadcast: a holder outliving the publisher
 		// would otherwise hand the dead generation to whoever consumes the path next.
-		this.#consumes.evict(path);
+		this.#consumes.withdraw(path, existing);
 		console.debug(`announced: broadcast=${path} active=false`);
 
 		for (const [consumer, filter] of this.#announcedConsumers) {
@@ -473,8 +489,8 @@ export class Subscriber {
 							if (live.has(path)) {
 								this.#updateAnnounce(path, route);
 							} else {
-								live.add(path);
 								this.#attachAnnounce(path, route);
+								live.add(path);
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
@@ -554,12 +570,13 @@ export class Subscriber {
 	/**
 	 * Consumes a broadcast from the connection.
 	 *
-	 * Deduplicated per path: repeat calls for the same still-live path share one reference-counted
+	 * Deduplicated per serving instance: repeat calls for the same path share one reference-counted
 	 * broadcast (and one upstream subscription). The shared broadcast closes once every caller has
 	 * closed its handle, so callers close normally.
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
-		return this.#consumes.get(path) ?? this.#consumes.insert(path, this.#createConsume(path));
+		const instance = this.#consumes.instance(path);
+		return this.#consumes.get(path, instance) ?? this.#consumes.insert(path, instance, this.#createConsume(path));
 	}
 
 	#createConsume(path: Path.Valid): broadcast.Consumer {
@@ -591,6 +608,12 @@ export class Subscriber {
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
+		const refused = unauthorized(broadcast);
+		if (this.#denied(broadcast)) {
+			request.reject(refused);
+			return;
+		}
+
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
 			request.reject(await this.#closedSession());
@@ -701,18 +724,33 @@ export class Subscriber {
 			return;
 		}
 
+		let disposeGrant: Dispose | undefined;
 		try {
 			// Which terminal fired decides whether we owe the publisher a cancellation, so
 			// tag them rather than racing bare promises.
 			const publisherEnded = Symbol("publisher");
 			const localEnded = Symbol("local");
+			const revokedEnded = Symbol("revoked");
 			const idle = Symbol("idle");
 
+			// Losing the grant ends the subscription, leaving the session alone.
+			let revoke!: () => void;
+			const revoked = new Promise<typeof revokedEnded>((resolve) => {
+				revoke = () => resolve(revokedEnded);
+			});
+			disposeGrant = this.#grant?.subscribe(() => {
+				if (this.#denied(broadcast)) revoke();
+			});
+			// The grant may have shrunk during setup, before this watcher existed.
+			if (this.#denied(broadcast)) revoke();
+
 			// Terminal conditions settle at most once (PublishDone, track close = local
-			// unsubscribe); race them once so the demand loop doesn't re-subscribe each pass.
+			// unsubscribe, a revoked grant); race them once so the demand loop doesn't
+			// re-subscribe each pass.
 			const done = race([
 				this.#runPublishDone(stream, subscription).then(() => publisherEnded),
 				producer.closed.then(() => localEnded),
+				revoked,
 			]);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
@@ -731,7 +769,12 @@ export class Subscriber {
 			// reopens the window the demand re-check above just closed, and a subscriber that
 			// returned during it would be closed by this line. The lite subscriber closes
 			// straight out of its loop for the same reason.
-			producer.close();
+			if (terminal === revokedEnded) {
+				console.info(`subscription no longer authorized: broadcast=${broadcast} track=${request.name}`);
+				producer.close(refused);
+			} else {
+				producer.close();
+			}
 
 			// The publisher already ended the request, so there is nothing to cancel. Sending
 			// UNSUBSCRIBE here would name a request it has already torn down.
@@ -747,6 +790,7 @@ export class Subscriber {
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
 		} finally {
+			disposeGrant?.();
 			// Only the owner tears down the alias metadata: a later subscription may have
 			// reclaimed the alias and installed its own timescale.
 			if (this.#aliases.retire(trackAlias, subscription)) this.#timescales.delete(trackAlias);
@@ -974,8 +1018,8 @@ export class Subscriber {
 
 			// Only now is the advertisement ours to announce, for the reason above: a
 			// consumer reacting with a SUBSCRIBE must not interleave with that OK.
-			attached = true;
 			this.#attachAnnounce(path, this.#route(msg.cluster));
+			attached = true;
 
 			// An advertisement is updated in place with REQUEST_UPDATE on the stream that
 			// already carries it, so read until the stream ends rather than waiting on the
@@ -1154,7 +1198,12 @@ export class Subscriber {
 			if (!group.flags.firstObject) {
 				let id: bigint | undefined;
 				try {
-					id = await stream.peekU62();
+					const peek = await race([stream.peekU62(), track.closed]);
+					if (typeof peek !== "bigint") {
+						stream.stop(peek ?? new StreamError(StreamCode.Cancel));
+						return;
+					}
+					id = peek;
 				} catch (err: unknown) {
 					if (!(err instanceof UnexpectedEnd)) throw err;
 				}
@@ -1178,9 +1227,11 @@ export class Subscriber {
 				// cache.
 				const frame =
 					stream.tryDecode(decode) ??
-					(await (producer
-						? race([stream.decodeMaybe(decode), producer.closed])
-						: stream.decodeMaybe(decode)));
+					(await race([stream.decodeMaybe(decode), producer?.closed ?? track.closed]));
+				if (!producer && (frame === null || frame instanceof Error)) {
+					stream.stop(frame ?? new StreamError(StreamCode.Cancel));
+					return;
+				}
 				if (!frame || frame instanceof Error) break;
 
 				if (frame.endOfTrack) {
@@ -1221,6 +1272,7 @@ export class Subscriber {
 				stream.stop(new Error("a group must start at object 0"));
 				return;
 			}
+			if (e instanceof ObjectIdGap) console.warn(`unsupported object gap: ${reason(e)}`);
 			if (e instanceof ProtocolViolation || (e instanceof StreamError && e.code === StreamCode.MalformedTrack)) {
 				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);

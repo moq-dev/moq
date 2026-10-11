@@ -1,4 +1,6 @@
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
+import type { Grant } from "../auth.ts";
+import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -11,6 +13,7 @@ import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
+import { untilAborted } from "../util/abort.ts";
 import { Slots, SUBSCRIPTIONS } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
@@ -227,7 +230,6 @@ interface RunFill {
  * @internal
  */
 export class Publisher {
-	#subscriptions: Slots;
 	#withdrawal = new Withdrawal();
 
 	withdraw(): Promise<void> {
@@ -236,6 +238,8 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+	// Subscriptions the peer holds live on this session.
+	#subscriptions: Slots;
 
 	// The one writer for the outbound datagram stream, shared by every subscription since a
 	// second getWriter would throw. Undefined when the transport carries no datagrams, which
@@ -256,6 +260,15 @@ export class Publisher {
 	// back came from us. `undefined` when nothing negotiated it.
 	#advert?: Cluster.Advert;
 
+	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
+	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
+	// allows everything.
+	#grant: Getter<Grant | undefined>;
+
+	// Resolves once the tokens this session presented at setup are answered, so nothing is
+	// advertised before the grant it would be checked against.
+	#ready: Promise<void>;
+
 	/**
 	 * Creates a new Publisher instance.
 	 *
@@ -268,6 +281,8 @@ export class Publisher {
 		requiresSolicitation,
 		hidden = false,
 		cluster,
+		grant = new Signal<Grant | undefined>(undefined),
+		ready = Promise.resolve(),
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -281,9 +296,15 @@ export class Publisher {
 		hidden?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
+		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
+		grant?: Getter<Grant | undefined>;
+		/** Resolves once the setup tokens are answered (MoQ Auth). */
+		ready?: Promise<void>;
 	}) {
 		this.#quic = quic;
-		this.#subscriptions = new Slots(SUBSCRIPTIONS, quic);
+		this.#subscriptions = new Slots(SUBSCRIPTIONS, { quic, reason: "too many subscriptions" });
+		this.#grant = grant;
+		this.#ready = ready;
 		this.#session = session;
 		const origin = publish && wireOf(publish);
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
@@ -312,20 +333,29 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
-		const supported = msg.forward && !msg.rangeFilters;
-		if (supported) this.#subscriptions.acquire();
+		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
+		// once. A peer past the cap loses the session.
+		const charged = msg.forward && !msg.rangeFilters && !this.#denied(msg.trackNamespace);
+		if (charged) this.#subscriptions.acquire();
 		try {
-			await this.#runSubscribe(msg, stream);
+			await this.#serveSubscribe(msg, stream);
 		} finally {
-			if (supported) this.#subscriptions.release();
+			if (charged) this.#subscriptions.release();
 		}
 	}
 
-	async #runSubscribe(msg: Subscribe, stream: Stream) {
+	async #serveSubscribe(msg: Subscribe, stream: Stream) {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		let broadcast: broadcast.Consumer | undefined;
 		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
+
+		// The requester leaving while the broadcast and track resolve ends the request, so a
+		// cancelled subscription gives back its slot instead of holding it until the track
+		// is answered, which may be never.
+		const left = new AbortController();
+		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
+		void cancelled(stream, version).then(() => left.abort(cancel));
 
 		// Legal requests we can't honor are refused one at a time. A subscription that
 		// forwards nothing is only useful to a subscriber that later turns forwarding on,
@@ -338,10 +368,16 @@ export class Publisher {
 
 		if (unsupported) {
 			refusal = { errorCode: toRequestCode("not_supported", "subscribe", version), reasonPhrase: unsupported };
+		} else if (this.#denied(name)) {
+			// Serve only what our grant lets us publish. Checked before resolving, so a denied
+			// request never reaches the origin.
+			refusal = { errorCode: toRequestCode("unauthorized", "subscribe", version), reasonPhrase: "not granted" };
 		} else {
 			try {
 				broadcast =
-					this.#publish && (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)));
+					this.#publish &&
+					(wireOf(this.#publish).local(name) ??
+						(await untilAborted(wireOf(this.#publish).demand(name), left.signal)));
 				if (!broadcast) {
 					refusal = {
 						errorCode: toRequestCode("does_not_exist", "subscribe", version),
@@ -349,6 +385,11 @@ export class Publisher {
 					};
 				}
 			} catch (err: unknown) {
+				// Nobody is left to refuse.
+				if (left.signal.aborted) {
+					stream.abort(cancel);
+					return;
+				}
 				const e = error(err);
 				const condition =
 					e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
@@ -394,7 +435,7 @@ export class Publisher {
 		let cache: TrackSubscriber | undefined;
 
 		try {
-			const info = await track.info();
+			const info = await untilAborted(track.info(), left.signal);
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			// Drafts 14-16 never write that property, so their objects stay unstamped.
 			const timescale =
@@ -585,13 +626,33 @@ export class Publisher {
 						})
 					: Promise.resolve();
 
+			// Losing the grant ends the subscription, leaving the session alone.
+			let revoke!: () => void;
+			const revoked = new Promise<"revoked">((resolve) => {
+				revoke = () => resolve("revoked");
+			});
+			const disposeGrant = this.#grant.subscribe(() => {
+				if (this.#denied(name)) revoke();
+			});
+			// The grant may have shrunk during setup, before this watcher existed.
+			if (this.#denied(name)) revoke();
+
 			let publishError: Error | undefined;
+			let unauthorized = false;
 			let ended = false;
 			try {
 				const served = Symbol("served");
-				ended = (await race([Promise.all([serving, filling]).then(() => served), requestEnded])) === served;
+				const end = await race([Promise.all([serving, filling]).then(() => served), requestEnded, revoked]);
+				if (end === "revoked") {
+					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
+					unauthorized = true;
+					unsubscribe();
+				}
+				ended = end === served;
 			} catch (err: unknown) {
 				publishError = error(err);
+			} finally {
+				disposeGrant();
 			}
 
 			// PUBLISH_DONE waits until every stream this subscription will open is closed, as
@@ -626,15 +687,17 @@ export class Publisher {
 						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
 							? msg.requestId
 							: undefined,
-					statusCode:
-						publishError instanceof UpdateFailed
+					statusCode: unauthorized
+						? PublishDoneStatus.UNAUTHORIZED
+						: publishError instanceof UpdateFailed
 							? PublishDoneStatus.UPDATE_FAILED
 							: publishError
 								? PublishDoneStatus.INTERNAL_ERROR
 								: PublishDoneStatus.TRACK_ENDED,
 					streamCount: BigInt(streams.opened),
-					reasonPhrase:
-						publishError instanceof UpdateFailed
+					reasonPhrase: unauthorized
+						? "not granted"
+						: publishError instanceof UpdateFailed
 							? "update failed"
 							: publishError
 								? "internal error"
@@ -650,7 +713,8 @@ export class Publisher {
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
+			if (e === cancel) console.debug(`publish cancelled: broadcast=${name} track=${track.name}`);
+			else console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
 			track.close();
@@ -934,6 +998,22 @@ export class Publisher {
 		}
 	}
 
+	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant.peek();
+		return grant !== undefined && !grant.publish.matches(broadcast);
+	}
+
+	/**
+	 * Close the session when our origin publishes a broadcast our grant does not cover;
+	 * see {@link enforceGrant}.
+	 *
+	 * @internal
+	 */
+	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
+	}
+
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
 	 *
@@ -986,7 +1066,11 @@ export class Publisher {
 			const visible = (covered: Path.Valid) => !this.#hidden || msg.hidden || !hiddenBelow(prefix, covered);
 			const carries = (covered: Path.Valid) =>
 				visible(covered) &&
-				(legacy ? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)) : true);
+				(legacy ? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)) : true) &&
+				!this.#denied(covered);
+
+			// Nothing is advertised before the grant it would be checked against.
+			await this.#ready;
 
 			// Inline entries always land, and the receiver treats a repeated NAMESPACE as a
 			// replacement, so repricing one is just sending it again, a new original
@@ -1024,8 +1108,15 @@ export class Publisher {
 				// waits for its reply only notifies listeners already registered.
 				// TODO Make a better helper within Signals.
 				let dispose!: Dispose;
-				const changed = new Promise<Advertisements | undefined>((resolve) => {
-					dispose = this.#advertised.changed(resolve);
+				const changed = new Promise<"changed">((resolve) => {
+					const table = this.#advertised.changed(() => resolve("changed"));
+					// A grant change re-diffs the same way, withdrawing what it no longer covers.
+					// The loop top re-reads the table, so an ended origin still stops it there.
+					const grant = this.#grant.changed(() => resolve("changed"));
+					dispose = () => {
+						table();
+						grant();
+					};
 				});
 
 				const advertised = this.#advertised.peek();
@@ -1105,6 +1196,9 @@ export class Publisher {
 
 		let dispose: Dispose | undefined;
 		try {
+			// Nothing is advertised before the grant it would be checked against.
+			if ((await Promise.race([this.#ready.then(() => "ready" as const), closed])) !== "ready") return;
+
 			// Keyed by path.
 			const ns: Namespaces = { active: new Map(), refused: new Map(), offered: new Map() };
 			let retry = 0;
@@ -1116,8 +1210,15 @@ export class Publisher {
 				// through it and leave the namespace unadvertised until something unrelated
 				// changed.
 				// TODO Make a better helper within Signals.
-				const changed = new Promise<Advertisements | undefined>((resolve) => {
-					dispose = this.#advertised.changed(resolve);
+				const changed = new Promise<"changed">((resolve) => {
+					const table = this.#advertised.changed(() => resolve("changed"));
+					// A grant change re-diffs the same way, withdrawing what it no longer covers.
+					// The loop top re-reads the table, so an ended origin still stops it there.
+					const grant = this.#grant.changed(() => resolve("changed"));
+					dispose = () => {
+						table();
+						grant();
+					};
 				});
 
 				const advertised = this.#advertised.peek();
@@ -1128,8 +1229,14 @@ export class Publisher {
 
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, candidates] of advertised) {
-					// Only peers that declared MoQ Hidden filter unsolicited discovery.
-					if ((this.#hidden && hiddenBelow(Path.empty(), covered)) || candidates.length === 0) continue;
+					// Only peers that declared MoQ Hidden filter unsolicited discovery, and
+					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
+					if (
+						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
+						this.#denied(covered) ||
+						candidates.length === 0
+					)
+						continue;
 					updated.set(covered, candidates[0]);
 				}
 

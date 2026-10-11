@@ -133,6 +133,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench track
 
+      # Fails if charging a subscription costs more as the session holds more
+      # broadcasts and tracks, which means the cap accounting went back to scanning.
       - name: JS session interest accounting benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench interests
@@ -156,6 +158,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
 
+      - name: HTTP idle accounting benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo bench --locked -p moq-relay --bench http_idle -- --test
+
       # One relay's stats tick (drain plus plain and compressed encode), swept
       # over held paths, tiers, and how many of those paths changed, plus the
       # decode table. `--test` runs each tick routine once (decode ignores it
@@ -173,9 +179,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
 
+      - name: TS damage PID benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
+
       - name: RTMP chunk-stream benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-rtmp --test
+
+      - name: Stream import throughput
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
 
       - name: BBB rendition alignment
         if: ${{ !cancelled() }}
@@ -228,7 +242,7 @@ jobs:
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
-        # `gh test` exercises the release tooling, which no pull request runs.
+        # `gh test` exercises workflow and release tooling, which no pull request runs.
         recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test"]
     steps:
       - name: Free disk space
@@ -286,7 +300,7 @@ jobs:
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - uses: ./.github/actions/just
       - name: Install nextest
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: nextest@0.9.146
       - name: Test
@@ -324,8 +338,15 @@ jobs:
       # its apt runtime libs, and run.sh's own install then no-ops.
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
+
+      - name: WebSocket fallback startup benchmark
+        run: nix develop --command just js qmux-bench
+
+      - name: Browser publisher fairness benchmark
+        run: nix develop --command just js serve-bench
         shell: bash -leo pipefail {0}
       - name: Audio quality
+        if: ${{ !cancelled() }}
         run: nix develop --command just test audio-quality --enforce --capture
         shell: bash -leo pipefail {0}
         env:
