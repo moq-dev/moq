@@ -44,3 +44,11 @@ tests against the [standard](https://pub.smpte.org/latest/st2022-7/st2022-7-2019
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - currently assumes an input-derived wall anchor is available
 - [Deterministic TS legs](/quest/m2/ts-hitless.md) - TS identity and RTP recovery need separate acceptance evidence
 - [TS passthrough export](/quest/m1/ts-passthrough-export.md) - unchanged packets do not establish identical groups from independent starts
+
+The automated validation work (#5328) enables the existing `just test ts --pair`
+arm nightly. Its local 45-second clean-delivery run found 100% PAT/PMT agreement
+but 86.96% SDT agreement over 41 seconds, below the existing 90% gate. Preserve
+that evidence while settling the alignment contract. The grader associates a
+table with the next PES PTS; verify that assumption against the current slot
+scheduler before attributing every mismatch to table emission. Do not loosen
+the threshold or claim packet identity from table agreement alone.

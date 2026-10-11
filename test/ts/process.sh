@@ -9,3 +9,11 @@ ts_wait() {
         return 1
     fi
 }
+
+# A finite measurement must not break its producer's pipe before source EOF.
+ts_drain() {
+    local status=0
+    "$@" || status=$?
+    cat >/dev/null || return $?
+    return "$status"
+}

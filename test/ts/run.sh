@@ -382,7 +382,7 @@ grade_live() {
     set +e
     timeout -k 3 $((DURATION + 20)) \
         "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log" |
-        python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
+        ts_drain python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
             ${SCHEDULE[@]+"${SCHEDULE[@]}"} ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$HARNESS_RUN/timing.out" 2>&1
     printf '%s\n' "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$HARNESS_RUN/timing.rc"
 }
@@ -464,11 +464,12 @@ if [[ -n "$LIVE" ]]; then
     read -r EXPORT_RC GRADE_RC <"$HARNESS_RUN/timing.rc"
     echo
     cat "$HARNESS_RUN/timing.out"
-    # SIGPIPE is expected when the live grader closes a completed measurement
-    # window. A timeout or another failure is not a successful export.
-    if [[ "$EXPORT_RC" -ne 0 && "$EXPORT_RC" -ne 141 ]]; then
+    # The grader drains after its measurement window, so no broken pipe or
+    # timeout is an expected successful export.
+    printf 'exporter: %s\ngrader: %s\n' "$EXPORT_RC" "$GRADE_RC" >>"$HARNESS_RUN/process-status.log"
+    if [[ "$EXPORT_RC" -ne 0 ]]; then
         echo >&2
-        echo "error: the exporter exited $EXPORT_RC before the window closed" >&2
+        echo "error: the exporter exited $EXPORT_RC" >&2
         dump_logs
         exit 1
     fi

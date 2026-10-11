@@ -54,7 +54,8 @@ at the rate: the `PCR_accuracy_error` an IRD or a TR 101 290 probe reports, whic
 Publisher and captured subscriber processes must exit successfully. Captures drain
 through EOF within the existing process deadline; a nonempty partial file cannot
 hide a failed pipeline or timeout. The live arm also requires its grader to pass;
-SIGPIPE is accepted only when that grader has completed its measurement window.
+after its measurement window, the reader drains through source EOF so neither a
+broken pipe nor another exporter failure needs to be ignored.
 
 `--analyze-only` needs only TSDuck + Python, so you can point it at any captured
 subscriber output:

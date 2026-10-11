@@ -80,6 +80,6 @@ Public API: a new export mode; nothing existing breaks.
 
 - [Deterministic TS legs](/quest/m2/ts-hitless.md) - common packet identity and the proposed `--sync` anchor
 - [T-STD TS export](/quest/m1/tstd/README.md) - the jitter buffer and clock recovery this release shares
-- [TS validation](/quest/m1/ts-reliability/validation.md) - shared automatic graders and controls
+- [TS validation](/test/ts/README.md) - shared automatic graders and controls
 - [Loss and recovery](/quest/m1/ts-reliability/recovery.md) - actual missing content and reacquisition proof
 - [Redundant alignment](/quest/m1/plan-ts-alignment.md) - identical common objects do not prove independent importers publish identical groups

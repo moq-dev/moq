@@ -52,10 +52,11 @@ and measured release timing as separate checks.
 
 ## Required
 
-- [Automated validation](/quest/m1/ts-reliability/validation.md) - shared graders, profiles and known-bad controls
 - [TS passthrough export](/quest/m1/ts-passthrough-export.md) - supplies the raw egress exercised by the loss matrix
 
 ## Related
+
+- [Automated validation](/test/ts/README.md) - shared graders, profiles and known-bad controls
 
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims after non-continuous transitions
 - [Gradual recovery](/quest/m2/intra-refresh/README.md) - recovery counts and per-group warmup
