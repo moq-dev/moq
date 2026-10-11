@@ -13,15 +13,14 @@ feature. A study may end with a measured no-go. Work gated on hardware, a
 partner, a consumer, a provider, or an upstream release, or with no named
 consumer yet, waits in [m3](/quest/m3/README.md).
 
-Added 2026-10-10 by maintainer priority, ranked first: bench readiness. A
-grant stats label was dropped: per-credential bytes already reach the auth
-decider through its lease's close report, and live presence alone does not
-justify a new public grant field. Refusal reasons folded the same day into
+Added 2026-10-10 by maintainer priority, ranked first: the grant stats label
+and bench readiness. Refusal reasons folded the same day into
 [Session outcomes](/quest/m1/session-outcomes.md) and
 [Typed refusal reason](/quest/m1/refusal-reason.md).
 
 ## Required
 
+- [Grant stats label](/quest/m2/grant-label.md) - an auth grant's optional `label` names what its session is counted under in stats, apart from the path scope it may access
 - [moq-bench readiness](/quest/m2/bench-ready.md) - every JSONL line carries the rolled targets and a `ready` flag, so a harness opens its window on readiness
 - [RTSP import](/quest/m2/rtsp-import.md) - `moq import rtsp` publishes an IP camera from its own network, through a `moq-rtsp` crate whose one-session ingest a caller can supervise itself
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
