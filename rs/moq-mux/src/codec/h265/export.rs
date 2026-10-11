@@ -1,9 +1,9 @@
 //! H.265 single-rendition Annex-B exporter.
 //!
-//! HEVC analogue of [`crate::codec::h264::Export`]. Accepts either a hev1
-//! (Annex-B, parameter sets inline) or hvc1 (length-prefixed + out-of-band
-//! hvcC) source and emits a raw Annex-B elementary stream. Timestamps are
-//! dropped.
+//! HEVC analogue of [`crate::codec::h264::Export`]. Sources without a description
+//! are already Annex-B. With an hvcC description, length prefixes become start codes
+//! and any out-of-band parameter sets precede keyframes. hev1 samples may carry all
+//! parameter sets inline. Timestamps are dropped.
 
 use std::task::{Poll, ready};
 
@@ -31,13 +31,12 @@ struct H265Track {
 	/// silently reusing a stale `convert`.
 	config: VideoConfig,
 	source: ExportSource,
-	/// `Some` for an hvc1 source: VPS/SPS/PPS prefix prebuilt from the hvcC,
-	/// and the hvcC length-prefix size. `None` for a hev1 source: Annex-B
-	/// passes through without conversion.
-	convert: Option<Hvc1Convert>,
+	/// A decoder description supplies length-prefix size and any out-of-band parameter sets.
+	/// Without one, the payload is already Annex-B.
+	convert: Option<Convert>,
 }
 
-struct Hvc1Convert {
+struct Convert {
 	length_size: usize,
 	keyframe_prefix: Bytes,
 }
@@ -152,7 +151,9 @@ impl<S: Stream> Export<S> {
 			None => None,
 			Some(hvcc) => {
 				let params = super::Hvcc::parse(hvcc)?;
-				if params.vps.is_empty() || params.sps.is_empty() || params.pps.is_empty() {
+				if matches!(&config.codec, hang::catalog::VideoCodec::H265(codec) if !codec.in_band)
+					&& (params.vps.is_empty() || params.sps.is_empty() || params.pps.is_empty())
+				{
 					return Err(super::Error::MissingParamSets {
 						name: name.clone(),
 						vps: params.vps.len(),
@@ -162,7 +163,7 @@ impl<S: Stream> Export<S> {
 					.into());
 				}
 				let prefix = annexb::build_prefix(params.vps.iter().chain(params.sps.iter()).chain(params.pps.iter()));
-				Some(Hvc1Convert {
+				Some(Convert {
 					length_size: params.length_size,
 					keyframe_prefix: prefix,
 				})
@@ -302,5 +303,44 @@ mod tests {
 			"group-start frame must begin with VPS/SPS/PPS"
 		);
 		assert_eq!(&frame1[prefix.len()..], &[0, 0, 0, 1, 0x02, 0x01, 0xe0, 0x12]);
+	}
+	#[tokio::test(start_paused = true)]
+	async fn in_band_export_accepts_empty_parameter_sets() {
+		for in_band in [false, true] {
+			let mut catalog = hvc1_catalog(
+				"video",
+				Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0]),
+			);
+			let config = catalog.video.renditions.get_mut("video").unwrap();
+			let hang::catalog::VideoCodec::H265(codec) = &mut config.codec else {
+				unreachable!()
+			};
+			codec.in_band = in_band;
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast
+				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			let nals: &[&[u8]] = &[&[0x40, 1, 0x0c], &[0x42, 1, 1], &[0x44, 1, 0xc0], &[0x26, 1, 0x88]];
+			write_length_prefixed(&mut group, 0, nals);
+			group.finish().unwrap();
+			track.finish().unwrap();
+			let consumer = broadcast.consume();
+			let mut exporter = Export::new(crate::source::announced(&consumer), Once(Some(catalog)));
+			let result = exporter.next().await;
+			if in_band {
+				let expected: Vec<_> = nals
+					.iter()
+					.flat_map(|nal| [0, 0, 0, 1].into_iter().chain(nal.iter().copied()))
+					.collect();
+				assert_eq!(result.unwrap().unwrap().as_ref(), expected.as_slice());
+				assert!(exporter.next().await.unwrap().is_none());
+			} else {
+				assert!(matches!(
+					result,
+					Err(crate::Error::H265(super::super::Error::MissingParamSets { .. }))
+				));
+			}
+		}
 	}
 }
