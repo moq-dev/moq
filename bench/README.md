@@ -75,8 +75,8 @@ and invalid samples still fail the command.
 `nix develop --command just bench-profile-probe lock OUTPUT` probes bpftrace
 permissions before a costly build; use `cpu` to probe perf's CPU clock event.
 A refused probe retains stdout, stderr and its command in OUTPUT and exits
-unsuccessfully. Linux lock capture needs sudo or CAP_BPF plus tracefs access;
-CPU capture needs perf_event permission. The probe captures no profile.
+unsuccessfully. Linux lock capture needs sudo or CAP\_BPF plus tracefs access;
+CPU capture needs perf\_event permission. The lock probe loads both futex tracepoints and user-stack collection before exiting; a BEGIN-only program would not establish that those facilities are usable. Missing tools and process-start failures retain refusal diagnostics too. The probe captures no profile.
 
 `profile.py thread-cpu PID OUTPUT` records relay worker CPU nanoseconds from
 Linux schedstat. The reducer accepts normalized records with `tid`, `comm`,
@@ -84,7 +84,7 @@ Linux schedstat. The reducer accepts normalized records with `tid`, `comm`,
 by TID. Only std mutex `lock_contended` frames contribute to the lock share;
 allocator, condvar and runtime parking waits are counted separately. The
 denominator is scheduled CPU time, so wait/CPU can exceed one. Missing CPU or
-user stacks are refused. Spinning does not reach the futex and is excluded.
+user stacks and address-only unresolved stacks are refused. Spinning does not reach the futex and is excluded.
 
 This is a partial foundation, not the profiling launcher. Still required:
 integrate captures with run.sh's owned-child lifecycle, preserve metadata and

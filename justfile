@@ -58,7 +58,7 @@ bench-runtime $ROUNDS="3" $WORKERS="":
 
 # Probe capture permissions without starting a relay or reporting a profile.
 bench-profile-probe MODE="lock" OUTPUT="target/profile-probe":
-    python3 bench/profile.py probe {{quote(MODE)}} {{quote(OUTPUT)}}
+    python3 bench/profile.py probe {{ quote(MODE) }} {{ quote(OUTPUT) }}
 
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
