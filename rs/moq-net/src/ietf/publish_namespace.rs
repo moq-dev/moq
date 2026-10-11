@@ -38,10 +38,11 @@ impl PublishNamespace<'_> {
 		let track_namespace = decode_namespace(r, version)?;
 
 		// The token is ignored: the session's grant is what authorizes the request.
+		// The cluster extension defines its parameters only where it can be negotiated.
 		decode_params!(r, version,
 			0x03 => _authorization_token: Vec<super::Opaque>,
-			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
-			cluster::ROUTE_COST => cost: Option<u64>,
+			cluster::HOP_PATH => hops: Option<cluster::HopPath> where cluster::supported(version),
+			cluster::ROUTE_COST => cost: Option<u64> where cluster::supported(version),
 		);
 
 		let cluster = match negotiated {
@@ -570,6 +571,25 @@ mod tests {
 		let mut buf = BytesMut::new();
 		assert!(msg.encode_msg(&mut buf, Version::Draft16).is_err());
 		assert!(decode_message::<PublishNamespaceUpdate>(&[0x02, 0x00], Version::Draft16).is_err());
+	}
+
+	/// Drafts 14 and 15 predate the cluster extension, so its parameters are unrecognized
+	/// there and ignored, repeats included.
+	#[test]
+	fn legacy_ignores_cluster_parameters() {
+		for version in [Version::Draft14, Version::Draft15] {
+			let msg = PublishNamespace {
+				request_id: RequestId(1),
+				track_namespace: Path::new("test"),
+				cluster: None,
+			};
+			let mut encoded = encode_message(&msg, version);
+			// Replace the empty parameter block with two ROUTE_COST (0x40B58) parameters.
+			assert_eq!(encoded.pop(), Some(0));
+			encoded.extend_from_slice(&[2, 0x80, 0x04, 0x0B, 0x58, 5, 0x80, 0x04, 0x0B, 0x58, 6]);
+			let decoded: PublishNamespace = decode_message(&encoded, version).unwrap();
+			assert!(decoded.cluster.is_none(), "{version}");
+		}
 	}
 
 	#[test]

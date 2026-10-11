@@ -242,14 +242,8 @@ test("Message Parameters: Location preserves bigint precision", async () => {
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [
-		Version.DRAFT_14,
-		Version.DRAFT_15,
-		Version.DRAFT_16,
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-		Version.DRAFT_19,
-	]) {
+	// Draft 14 carries Largest in the SUBSCRIBE_OK body, so it defines no LARGEST_OBJECT parameter.
+	for (const version of [Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -1947,25 +1941,38 @@ test("Subscribe v16: rejects INCLUDE_PROPERTIES", async () => {
 });
 
 for (const version of [Version.DRAFT_14, Version.DRAFT_15]) {
+	// DELIVERY_TIMEOUT (0x02) is the known key: both drafts define it.
 	test(`Parameters ${version}: unknown key does not hide a later known value`, async () => {
-		for (const bytes of [new Uint8Array([2, 0x3e, 1, 0x20, 7]), new Uint8Array([2, 0x3d, 1, 42, 0x20, 7])]) {
+		for (const bytes of [new Uint8Array([2, 0x3e, 1, 0x02, 7]), new Uint8Array([2, 0x3d, 1, 42, 0x02, 7])]) {
 			const params = await Parameters.decode(new Reader(undefined, bytes, version), version);
-			expect(params.subscriberPriority).toBe(7);
+			expect(params.deliveryTimeout).toBe(7n);
 		}
 	});
 
 	test(`Parameters ${version}: only a recognized key must be unique`, async () => {
 		for (const bytes of [
-			new Uint8Array([3, 0x3e, 1, 0x3e, 2, 0x20, 7]),
-			new Uint8Array([3, 0x3d, 1, 42, 0x3d, 1, 43, 0x20, 7]),
+			new Uint8Array([3, 0x3e, 1, 0x3e, 2, 0x02, 7]),
+			new Uint8Array([3, 0x3d, 1, 42, 0x3d, 1, 43, 0x02, 7]),
+			// ROUTE_COST (0x40b58): the cluster extension is negotiated only from draft 17.
+			new Uint8Array([3, 0x80, 0x04, 0x0b, 0x58, 5, 0x80, 0x04, 0x0b, 0x58, 6, 0x02, 7]),
 		]) {
 			const params = await Parameters.decode(new Reader(undefined, bytes, version), version);
-			expect(params.subscriberPriority).toBe(7);
+			expect(params.deliveryTimeout).toBe(7n);
 		}
-		const known = new Uint8Array([2, 0x20, 7, 0x20, 8]);
+		const known = new Uint8Array([2, 0x02, 7, 0x02, 8]);
 		await expect(Parameters.decode(new Reader(undefined, known, version), version)).rejects.toThrow(/duplicate/);
 	});
 }
+
+// Draft 14 defines only DELIVERY_TIMEOUT, AUTHORIZATION TOKEN and MAX CACHE DURATION, so
+// later definitions such as SUBSCRIBER_PRIORITY and LOCATION_FILTER are unrecognized and may repeat.
+test("Parameters draft14: later definitions are unrecognized", async () => {
+	for (const bytes of [new Uint8Array([2, 0x20, 7, 0x20, 8]), new Uint8Array([2, 0x21, 0, 0x21, 0])]) {
+		const params = await Parameters.decode(new Reader(undefined, bytes, Version.DRAFT_14), Version.DRAFT_14);
+		expect(params.subscriberPriority).toBeUndefined();
+		expect(params.subscriptionFilter).toBeUndefined();
+	}
+});
 
 test("Subscribe draft15 recognizes only its parameters", async () => {
 	for (const parameter of [

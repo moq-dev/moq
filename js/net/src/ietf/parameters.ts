@@ -255,7 +255,17 @@ const MSG_PARAM_REPEATABLE: readonly bigint[] = [
 	MSG_PARAM_TRACK_PROPERTY_FILTER,
 ];
 
-// These definitions are unknown KVPs in drafts 14 and 15.
+/// The message parameters draft 14 defines, plus HIDDEN, whose extension any draft can
+/// negotiate. Every other id is unrecognized there.
+const MSG_PARAM_DRAFT14: readonly bigint[] = [
+	MSG_PARAM_DELIVERY_TIMEOUT,
+	MSG_PARAM_AUTHORIZATION_TOKEN,
+	MSG_PARAM_MAX_CACHE_DURATION,
+	MSG_PARAM_HIDDEN,
+];
+
+// These definitions, including the cluster extension negotiated only from draft 17, are
+// unknown KVPs in draft 15.
 const MSG_PARAM_AFTER_DRAFT15: readonly bigint[] = [
 	MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT,
 	MSG_PARAM_FILL_TIMEOUT,
@@ -263,6 +273,8 @@ const MSG_PARAM_AFTER_DRAFT15: readonly bigint[] = [
 	...MSG_PARAM_RANGE_FILTERS,
 	MSG_PARAM_TRACK_PROPERTY_FILTER,
 	MSG_PARAM_INCLUDE_PROPERTIES,
+	MSG_PARAM_HOP_PATH,
+	MSG_PARAM_ROUTE_COST,
 ];
 
 type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "filter" | "bytes";
@@ -646,13 +658,15 @@ export class Parameters {
 				prevType = id;
 			}
 
-			// Drafts 14 and 15 have a receiver ignore unrecognized parameters, repeats included,
-			// and the later definitions are unrecognized there. Consume their KVP framing
-			// without interpreting a value or exposing it to message validation.
-			if (
-				(version === Version.DRAFT_14 || version === Version.DRAFT_15) &&
-				(MSG_PARAM_AFTER_DRAFT15.includes(id) || messageParamKind(id) === undefined)
-			) {
+			// Drafts 14 and 15 have a receiver ignore unrecognized parameters, repeats included.
+			// Consume their KVP framing without interpreting a value or exposing it to message
+			// validation.
+			const unrecognized =
+				version === Version.DRAFT_14
+					? !MSG_PARAM_DRAFT14.includes(id)
+					: version === Version.DRAFT_15 &&
+						(MSG_PARAM_AFTER_DRAFT15.includes(id) || messageParamKind(id) === undefined);
+			if (unrecognized) {
 				if (id % 2n === 0n) await r.u62();
 				else await r.read(await r.u53());
 				continue;
@@ -675,8 +689,7 @@ export class Parameters {
 							throw new Error(`duplicate message parameter id: ${id.toString()}`);
 						}
 						params.#locations.set(id, decodeLocation(bytes));
-					} else if (id === MSG_PARAM_SUBSCRIPTION_FILTER && version !== Version.DRAFT_14) {
-						// Draft-14 carries the filter in the SUBSCRIBE body, so 0x21 is undefined there.
+					} else if (id === MSG_PARAM_SUBSCRIPTION_FILTER) {
 						if (params.#filterBytes !== undefined || params.#filter !== undefined) {
 							throw new Error(`duplicate message parameter id: ${id.toString()}`);
 						}
