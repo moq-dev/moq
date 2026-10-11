@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -59,6 +60,7 @@ impl Stats {
 
 	/// Record one group keyframe's wall-clock delivery latency.
 	pub fn latency(&self, sent_ms: u128) {
+		// Read the clock before locking so contention is not measured as latency.
 		let now_ms = SystemTime::now()
 			.duration_since(UNIX_EPOCH)
 			.unwrap_or_default()
@@ -97,14 +99,7 @@ impl Stats {
 			let latency_interval = IntervalLatency::from_delta(&prev.latency_buckets, &now.latency_buckets);
 
 			if let Some(file) = &mut output {
-				let record = Record {
-					timestamp_ms: SystemTime::now()
-						.duration_since(UNIX_EPOCH)
-						.unwrap_or_default()
-						.as_millis(),
-					snapshot: &now,
-					interval: &latency_interval,
-				};
+				let record = Record::new(&prev, &now, &latency_interval)?;
 				// A serialization failure is a bug, not a runtime condition.
 				let line = serde_json::to_string(&record).expect("stats must serialize");
 				writeln!(file, "{line}")
@@ -167,14 +162,32 @@ impl Stats {
 struct Record<'a> {
 	/// Wall-clock milliseconds since the Unix epoch.
 	timestamp_ms: u128,
+	interval_start_ms: u128,
+	interval_end_ms: u128,
 	#[serde(flatten)]
 	snapshot: &'a Snapshot,
 	#[serde(flatten)]
 	interval: &'a IntervalLatency,
 }
 
+impl<'a> Record<'a> {
+	fn new(previous: &Snapshot, snapshot: &'a Snapshot, interval: &'a IntervalLatency) -> anyhow::Result<Self> {
+		let interval_start_ms = previous.captured_at.duration_since(UNIX_EPOCH)?.as_millis();
+		let interval_end_ms = snapshot.captured_at.duration_since(UNIX_EPOCH)?.as_millis();
+		Ok(Self {
+			timestamp_ms: interval_end_ms,
+			interval_start_ms,
+			interval_end_ms,
+			snapshot,
+			interval,
+		})
+	}
+}
+
 #[derive(Serialize)]
 struct Snapshot {
+	#[serde(skip)]
+	captured_at: SystemTime,
 	connections: u64,
 	broadcasts: u64,
 	subscriptions: u64,
@@ -207,7 +220,16 @@ struct Snapshot {
 /// cannot move these numbers. `latency_interval_samples` is the sum of that
 /// delta and the only sample count that belongs with these percentiles.
 #[derive(Serialize)]
+struct Histogram {
+	version: u8,
+	unit: &'static str,
+	/// Sparse pairs of millisecond bucket index and count, sorted by index.
+	buckets: Vec<(u32, u64)>,
+}
+
+#[derive(Serialize)]
 struct IntervalLatency {
+	latency_interval_histogram: Histogram,
 	latency_interval_samples: u64,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	latency_interval_p50_ms: Option<u64>,
@@ -232,6 +254,15 @@ impl IntervalLatency {
 			.collect();
 		let samples = buckets.iter().sum();
 		Self {
+			latency_interval_histogram: Histogram {
+				version: 1,
+				unit: "ms",
+				buckets: buckets
+					.iter()
+					.enumerate()
+					.filter_map(|(index, &count)| (count > 0).then_some((index as u32, count)))
+					.collect(),
+			},
 			latency_interval_samples: samples,
 			latency_interval_p50_ms: percentile(&buckets, samples, 50),
 			latency_interval_p90_ms: percentile(&buckets, samples, 90),
@@ -245,6 +276,7 @@ impl Snapshot {
 	fn take(stats: &Stats) -> Self {
 		let latency = stats.latency.snapshot();
 		Self {
+			captured_at: latency.captured_at,
 			connections: stats.connections.load(Ordering::Relaxed),
 			broadcasts: stats.broadcasts.load(Ordering::Relaxed),
 			subscriptions: stats.subscriptions.load(Ordering::Relaxed),
@@ -267,55 +299,81 @@ impl Snapshot {
 }
 
 struct Latency {
-	buckets: Box<[AtomicU64]>,
-	max_ms: AtomicU64,
-	clock_skew: AtomicU64,
+	state: Mutex<LatencyState>,
+}
+
+#[derive(Clone)]
+struct LatencyState {
+	buckets: Vec<u64>,
+	max_ms: u64,
+	clock_skew: u64,
 }
 
 impl Default for Latency {
 	fn default() -> Self {
 		Self {
-			buckets: (0..LATENCY_BUCKETS).map(|_| AtomicU64::new(0)).collect(),
-			max_ms: AtomicU64::new(0),
-			clock_skew: AtomicU64::new(0),
+			state: Mutex::new(LatencyState {
+				buckets: vec![0; LATENCY_BUCKETS],
+				max_ms: 0,
+				clock_skew: 0,
+			}),
 		}
 	}
 }
 
-impl Latency {
-	fn observe(&self, sent_ms: u128, now_ms: u128) {
+impl LatencyState {
+	fn observe(&mut self, sent_ms: u128, now_ms: u128) {
 		let Some(latency_ms) = now_ms.checked_sub(sent_ms) else {
-			self.clock_skew.fetch_add(1, Ordering::Relaxed);
+			self.clock_skew += 1;
 			return;
 		};
 		let latency_ms = u64::try_from(latency_ms).unwrap_or(u64::MAX);
 		let bucket = usize::try_from(latency_ms)
 			.unwrap_or(usize::MAX)
 			.min(LATENCY_BUCKETS - 1);
-		self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
-		self.max_ms.fetch_max(latency_ms, Ordering::Relaxed);
+		self.buckets[bucket] += 1;
+		self.max_ms = self.max_ms.max(latency_ms);
+	}
+}
+
+impl Latency {
+	fn observe(&self, sent_ms: u128, now_ms: u128) {
+		self.state
+			.lock()
+			.expect("latency lock poisoned")
+			.observe(sent_ms, now_ms);
 	}
 
 	fn snapshot(&self) -> LatencySnapshot {
-		let buckets: Vec<u64> = self
-			.buckets
-			.iter()
-			.map(|bucket| bucket.load(Ordering::Relaxed))
-			.collect();
+		// Observations and this boundary share one lock, so the histogram cannot
+		// include only part of an observation. One that reads the clock before the
+		// boundary but locks after it counts in the next interval, unaltered.
+		let state = self.state.lock().expect("latency lock poisoned");
+		let captured_at = SystemTime::now();
+		let LatencyState {
+			buckets,
+			max_ms,
+			clock_skew,
+		} = state.clone();
+		drop(state);
+
+		// Percentile scans and JSON preparation never block observations.
 		let samples = buckets.iter().sum();
 		LatencySnapshot {
+			captured_at,
 			samples,
 			p50_ms: percentile(&buckets, samples, 50),
 			p90_ms: percentile(&buckets, samples, 90),
 			p99_ms: percentile(&buckets, samples, 99),
-			max_ms: (samples > 0).then(|| self.max_ms.load(Ordering::Relaxed)),
-			clock_skew: self.clock_skew.load(Ordering::Relaxed),
+			max_ms: (samples > 0).then_some(max_ms),
+			clock_skew,
 			buckets,
 		}
 	}
 }
 
 struct LatencySnapshot {
+	captured_at: SystemTime,
 	samples: u64,
 	p50_ms: Option<u64>,
 	p90_ms: Option<u64>,
@@ -430,6 +488,8 @@ mod tests {
 
 		let record = Record {
 			timestamp_ms: 1,
+			interval_start_ms: 0,
+			interval_end_ms: 1,
 			snapshot: &steady,
 			interval: &interval,
 		};
@@ -439,6 +499,37 @@ mod tests {
 		assert_eq!(line["latency_p99_ms"], serde_json::json!(500));
 		assert_eq!(line["latency_interval_p99_ms"], serde_json::json!(99));
 		assert!(line.get("latency_buckets").is_none());
+	}
+
+	#[test]
+	fn sparse_runs_merge_at_bucket_resolution() {
+		let runs = [vec![0, 1, 1, 200, 60_000, 80_000], vec![1, 2, 4, 200, 200, 90_000]];
+		let mut merged = vec![0_u64; LATENCY_BUCKETS];
+		let mut concatenated = vec![0_u64; LATENCY_BUCKETS];
+		let zeros = vec![0; LATENCY_BUCKETS];
+		for samples in runs {
+			let mut counts = zeros.clone();
+			for sample in samples {
+				let index = sample.min(LATENCY_BUCKETS - 1);
+				counts[index] += 1;
+				concatenated[index] += 1;
+			}
+			let interval = IntervalLatency::from_delta(&zeros, &counts);
+			let histogram = interval.latency_interval_histogram;
+			assert_eq!(histogram.version, 1);
+			assert_eq!(histogram.unit, "ms");
+			assert_eq!(
+				histogram.buckets.iter().map(|(_, count)| count).sum::<u64>(),
+				interval.latency_interval_samples
+			);
+			for (index, count) in histogram.buckets {
+				merged[index as usize] += count;
+			}
+		}
+		assert_eq!(merged, concatenated);
+		for percent in [50, 90, 99, 100] {
+			assert_eq!(percentile(&merged, 12, percent), percentile(&concatenated, 12, percent));
+		}
 	}
 
 	#[test]
@@ -454,6 +545,8 @@ mod tests {
 
 		let record = Record {
 			timestamp_ms: 1,
+			interval_start_ms: 0,
+			interval_end_ms: 1,
 			snapshot: &again,
 			interval: &interval,
 		};
@@ -486,6 +579,97 @@ mod tests {
 		assert_eq!(interval.latency_interval_samples, 1);
 		assert_eq!(interval.latency_interval_max_ms, Some(2));
 		assert_eq!(interval.latency_interval_p50_ms, Some(2));
+	}
+
+	#[test]
+	fn report_bounds_belong_to_captured_samples() {
+		let stats = Stats::default();
+		let mut previous = Snapshot::take(&stats);
+		previous.captured_at = UNIX_EPOCH + Duration::from_millis(1_000);
+		stats.latency.observe(1_000, 1_050);
+		let mut snapshot = Snapshot::take(&stats);
+		snapshot.captured_at = UNIX_EPOCH + Duration::from_millis(2_000);
+
+		// This delivery belongs to the next capture, even if report construction is delayed.
+		stats.latency.observe(2_000, 2_050);
+		let interval = IntervalLatency::from_delta(&previous.latency_buckets, &snapshot.latency_buckets);
+		let record = Record::new(&previous, &snapshot, &interval).unwrap();
+		assert_eq!(record.interval_start_ms, 1_000);
+		assert_eq!(record.interval_end_ms, 2_000);
+		assert_eq!(record.timestamp_ms, 2_000);
+		assert_eq!(record.interval.latency_interval_samples, 1);
+		let next = Snapshot::take(&stats);
+		assert_eq!(
+			IntervalLatency::from_delta(&snapshot.latency_buckets, &next.latency_buckets).latency_interval_samples,
+			1
+		);
+	}
+
+	/// An observation whose clock read precedes a capture but whose update follows
+	/// it lands in the next interval and keeps its measured latency.
+	#[test]
+	fn observation_racing_a_capture_keeps_its_latency() {
+		let latency = Latency::default();
+		let first = latency.snapshot();
+		let captured_ms = first.captured_at.duration_since(UNIX_EPOCH).unwrap().as_millis();
+
+		latency.observe(captured_ms - 100, captured_ms - 50);
+		latency.observe(captured_ms - 50, captured_ms - 100);
+		let next = latency.snapshot();
+		let interval = IntervalLatency::from_delta(&first.buckets, &next.buckets);
+		assert_eq!(first.samples, 0);
+		assert_eq!(interval.latency_interval_samples, 1);
+		assert_eq!(interval.latency_interval_max_ms, Some(50));
+		assert_eq!(next.clock_skew, 1);
+	}
+
+	/// Sweep observation concurrency and report density without a network bottleneck.
+	#[test]
+	#[ignore = "performance measurement; run by the nightly stats benchmark"]
+	fn benchmark_observation_contention() {
+		use std::sync::Barrier;
+		use std::time::Instant;
+
+		for writers in [1, 4, 16] {
+			for snapshots in [0, 10, 100] {
+				let stats = Stats::default();
+				let start = Barrier::new(writers + 2);
+				let done = AtomicU64::new(0);
+				let samples = 100_000;
+				let elapsed = std::thread::scope(|scope| {
+					for _ in 0..writers {
+						scope.spawn(|| {
+							start.wait();
+							for _ in 0..samples {
+								stats.latency(0);
+								done.fetch_add(1, Ordering::Relaxed);
+							}
+						});
+					}
+					scope.spawn(|| {
+						start.wait();
+						for report in 1..=snapshots {
+							let threshold = (writers * samples * report / snapshots) as u64;
+							while done.load(Ordering::Relaxed) < threshold {
+								std::thread::yield_now();
+							}
+							std::hint::black_box(Snapshot::take(&stats));
+						}
+					});
+					let measured_at = Instant::now();
+					start.wait();
+					measured_at
+				});
+				let elapsed = elapsed.elapsed();
+				assert_eq!(Snapshot::take(&stats).latency_samples, (writers * samples) as u64);
+				println!(
+					"writers={writers} snapshots={snapshots} samples={} elapsed_ns={} samples_per_second={:.0}",
+					writers * samples,
+					elapsed.as_nanos(),
+					(writers * samples) as f64 / elapsed.as_secs_f64()
+				);
+			}
+		}
 	}
 
 	#[test]
