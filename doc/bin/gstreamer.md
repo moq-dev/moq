@@ -115,6 +115,4 @@ on its own; losing the relay connection posts an error. Properties: `url`,
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
 
-Native media selection skips disabled renditions. If none are enabled, playback
-waits for a later catalog; disabling the current rendition selects an enabled
-replacement. Explicit convenience decoders reject disabled configurations.
+`moqsrc` creates source pads only for enabled renditions. Disabling a rendition removes its pump; enabling it in a later catalog makes it eligible again.

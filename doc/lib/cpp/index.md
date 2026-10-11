@@ -164,6 +164,10 @@ Never block the executor. A continuation or resumed coroutine that calls
 which deadlocks. `moq::inline_executor` runs a continuation right where the
 future completed, which is the executor thread.
 
+## Disabled renditions
+
+Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+
 ## Shutdown
 
 `moq::shutdown()` stops the `moq-ffi` runtime thread, then the executor.
@@ -192,7 +196,3 @@ Everything else maps one to one onto the
 header is the reference; every method carries its doc comment.
 
 - Source: [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq); `just cpp check` builds, installs, and tests it locally
-
-Native media selection skips disabled renditions. If none are enabled, playback
-waits for a later catalog; disabling the current rendition selects an enabled
-replacement. Explicit convenience decoders reject disabled configurations.

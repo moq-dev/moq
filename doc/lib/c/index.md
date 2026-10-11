@@ -64,12 +64,9 @@ inside. The header is the reference: each function carries a doc comment.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `moq_publish_media_flush` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `moq_publish_media_discontinuity`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** Free each frame id with `moq_decode_video_frame_free` promptly, or the decoder stalls.
 - **Stats.** `moq_session_stats()` fills `moq_connection_stats` with `rtt_us`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). Each has a `<field>_valid` flag, false when the transport does not report it, which is not the same as zero.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 
 ## Reference
 
 - API reference: [docs.rs/moq-c](https://docs.rs/moq-c)
 - Source and a worked example: [`rs/moq-c`](https://github.com/moq-dev/moq/tree/main/rs/moq-c)
-
-Native media selection skips disabled renditions. If none are enabled, playback
-waits for a later catalog; disabling the current rendition selects an enabled
-replacement. Explicit convenience decoders reject disabled configurations.

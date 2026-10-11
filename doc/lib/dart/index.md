@@ -72,13 +72,10 @@ one to one; the API reference has the names.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs: ...)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Closing.** `await moq.close()` or `session.shutdown()` gives finished tracks up to one second to deliver and fails if they did not. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Cancelling a stream subscription releases its native cursor.
 - **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 
 ## Reference
 
 - API reference: [pub.dev/documentation/moq](https://pub.dev/documentation/moq/latest/)
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)
-
-Native media selection skips disabled renditions. If none are enabled, playback
-waits for a later catalog; disabling the current rendition selects an enabled
-replacement. Explicit convenience decoders reject disabled configurations.

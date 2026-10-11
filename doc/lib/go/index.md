@@ -99,13 +99,10 @@ one to one; the API reference has the names.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
 - **Closing.** `client.Close()` gives finished tracks up to one second to deliver and returns an error if they did not. `session.Shutdown(ctx)` does the same, and `session.Cancel(code)` closes at once. Finish or abort live tracks first.
 - **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, `EstimatedRecvRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero.
+- **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 
 ## Reference
 
 - API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [`go/`](https://github.com/moq-dev/moq/tree/main/go); `just go check` builds and tests locally
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)
-
-Native media selection skips disabled renditions. If none are enabled, playback
-waits for a later catalog; disabling the current rendition selects an enabled
-replacement. Explicit convenience decoders reject disabled configurations.

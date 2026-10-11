@@ -143,6 +143,8 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
 ```
 
+`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
+
 ## Capture
 
 ```bash
@@ -330,7 +332,3 @@ so the other formats refuse `--linger`.
 relay is reachable and shows what it holds; see [Inspect a relay](/bin/inspect). Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.
-
-Native media selection skips disabled renditions. If none are enabled, playback
-waits for a later catalog; disabling the current rendition selects an enabled
-replacement. Explicit convenience decoders reject disabled configurations.

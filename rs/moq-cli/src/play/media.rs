@@ -176,8 +176,8 @@ impl<O: Output> Media<O> {
 					snapshot = catalogs.next(), if playback.following() => {
 						match snapshot.context("failed to read the catalog")? {
 							Some(snapshot) => {
-								stop_disabled(&mut video_demand, snapshot.video.enabled().map(|(name, _)| name));
-								stop_disabled(&mut audio_demand, snapshot.audio.enabled().map(|(name, _)| name));
+								stop_disabled(&mut video_demand, snapshot.video.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
+								stop_disabled(&mut audio_demand, snapshot.audio.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
 								playback.received(snapshot);
 							},
 							None => {
@@ -214,7 +214,7 @@ impl<O: Output> Media<O> {
 
 			if playback.wants(Kind::Video) {
 				playback.read(Kind::Video);
-				for (name, config) in snapshot.video.ranked() {
+				for (name, config) in snapshot.video.enabled() {
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
@@ -236,8 +236,8 @@ impl<O: Output> Media<O> {
 						self.args.max_delay()
 					};
 					let opened = async {
-						let decoder = moq_video::decode::Sink::open(&config, &Default::default()).await?;
-						let track = rendition.track(&name)?;
+						let decoder = moq_video::decode::Sink::open(config, &Default::default()).await?;
+						let track = rendition.track(name)?;
 						let mut subscriber = track
 							.subscribe(
 								moq_net::track::Subscription::default()
@@ -250,7 +250,7 @@ impl<O: Output> Media<O> {
 						if let Some(latest) = track.latest() {
 							subscriber.set_groups(latest..);
 						}
-						let format = catalog::hang::Container::try_from(&config)?;
+						let format = catalog::hang::Container::try_from(config)?;
 						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))
 					}
 					.await;
@@ -288,7 +288,7 @@ impl<O: Output> Media<O> {
 
 			if playback.wants(Kind::Audio) {
 				playback.read(Kind::Audio);
-				for (name, config) in snapshot.audio.ranked() {
+				for (name, config) in snapshot.audio.enabled() {
 					let rendition = match source.resolve(config.broadcast.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
@@ -308,7 +308,7 @@ impl<O: Output> Media<O> {
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.
 					decode.output.format = moq_audio::Format::F32;
-					match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
+					match moq_audio::decode::Consumer::new(&rendition, config, name, decode).await {
 						Ok(consumer) => {
 							tracing::info!(track = name, decoder = consumer.name(), "playing audio rendition");
 							if speaker.is_none() {
@@ -357,11 +357,11 @@ impl<O: Output> Media<O> {
 // Cancel through the task's own result so it still reports which half ended.
 fn stop_disabled<'a>(
 	playing: &mut Option<(String, tokio::sync::oneshot::Sender<()>)>,
-	mut enabled: impl Iterator<Item = &'a String>,
+	mut disabled: impl Iterator<Item = &'a String>,
 ) {
 	if playing
 		.as_ref()
-		.is_some_and(|(name, _)| !enabled.any(|enabled| enabled == name))
+		.is_some_and(|(name, _)| disabled.any(|disabled| disabled == name))
 	{
 		let (_, stop) = playing.take().unwrap();
 		let _ = stop.send(());
@@ -608,9 +608,10 @@ mod tests {
 		catalog
 			.mutate(|catalog| {
 				let high = catalog.audio.renditions.get_mut("high").unwrap();
-				high.bitrate = Some(128_000);
+				high.bitrate = Some(u64::from(SAMPLE_RATE) * 32);
 				high.enabled = false;
-				catalog.audio.renditions.get_mut("low").unwrap().bitrate = Some(64_000);
+				// An unknown bitrate ranks below a known one without falsifying PCM metadata.
+				catalog.audio.renditions.get_mut("low").unwrap().bitrate = None;
 			})
 			.unwrap();
 		for index in 10..40 {

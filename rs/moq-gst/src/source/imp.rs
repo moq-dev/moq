@@ -862,7 +862,23 @@ fn reconcile(
 	// a pad stays in `active` and ends with its track, where `follow_catalog` ends its pad. One
 	// that never took a pad is stopped.
 	for name in plan.remove {
-		if !desired.contains_key(&name) && active.get(&name).is_some_and(|track| !track.state.cancel_before_live()) {
+		// An explicit disable stops a live pump too; a delist still drains its tail.
+		let disabled = active.get(&name).is_some_and(|track| match track.kind {
+			TrackKind::Video => catalog
+				.video
+				.renditions
+				.get(&name)
+				.is_some_and(|config| !config.enabled),
+			TrackKind::Audio => catalog
+				.audio
+				.renditions
+				.get(&name)
+				.is_some_and(|config| !config.enabled),
+		});
+		if !disabled
+			&& !desired.contains_key(&name)
+			&& active.get(&name).is_some_and(|track| !track.state.cancel_before_live())
+		{
 			continue;
 		}
 		if let Some(track) = active.remove(&name) {
@@ -1919,6 +1935,48 @@ mod session_tests {
 		assert!(!eos.load(Ordering::Relaxed), "a listed rendition's end sent EOS");
 		assert!(pad.parent().is_some(), "a listed rendition's end dropped its pad");
 		drop(shutdown);
+	}
+
+	#[test]
+	fn disabling_a_live_rendition_cancels_its_pump() {
+		let element = element();
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		let mut config = video_rendition();
+		config.enabled = false;
+		catalog.video.renditions.insert("video".into(), config.clone());
+		let state = std::sync::Arc::new(super::PumpState::new());
+		assert!(state.go_live());
+		let (cancel, cancelled) = watch::channel(false);
+		let task = super::RUNTIME.spawn(std::future::pending::<()>());
+		let mut active = std::collections::HashMap::from([(
+			"video".into(),
+			super::ActiveTrack {
+				kind: super::TrackKind::Video,
+				shape: super::Shape {
+					caps: super::video_caps(&config).unwrap(),
+					container: config.container.clone(),
+				},
+				cancel,
+				task: task.abort_handle(),
+				state,
+			},
+		)]);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut pumps = tokio::task::JoinSet::new();
+		let (_shutdown, shutdown) = watch::channel(false);
+		super::reconcile(
+			&catalog,
+			&mut active,
+			&mut pumps,
+			&broadcast.consume(),
+			&Pads::default(),
+			&element.downgrade(),
+			&shutdown,
+		);
+		task.abort();
+		assert!(super::RUNTIME.block_on(task).unwrap_err().is_cancelled());
+		assert!(*cancelled.borrow(), "a disabled live rendition kept its pump");
+		assert!(active.is_empty());
 	}
 
 	/// Pipelines link `moqsrc`'s pads by name, so the first video rendition that actually

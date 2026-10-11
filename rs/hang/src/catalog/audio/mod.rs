@@ -55,19 +55,21 @@ impl Audio {
 		self.renditions.is_empty()
 	}
 
-	/// Iterate enabled renditions in name order.
+	/// Iterate enabled renditions in quality order.
 	pub fn enabled(&self) -> impl Iterator<Item = (&String, &AudioConfig)> {
-		self.renditions.iter().filter(|(_, config)| config.enabled)
+		self.ranked().filter(|(_, config)| config.enabled)
 	}
 
-	/// Iterate enabled renditions best first: highest bitrate, then sample rate, then channel count.
+	/// Iterate the renditions best first: enabled, then highest bitrate, then sample rate, then channel count.
 	///
 	/// A consumer that carries one rendition takes the first it supports, so the
 	/// choice doesn't depend on how the tracks are named. An unknown bitrate ranks
 	/// below a known one, and exact ties keep name order.
 	pub fn ranked(&self) -> impl Iterator<Item = (&String, &AudioConfig)> {
-		let mut ranked: Vec<_> = self.enabled().collect();
-		ranked.sort_by_key(|(_, config)| std::cmp::Reverse((config.bitrate, config.sample_rate, config.channel_count)));
+		let mut ranked: Vec<_> = self.renditions.iter().collect();
+		ranked.sort_by_key(|(_, config)| {
+			std::cmp::Reverse((config.enabled, config.bitrate, config.sample_rate, config.channel_count))
+		});
 		ranked.into_iter()
 	}
 }
@@ -215,9 +217,11 @@ mod test {
 		let names: Vec<_> = audio.ranked().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, ["c", "d", "e", "b", "f", "a", "g"]);
 
-		// A disabled rendition is ineligible even when it had the highest quality.
+		// Disabled renditions rank last, so catalog transforms can retain their metadata.
 		audio.renditions.get_mut("c").unwrap().enabled = false;
 		let names: Vec<_> = audio.ranked().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["d", "e", "b", "f", "a", "g", "c"]);
+		let names: Vec<_> = audio.enabled().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, ["d", "e", "b", "f", "a", "g"]);
 	}
 
@@ -229,9 +233,9 @@ mod test {
 		assert_eq!(catalog.enabled().count(), 1);
 		catalog.renditions.get_mut("track").unwrap().enabled = false;
 		assert_eq!(catalog.enabled().count(), 0);
-		assert_eq!(catalog.ranked().count(), 0);
-		catalog.renditions.get_mut("track").unwrap().enabled = true;
 		assert_eq!(catalog.ranked().count(), 1);
+		catalog.renditions.get_mut("track").unwrap().enabled = true;
+		assert_eq!(catalog.enabled().count(), 1);
 	}
 
 	#[test]
