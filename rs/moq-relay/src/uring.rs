@@ -669,7 +669,12 @@ async fn serve_connection(
 		}
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
-	let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path.clone());
+	// Only a WebTransport session carries a URL.
+	let transport = match url {
+		Some(_) => moq_auth::Transport::WebTransport,
+		None => moq_auth::Transport::Quic,
+	};
+	let mut auth_request = serve.auth.request(transport, path.clone());
 	auth_request.query = query;
 	auth_request.remote = Some(remote);
 	auth_request.local = Some(serve.local);
@@ -774,11 +779,6 @@ async fn serve_connection(
 		}
 	});
 
-	// Only a WebTransport session carries a URL.
-	let transport = match url {
-		Some(_) => moq_tokio::Transport::WebTransport,
-		None => moq_tokio::Transport::Quic,
-	};
 	tracing::info!(id, version = %session.version(), %transport, "negotiated");
 
 	// The session handle is Send + Sync however its transport is driven, so

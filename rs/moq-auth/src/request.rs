@@ -129,7 +129,7 @@ pub enum Event {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Transport {
-	/// QUIC, either directly or through WebTransport over HTTP/3.
+	/// A native QUIC connection.
 	Quic,
 	/// An Iroh QUIC connection.
 	Iroh,
@@ -148,6 +148,11 @@ pub enum Transport {
 	Srt,
 	/// A WebRTC gateway session, including WHIP and WHEP.
 	WebRtc,
+	/// A WebTransport connection over HTTP/3.
+	WebTransport,
+	/// A transport name this auth server does not recognize.
+	#[serde(other)]
+	Unknown,
 }
 
 impl Transport {
@@ -163,6 +168,8 @@ impl Transport {
 			Self::Rtmp => "rtmp",
 			Self::Srt => "srt",
 			Self::WebRtc => "webrtc",
+			Self::WebTransport => "webtransport",
+			Self::Unknown => "unknown",
 		}
 	}
 }
@@ -232,6 +239,34 @@ mod tests {
 			issuer: "CN=cluster".into(),
 		});
 		request
+	}
+
+	#[test]
+	fn webtransport_and_future_transports_deserialize() {
+		for (incoming, expected) in [("webtransport", "webtransport"), ("carrier-pigeon", "unknown")] {
+			let mut json = serde_json::to_value(request()).unwrap();
+			json["transport"] = incoming.into();
+			let decoded: Request = serde_json::from_value(json).expect("transport contract accepts future names");
+			assert_eq!(decoded.transport.as_str(), expected);
+			assert_eq!(serde_json::to_value(decoded).unwrap()["transport"], expected);
+		}
+	}
+
+	#[test]
+	fn malformed_transports_are_refused() {
+		for transport in [
+			serde_json::Value::Null,
+			serde_json::json!(1),
+			serde_json::json!({}),
+			serde_json::json!([]),
+		] {
+			let mut json = serde_json::to_value(request()).unwrap();
+			json["transport"] = transport;
+			assert!(serde_json::from_value::<Request>(json).is_err());
+		}
+		let mut json = serde_json::to_value(request()).unwrap();
+		json.as_object_mut().unwrap().remove("transport");
+		assert!(serde_json::from_value::<Request>(json).is_err());
 	}
 
 	#[test]
