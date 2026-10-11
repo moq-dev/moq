@@ -25,3 +25,7 @@ Test with mocked time: an unsupported scheme fails at once under unlimited
 backoff, and a refused TCP connect still retries.
 
 Public API: behavior only (the loop ends with the error). Wire: none.
+
+## Required
+
+- [The moq-time crate](/quest/m1/time/crate.md) - the controlled clock and sim this tests on
