@@ -2202,7 +2202,13 @@ mod tests {
 		config.tls.insecure = Some(true);
 		config.backoff.timeout = Duration::ZERO;
 		let client = config.init(Default::default()).expect("build client");
-		for target in ["https://a!b:1/", "wss://a!b:1/", "moqt://a!b:1/"] {
+		for target in [
+			"https://a!b:1/",
+			"wss://a!b:1/",
+			"moqt://a!b:1/",
+			#[cfg(feature = "tcp")]
+			"tls://a!b:1/",
+		] {
 			let connection = client.connect(url(target));
 			let err = tokio::time::timeout(Duration::from_secs(1), connection.closed())
 				.await
