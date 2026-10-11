@@ -7602,7 +7602,7 @@ async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 		producers.push(producer);
 	}
 	catalog.modify().unwrap().ext.mpegts = config;
-	let mut exporter = Export::with_ts(crate::source::announced(&broadcast.consume()), Default::default())
+	let mut exporter = Export::with_ts(crate::source::announced(&broadcast.consume()).await, Default::default())
 		.await
 		.unwrap();
 	if let Some(mux_rate) = mux_rate {
