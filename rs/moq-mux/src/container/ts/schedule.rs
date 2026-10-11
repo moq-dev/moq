@@ -203,10 +203,10 @@ impl Slot {
 	/// them, so they still lead the keyframe they were written for and a reader knows each PID
 	/// before its first packet.
 	///
-	/// The tables share one [`SystemBuffer`]. Where the next table would overflow it, a null
-	/// takes the position instead, so a PMT spanning several packets goes out at the buffer's
-	/// rate, as long as the slot has nulls to spare and the delayed PIDs can still keep within
-	/// their own transport buffers ([`Self::caps`]).
+	/// The tables share one [`SystemBuffer`]. Where a table ahead of the slot's first media
+	/// packet would overflow it, a null takes the position instead, so a PMT spanning several
+	/// packets goes out at the buffer's rate, as long as the slot has nulls to spare and the
+	/// delayed PIDs can still keep within their own transport buffers ([`Self::caps`]).
 	pub fn layout(&self, clock: &[u8], pmt_pid: u16, null: &[u8]) -> Vec<u8> {
 		let packets = self.packets.as_chunks::<{ TsPacket::SIZE }>().0;
 		let mut tables = VecDeque::new();
@@ -238,6 +238,8 @@ impl Slot {
 		credit[0] -= total;
 		// Positions the round-robin has still to lay.
 		let mut left = total - 1;
+		// No media packet has gone out yet, so laying the slot afresh spaces no PID worse.
+		let mut fresh = true;
 
 		let positions = 1 + packets.len() + self.nulls;
 		let mut system = SystemBuffer::new(pmt_pid, positions);
@@ -262,11 +264,12 @@ impl Slot {
 				.copied()
 				.filter(|&table| next.is_none_or(|next| next.is_some_and(|i| table < i)));
 			if let Some(table) = table {
-				// A null spaces a table that would overflow TBsys, and the rest of the slot is
-				// laid out afresh around it, so no PID's packets bunch up to make up the time.
-				// The stall must leave every PID spread no denser over the rest of the slot than
-				// admission holds it to over a whole one. Otherwise the table goes out
-				// regardless.
+				// Ahead of the slot's first media packet, a null spaces a table that would
+				// overflow TBsys, and the rest of the slot is laid out afresh around it, so no
+				// PID's packets bunch up to make up the time. The stall must leave every PID
+				// spread no denser over the rest of the slot than admission holds it to over a
+				// whole one. Otherwise the table goes out regardless: past the first media
+				// packet, laying afresh would drop the spacing already given the PIDs served.
 				let room = || {
 					// The round-robin's positions left after the stall; the tables still to go
 					// lead the PIDs they delay, so lend them no time.
@@ -277,7 +280,7 @@ impl Slot {
 							.is_none_or(|&cap| lane.len() * positions <= cap * after)
 					})
 				};
-				if !system.fits() && nulls > 0 && room() {
+				if fresh && !system.fits() && nulls > 0 && room() {
 					nulls -= 1;
 					system.lay(null);
 					out.extend_from_slice(null);
@@ -306,6 +309,7 @@ impl Slot {
 			left -= 1;
 			let packet = match lanes.get_mut(pick) {
 				Some((_, lane)) => {
+					fresh = false;
 					let i = lane
 						.pop_front()
 						.expect("a lane takes no more positions than its weight");
@@ -1107,6 +1111,54 @@ mod tests {
 			);
 			let video = peak(&laid, &[video.into()], RX as f64);
 			assert!(video <= 512.0, "video TB peak {video:.0} B, {parts} PMT packets");
+		}
+	}
+
+	/// Tables ahead of a second keyframe, after the first's PID has gone out, never stall the
+	/// slot: laying it afresh would drop the spacing that PID already has.
+	#[test]
+	fn tables_after_media_leave_its_spacing_alone() {
+		let mut packets = unit(0, 1);
+		packets.extend(unit(100, 1));
+		packets.extend(unit(1, 125));
+		packets.extend(unit(0, 1));
+		packets.extend(unit(100, 1));
+		packets.extend(unit(2, 114));
+		let (a, b) = (
+			Buffer {
+				rate: 7_833_600,
+				size: None,
+			},
+			Buffer {
+				rate: 8_160_000,
+				size: None,
+			},
+		);
+		let slot = Slot {
+			index: 0,
+			pcr: 0,
+			packets,
+			nulls: 88,
+			keyframe: true,
+			units: vec![1, 2],
+			caps: HashMap::from([(1, a.per_slot()), (2, b.per_slot())]),
+		};
+		let mut null = unit(0, 1);
+		(null[1], null[2]) = (0x1f, 0xff);
+		let laid = slot.layout(&unit(1, 1), 100, &null);
+		let laid: Vec<&[u8]> = laid.chunks(TsPacket::SIZE).collect();
+		assert_eq!(laid.len(), 332);
+		for (media, buffer) in [(1, a), (2, b)] {
+			let drain = buffer.rate as f64 / 8.0 * 0.025 / laid.len() as f64;
+			let (mut tb, mut peak) = (0.0f64, 0.0f64);
+			for packet in &laid {
+				tb = (tb - drain).max(0.0);
+				if pid(packet) == media {
+					tb += 188.0;
+					peak = peak.max(tb);
+				}
+			}
+			assert!(peak <= 512.0, "PID {media} TB peak {peak:.0} B");
 		}
 	}
 }
