@@ -53,7 +53,6 @@ bench all require its crate.
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of perf; the rest of the QUIC line follows it
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
 - [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
-- [main merges through a squash queue](/quest/m1/merge-queue-settings.md) - condition: the maintainer enables the squash merge queue on `main`
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [Per-frame arrivals in @moq/watch](/quest/m1/watch-arrivals.md) - the audio and video decoders expose a window of recent frame arrivals, late and skipped marks included, as a signal
 - [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - condition: moq-dev/web-transport#419 ships in a release, then moq's iroh HTTP/3 client reports a peer's close capsule
@@ -92,8 +91,9 @@ bench all require its crate.
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [IETF epochs](/quest/m1/ietf-epochs.md) - negotiate explicit broadcast identity on drafts 17-22, retaining unchanged paths and epochless clients on updated relays
-- [Claim epochs](/quest/m1/claim-epochs.md) - a lite-07 claim's answer carries its broadcast's epoch, so a worker restarting an output under an unchanged claim route is a new source; moved from m0 on 2026-10-08 since lite-07 is opt-in
-- [IETF claim epochs](/quest/m1/ietf-claim-epochs.md) - carry the shared per-output identity in negotiated IETF responses after the extension and lite-07 model land
+- [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
+- [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
+- [Identity and recovery guide](/quest/m1/identity-guide.md) - explain pinned catalogs, lazy jobs, takeover, restart and version compatibility
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`
 - [Client settings parity](/quest/m1/obs-client-config.md) - moq-ffi offers moq-c's client knobs, and the OBS Advanced settings get back the ones the C++ migration dropped

@@ -61,10 +61,10 @@ Decided:
   reversed (2026-10-07): subscriptions stay sticky on their route and an
   explicit `Restart` announce event tells players to follow. When the newest goes and
   an older one is still live, the older one wins again as a new broadcast.
-- [Claim-served epochs](/quest/m1/claim-epochs.md), where a
-  lite-07 claim's answer carries the served broadcast's own epoch, no longer
-  gates this line (decided 2026-10-08): it is a lite-07 opt-in, so it moved
-  to m1.
+- [Announcement takeover](/quest/m1/announce-takeover.md) stays m1 and gates
+  the lite-07 cut, not this release. It replaces the response-only claim-epoch
+  proposal: an independent route explicitly continues the same served
+  instance, rather than inferring continuity from an epochless claim.
 - Decided in the 2026-10-10 resume audit: a catalog reference pins its first
   resolved sibling for the catalog instance's lifetime in players and
   exporters. Optional reference epochs constrain the first resolution on
