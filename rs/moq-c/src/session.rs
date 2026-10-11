@@ -120,10 +120,13 @@ impl Session {
 			let _consume = consume;
 
 			let res = tokio::select! {
-				// close() requested: a clean shutdown delivers a terminal 0.
-				_ = closed.1 => Ok(()),
-				res = Self::report(callback, reconnect) => res,
+				// close() requested: drain what the session queued, then close it.
+				_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
+				res = Self::report(callback, reconnect.clone()) => res,
 			};
+			// The terminal callback waits for the close to reach the peer, so a caller that exits
+			// on it doesn't leave the peer to time the connection out.
+			client.close().await;
 
 			// Deliver one final terminal callback (0 = closed, < 0 = error), then
 			// drop the entry. Pull it out from under the lock so the callback never

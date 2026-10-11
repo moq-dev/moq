@@ -22,13 +22,14 @@ old relay drops its upstream pull, the new relay subscribes upstream from
 scratch at the live edge. A group boundary that lands inside that window loses
 the group in flight: about 1 run in 5 at 100 ms groups.
 
-Rust solves this with #4741's single-writer pump (`model/resume.rs`): each track a
-front serves is one producer, a route change subscribes the new route from
-the first frame the logical track lacks (mid-group), an open group is
-continued in place, duplicates are dropped by frame index, and the old route
-is cancelled once the new one feeds the track. Mirror that shape and naming
-in JS rather than inventing a second model. Things to
-settle along the way:
+Current Rust (`model/resume.rs`) reads route copies directly through each
+reader. It retains replaced copies for unread and in-flight groups, bounds
+them at replacement, and recovers a group from the new copy at the first
+missing frame and byte. It does not copy through the earlier single-writer
+pump or immediately cancel every old copy. Decided in the 2026-10-10 audit:
+mirror the current identity, reader, recovery and lifetime contract, including
+the late-duplicate correction, rather than porting the obsolete pump.
+Things to settle along the way:
 
 - Whether the request's `active` broadcast stays the same object across a swap,
   with its tracks re-sourced underneath. That is the Rust behavior and the
@@ -65,3 +66,10 @@ subscriptions across a swap. Report it in the PR.
 ## Required
 
 - [One max_age meaning](/quest/m1/cache-max-age.md) - the rule that gives up a resumed group no route continues
+- [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - the corrected once-only delivery contract for reordered copies
+
+## Related
+
+- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - old handles cannot open unpinned requests after an identity change
+- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - a terminal group disposition stops recovery even for the newest group
+- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - recovery fetches retain the reader's budget
