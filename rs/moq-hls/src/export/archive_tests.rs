@@ -694,16 +694,13 @@ async fn history_after_expiry(finished: bool) {
 		"the initial timeline groups must really be evicted"
 	);
 	broadcast.announce(Default::default()).unwrap();
-	let source = moq_mux::Source::new(origin.consume(), "rec");
 	let broadcaster = Broadcaster::new(
-		source,
+		crate::resolved(&origin, "rec").await,
 		Config {
 			history: true,
 			..Config::default()
 		},
-	)
-	.await
-	.unwrap();
+	);
 	tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
 		.await
 		.expect("a rendition becomes playable after cache expiry");

@@ -20,6 +20,7 @@ pub(super) async fn watch(
 	let scale = moq_net::Timescale::new(section.timescale as u64)
 		.map_err(|_| moq_mux::Error::InvalidTimescale(section.timescale))?;
 	let track = broadcast.track(name)?;
+	// The largest delay the wire can carry (2^62 - 1 ms), so no history group is skipped as late.
 	let subscription = moq_net::track::Subscription::default()
 		.with_start(moq_net::track::Position::group(0))
 		.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
