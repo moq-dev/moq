@@ -39,13 +39,21 @@ where
 	fn accept(&self, stream: I, service: S) -> Self::Future {
 		let accepted = self.inner.accept(stream, service);
 		let timeout = self.timeout;
+		// The clock starts at accept, so a peer that stalls the inner (TLS) handshake
+		// is bounded by the same deadline as one that stalls its first request.
+		let since = Instant::now();
 		Box::pin(async move {
-			let (inner, service) = accepted.await?;
+			let (inner, service) = match timeout.and_then(|timeout| since.checked_add(timeout)) {
+				Some(deadline) => tokio::time::timeout_at(deadline, accepted)
+					.await
+					.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP connection idle deadline"))??,
+				None => accepted.await?,
+			};
 			let state = Arc::new(State {
 				timeout,
 				activity: Mutex::new(Activity {
 					active: 0,
-					since: Instant::now(),
+					since,
 					upgraded: false,
 				}),
 				wake: AtomicWaker::new(),
@@ -218,6 +226,34 @@ mod tests {
 		};
 		let (io, service) = acceptor.accept(server, ()).await.unwrap();
 		(io, client, service.state)
+	}
+
+	/// An inner acceptor whose handshake never completes, like a TLS peer that
+	/// connects and never sends a ClientHello.
+	#[derive(Clone)]
+	struct Stalled;
+	impl<I, S> Accept<I, S> for Stalled {
+		type Stream = I;
+		type Service = S;
+		type Future = std::future::Pending<io::Result<(I, S)>>;
+		fn accept(&self, _stream: I, _service: S) -> Self::Future {
+			std::future::pending()
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_stalled_handshake_counts_toward_idle() {
+		let (server, _client) = tokio::io::duplex(1024);
+		let acceptor = Acceptor {
+			inner: Stalled,
+			timeout: Some(TIMEOUT),
+		};
+		let start = Instant::now();
+		let result = tokio::time::timeout(TIMEOUT * 2, acceptor.accept(server, ()))
+			.await
+			.expect("stalled handshake survived its deadline");
+		assert_eq!(result.err().unwrap().kind(), io::ErrorKind::TimedOut);
+		assert_eq!(start.elapsed(), TIMEOUT);
 	}
 
 	#[tokio::test(start_paused = true)]
