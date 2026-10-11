@@ -16,9 +16,11 @@ Found by Codex on #5207 (`schedule.rs`, repeated PSI groups). It exists on
 `aac_program_config_follows_each_table`, because send-ahead units need their
 own tables.
 
-At 25 Mb/s, three PAT and PMT pairs back to back deliver 564 B of PAT in about
-301 µs, of which about 38 B drains at Rxsys = 1 Mb/s, peaking near 526 B. Two
-renditions' 376 B fit.
+The PAT and the PMT share one TBsys: it takes PIDs 0 to 3 and the selected
+program's PMT PID (ISO 13818-1 2.4.2.3). One PAT and PMT pair (376 B) fits. At
+25 Mb/s, two pairs back to back deliver 752 B in about 180 µs, of which about
+23 B drains at Rxsys = 1 Mb/s, peaking near 729 B; three peak near 1090 B. Two
+distinct pairs fit only about 1.9 ms apart, at any mux rate.
 
 - Start from the author's narrower diff on #5207
   (https://github.com/moq-dev/moq/pull/5207#discussion_r4239051134): drop a run
@@ -28,14 +30,14 @@ renditions' 376 B fit.
   clock packet and keeps its length, so no PCR moves.
 - A new table version that bunches with the old one is not spaced out.
 - Test against system-buffer fill with the T-STD model, not a packet count: a
-  unit test runs laid slots' PAT and each PMT PID through its own 512-byte
-  buffer drained at 1 Mb/s, with keyframes aligned at 25 Mb/s on three video
-  PIDs (fails without the fix) and on two (passes either way). The AAC tune-in
-  test still passes.
-- `test/ts/compliance.py` gains a hard-severity system-buffer check for the PAT
-  and every PMT PID: TBsys of 512 B drained at Rxsys, then Bsys, per ISO
-  13818-1 2.4.2.3. Its `tstd` check models only elementary streams today. DVB SI
-  (SDT, EIT) and SCTE-35 stay out, since ISO defines these buffers for
-  program-specific information. Every existing TS arm still passes.
+  unit test runs laid slots' PAT and PMT packets through one shared 512-byte
+  TBsys drained at 1 Mb/s, with keyframes aligned at 25 Mb/s on two and three
+  video PIDs (both fail without the fix) and on one (passes either way). The AAC
+  tune-in test still passes.
+- `test/ts/compliance.py` gains a hard-severity system-buffer check: for each
+  program, one 512 B TBsys fed by PIDs 0 to 3 and that program's PMT PID,
+  drained at Rxsys into Bsys. Its `tstd` check models only elementary streams
+  today. Other SI (NIT, SDT, EIT) and SCTE-35 never enter TBsys. Every existing
+  TS arm still passes.
 
 Public API: none. Wire: none.
