@@ -247,34 +247,9 @@ impl Error {
 			| Self::QlogUnsupported
 			| Self::Connect(_) => true,
 			#[cfg(feature = "noq")]
-			Self::Noq(err) => {
-				matches!(
-					err.as_ref(),
-					crate::noq::Error::InvalidScheme
-						| crate::noq::Error::UnsupportedScheme(_)
-						| crate::noq::Error::InvalidDnsName
-						| crate::noq::Error::NoRuntime
-						| crate::noq::Error::NoInitialCipherSuite
-						| crate::noq::Error::Tls(_)
-				) || self.status().is_some_and(|status| !status_retryable(status))
-			}
+			Self::Noq(err) => err.is_terminal(),
 			#[cfg(feature = "websocket")]
-			Self::WebSocket(err) => match err.as_ref() {
-				crate::websocket::Error::Disabled
-				| crate::websocket::Error::MissingHostname
-				| crate::websocket::Error::UnsupportedScheme(_)
-				| crate::websocket::Error::BuildRequest(_)
-				| crate::websocket::Error::ProtocolHeader(_)
-				| crate::websocket::Error::ConnectRejected(_) => true,
-				crate::websocket::Error::Failover(attempts) => {
-					!attempts.is_empty()
-						&& attempts.iter().all(|attempt| {
-							matches!(&attempt.error, crate::websocket::Error::ConnectRejected(_))
-								|| attempt.error.status().is_some_and(|status| !status_retryable(status))
-						})
-				}
-				_ => self.status().is_some_and(|status| !status_retryable(status)),
-			},
+			Self::WebSocket(err) => err.is_terminal(),
 			#[cfg(feature = "tcp")]
 			Self::Tcp(err) => matches!(
 				err.as_ref(),
@@ -440,6 +415,28 @@ mod tests {
 			.is_terminal()
 		);
 		assert!(Error::Tls(Arc::new(crate::tls::Error::NoRoots)).is_terminal());
+	}
+
+	/// Every raced address building the same malformed request is as terminal as one address doing so.
+	#[test]
+	fn an_address_race_is_terminal_only_when_every_attempt_is_terminal() {
+		use crate::failover::Attempt;
+		use crate::websocket::Error as Ws;
+
+		let addr = |port| std::net::SocketAddr::from(([127, 0, 0, 1], port));
+		let malformed = |port| Attempt {
+			addr: addr(port),
+			error: Ws::BuildRequest("fragment".into()),
+		};
+		let refused = |port| Attempt {
+			addr: addr(port),
+			error: Ws::Io(std::io::ErrorKind::ConnectionRefused.into()),
+		};
+
+		let race = |attempts| Error::WebSocket(Arc::new(Ws::Failover(attempts)));
+		assert!(race(vec![malformed(1), malformed(2)]).is_terminal());
+		assert!(!race(vec![malformed(1), refused(2)]).is_terminal());
+		assert!(!race(vec![refused(1), malformed(2)]).is_terminal());
 	}
 
 	#[test]

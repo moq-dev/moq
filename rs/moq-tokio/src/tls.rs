@@ -90,6 +90,10 @@ pub enum Error {
 	)]
 	DisableVerifyWithTrust,
 
+	/// The configured host name override is not a valid DNS name or IP address.
+	#[error("invalid TLS host name: {0}")]
+	InvalidHostName(String),
+
 	/// A root certificate parsed as PEM but rustls rejected it as a trust anchor.
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
@@ -951,6 +955,9 @@ impl Connect {
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
+		if let Some(name) = &self.host_name {
+			rustls::pki_types::ServerName::try_from(name.as_str()).map_err(|_| Error::InvalidHostName(name.clone()))?;
+		}
 		let reloadable_roots = cfg!(feature = "watch")
 			&& matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty());
 
@@ -3060,6 +3067,23 @@ mod legacy_tests {
 		};
 		assert!(matches!(err, Error::Deprecated(_)), "{err}");
 		assert!(err.to_string().contains("--connect-tls-root"), "{err}");
+	}
+
+	/// A host name override that can never be a TLS server name is refused before any dial.
+	#[test]
+	fn the_client_builder_refuses_an_invalid_host_name() {
+		let mut tls = parse(&["--connect-tls-insecure"]).connect;
+		tls.host_name = Some("not a host".to_string());
+
+		let Err(err) = tls.build() else {
+			panic!("building a client config must refuse an invalid host name");
+		};
+		assert!(matches!(err, Error::InvalidHostName(_)), "{err}");
+
+		for valid in ["example.com", "192.0.2.1", "::1"] {
+			tls.host_name = Some(valid.to_string());
+			tls.build().unwrap_or_else(|err| panic!("{valid}: {err}"));
+		}
 	}
 
 	/// The accept side, where a dropped `--server-tls-root` takes the mTLS client

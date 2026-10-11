@@ -410,7 +410,7 @@ async fn connect_tls_override(
 		Ok(ip) => tls_url.set_ip_host(ip),
 		Err(_) => tls_url.set_host(Some(tls_host_name)).map_err(|_| ()),
 	}
-	.map_err(|_| Error::connect(qmux::Error::InvalidServerName))?;
+	.map_err(|_| Error::BuildRequest(format!("invalid TLS host name: {tls_host_name}")))?;
 	let mut request = tls_url
 		.as_str()
 		.into_client_request()
@@ -465,6 +465,24 @@ impl Error {
 				status: Some(status), ..
 			} => crate::ConnectError::from_status_u16(*status),
 			_ => None,
+		}
+	}
+
+	/// A fixed local error or settled rejection that another dial cannot repair.
+	pub(crate) fn is_terminal(&self) -> bool {
+		match self {
+			Self::Disabled
+			| Self::MissingHostname
+			| Self::UnsupportedScheme(_)
+			| Self::BuildRequest(_)
+			| Self::ProtocolHeader(_)
+			| Self::ConnectRejected(_) => true,
+			Self::Failover(failures) => {
+				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
+			}
+			_ => self
+				.status()
+				.is_some_and(|status| !crate::error::status_retryable(status)),
 		}
 	}
 
