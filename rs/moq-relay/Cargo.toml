@@ -113,3 +113,7 @@ libc = "0.2"
 [[bench]]
 name = "http_idle"
 harness = false
+
+[[bench]]
+name = "auth"
+harness = false

@@ -540,6 +540,7 @@ Either endpoint can open an Auth Stream (0x7) to present a token and learn what 
 The opener sends a single AUTH message and keeps its side open for as long as the token applies.
 Each endpoint SHOULD open one Auth Stream with an empty token right after the session starts, so both learn what the credential the connection already presented (the request URI, a client certificate, or nothing) allows.
 The acceptor replies with an AUTH_OK carrying the grant, or an AUTH_ERROR refusing the token.
+An acceptor that cannot verify the presented kind of credential resets the stream before replying.
 It MAY send further AUTH_OK messages to replace the grant, such as with a lowered expiry, and MAY send an AUTH_ERROR after an AUTH_OK to revoke it; the latest AUTH_OK is the token's grant.
 After an AUTH_ERROR the acceptor closes its side of the stream.
 The opener withdraws a token by closing or resetting its side of the stream, and the acceptor then closes its own.
@@ -1563,6 +1564,7 @@ The `Message Length` describes the payload size on the wire.
 - Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13) and UNKNOWN_AUTH_TOKEN_ALIAS (0x17) session codes, with moq-transport's meaning.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 - Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
+- Specified that an Auth acceptor resets an unsupported kind of credential before replying.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 
 ## moq-lite-06

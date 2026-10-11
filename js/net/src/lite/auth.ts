@@ -220,6 +220,7 @@ export class LiteAuthWire implements AuthWire {
 	}
 
 	async refuse(stream: Stream, code: SessionCode, reason: string): Promise<void> {
+		if (code === SessionCode.Version) return this.unsupported(stream, reason);
 		await new AuthError(code, reason).encode(stream.writer, this.#version);
 	}
 

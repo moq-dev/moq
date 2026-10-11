@@ -349,6 +349,11 @@ bench-playback:
 bench-rtmp *args:
     cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"
 
+# Refresh one credential across unrelated sessions and held token counts.
+[positional-arguments]
+bench-relay-auth *args:
+    cargo bench --locked -p moq-relay --bench auth -- "$@"
+
 # One relay's stats tick, plus the decode table. `--test` runs each tick once; decode ignores it and prints its whole table.
 [positional-arguments]
 bench-stats *args:

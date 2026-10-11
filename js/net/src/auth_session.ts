@@ -128,6 +128,14 @@ class PeerRequest implements Request {
 		this.#issued = issued;
 	}
 
+	get closed(): Promise<Error | null> {
+		return this.#issued.closed;
+	}
+
+	get ended(): boolean {
+		return this.#issued.ended;
+	}
+
 	accept(grant: Grant): Issued {
 		if (this.#answered) throw new Error("already answered");
 		this.#answered = true;
@@ -144,6 +152,7 @@ class PeerRequest implements Request {
 
 /** Our side of one of the peer's tokens: the grant we issued and its stream. */
 class IssuedGrant implements Issued {
+	ended = false;
 	readonly closed: Promise<Error | null>;
 	#stream: Stream;
 	#wire: AuthWire;
@@ -155,8 +164,14 @@ class IssuedGrant implements Issued {
 		this.#wire = wire;
 		// The presenter withdraws by closing or cancelling its side.
 		this.closed = stream.reader.closed.then(
-			() => null,
-			(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
+			() => {
+				this.ended = true;
+				return null;
+			},
+			(err: unknown) => {
+				this.ended = true;
+				return err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err);
+			},
 		);
 	}
 
@@ -200,7 +215,8 @@ class RequestQueue implements Requests {
 	#closed = false;
 
 	push(request: PeerRequest): boolean {
-		if (this.#closed) return false;
+		if (this.#queue.length >= 128) this.#queue = this.#queue.filter((queued) => !queued.ended);
+		if (this.#closed || this.#queue.length >= 128) return false;
 		const waiter = this.#waiters.shift();
 		if (waiter) waiter(request);
 		else this.#queue.push(request);
@@ -208,7 +224,8 @@ class RequestQueue implements Requests {
 	}
 
 	next(): Promise<Request | undefined> {
-		const next = this.#queue.shift();
+		let next = this.#queue.shift();
+		while (next?.ended) next = this.#queue.shift();
 		if (next || this.#closed) return Promise.resolve(next);
 		return new Promise((resolve) => this.#waiters.push(resolve));
 	}

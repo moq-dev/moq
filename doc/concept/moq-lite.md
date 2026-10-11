@@ -166,7 +166,9 @@ to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
-union of every open token's grant.
+union of every open token's grant. The relay verifies these tokens through its
+[auth server](/bin/relay/auth#in-band-renewal), so a fresh grant can keep the
+connection alive after its original credential expires.
 
 A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes

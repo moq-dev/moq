@@ -728,7 +728,7 @@ async fn serve_connection(
 		match serve
 			.tokio
 			.spawn(async move {
-				let admitted = cluster.admit(&auth, auth_request.clone()).await?;
+				let admitted = cluster.admit_session(&auth, auth_request.clone()).await?;
 				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await
@@ -770,6 +770,7 @@ async fn serve_connection(
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
 	}
+	let lease = lease.preparing(request.auth(), request.role())?;
 	let (session, driver) = request.ok().await?;
 	let driver_handle = handle.clone();
 	handle.spawn(async move {

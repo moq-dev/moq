@@ -530,6 +530,10 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 					expires: grant.expires.map(|at| at.saturating_duration_since(now)),
 				})
 			}
+			crate::auth::Reply::Refuse {
+				code: crate::SessionError::Version,
+				..
+			} => return Err(Error::Unsupported),
 			crate::auth::Reply::Refuse { code, reason } => lite::AuthReply::Error(lite::AuthError {
 				code: code.to_code().into(),
 				reason,

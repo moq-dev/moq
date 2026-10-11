@@ -1373,3 +1373,113 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 	relay.abort();
 	let _ = relay.await;
 }
+
+/// A token can reach a prefix outside the initial credential, and withdrawing it
+/// revokes only the streams that depended on it on both native and upgraded WS.
+#[tokio::test]
+async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
+	for scheme in ["tcp", "ws"] {
+		let mut initial = Grant::new(all(), ["a/**".parse().unwrap()].into_iter().collect());
+		initial.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		let script = Script::new(initial);
+		let auth = build_auth(script.spawn().await);
+		let (port, relay) = if scheme == "tcp" {
+			spawn_relay(auth).await
+		} else {
+			spawn_ws_relay(auth).await
+		};
+		let client = || {
+			let mut config = moq_tokio::connect::Config::default();
+			config.once = Some(true);
+			config.version = vec!["moq-transport-22".parse().unwrap()];
+			config.websocket.delay = Duration::ZERO;
+			config.init(Default::default()).unwrap()
+		};
+		let origin = moq_tokio::origin::spawn();
+		let a = origin.create_broadcast("a/cam").unwrap();
+		let a_track = a.create_track("video", None).unwrap();
+		a.announce(Default::default()).unwrap();
+		let b = origin.create_broadcast("b/cam").unwrap();
+		let b_track = b.create_track("video", None).unwrap();
+		b.announce(Default::default()).unwrap();
+		let publisher = tokio::time::timeout(
+			TIMEOUT,
+			client()
+				.with_publisher(origin.consume())
+				.connect(room_url(scheme, port))
+				.established(),
+		)
+		.await
+		.unwrap()
+		.unwrap();
+		let received = moq_tokio::origin::spawn();
+		let read = received.consume();
+		let subscriber = tokio::time::timeout(
+			TIMEOUT,
+			client()
+				.with_subscriber(received)
+				.connect(room_url(scheme, port))
+				.established(),
+		)
+		.await
+		.unwrap()
+		.unwrap();
+		let a_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("a/cam"))
+			.await
+			.unwrap()
+			.unwrap();
+		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut replacement = Grant::new(all(), ["b/**".parse().unwrap()].into_iter().collect());
+		replacement.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		script.on_connect(Answer::Grant(replacement));
+		let token = tokio::time::timeout(TIMEOUT, subscriber.auth().add("replacement"))
+			.await
+			.unwrap()
+			.unwrap();
+		let b_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("b/cam"))
+			.await
+			.expect("new prefix not announced")
+			.unwrap();
+		let mut b_sub = b_read.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = b_track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::ZERO, b"new prefix".as_ref())
+			.unwrap();
+		group.finish().unwrap();
+		assert!(
+			tokio::time::timeout(TIMEOUT, b_sub.recv_group())
+				.await
+				.unwrap()
+				.unwrap()
+				.is_some()
+		);
+		drop(token);
+		let ended = tokio::time::timeout(TIMEOUT, b_sub.recv_group())
+			.await
+			.expect("withdrawn prefix stayed authorized");
+		assert!(
+			matches!(
+				ended,
+				Err(moq_net::Error::Unauthorized | moq_net::Error::Stream(moq_net::StreamError::Unauthorized))
+			),
+			"{scheme}: {:?}",
+			ended.as_ref().err()
+		);
+		let mut group = a_track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::ZERO, b"original prefix".as_ref())
+			.unwrap();
+		group.finish().unwrap();
+		assert!(
+			tokio::time::timeout(TIMEOUT, a_sub.recv_group())
+				.await
+				.unwrap()
+				.unwrap()
+				.is_some()
+		);
+		subscriber.abort(moq_net::Error::Cancel);
+		publisher.abort(moq_net::Error::Cancel);
+		relay.abort();
+		let _ = relay.await;
+	}
+}

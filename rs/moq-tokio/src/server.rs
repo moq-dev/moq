@@ -1626,6 +1626,11 @@ impl Request {
 		request_ref!(self, r => r.role())
 	}
 
+	/// Answer the peer's tokens before accepting and starting its protocol driver.
+	pub fn auth(&self) -> moq_net::auth::Handle {
+		request_ref!(self, r => r.auth())
+	}
+
 	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).
 	///
 	/// A peer declares this when it attaches a publish or subscribe origin.

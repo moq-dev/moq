@@ -1037,6 +1037,41 @@ impl Cluster {
 		self.scope(lease, &request)
 	}
 
+	/// Network sessions enforce changing grants in AUTH, within a fixed root and SETUP role.
+	pub(crate) async fn admit_session(
+		&self,
+		auth: &auth::Auth,
+		request: moq_auth::Request,
+	) -> Result<Admitted, auth::Error> {
+		let lease = auth.admit(request.clone()).await?;
+		self.scope_session(lease, &request)
+	}
+
+	pub(crate) fn scope_session(
+		&self,
+		lease: auth::Lease,
+		request: &moq_auth::Request,
+	) -> Result<Admitted, auth::Error> {
+		let mut admitted = self.scope(lease, request)?;
+		let mut bound = admitted.lease.token().clone();
+		bound.publish = moq_net::Pattern::all().into();
+		bound.subscribe = moq_net::Pattern::all().into();
+		if request.role != Some(moq_auth::Role::Subscriber) {
+			admitted.publisher = self
+				.publisher(&bound)
+				.map(|origin| origin.with_stats(admitted.stats.clone()));
+		}
+		if request.role != Some(moq_auth::Role::Publisher) {
+			admitted.subscriber = self.subscriber(&bound).map(|origin| {
+				origin
+					.consume()
+					.with_hidden(request.tls.is_some() || Self::is_lan_path(&request.path))
+					.with_stats(admitted.stats.clone())
+			});
+		}
+		Ok(admitted)
+	}
+
 	/// Resolve origin handles for a lease already admitted by a local relay rule.
 	pub(crate) fn scope(&self, lease: auth::Lease, request: &moq_auth::Request) -> Result<Admitted, auth::Error> {
 		let token = lease.token();

@@ -89,10 +89,45 @@ expiry, an expiry that leaves the union intact ends only that token, and
 
 Additive.
 
-**Investigation:** The persistent client AUTH handle and `server::Request::auth()` are already being introduced in [#5148](https://github.com/moq-dev/moq/pull/5148). That PR remains open and changes `auth::Request` to carry request-token scopes through the same `requests()` consumer. Adding an independent handle here would compete with that API and lose request-token state during a reconnect. Recommended landing order is #5148, then this quest extending that handle with session tokens.
+**Implementation and remaining decisions:**
 
-The current `moq_auth::lease::Consumer` carries a grant but no connection request identity. `Client::attach(&connection_lease, request)` therefore cannot yet establish that the request belongs to the connection. The current Driver also unconditionally POSTs `end` when a lease finishes, so simply reusing `connect` would end the shared session or free its limit slot when one token is withdrawn. The attach implementation needs explicit connection identity and lifecycle ownership in the lease, with only its owner reporting `end`. The auth server must recognize multiple grants with one session id without replacing or double-counting the session.
+The branch now verifies in-band tokens through the relay admission path, holds
+independent credentials behind one authorization union, and preserves the
+connection's identity and End ownership across attached leases. Network origin
+handles cover the admitted root and role, so a newly granted prefix can become
+reachable without rebuilding the session. Native, HTTP WebSocket, and io_uring
+admission take AUTH before starting the protocol driver. The persistent native
+Auth handle re-presents held tokens after replacement and keeps the predecessor's
+grant alive while it drains. The pending request queue is bounded in Rust and JS.
 
-The application-token queue is still unbounded (`Handle::requests` uses `Queue::new`), and `Serving::end` records peer closure only in the request's shared Issue. A queued Request is not removed when its stream closes. A bounded queue alone prevents memory growth but lets withdrawn tokens occupy every pending slot until the consumer drains them. Recommended queue design is a bounded per-session pending set that prunes closed Issues before admitting a new token and while reading, preserving arrival order. Its cap and overflow refusal need review; an AUTH-only semaphore would bound active streams but would not remove stale queued requests.
+Keep this quest until the public choices and wire error fidelity below settle:
 
-No relay token verification or union-expiry behavior is implemented by this investigation. The quest remains open so the integration and security cases in the Plan cannot be mistaken for completed coverage.
+- Persistent API: recommend the planned `Connection::auth()` with `Auth`, `Token`,
+  and `Watch`, adding request tokens through the same handle in #5148. Alternatively
+  land #5148 first and rebase this implementation onto its handle. Do not expose two
+  competing handles or silently discard one kind of token on reconnect.
+- Admission ownership: recommend `Client::attach(&Consumer, Request)` with a
+  cloneable Consumer and consuming `close(self)` ending all clones. A separate public
+  connection-admission handle would make ownership explicit at the cost of another
+  type and changes to every admission caller. Internal identity checks already
+  reject another client, a non-owning attachment, or changed connection facts.
+- Pending work: recommend a fixed 128 queued requests plus 128 verifications per
+  session. An explicit configurable limit is the alternative; unbounded work is
+  unsafe. Withdrawn requests release queued space, but an already-started
+  verification must retain its slot until it finishes.
+- Wire errors: the current cross-protocol API uses `SessionError` for AUTH refusals.
+  It has no expired-credential variant and IETF currently collapses all refusals
+  except unsupported into UNAUTHORIZED. This implementation preserves that mapping,
+  with the expiry/refusal reason in the reason phrase; it does not yet meet this
+  plan's distinct Expired and Timeout results. Recommend a focused typed AUTH
+  error API shared by Rust and JS, mapped to each protocol's existing registry,
+  instead of inventing session codes. Alternatively retain the coarse API and
+  revise the goal explicitly. No such decision is presumed approved.
+- Stats tier: recommend that the original connection credential owns tier updates;
+  attached credentials contribute permissions only. A deterministic tier-selection
+  policy across credentials is an alternative, requiring an explicit policy rule.
+
+The auth server already treats a known connection id as one live session. This
+branch preserves that connection-level accounting instead of changing limits to
+count individual tokens. The original lease alone reports End, after any
+attachment admission already in flight, even if its credential expired earlier.

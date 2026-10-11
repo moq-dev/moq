@@ -1,5 +1,8 @@
 //! The reconnect loop around a session, and the [`Monitor`] that observes it.
 
+pub mod auth;
+pub use auth::Auth;
+
 use std::task::{Poll, ready};
 use std::time::Duration;
 
@@ -1269,6 +1272,13 @@ impl Connection {
 	/// Wait until the connection loop stops.
 	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Present tokens that survive session replacement and observe the live grant union.
+	pub fn auth(&self) -> Auth {
+		Auth {
+			connection: self.state.clone(),
+		}
 	}
 
 	/// Observe the connection's statistics and presence across reconnects.
