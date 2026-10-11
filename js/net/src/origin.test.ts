@@ -2547,6 +2547,34 @@ test.each([
 	origin.close();
 });
 
+test("an epoch update does not retain an answer that already closed", async () => {
+	const origin = new Producer();
+	const path = Path.from("live/cam");
+	const dynamic = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const requests = dynamic.requested();
+	const held = origin.consume().request(path);
+	const old = new BroadcastProducer();
+	(await requests.next()).value?.accept(old);
+	old.close();
+	// The server's closure callback has not removed the answer yet.
+	dynamic.update({ epoch: NEWER });
+	try {
+		expect(held.closed.peek()).toBeInstanceOf(Error);
+		expect(held.active.peek()).toBeUndefined();
+		const fresh = origin.consume().request(path);
+		const next = new BroadcastProducer();
+		(await requests.next()).value?.accept(next);
+		expect(fresh.active.peek()?.epoch).toBe(NEWER);
+		fresh.close();
+		next.close();
+	} finally {
+		held.close();
+		await requests.return?.();
+		dynamic.close();
+		origin.close();
+	}
+});
+
 test("an unread resolved request retains its broadcast until its last handle closes", async () => {
 	const origin = new Producer();
 	const path = Path.from("live/cam");

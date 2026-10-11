@@ -668,7 +668,13 @@ class OriginState {
 			if (joined) slots.push(joined);
 			for (const slot of slots) {
 				const current = slot.route.peek();
-				if (!current?.front || current.source !== entry.identity || this.retained.has(slot)) continue;
+				if (
+					!current?.front ||
+					current.front.closed.peek() !== undefined ||
+					current.source !== entry.identity ||
+					this.retained.has(slot)
+				)
+					continue;
 				this.retire(path, slot);
 				// reset() releases the server's front; retain a separate owner even when no
 				// request has read active yet and therefore no per-request clone exists.
@@ -1475,9 +1481,10 @@ export class Consumer {
 	 *
 	 * The one way to consume by path. {@link Requesting.active} follows whatever the table
 	 * routes (an announced local publish, or any feeding session's announcement), staying on
-	 * the publisher instance it resolved and ending with an error once that stops serving;
-	 * request again to follow a restart. When nothing routes the path, the request stands and
-	 * whichever attached session answers first provides a blind subscription instead, which
+	 * the publisher instance it resolved. An in-place epoch change keeps its resolved broadcast
+	 * until you close the request; otherwise it ends with an error once its instance stops serving.
+	 * Request again to follow the new instance after a restart. When nothing routes the path,
+	 * the request stands and whichever attached session answers first provides a blind subscription instead, which
 	 * ends with that session.
 	 * With `announced: true`, an unrouted request waits while discovery is supported and
 	 * falls back to that blind behavior only when discovery is unavailable. Close the request
