@@ -202,8 +202,8 @@ impl Slot {
 	/// before its first packet.
 	///
 	/// The tables share one [`SystemBuffer`]. Where the next table would overflow it, a null
-	/// packet (or failing that, a packet muxed ahead of the table) takes the position instead,
-	/// so a PMT spanning several packets goes out at the buffer's rate.
+	/// takes the position instead, so a PMT spanning several packets goes out at the buffer's
+	/// rate where the slot has the nulls to spare.
 	pub fn layout(&self, clock: &[u8], pmt_pid: u16, null: &[u8]) -> Vec<u8> {
 		let packets = self.packets.as_chunks::<{ TsPacket::SIZE }>().0;
 		let mut tables = VecDeque::new();
@@ -223,33 +223,18 @@ impl Slot {
 		// Every position, each lane (the nulls last) gains its weight and the one furthest
 		// ahead takes it, paying back the total: over the slot each takes exactly its weight.
 		// The clock takes the first.
+		let mut nulls = self.nulls;
 		let mut weights: Vec<i64> = lanes
 			.iter()
 			.map(|(_, lane)| lane.len() as i64)
-			.chain([self.nulls as i64])
+			.chain([nulls as i64])
 			.collect();
 		weights[0] += 1;
-		let total: i64 = weights.iter().sum();
+		let mut total: i64 = weights.iter().sum();
 		let mut credit = weights.clone();
 		credit[0] -= total;
-		// The media and null positions in order, `None` for a null.
-		let mut order: VecDeque<Option<usize>> = VecDeque::with_capacity(total as usize);
-		for _ in 1..total {
-			for (credit, weight) in credit.iter_mut().zip(&weights) {
-				*credit += weight;
-			}
-			let mut pick = 0;
-			for lane in 1..credit.len() {
-				if credit[lane] > credit[pick] {
-					pick = lane;
-				}
-			}
-			credit[pick] -= total;
-			order.push_back(lanes.get_mut(pick).map(|(_, lane)| {
-				lane.pop_front()
-					.expect("a lane takes no more positions than its weight")
-			}));
-		}
+		// Positions the round-robin has still to lay.
+		let mut left = total - 1;
 
 		let positions = 1 + packets.len() + self.nulls;
 		let mut system = SystemBuffer::new(pmt_pid, positions);
@@ -257,36 +242,65 @@ impl Slot {
 		out.extend_from_slice(clock);
 		system.lay(clock);
 		loop {
-			// The next table, once the next media packet was muxed after it.
+			let pick = (left > 0).then(|| {
+				let mut pick = 0;
+				for lane in 1..credit.len() {
+					if credit[lane] + weights[lane] > credit[pick] + weights[pick] {
+						pick = lane;
+					}
+				}
+				pick
+			});
+			// The packet the round-robin lays next, `None` for a null.
+			let next = pick.map(|pick| lanes.get(pick).map(|(_, lane)| lane[0]));
+			// The next table, once the next packet was muxed after it.
 			let table = tables
 				.front()
 				.copied()
-				.filter(|&table| order.front().is_none_or(|next| next.is_some_and(|i| table < i)));
-			let next = match table {
-				None => order.pop_front(),
-				Some(table) => {
-					let filler = || {
-						order
-							.iter()
-							.position(Option::is_none)
-							.or_else(|| order.iter().position(|next| next.is_some_and(|i| i < table)))
-					};
-					match (!system.fits()).then(filler).flatten() {
-						Some(k) => order.remove(k),
-						// The table fits, or nothing is left to space it with.
-						None => {
-							tables.pop_front();
-							system.lay(&packets[table]);
-							out.extend_from_slice(&packets[table]);
-							continue;
-						}
-					}
+				.filter(|&table| next.is_none_or(|next| next.is_some_and(|i| table < i)));
+			if let Some(table) = table {
+				// A null spaces a table that would overflow TBsys, and the rest of the slot is
+				// laid out afresh around it, so no PID's packets bunch up to make up the time.
+				// Without a null left, the table goes out regardless.
+				if !system.fits() && nulls > 0 {
+					nulls -= 1;
+					system.lay(null);
+					out.extend_from_slice(null);
+					weights = lanes
+						.iter()
+						.map(|(_, lane)| lane.len() as i64)
+						.chain([nulls as i64])
+						.collect();
+					total = weights.iter().sum();
+					credit = vec![0; weights.len()];
+					left = total;
+					continue;
 				}
-			};
-			let Some(next) = next else {
+				tables.pop_front();
+				system.lay(&packets[table]);
+				out.extend_from_slice(&packets[table]);
+				continue;
+			}
+			let Some(pick) = pick else {
 				break;
 			};
-			let packet = next.map_or(null, |i| &packets[i]);
+			for (credit, weight) in credit.iter_mut().zip(&weights) {
+				*credit += weight;
+			}
+			credit[pick] -= total;
+			left -= 1;
+			let packet = match lanes.get_mut(pick) {
+				Some((_, lane)) => {
+					let i = lane
+						.pop_front()
+						.expect("a lane takes no more positions than its weight");
+					&packets[i]
+				}
+				None => {
+					nulls -= 1;
+					null
+				}
+			};
 			system.lay(packet);
 			out.extend_from_slice(packet);
 		}
@@ -1000,52 +1014,64 @@ mod tests {
 		assert_eq!(laid, [1, 0, 100, 3, 0x1fff, 3, 3, 1, 0x1fff, 3]);
 	}
 
-	/// A PAT and a three-packet PMT go out at TBsys's rate rather than in a burst, still in
-	/// order ahead of the keyframe muxed after them. Nulls space them in a padded slot, and a
-	/// packet muxed ahead of them where the slot has no nulls.
+	/// A PAT and a three-packet PMT go out at TBsys's rate rather than in a burst, spaced by
+	/// nulls and still in order ahead of the keyframe muxed after them. The video they delay
+	/// still keeps within its own transport buffer.
 	#[test]
 	fn the_tables_go_out_at_the_system_buffer_rate() {
-		for (ahead, nulls) in [(0, 332 - 1 - 54), (40, 0)] {
-			let mut packets = unit(3, ahead);
-			packets.extend(unit(0, 1));
+		// The peak fill of a 512-byte transport buffer fed by `pids` and drained at `rx` b/s, over
+		// a 25 ms slot.
+		let peak = |laid: &[&[u8]], pids: &[u16], rx: f64| {
+			let drain = rx / 8.0 * 0.025 / laid.len() as f64;
+			let (mut tb, mut peak) = (0.0f64, 0.0f64);
+			for packet in laid {
+				tb = (tb - drain).max(0.0);
+				if pids.contains(&pid(packet)) {
+					tb += 188.0;
+					peak = peak.max(tb);
+				}
+			}
+			peak
+		};
+		// A 20 Mb/s slot with a small keyframe, and a 25 Mb/s slot whose video takes most of it
+		// alongside AC-3, MPEG audio and teletext.
+		let others: &[(u8, usize)] = &[(122, 9), (121, 5), (123, 5), (124, 5), (131, 1)];
+		for (positions, video, count, others) in [(332, 1, 50, &[][..]), (416, 111, 300, others)] {
+			let mut packets = unit(0, 1);
 			for part in 0..3 {
 				let mut pmt = unit(100, 1);
 				pmt[4] = part;
 				packets.extend(pmt);
 			}
-			packets.extend(unit(1, 50));
-			let positions = 1 + packets.len() / TsPacket::SIZE + nulls;
+			packets.extend(unit(video, count));
+			for &(pid, count) in others {
+				packets.extend(unit(pid, count));
+			}
 			let slot = Slot {
 				index: 0,
 				pcr: 0,
+				nulls: positions - 1 - packets.len() / TsPacket::SIZE,
 				packets,
-				nulls,
 				keyframe: true,
-				units: vec![1],
+				units: vec![video.into()],
 			};
 			let mut null = unit(0, 1);
 			(null[1], null[2]) = (0x1f, 0xff);
-			let laid = slot.layout(&unit(1, 1), 100, &null);
+			let laid = slot.layout(&unit(video, 1), 100, &null);
 			assert_eq!(laid.len(), positions * TsPacket::SIZE, "the slot keeps its size");
 			let laid: Vec<&[u8]> = laid.chunks(TsPacket::SIZE).collect();
 
 			let tables: Vec<usize> = (0..laid.len()).filter(|&k| [0, 100].contains(&pid(laid[k]))).collect();
 			let parts: Vec<u8> = tables.iter().skip(1).map(|&k| laid[k][4]).collect();
 			assert_eq!(parts, [0, 1, 2], "the PMT keeps its order");
-			let keyframe = (1..laid.len()).find(|&k| pid(laid[k]) == 1).unwrap();
+			let keyframe = (1..laid.len()).find(|&k| pid(laid[k]) == u16::from(video)).unwrap();
 			assert!(tables.iter().all(|&k| k < keyframe), "the tables lead the keyframe");
 
-			// TBsys: 188 B in per table packet, drained at Rxsys over the slot's 25 ms.
-			let drain = 1_000_000.0 / 8.0 * 0.025 / positions as f64;
-			let (mut tb, mut peak) = (0.0f64, 0.0f64);
-			for packet in &laid {
-				tb = (tb - drain).max(0.0);
-				if [0, 100].contains(&pid(packet)) {
-					tb += 188.0;
-					peak = peak.max(tb);
-				}
-			}
-			assert!(peak <= 512.0, "TBsys peak {peak:.0} B with {ahead} packets ahead");
+			let system = peak(&laid, &[0, 100], 1_000_000.0);
+			assert!(system <= 512.0, "TBsys peak {system:.0} B in {positions} positions");
+			// The video's Rx is 1.2 x 17,999,872 b/s, as in the full-slot test above.
+			let video = peak(&laid, &[video.into()], 21_599_846.0);
+			assert!(video <= 512.0, "video TB peak {video:.0} B in {positions} positions");
 		}
 	}
 }
