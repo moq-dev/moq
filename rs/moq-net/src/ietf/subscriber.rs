@@ -1992,6 +1992,9 @@ where
 			}
 		};
 
+		// Retirement cancels only the wait for an ID. On drafts 14-16 the peer grants
+		// MAX_REQUEST_ID credit back only for requests it receives, so an allocated ID is
+		// always sent; the response wait below cancels it if the source retired meanwhile.
 		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
 			Ok(id) => id,
 			Err(err) => {
@@ -2000,10 +2003,7 @@ where
 			}
 		};
 
-		let mut stream = match validity
-			.run(Stream::open(&mut self.session.clone(), self.version))
-			.await
-		{
+		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
 			Ok(s) => s,
 			Err(err) => {
 				tracing::debug!(%err, "failed to open subscribe stream");
@@ -2038,27 +2038,26 @@ where
 		// Write Subscribe message. The aggregate is read now: a subscriber can join while
 		// the request ID and stream were awaited, and nothing updates the priority after.
 		let priority = target.subscription().map(|s| s.priority).unwrap_or(0);
-		let written = validity
-			.run(async {
-				stream.writer.varint(ietf::Subscribe::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::Subscribe {
-						request_id,
-						track_namespace: broadcast_path.to_owned(),
-						track_name: track_name.into(),
-						subscriber_priority: super::priority::to_wire(priority),
-						group_order: GroupOrder::Descending,
-						filter: join.filter,
-						fill: join.fill,
-						// A resumed copy already knows the track, from the answer that accepted it.
-						properties_wanted: matches!(target, Target::Request(_)),
-						forward: true,
-						range_filters: false,
-					})
-					.await
-			})
-			.await;
+		let written = async {
+			stream.writer.varint(ietf::Subscribe::ID).await?;
+			stream
+				.writer
+				.encode(&ietf::Subscribe {
+					request_id,
+					track_namespace: broadcast_path.to_owned(),
+					track_name: track_name.into(),
+					subscriber_priority: super::priority::to_wire(priority),
+					group_order: GroupOrder::Descending,
+					filter: join.filter,
+					fill: join.fill,
+					// A resumed copy already knows the track, from the answer that accepted it.
+					properties_wanted: matches!(target, Target::Request(_)),
+					forward: true,
+					range_filters: false,
+				})
+				.await
+		}
+		.await;
 		if let Err(err) = written {
 			tracing::debug!(%err, "failed to write subscribe");
 			self.remove_subscribe(request_id);
@@ -2798,6 +2797,7 @@ where
 		request: track::Request,
 	) -> Option<Idle> {
 		let validity = self.validity.start();
+		// An allocated ID is always sent, as in `subscribe_once`.
 		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
 			Ok(id) => id,
 			Err(err) => {
@@ -2805,30 +2805,26 @@ where
 				return None;
 			}
 		};
-		let mut stream = match validity
-			.run(Stream::open(&mut self.session.clone(), self.version))
-			.await
-		{
+		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
 			Ok(stream) => stream,
 			Err(err) => {
 				request.reject(err);
 				return None;
 			}
 		};
-		let written = validity
-			.run(async {
-				stream.writer.varint(ietf::TrackStatus::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::TrackStatus {
-						request_id,
-						track_namespace: broadcast_path.to_owned(),
-						track_name: track_name.into(),
-						properties_wanted: true,
-					})
-					.await
-			})
-			.await;
+		let written = async {
+			stream.writer.varint(ietf::TrackStatus::ID).await?;
+			stream
+				.writer
+				.encode(&ietf::TrackStatus {
+					request_id,
+					track_namespace: broadcast_path.to_owned(),
+					track_name: track_name.into(),
+					properties_wanted: true,
+				})
+				.await
+		}
+		.await;
 		if let Err(err) = written {
 			request.reject(err);
 			return None;
@@ -3789,6 +3785,7 @@ where
 		let start = request.frame_start();
 		let draft20 = Filter::is_draft20(self.version);
 
+		// An allocated ID is always sent, as in `subscribe_once`.
 		let fetch_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
 			Ok(id) => id,
 			Err(err) => return request.reject(err),
@@ -3798,10 +3795,7 @@ where
 		let slot = kio::Producer::new(GroupFetch::Pending);
 		let registered = GroupFetchEntry::new(&self.state, fetch_id, slot.clone());
 
-		let mut stream = match validity
-			.run(Stream::open(&mut self.session.clone(), self.version))
-			.await
-		{
+		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
 			Ok(stream) => stream,
 			Err(err) => return request.reject(err),
 		};
@@ -3836,26 +3830,25 @@ where
 				},
 			},
 		};
-		let res = validity
-			.run(async {
-				stream.writer.varint(ietf::Fetch::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::Fetch {
-						request_id: fetch_id,
-						subscriber_priority: super::priority::to_wire(request.priority()),
-						group_order: GroupOrder::Ascending,
-						fetch_type,
-						range_filters: false,
-						fill_timeout: false,
-						// The copy learned the track before any fetch, from SUBSCRIBE_OK or
-						// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
-						properties_wanted: false,
-					})
-					.await?;
-				Ok::<_, Error>(())
-			})
-			.await;
+		let res = async {
+			stream.writer.varint(ietf::Fetch::ID).await?;
+			stream
+				.writer
+				.encode(&ietf::Fetch {
+					request_id: fetch_id,
+					subscriber_priority: super::priority::to_wire(request.priority()),
+					group_order: GroupOrder::Ascending,
+					fetch_type,
+					range_filters: false,
+					fill_timeout: false,
+					// The copy learned the track before any fetch, from SUBSCRIBE_OK or
+					// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
+					properties_wanted: false,
+				})
+				.await?;
+			Ok::<_, Error>(())
+		}
+		.await;
 		let mut retired = false;
 		let res = match res {
 			Err(err) => Some(Err(err)),
@@ -5447,6 +5440,103 @@ mod tests {
 		assert!(matches!(subscription.await, Err(Error::Unroutable)));
 		assert!(occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0);
 		assert_eq!(log.stops(), vec![crate::ietf::error::CANCELLED]);
+	}
+
+	#[derive(Clone, Copy, Debug)]
+	enum Allocated {
+		Subscribe,
+		TrackStatus,
+		GroupFetch,
+	}
+
+	/// Drafts 14-16 return MAX_REQUEST_ID credit only for requests the peer receives, so a
+	/// source retiring after its request ID was allocated must still send that request,
+	/// then cancel it if the draft can. Skipping it would leak the credit for good.
+	#[moq_net_sim::test]
+	async fn a_retirement_after_allocation_still_sends_the_request() {
+		const VERSION: Version = Version::Draft16;
+
+		for kind in [Allocated::Subscribe, Allocated::TrackStatus, Allocated::GroupFetch] {
+			// Every request write parks until the gate opens, after the retirement.
+			let gate = kio::Producer::new(false);
+			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let mut subscriber = Subscriber::new(
+				crate::time::Clock::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				VERSION,
+				tasks,
+				Default::default(),
+			);
+			let route = kio::Producer::new(());
+			subscriber.validity = crate::model::broadcast::RequestValidity::token(Some(route.consume()));
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let _subscription = track.subscribe(None);
+			let request = dynamic.requested_track().await.expect("no track requested");
+
+			let mut fetch = None;
+			let serving = match kind {
+				Allocated::Subscribe => moq_net_sim::spawn(async move {
+					subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+				}),
+				Allocated::TrackStatus => moq_net_sim::spawn(async move {
+					assert!(
+						subscriber
+							.track_status(&Path::new("broadcast"), "video", request)
+							.await
+							.is_none()
+					);
+				}),
+				Allocated::GroupFetch => {
+					let track = track::Producer::new(
+						std::sync::Arc::new(crate::broadcast::Info::default()),
+						"video",
+						track::Info::default().with_timescale(None),
+					);
+					let requested = track.dynamic();
+					let mut pending = Box::pin(track.consume().fetch_group(0, None));
+					assert!(futures::poll!(pending.as_mut()).is_pending());
+					let group = requested.requested_group().await.expect("group request");
+					fetch = Some((track, pending));
+					moq_net_sim::spawn(subscriber.run_group_fetch(
+						Path::new("broadcast").to_owned(),
+						"video".into(),
+						group,
+						None,
+					))
+				}
+			};
+
+			// The ID is allocated and its request parked mid-write when the source retires.
+			settle().await;
+			drop(route);
+			settle().await;
+			let Ok(mut open) = gate.write() else {
+				panic!("gate closed")
+			};
+			*open = true;
+			drop(open);
+			serving.await.unwrap();
+			drop(fetch);
+
+			let expected = match kind {
+				Allocated::Subscribe => vec![ietf::Subscribe::ID, ietf::Unsubscribe::ID],
+				Allocated::TrackStatus => vec![ietf::TrackStatus::ID],
+				Allocated::GroupFetch => vec![ietf::Fetch::ID, ietf::FetchCancel::ID],
+			};
+			assert_eq!(control_message_types(&log, VERSION), expected, "{kind:?}");
+		}
 	}
 
 	/// The control messages that actually reached the wire, by type id.
