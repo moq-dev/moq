@@ -21,8 +21,23 @@ export const SetupOption = {
 	Hidden: 0x40b5cn,
 } as const;
 
-// Unknown SETUP options may repeat, including GREASE.
-const KNOWN_SETUP_OPTIONS: readonly bigint[] = Object.values(SetupOption);
+const SETUP_OPTIONS: readonly bigint[] = Object.values(SetupOption);
+
+// Whether `version` defines a SETUP option. Only defined options must be unique; others,
+// including GREASE, may repeat.
+function definedSetupOption(id: bigint, version: IetfVersion): boolean {
+	const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+	switch (id) {
+		case SetupOption.MaxRequestId:
+			return legacy;
+		// The MoQ Cluster extension is only negotiated on draft-17+ (see `cluster.ts`).
+		case SetupOption.HopId:
+		case SetupOption.RelayCost:
+			return !legacy;
+		default:
+			return SETUP_OPTIONS.includes(id);
+	}
+}
 
 /// Setup Options — used in SETUP messages.
 ///
@@ -143,13 +158,13 @@ export class SetupOptions {
 				i++;
 
 				if (id % 2n === 0n) {
-					if (id !== SetupOption.MaxRequestId && KNOWN_SETUP_OPTIONS.includes(id) && params.vars.has(id)) {
+					if (definedSetupOption(id, version) && params.vars.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();
 					params.setVarint(id, varint);
 				} else {
-					if (KNOWN_SETUP_OPTIONS.includes(id) && params.bytes.has(id)) {
+					if (definedSetupOption(id, version) && params.bytes.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const size = await r.u53();
@@ -172,13 +187,13 @@ export class SetupOptions {
 				}
 
 				if (id % 2n === 0n) {
-					if (KNOWN_SETUP_OPTIONS.includes(id) && params.vars.has(id)) {
+					if (definedSetupOption(id, version) && params.vars.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();
 					params.setVarint(id, varint);
 				} else {
-					if (KNOWN_SETUP_OPTIONS.includes(id) && params.bytes.has(id)) {
+					if (definedSetupOption(id, version) && params.bytes.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const size = await r.u53();
