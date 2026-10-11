@@ -2,8 +2,9 @@
 
 ## Goal
 
-A time-mocked drill in `rs/moq-relay/tests` with three or more clustered
-relays: a publisher on one node cleanly closes a broadcast, and a client
+A time-mocked drill with three or more clustered relays, extending
+`rs/moq-net/tests/mesh_withdraw.rs` (which already checks one retraction on a
+34-node partial mesh) or added beside it: a publisher on one node cleanly closes a broadcast, and a client
 watching its prefix on another node sees one retraction, with no
 re-announce, for that path. The drill runs against `main` and lands as a
 regression test.
@@ -19,7 +20,9 @@ Loss and FETCH were clean in every run (about 31k FETCHes, all ok).
 
 - Decided 2026-10-11: `main` likely already handles this (the report ran on
   the release), so reproduce before fixing. Run the drill on the
-  `moq-relay-v0.17.2` tree too, to confirm it catches the reported toggling.
+  `moq-relay-v0.17.2` tree too, to confirm it catches the reported toggling;
+  a passing `main` drill counts as evidence only after that positive control
+  fails on the release.
 - Suspected mechanism, unconfirmed: path hunting in today's lite-06 path
   vector. A peer's re-announce of a withdrawn prefix clears its withdrawal
   (`reannounced` in `rs/moq-net/src/model/origin.rs`) and revives stale
@@ -48,4 +51,4 @@ Loss and FETCH were clean in every run (about 31k FETCHes, all ok).
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the lite-07 redesign that ends path hunting by construction
-- [Fronts abort instead of dropping](/quest/m1/front-abort-codes.md) - the `internal error` replies seen during the same churn
+- [Dropped sources](/quest/m1/dropped-sources.md) - the `internal error` replies seen during the same churn
