@@ -264,7 +264,10 @@ impl<'a> PesStart<'a> {
 		let optional = payload.get(9..9 + header_len).context("PES header truncated")?;
 		let data_len = match packet_len {
 			0 => None,
-			len => Some(len.checked_sub(3 + header_len).context("PES packet length shorter than its header")?),
+			len => Some(
+				len.checked_sub(3 + header_len)
+					.context("PES packet length shorter than its header")?,
+			),
 		};
 
 		let (pts, dts) = match (pts_flag, dts_flag) {
