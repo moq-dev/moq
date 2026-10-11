@@ -631,6 +631,40 @@ int main()
 	}
 	report("unchanged rendition keeps decoder");
 
+	// The same track name with a new decoder configuration is a replacement; metadata alone is not.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
+		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
+		CHECK(snapshot.has_value());
+		auto &video = snapshot->video.begin()->second;
+		auto &audio = snapshot->audio.begin()->second;
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			video.label = "relabeled";
+			video.bitrate = 1;
+			audio.label = "relabeled";
+			audio.bitrate = 1;
+			moq_source_subscribe_video(ctx, conn, *snapshot);
+			moq_source_subscribe_audio(ctx, conn, *snapshot);
+			CHECK(!conn->pending_video && !conn->pending_audio);
+			video.coded = moq::Dimensions{(video.coded ? video.coded->width : 0) + 16, 16};
+			audio.sample_rate += 1;
+			moq_source_subscribe_video(ctx, conn, *snapshot);
+			moq_source_subscribe_audio(ctx, conn, *snapshot);
+			CHECK(conn->pending_video && conn->pending_audio);
+		}
+		destroySource(source);
+	}
+	report("reshaped rendition replaces decoder");
+
 	// A new rendition that has not delivered a frame cannot stop the old track.
 	{
 		TestRelay relay;
