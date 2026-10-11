@@ -34,8 +34,8 @@ class MoqGst < Formula
       The moq GStreamer plugin is installed at:
         #{opt_lib}/gstreamer-1.0/libgstmoq.#{OS.mac? ? "dylib" : "so"}
 
-      For GStreamer to discover it, add this prefix to GST_PLUGIN_PATH:
-        export GST_PLUGIN_PATH="#{opt_lib}/gstreamer-1.0:$GST_PLUGIN_PATH"
+      For GStreamer to discover it, add this directory to GST_PLUGIN_PATH_1_0:
+        export GST_PLUGIN_PATH_1_0="#{opt_lib}/gstreamer-1.0:$GST_PLUGIN_PATH_1_0"
 
       Then verify with:
         gst-inspect-1.0 moq
