@@ -54,9 +54,9 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	expect((await pendingRequest(consumer))?.name).toBe("video");
 });
 
-// Shared sequence namespace across producer replacements: the TypeScript equivalent of
-// cloned Rust producers, so insertDatagram advances the next append for the replacement.
-test("dynamic track sequences continue across producer replacements", async () => {
+// A name keeps one sequence namespace across producer replacements. The application owns where a
+// replacement starts: an append that would reuse an earlier producer's sequence throws.
+test("a replacement producer refuses to append a sequence the name already wrote", async () => {
 	const broadcast = new BroadcastProducer();
 
 	// Pull before subscribing: a broadcast nobody serves on demand answers NotFound instead.
@@ -76,7 +76,14 @@ test("dynamic track sequences continue across producer replacements", async () =
 	const secondRequest = await wireOf(broadcast).requested();
 	if (!secondRequest) throw new Error("expected second request");
 	const secondProducer = secondRequest.accept({ timescale: Timescale.MILLI });
-	expect(secondProducer.appendGroup().sequence).toBe(13);
+	expect(() => secondProducer.appendGroup()).toThrow("duplicate sequence");
+	expect(() => secondProducer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow(
+		"duplicate sequence",
+	);
+
+	// An explicit first write picks the start, and appends continue from there.
+	secondProducer.writeGroup(new GroupProducer(13));
+	expect(secondProducer.appendGroup().sequence).toBe(14);
 
 	const nextGeneration = new BroadcastProducer();
 	const nextPull = wireOf(nextGeneration).requested();
@@ -141,24 +148,26 @@ test("created and requested tracks share a name's sequences", async () => {
 	first.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
 	first.close();
 
-	// A replacement continues past every explicit write.
+	// A replacement refuses to append past nothing, since that would reuse every explicit write.
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	expect(second.appendGroup().sequence).toBe(13);
+	expect(() => second.appendGroup()).toThrow("duplicate sequence");
+	second.writeGroup(new GroupProducer(13));
 	second.close();
 
-	// An on-demand producer continues the same namespace, and so does a later created track.
+	// An on-demand producer checks the same namespace, and so does a later created track.
 	broadcast.removeTrack("media");
 	const pulled = wireOf(broadcast).requested();
 	const subscriber = broadcast.track("media").subscribe();
 	const request = await pulled;
 	if (!request) throw new Error("expected request");
 	const requested = request.accept({ timescale: Timescale.MILLI });
-	expect(requested.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toBe(14);
+	expect(() => requested.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow("duplicate sequence");
+	requested.insertDatagram(14, Timestamp.fromMillis(0), new Uint8Array());
 	subscriber.close();
 	requested.close();
 
 	const later = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	expect(later.appendGroup().sequence).toBe(15);
+	expect(() => later.appendGroup()).toThrow("duplicate sequence");
 	later.close();
 
 	// Only a new broadcast starts over.
@@ -185,8 +194,8 @@ test("a broadcast bounds the names it remembers sequences for", async () => {
 	}
 	expect(() => broadcast.createTrack("refused")).toThrow("too many track names");
 
-	// A remembered name is still admitted, continuing its sequences.
-	expect(broadcast.createTrack("written-1").appendGroup().sequence).toBe(1);
+	// A remembered name is still admitted, and still refuses to reuse its sequences.
+	expect(() => broadcast.createTrack("written-1").appendGroup()).toThrow("duplicate sequence");
 
 	// An on-demand request past the bound is refused to its subscribers.
 	const pulled = wireOf(broadcast).requested();

@@ -114,7 +114,7 @@ export interface ReadGroupFrame {
 	complete(): void;
 }
 
-/** The next group or datagram sequence, shared by every producer that serves one broadcast track in turn. */
+/** One past the highest sequence written under a broadcast track's name, by any of its producers. */
 export interface TrackSequence {
 	next: number;
 	/** Open producers writing through this namespace. */
@@ -126,10 +126,10 @@ export const MAX_TRACK_SEQUENCES = 1024;
 
 /**
  * Each name's sequence namespace for one broadcast generation, outliving the producers that
- * serve it so a replacement continues where the last one stopped. Written namespaces are kept
- * until the broadcast ends, since forgetting one would let a later producer reuse its sequences.
- * Namespaces nothing holds or wrote are swept once the map fills, and a new name past that bound
- * is refused: starting sequences over takes a new broadcast.
+ * serve it so a replacement that would append a sequence already written is refused. Written
+ * namespaces are kept until the broadcast ends, since forgetting one would let a later producer
+ * reuse its sequences. Namespaces nothing holds or wrote are swept once the map fills, and a new
+ * name past that bound is refused: starting sequences over takes a new broadcast.
  */
 export class TrackSequences {
 	#map = new Map<string, TrackSequence>();

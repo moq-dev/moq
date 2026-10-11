@@ -170,7 +170,7 @@ function lookup(state: BroadcastState, name: string): track.Producer | undefined
 // weak-dedup: a requested producer is cached in `state.requests` so every subscription and info
 // lookup fans out from one request instead of opening another. Whoever serves it closes it once
 // unused (the consuming wire tears the upstream down when its last subscriber leaves), which evicts
-// the entry so a later subscribe requests the track again, continuing its sequences.
+// the entry so a later subscribe requests the track again.
 function logical(state: BroadcastState, name: string): { producer: track.Producer; requested: boolean } {
 	if (state.closed.peek() !== undefined) {
 		throw new Error("broadcast is closed");
@@ -388,9 +388,10 @@ export class Producer {
 	 *
 	 * A request still queued for the name is answered with this track, so its subscribers read
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
-	 * The track continues the name's group and datagram sequences from any earlier track of the
-	 * name in this broadcast. Throws if an open track or a live request already holds the name,
-	 * or if the broadcast cannot remember another track name's sequences.
+	 * An append on the track throws if it would reuse a sequence an earlier track of the name
+	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
+	 * open track or a live request already holds the name, or if the broadcast cannot remember
+	 * another track name's sequences.
 	 */
 	createTrack(name: string, info: Partial<track.Info> = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {

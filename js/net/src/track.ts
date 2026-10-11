@@ -509,11 +509,12 @@ export class Producer {
 	// The producer's own state is the source of truth (info/closed); subscribers
 	// read mirrored sinks, never this state directly.
 	#state = new TrackState();
-	// Until a broadcast binds it, a namespace of its own. An open producer holds its namespace.
+	// The name's sequence namespace, which records every sequence any producer of the name
+	// wrote. Until a broadcast binds it, a namespace of its own. An open producer holds it.
 	#sequence: TrackSequence = { next: 0, holders: 1 };
 	// One past the highest group or datagram this producer received, like the Rust
-	// `max_sequence`. The shared counter above can run ahead of it: earlier producers of
-	// the same broadcast track advanced it too.
+	// `max_sequence`, and where the next append lands. The namespace above can run ahead of
+	// it: earlier producers of the same broadcast track advanced it too.
 	#received = 0;
 
 	// Recently written source groups, retained for replay to late subscribers and
@@ -551,7 +552,7 @@ export class Producer {
 		bindProducerSequence = (producer, sequence) => {
 			const own = producer.#sequence;
 			if (own === sequence) return;
-			sequence.next = Math.max(sequence.next, own.next);
+			sequence.next = Math.max(sequence.next, producer.#received);
 			producer.#sequence = sequence;
 			if (producer.#state.closed.peek() !== undefined) return;
 			own.holders--;
@@ -841,12 +842,33 @@ export class Producer {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>() };
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
-		this.#received = Math.max(this.#received, group.sequence + 1);
+		this.#advance(group.sequence);
 		this.#state.latest = Math.max(this.#state.latest ?? 0, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
 		this.#prune();
+	}
+
+	// Record a written sequence, here and in the name's namespace.
+	#advance(sequence: number): void {
+		this.#received = Math.max(this.#received, sequence + 1);
+		this.#sequence.next = Math.max(this.#sequence.next, sequence + 1);
+	}
+
+	// The sequence the next append takes: one past this producer's own writes. The
+	// application owns where a replacement of the name starts, so an append that would
+	// reuse a sequence an earlier producer wrote throws instead of renumbering.
+	#nextSequence(): number {
+		const next = this.#received;
+		this.#writable(next);
+		const written = this.#sequence.next;
+		if (next < written) {
+			throw new Error(
+				`duplicate sequence: ${this.name} already wrote up to ${written - 1}, so start a replacement with an explicit sequence`,
+			);
+		}
+		return next;
 	}
 
 	// Hold a group to this track's timedness, once the track has committed it.
@@ -871,17 +893,17 @@ export class Producer {
 	}
 
 	/**
-	 * Append a new group with the next sequence number.
+	 * Append a new group with the next sequence number: one past this producer's own writes.
+	 *
+	 * Throws if an earlier producer of the name in this broadcast already wrote that sequence.
+	 * A replacement picks where it starts by writing its first group with {@link writeGroup}.
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
 	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
 	 */
 	appendGroup(): GroupProducer {
-		const sequence = this.#sequence;
-		this.#writable(sequence.next);
-		const group = new GroupProducer(sequence.next);
+		const group = new GroupProducer(this.#nextSequence());
 		this.#bind(group);
-		sequence.next = group.sequence + 1;
 		this.#publish(group);
 
 		return group;
@@ -910,19 +932,13 @@ export class Producer {
 			this.#uncache(existing);
 		}
 
-		// Only advance the shared counter upward (for appendGroup auto-increment).
-		const sequence = this.#sequence;
-		if (group.sequence >= sequence.next) {
-			sequence.next = group.sequence + 1;
-		}
-
 		this.#publish(group);
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
 	#publishDatagram(datagram: Datagram): void {
-		this.#received = Math.max(this.#received, datagram.sequence + 1);
+		this.#advance(datagram.sequence);
 		for (const sink of this.#sinks) {
 			sink.received.set(this.#received);
 			sink.datagrams.mutate((list) => {
@@ -942,19 +958,17 @@ export class Producer {
 	 * keep datagram payloads small (e.g. a single audio frame). Datagrams are never delivered
 	 * over stream-only transports (the WebSocket fallback). A payload over
 	 * 65535 bytes (the QUIC datagram frame ceiling) throws. An origin publisher uses this; a
-	 * relay preserving upstream numbering uses {@link insertDatagram}.
+	 * relay preserving upstream numbering uses {@link insertDatagram}. Like {@link appendGroup},
+	 * throws if an earlier producer of the name already wrote that sequence.
 	 *
 	 * Pass `undefined` for the timestamp on an untimed track; a timestamp whose presence
 	 * disagrees with the track's {@link Info.timescale} throws {@link TimestampMismatch}.
 	 */
 	appendDatagram(timestamp: Timestamp | undefined, payload: Uint8Array): number {
-		const counter = this.#sequence;
-		const sequence = counter.next;
-		this.#writable(sequence);
+		const sequence = this.#nextSequence();
 		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 		this.#checkDatagram(timestamp);
 
-		counter.next = sequence + 1;
 		this.#publishDatagram({ sequence, timestamp, payload });
 		return sequence;
 	}
@@ -962,7 +976,7 @@ export class Producer {
 	/**
 	 * Insert a datagram with an explicit sequence number.
 	 *
-	 * Preserves the supplied sequence (advancing the shared counter if needed) so a relay can
+	 * Preserves the supplied sequence (later appends continue past it) so a relay can
 	 * forward a datagram without renumbering it. The size and timestamp rules of
 	 * {@link appendDatagram} apply. Most origin publishers want {@link appendDatagram} instead.
 	 */
@@ -971,10 +985,6 @@ export class Producer {
 		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 		this.#checkDatagram(timestamp);
 
-		const counter = this.#sequence;
-		if (sequence >= counter.next) {
-			counter.next = sequence + 1;
-		}
 		this.#publishDatagram({ sequence, timestamp, payload });
 	}
 
