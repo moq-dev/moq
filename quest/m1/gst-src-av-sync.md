@@ -27,8 +27,13 @@ a per-frame one (`moq_mux::container::Frame::timestamp`). `moqsink` already
 publishes aligned tracks (`two_pads_keep_av_aligned_through_real_segments`);
 only `moqsrc` loses the alignment.
 
-Whatever the reference:
+Decided 2026-10-11 by the maintainer, in #5189:
 
+- Per run, the first frame any pump reads fixes the run's reference
+  timestamp and segment base, and every pad of the run maps through both.
+  Mapping through the catalog's wall `clock` was rejected: the clock is
+  optional, assumes synchronized hosts, and only means something for
+  `moqsink` once #3021 lands.
 - Compare times converted to one scale, such as nanoseconds:
   `moq_net::Timestamp::checked_sub` refuses mismatched scales, and
   `relative_pts` turns that refusal into zero.
@@ -36,17 +41,12 @@ Whatever the reference:
   where the segment clips it. Today `relative_pts` clamps it to zero instead.
   For example, use the converted time as the PTS and the reference as the
   segment start.
-
-Open, for the maintainer:
-
-- The shared reference. Recommended: per run, the first frame any pump reads
-  fixes the run's reference timestamp and segment base, and every pad of the
-  run maps through both. Alternative: map timestamps through the
-  catalog's wall `clock` onto the pipeline clock, which also aligns across
-  hosts but assumes synchronized clocks and overlaps #3021.
-- Milestone: m1 is the recommendation; m2 is the alternative.
-- Docs: whether anything beyond the `moqsrc` paragraph of
-  `doc/bin/gstreamer.md` is needed is open; recommended no.
+- With one base, a pump whose first frame arrives late in wall time but
+  early in media time reaches a clock-synced sink late. That is synced
+  playback working as intended, not something to compensate for here.
+- m1, ranked after #3021.
+- Docs stay inline: the implementing PR updates the `moqsrc` paragraph of
+  `doc/bin/gstreamer.md`. No separate docs quest.
 
 Test: an audio and a video frame with the same broadcast time reach
 `moqsrc`'s two pads at the same running time, at the first start and after a

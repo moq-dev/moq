@@ -37,21 +37,19 @@ Decided 2026-10-10, planning the follow-ups of moqsrc's restart work
   `PAUSED`), so each run reserves for the pads that exist when it starts, and
   a pad requested mid-run reserves at once.
 
-Open, for the maintainer:
+Decided 2026-10-11 by the maintainer, in #5189:
 
-- A pad requested but never fed holds back the whole catalog; opaque pads
-  never reserve for this reason (`an_opaque_pad_stays_out_of_the_catalog`).
-  Recommended: drop the reservation when the pad is released or reaches EOS
-  without caps, and document that a linked pad must negotiate before the
-  broadcast lists anything. Alternative: drop every reservation still without
-  caps once another pad's first frame is ready, so the catalog waits only for
-  pads negotiating together, at the cost of the race this quest removes.
-- Milestone: m1 is the recommendation, since only a restart of a `moqsink`
-  whose pads negotiate at different times is affected. Alternative: m0 under
-  [Broadcast epochs](/quest/m0/broadcast-epoch/README.md), gating the release.
-- Docs: the `moqsink` and `moqsrc` paragraphs of `doc/bin/gstreamer.md`
-  describe the rule. Whether anything beyond them is needed is open;
-  recommended no.
+- A pad requested but never fed holds back the run's first catalog, so its
+  reservation drops when the pad is released, reaches EOS without caps, or
+  gets opaque caps. Dropping reservations once another pad's first frame is
+  ready was rejected: it brings back the race this quest removes. The
+  initial gate only holds the first snapshot, so later catalogs never wait.
+- m1, ranked after #3021: only a restart of a `moqsink` whose pads negotiate
+  at different times is affected, so it does not gate the release under
+  [Broadcast epochs](/quest/m0/broadcast-epoch/README.md).
+- Docs stay inline: the implementing PR updates the `moqsink` and `moqsrc`
+  paragraphs of `doc/bin/gstreamer.md`, including that every linked pad must
+  negotiate before the broadcast lists anything. No separate docs quest.
 
 Tests: a `moqsink` whose audio pad gets caps after its video pad's first
 buffer publishes one first catalog listing both; and a `moqsrc` following
