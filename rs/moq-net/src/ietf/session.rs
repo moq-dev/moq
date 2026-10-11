@@ -1099,11 +1099,11 @@ fn stop_on_error<R: crate::transport::poll::RecvStream>(
 	Ok(())
 }
 
-/// Accept incoming bidi streams and dispatch to the correct handler based on message type.
+/// Accept incoming bidi streams, leaving each request to read its own header.
 async fn run_dispatch<S>(
-	session: S,
+	mut session: S,
 	publisher: Publisher<S>,
-	mut subscriber: Subscriber<S>,
+	subscriber: Subscriber<S>,
 	peer_setup: peer::PeerSetup,
 	// Answers the peer's Auth requests, on the versions that can negotiate them.
 	serve: Option<auth::Serve>,
@@ -1112,14 +1112,14 @@ async fn run_dispatch<S>(
 where
 	S: crate::transport::poll::Boxable,
 {
+	use std::task::Poll;
+
 	// PUBLISH_NAMESPACE decodes differently once the MoQ Cluster extension is
-	// negotiated, so the whole dispatch loop waits for the peer's SETUP first. The peer
-	// must send it before anything else, and `run_unis` reads it independently, so this
-	// costs a handshake round rather than blocking.
+	// negotiated, so dispatch waits for SETUP, which `run_unis` reads independently.
 	let peer = subscriber.peer().await;
 
 	// An AUTH from a peer that did not negotiate MoQ Auth is an unknown request, which
-	// falls through to the protocol violation below.
+	// falls through to the protocol violation in `Bidi::serve`.
 	let serve = match peer_setup.get().await.auth {
 		true => serve,
 		false => None,
@@ -1129,7 +1129,6 @@ where
 	// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
 	let declared = subscriber.solicit().await;
 
-	let mut tasks = TaskSet::owned();
 	// Each AUTH serve task settles `Issued::closed` from whatever the auth handle
 	// holds when it drops, and the first reason wins. So the error that ends the
 	// session has to reach the handle while `tasks` is still alive, or every grant
@@ -1137,101 +1136,148 @@ where
 	// which leaves no serve task to settle.
 	let handle = serve.as_ref().map(|serve| serve.handle.clone());
 
-	// Scoped so `tasks` outlives the close below: the loop borrows it, so it only
-	// drops once this block's future is done.
-	let res: Result<(), Error> = async {
-		let mut accept = session.clone();
-		loop {
-			let mut stream = tasks
-				.drive(|waiter| {
-					let mut cx = waiter.context();
-					Stream::poll_accept(&mut accept, version, &mut cx)
-				})
-				.await?;
+	let bidi = Bidi {
+		publisher,
+		subscriber,
+		peer,
+		declared,
+		serve,
+		version,
+	};
+	let mut tasks = TaskSet::owned();
+	let fatal = kio::Shared::<Option<Error>>::default();
 
-			// The intermediate results live outside the poll closure, so a Pending
-			// mid-header resumes where it left off.
-			let mut hdr_id: Option<u64> = None;
-			let header = tasks
-				.drive(|waiter| {
-					let mut cx = waiter.context();
-					let id = match hdr_id {
-						Some(id) => id,
-						None => *hdr_id.insert(std::task::ready!(stream.reader.poll_varint(&mut cx))?),
-					};
-					let body = std::task::ready!(stream.reader.poll_decode::<ietf::Body>(&mut cx))?;
-					std::task::Poll::Ready(Ok::<_, Error>((id, body)))
-				})
-				.await;
-			// Same tolerance as `run_unis`: a request stream that dies before its header
-			// is the peer abandoning that request, not the session. Anything else, a
-			// header that does not parse included, still fails the session.
-			let (id, data) = match header {
-				Ok(header) => header,
-				Err(err) if died_before_header(&err) => {
-					tracing::debug!(%err, "dropping bidi stream that died before its header");
-					continue;
+	let err = loop {
+		let accepted = tasks
+			.drive(|waiter| {
+				let broken = fatal.poll(waiter, |fatal| match fatal.is_some() {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				});
+				if let Poll::Ready(mut fatal) = broken
+					&& let Some(err) = fatal.take()
+				{
+					return Poll::Ready(Err(err));
 				}
-				Err(err) => return Err(err),
-			};
+				let mut cx = waiter.context();
+				Stream::poll_accept(&mut session, version, &mut cx)
+			})
+			.await;
+		let stream = match accepted {
+			Ok(stream) => stream,
+			Err(err) => break err,
+		};
 
-			match id {
-				// Draft-16 moved SUBSCRIBE_NAMESPACE to its own stream, past the control stream
-				// that admits every other request, but it still takes a request ID from the
-				// MAX_REQUEST_ID window. Held until the request ends, like the rest.
-				ietf::SubscribeNamespaceLegacy::ID if version == Version::Draft16 => {
-					let request_id =
-						RequestId::decode(&mut crate::coding::Decoder::new(&data.0, version.into()), version)?;
-					let permit = publisher.control.accept(request_id)?;
-					let task = publisher.handle_stream(id, data, stream)?;
-					tasks.push(
-						async move {
-							let _permit = permit;
-							task.await
-						}
-						.maybe_boxed(),
-					);
-				}
-				// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
-				// 0x11 legacy), SubscribeTracks, TrackStatus
-				ietf::Subscribe::ID
-				| ietf::Fetch::ID
-				| ietf::SubscribeNamespace::ID
-				| ietf::SubscribeNamespaceLegacy::ID
-				| ietf::SUBSCRIBE_TRACKS_ID
-				| ietf::TrackStatus::ID => {
-					tasks.push(publisher.handle_stream(id, data, stream)?);
-				}
-				// Subscriber handles: Publish, PublishNamespace
-				ietf::Publish::ID | ietf::PublishNamespace::ID => {
-					tasks.push(subscriber.handle_stream(id, data, stream, peer, declared)?);
-				}
-				auth::Auth::ID if let Some(serve) = &serve => {
-					let mut data = data.decoder(version);
-					let msg = auth::Auth::decode_msg(&mut data, version)?;
-					if !data.is_empty() {
-						return Err(Error::WrongSize);
-					}
-					tasks.push(serve.clone().run(stream, msg, version));
-				}
-				_ => {
-					tracing::warn!(id, "unexpected bidi stream type");
-					return Err(Error::UnexpectedStream);
-				}
+		// QUIC may expose an earlier stream before its bytes arrive. Reading the
+		// header here could block later streams whose unread data holds flow control.
+		let bidi = bidi.clone();
+		let fatal = fatal.clone();
+		tasks.push(async move {
+			if let Err(err) = bidi.serve(stream).await {
+				fatal.lock().get_or_insert(err);
 			}
-		}
-	}
-	.await;
+		});
+	};
 
-	// Every error exit above drops the AUTH serve tasks in `tasks`, so the session's
-	// error has to land on the handle first. The driver closes it again with the same
-	// error, which then does nothing.
-	if let Some(handle) = &handle
-		&& let Err(err) = &res
-	{
+	// `tasks` still holds the AUTH serve tasks, so the session's error lands on the
+	// handle before they drop. The driver closes it again with the same error, which
+	// then does nothing.
+	if let Some(handle) = &handle {
 		handle.close(err.clone());
 	}
-	res
+	Err(err)
+}
+
+/// What serving one incoming bidi request needs from its session.
+struct Bidi<S: crate::transport::poll::Session> {
+	publisher: Publisher<S>,
+	subscriber: Subscriber<S>,
+	peer: cluster::Peer,
+	declared: Option<bool>,
+	serve: Option<auth::Serve>,
+	version: Version,
+}
+
+impl<S: crate::transport::poll::Session> Clone for Bidi<S> {
+	fn clone(&self) -> Self {
+		Self {
+			publisher: self.publisher.clone(),
+			subscriber: self.subscriber.clone(),
+			peer: self.peer,
+			declared: self.declared,
+			serve: self.serve.clone(),
+			version: self.version,
+		}
+	}
+}
+
+impl<S: crate::transport::poll::Boxable> Bidi<S> {
+	/// Read and serve a request, failing only when it breaks the session.
+	async fn serve(self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		let Self {
+			publisher,
+			mut subscriber,
+			peer,
+			declared,
+			serve,
+			version,
+		} = self;
+		let header = async {
+			let id = stream.reader.varint().await?;
+			let body = stream.reader.decode::<ietf::Body>().await?;
+			Ok::<_, Error>((id, body))
+		}
+		.await;
+		// Abandoning a request before its header is not a session failure. Bytes
+		// that arrive and do not parse, and dispatch errors, remain session-fatal.
+		let (id, data) = match header {
+			Ok(header) => header,
+			Err(err) if died_before_header(&err) => {
+				tracing::debug!(%err, "dropping bidi stream that died before its header");
+				return Ok(());
+			}
+			Err(err) => return Err(err),
+		};
+		match id {
+			// Draft-16 moved SUBSCRIBE_NAMESPACE to its own stream, past the control stream
+			// that admits every other request, but it still takes a request ID from the
+			// MAX_REQUEST_ID window. Held until the request ends, like the rest.
+			ietf::SubscribeNamespaceLegacy::ID if version == Version::Draft16 => {
+				let request_id = RequestId::decode(&mut crate::coding::Decoder::new(&data.0, version.into()), version)?;
+				let permit = publisher.control.accept(request_id)?;
+				let task = publisher.handle_stream(id, data, stream)?;
+				let _permit = permit;
+				task.await;
+			}
+			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
+			// 0x11 legacy), SubscribeTracks, TrackStatus
+			ietf::Subscribe::ID
+			| ietf::Fetch::ID
+			| ietf::SubscribeNamespace::ID
+			| ietf::SubscribeNamespaceLegacy::ID
+			| ietf::SUBSCRIBE_TRACKS_ID
+			| ietf::TrackStatus::ID => {
+				publisher.handle_stream(id, data, stream)?.await;
+			}
+			// Subscriber handles: Publish, PublishNamespace
+			ietf::Publish::ID | ietf::PublishNamespace::ID => {
+				subscriber.handle_stream(id, data, stream, peer, declared)?.await;
+			}
+			auth::Auth::ID if let Some(serve) = serve => {
+				let mut data = data.decoder(version);
+				let msg = auth::Auth::decode_msg(&mut data, version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
+				serve.run(stream, msg, version).await;
+			}
+			_ => {
+				tracing::warn!(id, "unexpected bidi stream type");
+				return Err(Error::UnexpectedStream);
+			}
+		}
+		Ok(())
+	}
 }
 
 /// Monitor the peer's SETUP stream for a GOAWAY, surfacing it through
@@ -2062,6 +2108,97 @@ mod tests {
 			"the stream behind the silent one was never read",
 		);
 		assert!(result.is_none(), "the silent stream ended the session: {result:?}");
+	}
+
+	/// A stalled bidi header must not block a SUBSCRIBE on the next stream.
+	#[moq_net_sim::test]
+	async fn a_silent_bidi_does_not_hold_up_the_next() {
+		const VERSION: Version = Version::Draft19;
+		let mut subscribe = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut subscribe, VERSION.into());
+		encoder.varint(ietf::Subscribe::ID).unwrap();
+		ietf::Subscribe {
+			request_id: RequestId(1),
+			track_namespace: crate::Path::new("room"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: ietf::GroupOrder::Descending,
+			filter: ietf::Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
+			forward: true,
+			range_filters: false,
+		}
+		.encode(&mut encoder, VERSION)
+		.unwrap();
+
+		// Stall before the type, then after it while the body has not arrived.
+		for stalled in [Vec::new(), vec![ietf::Subscribe::ID as u8]] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+			let mut track = broadcast.create_track("video", None).unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
+				.with_incoming_bidis(vec![stalled, subscribe.clone()]);
+			let driver = bidi_driver(session, Some(origin.consume()));
+			let subscribed = Box::pin(async { while track.subscription_changed().await.unwrap().is_none() {} });
+			let result = moq_net_sim::timeout(
+				std::time::Duration::from_secs(10),
+				futures::future::select(driver, subscribed),
+			)
+			.await
+			.expect("SUBSCRIBE behind the stalled header was never dispatched");
+			assert!(
+				matches!(result, futures::future::Either::Right(_)),
+				"session ended before SUBSCRIBE"
+			);
+		}
+	}
+
+	/// Child tasks must report malformed and unknown requests to the session driver.
+	#[moq_net_sim::test]
+	async fn invalid_bidi_requests_still_end_the_session() {
+		for id in [ietf::Subscribe::ID, 0x3f] {
+			let mut header = Vec::new();
+			let mut encoder = crate::coding::Encoder::new(&mut header, Version::Draft19.into());
+			encoder.varint(id).unwrap();
+			encoder.slice(&[0, 0]); // Complete, empty body: malformed for SUBSCRIBE.
+			let session =
+				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![header]);
+			let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), bidi_driver(session, None))
+				.await
+				.expect("invalid request did not end the session")
+				.expect_err("invalid request was accepted");
+			if id == ietf::Subscribe::ID {
+				assert!(matches!(err, Error::Decode(_)), "{err:?}");
+			} else {
+				assert!(matches!(err, Error::UnexpectedStream), "{err:?}");
+			}
+		}
+	}
+
+	/// Start a draft-19 session with SETUP already settled, so bidi requests run immediately.
+	fn bidi_driver(session: crate::lite::test_transport::ScriptedSession, publish: Option<origin::Consumer>) -> Driver {
+		start(Config {
+			runtime: crate::time::Clock::sim(),
+			session,
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish,
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version: Version::Draft19,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer::default()),
+			auth: crate::auth::Handle::new(false),
+			early_unis: Vec::new(),
+		})
+		.unwrap()
+		.0
 	}
 
 	/// A non-zero subgroup is refused on its own stream, never by closing the session.

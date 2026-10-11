@@ -69,8 +69,8 @@ session outcomes, and embedder refusals inside session outcomes.
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Test TypeScript check](/quest/m1/test-ts-check.md) - `just check` type-checks the TypeScript harnesses under test/
 - [Release backports, second batch](/quest/m1/release-backports/README.md) - the 0.17.x line picks up the smaller release-only fixes left from the 2026-10-09 triage
-- [IETF request headers](/quest/m1/ietf-dispatch-headers.md) - each bidi request reads its header in its own task, so a slow one never blocks the next
 - [END_OF_TRACK placement](/quest/m1/ietf-end-of-track-placement.md) - END_OF_TRACK rides the upstream's Location, and Rust's header stops claiming END_OF_GROUP
+- [Plan: a public model](/quest/m1/model-public-surface.md) - every crate-private model item is made public or unnecessary, so a custom publisher or subscriber builds from the public model alone
 - [FFI runtime](/quest/m1/ffi-runtime.md) - moq-ffi drives moq on a multi-thread runtime instead of one thread
 - [Pipelined requests](/quest/m1/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
@@ -139,12 +139,10 @@ session outcomes, and embedder refusals inside session outcomes.
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Plan: watch worker](/quest/m1/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m1/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
-- [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - with the default pool, relay memory plateaus at the expiry window on every version
 - [Front deadlines](/quest/m1/front-deadline-index.md) - a front's per-event cost stops growing with its track count: an expiry index and per-track wakes, proven by a churn benchmark
 - [io_uring handshake deadline](/quest/m1/listener-deadlines.md) - the io_uring workers apply `listen.timeout` to the handshake
 - [iroh keep-alive](/quest/m1/iroh-keep-alive.md) - the iroh backend honors `quic.keep_alive`
 - [Rust papercuts](/quest/m1/papercuts-rs.md) - HTTP refusals are counted, and a `u64::MAX` resume is unbounded
-- [JS papercuts](/quest/m1/papercuts-js.md) - IETF status 0 keeps the subgroup open, a muted rendition change settles, and bad element attributes warn
 - [Drop insertTrack](/quest/m1/js-insert-track.md) - `createTrack` is `@moq/net`'s only way to add a track by hand, as in Rust
 - [Front parking](/quest/m1/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Route wakes](/quest/m1/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
