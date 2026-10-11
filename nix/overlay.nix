@@ -338,9 +338,6 @@ in
           makeWrapper "${final.gst_all_1.gstreamer.bin}/bin/$tool" "$out/bin/$tool" \
             --suffix GST_PLUGIN_SYSTEM_PATH_1_0 : "${pluginPaths}"
         done
-      '';
-      doInstallCheck = true;
-      installCheckPhase = ''
         export GST_REGISTRY="$TMPDIR/gst-registry.bin"
         for element in moq x264enc avenc_aac avdec_h264; do
           $out/bin/gst-inspect-1.0 "$element" > /dev/null
