@@ -181,32 +181,41 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_noq_proto::Cl
 /// Serve as `config` says.
 pub(crate) fn server_config(config: &server::Config) -> Result<moq_noq_proto::ServerConfig, Error> {
 	config.check()?;
-	let provider = provider();
-	let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
-		.with_protocol_versions(&[&rustls::version::TLS13])
-		.map_err(|err| Error::Tls(err.to_string()))?;
+	let tls = match &config.tls {
+		server::Tls::Rustls(tls) => tls.clone(),
+		server::Tls::Pem(identity) => {
+			let provider = provider();
+			let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+				.with_protocol_versions(&[&rustls::version::TLS13])
+				.map_err(|err| Error::Tls(err.to_string()))?;
 
-	let verifier = match config.client_auth.roots() {
-		None => rustls::server::WebPkiClientVerifier::no_client_auth(),
-		Some((roots, required)) => {
-			// Client certificates chain to the roots configured here, never to
-			// the platform store for public sites.
-			let builder =
-				rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(root_store(roots)?), provider);
-			let builder = match required {
-				true => builder,
-				false => builder.allow_unauthenticated(),
+			let verifier = match config.client_auth.roots() {
+				None => rustls::server::WebPkiClientVerifier::no_client_auth(),
+				Some((roots, required)) => {
+					// Client certificates chain to the roots configured here, never to
+					// the platform store for public sites.
+					let builder = rustls::server::WebPkiClientVerifier::builder_with_provider(
+						Arc::new(root_store(roots)?),
+						provider,
+					);
+					let builder = match required {
+						true => builder,
+						false => builder.allow_unauthenticated(),
+					};
+					builder.build().map_err(|err| Error::Tls(err.to_string()))?
+				}
 			};
-			builder.build().map_err(|err| Error::Tls(err.to_string()))?
+
+			let (chain, key) = keypair(identity)?;
+			let mut tls = builder
+				.with_client_cert_verifier(verifier)
+				.with_single_cert(chain, key)
+				.map_err(|err| Error::Tls(err.to_string()))?;
+			tls.alpn_protocols = alpn(&config.alpn);
+
+			Arc::new(tls)
 		}
 	};
-
-	let (chain, key) = keypair(&config.identity)?;
-	let mut tls = builder
-		.with_client_cert_verifier(verifier)
-		.with_single_cert(chain, key)
-		.map_err(|err| Error::Tls(err.to_string()))?;
-	tls.alpn_protocols = alpn(&config.alpn);
 
 	let crypto = QuicServerConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
 	let mut server = moq_noq_proto::ServerConfig::with_crypto(Arc::new(crypto));

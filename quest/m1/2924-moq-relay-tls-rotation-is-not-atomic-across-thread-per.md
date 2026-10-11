@@ -44,9 +44,19 @@ missing is sharing it.
   pair keeps the old one serving; generate-with-workers serves one
   fingerprint. Run under the io_uring lane where the kernel allows.
 
-Public API: additive on `moq-tokio` (a constructor taking the shared
-resolver); `tls::Listen` is non-exhaustive, so no published signature
-changes. Wire: none.
+Public API, implemented provisionally: `moq-tokio::tls::Listen::load` returns
+`tls::Serve`; `server::Config::tls` accepts that shared handle. The io_uring
+QUIC config replaces its public `identity` field with `tls: server::Tls`,
+which accepts either fixed PEM material or an existing rustls config. Relay
+io_uring worker binding now accepts the native server config. These are
+breaking Rust API changes on main; the wire format does not change.
+
+The recommended API is the shared handle plus resolved rustls policy because
+it keeps reload ownership in one place and does not couple moq-uring to
+moq-tokio. Alternatives are a new transport-neutral TLS crate, with a larger
+package boundary change, or retaining per-backend identity loading, which
+cannot provide the required atomic rotation. Keep the PR draft until this
+public API choice is settled.
 
 ## Closes
 
@@ -55,3 +65,10 @@ changes. Wire: none.
 ## Related
 
 - [Automatic ACME certificates](/quest/m1/709-automatic-letsencrypt-support.md) - feeds the shared resolver
+
+Validation: all scoped local check stages and native/io_uring rotation tests pass.
+All-language interop passes the language matrix, denied publishers and finite
+track tails, but the browser refusal case reports clean close code 0 instead of
+unauthorized 2. The unchanged SETUP cleanup is related to
+[#5221](https://github.com/moq-dev/moq/pull/5221); causality is not established.
+Keep the quest until that validation limit and the public API choice are settled.

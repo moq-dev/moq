@@ -33,17 +33,39 @@ impl ClientAuth {
 	}
 }
 
+/// The TLS material used for new server handshakes.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum Tls {
+	/// A fixed PEM identity, using the config's ALPN and client-auth settings.
+	Pem(Identity),
+	/// A resolved rustls policy, including its ALPNs and shared certificate resolver.
+	Rustls(std::sync::Arc<rustls::ServerConfig>),
+}
+
+impl From<Identity> for Tls {
+	fn from(identity: Identity) -> Self {
+		Self::Pem(identity)
+	}
+}
+
+impl From<std::sync::Arc<rustls::ServerConfig>> for Tls {
+	fn from(config: std::sync::Arc<rustls::ServerConfig>) -> Self {
+		Self::Rustls(config)
+	}
+}
+
 /// What to present, what to speak, and who may connect.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// The certificate chain and key this server presents. Not optional: a
-	/// QUIC server without an identity cannot complete a handshake.
-	pub identity: Identity,
-	/// ALPN protocols to accept, in preference order. Required: QUIC without
+	/// The fixed identity or resolved TLS policy used by every handshake.
+	pub tls: Tls,
+	/// ALPN protocols for a PEM identity; leave empty for a resolved TLS policy.
+	/// Required for PEM: QUIC without
 	/// an application protocol is refused.
 	pub alpn: Vec<String>,
-	/// Whether to ask connecting clients for a certificate.
+	/// Client authentication for a PEM identity; leave unset for a resolved TLS policy.
 	pub client_auth: ClientAuth,
 	/// The per-connection transport settings (timeouts, stream limits,
 	/// congestion control).
@@ -51,11 +73,10 @@ pub struct Config {
 }
 
 impl Config {
-	/// Serve `identity`, speaking no ALPN and asking no client for a
-	/// certificate until told otherwise.
-	pub fn new(identity: Identity) -> Self {
+	/// Serve fixed PEM material or a resolved TLS policy shared with other listeners.
+	pub fn new(tls: impl Into<Tls>) -> Self {
 		Self {
-			identity,
+			tls: tls.into(),
 			alpn: Vec::new(),
 			client_auth: ClientAuth::default(),
 			transport: super::Transport::default(),
@@ -67,6 +88,13 @@ impl Config {
 	/// An empty store rejects every chain, so asking for a certificate with
 	/// nothing to check it against refuses exactly the clients that obey.
 	pub(crate) fn check(&self) -> Result<(), Error> {
+		if matches!(self.tls, Tls::Rustls(_))
+			&& (!self.alpn.is_empty() || !matches!(self.client_auth, ClientAuth::None))
+		{
+			return Err(Error::Tls(
+				"a resolved TLS policy already owns ALPN and client authentication".into(),
+			));
+		}
 		if self.client_auth.roots().is_some_and(|(roots, _)| roots.is_empty()) {
 			return Err(Error::Tls(
 				"client authentication needs at least one root certificate".to_string(),
