@@ -30,10 +30,12 @@ Decided 2026-10-10, planning the follow-ups of moqsrc's restart work
   when it is requested in `request_new_pad` (`rs/moq-gst/src/sink/imp.rs`),
   instead of when its caps arrive (`catalog.reserve()` in
   `rs/moq-gst/src/sink/pad.rs`), hands it to its importer once the caps
-  resolve the rendition, and drops it if the pad is released first. The
-  catalog withholds its first snapshot until every reservation resolves, so
-  that snapshot lists every pad. Each run re-reserves for the pads that exist
-  when it starts.
+  resolve the rendition, and drops it if the pad is released first or its
+  caps are opaque, which the catalog never lists. The catalog withholds its
+  first snapshot until every reservation resolves, so that snapshot lists
+  every pad. The catalog producer exists only during a run (`READY` to
+  `PAUSED`), so each run reserves for the pads that exist when it starts, and
+  a pad requested mid-run reserves at once.
 
 Open, for the maintainer:
 

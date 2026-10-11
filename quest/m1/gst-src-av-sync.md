@@ -48,10 +48,12 @@ Open, for the maintainer:
 - Docs: whether anything beyond the `moqsrc` paragraph of
   `doc/bin/gstreamer.md` is needed is open; recommended no.
 
-Test: a broadcast whose audio and video first frames differ by a known
-offset reaches `moqsrc`'s two pads with that offset between their running
-times, at the first start and after a restart, whichever pump reads first.
-One case is a CMAF broadcast whose tracks use different timescales.
+Test: an audio and a video frame with the same broadcast time reach
+`moqsrc`'s two pads at the same running time, at the first start and after a
+restart, whichever pump reads first and whichever track's first frame is
+earlier. A frame before the run's reference reaches its pad with a PTS before
+the segment start, for downstream to clip. One case is a CMAF broadcast whose
+tracks use different timescales.
 
 ## Related
 
