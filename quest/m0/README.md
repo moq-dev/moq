@@ -63,7 +63,6 @@ remain and no release waits on them.
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
 - [Interop latecomer control](/quest/m0/interop-latecomer-control.md) - the lagging-latecomer control fails as designed, and a red Interop step no longer skips the TS steps
 - [Paused spinner](/quest/m0/watch-paused-spinner.md) - the watch buffering spinner never covers the paused play button, so Interop's resume step can click it
-- [Check base](/quest/m0/check-base.md) - `just check` diffs against the PR's base whatever the local branch tracks, so scoped checks stay scoped
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [JS track takeover](/quest/m0/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does, so a re-announced `@moq/publish` catalog never restarts its groups

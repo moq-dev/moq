@@ -63,6 +63,12 @@ impl Kind {
 	}
 }
 
+/// How far behind the live edge a cursor's feed still asks for a group. A group resolves
+/// into a row only once its successor starts, so a cursor keeping up fetches it at the live
+/// edge; the budget only has to cover a burst (a publisher catching up) and a cursor that
+/// fell behind. The default zero would deliver only the newest group of a burst.
+const FEED_MAX_DELAY: Duration = Duration::from_secs(30);
+
 /// A built init segment, with the content hash that versions its URL (`init.{hash}.mp4`).
 ///
 /// Hashing the bytes rather than a list of catalog fields covers every input that shapes the
@@ -539,9 +545,10 @@ impl Rendition {
 		self.live.poll_playable(waiter)
 	}
 
-	/// End the window if the bound sibling ended, registering `waiter` to wake when it does.
-	pub(crate) fn poll_media(&self, waiter: &kio::Waiter) {
-		self.media.poll_sync(waiter, &self.live);
+	/// End the window if the bound sibling ended, registering `waiter` to wake when it does, and
+	/// return the binding this rendition's media is fetched through now.
+	pub(crate) fn poll_media(&self, waiter: &kio::Waiter) -> Arc<moq_mux::Binding> {
+		self.media.poll_sync(waiter, &self.live)
 	}
 
 	/// Render this rendition's media playlist from the current timeline window, or `None` when
@@ -802,6 +809,20 @@ impl Rendition {
 				Muxer::audio(&config)?
 			}
 		})
+	}
+
+	/// Subscribe to the media track on `binding` once it resolves: `None` when it never will.
+	pub(crate) fn poll_subscribe(
+		&self,
+		binding: &moq_mux::Binding,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<moq_net::track::Subscribing>> {
+		let Ok(broadcast) = std::task::ready!(binding.poll_broadcast(waiter)) else {
+			return Poll::Ready(None);
+		};
+		let track = broadcast.track(&self.name).ok();
+		let subscription = moq_net::track::Subscription::default().with_max_delay(FEED_MAX_DELAY);
+		Poll::Ready(track.map(|track| track.subscribe(subscription).into_inner()))
 	}
 
 	/// The media track handle on `binding`, with that bound broadcast so a fetch can tell a

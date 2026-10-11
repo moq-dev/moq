@@ -1631,6 +1631,11 @@ pub(super) fn adaptation_valid(pkt: &[u8; TsPacket::SIZE]) -> bool {
 	if pkt[3] & 0x20 == 0 {
 		return true;
 	}
+	// Without payload the adaptation field fills the packet; with payload it leaves a byte.
+	let length = usize::from(pkt[4]);
+	if (pkt[3] & 0x10 == 0 && length != 183) || (pkt[3] & 0x10 != 0 && length > 182) {
+		return false;
+	}
 	let Some(field) = pkt.get(5..5 + usize::from(pkt[4])) else {
 		return false;
 	};
@@ -6822,6 +6827,60 @@ pub(super) mod test {
 	#[tokio::test(start_paused = true)]
 	async fn damaged_h265_sps_keeps_the_last_good_parameter_sets() {
 		damaged_sps_keeps_the_last_good_parameter_sets(StreamType::H265).await;
+	}
+
+	#[test]
+	fn adaptation_lengths_obey_the_packet_control() {
+		for (control, length, valid) in [
+			(0b10, 0, false),
+			(0b10, 182, false),
+			(0b10, 183, true),
+			(0b10, 184, false),
+			(0b11, 0, true),
+			(0b11, 182, true),
+			(0b11, 183, false),
+			(0b11, 184, false),
+		] {
+			let mut packet: [u8; TsPacket::SIZE] = clock_break_packet(VIDEO).try_into().unwrap();
+			packet[3] = control << 4;
+			packet[4] = length;
+			packet[5] = 0;
+			assert_eq!(
+				super::adaptation_valid(&packet),
+				valid,
+				"control={control:b} length={length}"
+			);
+		}
+	}
+
+	#[test]
+	fn invalid_adaptation_lengths_damage_media_and_dedicated_clock_pids() {
+		const PCR: u16 = 0x0200;
+		for pid in [VIDEO, PCR] {
+			for (control, length) in [(0b10, 0), (0b10, 182), (0b11, 183)] {
+				let mut mux = Mux {
+					out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+					..Default::default()
+				};
+				mux.gop(VIDEO, 90_000);
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+				let mut import = super::Import::new(broadcast, catalog.reserve());
+				import.decode(&mux.out).unwrap();
+				import.pcr_pid = Some(Pid::new(PCR).unwrap());
+
+				let mut packet = clock_break_packet(pid);
+				packet[3] = control << 4;
+				packet[4] = length;
+				import.decode(&packet).unwrap();
+				assert!(import.last_pts.is_some(), "invalid adaptation reset the clock");
+				assert_eq!(
+					import.stats().streams[&pid].damaged,
+					1,
+					"pid={pid} control={control:b} length={length}"
+				);
+			}
+		}
 	}
 
 	/// A dedicated PCR PID's malformed adaptation field cannot declare a timebase break.
