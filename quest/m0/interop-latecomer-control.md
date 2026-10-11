@@ -24,6 +24,20 @@ so TS regressions can land with no CI signal (the `--headroom` arm added in
 - Decided (2026-10-10): in this quest, make the Interop steps independent, so
   one red step never skips another. The job still fails if any step fails.
 
+Draft implementation requires the audio sink to leave preroll before a changed
+near-live canvas counts as playback, matching the existing media-quality gate.
+Deterministic stalled/suspended regressions fail against the original predicate.
+Local diagnostics observed advancing video while audio remained stalled at the
+configured 3000 ms delay, but did not reproduce the hosted false-positive verdict.
+
+Each Interop suite now runs after successful setup even when an earlier suite
+failed. Cancellation and setup failure still stop dependent tests, and every test
+failure still fails the job.
+
+Keep this quest open until the hosted control and independent TS steps confirm
+these changes. The local full media suite also hit an unchanged A/V-sync failure
+after video re-enable; do not weaken that assertion to validate this fix.
+
 Public API: none. Wire: none.
 
 ## Related
