@@ -7,17 +7,31 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_with::{DeserializeAs, SerializeAs};
 
-/// A [`serde_with`] adapter encoding an optional [`Duration`] as whole milliseconds, rounded up.
+/// A [`serde_with`] adapter encoding a [`Duration`] as whole milliseconds, rounded up.
 ///
 /// Every duration on the wire here is an upper bound a consumer sizes a buffer against, so
 /// rounding down is the one direction that breaks it. A 44.1 kHz AAC frame is 23.2 ms, and
 /// truncating advertises 23; anything under a millisecond truncates to 0, which reads as
 /// "flushed immediately" rather than "a little".
 ///
-/// So `0` is not a value the field carries: a track that flushes each frame immediately omits it.
-/// Reading one is how a publisher that truncated says "immediately", so it decodes as absent;
-/// writing one is a caller stating something the field can't mean, so it's refused.
+/// The optional implementation is for jitter and delay, where zero decodes as absent and
+/// cannot be written. Fields such as warmup, where zero is meaningful, use `Option<MillisCeil>`.
 pub(crate) struct MillisCeil;
+
+impl SerializeAs<Duration> for MillisCeil {
+	fn serialize_as<S: Serializer>(source: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+		let millis = source.as_nanos().div_ceil(1_000_000);
+		u64::try_from(millis)
+			.map_err(|_| S::Error::custom("a duration too long to express in milliseconds"))?
+			.serialize(serializer)
+	}
+}
+
+impl<'de> DeserializeAs<'de, Duration> for MillisCeil {
+	fn deserialize_as<D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+		u64::deserialize(deserializer).map(Duration::from_millis)
+	}
+}
 
 impl SerializeAs<Option<Duration>> for MillisCeil {
 	fn serialize_as<S: Serializer>(source: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error> {
@@ -31,10 +45,7 @@ impl SerializeAs<Option<Duration>> for MillisCeil {
 			));
 		}
 
-		let millis = duration.as_nanos().div_ceil(1_000_000);
-		u64::try_from(millis)
-			.map_err(|_| S::Error::custom("a duration too long to express in milliseconds"))?
-			.serialize(serializer)
+		Self::serialize_as(duration, serializer)
 	}
 }
 
