@@ -10,19 +10,26 @@ from whichever platform a user happened to be on.
 ## Plan
 
 - Drive the shipped binary, not a purpose-built harness: `moq play --no-video`
-  against a local relay behind the same seeded shaper, on a cpal null or dummy
-  backend so CI needs no audio hardware. The draft supplies the headless path
-  through the real speaker without constructing a window. A real device callback
-  is part of what is measured, so keep the production backend rather than a fake
-  clock. Measure that timing noise before writing native budgets.
-- `moq play` needs to emit the run's counters and stage timings as JSON for the
-  analyzer. Add that output, and keep it useful outside the test: a user
-  debugging their own latency wants the same dump.
-- Reuse the browser lane's analyzer and budget file (`test/audio-quality/`, the
-  schema is `clients/js/src/schema.ts`), with the JSON field names
-  and meanings matching its schema exactly. Native rows get their own budget
-  values in the same file, keyed the same way, since the device floor differs;
-  they do not get their own schema.
+  against a local relay behind the same seeded shaper. Headless playback has
+  landed: `--no-video` opens no window or GPU surface, and `just test
+  native-play` already hears it through a private PulseAudio null sink via the
+  production ALSA/cpal backend in nightly (`test/native-play/`). Reuse that
+  device setup rather than a fake clock: a real device callback is part of what
+  is measured. Measure that timing noise before writing native budgets.
+- Collect the metrics where they happen. The native driver exposes only device
+  failures and sink writes today, not rendered quanta, short quanta, stalls, or
+  per-stage timings, so sample them at the device callback and decoder
+  boundaries. Recommended shape: a bounded observation handle that a reader
+  drains into the browser lane's `Summary` (`clients/js/src/schema.ts`), with
+  overflow invalidating the run and no blocking or user callback on the audio
+  thread. Settle the handle's API and the CLI JSON flag name when implementing.
+- `moq play` emits that `Summary` as JSON for the analyzer. Keep it useful
+  outside the test: a user debugging their own latency wants the same dump.
+- Reuse the browser lane's analyzer and budget file (`test/audio-quality/`),
+  with the JSON field names and meanings matching its schema exactly. Native
+  rows get their own budget values in the same file, keyed the same way, since
+  the device floor differs; they do not get their own schema. Never fill an
+  unmeasured field with a passing zero.
 - Add the lane to the nightly matrix beside the browser one.
 
 Nothing here is a second estimator, and this lane does not compare the two
@@ -38,26 +45,6 @@ totals alone proves nothing about the estimator.
 Standalone in m1 rather than a child of the m0 audio quality harness line
 (decided in the 2026-09-28 quest audit): nothing in m0 waits on it. The native jitter target
 it grades is done on the jitter target line.
-
-### Draft progress
-
-The draft routes `moq play --no-video` through an async event receiver instead
-of constructing winit or a wgpu surface. It still opens the production
-moq-audio Engine and uses the same Media tasks. Native playback tests cover
-the actual dispatch and transport-error propagation. `just test native-play`
-also drives the shipped binary through a private clocked PulseAudio null sink
-via the production ALSA/cpal backend, observes PCM at its monitor, and checks
-clean Ctrl-C shutdown without a display. It fails when dispatch is forced back
-through the original windowed path and runs in nightly. This proves the
-headless prerequisite, not the full quality lane.
-
-The metric lane remains unfinished. The native driver exposes device failures
-and sink writes, not the browser schema's rendered quantum, short-quantum,
-stall, and stage series. Those measurements must be collected at the device
-callback and decoder boundaries before emitting compatible JSON. No fake zero
-metrics, unmeasured budget values, or passing native nightly row are added.
-Measure the real dummy-device floor, then complete JSON output, analyzer
-integration, and nightly wiring here.
 
 ## Related
 
