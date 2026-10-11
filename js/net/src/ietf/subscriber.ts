@@ -313,7 +313,9 @@ export class Subscriber {
 			if (this.#goingAway()) this.#updateAnnounce(path, existing.route);
 			return;
 		}
-		this.#announced.set(path, { count: 1, route });
+		const entry = { count: 1, route };
+		this.#announced.set(path, entry);
+		this.#consumes.announce(path, entry, route);
 
 		console.debug(`announced: broadcast=${path} active=true`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
@@ -334,6 +336,7 @@ export class Subscriber {
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;
+		this.#consumes.announce(path, existing, route);
 		console.debug(`announced: broadcast=${path} rerouted`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
@@ -357,7 +360,7 @@ export class Subscriber {
 
 		// The path is gone, so stop sharing its broadcast: a holder outliving the publisher
 		// would otherwise hand the dead generation to whoever consumes the path next.
-		this.#consumes.evict(path);
+		this.#consumes.withdraw(path, existing);
 		console.debug(`announced: broadcast=${path} active=false`);
 
 		for (const [consumer, filter] of this.#announcedConsumers) {
@@ -564,12 +567,13 @@ export class Subscriber {
 	/**
 	 * Consumes a broadcast from the connection.
 	 *
-	 * Deduplicated per path: repeat calls for the same still-live path share one reference-counted
+	 * Deduplicated per serving instance: repeat calls for the same path share one reference-counted
 	 * broadcast (and one upstream subscription). The shared broadcast closes once every caller has
 	 * closed its handle, so callers close normally.
 	 */
 	consume(path: Path.Valid): broadcast.Consumer {
-		return this.#consumes.get(path) ?? this.#consumes.insert(path, this.#createConsume(path));
+		const instance = this.#consumes.instance(path);
+		return this.#consumes.get(path, instance) ?? this.#consumes.insert(path, instance, this.#createConsume(path));
 	}
 
 	#createConsume(path: Path.Valid): broadcast.Consumer {

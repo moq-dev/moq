@@ -6,13 +6,14 @@ import * as Epoch from "../epoch.ts";
 import { error, fromTransport, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
-import { type Reader, Writer } from "../stream.ts";
+import { Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
+import { StreamId } from "./stream.ts";
 import { SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
-import { TrackInfo } from "./track.ts";
+import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
@@ -873,7 +874,7 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 			const written: Uint8Array[] = [];
 			const writable = new WritableStream<Uint8Array>({
 				write: (chunk) => {
-					written.push(chunk);
+					written.push(new Uint8Array(chunk));
 					return stalled ? new Promise<void>(() => {}) : undefined;
 				},
 				close: () => onFinish(),
@@ -1279,3 +1280,87 @@ test("the last reader leaving mid-response cancels the fetch", async () => {
 
 	subscriber.close();
 });
+
+// Drive discovery and inspect the TRACK request before answering it. Waiting for the
+// reader means the whole request has reached the wire, without a clock-based settle.
+test("consumes resolve the serving prefix and pin its epoch", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const announced = subscriber.announced();
+	await drainUntil(() => streams.length === 1);
+	const peer = new Writer(
+		new WritableStream<Uint8Array>({
+			write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
+		}),
+		version,
+	);
+	await new AnnounceOk(PEER, 0).encode(peer, version);
+	const pool = Path.from("pool");
+	const job = Path.from("pool/job");
+	const epoch = Epoch.mint();
+	await encodeAnnounceBroadcast(peer, { status: "active", suffix: pool, epoch, hops: [PUBLISHER_A] }, version);
+	await announced.next();
+	const held = subscriber.consume(job);
+	const info = held
+		.track("video")
+		.info()
+		.catch(() => {});
+	await drainUntil(() => streams.length === 2);
+	await streams[1].reading;
+	const reader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[1].written)), version);
+	expect(await reader.u53()).toBe(StreamId.Track);
+	expect((await Track.decode(reader, version)).epoch).toBe(epoch);
+
+	// No epoch on the more specific source must shadow the covering source's epoch.
+	await encodeAnnounceBroadcast(peer, { status: "active", suffix: job, hops: [PUBLISHER_B] }, version);
+	await announced.next();
+	const fresh = subscriber.consume(job);
+	expect(fresh.closed).not.toBe(held.closed);
+	expect(held.closed.peek()).toBeUndefined();
+	const freshInfo = fresh
+		.track("video")
+		.info()
+		.catch(() => {});
+	await drainUntil(() => streams.length === 3);
+	await streams[2].reading;
+	const freshReader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[2].written)), version);
+	await freshReader.u53();
+	expect((await Track.decode(freshReader, version)).epoch).toBeUndefined();
+
+	await encodeAnnounceBroadcast(peer, { status: "endedId", id: 1n }, version);
+	await announced.next();
+	const fallback = subscriber.consume(job);
+	expect(fallback.closed).toBe(held.closed);
+	expect(subscriber.consume(pool).closed).toBe(subscriber.consume(pool).closed);
+	fresh.close();
+	held.close();
+	fallback.close();
+	announced.close();
+	subscriber.close();
+	await Promise.all([info, freshInfo]);
+});
+
+test.each([Version.DRAFT_06, Version.DRAFT_07])(
+	"a more specific start replaces an existing consume on %s",
+	async (version) => {
+		const { subscriber, send, settle } = announceHarness(version);
+		const announced = subscriber.announced();
+		await settle();
+		await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
+		const pool = Path.from("pool");
+		const job = Path.from("pool/job");
+		await send((w) => encodeAnnounceBroadcast(w, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, version));
+		await announced.next();
+		const held = subscriber.consume(job);
+		await send((w) => encodeAnnounceBroadcast(w, { status: "active", suffix: job, hops: [PUBLISHER_B] }, version));
+		await announced.next();
+		const fresh = subscriber.consume(job);
+		expect(fresh.closed).not.toBe(held.closed);
+		expect(held.closed.peek()).toBeUndefined();
+		fresh.close();
+		held.close();
+		announced.close();
+		subscriber.close();
+	},
+);
