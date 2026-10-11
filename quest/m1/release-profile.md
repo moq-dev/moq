@@ -32,9 +32,12 @@ C++ generation reads the linked cdylib, while consumers still link the staticlib
 
 The original Linux x86_64 FFI build measured 25,224,272 shared-library bytes and
 59,638,882 static-library bytes, but its stripped ELF could not generate bindings.
-The corrected profile still needs the complete Linux x86_64 and aarch64 artifact
-matrix and controlled comparative link times. The macOS table above is planning
-evidence. Keep this quest until the corrected Linux matrix is recorded.
+The corrected Linux x86_64 release builds pass: FFI shared 28,666,872 bytes,
+FFI static 59,674,722, C static 59,331,644, relay 36,141,368 and CLI 50,390,336.
+The shared FFI artifact generates Python and C++ bindings. Hosted Linux aarch64
+FFI, Swift, macOS and MSVC C++ checks also pass. The full aarch64 artifact
+matrix and controlled comparative link times remain incomplete. The macOS
+table above is planning evidence, not a new measurement. Keep this quest.
 
 
 Decided in planning:
