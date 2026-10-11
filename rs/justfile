@@ -352,3 +352,8 @@ bench-rtmp *args:
 [positional-arguments]
 bench-stats *args:
     cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode -- "$@"
+
+# Sweep container export tracks and queued frames independently.
+[positional-arguments]
+bench-export *args:
+    cargo bench --locked -p moq-mux --bench export -- "$@"

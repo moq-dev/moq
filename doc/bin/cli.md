@@ -301,16 +301,20 @@ See [Authentication](/bin/relay/auth).
 ## Retention and latency
 
 `import --max-age` (default 30 s) tells relays how long to keep old groups
-fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-delay`
+fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export h264`,
+and `export h265` use `--max-delay`
 (default 500 ms) is how far a stalled group may fall behind the live edge
 before *this* consumer skips it. Raising the first never delays playback.
 
-`export ts` takes `--delay` (default 500 ms) instead, like an SRT receiver's
+`export ts`, `export flv`, and `export mkv` take `--delay` (default 500 ms)
+instead, like an SRT receiver's
 latency: each frame is muxed that long after its decode time, all tracks in
 decode order, so two exporters of one broadcast emit the same order. A frame
 arriving after its deadline is dropped, and video resumes at its next
-keyframe. The output's PCR follows the source's clock within what ISO/IEC
-13818-1 allows. `--delay 0` writes frames in arrival order and drops nothing.
+keyframe. `--delay 0` writes frames in arrival order and drops nothing.
+FLV and MKV reject their former `--max-delay` spelling with a migration
+message. TS output's PCR follows the source's clock within what ISO/IEC
+13818-1 allows.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

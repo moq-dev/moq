@@ -108,7 +108,8 @@ impl Flavor {
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	max_delay: std::time::Duration,
+	delay: std::time::Duration,
+	jitter: crate::jitter::Buffer<(u8, usize), Bytes>,
 	/// Emit every rendition as an enhanced-RTMP multitrack track, rather than only
 	/// the best video and audio rendition.
 	multitrack: bool,
@@ -127,7 +128,9 @@ struct FlvTrack {
 	/// used when muxing multitrack; a single-track FLV stream carries no id.
 	track_id: u8,
 	source: ExportSource,
-	pending: Option<Frame>,
+	pending: Option<crate::jitter::Arrival<Frame>>,
+	/// When the source was last empty, bounding the next frame's arrival.
+	empty: web_async::time::Instant,
 	finished: bool,
 	/// The FLV payload shape (legacy CodecID vs enhanced FourCC) to mux this
 	/// track as, fixed from its catalog codec when it's bound.
@@ -178,7 +181,8 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			max_delay: std::time::Duration::ZERO,
+			delay: std::time::Duration::ZERO,
+			jitter: crate::jitter::Buffer::new(std::time::Duration::ZERO),
 			multitrack: false,
 			video: Vec::new(),
 			audio: Vec::new(),
@@ -186,13 +190,12 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Set the max delay for each per-track source.
+	/// Release frames a fixed delay after their decode time, dropping late frames.
 	///
-	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
-	/// Defaults to
-	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip aggressively).
-	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
-		self.max_delay = max_delay;
+	/// The same delay bounds each source's staleness. Zero (the default) holds and drops nothing.
+	pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
+		self.delay = delay;
+		self.jitter = crate::jitter::Buffer::new(delay);
 		self
 	}
 
@@ -227,31 +230,12 @@ impl<S: Stream> Export<S> {
 			}
 		}
 
-		// 2. Pull frames from each track into `pending`. Pre-header, drop slices
-		// that arrived before the track's codec config is ready: a mid-GOP joiner
-		// can't render them, and parking would block polling for the next SPS/PPS.
-		let waiting_for_header = !self.header_emitted;
-		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
-			if track.pending.is_some() || track.finished {
-				continue;
-			}
-			loop {
-				match track.source.poll_read(waiter)? {
-					Poll::Ready(Some(frame)) => {
-						if waiting_for_header && !track.source.header_ready() {
-							continue;
-						}
-						track.pending = Some(frame);
-						break;
-					}
-					Poll::Ready(None) => {
-						track.finished = true;
-						break;
-					}
-					Poll::Pending => break,
-				}
-			}
-		}
+		self.jitter.expect(
+			(0..self.video.len())
+				.map(|i| (0, i))
+				.chain((0..self.audio.len()).map(|i| (1, i))),
+		);
+		self.fill(waiter)?;
 
 		// 3. Emit the header once every track's codec config has resolved.
 		if !self.header_emitted {
@@ -268,16 +252,11 @@ impl<S: Stream> Export<S> {
 			return Poll::Pending;
 		}
 
-		// 4. Emit the smallest FLV tag timestamp as one tag.
-		if let Some((is_video, index)) = self.pick_next_track()? {
-			let track = if is_video {
-				&mut self.video[index]
-			} else {
-				&mut self.audio[index]
-			};
-			let frame = track.pending.take().unwrap();
-			let chunk = self.encode_frame(is_video, index, frame)?;
-			return Poll::Ready(Ok(Some(chunk)));
+		if let Poll::Ready(ready) = self.jitter.poll_next(waiter) {
+			return Poll::Ready(Ok(Some(ready.item)));
+		}
+		if !self.jitter.is_empty() {
+			return Poll::Pending;
 		}
 
 		// 5. End-of-stream once every subscribed track is drained.
@@ -299,6 +278,102 @@ impl<S: Stream> Export<S> {
 
 	fn has_tracks(&self) -> bool {
 		!self.video.is_empty() || !self.audio.is_empty()
+	}
+
+	#[cfg(test)]
+	pub(super) fn next_deadline(&self) -> Option<web_async::time::Instant> {
+		self.jitter.next_deadline()
+	}
+
+	#[cfg(test)]
+	pub(super) fn with_replay(mut self) -> Self {
+		self.jitter = self.jitter.replay();
+		self
+	}
+
+	/// Read available frames once, preserving ingress timing before buffering or encoding.
+	fn fill(&mut self, waiter: &kio::Waiter) -> anyhow::Result<()> {
+		for kind in [0, 1] {
+			let count = if kind == 0 { self.video.len() } else { self.audio.len() };
+			for index in 0..count {
+				loop {
+					let track = if kind == 0 {
+						&mut self.video[index]
+					} else {
+						&mut self.audio[index]
+					};
+					if !self.header_emitted && track.pending.is_some() {
+						break;
+					}
+					let mut arrival = if let Some(pending) = track.pending.take() {
+						pending
+					} else {
+						if track.finished {
+							break;
+						}
+						let frame = match track.source.poll_read(waiter)? {
+							Poll::Ready(Some(frame)) => frame,
+							Poll::Ready(None) => {
+								track.finished = true;
+								break;
+							}
+							Poll::Pending => {
+								track.empty = web_async::time::Instant::now();
+								break;
+							}
+						};
+						if !self.header_emitted && !track.source.header_ready() {
+							continue;
+						}
+						crate::jitter::Arrival {
+							arrived: track.empty,
+							read: web_async::time::Instant::now(),
+							decode: frame.timestamp,
+							restart: track.source.markers(),
+							skip: track.source.skips(),
+							sync: kind == 1 || frame.keyframe,
+							item: frame,
+						}
+					};
+					if !self.header_emitted {
+						track.pending = Some(arrival);
+						break;
+					}
+					arrival.decode = moq_net::Timestamp::from_millis(u64::from(track.tag_timestamp(&arrival.item)?))?;
+					let crate::jitter::Arrival {
+						arrived,
+						read,
+						decode,
+						restart,
+						skip,
+						sync,
+						item,
+					} = arrival;
+					let item = self.encode_frame(kind == 0, index, item)?;
+					if self.jitter.push(
+						(kind, index),
+						crate::jitter::Arrival {
+							arrived,
+							read,
+							decode,
+							restart,
+							skip,
+							sync,
+							item,
+						},
+					)? == crate::jitter::Push::Late
+					{
+						tracing::warn!(
+							kind,
+							index,
+							dropped = self.jitter.dropped(),
+							"frame missed its deadline; dropped"
+						);
+					}
+				}
+			}
+		}
+		Ok(())
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog) -> anyhow::Result<()> {
@@ -367,7 +442,7 @@ impl<S: Stream> Export<S> {
 				(VideoCodec::AV1(av1), None) => Some(Bytes::copy_from_slice(&av1c_bytes(av1))),
 				_ => None,
 			};
-			let Some(source) = ExportSource::for_video(&self.source, name, config, self.max_delay)? else {
+			let Some(source) = ExportSource::for_video(&self.source, name, config, self.delay)? else {
 				continue;
 			};
 			let track_id = u8::try_from(self.video.len()).context("too many FLV video tracks")?;
@@ -376,6 +451,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
+				empty: web_async::time::Instant::now(),
 				finished: false,
 				flavor,
 				fallback_description,
@@ -420,7 +496,7 @@ impl<S: Stream> Export<S> {
 			}
 			let flavor = audio_flavor(config)?;
 			ensure_legacy(&config.container, "audio", name)?;
-			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.max_delay)? else {
+			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.delay)? else {
 				continue;
 			};
 			let track_id = u8::try_from(self.audio.len()).context("too many FLV audio tracks")?;
@@ -429,6 +505,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
+				empty: web_async::time::Instant::now(),
 				finished: false,
 				flavor,
 				fallback_description: None,
@@ -477,30 +554,6 @@ impl<S: Stream> Export<S> {
 		}
 
 		Ok(out.freeze())
-	}
-
-	/// Pick the track with the smallest pending FLV tag timestamp. Returns whether
-	/// it's a video track and its index within that kind, or `None` if no frame is
-	/// pending. Video wins ties, matching the single-track interleave.
-	fn pick_next_track(&self) -> anyhow::Result<Option<(bool, usize)>> {
-		let mut best: Option<(u32, bool, usize)> = None;
-		for (index, track) in self.video.iter().enumerate() {
-			if let Some(frame) = &track.pending {
-				let ts = track.tag_timestamp(frame)?;
-				if best.is_none_or(|(b, _, _)| ts < b) {
-					best = Some((ts, true, index));
-				}
-			}
-		}
-		for (index, track) in self.audio.iter().enumerate() {
-			if let Some(frame) = &track.pending {
-				let ts = frame_timestamp_ms(frame)?;
-				if best.is_none_or(|(b, _, _)| ts < b) {
-					best = Some((ts, false, index));
-				}
-			}
-		}
-		Ok(best.map(|(_, is_video, index)| (is_video, index)))
 	}
 
 	/// Encode one frame as a single FLV tag.
