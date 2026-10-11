@@ -1928,7 +1928,11 @@ mod tests {
 			auth: crate::auth::Handle::new(false),
 		});
 
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		let mut cached = track.receive_group(group::Info { sequence: 3 }).unwrap();
 		cached.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
 		cached.finish().unwrap();
@@ -2409,11 +2413,7 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("audio").unwrap();
 		let mut serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::MILLI));
-		let establish = serve.prepare_establish(
-			&mut serving.serving,
-			Subscription::default(),
-			Some(Timescale::MILLI),
-		);
+		let establish = serve.prepare_establish(&mut serving.serving, Subscription::default(), Some(Timescale::MILLI));
 		serving.mode = ServeMode::Establish(establish);
 		let gate_run = serve.gate();
 		let mut running = TrackServeRun {

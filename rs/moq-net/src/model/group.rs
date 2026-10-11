@@ -2000,7 +2000,7 @@ mod test {
 		for mode in 0..3 {
 			let pool = cache::Pool::unbounded();
 			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
-			let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
+			let mut group = Producer::new(Info::from(0u64), track::Info::timed(), cache);
 			for _ in 0..FRAME_SLOTS {
 				group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap();
 			}

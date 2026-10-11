@@ -6475,7 +6475,7 @@ mod test {
 	/// the abort nor that group's first frame touches the track, so the read must still wake.
 	#[test]
 	fn a_parked_read_watches_its_edge_abort() {
-		let mut producer = track_producer("test", None);
+		let mut producer = track_producer("test", crate::track::Info::timed());
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
 		let mut head = producer.append_group().unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
@@ -6569,7 +6569,7 @@ mod test {
 	/// the track, so only the read watching the edge's abort sees the head go stale.
 	#[test]
 	fn a_parked_read_watches_its_rewound_edge_abort() {
-		let mut producer = track_producer("test", None);
+		let mut producer = track_producer("test", crate::track::Info::timed());
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
 		let mut head = producer.append_group().unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
@@ -6650,7 +6650,7 @@ mod test {
 	/// they show: a reader ending at the boundary would never see them.
 	#[test]
 	fn a_withheld_group_holds_the_end() {
-		let mut producer = track_producer("test", None);
+		let mut producer = track_producer("test", crate::track::Info::timed());
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
 		producer.finish_at(2).unwrap();
 		let mut received: Vec<_> = (0..2)

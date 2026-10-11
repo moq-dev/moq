@@ -5281,7 +5281,7 @@ mod tests {
 	fn a_finished_logical_track_does_not_warn() {
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let broadcast = Arc::new(broadcast::Info::default());
-			let source = track::Producer::new(broadcast.clone(), "catalog.json", None);
+			let source = track::Producer::new(broadcast.clone(), "catalog.json", crate::track::Info::timed());
 			let mut group = source.create_group(7u64.into()).unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 			group.finish().unwrap();

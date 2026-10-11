@@ -920,7 +920,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		let mut track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		let task = {

@@ -8146,7 +8146,7 @@ async fn a_repointed_si_entry_never_reads_a_replacement() {
 		..Default::default()
 	};
 	let si_track = |broadcast: &mut moq_net::broadcast::Producer, name: &str, sdt: &[u8]| {
-		let mut track = broadcast.create_track(name, None).unwrap();
+		let mut track = broadcast.create_track(name, timed()).unwrap();
 		track.write_frame(Timestamp::ZERO, Bytes::copy_from_slice(sdt)).unwrap();
 		track
 	};

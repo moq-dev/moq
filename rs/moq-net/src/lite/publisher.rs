@@ -4392,7 +4392,11 @@ mod serve_group_test {
 
 		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
 
-		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
 		let log = Log::default();
 		let (mut run, mut writer, _) = lite07_run(SinkSession::new(log.clone()).with_unacked_fin(), subscriber);
@@ -4480,7 +4484,11 @@ mod serve_group_test {
 	#[moq_net_sim::test]
 	async fn the_end_drops_the_sequences_never_served() {
 		for version in [Version::Lite05, Version::Lite06] {
-			let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
 			let subscriber = track.subscribe(None);
 			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			{
@@ -4502,7 +4510,11 @@ mod serve_group_test {
 	#[moq_net_sim::test]
 	async fn the_end_drops_below_a_lowered_start() {
 		let version = Version::Lite06;
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscription = track::Subscription::default()
 			.with_start(track::Position::group(5))
 			.with_max_delay(Duration::from_secs(60));
@@ -4542,7 +4554,11 @@ mod serve_group_test {
 	#[moq_net_sim::test]
 	async fn the_end_drops_below_a_lowered_start_after_the_grace() {
 		let version = Version::Lite06;
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscription = track::Subscription::default()
 			.with_start(track::Position::group(5))
 			.with_max_delay(Duration::from_secs(1));
@@ -4579,7 +4595,11 @@ mod serve_group_test {
 	#[moq_net_sim::test]
 	async fn the_end_drops_below_a_start_raised_then_lowered() {
 		let version = Version::Lite06;
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscription = track::Subscription::default()
 			.with_start(track::Position::group(0))
 			.with_max_delay(Duration::from_secs(1));
@@ -4619,7 +4639,11 @@ mod serve_group_test {
 	/// floor re-pins the cursor there: a group created below it afterwards is not served.
 	#[moq_net_sim::test]
 	async fn a_pre06_update_dropping_the_floor_repins_to_the_latest_group() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_start(track::Position::group(0))
@@ -4654,7 +4678,11 @@ mod serve_group_test {
 	/// track produces is served, even below the dropped floor.
 	#[moq_net_sim::test]
 	async fn a_pre06_update_dropping_the_floor_on_an_empty_track_serves_the_next_group() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_start(track::Position::group(5))
@@ -4685,7 +4713,11 @@ mod serve_group_test {
 	#[moq_net_sim::test]
 	async fn the_end_drops_only_gaps_within_the_grace() {
 		let version = Version::Lite06;
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(1)));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		{
@@ -5705,7 +5737,7 @@ mod tests {
 			.now_or_never()
 			.expect("track requested")
 			.unwrap()
-			.accept(None);
+			.accept(crate::track::Info::timed());
 		assert!(!drive(&mut serve).await, "the subscription ended");
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");

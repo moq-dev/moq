@@ -752,7 +752,7 @@ async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, r
 	for (name, hop, cost) in [("P1", 1, None), ("P2", 2, Some(1_000))] {
 		let publisher = produce_origin(hop);
 		let broadcast = publisher.create_broadcast("live").unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
 		let route = match &epoch {
 			Some(epoch) => origin::Route::default().with_epoch(epoch.clone()),
 			None => origin::Route::default(),

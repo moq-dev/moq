@@ -3614,7 +3614,11 @@ mod group_priority_test {
 		const BATCH: u64 = 1_000;
 
 		let session = SinkSession::new(crate::lite::test_transport::Log::default()).with_unacked_fin();
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber =
 			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
 		let serve = TrackServe::new(
@@ -3659,7 +3663,11 @@ mod group_priority_test {
 
 		let log = crate::lite::test_transport::Log::default();
 		let session = SinkSession::new(log.clone()).with_unacked_fin();
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber =
 			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -3860,7 +3868,11 @@ mod group_priority_test {
 	async fn unacknowledged_fin_follows_priority_updates() {
 		let session = SinkSession::new(Default::default()).with_unacked_fin();
 		let log = session.log.clone();
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"done".as_slice()).unwrap();
 		let consumer = group.consume();
@@ -5595,7 +5607,7 @@ mod serve_tests {
 			}
 			let properties = match ietf::Properties::sends_timescale(version) {
 				false => ietf::Properties::default(),
-				true => track_properties(&track::Info::default(), true),
+				true => track_properties(&track::Info::timed(), true),
 			};
 			assert_eq!(ok.properties, properties, "{version}: wrong properties");
 			assert_eq!(
@@ -6128,6 +6140,7 @@ mod serve_tests {
 		let info = track::Info {
 			max_age: Some(Duration::from_secs(5)),
 			priority: 200,
+			timescale: Some(crate::Timescale::MILLI),
 			..Default::default()
 		};
 		let stamp = crate::Timestamp::from_millis(123_456).unwrap();
@@ -6586,7 +6599,7 @@ mod serve_tests {
 		for version in FETCH_DRAFTS {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast.create_track("video", None).unwrap();
+			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(timestamp(), b"0-0".to_vec()).unwrap();
 			group.finish().unwrap();
@@ -6679,7 +6692,7 @@ mod serve_tests {
 			] {
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", None).unwrap();
+				let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 				let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 				group.write_frame(timestamp(), PAYLOAD.to_vec()).unwrap();
 				settle().await;
@@ -7049,7 +7062,11 @@ mod serve_tests {
 			let log = crate::lite::test_transport::Log::default();
 			let session = SinkSession::new(log.clone());
 
-			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
 			let subscriber = track.subscribe(None);
 
 			let mut group = track.append_group().unwrap();

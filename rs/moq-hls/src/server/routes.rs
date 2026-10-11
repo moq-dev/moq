@@ -710,7 +710,7 @@ mod tests {
 			let pair = lite_pair_on(version, moq_net::Hop::random()).await;
 			let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 			broadcast.announce(Default::default()).expect("announce");
-			let (_catalog, _registration, track, mut media) = publish_video(&mut broadcast, video_config(), None);
+			let (_catalog, _registration, track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 
 			let origin = pair.sub_origin.consume();
 			tokio::time::timeout(TIMEOUT, origin.routed("live"))

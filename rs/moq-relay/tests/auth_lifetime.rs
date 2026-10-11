@@ -591,7 +591,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let mut tracks = Vec::new();
 		for path in ["alice/audio", "alice/video"] {
 			let broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
-			let track = broadcast.create_track("media", None).expect("create track");
+			let track = broadcast.create_track("media", timed()).expect("create track");
 			broadcast.announce(Default::default()).expect("announce broadcast");
 			tracks.push((broadcast, track));
 		}
