@@ -239,8 +239,8 @@ impl Error {
 		match self {
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
+			Self::Tls(err) => err.is_terminal(),
 			Self::NoBackend(_)
-			| Self::Tls(_)
 			| Self::Deprecated(_)
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
@@ -415,6 +415,10 @@ mod tests {
 			.is_terminal()
 		);
 		assert!(Error::Tls(Arc::new(crate::tls::Error::NoRoots)).is_terminal());
+		assert!(Error::Tls(Arc::new(crate::tls::Error::InvalidHostName("a!b".into()))).is_terminal());
+		// A root file can be briefly absent or empty while it rotates, so rereading it may succeed.
+		assert!(!Error::Tls(Arc::new(crate::tls::Error::EmptyRoots("roots.pem".into()))).is_terminal());
+		assert!(!Error::Tls(Arc::new(crate::tls::Error::Open(std::io::ErrorKind::NotFound.into()))).is_terminal());
 	}
 
 	/// Every raced address building the same malformed request is as terminal as one address doing so.

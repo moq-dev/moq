@@ -489,8 +489,8 @@ impl Error {
 			| Self::UnsupportedScheme(_)
 			| Self::BuildRequest(_)
 			| Self::ProtocolHeader(_)
-			| Self::Tls(_)
 			| Self::ConnectRejected(_) => true,
+			Self::Tls(err) => err.is_terminal(),
 			Self::Failover(failures) => {
 				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
 			}

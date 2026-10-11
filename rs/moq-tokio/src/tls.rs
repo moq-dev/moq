@@ -159,6 +159,24 @@ pub enum Error {
 	Deprecated(crate::cli::Deprecated),
 }
 
+impl Error {
+	/// A configuration no retry can fix, unlike a certificate file read mid-rotation.
+	pub(crate) fn is_terminal(&self) -> bool {
+		!matches!(
+			self,
+			Self::Open(_)
+				| Self::ReadFile(_)
+				| Self::Read(_)
+				| Self::Key(_)
+				| Self::Empty
+				| Self::EmptyRoots(_)
+				| Self::AddRoot(_)
+				| Self::ClientAuth(_)
+				| Self::ServerVerifier(_)
+		)
+	}
+}
+
 #[cfg(feature = "_certs")]
 crate::error::from_message! {
 	rcgen::Error => Rcgen,

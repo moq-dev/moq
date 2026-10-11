@@ -465,8 +465,8 @@ impl Error {
 			| Self::InvalidDnsName
 			| Self::NoRuntime
 			| Self::NoInitialCipherSuite
-			| Self::Tls(_)
 			| Self::ConnectRejected(_) => true,
+			Self::Tls(err) => err.is_terminal(),
 			Self::Failover(failures) => {
 				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
 			}
