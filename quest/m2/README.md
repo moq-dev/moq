@@ -13,8 +13,15 @@ feature. A study may end with a measured no-go. Work gated on hardware, a
 partner, a consumer, a provider, or an upstream release, or with no named
 consumer yet, waits in [m3](/quest/m3/README.md).
 
+Added 2026-10-10 by maintainer priority, ranked first: the grant stats label
+and bench readiness. Refusal reasons folded the same day into
+[Session outcomes](/quest/m1/session-outcomes.md) and
+[Typed refusal reason](/quest/m1/refusal-reason.md).
+
 ## Required
 
+- [Grant stats label](/quest/m2/grant-label.md) - an auth grant's optional `label` names what its session's presence and live bytes count under in stats, apart from the path scope it may access
+- [moq-bench readiness](/quest/m2/bench-ready.md) - every JSONL line carries the rolled targets and a `ready` flag, so a harness opens its window on readiness
 - [RTSP import](/quest/m2/rtsp-import.md) - `moq import rtsp` publishes an IP camera from its own network, through a `moq-rtsp` crate whose one-session ingest a caller can supervise itself
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [Bitrate claim](/quest/m2/rate-claim.md) - tokens and auth grants cap a session's upload and download bitrate, refused where unenforced and always on HTTP
@@ -55,7 +62,6 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [#3199](/quest/m2/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup, if a profile shows the win
 - [#3200](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
 - [Send depth](/quest/m2/send-depth.md) - moq-net futures prove Send at the default recursion limit, so downstream crates see no nightly lint
-- [Refusal reasons](/quest/m2/refusal-reasons.md) - refused-session metrics tell an expired token from an invalid one, and count gateway admissions
 - [Bench coverage](/quest/m2/bench-coverage.md) - Criterion targets for moq-pattern matching first, then moq-mux containers
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
 - [Generated lite browser report](/quest/m2/rs2ts-browser-report.md) - compare generated and hand-written js/net on bundle size, per-frame CPU, and first-frame latency

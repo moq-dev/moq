@@ -203,6 +203,8 @@ encodings; read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
 
+Iroh requires building the relay from source with `cargo build --release -p moq-relay --features iroh`. Published binaries, Docker images, and the Nix package leave it out.
+
 ```toml
 [iroh]
 enabled = true

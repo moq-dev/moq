@@ -11,6 +11,7 @@ test:
     python3 bench/compare.test.py
     python3 bench/summary.test.py
     python3 bench/relay.test.py
+    python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
@@ -43,3 +44,8 @@ install-formula *args:
 [positional-arguments]
 trigger-repo-publish *args:
     sh/gh/trigger-repo-publish.sh "$@"
+
+# Install the rendered GStreamer formula against the current macOS tarball.
+[positional-arguments]
+gst-formula *args:
+    python3 sh/gh/gst-formula.py "$@"
