@@ -47,7 +47,7 @@ async fn dial(
 	version: Version,
 	cdn: &origin::Producer,
 	subscriber: &origin::Producer,
-	preference: u8,
+	preference: i8,
 	cost: u64,
 ) -> MockPair {
 	let mut options = MockConnectOptions::new(version);

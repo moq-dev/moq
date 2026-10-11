@@ -384,25 +384,26 @@ impl From<u64> for Cost {
 
 /// How much an endpoint prefers a link over its others; higher wins.
 ///
-/// Every link starts at [`Preference::default`], which is also what a broadcast
-/// published locally ranks. See [`Producer::with_preference`].
+/// Every link starts at the neutral [`Preference::default`] (0), which is also what
+/// a broadcast published locally ranks. A positive value promotes a link and a
+/// negative one demotes it. See [`Producer::with_preference`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Preference(u8);
+pub struct Preference(i8);
 
 impl Preference {
 	/// Rank a link.
-	pub const fn new(preference: u8) -> Self {
+	pub const fn new(preference: i8) -> Self {
 		Self(preference)
 	}
 
 	/// The rank.
-	pub const fn value(self) -> u8 {
+	pub const fn value(self) -> i8 {
 		self.0
 	}
 }
 
-impl From<u8> for Preference {
-	fn from(preference: u8) -> Self {
+impl From<i8> for Preference {
+	fn from(preference: i8) -> Self {
 		Self::new(preference)
 	}
 }
@@ -1542,7 +1543,7 @@ impl Producer {
 	}
 
 	/// Rank the link this handle (and any handle derived from it) is given to:
-	/// higher wins, and every handle starts at [`Preference::default`].
+	/// higher wins, and every handle starts at the neutral [`Preference::default`].
 	///
 	/// Applies to what [`Self::dynamic`] advertises, which is how a session lands its
 	/// peer's routes, not to a broadcast published here. A route with a newer epoch still wins,
@@ -6354,6 +6355,29 @@ mod tests {
 		assert!(
 			anonymous.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
 			"the cheaper anonymous route must not serve"
+		);
+	}
+
+	#[moq_net_sim::test]
+	async fn request_avoids_a_demoted_link_even_when_cheaper() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let demoted = producer
+			.clone()
+			.with_preference(Preference::new(-1))
+			.dynamic("room", Route::default().with_hops(hops(&[10])).with_cost(1))
+			.unwrap();
+		let unranked = producer
+			.dynamic("room", Route::default().with_hops(hops(&[11])).with_cost(5))
+			.unwrap();
+
+		let _pending = consumer.request_broadcast("room/alice", None);
+		let request = queued(&unranked).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+		assert!(
+			demoted.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the cheaper demoted link must not serve"
 		);
 	}
 

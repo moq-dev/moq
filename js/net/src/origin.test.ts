@@ -1367,9 +1367,38 @@ test("a preferred link wins over a cheaper one, fails over, and moves back", asy
 	origin.close();
 });
 
-test("a preference outside a byte is refused", () => {
-	expect(() => Preference(256)).toThrow(RangeError);
-	expect(() => Preference(-1)).toThrow(RangeError);
+test("a demoted link ranks below an unranked one, even when cheaper", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const upstream = new BroadcastProducer();
+	const served: string[] = [];
+	const via = (name: string) => () => {
+		served.push(name);
+		return upstream.consume();
+	};
+	const route = (cost: bigint) => Route.normalize({ epoch: EPOCH, hops: [PEER], cost });
+	const demoted = serve(origin.withPreference(Preference(-1)), path, via("demoted"), route(1n));
+	const unranked = serve(origin, path, via("unranked"), route(10n));
+
+	expect(consumer.broadcasts().peek().get(path)).toEqual(route(10n));
+	const request = consumer.request(path);
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(served).toEqual(["unranked"]);
+
+	request.close();
+	unranked();
+	demoted();
+	upstream.close();
+	origin.close();
+});
+
+test("a preference outside a signed byte is refused", () => {
+	expect(Number(Preference(-128))).toBe(-128);
+	expect(Number(Preference(127))).toBe(127);
+	expect(() => Preference(128)).toThrow(RangeError);
+	expect(() => Preference(-129)).toThrow(RangeError);
 	expect(() => Preference(0.5)).toThrow(RangeError);
 });
 

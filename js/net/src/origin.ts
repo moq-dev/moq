@@ -34,20 +34,23 @@ import { type Advertised, type Advertisements, type Instance, registerWire, same
 export type { Cost, Hop, Route } from "./hop.ts";
 export { isAnonymous } from "./hop.ts";
 
-/** How much an endpoint prefers a link over its others; higher wins. See {@link Producer.withPreference}. */
+/**
+ * How much an endpoint prefers a link over its others; higher wins. A positive value promotes a
+ * link and a negative one demotes it. See {@link Producer.withPreference}.
+ */
 export type Preference = number & { readonly _brand: "preference" };
 
 /** Constructors for {@link Preference}. */
 export const Preference = Object.assign(
-	/** Rank a link, throwing a `RangeError` outside 0..=255. */
+	/** Rank a link, throwing a `RangeError` outside -128..=127. */
 	(value: number): Preference => {
-		if (!Number.isInteger(value) || value < 0 || value > 255) {
-			throw new RangeError(`preference must be an integer in 0..=255: ${value}`);
+		if (!Number.isInteger(value) || value < -128 || value > 127) {
+			throw new RangeError(`preference must be an integer in -128..=127: ${value}`);
 		}
 		return value as Preference;
 	},
 	{
-		/** Where every link starts, and what a broadcast published locally ranks. */
+		/** The neutral 0 every link starts at, and what a broadcast published locally ranks. */
 		default: 0 as Preference,
 	},
 );
@@ -999,7 +1002,7 @@ export class Producer implements Table {
 
 	/**
 	 * Rank the link this handle (and any handle derived from it) is given to: higher wins, and
-	 * every handle starts at {@link Preference.default}.
+	 * every handle starts at the neutral {@link Preference.default}.
 	 *
 	 * Applies to what {@link dynamic} advertises, which is how a session lands its peer's
 	 * routes, not to a broadcast published here. A route with a newer epoch still wins, but

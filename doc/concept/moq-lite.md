@@ -108,7 +108,7 @@ relay uses this.
 
 An endpoint can hold sessions to several CDNs at once, each feeding one shared
 origin, and rank them: moq.pro as primary, another CDN as secondary. The rank is
-a per-link preference the endpoint sets (higher wins), never sent on the wire. It decides after
+a per-link preference the endpoint sets (higher wins, 0 is neutral, negative demotes), never sent on the wire. It decides after
 the newest epoch and before cost, so metrics from different operators are never
 compared. A subscription uses the preferred link that has a route and moves to the
 next when that route goes; a publisher pushes the same broadcast to every CDN.
