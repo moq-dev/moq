@@ -3053,25 +3053,25 @@ where
 		}
 
 		// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
-		// through the group; older drafts have only the first ID to identify its head.
-		// The first Object ID is absolute either way, and IDs start
+		// through the group. The first Object ID is absolute either way, and IDs start
 		// at 0, so a clear bit on object 0 is still the head: the publisher is out of
 		// spec, not missing a keyframe. Any other first ID, or a stream with no object,
 		// has a hole at the front. Drop it before a group exists and resume at the next
 		// group, the same as a publisher that no longer holds the head.
 		//
+		// Drafts 14-17 have no FIRST_OBJECT bit, so only a non-zero first ID marks the
+		// hole there; a stream with no object is an empty group.
+		//
 		// A fill we asked for is the exception: its fetch stream is carrying the head
 		// this tail stitches onto. So is the group a resumed subscription asked to start
 		// partway through, whose head came from another route.
-		let has_first_object = !matches!(
-			self.version,
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
-		);
-		if (!header.flags.first_object || !has_first_object)
-			&& !fill.read().outstanding()
-			&& resume.is_none()
-			&& first.is_none_or(|first| first.id != 0)
-		{
+		let headless = match self.version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				first.is_some_and(|first| first.id != 0)
+			}
+			_ => !header.flags.first_object && first.is_none_or(|first| first.id != 0),
+		};
+		if headless && !fill.read().outstanding() && resume.is_none() {
 			tracing::debug!(
 				track_alias = %header.track_alias,
 				group = %header.group_id,
