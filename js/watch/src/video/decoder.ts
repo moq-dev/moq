@@ -173,6 +173,23 @@ export class Decoder {
 		const broadcast = effect.get(this.source.in.broadcast);
 		const track = effect.get(this.source.out.track);
 		const identity = effect.get(this.#identity);
+
+		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
+		// broadcast instead of the catalog's own broadcast. A disabled decoder resolves it only to
+		// tell whether a failure's source is still selected.
+		const active: Moq.Broadcast.Consumer | undefined =
+			broadcast && track && identity && (enabled || this.#failed)
+				? broadcast.relativeBroadcast(effect, identity.broadcast)
+				: undefined;
+		const key = identity && JSON.stringify(identity);
+
+		// A failure belongs to its source: selecting another clears it, even while disabled.
+		const failed = this.#failed;
+		if (failed && (failed.instance !== active?.closed || failed.track !== track || failed.identity !== key)) {
+			this.#failed = undefined;
+			this.#out.error.set(undefined);
+		}
+
 		if (!enabled || !broadcast || !track || !identity) {
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
@@ -186,10 +203,7 @@ export class Decoder {
 			return;
 		}
 
-		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
-		// broadcast instead of the catalog's own broadcast.
-		const active: Moq.Broadcast.Consumer | undefined = broadcast.relativeBroadcast(effect, identity.broadcast);
-		if (!active) {
+		if (!active || !key) {
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);
 			this.#clearCurrentFrame();
@@ -197,11 +211,8 @@ export class Decoder {
 			return;
 		}
 
-		const key = JSON.stringify(identity);
-		if (this.#failed?.instance === active.closed && this.#failed.track === track && this.#failed.identity === key)
-			return;
-		this.#failed = undefined;
-		this.#out.error.set(undefined);
+		// This source already failed; wait for another.
+		if (this.#failed) return;
 
 		// A republish of the media this rendition reads (the catalog's own broadcast, or the one a
 		// `broadcast` override names) is another instance, whose timeline starts over. Waiting for

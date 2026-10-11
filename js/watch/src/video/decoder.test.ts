@@ -500,6 +500,24 @@ it("releases a failed video subscription and recovers only on a new source", asy
 	}
 });
 
+it("clears a video failure when a source without video is selected while hidden", async () => {
+	const playback = await guardedPlayback("legacy", []);
+	try {
+		const failure = new DOMException("invalid encoded video", "EncodingError");
+		playback.fail(failure);
+		await microtasks();
+		playback.enabled.set(false);
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		// An audio-only broadcast advertises no video rendition.
+		playback.catalog.set({});
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBeUndefined();
+	} finally {
+		playback.close();
+	}
+});
+
 for (const kind of ["legacy", "cmaf"] as const) {
 	it(`reports the outgoing ${kind} decoder failing during a rendition handover`, async () => {
 		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);

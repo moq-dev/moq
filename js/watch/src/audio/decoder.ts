@@ -317,32 +317,36 @@ export class Decoder {
 	}
 
 	#runDecoder(effect: Effect): void {
-		const enabled = effect.get(this.in.enabled);
-		if (!enabled) return;
-		if (effect.get(this.sync.out.instant)) return;
-
+		const running = effect.get(this.in.enabled) && !effect.get(this.sync.out.instant);
 		const broadcast = effect.get(this.source.in.broadcast);
-		if (!broadcast) return;
-
 		const track = effect.get(this.source.out.track);
-		if (!track) return;
-
 		const identity = effect.get(this.#identity);
-		if (!identity) return;
+
+		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
+		// broadcast instead of the catalog's own broadcast. A stopped decoder resolves it only to
+		// tell whether a failure's source is still selected.
+		const active =
+			broadcast && track && identity && (running || this.#failed)
+				? broadcast.relativeBroadcast(effect, identity.broadcast)
+				: undefined;
+		const key = identity && JSON.stringify(identity);
+
+		// A failure belongs to its source: selecting another clears it, even while muted or paused.
+		const failed = this.#failed;
+		if (failed && (failed.instance !== active?.closed || failed.track !== track || failed.identity !== key)) {
+			this.#failed = undefined;
+			this.#out.error.set(undefined);
+		}
+
+		if (!running || !broadcast || !track || !identity) return;
 
 		const config = identity.decoder;
 		this.#frame.set(frameDuration(config));
 
-		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
-		// broadcast instead of the catalog's own broadcast.
-		const active = broadcast.relativeBroadcast(effect, identity.broadcast);
-		if (!active) return;
+		if (!active || !key) return;
 
-		const key = JSON.stringify(identity);
-		if (this.#failed?.instance === active.closed && this.#failed.track === track && this.#failed.identity === key)
-			return;
-		this.#failed = undefined;
-		this.#out.error.set(undefined);
+		// This source already failed; wait for another.
+		if (this.#failed) return;
 		// Closing this effect releases both its container reader and track subscription.
 		const failure = new Signal<Error | undefined>(undefined);
 		let attempt: Effect | undefined;

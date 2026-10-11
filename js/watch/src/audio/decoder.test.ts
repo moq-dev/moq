@@ -213,7 +213,9 @@ async function play(initial: Delay) {
 	const delay = new Signal<Delay>(initial);
 	const source = new Source({ broadcast, supported: async () => true });
 	const sync = new Sync({ delay });
-	const decoder = new Decoder({ source, sync });
+	// The decoder's own switch, which a mute or pause turns off.
+	const decoding = new Signal(true);
+	const decoder = new Decoder({ source, sync, enabled: decoding });
 	await microtasks();
 
 	// Enough frames to get past the legacy decoder's warm-up, so a handover would truncate.
@@ -232,6 +234,7 @@ async function play(initial: Delay) {
 		delay,
 		push,
 		enabled,
+		decoding,
 		context: decoder.out.context,
 		error: decoder.out.error,
 		play,
@@ -550,11 +553,11 @@ describe("fatal decoder errors", () => {
 			await microtasks();
 			expect(playback.error.peek()).toBe(failure);
 			expect(close.mock.calls.length).toBeGreaterThan(before);
+			playback.decoding.set(false);
+			await microtasks();
+			playback.decoding.set(true);
+			await microtasks();
 			const attempts = playback.subscriptions();
-			playback.enabled.set(false);
-			await microtasks();
-			playback.enabled.set(true);
-			await microtasks();
 			expect(playback.error.peek()).toBe(failure);
 			expect(playback.codecs()).toBe(1);
 			playback.remove();
@@ -567,6 +570,25 @@ describe("fatal decoder errors", () => {
 		} finally {
 			playback.close();
 			close.mockRestore();
+		}
+	});
+
+	it("clears the failure when a source without audio is selected while muted", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const failure = new DOMException("invalid encoded audio", "EncodingError");
+			codecErrors.at(-1)?.(failure);
+			await microtasks();
+			playback.decoding.set(false);
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			// A video-only broadcast advertises no audio rendition.
+			playback.remove();
+			await microtasks();
+			expect(playback.error.peek()).toBeUndefined();
+		} finally {
+			playback.close();
 		}
 	});
 });
