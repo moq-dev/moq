@@ -16,4 +16,10 @@ Public API: removes the unpublished `@moq/wasm` package. Wire: none.
 
 ## Required
 
-- [Generated lite](/quest/m1/rs2ts/lite.md) - the replacement
+- [Generated lite session](/quest/m2/rs2ts-session.md) - the replacement
+
+## Closes
+
+- [#2907](https://github.com/moq-dev/moq/issues/2907) - close this issue when the quest finishes
+- [#2822](https://github.com/moq-dev/moq/issues/2822) - close this issue when the quest finishes
+- [#2835](https://github.com/moq-dev/moq/issues/2835) - close this issue when the quest finishes

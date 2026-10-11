@@ -41,6 +41,11 @@ and bench readiness. Refusal reasons folded the same day into
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
 - [Windows GPU input](/quest/m2/obs-windows.md) - import or blit OBS D3D11 textures with explicit synchronization
+- [rs2ts model support](/quest/m2/rs2ts-model-support.md) - rs2ts translates kio and the model's Drop, Arc, Weak, atomics, and collections; moves to the rs2ts repo once it exists
+- [Generated model](/quest/m2/rs2ts-model.md) - @moq/net's model layer and kio are generated from moq-net
+- [Sans-IO lite session](/quest/m2/rs2ts-sans-io-lite.md) - the lite session is driven by bytes, stream events, and `tick(now)`, once the generated model works
+- [Generated lite session](/quest/m2/rs2ts-session.md) - @moq/net's lite session is generated over the generated model
+- [Remove moq-wasm](/quest/m2/rs2ts-remove-wasm.md) - the WASM experiment is deleted once generated lite ships
 - [Sans-IO IETF session](/quest/m2/rs2ts-sans-io-ietf.md) - the moq-transport session is driven by bytes and tick(now), so it can translate
 - [IETF parameters](/quest/m2/rs2ts-ietf-params.md) - the IETF codec drops its `Param` trait on primitives, so it translates like lite
 - [Generated IETF](/quest/m2/rs2ts-ietf.md) - @moq/net's moq-transport session is generated too
