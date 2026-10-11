@@ -155,6 +155,14 @@ if (!Array.isArray(list)) {
     console.error("alert.sh: alert.yml has no on.workflow_run.workflows list");
     process.exit(2);
 }
+// GitHub reads each entry as a glob, so a literal name like "C++" is an invalid
+// pattern and GitHub refuses to load alert.yml at all: every watched run then
+// spawns a startup failure instead of an alert. Name workflows without these.
+const glob = list.filter((name) => /[*?+\[\]!]/.test(name));
+if (glob.length) {
+    console.error("alert.sh: glob characters in alert.yml workflow names: " + glob.join(", "));
+    process.exit(2);
+}
 if (list.length) console.log(list.join("\n"));
 '
 }

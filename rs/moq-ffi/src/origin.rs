@@ -199,6 +199,9 @@ pub enum MoqAnnounceEvent {
 	Update { announce: MoqAnnounce },
 	/// No route covers the prefix any more. Carries its last advertised route.
 	End { announce: MoqAnnounce },
+	/// Another publisher instance now serves the prefix: drop what was resolved under
+	/// it and request afresh.
+	Restart { announce: MoqAnnounce },
 }
 
 impl From<moq_net::announce::Event> for MoqAnnounceEvent {
@@ -212,6 +215,9 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 				announce: announce.into(),
 			},
 			Event::End(announce) => Self::End {
+				announce: announce.into(),
+			},
+			Event::Restart(announce) => Self::Restart {
 				announce: announce.into(),
 			},
 		}

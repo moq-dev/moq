@@ -87,6 +87,7 @@ func TestErrorSentinels(t *testing.T) {
 		{"UnresolvableBroadcast", ffi.NewMoqErrorUnresolvableBroadcast(""), moq.ErrUnresolvableBroadcast},
 		{"AlreadyCommitted", ffi.NewMoqErrorAlreadyCommitted(), moq.ErrAlreadyCommitted},
 		{"Log", ffi.NewMoqErrorLog(""), moq.ErrLog},
+		{"Config", ffi.NewMoqErrorConfig(""), moq.ErrConfig},
 	}
 
 	for _, test := range tests {

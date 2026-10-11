@@ -24,7 +24,3 @@ Guidance:
 - If it's adopted, use a named profile (for example `[profile.ffi]`,
   inheriting release) that every binding build path selects, so the relay
   and self-builders keep opt-level 3.
-
-## Required
-
-- [Release profile](/quest/m1/release-profile.md) - the baseline this compares against

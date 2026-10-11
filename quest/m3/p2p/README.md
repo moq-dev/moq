@@ -106,7 +106,7 @@ one), which keeps warm and cold costs and cache-aware routing out of the
 protocol. [Direct peers win](/quest/m3/p2p/cost-scopes.md) sets the cost
 knobs and defaults.
 
-No Rust + WASM in-tab hop: [rs2ts](/quest/m1/rs2ts/remove-wasm.md) removes the
+No Rust + WASM in-tab hop: [rs2ts](/quest/m2/rs2ts-remove-wasm.md) removes the
 WASM build, so the browser side stays TypeScript.
 
 ### Risks

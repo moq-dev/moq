@@ -1,0 +1,36 @@
+# [L] iOS capture
+
+## Goal
+
+`moq-video` captures on iOS: the camera through AVFoundation and the screen
+through ReplayKit.
+
+## Plan
+
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit.
+Not a new codec backend. VideoToolbox encode, decode, and the native
+PixelBuffer surface compile on iOS (the `apple` cfg in moq-video). Verify the
+runtime path on a device rather than assuming desktop behavior. The new work is
+capture wiring plus the lifecycle iOS imposes and macOS does not.
+
+That lifecycle is the work. Camera and screen access are permission-gated and
+revocable, an app is suspended and resumed on foreground changes, and
+ReplayKit's broadcast extension runs in a separate process with a hard memory
+cap. Capture has to open on demand, survive being interrupted, and release the
+device when it stops, rather than assuming a session it opened stays valid.
+
+Reuse the `capture::Source` shape the other platforms use rather than growing
+an iOS-specific entry point, so device enumeration and selection behave the
+same everywhere.
+
+Capture sets the catalog `rotation` from the device orientation, so a phone
+held in portrait plays upright; the browser half of that is
+[#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md).
+
+Promoted from m2 on 2026-10-09 by maintainer priority.
+
+## Related
+
+- [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - the same catalog rotation for browser capture
+- [Android capture](/quest/m1/mobile-capture-android.md) - the other half of
+  mobile, and a much larger one

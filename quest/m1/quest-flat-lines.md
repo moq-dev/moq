@@ -58,21 +58,14 @@ Remaining:
 - Land each line's umbrella PR with `/quest-complete`, then delete its branch.
   Landed so far: #4403 wildcard, #4034 archive (with #4255 folded in), #4080
   obs-moq-video, #4162 audio-jitter-target, #4180 transport-upgrade, #4437
-  rs2ts (with #4438 folded in), #4640 tstd, and #4653 test-flakes-2. As of
-  2026-10-08 four lines remain, and all four conflict with `main` and need
-  it merged in again.
-  - #4039 auth: its `wip-version.md` child landed on the line (#5004). The
-    line's UNAUTHORIZED stream code collides with `main`'s NOT_FETCHABLE
-    (0x3A) and moves to 0x3B before it lands.
-  - #4079 cpp: the generated-newline fork tags exist
-    (`v0.11.0-kixelated.3` and `.4`); bump the line's `uniffi-bindgen-cpp`
-    pin from `.2`, then check `OBS (macOS)`.
-  - #4519 ffi-shape waits on
-    [Bindings](/quest/m0/broadcast-epoch/bindings.md).
-  - #4133 qos: closed without landing (2026-10-09). Every change it had over
-    `main` is the egress `lag` histogram, which
-    [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) ports from the
-    branch once stats-split lands.
+  rs2ts (with #4438 folded in), #4640 tstd, #4653 test-flakes-2, #4079 cpp,
+  #4519 ffi-shape, and #4039 auth (UNAUTHORIZED moved to 0x3B). No umbrella
+  PR remains open.
+- #4133 qos closed without landing (2026-10-09). Its egress `lag` histogram
+  is owned by [Viewer lag histogram](/quest/m1/qos/lag-histogram.md), which
+  ports it once stats-split lands. Do not reopen the umbrella PR.
+- Check for leftover questline branches and retire them only once their work
+  is merged or assigned to an outstanding quest.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.

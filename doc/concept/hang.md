@@ -126,6 +126,27 @@ Name the section with a namespaced key such as
 `com.example.mavlink`. A generic consumer only finds tracks in `json` and
 `binary`.
 
+## Transport streams
+
+A broadcast can carry an MPEG transport stream whole instead of demultiplexed
+into renditions, for what demultiplexing cannot carry, such as a scrambled
+service. The root `m2ts` section names the one track holding it:
+
+```json
+{
+  "m2ts": { "track": "0.m2ts", "randomAccess": true, "muxRate": 2499999 }
+}
+```
+
+Each frame is a run of whole 188-byte packets in input order, timestamped on
+the multiplex's own PCR clock, which never steps back: a source whose clock
+steps back is a new broadcast. `randomAccess` says whether every group begins
+where a receiver can start decoding, and `muxRate` is the constant multiplex
+rate in bits per second, absent for a variable-rate source. A player has
+nothing to decode here. `moq import ts --passthrough` writes this section (see
+[moq-cli](/bin/cli)); the encoding is in
+[draft-lcurley-moq-mpegts](/draft/moq-mpegts).
+
 ## Container
 
 The `container.kind` on each rendition says how frames are framed:

@@ -7,26 +7,205 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
 
-/// Native QUIC/WebTransport client configuration.
+/// Configuration for [`MoqClient::new`], mirroring moq-tokio's client config.
+///
+/// Every field has a default, so set only what you need. The browser owns the socket and the
+/// trust store, so a wasm build honors only `versions`, `tls.fingerprints`, and the origins,
+/// always dials once, and fails `new` with `Unsupported` when anything else is set.
+#[derive(Clone, Default, uniffi::Record)]
+pub struct MoqClientConfig {
+	/// Local UDP address to bind, e.g. `0.0.0.0:0`. Null binds an ephemeral dual-stack port.
+	#[uniffi(default = None)]
+	pub bind: Option<String>,
+	/// Protocol versions to offer, most preferred first, spelled like `moq-lite-03`.
+	/// Empty offers every supported version.
+	#[uniffi(default = [])]
+	pub versions: Vec<String>,
+	/// Certificate trust and the mTLS identity.
+	#[uniffi(default)]
+	pub tls: MoqClientTls,
+	/// QUIC transport tuning.
+	#[uniffi(default)]
+	pub quic: MoqQuicConfig,
+	/// The WebSocket fallback, raced against QUIC for networks that block UDP.
+	#[uniffi(default)]
+	pub websocket: MoqWebSocketConfig,
+	/// Dial once instead of redialing with backoff whenever the transport drops.
+	///
+	/// With this set, the transport's close ends the session (surfaced via
+	/// [`MoqSession::closed`]).
+	#[uniffi(default = false)]
+	pub once: bool,
+	/// Retry pacing for the automatic reconnect.
+	#[uniffi(default)]
+	pub backoff: MoqBackoff,
+	/// The origin whose broadcasts are published to the remote.
+	///
+	/// With neither `publish` nor `consume` set, each session's two sides share one fresh
+	/// origin, so a broadcast announced on it is also discoverable through it. Setting either
+	/// opts out of that and gives the other side its own fresh origin.
+	#[uniffi(default = None)]
+	pub publish: Option<Arc<MoqOriginProducer>>,
+	/// The origin that receives broadcasts consumed from the remote. See `publish`.
+	#[uniffi(default = None)]
+	pub consume: Option<Arc<MoqOriginProducer>>,
+}
+
+/// Certificate trust and the mTLS identity for a [`MoqClientConfig`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct MoqClientTls {
+	/// Skip certificate verification. Local development only.
+	#[uniffi(default = false)]
+	pub insecure: bool,
+	/// PEM root certificate files to trust instead of the platform roots.
+	#[uniffi(default = [])]
+	pub roots: Vec<String>,
+	/// Whether to also trust the platform roots. Null trusts them only when `roots` is empty.
+	#[uniffi(default = None)]
+	pub system_roots: Option<bool>,
+	/// SHA-256 certificate fingerprints, hex-encoded, to pin the peer to.
+	///
+	/// The native equivalent of WebTransport's `serverCertificateHashes`, accepting what
+	/// `MoqServer.cert_fingerprints` reports, so a self-signed certificate is trusted without
+	/// disabling verification.
+	#[uniffi(default = [])]
+	pub fingerprints: Vec<String>,
+	/// PEM certificate chain to present when the relay requires mTLS. Pair with `key`.
+	#[uniffi(default = None)]
+	pub cert: Option<String>,
+	/// PEM private key to present when the relay requires mTLS. Pair with `cert`.
+	#[uniffi(default = None)]
+	pub key: Option<String>,
+}
+
+/// QUIC transport tuning, mirroring moq-tokio's QUIC config.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct MoqQuicConfig {
+	/// Cap on the concurrent QUIC streams the peer may open toward this endpoint. Null uses 1024.
+	///
+	/// MoQ opens a stream per group, and for a subscriber those arrive from the peer, so an
+	/// endpoint subscribing to many tracks wants this raised. Ignored by the WebSocket fallback.
+	#[uniffi(default = None)]
+	pub max_streams: Option<u64>,
+}
+
+/// The WebSocket fallback for a [`MoqClientConfig`], raced against QUIC for `http(s)` URLs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct MoqWebSocketConfig {
+	/// Whether the fallback runs. Null enables it; disable it for a relay that only serves
+	/// QUIC, so a failed QUIC dial reports its own error.
+	#[uniffi(default = None)]
+	pub enabled: Option<bool>,
+	/// Head start QUIC gets before the fallback joins the race, in microseconds. Null uses
+	/// 200ms, and 0 races both at once.
+	#[uniffi(default = None)]
+	pub delay_us: Option<u64>,
+}
+
+/// Retry pacing for the automatic reconnect.
+///
+/// The delay starts at `initial_us`, multiplies by `multiplier` after each failed attempt,
+/// and caps at `max_us`. After `timeout_us` of consecutive failures the connection gives up
+/// for good; the window resets whenever a session stays up past `initial_us`. Each null
+/// field uses moq-tokio's default: 1s, x2, 5s, and a 10s window.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct MoqBackoff {
+	/// Delay before the first reconnect attempt, in microseconds.
+	#[uniffi(default = None)]
+	pub initial_us: Option<u64>,
+	/// Multiplier applied to the delay after each failure.
+	#[uniffi(default = None)]
+	pub multiplier: Option<u32>,
+	/// Maximum delay between reconnect attempts, in microseconds.
+	#[uniffi(default = None)]
+	pub max_us: Option<u64>,
+	/// Time spent retrying before giving up, in microseconds. 0 retries forever.
+	#[uniffi(default = None)]
+	pub timeout_us: Option<u64>,
+}
+
+/// Parse protocol version names, as `MoqClientConfig::versions` and
+/// `MoqServerConfig::versions` spell them.
+pub(crate) fn parse_versions(versions: &[String]) -> Result<Vec<moq_net::Version>, MoqError> {
+	versions
+		.iter()
+		.map(|version| version.parse().map_err(MoqError::Config))
+		.collect()
+}
+
+/// Native QUIC/WebTransport client state: the configured endpoint and the wired origins.
 #[cfg(not(target_arch = "wasm32"))]
 struct Client {
-	config: moq_tokio::connect::Config,
-	/// QUIC transport tuning the dial applies, e.g. `quic_max_streams`.
-	quic: moq_tokio::quic::Config,
+	client: moq_tokio::Client,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Client {
-	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
-		let client = self.config.clone().init(self.quic.clone()).map_err(map_connect_error)?;
+	fn new(config: MoqClientConfig) -> Result<Self, MoqError> {
+		let _guard = crate::ffi::enter();
 
+		let mut connect = moq_tokio::connect::Config::default();
+		if let Some(bind) = config.bind {
+			let bind = bind
+				.parse()
+				.map_err(|err| MoqError::Config(format!("invalid bind address {bind}: {err}")))?;
+			connect.bind = Some(bind);
+		}
+		connect.version = parse_versions(&config.versions)?;
+
+		let tls = config.tls;
+		connect.tls.insecure = Some(tls.insecure);
+		connect.tls.root = tls.roots.into_iter().map(Into::into).collect();
+		connect.tls.system_roots = tls.system_roots;
+		connect.tls.fingerprint = tls.fingerprints;
+		connect.tls.cert = tls.cert.map(Into::into);
+		connect.tls.key = tls.key.map(Into::into);
+
+		connect.websocket.enabled = config.websocket.enabled;
+		if let Some(delay) = config.websocket.delay_us {
+			connect.websocket.delay = std::time::Duration::from_micros(delay);
+		}
+
+		connect.once = Some(config.once);
+
+		let backoff = config.backoff;
+		if let Some(initial) = backoff.initial_us {
+			connect.backoff.initial = std::time::Duration::from_micros(initial);
+		}
+		if let Some(multiplier) = backoff.multiplier {
+			connect.backoff.multiplier = multiplier;
+		}
+		if let Some(max) = backoff.max_us {
+			connect.backoff.max = std::time::Duration::from_micros(max);
+		}
+		if let Some(timeout) = backoff.timeout_us {
+			connect.backoff.timeout = std::time::Duration::from_micros(timeout);
+		}
+
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.max_streams = config.quic.max_streams;
+
+		// Building the endpoint here, not at connect, is what surfaces an unreadable
+		// certificate or a half-configured mTLS identity from `new`.
+		let client = connect.init(quic).map_err(|err| MoqError::Config(format!("{err}")))?;
+
+		Ok(Self {
+			client,
+			publish: config.publish,
+			consume: config.consume,
+		})
+	}
+
+	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
 		// Materialize both origin sides so the session can publish/subscribe and the FFI can
 		// always hand back a publish/consume origin.
 		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
 
-		let connection = client
+		let connection = self
+			.client
+			.clone()
 			.with_publisher(&publish)
 			.with_subscriber(subscribe.clone())
 			.connect(url);
@@ -106,7 +285,7 @@ mod tests {
 	#[test]
 	fn rejects_non_ascii_instead_of_panicking() {
 		for input in ["aéa", "é", "ééééééééééééééééééééééééééééééé"] {
-			assert!(matches!(decode_hex(input), Err(MoqError::Connect(_))), "{input}");
+			assert!(matches!(decode_hex(input), Err(MoqError::Config(_))), "{input}");
 		}
 	}
 
@@ -128,7 +307,7 @@ mod tests {
 			format!("{}+0", &VALID[..62]),
 			format!(" 0{}", &VALID[2..]),
 		] {
-			assert!(matches!(decode_hex(&bad), Err(MoqError::Connect(_))), "{bad}");
+			assert!(matches!(decode_hex(&bad), Err(MoqError::Config(_))), "{bad}");
 		}
 	}
 
@@ -186,109 +365,49 @@ mod tests {
 		));
 	}
 
+	/// `new` is where a bad value surfaces, rather than at the first connect.
 	#[test]
-	fn sets_tls_system_roots() {
-		let client = MoqClient::new();
+	fn new_rejects_invalid_config() {
+		let bind = MoqClientConfig {
+			bind: Some("not-an-address".into()),
+			..Default::default()
+		};
+		assert!(matches!(MoqClient::new(bind), Err(MoqError::Config(_))));
 
-		client.set_tls_system_roots(true).unwrap();
-		{
-			let state = client.task.lock().expect("client state should be available");
-			assert_eq!(state.config.tls.system_roots, Some(true));
-		}
+		let version = MoqClientConfig {
+			versions: vec!["moq-lite-99".into()],
+			..Default::default()
+		};
+		assert!(matches!(MoqClient::new(version), Err(MoqError::Config(_))));
 
-		client.set_tls_system_roots(false).unwrap();
-		let state = client.task.lock().expect("client state should be available");
-		assert_eq!(state.config.tls.system_roots, Some(false));
+		let missing = MoqClientConfig {
+			tls: MoqClientTls {
+				roots: vec!["/nonexistent/root.pem".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+		assert!(matches!(MoqClient::new(missing), Err(MoqError::Config(_))));
 	}
 
 	#[test]
-	fn sets_tls_client_cert_and_key() {
-		let client = MoqClient::new();
-
-		client.set_tls_cert(Some("cert.pem".into())).unwrap();
-		client.set_tls_key(Some("key.pem".into())).unwrap();
-		{
-			let state = client.task.lock().expect("client state should be available");
-			assert_eq!(state.config.tls.cert.as_deref(), Some(std::path::Path::new("cert.pem")));
-			assert_eq!(state.config.tls.key.as_deref(), Some(std::path::Path::new("key.pem")));
-		}
-
-		client.set_tls_cert(None).unwrap();
-		client.set_tls_key(None).unwrap();
-		let state = client.task.lock().expect("client state should be available");
-		assert_eq!(state.config.tls.cert, None);
-		assert_eq!(state.config.tls.key, None);
-	}
-
-	#[test]
-	fn sets_the_quic_stream_cap() {
-		let client = MoqClient::new();
-		assert_eq!(client.task.lock().unwrap().quic.max_streams, None);
-
-		client.set_quic_max_streams(4096).unwrap();
-		assert_eq!(client.task.lock().unwrap().quic.max_streams, Some(4096));
-	}
-
-	#[test]
-	fn sets_the_websocket_fallback() {
-		let client = MoqClient::new();
-		let resolved = client.task.lock().unwrap().config.websocket.resolve();
-		assert!(resolved.enabled);
-		assert_eq!(resolved.delay, std::time::Duration::from_millis(200));
-
-		client.set_websocket_enabled(false).unwrap();
-		client.set_websocket_delay(0).unwrap();
-		let resolved = client.task.lock().unwrap().config.websocket.resolve();
-		assert!(!resolved.enabled);
-		assert_eq!(resolved.delay, std::time::Duration::ZERO);
-
-		client.set_websocket_enabled(true).unwrap();
-		client.set_websocket_delay(1_500).unwrap();
-		let resolved = client.task.lock().unwrap().config.websocket.resolve();
-		assert!(resolved.enabled);
-		assert_eq!(resolved.delay, std::time::Duration::from_micros(1_500));
-	}
-
-	#[test]
-	fn setters_fail_after_cancel() {
-		let client = MoqClient::new();
-		client.set_tls_verify(false).unwrap();
-		client.cancel();
-		assert!(matches!(client.set_tls_verify(true), Err(MoqError::Cancelled)));
-		assert!(matches!(
-			client.set_bind("127.0.0.1:0".into()),
-			Err(MoqError::Cancelled)
-		));
-		assert!(matches!(client.set_publish(None), Err(MoqError::Cancelled)));
-		assert!(matches!(client.set_consume(None), Err(MoqError::Cancelled)));
+	fn new_accepts_the_defaults_and_known_versions() {
+		MoqClient::new(MoqClientConfig::default()).unwrap();
+		MoqClient::new(MoqClientConfig {
+			bind: Some("127.0.0.1:0".into()),
+			versions: vec!["moq-lite-03".into()],
+			once: true,
+			backoff: MoqBackoff {
+				timeout_us: Some(0),
+				..Default::default()
+			},
+			..Default::default()
+		})
+		.unwrap();
 	}
 }
 
-/// Retry pacing for the automatic reconnect (see [`MoqClient::set_backoff`]).
-///
-/// The delay starts at `initial_us`, multiplies by `multiplier` after each failed
-/// attempt, and caps at `max_us`. After `timeout_us` of consecutive failures the
-/// connection gives up for good (0 retries forever); the window resets whenever a
-/// session stays up past `initial_us`. The defaults mirror the native
-/// [`moq_tokio::Backoff`]: 1s, x2, 5s, and a 10s window.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Debug, uniffi::Record)]
-pub struct MoqBackoff {
-	/// Delay before the first reconnect attempt, in microseconds.
-	#[uniffi(default = 1000000)]
-	pub initial_us: u64,
-	/// Multiplier applied to the delay after each failure.
-	#[uniffi(default = 2)]
-	pub multiplier: u32,
-	/// Maximum delay between reconnect attempts, in microseconds.
-	#[uniffi(default = 5000000)]
-	pub max_us: u64,
-	/// Time spent retrying before giving up, in microseconds. 0 retries forever.
-	#[uniffi(default = 10000000)]
-	pub timeout_us: u64,
-}
-
-/// Browser WebTransport client configuration.
+/// Browser WebTransport client state.
 ///
 /// The browser owns the socket and the trust store, so none of the native TLS knobs
 /// (roots, mTLS, bind address) have an equivalent. Certificate hashes are the one
@@ -296,18 +415,62 @@ pub struct MoqBackoff {
 #[cfg(target_arch = "wasm32")]
 struct Client {
 	fingerprints: Vec<Vec<u8>>,
+	/// Offered as ALPNs to WebTransport and then enforced by moq-net, so the two agree.
+	versions: moq_net::Versions,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl Client {
+	fn new(config: MoqClientConfig) -> Result<Self, MoqError> {
+		let MoqClientConfig {
+			bind,
+			versions,
+			tls,
+			quic,
+			websocket,
+			// A browser session never redials, so it dials once either way.
+			once: _,
+			backoff,
+			publish,
+			consume,
+		} = config;
+
+		let native_tls = MoqClientTls {
+			fingerprints: Vec::new(),
+			..tls.clone()
+		};
+		if bind.is_some()
+			|| native_tls != MoqClientTls::default()
+			|| quic != MoqQuicConfig::default()
+			|| websocket != MoqWebSocketConfig::default()
+			|| backoff != MoqBackoff::default()
+		{
+			return Err(MoqError::Unsupported);
+		}
+
+		Ok(Self {
+			fingerprints: tls
+				.fingerprints
+				.iter()
+				.map(|hex| decode_hex(hex))
+				.collect::<Result<_, _>>()?,
+			versions: match versions.is_empty() {
+				true => moq_net::Versions::default(),
+				false => parse_versions(&versions)?.into(),
+			},
+			publish,
+			consume,
+		})
+	}
+
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
 		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
 
 		let transport = match self.fingerprints.is_empty() {
-			true => crate::transport::connect(url).await,
-			false => crate::transport::connect_with_hashes(url, self.fingerprints.clone()).await,
+			true => crate::transport::connect(url, &self.versions).await,
+			false => crate::transport::connect_with_hashes(url, &self.versions, self.fingerprints.clone()).await,
 		}
 		.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
@@ -315,6 +478,7 @@ impl Client {
 		// holds no session clone, so dropping the last handle still closes the
 		// transport and ends that task.
 		let (session, driver) = moq_net::Client::new()
+			.with_versions(self.versions.clone())
 			.with_publisher(&publish)
 			.with_subscriber(subscribe.clone())
 			.connect(web_async::time::Instant::now(), transport)
@@ -343,14 +507,14 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
 	// non-ASCII would let a 2-byte chunk split a character, and `from_str_radix` accepts
 	// a leading sign, so an unchecked "+a" would decode to 10 rather than erroring.
 	if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-		return Err(MoqError::Connect(format!("fingerprint is not hex: {hex}")));
+		return Err(MoqError::Config(format!("fingerprint is not hex: {hex}")));
 	}
 
 	// WebTransport's `serverCertificateHashes` only accepts a 32-byte sha-256, so a
 	// different length can never match a certificate. Rejecting here beats failing
 	// opaquely inside the browser.
 	if hex.len() != LEN {
-		return Err(MoqError::Connect(format!(
+		return Err(MoqError::Config(format!(
 			"expected a {LEN}-character sha-256 fingerprint, got {}",
 			hex.len()
 		)));
@@ -360,272 +524,45 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
 		.chunks(2)
 		.map(|pair| {
 			let pair = std::str::from_utf8(pair).expect("checked ascii above");
-			u8::from_str_radix(pair, 16).map_err(|err| MoqError::Connect(format!("{err}")))
+			u8::from_str_radix(pair, 16).map_err(|err| MoqError::Config(format!("{err}")))
 		})
 		.collect()
 }
 
-/// Builds a [`MoqSession`]: configure it, then [`connect`](Self::connect).
+/// Dials a [`MoqSession`] with the configuration it was built from.
 ///
-/// The configuration differs by target, because the transport does. Native builds expose
-/// the QUIC socket and TLS trust store; the browser owns both, so a wasm build exposes
-/// only the certificate hashes WebTransport accepts.
-///
-/// Setters write the configuration [`connect`](Self::connect) will snapshot. They fail
-/// with [`MoqError::Busy`] while a connect is in flight and [`MoqError::Cancelled`]
-/// after [`cancel`](Self::cancel). A finished connect does not freeze the handle: later
-/// setters apply to the next dial until cancel.
+/// The configuration differs by what the target honors, because the transport does; see
+/// [`MoqClientConfig`]. [`connect`](Self::connect) may be called again for another session
+/// until [`cancel`](Self::cancel).
 #[derive(uniffi::Object)]
 pub struct MoqClient {
 	task: Task<Client>,
 }
 
-impl MoqClient {
-	fn configure<R>(&self, f: impl FnOnce(&mut Client) -> R) -> Result<R, MoqError> {
-		Ok(f(&mut *self.task.configure()?))
-	}
-}
-
-#[cfg(target_arch = "wasm32")]
 #[uniffi::export]
 impl MoqClient {
-	/// Create a new MoQ client with default configuration.
+	/// Create a client from `config`, failing on any value it cannot use.
 	#[uniffi::constructor]
-	pub fn new() -> Arc<Self> {
-		Arc::new(Self {
-			task: Task::new(Client {
-				fingerprints: Vec::new(),
-				publish: None,
-				consume: None,
-			}),
-		})
-	}
-
-	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
-	///
-	/// Passed through to WebTransport's `serverCertificateHashes`. An empty list restores
-	/// the browser's normal certificate verification.
-	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) -> Result<(), MoqError> {
-		let parsed = fingerprints
-			.iter()
-			.map(|hex| decode_hex(hex))
-			.collect::<Result<Vec<_>, _>>()?;
-		self.configure(|state| {
-			state.fingerprints = parsed;
-		})
-	}
-
-	/// Set the origin to publish local broadcasts to the remote.
-	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.publish = origin;
-		})
-	}
-
-	/// Set the origin to consume remote broadcasts from the remote.
-	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.consume = origin;
-		})
+	pub fn new(config: MoqClientConfig) -> Result<Arc<Self>, MoqError> {
+		Ok(Arc::new(Self {
+			task: Task::new(Client::new(config)?),
+		}))
 	}
 
 	/// Connect to a MoQ server and wait for the session to be established.
 	///
-	/// Can be cancelled by calling `cancel()`.
-	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
-		let url = Url::parse(&url)?;
-		self.task.run(|state| async move { state.connect(url).await }).await
-	}
-
-	/// Cancel all current and future `connect()` calls.
-	pub fn cancel(&self) {
-		self.task.cancel();
-	}
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[uniffi::export]
-impl MoqClient {
-	/// Create a new MoQ client with default configuration.
-	#[uniffi::constructor]
-	pub fn new() -> Arc<Self> {
-		let _guard = crate::ffi::enter();
-		Arc::new(Self {
-			task: Task::new(Client {
-				config: moq_tokio::connect::Config::default(),
-				quic: moq_tokio::quic::Config::default(),
-				publish: None,
-				consume: None,
-			}),
-		})
-	}
-
-	/// Enable or disable TLS certificate verification.
-	pub fn set_tls_verify(&self, verify: bool) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.config.tls.insecure = Some(!verify);
-		})
-	}
-
-	/// Trust these PEM root certificate file(s) instead of the system roots.
-	///
-	/// Pass the paths to PEM-encoded CA certificates. An empty list restores the
-	/// default behavior of using the platform's native root store.
-	pub fn set_tls_roots(&self, paths: Vec<String>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.config.tls.root = paths.into_iter().map(Into::into).collect();
-		})
-	}
-
-	/// Configure whether to also trust the platform's native root certificates.
-	///
-	/// By default, system roots are trusted only when no custom roots are configured.
-	/// Set this to `true` to trust system roots in addition to roots from
-	/// `set_tls_roots`, or `false` to trust only custom roots.
-	pub fn set_tls_system_roots(&self, system_roots: bool) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.config.tls.system_roots = Some(system_roots);
-		})
-	}
-
-	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
-	///
-	/// This is the native equivalent of the browser's WebTransport `serverCertificateHashes`
-	/// and accepts the same values a server reports (see `MoqServer.cert_fingerprints`). Use it
-	/// to trust a self-signed certificate without disabling verification. An empty list clears
-	/// any pinned fingerprints.
-	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.config.tls.fingerprint = fingerprints;
-		})
-	}
-
-	/// Present this PEM certificate chain when the relay requires mTLS.
-	///
-	/// Only certificates are read from the file; any private keys are ignored. Must be
-	/// paired with `set_tls_key`, otherwise `connect` fails with an incomplete-auth error.
-	/// Pass `None` to clear a previously set path.
-	pub fn set_tls_cert(&self, path: Option<String>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.config.tls.cert = path.map(Into::into);
-		})
-	}
-
-	/// Present this PEM private key when the relay requires mTLS.
-	///
-	/// Only the private key is read from the file; any certificates are ignored. Must be
-	/// paired with `set_tls_cert`, otherwise `connect` fails with an incomplete-auth error.
-	/// Pass `None` to clear a previously set path.
-	pub fn set_tls_key(&self, path: Option<String>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.config.tls.key = path.map(Into::into);
-		})
-	}
-
-	/// Set the local UDP socket bind address. Defaults to `[::]:0`.
-	///
-	/// Returns an error if the address cannot be parsed, if a connect is in flight,
-	/// or after [`cancel`](Self::cancel).
-	pub fn set_bind(&self, addr: String) -> Result<(), MoqError> {
-		let parsed: std::net::SocketAddr = addr
-			.parse()
-			.map_err(|err| MoqError::Bind(format!("invalid bind address: {err}")))?;
-		self.configure(|state| {
-			state.config.bind = Some(parsed);
-		})
-	}
-
-	/// Cap the concurrent QUIC streams the peer may open toward this connection.
-	/// Defaults to 1024.
-	///
-	/// MoQ opens a stream per group, and for a subscriber those arrive from the relay,
-	/// so a client subscribing to many tracks wants this raised. A publisher's own
-	/// streams are bounded by the peer's advertised limit, not this one. Ignored by
-	/// the WebSocket fallback.
-	pub fn set_quic_max_streams(&self, max_streams: u64) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.quic.max_streams = Some(max_streams);
-		})
-	}
-
-	/// Enable or disable the WebSocket fallback. Enabled by default.
-	///
-	/// The fallback races a WebSocket dial against QUIC for `http(s)` URLs, for networks
-	/// that block UDP. Disable it for a relay that only serves QUIC, so a failed QUIC dial
-	/// reports its own error instead of the fallback's.
-	pub fn set_websocket_enabled(&self, enabled: bool) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.config.websocket.enabled = Some(enabled);
-		})
-	}
-
-	/// Set the head start, in microseconds, QUIC gets before the WebSocket fallback joins
-	/// the race. Defaults to 200ms.
-	///
-	/// Zero races both at once. A server where WebSocket already won skips the head start.
-	pub fn set_websocket_delay(&self, delay_us: u64) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.config.websocket.delay = std::time::Duration::from_micros(delay_us);
-		})
-	}
-
-	/// Enable or disable automatic reconnecting. Enabled by default.
-	///
-	/// When enabled, the session returned by [`connect`](Self::connect) redials with
-	/// backoff whenever the transport drops, and broadcasts consumed through it survive
-	/// the gap. Disable for a one-shot dial: the transport's close then ends the session
-	/// (surfaced via [`MoqSession::closed`]).
-	pub fn set_reconnect(&self, enabled: bool) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.config.once = Some(!enabled);
-		})
-	}
-
-	/// Configure retry pacing for the automatic reconnect (see [`MoqBackoff`]).
-	pub fn set_backoff(&self, backoff: MoqBackoff) -> Result<(), MoqError> {
-		self.configure(|state| {
-			let mut out = moq_tokio::Backoff::default();
-			out.initial = std::time::Duration::from_micros(backoff.initial_us);
-			out.multiplier = backoff.multiplier;
-			out.max = std::time::Duration::from_micros(backoff.max_us);
-			out.timeout = std::time::Duration::from_micros(backoff.timeout_us);
-			state.config.backoff = out;
-		})
-	}
-
-	/// Set the origin to publish local broadcasts to the remote.
-	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.publish = origin;
-		})
-	}
-
-	/// Set the origin to consume remote broadcasts from the remote.
-	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure(|state| {
-			state.consume = origin;
-		})
-	}
-
-	/// Connect to a MoQ server and wait for the session to be established.
-	///
-	/// The returned session automatically reconnects with backoff when the transport
-	/// drops (unless disabled via [`set_reconnect`](Self::set_reconnect)), and broadcasts
-	/// consumed through it ride out the gap. Watch [`MoqSession::status`] for the
-	/// connect/disconnect transitions, [`MoqSession::epoch`] for the reconnect count,
-	/// and [`MoqSession::closed`] for the connection giving up for good.
+	/// A native session automatically reconnects with backoff when the transport drops
+	/// (unless [`MoqClientConfig::once`] is set), and broadcasts consumed through it ride out
+	/// the gap. Watch [`MoqSession::status`] for the connect/disconnect transitions,
+	/// [`MoqSession::epoch`] for the reconnect count, and [`MoqSession::closed`] for the
+	/// connection giving up for good.
 	///
 	/// Both origin sides are always accessible via [`MoqSession::publish`] and
-	/// [`MoqSession::consume`], without the caller constructing a [`MoqOriginProducer`]
-	/// themselves. With neither [`set_publish`](Self::set_publish) nor
-	/// [`set_consume`](Self::set_consume) wired, the two sides share one origin, so a broadcast
-	/// announced on this session is also discoverable through it. Wiring either side opts out of
-	/// that and gives the other side its own fresh origin.
+	/// [`MoqSession::consume`], without the caller constructing a [`MoqOriginProducer`].
 	///
 	/// Can be cancelled by calling `cancel()`, including while the initial dial is retrying.
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
 		let url = Url::parse(&url)?;
-
 		self.task.run(|state| async move { state.connect(url).await }).await
 	}
 
@@ -892,7 +829,7 @@ impl MoqSession {
 
 	/// The publish-side origin: where local broadcasts get advertised
 	/// to the remote. Either the producer the caller wired via
-	/// `set_publish` / `set_consume` before connect/accept, or one
+	/// client config or request accept arguments, or one
 	/// auto-created if neither was set.
 	pub fn publish(&self) -> Arc<MoqOriginProducer> {
 		self.publisher.clone()
@@ -900,7 +837,7 @@ impl MoqSession {
 
 	/// The subscribe-side origin: a read handle for receiving
 	/// announcements pushed by the remote. Either derived from the
-	/// origin the caller wired via `set_consume`, or auto-created if
+	/// consume origin the caller supplied, or auto-created if
 	/// neither was set.
 	pub fn consume(&self) -> Arc<MoqOriginConsumer> {
 		self.consumer.clone()

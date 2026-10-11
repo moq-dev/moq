@@ -55,6 +55,19 @@ export class Encoder {
 	}
 
 	/**
+	 * The most bytes {@link frame} can return for a payload of `len` bytes, at any level and whatever
+	 * the window already holds.
+	 *
+	 * zlib's `deflateBound` for its default window and memory level, which both pako and the Rust
+	 * `moq-flate` use: incompressible input falls back to stored blocks, 5 bytes per 16 KiB. The
+	 * constant covers the block headers and the flush, whose fixed 4-byte marker is stripped anyway.
+	 */
+	static bound(len: number): number {
+		// Division rather than shifts, which wrap past 2^31.
+		return len + Math.floor(len / 4096) + Math.floor(len / 16384) + Math.floor(len / 33554432) + 13;
+	}
+
+	/**
 	 * Compress the next frame's `payload`, returning its slice of the stream: the DEFLATE bytes minus
 	 * the fixed sync-flush marker. Empty in yields empty out. Slices must be produced in frame order.
 	 */

@@ -11,7 +11,7 @@ everything since the epoch began.
 
 ## Plan
 
-Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
+Decided 2026-10-05:
 
 - **Why.** Every counter is cumulative per entry, and an entry is pruned right
   after the frame carrying its closing readout. A broadcast that starts and
@@ -64,8 +64,7 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   just-ended children, not every child the prefix has ever seen. Decide
   while implementing whether a map with hundreds of children needs a cap or
   paging.
-- **Self counters** (decided 2026-10-07, planned from
-  moq-dev/moq.pro#2165). A prefix track also carries cumulative counters for
+- **Self counters** (decided 2026-10-07). A prefix track also carries cumulative counters for
   members at exactly the prefix, not its descendants, so a reader can show a
   broadcast that also has nested broadcasts. A reader can't derive them as the
   rollup less the current children: a pruned child's tail stays in the

@@ -436,9 +436,9 @@ ui.run((effect) => {
 	effect.spawn(async () => {
 		try {
 			for (;;) {
-				const value = await effect.race(consumer.next());
-				if (value === undefined) break;
-				metaSignal.set(value);
+				const state = await effect.race(consumer.latest());
+				if (state === undefined) break;
+				metaSignal.set(state.value);
 			}
 		} catch (err) {
 			console.warn("error reading metadata", err);

@@ -10,7 +10,7 @@ previous nightly's commit measured on the same runner, so the existing Alert
 workflow posts it to Discord.
 
 Rust Criterion targets only. Browser and JS benchmarks stay with
-[Browser benchmarks](/quest/m1/browser-benchmarks.md), and relay load stays
+[Browser benchmarks](/quest/m2/browser-benchmarks.md), and relay load stays
 local under `just bench BASE`.
 
 ## Plan
@@ -45,5 +45,5 @@ a GitHub App:
 
 ## Related
 
-- [Benchmark comparisons](/quest/m1/performance-comparisons.md) - extends the same `bench/run.sh` with repeated paired rounds
+- [Benchmark reporting](/bench/README.md) - the existing `bench/run.sh` retains repeated paired rounds
 - [Bench coverage](/quest/m2/bench-coverage.md) - more targets for this job to track

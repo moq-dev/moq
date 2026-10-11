@@ -69,6 +69,7 @@ The simplest way to watch a stream:
 | `muted`          | boolean                    | false         | Mute audio                               |
 | `visible`        | never, distance, or always | `20%`         | When to download video (see below)       |
 | `volume`         | number                     | 0.5           | Audio volume (0-1)                       |
+| `backend`        | auto, webgpu, 2d           | `auto`        | Graphics API for the canvas. `auto` picks WebGPU where it can render video, else Canvas2D. |
 | `announced`      | boolean                    | true          | Wait for (re)announcement before subscribing. Ignored when the relay does not support broadcast discovery. |
 | `delay`          | `auto`, duration, `instant` | `auto`       | Distance from the live edge. `instant` paints frames as they decode and disables audio. |
 | `buffer`         | duration                   | `0ms`         | Future-dated media held before playback skips ahead. |
