@@ -639,3 +639,98 @@ async fn history_mode_lists_a_durable_timeline_past_the_window() {
 		assert!(!playlist.contains("seg/29b1cd67.0.m4s\n"), "{playlist}");
 	}
 }
+
+#[tokio::test(start_paused = true)]
+async fn history_mode_recovers_evicted_timeline_groups() {
+	history_after_expiry(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn history_mode_recovers_a_finished_timeline() {
+	history_after_expiry(true).await;
+}
+
+async fn history_after_expiry(finished: bool) {
+	let recording = bounded_segments(12).await;
+	let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+	let driver = tokio::spawn(moq_net::time::run(driver));
+	let broadcast = origin.create_broadcast("rec").unwrap();
+	let track = broadcast
+		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+		.unwrap();
+	let mut catalog = moq_json::snapshot::Producer::new(track, moq_json::snapshot::Config::default());
+	catalog.update(&self::catalog(durable())).unwrap();
+	let reader = moq_archive::Reader::open(
+		recording.store.clone(),
+		&broadcast,
+		reader::Config::new(recording.timelines()),
+	)
+	.await
+	.unwrap();
+	let serving = tokio::spawn(reader.serve());
+	let reader = if finished {
+		reader.finish().unwrap();
+		None
+	} else {
+		Some(reader)
+	};
+	// Expire the publisher cache before any HLS consumer can retain a copy.
+	let now = moq_net::time::Instant::now();
+	broadcast.info().pool.gc(now);
+	broadcast.info().pool.gc(now + Duration::from_secs(31));
+	let subscription = moq_net::track::Subscription::default()
+		.with_start(moq_net::track::Position::group(0))
+		.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
+	let mut retained = broadcast
+		.consume()
+		.track(&timeline("1080p"))
+		.unwrap()
+		.subscribe(subscription)
+		.await
+		.unwrap()
+		.ordered();
+	let retained = retained.next_group().await.unwrap();
+	assert!(
+		retained.is_none_or(|group| group.sequence > 0),
+		"the initial timeline groups must really be evicted"
+	);
+	broadcast.announce(Default::default()).unwrap();
+	let source = moq_mux::Source::new(origin.consume(), "rec");
+	let broadcaster = Broadcaster::new(
+		source,
+		Config {
+			history: true,
+			..Config::default()
+		},
+	)
+	.await
+	.unwrap();
+	tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
+		.await
+		.expect("a rendition becomes playable after cache expiry");
+	let replay = Replay {
+		reader,
+		broadcaster,
+		_catalog: catalog,
+		_broadcast: broadcast,
+		_origin: origin,
+	};
+	let playlist = replay
+		.playlist_until(Kind::Video, "1080p", |playlist| {
+			playlist.contains("seg/29b1cd67.11.m4s\n")
+		})
+		.await;
+	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
+	assert!(
+		replay
+			.rendition(Kind::Video, "1080p")
+			.listed_segment(0)
+			.await
+			.unwrap()
+			.is_some()
+	);
+	serving.abort();
+	driver.abort();
+	let _ = serving.await;
+	let _ = driver.await;
+}

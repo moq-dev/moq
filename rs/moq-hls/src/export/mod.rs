@@ -29,6 +29,7 @@
 
 #[cfg(test)]
 mod archive_tests;
+mod history;
 pub mod master;
 mod mpd;
 mod playlist;
@@ -498,22 +499,10 @@ async fn watch(
 	renditions: &renditions::Fanout,
 	history: bool,
 ) -> crate::Result<()> {
-	let mut timeline = if history {
-		let name = section
-			.timelines
-			.get(&reference.1)
-			.ok_or_else(|| moq_mux::Error::TimelineMissing(reference.1.clone()))?;
-		let scale = moq_net::Timescale::new(section.timescale as u64)
-			.map_err(|_| moq_mux::Error::InvalidTimescale(section.timescale))?;
-		let subscription = moq_net::track::Subscription::default()
-			.with_start(moq_net::track::Position::group(0))
-			// The full representable wire budget keeps historical timed groups eligible.
-			.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
-		let track = broadcast.track(name)?.subscribe(subscription).await?;
-		moq_mux::timeline::Consumer::<()>::new(track, scale)
-	} else {
-		moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section, &reference.1).await?
-	};
+	if history {
+		return history::watch(broadcast, section, reference, renditions).await;
+	}
+	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section, &reference.1).await?;
 	while let Some(event) = timeline.next().await? {
 		match event {
 			moq_mux::timeline::Event::Push { index, entry } => renditions.push(index, entry, reference),

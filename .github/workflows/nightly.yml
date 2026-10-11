@@ -169,6 +169,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
 
+      - name: Archive timeline FETCH fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs test -p moq-archive benchmark_timeline_fetch_fanout --run-ignored only --success-output immediate
+
       - name: RTMP chunk-stream benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-rtmp --test

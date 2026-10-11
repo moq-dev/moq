@@ -652,6 +652,24 @@ pub struct Entry<E: RecordExt = ()> {
 }
 
 impl<E: RecordExt> Entry<E> {
+	/// Decode a record into an entry, converting its timing out of the wire timescale.
+	///
+	/// A pts the timescale can't represent is an error rather than a substituted value: silently
+	/// moving a timestamp would misdirect seeking and live-edge logic.
+	pub fn decode(record: Record<E>, timescale: Timescale) -> crate::Result<Entry<E>> {
+		let scale = timescale.as_u64() as u128;
+		let nanos = (record.duration as u128) * 1_000_000_000 / scale;
+		Ok(Self {
+			sequence: record.sequence,
+			pts: Timestamp::new(record.pts, timescale)?,
+			duration: Duration::from_nanos(nanos as u64),
+			start: record.start,
+			end: record.end,
+			keyframe: record.keyframe,
+			ext: record.ext,
+		})
+	}
+
 	/// The span's exclusive end time.
 	pub fn end_time(&self) -> Duration {
 		Duration::from(self.pts) + self.duration
@@ -701,33 +719,10 @@ impl<E: RecordExt> Consumer<E> {
 		let timescale =
 			Timescale::new(section.timescale as u64).map_err(|_| crate::Error::InvalidTimescale(section.timescale))?;
 		let track = broadcast.track(name)?.subscribe(None).await?;
-		Ok(Self::new(track, timescale))
-	}
-
-	/// Read a configured timeline subscription using its catalog's validated timescale.
-	pub fn new(track: moq_net::track::Subscriber, timescale: Timescale) -> Self {
 		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
-		Self {
+		Ok(Self {
 			inner: moq_json::window::Consumer::new(track, config),
 			timescale,
-		}
-	}
-
-	/// Decode a record into an entry, converting its timing out of the wire timescale.
-	///
-	/// A pts the timescale can't represent is an error rather than a substituted value: silently
-	/// moving a timestamp would misdirect seeking and live-edge logic.
-	fn decode(&self, record: Record<E>) -> crate::Result<Entry<E>> {
-		let scale = self.timescale.as_u64() as u128;
-		let nanos = (record.duration as u128) * 1_000_000_000 / scale;
-		Ok(Entry {
-			sequence: record.sequence,
-			pts: Timestamp::new(record.pts, self.timescale)?,
-			duration: Duration::from_nanos(nanos as u64),
-			start: record.start,
-			end: record.end,
-			keyframe: record.keyframe,
-			ext: record.ext,
 		})
 	}
 
@@ -735,7 +730,7 @@ impl<E: RecordExt> Consumer<E> {
 		Ok(match event {
 			moq_json::window::Event::Push { index, value } => Event::Push {
 				index,
-				entry: self.decode(value)?,
+				entry: Entry::decode(value, self.timescale)?,
 			},
 			moq_json::window::Event::Pop(range) => Event::Pop(range),
 			moq_json::window::Event::Skip(range) => Event::Skip(range),

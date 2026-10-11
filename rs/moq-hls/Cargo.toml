@@ -24,6 +24,7 @@ hang = { workspace = true }
 humantime = { workspace = true }
 kio = { workspace = true }
 m3u8-rs = "6"
+moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 percent-encoding = { workspace = true }
@@ -39,7 +40,6 @@ url = { workspace = true }
 async-trait = "0.1"
 futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
-moq-json = { path = "../moq-json" }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "noq", "aws-lc-rs"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }

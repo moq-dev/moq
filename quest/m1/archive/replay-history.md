@@ -24,19 +24,23 @@ keeps the live path bounded: live joins must keep reading at most the window.
 Test with more records than one checkpoint and assert history mode lists
 segment 0.
 
-Draft implementation reads a configured subscriber from group zero with the full
-representable delay budget, keeping old timed groups eligible. A bounded four-record
-fixture now lists all 12 segments from zero; ordinary live joins stay bounded.
-The proposed `timeline::Consumer::new(subscriber, timescale)` constructor lets the
-exporter configure that subscription without coupling history policy to the decoder.
+The candidate now supports durable timeline FETCH. Reader keeps a validated
+mapping from timeline group to its original stored object and serves evicted
+groups through the existing byte-bounded object cache. The HLS history loop
+fetches missing groups before following the live subscription, including a
+finished recording whose timeline cache is empty. Missing history is an error.
+Ordinary live joins still read the bounded checkpoint window.
 
-Remaining limitation: `Reader` replays timeline groups into the ordinary broadcast
-cache and its FETCH handler serves media groups, not timeline groups. Once old
-timeline groups are evicted, starting at zero cannot recover them. The draft fixes
-checkpoint-tail joins but does not yet satisfy arbitrary-length cached-out history.
+Paused-time regressions reproduce Reader FETCH failure and a first HLS join
+listing segment 8 after confirmed eviction, then pass with the fix. Finished
+recording recovery and later timeline enrollment also pass. A nightly benchmark
+sweeps unrelated tracks and concurrent readers, with explicit eviction checks.
 
-Recommended next step: support durable timeline FETCH replay. Alternatives are a
-dedicated unbounded timeline cache or Reader full-history restatement; both change
-memory or live-join costs. Keep this quest open until the durable path is settled.
+Public API: add `timeline::Entry::decode(record, timescale)` for callers that own
+frame decoding; remove this draft's unnecessary configured-subscriber Consumer
+constructor. No wire or stored format change.
 
-Public API: proposed configured-subscriber Consumer constructor. Wire: none.
+Full validation passed all Rust and other JavaScript tests but hit the existing
+publish bundle test's production build inside Bun's five-second unit-test limit.
+The focused fix is published separately in #5267. Keep this quest while the PR
+remains draft pending complete validation; do not import an unrelated workaround.
