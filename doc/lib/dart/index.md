@@ -73,14 +73,15 @@ one to one; the API reference has the names.
 - **Closing.** `await moq.close()` or `session.shutdown()` gives finished tracks up to one second to deliver and fails if they did not. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Cancelling a stream subscription releases its native cursor.
 - **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero.
 
+## Runtime
+
+Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
+host still poll in place; independent native wake callbacks can run concurrently.
+The generated bindings deliver native wakeups to the Dart isolate. Keep UI work
+on its owning isolate.
+
 ## Reference
 
 - API reference: [pub.dev/documentation/moq](https://pub.dev/documentation/moq/latest/)
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)
-
-Native I/O and background tasks run on a Tokio worker pool. UniFFI wake callbacks
-can arrive concurrently from different worker threads; marshal UI work onto your
-host runtime. The process shutdown hook waits for workers and in-flight callbacks,
-including blocking native tasks, before returning. Invoke it from a host thread,
-never from a native callback. Async calls polled by the host still run in place.

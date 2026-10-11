@@ -71,7 +71,7 @@ impl Runtime {
 			.name("moq-ffi".into())
 			.spawn(move || {
 				// `Err` when the sender is dropped, which the shutdown never does; either way the
-				// runtime is torn down here, on the thread that ran its tasks.
+				// runtime is torn down here, joining the threads that ran its tasks.
 				let _ = runtime.block_on(stopped);
 				// Join every worker and blocking task before the host can unload callbacks.
 				drop(runtime);

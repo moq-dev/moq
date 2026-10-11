@@ -148,6 +148,14 @@ auto continuation = std::move(reading).then(moq::inline_executor, [](moq::expect
 auto frame = co_await media->next();
 ```
 
+## Runtime
+
+Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
+host still poll in place; independent native wake callbacks can run concurrently.
+The configured executor dispatches continuations. Call `moq::shutdown()` from a
+host thread before unloading the module; it joins native workers and then the
+executor. Never call shutdown from a continuation.
+
 ## Executor
 
 Futures are polled, and continuations run, on one process-wide executor
@@ -192,9 +200,3 @@ Everything else maps one to one onto the
 header is the reference; every method carries its doc comment.
 
 - Source: [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq); `just cpp check` builds, installs, and tests it locally
-
-Native I/O and background tasks run on a Tokio worker pool. UniFFI wake callbacks
-can arrive concurrently from different worker threads; marshal UI work onto your
-host runtime. The process shutdown hook waits for workers and in-flight callbacks,
-including blocking native tasks, before returning. Invoke it from a host thread,
-never from a native callback. Async calls polled by the host still run in place.

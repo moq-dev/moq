@@ -95,14 +95,15 @@ one to one; the API reference has the names.
 - **Closing.** `await session.shutdown()` gives finished tracks up to one second to deliver and raises if they did not. `cancel(code)` closes at once. Finish or abort live tracks first.
 - **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero.
 
+## Runtime
+
+Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
+host still poll in place; independent native wake callbacks can run concurrently.
+The generated bindings wake Python futures through the asyncio event loop. The
+package exit hook joins native workers before interpreter finalization.
+
 ## Reference
 
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
-
-Native I/O and background tasks run on a Tokio worker pool. UniFFI wake callbacks
-can arrive concurrently from different worker threads; marshal UI work onto your
-host runtime. The process shutdown hook waits for workers and in-flight callbacks,
-including blocking native tasks, before returning. Invoke it from a host thread,
-never from a native callback. Async calls polled by the host still run in place.
