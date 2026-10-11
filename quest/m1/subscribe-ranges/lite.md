@@ -22,7 +22,11 @@ group. moq-transport's relative offsets differ by one: draft-20
 `Relative(n)` start maps to draft-20 `Relative(n + 1)`. Live keeps today's
 join, `NextObject` plus a `Relative(1)` fill on draft-20+ or a relative
 joining FETCH on older drafts (`ietf::subscriber::subscribe_join`), so the
-current group's existing prefix still arrives.
+current group's existing prefix still arrives. A relative end resolves
+against the latest group the answering hop knows. Behind an IETF upstream
+that is the Largest Object's group, so a newest group with no objects yet is
+not counted until its first object arrives; the relay reports what it has
+rather than waiting for the peer.
 
 Update `drafts/draft-lcurley-moq-lite.md` in the same PR: the SUBSCRIBE and
 SUBSCRIBE_UPDATE fields, the Group Order section (the order is now a field),
