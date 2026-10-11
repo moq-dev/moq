@@ -149,6 +149,11 @@ test("SUBSCRIBE_TRACKS refuses only its request", async () => {
 		for (let i = 0; i < 2; i++) {
 			const stream = await Stream.open(pair.client, { version });
 			await stream.writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
+			await Message.encode(stream.writer, async (writer) => {
+				await writer.u62(BigInt(i * 2));
+				await Namespace.encode(writer, Path.from(""));
+				await writer.u53(0);
+			});
 			expect(await stream.reader.u53()).toBe(RequestError.id);
 			const refused = await RequestError.decode(stream.reader, version);
 			expect(refused.errorCode).toBe(0x3);

@@ -40,4 +40,12 @@ regression test per case, and check the lite and IETF draft text agrees. Run
 
 Public API: none. Wire: none beyond draft wording.
 
-**Draft progress:** [#5279](https://github.com/moq-dev/moq/pull/5279) implements malformed AUTH decoding, unexpected and extra messages, expiry/code bounds, and session-fatal propagation in Rust and JS. The quest remains open for AUTH Request-ID ordering and reuse, which must use the common validator being implemented in [#5235](https://github.com/moq-dev/moq/pull/5235), rather than introduce a competing AUTH-only validator.
+**Draft progress:** [#5279](https://github.com/moq-dev/moq/pull/5279) implements malformed AUTH decoding, unexpected and extra messages, expiry/code bounds, and session-fatal propagation in Rust and JS. It composes [#5235](https://github.com/moq-dev/moq/pull/5235) for legacy request admission and adds one modern lifetime history shared by AUTH, other initial requests, and REQUEST_UPDATE. Duplicate and wrong-parity IDs close with INVALID_REQUEST_ID; reordered streams remain valid.
+
+The remaining decision is the resource bound for fragmented modern request-ID history. The implementation coalesces adjacent IDs and provisionally limits disjoint ranges to the existing request capacity (twice the announce plus subscription caps; 220,000 by default in both languages), closing with INTERNAL_ERROR when exhausted. Modern drafts no longer assign 0x7 to TOO_MANY_REQUESTS. Keep this quest until the history policy is settled:
+
+- **Recommended:** use the existing capacity, as implemented, retaining every spent ID until the session ends.
+- Expose a separate configurable history budget, adding a public API surface that must match both languages and bindings.
+- Keep unbounded compressed history, preserving arbitrary fragmentation but allowing memory to grow with adversarial or abandoned requests.
+
+Evicting old history or enforcing arrival order would allow reuse or reject reordered streams, respectively, and does not satisfy the lifetime contract.

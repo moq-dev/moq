@@ -1,12 +1,12 @@
 import { Once } from "@moq/signals";
 import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
-import { error, ProtocolViolation, SessionCode } from "../error.ts";
+import { error, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import { Reader, Stream, type Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
+import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestIds } from "./request.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** The peer used a request ID the draft closes the session for. */
@@ -29,6 +29,7 @@ export interface Session {
 	openNativeBi?(): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(): Promise<bigint | undefined>;
+	admitRequest(id: bigint): void;
 	close(): void;
 	readonly version: IetfVersion;
 }
@@ -42,12 +43,24 @@ export class NativeSession implements Session {
 	// moq-transport reserves even request IDs for the client and odd for the server,
 	// so the two peers' ID spaces never overlap.
 	#requestId: bigint;
+	#received: RequestIds;
 	readonly version: IetfVersion;
 
 	constructor(quic: WebTransport, version: IetfVersion, client: boolean) {
 		this.#quic = quic;
 		this.version = version;
 		this.#requestId = client ? 0n : 1n;
+		this.#received = new RequestIds(client);
+	}
+
+	/** Validate all incoming modern requests against the same lifetime history. */
+	admitRequest(id: bigint): void {
+		try {
+			this.#received.accept(id);
+		} catch (err) {
+			if (err instanceof SessionError) this.#quic.close({ closeCode: err.code, reason: err.message });
+			throw err;
+		}
 	}
 
 	async openBi(): Promise<Stream> {

@@ -1,4 +1,7 @@
-use std::{collections::HashSet, task::Poll};
+use std::{
+	collections::{BTreeMap, HashSet},
+	task::Poll,
+};
 
 use crate::{
 	Error, SessionError,
@@ -19,6 +22,8 @@ struct ControlState {
 	request_id_max: Option<RequestId>,
 	/// The peer's requests, flow controlled on drafts 14 to 16 only.
 	incoming: Option<Incoming>,
+	/// Permanently spent modern request IDs, compressed across adjacent IDs.
+	modern: Ids,
 }
 
 /// The MAX_REQUEST_ID window we grant the peer.
@@ -40,6 +45,41 @@ struct Incoming {
 	missing: Option<HashSet<RequestId>>,
 }
 
+/// Modern request streams can reorder, so a high-water mark alone would reject valid peers.
+struct Ids {
+	parity: u64,
+	ranges: BTreeMap<u64, u64>,
+	limit: u64,
+}
+
+impl Ids {
+	fn accept(&mut self, id: RequestId) -> Result<(), Error> {
+		let id = id.0;
+		if id >= 1 << 62 || id % 2 != self.parity {
+			return Err(SessionError::InvalidRequestId.into());
+		}
+		let previous = self.ranges.range(..=id).next_back().map(|(&start, &end)| (start, end));
+		if previous.is_some_and(|(_, end)| id <= end) {
+			return Err(SessionError::InvalidRequestId.into());
+		}
+		let next = self.ranges.range(id..).next().map(|(&start, &end)| (start, end));
+		let left = previous.filter(|(_, end)| end + 2 == id);
+		let right = next.filter(|(start, _)| *start == id + 2);
+		// Never evict history: doing so would make a retired ID usable again.
+		if left.is_none() && right.is_none() && self.ranges.len() as u64 >= self.limit {
+			tracing::warn!(limit = self.limit, "request ID history exhausted");
+			return Err(SessionError::Internal.into());
+		}
+		let start = left.map_or(id, |(start, _)| start);
+		let end = right.map_or(id, |(_, end)| end);
+		if let Some((start, _)) = right {
+			self.ranges.remove(&start);
+		}
+		self.ranges.insert(start, end);
+		Ok(())
+	}
+}
+
 #[derive(Clone)]
 pub(super) struct Control {
 	state: kio::Shared<ControlState>,
@@ -52,6 +92,11 @@ impl Control {
 				request_id_next: if client { RequestId(0) } else { RequestId(1) },
 				request_id_max,
 				incoming: None,
+				modern: Ids {
+					parity: u64::from(client),
+					ranges: BTreeMap::new(),
+					limit: crate::session::Limits::default().requests(),
+				},
 			}),
 		}
 	}
@@ -74,6 +119,11 @@ impl Control {
 		self
 	}
 
+	/// Bound fragmented modern ID history using the session's existing request capacity.
+	pub fn history_limit(&self, limit: u64) {
+		self.state.lock().modern.limit = limit;
+	}
+
 	pub fn max_request_id(&self, max: RequestId) {
 		// Mutating through the guard wakes any `next_request_id` waiting on the limit.
 		self.state.lock().request_id_max = Some(max);
@@ -89,6 +139,7 @@ impl Control {
 	pub fn accept(&self, id: RequestId) -> Result<Option<RequestPermit>, Error> {
 		let mut state = self.state.lock();
 		let Some(incoming) = &mut state.incoming else {
+			state.modern.accept(id)?;
 			return Ok(None);
 		};
 		if id.0 >= incoming.max {
@@ -325,11 +376,81 @@ mod tests {
 		}
 	}
 
-	/// Draft-17+ has no MAX_REQUEST_ID: nothing is tracked or granted.
+	#[test]
+	fn modern_requests_reject_reuse_and_wrong_parity() {
+		for client in [false, true] {
+			let control = Control::new(None, client);
+			let first = u64::from(client);
+			for id in [first + 4, first, first + 2] {
+				assert!(control.accept(RequestId(id)).is_ok());
+			}
+			for id in [first, first + 2, first + 4, first ^ 1] {
+				assert!(
+					matches!(
+						control.accept(RequestId(id)),
+						Err(Error::Session(SessionError::InvalidRequestId))
+					),
+					"accepted spent or wrong-parity ID {id}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn modern_history_coalesces_and_never_forgets() {
+		for reversed in [false, true] {
+			let control = Control::new(None, false);
+			control.history_limit(1);
+			for n in 0..4096 {
+				let id = if reversed { 4095 - n } else { n } * 2;
+				assert!(control.accept(RequestId(id)).is_ok());
+			}
+			assert_eq!(control.state.lock().modern.ranges.len(), 1);
+			assert!(matches!(
+				control.accept(RequestId(0)),
+				Err(Error::Session(SessionError::InvalidRequestId))
+			));
+		}
+		let control = Control::new(None, false);
+		control.history_limit(2);
+		control.accept(RequestId(0)).unwrap();
+		control.accept(RequestId(4)).unwrap();
+		assert!(matches!(
+			control.accept(RequestId(8)),
+			Err(Error::Session(SessionError::Internal))
+		));
+		control.accept(RequestId(2)).unwrap();
+		control.accept(RequestId(8)).unwrap();
+		for id in [0, 2, 4, 8] {
+			assert!(matches!(
+				control.accept(RequestId(id)),
+				Err(Error::Session(SessionError::InvalidRequestId))
+			));
+		}
+	}
+
+	#[test]
+	fn modern_sparse_ids_do_not_allocate_the_gap() {
+		let control = Control::new(None, false);
+		control.history_limit(2);
+		control.accept(RequestId((1 << 62) - 2)).unwrap();
+		control.accept(RequestId(0)).unwrap();
+		assert_eq!(control.state.lock().modern.ranges.len(), 2);
+		assert!(matches!(
+			control.accept(RequestId((1 << 62) - 2)),
+			Err(Error::Session(SessionError::InvalidRequestId))
+		));
+		assert!(matches!(
+			control.accept(RequestId(1 << 62)),
+			Err(Error::Session(SessionError::InvalidRequestId))
+		));
+	}
+
+	/// Draft-17+ spends IDs without granting a MAX_REQUEST_ID window.
 	#[test]
 	fn unlimited_without_a_window() {
 		let control = Control::new(None, true);
-		assert!(control.accept(RequestId(u64::MAX)).unwrap().is_none());
+		assert!(control.accept(RequestId(1)).unwrap().is_none());
 		assert_eq!(granted(&control), None);
 	}
 }

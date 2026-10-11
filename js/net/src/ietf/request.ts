@@ -1,3 +1,4 @@
+import { SessionCode, SessionError } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
@@ -21,6 +22,45 @@ export const REQUEST_WINDOW = 220_000n;
  */
 export function initialMaxRequestId(peerClient: boolean, window: bigint = REQUEST_WINDOW): bigint {
 	return window * 2n + (peerClient ? 0n : 1n);
+}
+
+/** Permanently spent modern request IDs, coalesced so contiguous traffic retains one range. @internal */
+export class RequestIds {
+	#parity: bigint;
+	#ranges: { start: bigint; end: bigint }[] = [];
+	#limit: number;
+	constructor(client: boolean, limit = Number(REQUEST_WINDOW)) {
+		this.#parity = client ? 1n : 0n;
+		this.#limit = limit;
+	}
+	/** Admit one peer ID regardless of request type or stream arrival order. */
+	accept(id: bigint): void {
+		if (id < 0n || id >= 1n << 62n || id % 2n !== this.#parity)
+			throw new SessionError(SessionCode.InvalidRequestId);
+		let low = 0;
+		let high = this.#ranges.length;
+		while (low < high) {
+			const mid = (low + high) >>> 1;
+			const range = this.#ranges[mid];
+			if (range && range.start <= id) low = mid + 1;
+			else high = mid;
+		}
+		const previous = this.#ranges[low - 1];
+		const next = this.#ranges[low];
+		if (previous && id <= previous.end) throw new SessionError(SessionCode.InvalidRequestId);
+		const right = next && next.start === id + 2n;
+		if (previous && previous.end === id - 2n) {
+			previous.end = right ? next.end : id;
+			if (right) this.#ranges.splice(low, 1);
+		} else if (right) {
+			next.start = id;
+		} else {
+			// Evicting an old range would make its spent IDs usable again.
+			if (this.#ranges.length >= this.#limit)
+				throw new SessionError(SessionCode.Internal, { reason: "request ID history exhausted" });
+			this.#ranges.splice(low, 0, { start: id, end: id });
+		}
+	}
 }
 
 export class MaxRequestId {

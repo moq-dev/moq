@@ -61,3 +61,43 @@ try {
 } finally {
 	console.debug = debug;
 }
+
+// Modern streams have no MAX_REQUEST_ID window. Sweep history fragmentation separately
+// from session fanout, including reverse insertion into a fragmented history.
+const { RequestIds } = await import("../src/ietf/request.ts");
+// The old modern path admitted every ID without tracking it.
+const baseline = process.argv.includes("--baseline");
+console.log("modern_mode,sessions,ranges,admit_us,accepted,duplicates_refused");
+for (const fragmented of [false, true]) {
+	for (const sessions of [1, 8, 32]) {
+		for (const ranges of [8, 32, 128]) {
+			const ids = Array.from({ length: ranges }, (_, i) => BigInt(i * (fragmented ? 4 : 2)));
+			if (fragmented) ids.reverse();
+			let elapsed = 0;
+			let accepted = 0;
+			let duplicates = 0;
+			for (let round = 0; round < 64; round++) {
+				const receivers = Array.from({ length: sessions }, () =>
+					baseline ? { accept(_id: bigint) {} } : new RequestIds(false),
+				);
+				const start = performance.now();
+				for (const receiver of receivers)
+					for (const id of ids) {
+						receiver.accept(id);
+						accepted++;
+					}
+				elapsed += performance.now() - start;
+				for (const receiver of receivers) {
+					try {
+						receiver.accept(ids[0] ?? 0n);
+					} catch {
+						duplicates++;
+					}
+				}
+			}
+			console.log(
+				`modern-${fragmented ? "fragmented" : "contiguous"},${sessions},${ranges},${((elapsed * 1000) / 64).toFixed(2)},${accepted},${duplicates}`,
+			);
+		}
+	}
+}

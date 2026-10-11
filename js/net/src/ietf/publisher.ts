@@ -506,7 +506,7 @@ export class Publisher {
 						continue;
 					}
 					const params = await Message.decode(stream.reader, async (r) => {
-						await r.u62();
+						this.#session.admitRequest(await r.u62());
 						if (version === Version.DRAFT_17) await r.u62();
 						return Parameters.decode(r, version, "request-update");
 					});

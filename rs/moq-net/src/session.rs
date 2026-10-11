@@ -671,7 +671,9 @@ impl Drop for Withdrawing {
 ///
 /// On moq-transport drafts 14 to 16 the caps also size the request window, which counts
 /// every request (FETCH, TRACK_STATUS and SUBSCRIBE_UPDATE included), so very low caps
-/// can starve it.
+/// can starve it. Modern drafts retain compressed request-ID history to reject reuse
+/// after a request ends. At most twice the sum of these caps may be disjoint ID ranges;
+/// exhausting that local history closes with `INTERNAL_ERROR`, without forgetting IDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {

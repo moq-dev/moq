@@ -1051,6 +1051,7 @@ export class Subscriber {
 				}
 
 				const update = await PublishNamespaceUpdate.decode(stream.reader, version);
+				this.#session.admitRequest(update.requestId);
 
 				// The parameters exist only on a session that negotiated the extension;
 				// anywhere else they are the peer's violation.

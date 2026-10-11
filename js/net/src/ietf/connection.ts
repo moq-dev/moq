@@ -17,6 +17,7 @@ import { AuthMessage, supported as authSupported, IetfAuthWire } from "./auth.ts
 import * as Cluster from "./cluster.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
+import * as Message from "./message.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
@@ -184,14 +185,7 @@ export class Connection implements Established {
 		// since we consume on demand, and subscribing to whatever we publish.
 		const session = this.#session;
 		this.#auth = new AuthSession({
-			wire:
-				auth && authSupported(version)
-					? new IetfAuthWire({
-							openBi: async () => session.openBi(),
-							nextRequestId: () => session.nextRequestId(),
-							version,
-						})
-					: undefined,
+			wire: auth && authSupported(version) ? new IetfAuthWire(session) : undefined,
 			peerGrant: {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
@@ -344,11 +338,13 @@ export class Connection implements Established {
 			// request for PUBLISH alone is refused, and one for both gets only NAMESPACE.
 			case BigInt(SubscribeNamespace.id): {
 				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
+				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
 				await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
 			}
 			case BigInt(SubscribeNamespaceLegacy.id): {
 				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
+				if (this.#session instanceof NativeSession) this.#session.admitRequest(legacy.requestId);
 				// Draft-16 carries this on its own stream, so the control adapter never sees the ID.
 				// Draft-14 and 15 already admitted it off the control stream. A refused request
 				// still spends its ID, so it is admitted and released like any other.
@@ -381,6 +377,7 @@ export class Connection implements Established {
 			// Publisher handles incoming requests
 			case BigInt(Subscribe.id): {
 				const msg = await Subscribe.decode(stream.reader, this.#session.version);
+				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
 				await this.#publisher.runSubscribe(msg, stream);
 				break;
 			}
@@ -389,16 +386,24 @@ export class Connection implements Established {
 				if (this.#session.version < Version.DRAFT_18) {
 					throw new ProtocolViolation("SUBSCRIBE_TRACKS before draft-18");
 				}
+				const requestId = await Message.decode(stream.reader, async (reader) => {
+					const id = await reader.u62();
+					await reader.readAll();
+					return id;
+				});
+				this.#session.admitRequest(requestId);
 				await this.#publisher.runSubscribeTracks(stream);
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
 				const msg = await TrackStatusRequest.decode(stream.reader, this.#session.version);
+				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
 				await this.#publisher.runTrackStatusRequest(msg, stream);
 				break;
 			}
 			case BigInt(Fetch.id): {
 				const msg = await Fetch.decode(stream.reader, this.#session.version);
+				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
 				await this.#publisher.runFetch(msg, stream);
 				break;
 			}
@@ -410,6 +415,8 @@ export class Connection implements Established {
 					this.#session.version,
 					Cluster.negotiated(this.#cluster),
 				);
+
+				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
 
 				// We always declare that advertisements to us must be solicited (MoQ
 				// Solicit), and writing the option at all proves the peer implements the
@@ -441,6 +448,7 @@ export class Connection implements Established {
 			}
 			case BigInt(Publish.id): {
 				const msg = await Publish.decode(stream.reader, this.#session.version);
+				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
 				await this.#subscriber.runPublish(msg, stream);
 				break;
 			}

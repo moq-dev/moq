@@ -135,7 +135,8 @@ AUTH Message {
 ~~~
 
 **Request ID**:
-The request's identifier, allocated like that of any other request ({{moqt}}).
+The request's identifier, allocated from the same space as every other request ({{moqt}}).
+A duplicate or wrong-parity Request ID closes the session with INVALID_REQUEST_ID, including an ID from an AUTH that has ended.
 
 **Token**:
 The credential to verify, opaque to this extension.
