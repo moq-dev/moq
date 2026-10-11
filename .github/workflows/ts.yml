@@ -1,7 +1,7 @@
 name: TS
 
 # Decoder, transport structure, buffer-model and release-timing gates are
-# independent of browser interop. Every grader has an automated control arm.
+# independent of browser interop. Decoder and transport gates have real-tool controls.
 on:
   workflow_dispatch:
   schedule:

@@ -81,22 +81,28 @@ jobs:
       # browser client can launch headless Chromium. interop.sh's own
       # `playwright install` then no-ops.
       - name: Playwright Chromium
+        id: setup
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
 
+      # Each suite reports independently after setup, while a failed step still fails the job.
       - name: Optional publisher retention
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test max-age
         shell: bash -leo pipefail {0}
 
       - name: Harness regressions
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test harness
         shell: bash -leo pipefail {0}
 
       - name: Subscription termination interop
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test bare-fin
         shell: bash -leo pipefail {0}
 
       - name: Interop (full matrix)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test interop --all
         shell: bash -leo pipefail {0}
         env:
@@ -107,7 +113,7 @@ jobs:
       # Registry installs and the release matrix run only on main, nightly or
       # on demand: a break only needs catching before the next release.
       - name: Released wire compatibility
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
         run: nix develop --command just test wire-compat
         shell: bash -leo pipefail {0}
         env:
@@ -115,6 +121,7 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: Interop negative control
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test interop-negative
         shell: bash -leo pipefail {0}
         env:
@@ -123,6 +130,7 @@ jobs:
       # Browser-to-browser media QA: presented frame progress, audible tone, audio/video skew, and
       # the publication lifecycle, plus the negative controls that prove each assertion can fail.
       - name: Media output and lifecycle
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test media
         shell: bash -leo pipefail {0}
         env:
