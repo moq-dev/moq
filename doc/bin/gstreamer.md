@@ -25,7 +25,9 @@ gst-launch-1.0 -e videotestsrc is-live=true ! x264enc tune=zerolatency ! h264par
 ```
 
 Install via `apt install gstreamer1.0-moq` or `dnf install gstreamer1-moq`
-([Install](/setup/install)), or build with `cargo build -p moq-gst` and point
+([Install](/setup/install)). With Homebrew, run `brew install moq-dev/tap/moq-gst`
+and add `$(brew --prefix moq-gst)/lib/gstreamer-1.0` to `GST_PLUGIN_PATH_1_0`.
+For a source build, run `cargo build -p moq-gst` and point
 `GST_PLUGIN_PATH_1_0` at the output. `http://` URLs pin the relay's
 certificate fingerprint automatically, so local development needs no TLS setup.
 That scheme is for localhost only: the fingerprint is fetched unauthenticated
