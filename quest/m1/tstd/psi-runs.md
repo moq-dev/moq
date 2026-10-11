@@ -36,8 +36,10 @@ only about 1.9 ms apart, at any mux rate.
   units on four and eight video PIDs still overflow after suppression.
 - #5220 (multi-packet PMT) adds PMT pacing at the system-buffer rate, since a
   PMT section of up to 1,024 B spans several packets and can exceed 512 B alone.
-  Build on that pacing rather than adding a second one, pacing the PAT and PMT
-  together since they share TBsys.
+  Build on that pacing rather than adding a second one, or own it here if #5220
+  lands without it. Pace every PID that enters TBsys as one lane: the PAT, the
+  PMT, and any `mpegts.si` passthrough on PIDs 1 to 3, which the scheduler gives
+  its own `Buffer::SYSTEM` lane today.
 - Test against TBsys fill with the T-STD model, not a packet count: a unit test
   runs laid slots' PAT and PMT packets through one shared 512-byte TBsys
   drained at 1 Mb/s, with keyframes aligned at 25 Mb/s on two and three video
