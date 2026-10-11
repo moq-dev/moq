@@ -313,10 +313,15 @@ keyframe. The output's PCR follows the source's clock within what ISO/IEC
 13818-1 allows. `--delay 0` writes frames in arrival order and drops nothing.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
-long for a restarted publisher instead, and marks the break in the stream
-(PCR discontinuity, PAT/PMT re-sent). An export that fails while the broadcast
-stays up, such as on a codec TS cannot carry, exits 1 without lingering. Only
-`ts` can mark a restart, so the other formats refuse `--linger`.
+long for the same publisher instance to come back, and carries on with the same
+stream. A replacement (a restarted publisher, under a new
+[epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
+it as a full program switch: a new PMT from its catalog, with every PID flagging
+the break. Without `--stitch` the export stays on the old publisher while it is
+up. Only lite-07 sessions carry epochs, so on the default version every return
+is a replacement. An export that fails while the broadcast stays up, such as on
+a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
+so the other formats refuse `--linger`.
 
 ## Debugging
 
