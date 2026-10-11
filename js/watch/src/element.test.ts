@@ -31,6 +31,8 @@ for (const [attribute, value, expected] of [
 	["volume", "foo", 0.5],
 	["volume", "Infinity", 0.5],
 	["volume", "1oops", 0.5],
+	["volume", "0x10", 0.5],
+	["volume", "-0.1", 0.5],
 ] as const) {
 	test(`invalid ${attribute}=${value} warns and uses the default`, () => {
 		const Element = require("./element").default;

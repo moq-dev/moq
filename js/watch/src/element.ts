@@ -30,8 +30,8 @@ function parseUrl(value: string | null): URL | undefined {
 function parseVolume(value: string | null): number {
 	if (!value?.trim()) return 0.5;
 	const volume = Number(value);
-	if (Number.isFinite(volume)) return volume;
-	console.warn(`moq-watch: invalid volume="${value}", expected a finite number`);
+	if (volume >= 0 && volume <= 1) return volume;
+	console.warn(`moq-watch: invalid volume="${value}", expected a number from 0 to 1`);
 	return 0.5;
 }
 
