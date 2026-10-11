@@ -87,6 +87,9 @@ export class Broadcast {
 	// A static network track is exposed here only while at least one subscriber uses it.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
 
+	// The kind each rendition name was first registered as, for the broadcast's whole life.
+	readonly #kinds = new Map<string, Kind>();
+
 	#signals = new Effect();
 
 	constructor(props?: Inputs<BroadcastInput>) {
@@ -131,6 +134,12 @@ export class Broadcast {
 		if (this.#renditions.peek()[name]) {
 			throw new Error(`rendition already registered: ${name}`);
 		}
+		// A name keeps its track, so it keeps its kind: different media takes a different name.
+		const previous = this.#kinds.get(name);
+		if (previous !== undefined && previous !== kind) {
+			throw new Error(`rendition ${name} was registered as ${previous}, not ${kind}`);
+		}
+		this.#kinds.set(name, kind);
 
 		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
 		this.#tracks.set(name, track);
@@ -288,8 +297,10 @@ export class Broadcast {
 				const signal = this.#tracks.get(rendition.name);
 				if (!signal) continue;
 
+				// A track that closed (an encoder error) is replaced. Its appends then throw rather
+				// than reuse the closed track's sequences.
 				let track = tracks.get(rendition.name);
-				if (!track) {
+				if (!track || track.closed.peek() !== undefined) {
 					track = broadcast.createTrack(
 						rendition.name,
 						Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),

@@ -246,8 +246,42 @@ test("a rendition keeps its track across rendition changes", async () => {
 	expect(again.track.peek()).toBe(track);
 	expect(track.appendGroup().sequence).toBe(1);
 
+	// The name keeps its kind.
+	again.close();
+	expect(() => broadcast.audio("video")).toThrow("registered as video");
+
 	audio.close();
 	subscriber.close();
+	broadcast.close();
+});
+
+test("a rendition whose track closed gets a replacement", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
+	const video = broadcast.video("video");
+	await settle();
+
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+	const first = net.track("video").subscribe();
+	await settle();
+	const track = video.track.peek();
+	if (!track) throw new Error("expected the demanded track");
+
+	// An encoder error closes the track before it wrote anything.
+	track.close(new Error("encoder failed"));
+	video.close();
+	await settle();
+
+	const again = broadcast.video("video");
+	await settle();
+	const second = net.track("video").subscribe();
+	await settle();
+	const replacement = again.track.peek();
+	expect(replacement).toBeDefined();
+	expect(replacement).not.toBe(track);
+
+	first.close();
+	second.close();
 	broadcast.close();
 });
 
