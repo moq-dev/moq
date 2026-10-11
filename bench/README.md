@@ -15,7 +15,8 @@ Run every Criterion target plus the local relay workloads:
 nix develop --command just bench
 ```
 
-Measure audio grouping at 0, 100 and 200 ms with 50 fps, 200-byte frames:
+Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
+(2.5 ms packets) at per-packet and the 20 ms default. Frames are 200 bytes:
 
 ```bash
 nix develop --command just bench-audio

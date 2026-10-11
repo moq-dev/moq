@@ -25,7 +25,9 @@ gst-launch-1.0 -e videotestsrc is-live=true ! x264enc tune=zerolatency ! h264par
 ```
 
 Install via `apt install gstreamer1.0-moq` or `dnf install gstreamer1-moq`
-([Install](/setup/install)), or build with `cargo build -p moq-gst` and point
+([Install](/setup/install)). With Homebrew, run `brew install moq-dev/tap/moq-gst`
+and add `$(brew --prefix moq-gst)/lib/gstreamer-1.0` to `GST_PLUGIN_PATH_1_0`.
+For a source build, run `cargo build -p moq-gst` and point
 `GST_PLUGIN_PATH_1_0` at the output. `http://` URLs pin the relay's
 certificate fingerprint automatically, so local development needs no TLS setup.
 That scheme is for localhost only: the fingerprint is fetched unauthenticated
@@ -53,6 +55,7 @@ into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that
 resolves timed text (`qtdemux` on a 3GPP timed-text track) can feed the pad
 directly. A cue with no duration is dropped rather than left on screen.
 
+Audio packets share groups of at least 20 ms while forwarding as they arrive.
 Each `sink_%u` request pad is one track. Pad properties: `track` names it
 (default: after the codec), `container=loc` publishes it as
 [LOC](/concept/standard#loc) instead of the legacy hang container,
