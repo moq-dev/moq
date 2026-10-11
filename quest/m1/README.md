@@ -68,7 +68,6 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - the moq.pro dashboard hosts the worklets and calls `assets()` after the release
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Test TypeScript check](/quest/m1/test-ts-check.md) - `just check` type-checks the TypeScript harnesses under test/
-- [Release backports, second batch](/quest/m1/release-backports/README.md) - the 0.17.x line picks up the smaller release-only fixes left from the 2026-10-09 triage
 - [Plan: a public model](/quest/m1/model-public-surface.md) - every crate-private model item is made public or unnecessary, so a custom publisher or subscriber builds from the public model alone
 - [FFI runtime](/quest/m1/ffi-runtime.md) - moq-ffi drives moq on a multi-thread runtime instead of one thread
 - [Pipelined requests](/quest/m1/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
@@ -111,7 +110,6 @@ session outcomes, and embedder refusals inside session outcomes.
 - [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
 - [Rendition preference](/quest/m1/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
-- [Native enabled](/quest/m1/native-enabled.md) - native players and the ffi/C paths never select a disabled rendition, and move off one disabled mid-playback
 - [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - JS, Rust/FFI, and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
 - [Discover media headroom](/quest/m1/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [Viewer up-switch](/quest/m1/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
@@ -138,7 +136,6 @@ session outcomes, and embedder refusals inside session outcomes.
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Plan: watch worker](/quest/m1/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m1/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
-- [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - with the default pool, relay memory plateaus at the expiry window on every version
 - [Front deadlines](/quest/m1/front-deadline-index.md) - a front's per-event cost stops growing with its track count: an expiry index and per-track wakes, proven by a churn benchmark
 - [io_uring handshake deadline](/quest/m1/listener-deadlines.md) - the io_uring workers apply `listen.timeout` to the handshake
 - [iroh keep-alive](/quest/m1/iroh-keep-alive.md) - the iroh backend honors `quic.keep_alive`

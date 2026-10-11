@@ -93,7 +93,7 @@ sd-notify = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
-moq-shaper = { path = "../moq-shaper" }
+moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rand = { workspace = true }
 rcgen = "0.14"

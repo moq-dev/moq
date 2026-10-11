@@ -1,5 +1,5 @@
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
-import { error, fromClose } from "../error.ts";
+import { error, fromClose, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
@@ -235,6 +235,9 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 	try {
 		return await Promise.race([terminal, negotiate(url, session, wiring)]);
 	} catch (cause) {
+		// A session failure already guarantees a terminal close; its authoritative code
+		// must not be overwritten by the reset-only fallback while the browser delivers it.
+		cause = await sessionCause(session, cause);
 		// A session shutdown can reject its SETUP stream before `closed` publishes the
 		// peer's close code. Wait briefly without closing locally, since a local clean close
 		// could overwrite that code. A reset-only peer is cleaned up after the grace period.

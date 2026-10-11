@@ -87,6 +87,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just bench-audio
 
+      - name: Latency observation benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-latency
+
       - name: Audio mixer benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-playback
