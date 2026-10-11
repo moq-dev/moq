@@ -126,10 +126,26 @@ class Controls(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0 if expected else 1, result.stdout + result.stderr)
                     parsed = json.loads(report.read_text())
-                    if not expected and "error" not in parsed:
+                    if label == "insufficient shared media":
+                        self.assertEqual(parsed["error"], "only 13.990s of acquired shared clock; need 20.0s")
+                    else:
+                        self.assertNotIn("error", parsed)
                         sdt = next(r for r in parsed["tables"] if r["pid"] == 0x11)
                         self.assertTrue(sdt["graded"])
-                        self.assertFalse(sdt["ok"])
+                        self.assertEqual(sdt["ok"], expected)
+                        self.assertTrue(all(r["ok"] for r in parsed["tables"] if r["pid"] != 0x11))
+                        if label in ("persistent phase", "drift"):
+                            self.assertEqual((sdt["a"], sdt["b"]), (12, 12))
+                            self.assertLess(sdt["agreement_pct"], 90)
+                        elif not expected:
+                            counts = {
+                                "table disappears in shared media": (14, 6),
+                                "table absent": (14, 0),
+                                "table absent on both legs": (0, 0),
+                                "sparse emissions": (14, 7),
+                                "sparse on both legs": (7, 7),
+                            }
+                            self.assertEqual((sdt["a"], sdt["b"]), counts[label])
                     print(f"PASS control: {label}")
             capture(a, wrap=True)
             capture(b, start=11500, wrap=True)
