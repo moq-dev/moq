@@ -36,6 +36,7 @@ pub(crate) struct Inner {
 }
 
 pub(crate) struct State {
+	pub(crate) active: Option<moq_net::server::Active>,
 	/// Wakes the driver; handles kick it after mutating the connection so
 	/// fresh egress reaches the wire.
 	driver: kio::WaiterList,
@@ -90,6 +91,7 @@ pub(crate) struct State {
 impl State {
 	fn new() -> Self {
 		Self {
+			active: None,
 			driver: kio::WaiterList::new(),
 			established: false,
 			establish_waiters: kio::WaiterList::new(),
@@ -126,6 +128,7 @@ impl State {
 	/// Terminate with `err` (the first one wins) and wake absolutely everyone,
 	/// the driver included: an externally failed driver has to notice.
 	fn fail(&mut self, err: Error) {
+		self.active.take();
 		if self.closed.is_none() {
 			self.closed = Some(err);
 		}

@@ -7,9 +7,8 @@
 //! only the time left, so no session outlives the window the relay promised.
 //!
 //! The drain ends as soon as every session has left, or at that deadline.
-//! Sessions are counted once established, so one still in
-//! its handshake when the last established session leaves is cut off with the
-//! process.
+//! Accepted transports hold the drain through handshake and authentication,
+//! then through the established session, or until the shared deadline.
 
 use std::{sync::Arc, time::Duration};
 
@@ -56,6 +55,7 @@ pub(crate) struct Tally {
 /// and drains itself via [`drain_session`](Self::drain_session) when it fires.
 #[derive(Clone)]
 pub struct Observer {
+	pub(crate) activity: moq_net::server::Activity,
 	rx: watch::Receiver<Option<Instant>>,
 	tally: Arc<watch::Sender<Tally>>,
 	/// How long a drained session may keep running before it is force-closed.
@@ -83,6 +83,7 @@ impl Observer {
 		Self {
 			rx,
 			tally: Arc::new(watch::channel(Tally::default()).0),
+			activity: Default::default(),
 			drain_timeout,
 		}
 	}
@@ -107,6 +108,7 @@ impl Observer {
 	pub(crate) fn serve(&self) -> Serving {
 		self.tally.send_modify(|tally| tally.live += 1);
 		Serving {
+			_active: self.activity.enter(),
 			tally: self.tally.clone(),
 		}
 	}
@@ -116,10 +118,9 @@ impl Observer {
 		*self.tally.borrow()
 	}
 
-	/// Resolve once no [`serve`](Self::serve) guard is left.
+	/// Resolve once every admitted transport and serving guard has left.
 	pub(crate) async fn drained(&self) {
-		// The sender lives in `self`, so the channel cannot close under the wait.
-		let _ = self.tally.subscribe().wait_for(|tally| tally.live == 0).await;
+		self.activity.idle().await;
 	}
 
 	/// Count a session as draining until the returned guard drops, and as forced
@@ -176,6 +177,7 @@ impl Observer {
 
 /// An established session the drain waits on; see [`Observer::serve`].
 pub(crate) struct Serving {
+	_active: moq_net::server::Active,
 	tally: Arc<watch::Sender<Tally>>,
 }
 
@@ -207,6 +209,65 @@ impl Drop for Draining {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn pending_admission_holds_drain() {
+		use futures::FutureExt;
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let url: url::Url = format!("tcp://{}/room", relay.tcp_addr().unwrap()).parse().unwrap();
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let shutdown = relay.shutdown().clone();
+		let running = tokio::spawn(relay.run());
+		let connecting = tokio::spawn(async move {
+			moq_tokio::connect::Config::default()
+				.init(Default::default())
+				.unwrap()
+				.with_reconnect(false)
+				.connect(url)
+				.established()
+				.await
+		});
+		let admission = admissions.next().await.unwrap();
+		trigger.start();
+		let waited = shutdown.drained().now_or_never().is_none();
+		admission.refuse(crate::auth::Error::Refused);
+		drop(connecting.await.unwrap());
+		running.await.unwrap().unwrap();
+		assert!(waited, "drain completed while auth admission is pending");
+	}
+
+	#[tokio::test]
+	async fn pending_admission_receives_goaway_after_drain_starts() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let url: url::Url = format!("tcp://{}/room", relay.tcp_addr().unwrap()).parse().unwrap();
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		let connecting = tokio::spawn(async move {
+			moq_tokio::connect::Config::default()
+				.init(Default::default())
+				.unwrap()
+				.with_reconnect(false)
+				.connect(url)
+				.established()
+				.await
+		});
+		let admission = admissions.next().await.unwrap();
+		trigger.start();
+		let all = || [moq_auth::Pattern::all()].into_iter().collect();
+		let (_lease, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
+		admission.grant(consumer);
+		let connection = connecting.await.unwrap().unwrap();
+		let goaway = connection.draining().unwrap().recv().await.unwrap();
+		assert_eq!(goaway.uri(), "");
+		connection.closed().await.unwrap();
+		running.await.unwrap().unwrap();
+	}
 
 	#[tokio::test(start_paused = true)]
 	async fn drained_waits_for_every_session() {

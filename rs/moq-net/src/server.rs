@@ -13,6 +13,34 @@ use crate::{
 	ietf, lite, setup, stats,
 };
 
+/// Tracks admitted connections until their handshake or session ends.
+#[derive(Clone, Debug, Default)]
+pub struct Activity {
+	state: kio::Producer<()>,
+}
+
+impl Activity {
+	/// Hold the server active until the returned guard is dropped.
+	pub fn enter(&self) -> Active {
+		Active {
+			_guard: self.state.consume(),
+		}
+	}
+
+	/// Wait until every admitted connection has released its guard.
+	pub async fn idle(&self) {
+		// This handle owns a producer, so its channel cannot close here.
+		self.state.unused().await.expect("activity channel closed");
+	}
+}
+
+/// Keeps an admitted connection in the server's active set.
+#[derive(Debug)]
+#[must_use]
+pub struct Active {
+	_guard: kio::Consumer<()>,
+}
+
 /// A MoQ server session builder.
 #[derive(Default, Clone)]
 pub struct Server {

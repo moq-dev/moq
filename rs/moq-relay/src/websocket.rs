@@ -37,6 +37,7 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
+	let active = state.shutdown.activity.enter();
 	let alpns = versions.alpns();
 	let ws = negotiate_subprotocol(ws, &alpns)?;
 
@@ -84,6 +85,7 @@ pub(crate) async fn serve_ws(
 	let lease = lease.with_stats(stats.clone());
 
 	Ok(ws.on_upgrade(async move |socket| {
+		let _active = active;
 		let id = state.conn_id.fetch_add(1, Ordering::Relaxed);
 
 		// Capture the negotiated subprotocol before we erase the WebSocket type

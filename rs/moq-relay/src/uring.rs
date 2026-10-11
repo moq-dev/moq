@@ -545,9 +545,10 @@ fn serve_worker(spawn: Spawn) -> bool {
 			.handle()
 			.udp(member, udp)
 			.context("failed to adopt the worker socket")?;
+		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
+		endpoint_config.activity = serve.shutdown.activity.clone();
 		let endpoint =
-			moq_uring::quic::Endpoint::new(socket, moq_uring::quic::endpoint::Config::default().with_server(server))
-				.context("failed to build the QUIC endpoint")?;
+			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
 	})();
 
