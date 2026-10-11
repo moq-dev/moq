@@ -21,6 +21,24 @@ export const SetupOption = {
 	Hidden: 0x40b5cn,
 } as const;
 
+const SETUP_OPTIONS: readonly bigint[] = Object.values(SetupOption);
+
+// Whether `version` defines a SETUP option. Only defined options must be unique; others,
+// including GREASE, may repeat.
+function definedSetupOption(id: bigint, version: IetfVersion): boolean {
+	const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+	switch (id) {
+		case SetupOption.MaxRequestId:
+			return legacy;
+		// The MoQ Cluster extension is only negotiated on draft-17+ (see `cluster.ts`).
+		case SetupOption.HopId:
+		case SetupOption.RelayCost:
+			return !legacy;
+		default:
+			return SETUP_OPTIONS.includes(id);
+	}
+}
+
 /// Setup Options — used in SETUP messages.
 ///
 /// In d14-d16 these are count-prefixed ("Setup Parameters").
@@ -140,13 +158,13 @@ export class SetupOptions {
 				i++;
 
 				if (id % 2n === 0n) {
-					if (params.vars.has(id)) {
+					if (definedSetupOption(id, version) && params.vars.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();
 					params.setVarint(id, varint);
 				} else {
-					if (params.bytes.has(id)) {
+					if (definedSetupOption(id, version) && params.bytes.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const size = await r.u53();
@@ -169,13 +187,13 @@ export class SetupOptions {
 				}
 
 				if (id % 2n === 0n) {
-					if (params.vars.has(id)) {
+					if (definedSetupOption(id, version) && params.vars.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();
 					params.setVarint(id, varint);
 				} else {
-					if (params.bytes.has(id)) {
+					if (definedSetupOption(id, version) && params.bytes.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const size = await r.u53();
@@ -341,6 +359,11 @@ export class Parameters {
 	/** Whether the message carried TRACK_PROPERTY_FILTER, which only a SUBSCRIBE_TRACKS may. */
 	get trackPropertyFilter(): boolean {
 		return this.#repeated.has(MSG_PARAM_TRACK_PROPERTY_FILTER);
+	}
+
+	/** Whether the message carried an AUTHORIZATION_TOKEN. */
+	get authorizationToken(): boolean {
+		return this.#repeated.has(MSG_PARAM_AUTHORIZATION_TOKEN);
 	}
 
 	// --- Numeric accessors ---

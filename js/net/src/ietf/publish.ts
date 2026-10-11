@@ -217,6 +217,7 @@ export class PublishError {
 export const PublishDoneStatus = {
 	INTERNAL_ERROR: 0x0,
 	TRACK_ENDED: 0x2,
+	UPDATE_FAILED: 0x8,
 	/** Removed in draft-20, where 0x3 is unassigned. */
 	SUBSCRIPTION_ENDED: 0x3,
 } as const;

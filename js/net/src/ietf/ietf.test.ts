@@ -7,7 +7,7 @@ import { Fetch } from "./fetch.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
 import { FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
-import { Parameters, SetupOptions } from "./parameters.ts";
+import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -2003,5 +2003,77 @@ for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16, Ver
 			if (version === Version.DRAFT_14 || value <= 1) await decoded;
 			else await expect(decoded).rejects.toThrow();
 		}
+	});
+}
+
+const SETUP_VERSIONS = [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+] as const;
+
+const legacySetup = (version: IetfVersion) => version <= Version.DRAFT_16;
+
+// A SETUP block carrying the option `kind` twice.
+async function repeatedSetupOption(kind: bigint, version: IetfVersion): Promise<Uint8Array> {
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream, version);
+	if (legacySetup(version)) await writer.u53(2);
+	await writer.u62(kind);
+	for (let i = 0; i < 2; i++) {
+		if (i > 0) await writer.u62(version <= Version.DRAFT_15 ? kind : 0n);
+		if (kind % 2n === 0n) await writer.u62(1n);
+		else {
+			await writer.u53(1);
+			await writer.u8(1);
+		}
+	}
+	await writer.close();
+	await writer.closed;
+	return concatChunks(written);
+}
+
+const SETUP_UNIQUENESS: [bigint, (version: IetfVersion) => boolean][] = [
+	[0x20n, () => false],
+	[0x21n, () => false],
+	[0x9dn, () => false],
+	[0x11cn, () => false],
+	[SetupOption.MaxRequestId, legacySetup],
+	[SetupOption.HopId, (v) => !legacySetup(v)],
+	[SetupOption.RelayCost, (v) => !legacySetup(v)],
+	[SetupOption.MaxAuthTokenCacheSize, () => true],
+	[SetupOption.Solicit, () => true],
+	[SetupOption.Hidden, () => true],
+	[SetupOption.Implementation, () => true],
+];
+
+for (const version of SETUP_VERSIONS) {
+	for (const [kind, unique] of SETUP_UNIQUENESS) {
+		test(`SETUP ${version}: option ${kind} must be unique only when defined`, async () => {
+			const bytes = await repeatedSetupOption(kind, version);
+			const decoded = SetupOptions.decode(new Reader(undefined, bytes, version), version);
+			if (unique(version)) await expect(decoded).rejects.toThrow(/duplicate/);
+			else await decoded;
+		});
+	}
+}
+
+for (const version of [
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+]) {
+	test(`SETUP ${version}: repeated unknown options still require complete values`, async () => {
+		const bytes = new Uint8Array([0x21, 1, 97, 0, 2, 98]);
+		await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow();
 	});
 }

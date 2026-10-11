@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map};
+use std::collections::HashMap;
 
 use bytes::Buf;
 use num_enum::{FromPrimitive, IntoPrimitive};
@@ -30,6 +30,18 @@ pub enum ParameterVarInt {
 	Hidden = super::hidden::HIDDEN,
 	#[num_enum(catch_all)]
 	Unknown(u64),
+}
+
+impl ParameterVarInt {
+	/// Whether `version` defines this option. Only defined options must be unique.
+	fn defined(self, version: Version) -> bool {
+		match self {
+			Self::MaxRequestId => matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16),
+			Self::HopId | Self::RelayCost => super::cluster::supported(version),
+			Self::Unknown(_) => false,
+			Self::MaxAuthTokenCacheSize | Self::Solicit | Self::Hidden => true,
+		}
+	}
 }
 
 #[derive(Debug, Copy, Clone, FromPrimitive, IntoPrimitive, Eq, Hash, PartialEq)]
@@ -82,20 +94,21 @@ impl Decode<Version> for Parameters {
 
 					if kind % 2 == 0 {
 						let kind = ParameterVarInt::from(kind);
-						match vars.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
-						};
+						// Unknown SETUP options may repeat, but their values must still decode.
+						if kind.defined(version) && vars.contains_key(&kind) {
+							return Err(DecodeError::Duplicate);
+						}
+						vars.insert(kind, u64::decode(&mut r, version)?);
 					} else {
 						let kind = ParameterBytes::from(kind);
 						let val = Vec::<u8>::decode(&mut r, version)?;
 						if val.len() > MAX_KVP_VALUE_LEN {
 							return Err(DecodeError::BoundsExceeded);
 						}
-						match bytes.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(val),
-						};
+						if !matches!(kind, ParameterBytes::Unknown(_)) && bytes.contains_key(&kind) {
+							return Err(DecodeError::Duplicate);
+						}
+						bytes.insert(kind, val);
 					}
 				}
 			}
@@ -119,20 +132,21 @@ impl Decode<Version> for Parameters {
 
 					if abs % 2 == 0 {
 						let kind = ParameterVarInt::from(abs);
-						match vars.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
-						};
+						// Unknown SETUP options may repeat, but their values must still decode.
+						if kind.defined(version) && vars.contains_key(&kind) {
+							return Err(DecodeError::Duplicate);
+						}
+						vars.insert(kind, u64::decode(&mut r, version)?);
 					} else {
 						let kind = ParameterBytes::from(abs);
 						let val = Vec::<u8>::decode(&mut r, version)?;
 						if val.len() > MAX_KVP_VALUE_LEN {
 							return Err(DecodeError::BoundsExceeded);
 						}
-						match bytes.entry(kind) {
-							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(val),
-						};
+						if !matches!(kind, ParameterBytes::Unknown(_)) && bytes.contains_key(&kind) {
+							return Err(DecodeError::Duplicate);
+						}
+						bytes.insert(kind, val);
 					}
 				}
 			}
@@ -608,6 +622,94 @@ mod tests {
 	use super::super::Filter;
 	use super::*;
 	use bytes::{Buf, Bytes, BytesMut};
+
+	const SETUP_VERSIONS: [Version; 9] = [
+		Version::Draft14,
+		Version::Draft15,
+		Version::Draft16,
+		Version::Draft17,
+		Version::Draft18,
+		Version::Draft19,
+		Version::Draft20,
+		Version::Draft21,
+		Version::Draft22,
+	];
+
+	fn legacy(version: Version) -> bool {
+		matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+	}
+
+	/// A SETUP block carrying the option `kind` twice.
+	fn repeated_setup_option(kind: u64, version: Version) -> Vec<u8> {
+		let mut buf = Vec::new();
+		if legacy(version) {
+			2u64.encode(&mut buf, version).unwrap();
+		}
+		kind.encode(&mut buf, version).unwrap();
+		for i in 0..2 {
+			if i > 0 {
+				let next = if matches!(version, Version::Draft14 | Version::Draft15) {
+					kind
+				} else {
+					0
+				};
+				next.encode(&mut buf, version).unwrap();
+			}
+			if kind.is_multiple_of(2) {
+				1u64.encode(&mut buf, version).unwrap();
+			} else {
+				vec![1u8].encode(&mut buf, version).unwrap();
+			}
+		}
+		buf
+	}
+
+	#[test]
+	fn setup_only_defined_options_must_be_unique() {
+		// Whether the option must be unique on a given draft.
+		type Unique = fn(Version) -> bool;
+		let cases: [(u64, Unique); 11] = [
+			(0x20, |_| false),
+			(0x21, |_| false),
+			(0x9d, |_| false),
+			(0x11c, |_| false),
+			(ParameterVarInt::MaxRequestId.into(), legacy),
+			(ParameterVarInt::HopId.into(), |v| !legacy(v)),
+			(ParameterVarInt::RelayCost.into(), |v| !legacy(v)),
+			(ParameterVarInt::MaxAuthTokenCacheSize.into(), |_| true),
+			(ParameterVarInt::Solicit.into(), |_| true),
+			(ParameterVarInt::Hidden.into(), |_| true),
+			(ParameterBytes::Implementation.into(), |_| true),
+		];
+		for version in SETUP_VERSIONS {
+			for (kind, unique) in cases {
+				let buf = repeated_setup_option(kind, version);
+				let result = Parameters::decode(&mut buf.as_slice(), version);
+				if unique(version) {
+					assert!(
+						matches!(result, Err(DecodeError::Duplicate)),
+						"{kind:#x} on {version:?}"
+					);
+				} else {
+					result.unwrap_or_else(|err| panic!("{kind:#x} on {version:?}: {err:?}"));
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn setup_repeated_options_require_valid_values() {
+		for version in [
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			assert!(Parameters::decode(&mut &[0x21, 1, b'a', 0, 2, b'b'][..], version).is_err());
+		}
+	}
 
 	// ---- Setup Parameters tests (unchanged) ----
 
