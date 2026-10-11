@@ -1,12 +1,13 @@
-# [M] T-STD compliant TS export
+# T-STD compliant TS export
 
 ## Goal
 
-`moq export ts` output passes a full ISO 13818-1 T-STD buffer-model check
-(transport, multiplex, and elementary buffers, with every access unit decoded
-at its DTS without overflow or underflow), on a clean path and under
-sustained loss. That is the bar for the media-aware lane to carry primary
-distribution. Without it, only the passthrough lane can.
+`moq export ts` output passes the applicable ISO 13818-1 T-STD buffer-model
+checks for explicitly supported profiles, with admitted decodable access
+units complete by their decode time and no modelled buffer overflow. Under
+loss, validate the surviving content, declared discontinuities and recovery;
+missing source units cannot all be decoded. Packet passthrough also needs
+timing and recovery evidence before making a distribution-readiness claim.
 
 ## Plan
 
@@ -33,6 +34,18 @@ This README owns the end-to-end proof: the #4613 netem rig (10% loss, a real
 ~10 Mb/s broadcast TS) passes the strict T-STD check, and the recipe runs
 nightly.
 
+Audit clarification (2026-10-11): record what actually arrived, was
+retransmitted, or missed its deadline. The IP loss percentage alone is not
+a MoQ omission test. Keep this network/pacing proof and add deterministic
+content-loss coverage through the TS reliability line. Run TSDuck, FFmpeg
+software decode, and the custom model as automated assertions with known-bad
+controls. A model pass is not independent proof of decoded content.
+
+The current model does not cover every codec/layout or the PSI system buffer.
+Name those exclusions and assumptions in the profile report; the PSI quest
+owns its system-buffer proof, and the existing controls quest owns the missing
+MB/AAC controls. Do not relabel the current subset a full standards check.
+
 ## Required
 
 - [Send-ahead within the delay](/quest/m1/tstd/send-ahead.md) - total lag is `--delay`, send-ahead included, with a 1 s default
@@ -42,3 +55,5 @@ nightly.
 ## Related
 
 - [TS passthrough export](/quest/m1/ts-passthrough-export.md) - the passthrough lane named in the Goal
+- [Automated validation](/quest/m1/ts-reliability/validation.md) - independent decode, profile coverage and CI ownership
+- [Loss and recovery](/quest/m1/ts-reliability/recovery.md) - actual object/group omissions and recovery

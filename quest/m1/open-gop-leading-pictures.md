@@ -56,13 +56,17 @@ decode, and the JS test should drive the software decoder.
   export still sends a join's orphaned leading pictures, so 3 of 500
   frames on the open-GOP fixture decode after they present
   (`dts-before-pts`). Trim them at tune-in from the same signal, on the
-  export's first group only, and make `just test ts --open-gop` pass under
+  first group after each non-continuous transition, and make
+  `just test ts --open-gop` pass under
   `--strict`. Decided in the 2026-10-05 audit: the grader changes with it.
   `test/ts/open-gop.py`'s decode-order check (a contiguous run of source
   access units) and leading-pictures check, and the `test/ts/README.md` text
   that says the round-trip must hand every leading picture on, both expect
-  every picture today; rewrite them to expect the first group's orphaned
-  leading pictures trimmed and every later group's kept. Rejected: dropping
+  every picture today; rewrite them to expect orphaned leading pictures
+  trimmed after each delivery break and every continuous group's kept.
+  The 2026-10-11 audit applies the same recovery rule to TS as to the
+  playback paths: the previous first-group-only wording missed later skips.
+  Rejected: dropping
   this bullet and keeping the grader.
 - Tests: a synthetic group with a keyframe followed by two earlier-stamped
   deltas is trimmed on the first group and kept on the second; and a viewer

@@ -25,6 +25,10 @@ broadcast feeds that only do intra refresh.
 
 Decisions the quests share:
 
+The recovery-boundary planning prerequisite checks the duration contract
+below before implementation. Its precision and publication ordering must
+make these presentation guarantees true even when sweep lengths change.
+
 - One group per refresh cycle. A group starts at the recovery point, the frame
   that begins a sweep, so a viewer joining at any group boundary is clean after
   exactly one cycle and relay shedding keeps its meaning.
@@ -42,6 +46,7 @@ Decisions the quests share:
 
 ## Required
 
+- [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - settle safe precision and publication ordering before consumers rely on a duration
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - JS and Rust viewers join `warmup` earlier and withhold display until recovery, except at a true IDR
 - [H.264 import](/quest/m2/intra-refresh/h264-import.md) - the splitter keeps `recovery_frame_cnt` and import publishes `warmup` from it
 - [H.265 import](/quest/m2/intra-refresh/h265-import.md) - the splitter reads the recovery-point SEI so an HEVC intra-refresh stream forms groups and publishes `warmup`

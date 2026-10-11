@@ -75,6 +75,7 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
 - [Kotlin wrapper POMs](/quest/m1/kt-ffi-pom.md) - Maven builds of `dev.moq:moq` resolve a published moq-ffi instead of the missing `0.0.0-dev`
+- [Plan: redundant TS alignment](/quest/m1/plan-ts-alignment.md) - settle shared source coordinates and distinguish TS identity from coordinated RTP recovery
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [moq.sh deploys from CI](/quest/m1/moq-sh-deploy.md) - the first `release` run of the moq.sh workflow deploys with the Workers Editor token
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
@@ -159,7 +160,8 @@ session outcomes, and embedder refusals inside session outcomes.
 - [MSF caption roles](/quest/m1/captions-msf.md) - an MSF caption or subtitle track survives conversion to a hang catalog
 - [Fail loud on dropped timed metadata](/quest/m1/drop-loud.md) - FLV script tags and fMP4 emsg boxes are counted and warned about instead of silently dropped, until real carriage lands
 - [Encoder colour](/quest/m1/color-model.md) - every moq-video encode path signals the colour its output actually has, or refuses instead of mislabelling
-- [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the T-STD buffer model, starting with a fixed `--delay`
+- [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
+- [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the supported T-STD buffer models, starting with a fixed `--delay`
 - [Multi-packet PMT](/quest/m1/ts-pmt-split.md) - `export ts` splits a PMT longer than one packet instead of exiting before its first packet
 - [ATSC AC-3](/quest/m1/ts-atsc-ac3.md) - `export ts` carries 48 kHz ATSC AC-3 at every A/52 rate up to 640 kb/s instead of aborting from 384 kb/s up
 - [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust container consumer reports a frame after a subscribe or discontinuity as non-continuous, like JS, for the tune-in and warmup trims
