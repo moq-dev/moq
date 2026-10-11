@@ -15,6 +15,7 @@ pub enum Direction {
 }
 
 /// An armed ingress burst; dropping it cancels and discards held datagrams.
+#[must_use = "dropping the burst cancels it and discards held datagrams"]
 pub struct Burst {
 	state: Arc<Mutex<State>>,
 	done: oneshot::Receiver<()>,
