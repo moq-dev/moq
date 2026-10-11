@@ -381,13 +381,24 @@ impl<S: Stream> Client<S> {
 	/// outbound packets and failing on an explicit rejection.
 	async fn await_event(&mut self, direction: Direction) -> Result<()> {
 		let mut buffer = [0u8; READ_BUFFER];
+		// Script data can precede Play.Start; hold it so the pull path still counts it.
+		let mut held = VecDeque::new();
 		loop {
 			while let Some(result) = self.work.pop_front() {
 				match result {
 					ClientSessionResult::OutboundResponse(packet) => self.stream.write_all(&packet.bytes).await?,
 					ClientSessionResult::RaisedEvent(event) => match (direction, event) {
 						(Direction::Publish, ClientSessionEvent::PublishRequestAccepted)
-						| (Direction::Play, ClientSessionEvent::PlaybackRequestAccepted) => return Ok(()),
+						| (Direction::Play, ClientSessionEvent::PlaybackRequestAccepted) => {
+							held.append(&mut self.work);
+							self.work = held;
+							return Ok(());
+						}
+						(
+							Direction::Play,
+							event @ (ClientSessionEvent::StreamMetadataReceived { .. }
+							| ClientSessionEvent::UnhandleableAmf0Data { .. }),
+						) => held.push_back(ClientSessionResult::RaisedEvent(event)),
 						// A refused publish/play arrives as an onStatus *failure* code, not a
 						// Rejected event; surface it instead of hanging until the peer closes.
 						// Benign progress codes (e.g. NetStream.Play.Reset, which precedes
@@ -556,12 +567,21 @@ mod tests {
 	async fn pull_metadata_drops_warn_once() {
 		let (stream, _peer) = tokio::io::duplex(1024);
 		let (mut session, _) = ClientSession::new(crate::rml::sessions::ClientSessionConfig::new()).unwrap();
-		// A custom script message goes through the session's own parser.
-		let cue_point = session.handle_input(&crate::metadata::cue_point_packet()).unwrap();
+		// A custom script message goes through the session's own parser, ahead of
+		// Play.Start, then onMetaData follows the acceptance.
+		let mut work = VecDeque::from(session.handle_input(&crate::metadata::cue_point_packet()).unwrap());
+		work.push_back(ClientSessionResult::RaisedEvent(
+			ClientSessionEvent::PlaybackRequestAccepted,
+		));
+		work.push_back(ClientSessionResult::RaisedEvent(
+			ClientSessionEvent::StreamMetadataReceived {
+				metadata: crate::rml::sessions::StreamMetadata::new(),
+			},
+		));
 		let mut client = Client {
 			stream,
 			session,
-			work: VecDeque::new(),
+			work,
 			app: "live".into(),
 			export_max_delay: crate::DEFAULT_MAX_DELAY,
 			import_max_age: None,
@@ -569,13 +589,9 @@ mod tests {
 		};
 		let origin = moq_tokio::origin::spawn();
 		let mut publisher = Publisher::new(&origin, "metadata", Default::default()).unwrap();
-		let events = std::iter::once(ClientSessionResult::RaisedEvent(
-			ClientSessionEvent::StreamMetadataReceived {
-				metadata: crate::rml::sessions::StreamMetadata::new(),
-			},
-		))
-		.chain(cue_point);
-		client.pull_results(events, &mut publisher).await.unwrap();
+		client.await_event(Direction::Play).await.unwrap();
+		let queued = std::mem::take(&mut client.work);
+		client.pull_results(queued, &mut publisher).await.unwrap();
 		assert_eq!(publisher.metadata.count, 2);
 		publisher.finish().unwrap();
 		drop(publisher);
