@@ -65,7 +65,6 @@ consumer yet, waits in [m3](/quest/m3/README.md).
 - [Archive S3 wire proof](/quest/m2/archive-s3.md) - the archive proof also runs through the S3 client against an in-process S3-compatible server
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
 - [Range-addressed HLS playlists](/quest/m2/hls-ranges.md) - `moq-hls` lists a start-to-end range of a recording as its own playlist, for moq.pro's managed HLS
-- [DASH rendition URLs](/quest/m2/dash-rendition-uri.md) - DASH init and segment URLs percent-encode the rendition name, so a name with a slash resolves to its own rendition
 - [IETF on the ring](/quest/m2/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
 - [Dropped uring session closes](/quest/m2/uring-drop-close.md) - a moq-uring session dropped without close() closes its connection
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio

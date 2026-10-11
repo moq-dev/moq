@@ -6,11 +6,12 @@ check:
     sh/gh/alert.sh check-coverage
     bun sh/gh/check-runs.ts
 
-# Tests of the release tooling itself; nightly, not on every pull request.
+# Tests of repository tooling; nightly, not on every pull request.
 test:
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/rs/package-rename.test.py
+    python3 sh/rs/select.test.py
     sh/go/publish-wrapper.test.sh
     bash .claude/hooks/direnv.test.sh
 
