@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 
 // Stand-ins for the only DOM globals the module body touches: the base class and the registry it
 // writes to. No element is constructed here, so nothing else is reached.
@@ -25,3 +25,26 @@ test("importing the entrypoint registers <moq-watch> before the import finishes"
 	require("./element");
 	expect(registry.get("moq-watch")).toBeDefined();
 });
+
+for (const [attribute, value, expected] of [
+	["url", "http://[", undefined],
+	["volume", "foo", 0.5],
+	["volume", "Infinity", 0.5],
+	["volume", "1oops", 0.5],
+	["volume", "0x10", 0.5],
+	["volume", "-0.1", 0.5],
+] as const) {
+	test(`invalid ${attribute}=${value} warns and uses the default`, () => {
+		const Element = require("./element").default;
+		const set = mock(() => {});
+		const target = { connection: { url: { set } }, controls: { volume: { set } } };
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			expect(() => Element.prototype.attributeChangedCallback.call(target, attribute, null, value)).not.toThrow();
+			expect(set).toHaveBeenCalledWith(expected);
+			expect(warn).toHaveBeenCalledTimes(1);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+}

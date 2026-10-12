@@ -15,6 +15,16 @@ import * as Source from "./source";
 import { clearSourceState } from "./source-state";
 import * as Video from "./video";
 
+function parseUrl(value: string | null): URL | undefined {
+	if (!value) return undefined;
+	try {
+		return new URL(value);
+	} catch {
+		console.warn(`moq-publish: invalid url="${value}", expected an absolute URL`);
+		return undefined;
+	}
+}
+
 const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "backend", "announce"] as const;
 type Observed = (typeof OBSERVED)[number];
 
@@ -305,7 +315,7 @@ export default class MoqPublish extends HTMLElement {
 		if (oldValue === newValue) return;
 
 		if (name === "url") {
-			this.connection.url.set(newValue ? new URL(newValue) : undefined);
+			this.connection.url.set(parseUrl(newValue));
 		} else if (name === "name") {
 			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "source") {

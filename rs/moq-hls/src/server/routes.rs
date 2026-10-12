@@ -378,6 +378,11 @@ fn server_error(err: crate::Error) -> Response {
 mod tests {
 	use super::*;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	#[test]
 	fn parses_multisegment_broadcast_and_encoded_rendition() {
 		assert_eq!(
@@ -389,6 +394,39 @@ mod tests {
 					rendition: "cam#1/main?alt".to_string(),
 				},
 			})
+		);
+	}
+
+	#[test]
+	fn parses_encoded_dash_rendition_as_one_segment() {
+		let parsed = |path| {
+			let route = Route::parse(path)?;
+			let rendition = match &route.resource {
+				Resource::Media { rendition, .. }
+				| Resource::Init { rendition, .. }
+				| Resource::Segment { rendition, .. }
+				| Resource::SegmentAt { rendition, .. } => rendition.clone(),
+				Resource::Master | Resource::Manifest => return None,
+			};
+			Some((route.broadcast, rendition))
+		};
+
+		// The manifest for broadcast `live` and rendition `video/1080p` emits these paths.
+		// Unencoded, the same name is broadcast `live/video`, rendition `1080p`.
+		let cases = [
+			("/live/video/video%2F1080p/init.0123abcd.mp4", "video/1080p"),
+			("/live/video/video%2F1080p/seg/ab12cd34.t2000.m4s", "video/1080p"),
+			("/live/video/cam%3F1/init.0123abcd.mp4", "cam?1"),
+			("/live/video/cam%231/media.m3u8", "cam#1"),
+			("/live/audio/100%25/init.0123abcd.mp4", "100%"),
+			("/live/video/price%249/seg/ab12cd34.t0.m4s", "price$9"),
+		];
+		for (path, rendition) in cases {
+			assert_eq!(parsed(path), Some(("live".into(), rendition.into())), "{path}");
+		}
+		assert_eq!(
+			parsed("/live/video/video/1080p/init.0123abcd.mp4"),
+			Some(("live/video".into(), "1080p".into()))
 		);
 	}
 
@@ -629,7 +667,7 @@ mod tests {
 		let pair = lite_pair().await;
 		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 		broadcast.announce(Default::default()).expect("announce");
-		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
 		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
@@ -672,21 +710,19 @@ mod tests {
 			let pair = lite_pair_on(version, moq_net::Hop::random()).await;
 			let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 			broadcast.announce(Default::default()).expect("announce");
-			let (_catalog, _registration, track, mut media) = publish_video(&mut broadcast, video_config(), None);
+			let (_catalog, _registration, track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 
 			let origin = pair.sub_origin.consume();
 			tokio::time::timeout(TIMEOUT, origin.routed("live"))
 				.await
 				.expect("announce timed out")
 				.expect("routed");
-			let source = moq_mux::Source::new(origin, "live");
-			let broadcaster = tokio::time::timeout(
-				TIMEOUT,
-				crate::export::Broadcaster::new(source, crate::export::Config::default()),
-			)
-			.await
-			.expect("broadcaster timed out")
-			.expect("broadcaster");
+			let remote = tokio::time::timeout(TIMEOUT, origin.request_broadcast("live", None))
+				.await
+				.expect("request timed out")
+				.expect("remote broadcast");
+			let source = moq_mux::Source::new(origin, remote);
+			let broadcaster = crate::export::Broadcaster::new(source, crate::export::Config::default());
 			// Recorded as soon as the catalog lists it, before any media, as a recorder does.
 			let mut renditions = broadcaster.renditions();
 			let rendition = match tokio::time::timeout(TIMEOUT, renditions.next()).await {
@@ -730,7 +766,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(Default::default()).expect("announce");
-		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 
 		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
 		assert_eq!(status(&app, "/live/master.m3u8").await, StatusCode::NOT_FOUND);
@@ -746,7 +782,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(Default::default()).expect("announce");
-		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
 		let server = Server::new(origin.consume(), crate::export::Config::default());
@@ -813,7 +849,7 @@ mod tests {
 		.await;
 		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 		broadcast.announce(Default::default()).expect("announce");
-		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
@@ -831,7 +867,7 @@ mod tests {
 		let pair = lite_pair().await;
 		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 		broadcast.announce(Default::default()).expect("announce");
-		let (catalog, registration, track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		let (catalog, registration, track, mut media) = publish_video(&mut broadcast, video_config(), timed());
 		write_three_gops(&mut media);
 
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
@@ -868,7 +904,7 @@ mod tests {
 		let reserved = catalog.reserve();
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("../source").to_owned());
-		let track = media_broadcast.create_track("video0", None).unwrap();
+		let track = media_broadcast.create_track("video0", timed()).unwrap();
 		let mut media = reserved
 			.video(
 				track,

@@ -61,10 +61,10 @@ Decided:
   reversed (2026-10-07): subscriptions stay sticky on their route and an
   explicit `Restart` announce event tells players to follow. When the newest goes and
   an older one is still live, the older one wins again as a new broadcast.
-- [Claim-served epochs](/quest/m1/claim-epochs.md), where a
-  lite-07 claim's answer carries the served broadcast's own epoch, no longer
-  gates this line (decided 2026-10-08): it is a lite-07 opt-in, so it moved
-  to m1.
+- [Announcement takeover](/quest/m1/announce-takeover.md) stays m1 and gates
+  the lite-07 cut, not this release. It replaces the response-only claim-epoch
+  proposal: an independent route explicitly continues the same served
+  instance, rather than inferring continuity from an epochless claim.
 - Decided in the 2026-10-10 resume audit: a catalog reference pins its first
   resolved sibling for the catalog instance's lifetime in players and
   exporters. Optional reference epochs constrain the first resolution on
@@ -73,7 +73,7 @@ Decided:
   [catalog references quest](/quest/m0/broadcast-epoch/catalog-references.md)
   owns the schemas, readers, and compatibility documentation.
 - Every first-party publisher that can restart mints its own: the apps,
-  moq-boy, the ingest gateways, moqsink, and the bindings below. Players
+  moq-boy, the ingest gateways, moqsink, and the bindings. Players
   (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
   [group announcement](/doc/concept/stats.md#broadcasts), which also gated
   the release (decided 2026-10-04).
@@ -123,12 +123,11 @@ End+Start. The child quests own their focused regressions.
 
 ## Required
 
-- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - a held broadcast or track cannot open unpinned wire work against its replacement
 - [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - a delayed group is delivered once even beyond the old 1024-entry history
-- [JS consume identity](/quest/m0/broadcast-epoch/js-consume-identity.md) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast
-- [JS restart keeps the request](/quest/m0/broadcast-epoch/js-restart-keeps-request.md) - a resolved request remains on its old instance, matching Rust's sticky subscriptions
-- [Source pin](/quest/m0/broadcast-epoch/source-pin.md) - `Source` is built from the resolved catalog broadcast and every later request stays on it, so an epochless replacement never splices into the old program
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
-- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
+
+## Related
+
+- [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast

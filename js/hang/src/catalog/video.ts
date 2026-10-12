@@ -74,6 +74,10 @@ export const VideoConfigSchema = z.object({
 		),
 	),
 
+	// After a non-continuous join, decode from the group start, present at start plus warmup,
+	// and join that many milliseconds earlier.
+	warmup: z.optional(u53Schema),
+
 	// How far this rendition's frames reach the transport behind the broadcast's earliest
 	// rendition, in whole milliseconds rounded up. A player holds `delay + jitter` for it and never
 	// subtracts one rendition's `delay` from another's. Absent on the earliest rendition. It only

@@ -47,13 +47,16 @@ Decided 2026-10-10 in the epoch audit interview:
   it. Do not claim that removing the epoch makes reused object names safe
   through those relays or through clients retaining caches across broadcasts.
   Immutable wire names plus discovery/translation would be separate work.
-- Claim-served response identities are a separate follow-up, shared with
-  lite-07's claim-epochs work. Do not block announcement-based epochs on it.
+- Independent announcement takeover is a separate follow-up, sharing the
+  lite-07 model. An epoch-bound request requires a matching advertised epoch;
+  response metadata alone cannot make an epochless claim eligible. Do not
+  block this base extension on takeover.
 
 Add a feature-specific IETF extension draft in the implementation PR, with
 negotiation, identity, cache, request, downgrade, and malformed-input rules.
 Update the cluster draft and existing identity/compatibility concept docs
-inline. No separate migration-guide quest. The new draft must distinguish
+inline. The dedicated [identity guide](/quest/m1/identity-guide.md) follows
+separately and does not replace those updates. The new draft must distinguish
 our legacy-client behavior from base IETF's immutable-name guarantee; an
 End+Start is not a general cache invalidation mechanism.
 
@@ -77,8 +80,8 @@ extension; no changes to unnegotiated published versions or broadcast paths.
 ## Related
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - current lite-07 identity and legacy restart behavior
-- [Claim epochs](/quest/m1/claim-epochs.md) - shared broadcast identity and lite-07 response identity
-- [IETF claim epochs](/quest/m1/ietf-claim-epochs.md) - learn per-output identity from an IETF claim response
+- [Announcement takeover](/quest/m1/announce-takeover.md) - shared continuity model and lite-07 operation
+- [IETF takeover](/quest/m1/ietf-takeover.md) - independently advertised continuation of a claim-served instance
 - [JS track handover](/quest/m1/js-group-handover.md) - stable JS readers across same-epoch route changes
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - optional requested epochs become verifiable on this negotiated transport; epochless fallback remains best effort
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native wait-budget support is separate from epoch negotiation and adds no age extension

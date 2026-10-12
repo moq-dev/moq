@@ -1053,7 +1053,12 @@ impl FrameRecv {
 		let mut info = broadcast::Info::new();
 		info.pool = cache::Pool::unbounded();
 		let broadcast = info.produce();
-		let track = broadcast.create_track("frames", None).unwrap();
+		let track = broadcast
+			.create_track(
+				"frames",
+				crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
+			)
+			.unwrap();
 		let budget = budget.map(frame::Budget::new).unwrap_or_default();
 		let payload = bytes::Bytes::from(vec![0u8; size]);
 
@@ -1168,6 +1173,29 @@ impl std::error::Error for NoError {}
 impl crate::transport::Error for NoError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
+	}
+}
+
+/// Admit a draft-16 window for the request-ID benchmark, returning the accepted count.
+pub fn request_ids(window: u64, ids: &[u64]) -> usize {
+	ietf::request_ids(window, ids)
+}
+
+/// A source-selection watch for the private request-lifetime benchmark.
+pub struct RequestValidity(crate::model::broadcast::RequestValidity);
+
+impl RequestValidity {
+	/// Watch which instance this route's peer selects for a path.
+	pub fn new(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
+	}
+
+	/// Capture the lifetime of one pending request.
+	pub fn start(&self) -> kio::Consumer<()> {
+		match self.0.start() {
+			crate::model::broadcast::RequestValidity::Route(route) => route,
+			_ => unreachable!("a source watch always captures a route lease"),
+		}
 	}
 }
 

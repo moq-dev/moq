@@ -16,9 +16,10 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 /// [`create_track`](moq_net::broadcast::Producer::create_track) or
 /// [`accept`](moq_net::track::Request::accept).
 ///
-/// Pins the track's timescale to [`TIMESCALE`]. `moq_net::track::Info::default()` is milliseconds,
-/// which would quantize the net-level frame timestamps that moq-lite-05 and later delta-encode on
-/// the wire, even though the container prefix stays at microseconds. Chain
+/// Pins the track's timescale to [`TIMESCALE`], since `moq_net::track::Info::default()` is
+/// untimed and refuses timestamped frames. Microseconds match the container prefix, so the
+/// net-level frame timestamps that moq-lite-05 and later delta-encode on the wire aren't
+/// quantized. Chain
 /// [`with_timescale`](moq_net::track::Info::with_timescale) for a container that carries the
 /// source's own scale instead (CMAF and Matroska both do).
 ///

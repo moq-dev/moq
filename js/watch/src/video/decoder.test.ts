@@ -5,7 +5,7 @@ import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { type Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { Sync } from "../sync";
+import { type Delay, Sync } from "../sync";
 import { Decoder } from "./decoder";
 import { Source } from "./source";
 
@@ -191,6 +191,8 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	const owed = new Set(hold);
 	const pending: Array<() => void> = [];
 	let resets = 0;
+	const errors: VideoDecoderInit["error"][] = [];
+	const frames: VideoDecoderInit["output"][] = [];
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
 	class Codec {
 		state = "unconfigured";
@@ -199,6 +201,8 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		readonly callbacks: VideoDecoderInit;
 		constructor(callbacks: VideoDecoderInit) {
 			this.callbacks = callbacks;
+			errors.push(callbacks.error);
+			frames.push(callbacks.output);
 		}
 		configure() {
 			this.state = "configured";
@@ -266,12 +270,22 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		mediaProducer.close();
 	};
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay: "instant" });
+	const delay = new Signal<Delay>("instant");
+	const sync = new Sync({ delay });
 	const enabled = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled });
 	await microtasks();
 	return {
 		decoder,
+		delay,
+		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
+		emit: (timestamp: number, index = -1) => frames.at(index)?.(new Picture(timestamp) as unknown as VideoFrame),
+		get codecs() {
+			return errors.length;
+		},
+		switchRendition(track = "replacement") {
+			catalog.set({ video: { renditions: { [track]: video } } });
+		},
 		enabled,
 		catalog,
 		submitted,
@@ -463,3 +477,225 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 }
+
+it("releases a failed video subscription and recovers only on a new source", async () => {
+	const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+	const playback = await guardedPlayback("legacy", []);
+	try {
+		const before = close.mock.calls.length;
+		const failure = new DOMException("invalid encoded video", "EncodingError");
+		playback.fail(failure);
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		expect(close.mock.calls.length).toBeGreaterThan(before);
+		playback.enabled.set(false);
+		await microtasks();
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		playback.republish();
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBeUndefined();
+	} finally {
+		playback.close();
+		close.mockRestore();
+	}
+});
+
+it("clears a video failure when a source without video is selected while hidden", async () => {
+	const playback = await guardedPlayback("legacy", []);
+	try {
+		const failure = new DOMException("invalid encoded video", "EncodingError");
+		playback.fail(failure);
+		await microtasks();
+		playback.enabled.set(false);
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		// Another broadcast, one advertising no video rendition.
+		playback.republishCatalog();
+		playback.catalog.set({});
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBeUndefined();
+	} finally {
+		playback.close();
+	}
+});
+
+it("keeps a video failure while the same rendition is muted by its publisher", async () => {
+	const playback = await guardedPlayback("legacy", []);
+	try {
+		const failure = new DOMException("invalid encoded video", "EncodingError");
+		playback.fail(failure);
+		await microtasks();
+		playback.catalog.set({});
+		await microtasks();
+		playback.switchRendition("video");
+		await microtasks();
+		expect(playback.decoder.out.error.peek()).toBe(failure);
+		expect(playback.codecs).toBe(1);
+	} finally {
+		playback.close();
+	}
+});
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	it(`reports the outgoing ${kind} decoder failing during a rendition handover`, async () => {
+		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);
+		try {
+			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(100));
+			playback.switchRendition();
+			await microtasks();
+			expect(playback.codecs).toBe(2);
+			const failure = new DOMException("outgoing decoder failed", "EncodingError");
+			playback.fail(failure, 0);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.emit(200_000, 1);
+			await microtasks();
+			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(200));
+			expect(playback.decoder.out.error.peek()).toBeUndefined();
+			playback.switchRendition("video");
+			await microtasks();
+			expect(playback.codecs).toBe(3);
+		} finally {
+			playback.close();
+		}
+	});
+
+	it(`keeps a failed pending ${kind} rendition out of the active slot`, async () => {
+		const playback = await guardedPlayback(kind, [sample(1, 100_000)]);
+		try {
+			playback.switchRendition();
+			await microtasks();
+			const failure = new DOMException("replacement decoder failed", "EncodingError");
+			playback.fail(failure, 1);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			// Healthy outgoing frames must not conceal the selected rendition's failure.
+			playback.emit(200_000, 0);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.fail(new DOMException("outgoing decoder failed", "EncodingError"), 0);
+			await microtasks();
+			expect(playback.decoder.out.jitter.peek()).toBeUndefined();
+			expect(playback.decoder.out.timestamp.peek()).toBeUndefined();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.enabled.set(false);
+			await microtasks();
+			playback.enabled.set(true);
+			await microtasks();
+			expect(playback.codecs).toBe(2);
+		} finally {
+			playback.close();
+		}
+	});
+}
+
+it("a shared audio clock reset cannot present a parked video frame", async () => {
+	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
+	const timer = spyOn(globalThis, "setTimeout").mockImplementation(
+		(() => 1 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
+	);
+	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const reads: Read[] = [];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		playback.enabled.set(false);
+		playback.delay.set(Time.Milli(1000));
+		await microtasks();
+		reads.push(sample(0, 0), sample(0, 100_000, 0, false));
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.submitted).toEqual([0, 100_000]);
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+		// Audio can reset the shared reference while this video's own container
+		// discontinuity remains unchanged.
+		playback.sync.reset();
+		await microtasks();
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+		// The next utterance anchors the clock past the parked frame's deadline.
+		playback.sync.received(Time.Milli(2000));
+		await microtasks();
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+	} finally {
+		playback.close();
+		await microtasks();
+		clear.mockRestore();
+		timer.mockRestore();
+		now.mockRestore();
+	}
+});
+
+it("closing the track releases a video wait parked across a reset", async () => {
+	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
+	const timer = spyOn(globalThis, "setTimeout").mockImplementation(
+		(() => 1 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
+	);
+	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const reads: Read[] = [];
+	const playback = await guardedPlayback("legacy", reads);
+	const waits: Promise<void>[] = [];
+	const original = playback.sync.wait.bind(playback.sync);
+	const wait = spyOn(playback.sync, "wait").mockImplementation((timestamp, signal) => {
+		const waiting = original(timestamp, signal);
+		waits.push(waiting);
+		return waiting;
+	});
+	try {
+		playback.enabled.set(false);
+		playback.delay.set(Time.Milli(1000));
+		await microtasks();
+		reads.push(sample(0, 0), sample(0, 100_000, 0, false));
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.submitted).toEqual([0, 100_000]);
+		playback.sync.reset();
+		await microtasks();
+		expect(waits.map((waiting) => Bun.peek.status(waiting))).toContain("pending");
+		// No frame re-anchors the shared clock, but the closed track must not leave its wait behind.
+		playback.enabled.set(false);
+		await microtasks();
+		expect(waits.map((waiting) => Bun.peek.status(waiting))).not.toContain("pending");
+	} finally {
+		wait.mockRestore();
+		playback.close();
+		await microtasks();
+		clear.mockRestore();
+		timer.mockRestore();
+		now.mockRestore();
+	}
+});
+
+it("a reset drops a parked video frame even when the next anchor restores the reference", async () => {
+	const now = spyOn(Time.Milli, "now").mockReturnValue(Time.Milli(1000));
+	const timers: Array<() => void> = [];
+	const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void) => {
+		timers.push(fn);
+		return timers.length as unknown as ReturnType<typeof setTimeout>;
+	}) as unknown as typeof setTimeout);
+	const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {});
+	const reads: Read[] = [];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		playback.enabled.set(false);
+		playback.delay.set(Time.Milli(1000));
+		await microtasks();
+		reads.push(sample(0, 0), sample(0, 100_000, 0, false));
+		playback.enabled.set(true);
+		await microtasks();
+		expect(playback.submitted).toEqual([0, 100_000]);
+		// In one turn, so the reference never visibly changes and the parked sleep keeps its timer.
+		playback.sync.reset();
+		playback.sync.received(Time.Milli(0));
+		await microtasks();
+		for (const fn of timers.splice(0)) fn();
+		await microtasks();
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
+	} finally {
+		playback.close();
+		await microtasks();
+		clear.mockRestore();
+		timer.mockRestore();
+		now.mockRestore();
+	}
+});

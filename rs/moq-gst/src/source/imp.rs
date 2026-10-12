@@ -798,8 +798,8 @@ async fn follow_catalog(
 
 /// Bring the run's pumps in line with `catalog`: spawn pumps for newly announced renditions,
 /// hand the pad of any whose caps or container changed to a new pump, leave ones that vanished to
-/// end with their track, and end the kept pads of renditions it no longer lists. Returns the
-/// renditions it lists.
+/// end with their track, stop disabled ones, and end the kept pads of renditions it no longer
+/// lists. Returns the renditions it lists.
 ///
 /// Infallible by design: every way a single rendition can be unusable (unsupported codec,
 /// malformed init, a name the broadcast refuses) skips just that rendition, so one bad entry in
@@ -835,12 +835,30 @@ fn reconcile(
 		}
 		Err(err) => gst::warning!(CAT, "ignoring {kind:?} rendition {name}: {err:?}"),
 	};
-	for (name, config) in &catalog.video.renditions {
+	for (name, config) in catalog.video.enabled() {
 		insert(name, TrackKind::Video, video_caps(config), &config.container);
 	}
-	for (name, config) in &catalog.audio.renditions {
+	for (name, config) in catalog.audio.enabled() {
 		insert(name, TrackKind::Audio, audio_caps(config), &config.container);
 	}
+
+	// A disabled rendition stays listed: its pump stops, but its pad waits idle for a re-enable,
+	// since a pipeline links pads by name (`s.video_0 ! ...`).
+	let disabled: HashSet<Rendition> = catalog
+		.video
+		.renditions
+		.iter()
+		.filter(|(_, config)| !config.enabled)
+		.map(|(name, _)| (TrackKind::Video, name.clone()))
+		.chain(
+			catalog
+				.audio
+				.renditions
+				.iter()
+				.filter(|(_, config)| !config.enabled)
+				.map(|(name, _)| (TrackKind::Audio, name.clone())),
+		)
+		.collect();
 
 	// Pure set math: which pumps to tear down, which renditions to spawn.
 	let plan = plan_reconcile(
@@ -862,17 +880,22 @@ fn reconcile(
 	// a pad stays in `active` and ends with its track, where `follow_catalog` ends its pad. One
 	// that never took a pad is stopped.
 	for name in plan.remove {
-		if !desired.contains_key(&name) && active.get(&name).is_some_and(|track| !track.state.cancel_before_live()) {
-			continue;
-		}
-		if let Some(track) = active.remove(&name) {
+		let Some(track) = active.get(&name) else { continue };
+		// An explicit disable stops a live pump too; a delist still drains its tail.
+		let drains = !desired.contains_key(&name)
+			&& !disabled.contains(&(track.kind, name.clone()))
+			&& !track.state.cancel_before_live();
+		if !drains && let Some(track) = active.remove(&name) {
 			track.cancel();
 		}
 	}
 
 	// A kept pad the catalog no longer lists ends with EOS, unless a pump still drains its track.
-	let unwanted = pads.unwanted(|(kind, name)| {
-		desired.get(name).is_some_and(|d| d.kind == *kind) || active.get(name).is_some_and(|t| t.kind == *kind)
+	let unwanted = pads.unwanted(|rendition| {
+		let (kind, name) = rendition;
+		desired.get(name).is_some_and(|d| d.kind == *kind)
+			|| disabled.contains(rendition)
+			|| active.get(name).is_some_and(|t| t.kind == *kind)
 	});
 	for rendition in unwanted {
 		if let Some(retire) = pads.retire(&rendition) {
@@ -946,7 +969,11 @@ fn reconcile(
 		);
 	}
 
-	desired.into_iter().map(|(name, d)| (d.kind, name)).collect()
+	desired
+		.into_iter()
+		.map(|(name, d)| (d.kind, name))
+		.chain(disabled)
+		.collect()
 }
 
 /// Tear-down / spawn decisions for one catalog update, computed purely from the desired and
@@ -1170,14 +1197,14 @@ fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
 	use hang::catalog::VideoCodec;
 
 	let caps = match &config.codec {
-		VideoCodec::H264(_) => {
+		VideoCodec::H264(h264) => {
 			let mut builder = gst::Caps::builder("video/x-h264").field("alignment", "au");
 			if let Some(description) = &config.description {
 				builder = builder
-					.field("stream-format", "avc")
+					.field("stream-format", if h264.inline { "avc3" } else { "avc" })
 					.field("codec_data", gst::Buffer::from_slice(description.clone()));
 			} else {
-				builder = builder.field("stream-format", "annexb");
+				builder = builder.field("stream-format", "byte-stream");
 			}
 			builder.build()
 		}
@@ -1191,8 +1218,7 @@ fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
 						.field("codec_data", gst::Buffer::from_slice(description.clone()));
 				}
 				None => {
-					let format = if h265.in_band { "hev1" } else { "byte-stream" };
-					builder = builder.field("stream-format", format);
+					builder = builder.field("stream-format", "byte-stream");
 				}
 			}
 			builder.build()
@@ -1256,6 +1282,29 @@ mod tests {
 	use super::{PumpState, plan_reconcile, relative_pts};
 	use moq_net::Timestamp;
 	use std::collections::HashMap;
+
+	#[test]
+	fn video_caps_preserve_nal_framing() {
+		gst::init().unwrap();
+		for (codec, format) in [
+			("avc1.42001f", "avc"),
+			("avc3.42001f", "avc3"),
+			("hvc1.1.0.L93.00", "hvc1"),
+			("hev1.1.0.L93.00", "hev1"),
+		] {
+			for description in [None, Some(bytes::Bytes::from_static(b"config"))] {
+				let mut config = hang::catalog::VideoConfig::new(codec.parse::<hang::catalog::VideoCodec>().unwrap());
+				config.description = description.clone();
+				let caps = super::video_caps(&config).unwrap();
+				let structure = caps.structure(0).unwrap();
+				assert_eq!(
+					structure.get::<String>("stream-format").unwrap(),
+					if description.is_some() { format } else { "byte-stream" }
+				);
+				assert_eq!(structure.has_field("codec_data"), description.is_some());
+			}
+		}
+	}
 
 	// The shape type is generic, so the set math can be exercised with a plain integer standing
 	// in for (caps, container): equal value == unchanged rendition, different value == reshape.
@@ -2476,6 +2525,56 @@ mod session_tests {
 
 		let seen = recorder.seen();
 		assert!(seen.contains(&Seen::Caps(pad, "video/x-vp8".into())), "{seen:?}");
+		recorder.assert_one_pad_held();
+	}
+
+	/// Disabling a rendition stops its pump but holds its pad idle, without an EOS, so a pipeline
+	/// linked by name resumes on it once the rendition is enabled again.
+	#[test]
+	fn a_reenabled_rendition_resumes_on_the_same_pad() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+
+		let mut publisher = Publisher::new(&origin, epoch(), video_rendition());
+		let _audio = publisher
+			.broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let session = follow(&element, &origin);
+		let pad = recorder.written(&mut publisher, 1);
+
+		// The catalog consumer only yields the newest snapshot, so the same update lists an audio
+		// rendition: its pad appearing proves the run acted on the disable.
+		{
+			let mut guard = publisher.catalog.modify().unwrap();
+			guard.video.renditions.get_mut("video").unwrap().enabled = false;
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		await_pad(&element, "audio_");
+
+		publisher
+			.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("video")
+			.unwrap()
+			.enabled = true;
+		assert_eq!(
+			recorder.written(&mut publisher, 2),
+			pad,
+			"the re-enabled rendition moved to another pad"
+		);
+		stop(session);
+
+		let seen = recorder.seen();
+		assert!(
+			seen.contains(&Seen::Start(pad)),
+			"the disabled pump kept running: {seen:?}"
+		);
 		recorder.assert_one_pad_held();
 	}
 

@@ -32,6 +32,11 @@ fn worker() -> Option<Worker> {
 const ALPN: &str = "moq-lite-05";
 const PAYLOAD: &[u8] = b"hello over io_uring";
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 #[test]
 fn lite_session_over_the_worker() {
 	let Some(mut worker) = worker() else { return };
@@ -54,7 +59,7 @@ fn lite_session_over_the_worker() {
 	// finished group.
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("data", None).expect("create track");
+	let track = broadcast.create_track("data", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)
@@ -183,7 +188,7 @@ fn two_lite_sessions_share_the_server_socket() {
 
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("data", None).expect("create track");
+	let track = broadcast.create_track("data", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)

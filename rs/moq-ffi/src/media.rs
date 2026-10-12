@@ -662,8 +662,10 @@ impl MoqMediaTrackProducer {
 		let init: moq_mux::import::AudioInit = init.into();
 		let request = target.resolve(&state.broadcast, &init.format)?;
 
-		let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init)
-			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let import =
+			moq_mux::import::Track::audio(request, state.catalog.reserve(), init).map_err(|err| MoqError::Codec {
+				reason: format!("init failed: {err}"),
+			})?;
 		Ok(MoqMediaTrackProducer::from_import(import))
 	}
 }
@@ -687,8 +689,10 @@ impl MoqMediaTrackProducer {
 		let init: moq_mux::import::VideoInit = init.into();
 		let request = target.resolve(&state.broadcast, &init.format)?;
 
-		let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init)
-			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let import =
+			moq_mux::import::Track::video(request, state.catalog.reserve(), init).map_err(|err| MoqError::Codec {
+				reason: format!("init failed: {err}"),
+			})?;
 		Ok(MoqMediaTrackProducer::from_import(import))
 	}
 }
@@ -706,8 +710,11 @@ impl MoqMediaContainerProducer {
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let init: moq_mux::import::ContainerInit = init.into();
-		let import = moq_mux::import::Container::new(state.broadcast.clone(), state.catalog.reserve(), &init)
-			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let import = moq_mux::import::Container::new(state.broadcast.clone(), state.catalog.reserve(), &init).map_err(
+			|err| MoqError::Codec {
+				reason: format!("init failed: {err}"),
+			},
+		)?;
 
 		Ok(Arc::new(MoqMediaContainerProducer {
 			inner: std::sync::Mutex::new(Some(ContainerProducer { import })),
@@ -734,8 +741,11 @@ impl MoqMediaTrackStreamProducer {
 		let init: moq_mux::import::VideoInit = init.into();
 		let request = target.resolve(&state.broadcast, &init.format)?;
 
-		let import = moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init)
-			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let import = moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(|err| {
+			MoqError::Codec {
+				reason: format!("init failed: {err}"),
+			}
+		})?;
 
 		Ok(Arc::new(MoqMediaTrackStreamProducer {
 			inner: std::sync::Mutex::new(Some(MediaStreamProducer {
@@ -759,7 +769,9 @@ impl MoqMediaContainerStreamProducer {
 
 		let import =
 			moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.reserve(), format.into())
-				.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+				.map_err(|err| MoqError::Codec {
+					reason: format!("init failed: {err}"),
+				})?;
 
 		Ok(Arc::new(MoqMediaContainerStreamProducer {
 			inner: std::sync::Mutex::new(Some(ContainerStreamProducer { import })),
@@ -806,7 +818,9 @@ impl MoqMediaTrackProducer {
 		media
 			.import
 			.decode(&frame.payload, timestamp)
-			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
+			.map_err(|err| MoqError::Codec {
+				reason: format!("decode failed: {err}"),
+			})?;
 
 		Ok(())
 	}
@@ -846,10 +860,9 @@ impl MoqMediaTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media
-			.import
-			.cut(None)
-			.map_err(|err| MoqError::Codec(format!("cut failed: {err}")))?;
+		media.import.cut(None).map_err(|err| MoqError::Codec {
+			reason: format!("cut failed: {err}"),
+		})?;
 		Ok(())
 	}
 
@@ -861,10 +874,9 @@ impl MoqMediaTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media
-			.import
-			.seek(sequence)
-			.map_err(|err| MoqError::Codec(format!("seek failed: {err}")))?;
+		media.import.seek(sequence).map_err(|err| MoqError::Codec {
+			reason: format!("seek failed: {err}"),
+		})?;
 		Ok(())
 	}
 
@@ -873,10 +885,9 @@ impl MoqMediaTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut media = guard.take().ok_or(MoqError::Closed)?;
-		media
-			.import
-			.finish()
-			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
+		media.import.finish().map_err(|err| MoqError::Codec {
+			reason: format!("finish failed: {err}"),
+		})?;
 		Ok(())
 	}
 }
@@ -891,10 +902,9 @@ impl MoqMediaContainerProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let container = guard.as_mut().ok_or(MoqError::Closed)?;
-		container
-			.import
-			.decode(&payload)
-			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
+		container.import.decode(&payload).map_err(|err| MoqError::Codec {
+			reason: format!("decode failed: {err}"),
+		})?;
 		Ok(())
 	}
 
@@ -917,10 +927,9 @@ impl MoqMediaContainerProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let container = guard.as_mut().ok_or(MoqError::Closed)?;
-		container
-			.import
-			.seek(sequence)
-			.map_err(|err| MoqError::Codec(format!("seek failed: {err}")))?;
+		container.import.seek(sequence).map_err(|err| MoqError::Codec {
+			reason: format!("seek failed: {err}"),
+		})?;
 		Ok(())
 	}
 
@@ -929,10 +938,9 @@ impl MoqMediaContainerProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut container = guard.take().ok_or(MoqError::Closed)?;
-		container
-			.import
-			.finish()
-			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
+		container.import.finish().map_err(|err| MoqError::Codec {
+			reason: format!("finish failed: {err}"),
+		})?;
 		Ok(())
 	}
 }
@@ -954,10 +962,9 @@ impl MoqMediaTrackStreamProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media
-			.import
-			.decode(&payload)
-			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
+		media.import.decode(&payload).map_err(|err| MoqError::Codec {
+			reason: format!("decode failed: {err}"),
+		})?;
 		Ok(())
 	}
 
@@ -970,10 +977,9 @@ impl MoqMediaTrackStreamProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut media = guard.take().ok_or(MoqError::Closed)?;
-		media
-			.import
-			.finish()
-			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
+		media.import.finish().map_err(|err| MoqError::Codec {
+			reason: format!("finish failed: {err}"),
+		})?;
 		Ok(())
 	}
 }
@@ -986,10 +992,9 @@ impl MoqMediaContainerStreamProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let container = guard.as_mut().ok_or(MoqError::Closed)?;
-		container
-			.import
-			.decode(&payload)
-			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
+		container.import.decode(&payload).map_err(|err| MoqError::Codec {
+			reason: format!("decode failed: {err}"),
+		})?;
 		Ok(())
 	}
 
@@ -998,10 +1003,9 @@ impl MoqMediaContainerStreamProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut container = guard.take().ok_or(MoqError::Closed)?;
-		container
-			.import
-			.finish()
-			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
+		container.import.finish().map_err(|err| MoqError::Codec {
+			reason: format!("finish failed: {err}"),
+		})?;
 		Ok(())
 	}
 }
@@ -1013,9 +1017,9 @@ fn reserve_track(
 	format: &impl std::fmt::Display,
 ) -> Result<moq_net::track::Request, MoqError> {
 	let name = track.unwrap_or_else(|| broadcast.unique_name(&format!(".{format}")));
-	broadcast
-		.reserve_track(name)
-		.map_err(|err| MoqError::Codec(format!("init failed: {err}")))
+	broadcast.reserve_track(name).map_err(|err| MoqError::Codec {
+		reason: format!("init failed: {err}"),
+	})
 }
 
 /// A media track's name, container, and live delivery options.
@@ -1058,8 +1062,9 @@ fn media_frame(mut frame: moq_mux::container::Frame) -> Result<MoqMediaFrame, Mo
 fn media_container(container: MoqContainer) -> Result<moq_mux::catalog::hang::Container, MoqError> {
 	let container: hang::catalog::Container = container.into();
 	// This byte-oriented API has no media-kind configuration.
-	moq_mux::catalog::hang::Container::new(&container, moq_mux::container::Kind::Data)
-		.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))
+	moq_mux::catalog::hang::Container::new(&container, moq_mux::container::Kind::Data).map_err(|e| MoqError::Codec {
+		reason: format!("invalid container: {e}"),
+	})
 }
 
 /// Reads the latest catalog snapshots from a broadcast.

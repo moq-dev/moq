@@ -28,6 +28,12 @@ Decided in the 2026-10-10 resume audit:
   mismatch fails instead of falling back to the current winner. Conflicting
   identities for an already-pinned path cannot replace that pin through a
   catalog update.
+- Lazy work has no anticipated epoch: leave it out of unresolved contribution
+  references. Once a worker accepts a job it advertises a concrete path with
+  a unique epoch. A proven Takeover preserves the same pinned instance; a
+  replacement requires a new catalog instance. An epoch-bound request on an
+  epoch-capable link requires a matching advertised epoch, not merely an
+  epoch returned from an epochless claim.
 - Omission remains compatible with existing catalogs: pin the first
   resolved instance, with no promise about an unresolved sibling's past.
 - On epochless transports, explicit catalog epochs are best effort
@@ -58,17 +64,15 @@ run `just check`, `just test interop --all`, and `just drafts check`.
 Public API: additive optional catalog fields and changed player sibling
 following behavior. Wire: additive Hang catalog fields, no transport
 framing change. Update the Hang draft, existing catalog/identity docs, and
-upgrade notes inline; no separate guide. Explain both the strong epoch-aware
+upgrade notes inline. The [identity guide](/quest/m1/identity-guide.md)
+consolidates the behavior separately. Explain both the strong epoch-aware
 guarantee and the selected legacy best-effort behavior.
-
-## Required
-
-- [Source pin](/quest/m0/broadcast-epoch/source-pin.md) - exporters share their resolved catalog handle
-- [JS consume identity](/quest/m0/broadcast-epoch/js-consume-identity.md) - JS resolves the actual serving identity
 
 ## Related
 
-- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - held handles cannot emit unpinned requests after retirement
+- [Source pin](https://github.com/moq-dev/moq/pull/5252) - exporters share their resolved catalog handle
+- [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - JS resolves the actual serving identity
+- [Retired requests](https://github.com/moq-dev/moq/pull/5294) - held handles cannot emit unpinned requests after retirement
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - the adjacent optional wire-track field
 - [Catalog track identity](/quest/m1/catalog-tracks.md) - catalog updates cannot redefine a track's content
 - [IETF epochs](/quest/m1/ietf-epochs.md) - verified catalog identity over negotiated IETF sessions

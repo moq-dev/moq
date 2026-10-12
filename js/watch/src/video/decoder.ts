@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
-import { nextMedia, subscribeMedia } from "../media";
+import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import {
@@ -54,6 +54,8 @@ export interface Stats {
 }
 
 type DecoderOutput = {
+	/** Fatal decode failure, cleared when another source is selected. */
+	error: Signal<Error | undefined>;
 	// The current frame to render.
 	frame: Signal<VideoFrame | undefined>;
 
@@ -80,6 +82,7 @@ export class Decoder {
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
+		error: new Signal<Error | undefined>(undefined),
 		frame: new Signal<VideoFrame | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
@@ -104,6 +107,8 @@ export class Decoder {
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
+	#selected?: DecoderTrack;
+	#failed?: Failure;
 
 	#clearCurrentFrame(): void {
 		this.#out.frame.update((prev) => {
@@ -163,10 +168,29 @@ export class Decoder {
 	}
 
 	#runPending(effect: Effect): void {
+		this.#selected = undefined;
 		const enabled = effect.get(this.in.enabled);
 		const broadcast = effect.get(this.source.in.broadcast);
 		const track = effect.get(this.source.out.track);
 		const identity = effect.get(this.#identity);
+
+		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
+		// broadcast instead of the catalog's own broadcast. A disabled decoder resolves it only to
+		// tell whether a failure's source is still selected.
+		const active: Moq.Broadcast.Consumer | undefined =
+			broadcast && track && identity && (enabled || this.#failed)
+				? broadcast.relativeBroadcast(effect, identity.broadcast)
+				: undefined;
+		const key = identity && JSON.stringify(identity);
+
+		// A failure belongs to its source: selecting another clears it, even while disabled.
+		const failed = this.#failed;
+		const selected = broadcast && failed ? effect.get(broadcast.out.active)?.closed : undefined;
+		if (failed && failureMoved(failed, { broadcast: selected, media: active?.closed, track, identity: key })) {
+			this.#failed = undefined;
+			this.#out.error.set(undefined);
+		}
+
 		if (!enabled || !broadcast || !track || !identity) {
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
@@ -180,16 +204,16 @@ export class Decoder {
 			return;
 		}
 
-		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
-		// broadcast instead of the catalog's own broadcast.
-		const active: Moq.Broadcast.Consumer | undefined = broadcast.relativeBroadcast(effect, identity.broadcast);
-		if (!active) {
+		if (!active || !key) {
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);
 			this.#clearCurrentFrame();
 			this.#out.buffered.set([]);
 			return;
 		}
+
+		// This source already failed; wait for another.
+		if (this.#failed) return;
 
 		// A republish of the media this rendition reads (the catalog's own broadcast, or the one a
 		// `broadcast` override names) is another instance, whose timeline starts over. Waiting for
@@ -206,15 +230,32 @@ export class Decoder {
 			broadcast: active,
 			track,
 			config: identity.decoder,
+			identity: key,
 			stats: this.#out.stats,
 			catalog: broadcast.out.catalog,
+		});
+		this.#selected = pending;
+		effect.run((inner) => {
+			if (!pending) {
+				inner.close(); // Promoted tracks are observed by their active lifetime.
+				return;
+			}
+			const error = inner.get(pending.error);
+			if (!error) return;
+			this.#recordError(pending, error);
+			pending.close();
+			pending = undefined;
+			this.#pending.set(undefined);
 		});
 		effect.set(this.#pending, { track, catalog: broadcast.out.catalog });
 
 		effect.cleanup(() => pending?.close());
 
 		effect.run((effect) => {
-			if (!pending) return;
+			if (!pending) {
+				effect.close();
+				return;
+			}
 
 			const current = effect.get(this.#active);
 			if (current && !republished) {
@@ -248,11 +289,24 @@ export class Decoder {
 
 		effect.cleanup(() => active.close());
 
+		effect.run((inner) => {
+			const error = inner.get(active.error);
+			if (!error) return;
+			this.#recordError(active, error);
+			this.#active.set(undefined);
+			this.#clearCurrentFrame();
+		});
+
 		// Clone the frame so we own it independently of the DecoderTrack.
 		// proxy() would share the same reference, allowing the source to close our frame.
 		effect.run((inner) => {
 			const frame = inner.get(active.frame);
 			if (!frame) return; // A promoted track holds the previous picture until its first frame.
+			if (active.error.peek()) return;
+			if (this.#selected === active) {
+				this.#failed = undefined;
+				this.#out.error.set(undefined);
+			}
 			this.#out.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
 			this.#out.frame.update((prev) => {
 				prev?.close();
@@ -261,6 +315,18 @@ export class Decoder {
 		});
 		effect.proxy(this.#out.buffered, active.buffered);
 		effect.proxy(this.#spread, active.spread);
+	}
+
+	#recordError(track: DecoderTrack, error: Error): void {
+		// An outgoing failure must not replace the selected rendition's failure latch.
+		if (track !== this.#selected && this.#selected?.error.peek()) return;
+		this.#failed = {
+			broadcast: this.source.in.broadcast.peek()?.out.active.peek()?.closed,
+			media: track.broadcast.closed,
+			track: track.track,
+			identity: track.identity,
+		};
+		this.#out.error.set(error);
 	}
 
 	#runDisplay(effect: Effect): void {
@@ -314,6 +380,7 @@ interface DecoderTrackProps {
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
 	config: DecoderConfig;
+	identity: string;
 	// The broadcast catalog this subscription started from. Updates on that broadcast still apply;
 	// a later source does not.
 	catalog: Getter<Catalog.Root | undefined>;
@@ -322,10 +389,12 @@ interface DecoderTrackProps {
 }
 
 class DecoderTrack {
+	error = new Signal<Error | undefined>(undefined);
 	sync: Sync;
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
 	config: DecoderConfig;
+	identity: string;
 	catalog: Getter<Catalog.Root | undefined>;
 	stats: Signal<Stats | undefined>;
 
@@ -341,9 +410,7 @@ class DecoderTrack {
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<Container.BufferedRanges>([]);
 
-	// The last discontinuity count seen from the container consumer. An output callback
-	// captures it when the frame comes out, so a picture already parked in sync.wait
-	// can be dropped after the playhead moves.
+	// The last discontinuity count seen from the container consumer.
 	#discontinuity = 0;
 
 	// Codec description from the last configure, reused after a playhead reset.
@@ -359,6 +426,7 @@ class DecoderTrack {
 		this.broadcast = props.broadcast;
 		this.track = props.track;
 		this.config = props.config;
+		this.identity = props.identity;
 		this.catalog = props.catalog;
 		this.stats = props.stats;
 
@@ -377,9 +445,10 @@ class DecoderTrack {
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				try {
-					// The generation this frame was decoded in. If the playhead bumps while we wait
-					// below, this frame belongs to the previous generation and must be dropped.
-					const generation = this.#discontinuity;
+					// The clock epoch this frame was decoded in. A reset while we wait below (this
+					// track's playhead moving, or a shared reset such as audio's at an utterance
+					// boundary) means the frame belongs to the previous timeline and must be dropped.
+					const epoch = this.sync.epoch;
 
 					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
@@ -398,10 +467,12 @@ class DecoderTrack {
 						this.frame.set(frame.clone());
 					}
 
-					// Returns immediately when the latency is "instant".
-					const ok = await effect.race(this.sync.wait(timestamp).then(() => true));
-					if (!ok) return;
-					if (generation !== this.#discontinuity) return; // the playhead moved while waiting
+					// Returns immediately when the latency is "instant". Closing the track releases it.
+					// Capture the signal: a rerun replaces `effect.abort` before this continuation runs.
+					const signal = effect.abort;
+					await this.sync.wait(timestamp, signal);
+					if (signal.aborted) return;
+					if (epoch !== this.sync.epoch) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -422,9 +493,8 @@ class DecoderTrack {
 					frame.close();
 				}
 			},
-			// TODO bubble up error
 			error: (error) => {
-				console.error("video decoder error", error);
+				this.error.set(error);
 				effect.close();
 			},
 		});
@@ -615,7 +685,7 @@ class DecoderTrack {
 	// otherwise come out above the new keyframe and late-reject it. A delta continues a group the
 	// bump interrupted (a stale marker or a max-delay hole), so it keeps the decoder's references;
 	// a reset would make WebCodecs require a key chunk and throw. `reset()` cannot cancel an
-	// output callback that already holds a frame; the generation it captured rejects that one.
+	// output callback that already holds a frame; the clock epoch it captured rejects that one.
 	#resetAtKeyframe(decoder: VideoDecoder, keyframe: boolean): void {
 		if (!this.#resetPending) return;
 		this.#resetPending = false;

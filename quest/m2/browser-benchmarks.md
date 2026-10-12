@@ -44,4 +44,4 @@ pieces and add a focused recipe with artifacts under the benchmark conventions.
 ## Related
 
 - [Generated lite browser report](/quest/m2/rs2ts-browser-report.md) - compares generated and hand-written js/net through this harness
-- [Benchmark comparisons](/quest/m1/performance-comparisons.md) - reporting conventions
+- [Benchmark reporting](/bench/README.md) - reporting conventions

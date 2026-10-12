@@ -7,7 +7,7 @@ import { Producer as GroupProducer } from "./group.ts";
 import { HopSchema, Route } from "./hop.ts";
 import { spreadHash } from "./internal.ts";
 import type { Consumer, Table } from "./origin.ts";
-import { Producer } from "./origin.ts";
+import { Preference, Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale } from "./time.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -1323,6 +1323,85 @@ test("the cheapest received route competes with the local broadcast, not the new
 	origin.close();
 });
 
+test("a preferred link wins over a cheaper one, fails over, and moves back", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const upstream = new BroadcastProducer();
+	const served: string[] = [];
+	const via = (name: string) => () => {
+		served.push(name);
+		return upstream.consume();
+	};
+	const route = (cost: bigint) => Route.normalize({ epoch: EPOCH, hops: [PEER], cost });
+	const preferred = origin.withPreference(Preference(1));
+	const backup = serve(origin, path, via("secondary"), route(1n));
+	let primary = serve(preferred, path, via("primary"), route(10n));
+
+	expect(consumer.broadcasts().peek().get(path)).toEqual(route(10n));
+	const request = consumer.request(path);
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(served).toEqual(["primary"]);
+
+	// Same epoch, so the request resumes on the secondary and back again.
+	primary();
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(served).toEqual(["primary", "secondary"]);
+	primary = serve(preferred, path, via("primary"), route(10n));
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(served).toEqual(["primary", "secondary", "primary"]);
+
+	// A newer epoch outranks preference.
+	const newer = Epoch.parse("01900000-0000-7000-8000-000000000002");
+	const fresh = serve(origin, path, via("newer"), Route.normalize({ epoch: newer, hops: [PEER], cost: 1n }));
+	expect(consumer.broadcasts().peek().get(path)?.epoch).toBe(newer);
+
+	request.close();
+	fresh();
+	primary();
+	backup();
+	upstream.close();
+	origin.close();
+});
+
+test("a demoted link ranks below an unranked one, even when cheaper", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const upstream = new BroadcastProducer();
+	const served: string[] = [];
+	const via = (name: string) => () => {
+		served.push(name);
+		return upstream.consume();
+	};
+	const route = (cost: bigint) => Route.normalize({ epoch: EPOCH, hops: [PEER], cost });
+	const demoted = serve(origin.withPreference(Preference(-1)), path, via("demoted"), route(1n));
+	const unranked = serve(origin, path, via("unranked"), route(10n));
+
+	expect(consumer.broadcasts().peek().get(path)).toEqual(route(10n));
+	const request = consumer.request(path);
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(served).toEqual(["unranked"]);
+
+	request.close();
+	unranked();
+	demoted();
+	upstream.close();
+	origin.close();
+});
+
+test("a preference outside a signed byte is refused", () => {
+	expect(Number(Preference(-128))).toBe(-128);
+	expect(Number(Preference(127))).toBe(127);
+	expect(() => Preference(128)).toThrow(RangeError);
+	expect(() => Preference(-129)).toThrow(RangeError);
+	expect(() => Preference(0.5)).toThrow(RangeError);
+});
+
 test("a handle serves a request under live", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
@@ -2517,14 +2596,18 @@ test.each([
 	const same = origin.consume().request(path);
 	await settle();
 	expect(same.active.peek()?.epoch).toBe(from);
+	const pinned = origin.consume().request(path, { epoch: from });
 
-	// Another epoch, or none, is another instance: the requests on the old one end.
+	// Another epoch, or none, is another instance: resolved requests keep the old one.
 	dynamic.update({ ...dynamic.route, epoch: to });
 	expect(await announced.next()).toMatchObject({ prefix, kind: "restart" });
 	await settle();
-	expect(held.active.peek()).toBeUndefined();
-	expect(held.unroutable.peek()).toBe(true);
-	expect(same.active.peek()).toBeUndefined();
+	expect(held.active.peek()).toBe(resolved);
+	expect(held.closed.peek()).toBeUndefined();
+	expect(held.unroutable.peek()).toBe(false);
+	expect(same.active.peek()?.epoch).toBe(from);
+	expect(pinned.active.peek()?.epoch).toBe(from);
+	expect(pinned.unroutable.peek()).toBe(false);
 
 	// The subscription already open stays on the old answer.
 	oldTrack.appendGroup().close();
@@ -2545,15 +2628,77 @@ test.each([
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
 	expect((await forwarded?.recvGroup())?.sequence).toBe(7);
 
+	// Existing request handles can still subscribe, but never join the new answer.
+	const retained = held.active.peek()?.track("video").subscribe();
+	expect((await retained?.recvGroup())?.sequence).toBe(1);
+	oldTrack.appendGroup().close();
+	expect((await retained?.recvGroup())?.sequence).toBe(2);
+	expect(held.active.peek()).toBe(resolved);
+
+	// Retracting the new claim does not retract the resolved old request.
+	dynamic.close();
+	await settle();
+	expect(held.active.peek()).toBe(resolved);
+	expect(held.closed.peek()).toBeUndefined();
+	retained?.close();
 	await requests.return?.();
 	sticky?.close();
 	subscription?.close();
 	forwarded?.close();
-	for (const handle of [held, same, fresh]) handle.close();
+	for (const handle of [held, same, pinned, fresh]) handle.close();
 	old.close();
 	next.close();
 	dynamic.close();
 	announced.close();
+	origin.close();
+});
+
+test("an epoch update does not retain an answer that already closed", async () => {
+	const origin = new Producer();
+	const path = Path.from("live/cam");
+	const dynamic = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const requests = dynamic.requested();
+	const held = origin.consume().request(path);
+	const old = new BroadcastProducer();
+	(await requests.next()).value?.accept(old);
+	old.close();
+	// The server's closure callback has not removed the answer yet.
+	dynamic.update({ epoch: NEWER });
+	try {
+		expect(held.closed.peek()).toBeInstanceOf(Error);
+		expect(held.active.peek()).toBeUndefined();
+		const fresh = origin.consume().request(path);
+		const next = new BroadcastProducer();
+		(await requests.next()).value?.accept(next);
+		expect(fresh.active.peek()?.epoch).toBe(NEWER);
+		fresh.close();
+		next.close();
+	} finally {
+		held.close();
+		await requests.return?.();
+		dynamic.close();
+		origin.close();
+	}
+});
+
+test("an unread resolved request retains its broadcast until its last handle closes", async () => {
+	const origin = new Producer();
+	const path = Path.from("live/cam");
+	const dynamic = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const requests = dynamic.requested();
+	const held = origin.consume().request(path);
+	const old = new BroadcastProducer();
+	(await requests.next()).value?.accept(old);
+	// Change epochs before the active getter or its subscription can clone the answer.
+	dynamic.update({ epoch: NEWER });
+	expect(old.closed.peek()).toBeUndefined();
+	expect(held.active.peek()?.epoch).toBe(EPOCH);
+	held.close();
+	await old.closed;
+	expect(held.active.peek()).toBeUndefined();
+	await requests.return?.();
+	dynamic.close();
+	old.close();
 	origin.close();
 });
 
@@ -2602,7 +2747,7 @@ test("an update does not override route selection: another claim at the epoch ke
 	expect(held.active.peek()?.epoch).toBe(EPOCH);
 
 	// The first claim drops the epoch, so the second, still at it, outranks it: the
-	// request on the epoch moves to the second's answer rather than ending.
+	// resolved request keeps its answer, and new requests go through the second claim.
 	first.update({ ...first.route, epoch: undefined });
 	const fresh = origin.consume().request(path);
 	const replacement = new BroadcastProducer();

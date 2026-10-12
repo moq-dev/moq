@@ -87,6 +87,11 @@ mod tests {
 	use super::*;
 	use crate::catalog::hang::Container as Hang;
 
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
+
 	fn frame(timestamp_us: u64, payload: &'static [u8], keyframe: bool) -> Frame {
 		Frame {
 			timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
@@ -100,7 +105,7 @@ mod tests {
 	#[tokio::test]
 	async fn reads_a_group_to_completion() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("media", None).unwrap();
+		let track = broadcast.create_track("media", timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		let mut media = crate::container::Producer::new(track, Hang::Legacy(crate::container::Kind::Data));
@@ -156,7 +161,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_duration_marker_times_the_last_frame() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("media", None).unwrap();
+		let track = broadcast.create_track("media", timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		let mut media = crate::container::Producer::new(track, Hang::Legacy(crate::container::Kind::Video));
