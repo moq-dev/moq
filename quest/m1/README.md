@@ -101,6 +101,7 @@ folded into Dropped sources.
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`; a dead route ends Unroutable, and the TS follower lingers on announcements instead of matching errors
 - [Release warm FETCH](/quest/m1/release-warm-fetch.md) - on the 0.17 line, a FETCH of a group a subscription delivered in part gets every frame instead of stalling on a parked open group
 - [Malformed moq-lite input](/quest/m1/lite-malformed-close.md) - a lite peer that breaks a control-stream rule, including SETUP's client-only parameters, gets PROTOCOL_VIOLATION, and a Report-level publisher answers PROBE targets, in Rust and js/net
+- [Own-range codes on MoQT](/quest/m1/own-range-bridge.md) - a MoQT close never carries a moq-lite own-range session code
 - [Client settings parity](/quest/m1/obs-client-config.md) - moq-ffi offers moq-c's client knobs, and the OBS Advanced settings get back the ones the C++ migration dropped
 - [Session report parity](/quest/m1/obs-session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
 - [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - `moq::Client` is the generated type itself and `moq::expected` is one type at every C++ standard
@@ -129,6 +130,7 @@ folded into Dropped sources.
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - catalog rendition keys become IDs unique across video and audio, with an optional `track` name, so one catalog lists renditions from several broadcasts
 - [Media stats](/quest/m1/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
 - [JS track handover](/quest/m1/js-group-handover.md) - a JS track subscription resumes across a route swap from the first frame it lacks, so `test/drain` passes at zero latency budget
+- [Drain web connections from accept](/quest/m1/drain-web-accept.md) - a relay drain never exits under a WebSocket client still in TLS or header parsing
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over without dropping a group
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
 - [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) - packet bookkeeping scales with completed entries instead of scanning the flight on every ACK
