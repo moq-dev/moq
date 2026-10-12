@@ -524,7 +524,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				return Err(Error::InvalidSubtitle("laced subtitles are unsupported").into());
 			}
 			let duration = match cue.duration {
-				Some(ticks) => ticks.checked_mul(self.timestamp_scale_ns).ok_or(Error::TimestampOverflow)?,
+				Some(ticks) => ticks
+					.checked_mul(self.timestamp_scale_ns)
+					.ok_or(Error::TimestampOverflow)?,
 				None => {
 					let duration = track
 						.default_duration
@@ -549,7 +551,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				duration: Some(duration),
 			})?;
 			// Each cue is self-contained, so close its group immediately.
-			return Ok(track.track.cut(None)?);
+			return track.track.cut(None);
 		}
 
 		let frames = split_lacing(block).map_err(anyhow::Error::new)?;
