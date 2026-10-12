@@ -127,6 +127,7 @@ drill-sensitivity *args:
 # Check the subscriber's MPEG-TS output for IRD compliance.
 [positional-arguments]
 ts *args:
+    python3 ./ts/pcr-timing.test.py
     ./ts/run.sh "$@"
 
 # Round-trip the EIT fixtures: the sparse schedule must survive and

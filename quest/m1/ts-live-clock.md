@@ -55,5 +55,5 @@ public API and wire changes are not expected.
 - [Passing full CI](https://github.com/moq-dev/moq/actions/runs/38178905198) - same-head contrast, including real live timing
 - [Same-instance resume](/quest/m1/ts-same-instance-resume.md) - independent full-check failure
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - existing session handover and epoch contract
-- [Mux-rate hold](/quest/m1/tstd/mux-rate-hold.md) - #5287 owns initial rate publication and its finite-source behavior
+- [Mux-rate hold #5287](https://github.com/moq-dev/moq/pull/5287) - initial rate publication, and a finished import lingering for its max-age
 - [TS AC-3 scheduling](/quest/m1/ts-atsc-ac3.md) - #5306 owns decoder deadlines and unknown-rate startup overflow
