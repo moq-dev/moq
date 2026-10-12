@@ -111,7 +111,8 @@ fn import(relay: &Relay) -> (Child, JoinHandle<ChildStdin>) {
 /// [`import`] with `global` flags, such as the session version or the epoch.
 fn import_with(relay: &Relay, global: &[&str]) -> (Child, JoinHandle<ChildStdin>) {
 	let mut child = moq(relay, global)
-		.args(["import", "ts"])
+		// A finished import lingers for its max-age; keep that short so the publisher exits promptly.
+		.args(["import", "--max-age", "1s", "ts"])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");
@@ -218,7 +219,7 @@ async fn an_export_failure_with_the_broadcast_up_exits_without_lingering() {
 	let (mut export, _output) = export(&relay, "20s");
 
 	// TS cannot carry AV1, so the export fails on the catalog while the publisher stays up.
-	let mut publisher = moq(&relay, &["import", "fmp4"])
+	let mut publisher = moq(&relay, &["import", "--max-age", "1s", "fmp4"])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");

@@ -596,6 +596,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	self_origin: crate::Hop,
 	// What the peer declared in its SETUP.
 	peer_setup: peer::PeerSetup,
+	// Whether our SETUP declared MoQ Solicit, which is what makes an unsolicited
+	// PUBLISH_NAMESPACE the peer's fault.
+	solicit: bool,
 	// Local policy for what pulling from this peer costs, overriding whatever it
 	// declared. See `cluster::link_cost`.
 	cost: Option<u64>,
@@ -688,6 +691,7 @@ where
 			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
 			peer_setup,
+			solicit: true,
 			cost,
 			state: Default::default(),
 			tasks,
@@ -706,6 +710,13 @@ where
 		self.auth = auth;
 		let this = self.clone();
 		self.tasks.push(async move { this.run_limit().await });
+		self
+	}
+
+	/// Whether our SETUP declared MoQ Solicit. Without it an unsolicited PUBLISH_NAMESPACE
+	/// is what we invited, even from a peer that implements the extension.
+	pub fn with_solicit(mut self, solicit: bool) -> Self {
+		self.solicit = solicit;
 		self
 	}
 
@@ -1134,7 +1145,12 @@ where
 		let mut data = body.decoder(this.version);
 		let task = match id {
 			ietf::Publish::ID => {
-				let msg = ietf::Publish::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::Publish::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::Publish, body.clone()));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -1149,7 +1165,12 @@ where
 			ietf::PublishNamespace::ID => {
 				// A negotiated session that omits HOP_PATH fails the decode here, which
 				// the dispatcher turns into the protocol violation the draft requires.
-				let msg = ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated())?;
+				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated()) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::PublishNamespace, body.clone()));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -1177,6 +1198,23 @@ where
 		Ok(task)
 	}
 
+	/// Refuse a request whose AUTHORIZATION TOKEN repeats (section 8.9), which unlike any
+	/// other decode error leaves the session open.
+	fn reject_token(
+		&self,
+		stream: Stream<S, Version>,
+		kind: request::Kind,
+		body: ietf::Body,
+	) -> MaybeSendBox<'static, ()> {
+		let version = self.version;
+		async move {
+			if let Err(err) = super::token::reject(stream, kind, body, version).await {
+				tracing::debug!(%err, "token refusal failed");
+			}
+		}
+		.maybe_boxed()
+	}
+
 	/// What the peer declared about being solicited (MoQ Solicit).
 	///
 	/// Read once by the dispatch loop and handed to each stream rather than awaited per
@@ -1188,16 +1226,20 @@ where
 
 	/// Whether an incoming PUBLISH_NAMESPACE means the peer ignored our SETUP.
 	///
-	/// We always declare that advertisements to us must be solicited (MoQ Solicit), and a
-	/// peer that wrote the option at all proves it implements the extension, whichever
-	/// value it chose. It also cannot have advertised before reading our SETUP, since our
-	/// SETUP is what says whether advertising unasked is allowed. So this is a bug in the
-	/// peer, and a silent one on both sides if we tolerate it.
+	/// Unless [`with_solicit`](Self::with_solicit) turned it off, we declare that
+	/// advertisements to us must be solicited (MoQ Solicit), and a peer that wrote the
+	/// option at all proves it implements the extension, whichever value it chose. It also
+	/// cannot have advertised before reading our SETUP, since our SETUP is what says whether
+	/// advertising unasked is allowed. So this is a bug in the peer, and a silent one on
+	/// both sides if we tolerate it.
 	///
 	/// Draft-14/15 are exempt: they have no inline NAMESPACE, so a PUBLISH_NAMESPACE
 	/// request is also how a peer answers our SUBSCRIBE_NAMESPACE there, and the message
 	/// alone does not say which it is.
 	fn unsolicited_is_a_violation(&self, declared: Option<bool>) -> bool {
+		if !self.solicit {
+			return false;
+		}
 		match self.version {
 			Version::Draft14 | Version::Draft15 => false,
 			_ => declared.is_some(),
@@ -1350,7 +1392,21 @@ where
 				return Ok(());
 			}
 
-			let msg = ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version)?;
+			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
+				// Section 8.9 rejects the update, which withdraws the advertisement as any
+				// refused update does.
+				Err(DecodeError::MalformedAuthToken) => {
+					let request_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
+					let err = Error::Decode(DecodeError::MalformedAuthToken);
+					self.write_error(stream, request_id, &err, "repeated AUTHORIZATION TOKEN")
+						.await?;
+					if stream.writer.finish().is_ok() {
+						let _ = stream.writer.closed().await;
+					}
+					return Ok(());
+				}
+				msg => msg?,
+			};
 			// Junk inside the declared size would otherwise be applied silently, which
 			// is the one decode path that skipped the check the others make.
 			if !data.is_empty() {
@@ -4671,8 +4727,13 @@ mod tests {
 	}
 
 	/// What an unsolicited advertisement means to a subscriber on `version` whose peer
-	/// declared `solicit`.
+	/// declared `solicit`, when we declared MoQ Solicit ourselves.
 	fn unsolicited_is_a_violation(solicit: Option<bool>, version: Version) -> bool {
+		unsolicited_is_a_violation_to(true, solicit, version)
+	}
+
+	/// The same, for a subscriber whose own SETUP declared MoQ Solicit only if `ours`.
+	fn unsolicited_is_a_violation_to(ours: bool, solicit: Option<bool>, version: Version) -> bool {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let peer_setup = peer::PeerSetup::default();
@@ -4695,10 +4756,23 @@ mod tests {
 			tasks,
 			Default::default(),
 		)
+		.with_solicit(ours)
 		.unsolicited_is_a_violation(solicit)
 	}
 
-	/// We always declare that advertisements to us must be solicited, so a peer that
+	/// A side that declined MoQ Solicit invited unsolicited advertisements, so one is
+	/// expected even from a peer that implements the extension.
+	#[moq_net_sim::test]
+	async fn an_announce_to_a_side_that_declined_solicit_is_fine() {
+		for solicit in [Some(true), Some(false), None] {
+			assert!(
+				!unsolicited_is_a_violation_to(false, solicit, Version::Draft17),
+				"{solicit:?}"
+			);
+		}
+	}
+
+	/// By default we declare that advertisements to us must be solicited, so a peer that
 	/// implements the extension and announces anyway has a bug. Tolerating it is what
 	/// keeps that bug invisible on both sides, so the session goes.
 	///
@@ -5040,7 +5114,11 @@ mod tests {
 				state.subscribes.insert(
 					*request_id,
 					TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), *name, None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							*name,
+							crate::track::Info::timed(),
+						),
 						Path::new(broadcast).to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,
@@ -5080,17 +5158,17 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 
-		let timestamp = crate::Timestamp::new(96_000, Timescale::default()).unwrap();
+		let timestamp = crate::Timestamp::new(96_000, Timescale::MILLI).unwrap();
 		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
 				timestamp,
-				Timescale::default(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -5147,15 +5225,15 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 		let datagram = |group_id: u64| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
-				crate::Timestamp::new(96_000, Timescale::default()).unwrap(),
-				Timescale::default(),
+				crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -5729,7 +5807,11 @@ mod tests {
 				TrackState {
 					alias: Some(7),
 					..TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							"video",
+							crate::track::Info::timed(),
+						),
 						Path::new("broadcast").to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,

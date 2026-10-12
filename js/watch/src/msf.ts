@@ -98,8 +98,10 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 
 /** Convert an MSF catalog to a hang catalog Root. */
 export function toHang(msf: Msf.Catalog): Catalog.Root {
-	const videoRenditions: Record<string, Catalog.VideoConfig> = {};
-	const audioRenditions: Record<string, Catalog.AudioConfig> = {};
+	// Track names are untrusted keys; a null prototype keeps `__proto__` an ordinary rendition.
+	const videoRenditions: Record<string, Catalog.VideoConfig> = Object.create(null);
+	const audioRenditions: Record<string, Catalog.AudioConfig> = Object.create(null);
+	const textRenditions: Record<string, Catalog.TextConfig> = Object.create(null);
 
 	for (const track of msf.tracks) {
 		if (track.role === "video") {
@@ -108,6 +110,27 @@ export function toHang(msf: Msf.Catalog): Catalog.Root {
 		} else if (track.role === "audio") {
 			const config = toAudioConfig(track);
 			if (config) audioRenditions[track.name] = config;
+		} else if (
+			track.role === "caption" ||
+			track.role === "subtitle" ||
+			(track.role &&
+				track.role !== "audiodescription" &&
+				track.role !== "signlanguage" &&
+				["vtt", "ttml", "utf8"].includes(track.codec ?? ""))
+		) {
+			const info = toContainer(track);
+			// A player selects usable renditions; an optional unsupported track cannot invalidate A/V.
+			if (!info) continue;
+			if (!track.codec) throw new Error(`MSF text track ${track.name} missing codec`);
+			textRenditions[track.name] = {
+				format: track.codec,
+				role: track.role,
+				lang: track.lang,
+				label: track.label,
+				container: info.container,
+				jitter: track.jitter != null ? delayMillis(track.jitter) : undefined,
+				delay: track.delay != null ? delayMillis(track.delay) : undefined,
+			};
 		}
 	}
 
@@ -120,6 +143,8 @@ export function toHang(msf: Msf.Catalog): Catalog.Root {
 	if (Object.keys(audioRenditions).length > 0) {
 		root.audio = { renditions: audioRenditions };
 	}
+
+	if (Object.keys(textRenditions).length > 0) root.text = { renditions: textRenditions };
 
 	return root;
 }

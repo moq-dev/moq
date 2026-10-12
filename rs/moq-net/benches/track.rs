@@ -34,6 +34,11 @@ use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{Error, Timestamp, broadcast, cache, track};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 /// Fanout sizes spanning a direct viewer, a small room, and a large room.
 const FANOUT: [usize; 4] = [1, 8, 64, 512];
 
@@ -81,7 +86,7 @@ impl Fanout {
 			.with_expiry(cache::DEFAULT_EXPIRY);
 		info.pool = cache::Pool::new(config);
 		let broadcast = broadcast::Producer::new(info);
-		let track = broadcast.create_track("bench", None).unwrap();
+		let track = broadcast.create_track("bench", timed()).unwrap();
 		let mut subscribers: Vec<_> = (0..subscribers).map(|_| track.subscribe(None)).collect();
 		let waiters: Vec<_> = (0..subscribers.len()).map(|_| kio::Waiter::noop()).collect();
 
@@ -174,7 +179,7 @@ impl Swept {
 		let payload = Bytes::from_static(&[0; PAYLOAD]);
 		let tracks = (0..tracks)
 			.map(|i| {
-				let track = broadcast.create_track(format!("bench{i}"), None).unwrap();
+				let track = broadcast.create_track(format!("bench{i}"), timed()).unwrap();
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 				group.finish().unwrap();
@@ -284,7 +289,7 @@ fn parallel_write(pool: &cache::Pool, writers: usize, iterations: u64) -> Durati
 					let mut info = broadcast::Info::default();
 					info.pool = pool;
 					let broadcast = broadcast::Producer::new(info);
-					let track = broadcast.create_track("bench", None).unwrap();
+					let track = broadcast.create_track("bench", timed()).unwrap();
 					let payload = Bytes::from_static(&[0; PAYLOAD]);
 					// Arrive once setup is done, then park until the main thread has stamped the clock.
 					barrier.wait();
@@ -393,6 +398,37 @@ fn bench_subscriber_join(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Late joins scan a bounded datagram ring; sweep both the backlog and the joining audience.
+fn bench_datagram_subscriber_join(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_datagram_subscriber_join");
+	for buffered in [0, 1, 8, 64] {
+		for join in [1, 8, 64] {
+			group.throughput(Throughput::Elements(join as u64));
+			group.bench_function(BenchmarkId::new(format!("{buffered}d"), join), |b| {
+				b.iter_batched(
+					|| {
+						let broadcast = broadcast::Info::default().produce();
+						let mut track = broadcast.create_track("bench", timed()).unwrap();
+						for millis in 0..buffered {
+							track
+								.append_datagram(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
+								.unwrap();
+						}
+						(broadcast, track)
+					},
+					|(broadcast, track)| {
+						let preferences = track::Subscription::default().with_max_delay(Duration::from_millis(5));
+						let viewers: Vec<_> = (0..join).map(|_| track.subscribe(preferences.clone())).collect();
+						(broadcast, track, viewers)
+					},
+					BatchSize::SmallInput,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
 /// Queues a parked read as woken, so the bench visits only what an append wakes.
 struct Woken {
 	read: usize,
@@ -420,7 +456,7 @@ fn bench_parked_read(c: &mut Criterion) {
 		group.bench_function(BenchmarkId::from_parameter(parked), |b| {
 			b.iter_custom(|iterations| {
 				let broadcast = broadcast::Info::default().produce();
-				let track = broadcast.create_track("bench", None).unwrap();
+				let track = broadcast.create_track("bench", timed()).unwrap();
 				// Cover setup and every measured append so the same backlog stays parked,
 				// even when Criterion requests more iterations during warm-up.
 				let max_delay = Duration::from_micros(
@@ -494,6 +530,7 @@ criterion_group!(
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
 	bench_subscriber_join,
+	bench_datagram_subscriber_join,
 	bench_parked_read
 );
 criterion_main!(benches);

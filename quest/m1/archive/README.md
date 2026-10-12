@@ -52,9 +52,9 @@ Every track has its own timeline (`rs/moq-mux/src/timeline.rs`):
   spans durable on that broadcast. The exporter still lists a capped window
   for it; only the explicit `export::Config::history` mode lists the whole
   retained timeline and lets only its pops trim it (`durable` in
-  `rs/moq-hls/src/export/mod.rs`). Either way the listing starts at the
-  records the timeline restates on join (at most 256 from `moq-mux`), so a
-  longer recording does not list from its start yet.
+  `rs/moq-hls/src/export/mod.rs`). History mode FETCHes stored timeline
+  groups from group 0, and refuses a recording whose start retention pruned
+  (`Error::HistoryPruned`).
 
 `rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`.
 `moq_archive::Writer` (`rs/moq-archive/src/writer.rs`) cuts each enrolled track
@@ -165,9 +165,9 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md) - each timeline entry declares its segment duration (reported or estimated by the publisher), replacing the root `durationMax`
 - [JS per-track timelines](/quest/m1/archive/js-timelines.md) - `@moq/hang` publishes the same per-track timelines as Rust (it already reads them)
 - [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the reference timeline's declared duration; an overrun is listed with a warning
-- [History from the start](/quest/m1/archive/replay-history.md) - history mode lists a recording from its first segment by reading stored timeline groups, not only the restated tail
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq_archive::Reader` republishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay of `moq import archive`
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
+- [History from the retained floor](/quest/m1/archive/history-floor.md) - history mode lists a retained (DVR) recording from its oldest retained segment instead of refusing it
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 
 ## Related

@@ -29,6 +29,7 @@ pub(crate) async fn serve_ws(
 	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	Extension(versions): Extension<moq_net::Versions>,
+	Extension(extensions): Extension<moq_net::setup::Extensions>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
@@ -103,6 +104,7 @@ pub(crate) async fn serve_ws(
 			remote: remote.0,
 			alpn,
 			versions,
+			extensions,
 			publish,
 			subscribe,
 			stats,
@@ -121,6 +123,8 @@ struct SessionInputs {
 	remote: SocketAddr,
 	alpn: Option<String>,
 	versions: moq_net::Versions,
+	/// The moq-transport extensions this side offers in SETUP.
+	extensions: moq_net::setup::Extensions,
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Consumer>,
 	stats: Session,
@@ -157,6 +161,7 @@ where
 		remote: _,
 		alpn,
 		versions,
+		extensions,
 		publish,
 		subscribe,
 		stats,
@@ -191,7 +196,10 @@ where
 	// Only set the side the token actually grants. moq-net defaults the
 	// unset side to a fresh no-op origin, which is fine for a
 	// publish-only or subscribe-only token.
-	let mut server = moq_net::Server::new().with_versions(versions).with_stats(stats);
+	let mut server = moq_net::Server::new()
+		.with_versions(versions)
+		.with_extensions(extensions)
+		.with_stats(stats);
 	if let Some(subscribe) = subscribe {
 		server = server.with_publisher(subscribe);
 	}
@@ -990,6 +998,7 @@ mod tests {
 			remote: "127.0.0.1:0".parse().unwrap(),
 			alpn: Some(alpn.clone()),
 			versions: moq_net::Versions::all(),
+			extensions: Default::default(),
 			publish: None,
 			subscribe: None,
 			stats: Session::default(),
@@ -1056,6 +1065,7 @@ mod tests {
 			remote: "127.0.0.1:0".parse().unwrap(),
 			alpn: Some(alpn.clone()),
 			versions: moq_net::Versions::all(),
+			extensions: Default::default(),
 			publish: None,
 			subscribe: None,
 			stats: Session::default(),

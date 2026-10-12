@@ -10,11 +10,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Shrink the release staticlib the way rs/moq-c/build.sh does: thin LTO with one codegen
-# unit dead-strips the monomorphizations Rust bakes into a staticlib.
-export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-thin}"
-export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-1}"
-
 TARGET=""
 OUTPUT_DIR="dist"
 

@@ -449,17 +449,24 @@ function raceUntil<T>(values: readonly unknown[], abort?: AbortSignal): Promise<
 			else reject(settled.error);
 		};
 
-		if (abort) {
-			if (abort.aborted) return finish({ ok: true, value: undefined });
+		if (abort?.aborted) {
+			finish({ ok: true, value: undefined });
+		} else if (abort) {
 			const stop = () => finish({ ok: true, value: undefined });
 			abort.addEventListener("abort", stop);
 			disposes.push(() => abort.removeEventListener("abort", stop));
 		}
 
 		for (const value of values) {
+			// Observe a loser even once the race is decided, as Promise.race does, so its later
+			// rejection is not reported as unhandled. A thenable keeps one shared reaction.
+			if (done) {
+				listen(value, noop)();
+				continue;
+			}
 			const dispose = listen(value, finish);
-			if (done) return dispose();
-			disposes.push(dispose);
+			if (done) dispose();
+			else disposes.push(dispose);
 		}
 	});
 }
@@ -471,7 +478,8 @@ function raceUntil<T>(values: readonly unknown[], abort?: AbortSignal): Promise<
  * Accepts promises and {@link GetPromise} values such as a {@link Once}. Racing a value that
  * outlives the call (a `closed` pending for the whole track) once per frame therefore leaks nothing,
  * where `Promise.race` would leave a listener or reaction behind on every call. An already settled
- * value wins at once.
+ * value wins at once. Like `Promise.race`, every value is observed, so a loser that rejects later
+ * is not an unhandled rejection.
  */
 export function race<const T extends readonly unknown[]>(values: T): Promise<Awaited<T[number]>> {
 	return raceUntil(values);

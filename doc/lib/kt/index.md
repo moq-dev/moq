@@ -33,10 +33,15 @@ import dev.moq.media.*
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = listOf("ca.pem")))).use { moq ->
     moq.announced(AnnounceConfig(prefix = "live/", filter = "*/camera")).updates().collect { event ->
-        if (event !is AnnounceEventStart) return@collect // Update or End
+        // A restart is a new publisher run at the same path: request it again.
+        val announce = when (event) {
+            is AnnounceEventStart -> event.announce
+            is AnnounceEventRestart -> event.announce
+            else -> return@collect // Update or End
+        }
         // Prefixes stay origin-relative; captures reports what each wildcard matched.
-        println(event.announce.captures)
-        val broadcast = moq.requestBroadcast(event.announce.prefix)
+        println(announce.captures)
+        val broadcast = moq.requestBroadcast(announce.prefix)
         println(catalog(broadcast))
     }
 }
@@ -56,7 +61,7 @@ Moq.connect("https://relay.example.com").use { moq ->
         VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", bitrate = null, gop = null, kind = autoEncoder),
     )
     video.write(VideoFrame(timestampUs = pts, data = rgba))
-    broadcast.announce(Route())
+    broadcast.announce(Route(epoch = mintEpoch())) // a fresh epoch per run
     audio.finish()
     video.finish()
     broadcast.end()
@@ -75,6 +80,7 @@ one to one; the API reference has the names.
 - **Decoded frames hold decoder buffers.** `close()` each frame from `decodeVideo` promptly (or `use { }` it), or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** Suspending `moq.shutdown()` gives finished tracks up to one second to deliver and throws if they did not. `Moq.close()`, and so `use { }`, cancels at once. Finish or abort live tracks first.
 - **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero.
+- **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 

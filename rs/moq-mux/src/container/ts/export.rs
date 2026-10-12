@@ -515,8 +515,8 @@ impl Kind {
 
 /// The program tables plus the resolved PID layout.
 struct Psi {
-	pat: Pat,
-	pmt: Pmt,
+	pat: Bytes,
+	pmt: Bytes,
 	pcr_pid: u16,
 	/// PID the PMT rides on: the source's original (preserved from the service
 	/// record) or the synthesized [`PMT_PID`] for a media-only source.
@@ -1764,8 +1764,8 @@ impl<E: catalog::Catalog> Export<E> {
 			self.liveness.register(track.pid);
 		}
 		self.psi = Some(Psi {
-			pat,
-			pmt,
+			pat: super::psi::encode_pat(&pat)?,
+			pmt: super::psi::encode_pmt(&pmt)?,
 			pcr_pid,
 			pmt_pid,
 		});
@@ -1839,12 +1839,10 @@ impl<E: catalog::Catalog> Export<E> {
 		if psi {
 			let psi = self.psi.as_ref().context("PSI not built")?;
 			let pmt_pid = psi.pmt_pid;
-			let pat = TsPayload::Pat(psi.pat.clone());
-			let pmt = TsPayload::Pmt(psi.pmt.clone());
-			let flag = self.breaks(Pid::PAT).then(|| flags(true));
-			self.write_packet(&mut out, Pid::PAT, flag, pat)?;
-			let flag = self.breaks(pmt_pid).then(|| flags(true));
-			self.write_packet(&mut out, pmt_pid, flag, pmt)?;
+			let pat = psi.pat.clone();
+			let pmt = psi.pmt.clone();
+			self.write_section(&mut out, Pid::PAT, &pat)?;
+			self.write_section(&mut out, pmt_pid, &pmt)?;
 			self.last_psi = Some(frame.timestamp);
 		}
 
@@ -2143,7 +2141,7 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Packetize a private section (SCTE-35 or other) verbatim. The first packet
+	/// Packetize a complete PSI or private section verbatim. The first packet
 	/// carries the pointer_field plus the section start as a `Section` payload (sets
 	/// the unit-start bit so the receiver finds the pointer_field); continuations are
 	/// `Raw`. The section bytes are opaque, so this round-trips byte-for-byte.
