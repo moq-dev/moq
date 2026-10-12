@@ -105,11 +105,13 @@ impl Observer {
 		decision: impl Future<Output = Result<T, E>>,
 	) -> Result<T, E> {
 		tokio::select! {
-			res = decision => res,
+			// A decision that lands after the deadline, polled late, is still late.
+			biased;
 			() = self.expired() => Err(crate::auth::Error::Unavailable(
 				"the admission was still pending at the drain deadline".into(),
 			)
 			.into()),
+			res = decision => res,
 		}
 	}
 
@@ -269,6 +271,23 @@ mod tests {
 		drop(connecting.await.unwrap());
 		running.await.unwrap().unwrap();
 		assert!(waited, "drain completed while auth admission is pending");
+	}
+
+	/// A decision ready only once the deadline has passed is refused, however
+	/// the executor orders the two.
+	#[tokio::test(start_paused = true)]
+	async fn a_decision_after_the_deadline_is_refused() {
+		let window = Duration::from_secs(1);
+		let (trigger, shutdown) = Observer::new(window);
+		trigger.start();
+		tokio::time::advance(window).await;
+		for _ in 0..32 {
+			let decided = shutdown.admit(async { Ok::<_, crate::auth::Error>(()) }).await;
+			assert!(
+				matches!(decided, Err(crate::auth::Error::Unavailable(_))),
+				"admitted after the deadline"
+			);
+		}
 	}
 
 	/// An auth decision still pending at the drain deadline is abandoned then, so
