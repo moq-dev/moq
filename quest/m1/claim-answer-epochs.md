@@ -42,6 +42,24 @@ Session forwarding keeps a crate-private accept. Rejected: renewing the
 prefix on each restart (resets every sibling), and carrying sequences over to
 the next answer (relabels a different job as a continuation).
 
+Open, for the maintainer: a requester that resolves through an announced but
+still empty broadcast gets `NotFound` for its first track, so the handler
+must create its tracks (or a `broadcast::Dynamic`) before anyone resolves.
+`publish` as sketched announces too early. Options, keeping the name and the
+explicit epoch:
+
+- A typed two-phase answer: `request.prepare(epoch)` returns an unannounced
+  handle to fill, and its `publish()` announces and resolves (recommended:
+  misuse can't be expressed).
+- `request.publish(broadcast, epoch)` taking a broadcast from
+  `create_broadcast(request.path())`, refusing a wrong path or an announced
+  one at runtime.
+
+Required: validity and route insertion are atomic. A request the claim
+released (an `update` to another instance) or abandoned (the claim dropped)
+before the handler publishes is refused, never announced, as `accept` drops
+it today. Regression tests cover both.
+
 Look out for:
 
 - A downstream relay that resolved the path through its copy of the claim
