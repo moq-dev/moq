@@ -1,40 +1,42 @@
-# [M] rust-js spike
+# [M] Browser backend baseline
 
 ## Goal
 
-A report on running [rust-js](https://github.com/rust-js-lang/rust-js) over
-moq-net's lite codec and model layer, and the maintainer's choice of the
-translator's foundation from it: Charon in a new repo (the default), an own
-THIR driver, contributing to rust-js, or forking it. The PR rewrites
-[the rs2ts repo quest](/quest/m1/rs2ts/repo.md) for the chosen foundation.
+A reproducible browser harness compares handwritten js/net and the current
+Rust WASM consumer, retains their baselines, and can exercise the complete
+bindings before adoption. Measurements and parity fixtures run in CI, at
+least nightly, and the report identifies gaps rather than declaring the
+current consume-only WASM package a complete replacement.
 
 ## Plan
 
-A planning quest: the report and the rewritten quests are the output, not
-production code. Keep spike code on a scratch branch or in the report's
-artifact. It reports facts; no pass/fail bar is set in advance.
+Decided 2026-10-12: move the focused backend comparison before adoption.
+Reuse `test/wasm` and existing benchmark conventions; the broader
+[media benchmark suite](/quest/m2/browser-benchmarks.md) stays in m2 and
+is not a prerequisite. Preserve fixtures independently of backend packaging.
 
-Report, for the codec (`coding/` plus the lite message types) and the model
-(`model/` plus kio):
+- Record source revisions, Rust/bindgen/Binaryen versions where applicable,
+  build features, browser versions, hardware, and reproducible commands.
+  Inspect and reproduce the applicable async cases attached to
+  [#5337](https://github.com/moq-dev/moq/issues/5337); label unverified
+  contributor results separately. Do not equate its publisher prototype
+  with the original async consumer or with handwritten js/net.
+- Compare complete shipped assets, compressed JS plus WASM and glue, cold
+  startup and first-frame latency, per-frame CPU, and memory/copy/GC costs
+  where measurable. Use matching workloads and alternating repeated runs;
+  report unavailable metrics and measurement variability explicitly.
+- Exercise real WebTransport and the supported fallback. Separate protocol,
+  boundary, and network costs, and cover small audio through large frames.
+  Sweep publisher and subscriber counts so fan-out costs remain visible.
+- Retain parity cases for payloads and metadata, negotiated versions,
+  cancellation, close/error propagation, backpressure, memory growth, and
+  exact u64 values above 2^53 through u64::MAX where legal. Refuse values
+  outside each wire version's range; do not round them through JS numbers.
+- Deterministic unit tests use controlled time. Browser integration tests
+  synchronize on events. Timing reports should not fail a shared runner for
+  arbitrary slowdowns; correctness and invalid benchmark samples do fail.
 
-- What translates unmodified, what fails, and the source changes needed,
-  per construct: close-on-last-drop through `Arc` (and `Arc::strong_count`
-  logic in `model/resume.rs`), `Weak`, kio's wakers and RAII guards,
-  atomics, `BTreeMap::range`, maps keyed by `u64` or structs, the nested
-  `Option`s, `Arc<dyn Expiry>`, and the `unsafe` frame storage.
-- Gzip size and per-frame CPU of the generated codec against js/net's
-  hand-written one. Bun or node numbers are a proxy for the browser; label
-  them so.
-- What it takes to get the shapes the line decided: `U64` as two `u32`
-  halves instead of BigInt, checked integer arithmetic instead of wrapping,
-  TypeScript output, and no async translation. Say whether each is a config
-  option, an upstream patch, or a fork.
-- rust-js's churn, maintenance, and license, and Charon's for comparison:
-  Charon has no crates.io release, and its LLBC format breaks about five
-  times a week.
-
-The prior Charon evidence is the 2026-09-27 spike and the draft prototype in
-[#5049](https://github.com/moq-dev/moq/pull/5049). Do not post on rust-js
-without the maintainer's approval; it is outside our orgs.
+The binding and adoption quests extend this harness to publishing and the
+full API. The report is a baseline, not approval to switch implementations.
 
 Public API: none. Wire: none.
