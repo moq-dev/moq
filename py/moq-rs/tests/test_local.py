@@ -395,6 +395,8 @@ async def test_announced_epoch_restarts():
 
     with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
         moq.epoch_time(first.upper())
+    with pytest.raises(OverflowError):
+        moq.epoch_time("ffffffff-ffff-7000-8000-000000000000")
     with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
         broadcast.announce(moq.Route(epoch="not-an-epoch"))
     broadcast.close()

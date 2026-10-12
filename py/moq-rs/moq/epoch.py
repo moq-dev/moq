@@ -19,6 +19,7 @@ def mint_epoch() -> str:
 def epoch_time(epoch: str) -> datetime:
     """The UTC wall-clock time an epoch encodes, to the millisecond.
 
-    Raises `moq.Error` unless ``epoch`` is a lowercase hyphenated UUIDv7.
+    Raises `moq.Error` unless ``epoch`` is a lowercase hyphenated UUIDv7, and
+    ``OverflowError`` for a time past year 9999, which ``datetime`` cannot hold.
     """
     return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=moq_epoch_time_ms(epoch))
