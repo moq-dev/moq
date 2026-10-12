@@ -53,8 +53,9 @@ pub(crate) enum Event {
 ///
 /// A marker group (no decodable frames, one empty payload) is a walk-now discontinuity.
 /// A delivered sequence hole is a playhead event unless the boundary is contiguous within
-/// 1 ms, and a latency skip is the same event. [`discontinuity`](Self::discontinuity) is
-/// that playhead generation: re-apply startup delay and skip, not a decoder flush.
+/// 1 ms, and a latency skip or an evicted current group is the same event.
+/// [`discontinuity`](Self::discontinuity) is that playhead generation: re-apply startup
+/// delay and skip, not a decoder flush.
 /// Empty groups (zero objects) mean nothing. A group whose timestamps fall below the live
 /// edge earlier groups reached is malformed and aborts the track.
 pub struct Consumer<F: Container> {
@@ -151,7 +152,7 @@ impl<F: Container> Consumer<F> {
 	}
 
 	/// A counter that increments at each playhead event: a declared marker group, an
-	/// unproven delivered hole, or a latency skip.
+	/// unproven delivered hole, a latency skip, or an evicted current group.
 	///
 	/// Downstream consumers re-apply startup delay and skip when it changes. It is not a
 	/// decoder flush: the next group already starts on a keyframe with parameter sets.
@@ -307,6 +308,8 @@ impl<F: Container> Consumer<F> {
 							error = ?e,
 							"current group evicted; skipping to next buffered group"
 						);
+						// Whatever the group still held is lost, so this is a skip like any other.
+						self.bump_playhead();
 						self.pending.pop_front();
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 						continue 'read;
@@ -1874,6 +1877,7 @@ mod tests {
 			ts(150_000),
 			"skipped the evicted gap to the live group"
 		);
+		assert!(!next.continuous, "the eviction skip starts a new span");
 	}
 
 	/// A missing (evicted) sequence with a newer group buffered must be skipped once the
