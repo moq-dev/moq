@@ -52,9 +52,9 @@ Every track has its own timeline (`rs/moq-mux/src/timeline.rs`):
   spans durable on that broadcast. The exporter still lists a capped window
   for it; only the explicit `export::Config::history` mode lists the whole
   retained timeline and lets only its pops trim it (`durable` in
-  `rs/moq-hls/src/export/mod.rs`). Either way the listing starts at the
-  records the timeline restates on join (at most 256 from `moq-mux`), so a
-  longer recording does not list from its start yet.
+  `rs/moq-hls/src/export/mod.rs`). History mode FETCHes stored timeline
+  groups from group 0, and refuses a recording whose start retention pruned
+  (`Error::HistoryPruned`).
 
 `rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`.
 `moq_archive::Writer` (`rs/moq-archive/src/writer.rs`) cuts each enrolled track
