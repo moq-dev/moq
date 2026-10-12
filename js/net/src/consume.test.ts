@@ -118,7 +118,7 @@ test("request validity cancels one selection period and permits the held fallbac
 	// A more specific route taking over ends the old instance's requests the way Rust does, so
 	// players treat it as the instance going offline rather than an unexpected failure.
 	expect(first?.reason).toBeInstanceOf(StreamError);
-	expect((first?.reason as StreamError).code).toBe(StreamCode.Unroutable);
+	expect(first?.reason).toMatchObject({ code: StreamCode.Unroutable });
 	const sourceB = new Producer();
 	const instanceB = cache.instance(path);
 	const heldB = cache.insert(path, instanceB, sourceB.consume());
