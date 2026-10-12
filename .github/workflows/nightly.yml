@@ -91,7 +91,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just bench-audio
 
-      # Smoke-tests the unprivileged capture path: resolved worker stacks and CPU.
+      # perf needs the sched_switch tracepoint and kernel stacks; bench-lock refuses without them.
+      - name: Allow perf tracing
+        if: ${{ !cancelled() }}
+        run: |
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          sudo mount -o remount,mode=755 /sys/kernel/tracing
+
+      # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
       - name: Relay lock-wait profile
         if: ${{ !cancelled() }}
         run: nix develop --command just bench-lock fanout-heavy 4

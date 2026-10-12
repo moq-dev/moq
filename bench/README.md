@@ -59,19 +59,25 @@ nix develop --command just bench-lock fanout-heavy "4 16"
 This builds the relay with `[profile.profiling]` and frame pointers, then runs
 the workload on Tokio workers at each count twice: an unprofiled control, then
 a profiled run, so the throughput and CPU difference shows the profiler's
-overhead. During the profiled run's steady window, `eu-stack` samples every
-thread's stack back to back. A `moq-quic-N` sample counts as a mutex wait only
-when it is blocked in the futex under std's `Mutex::lock_contended`
-(`kio::Lock`); condvar, allocator and parking waits are counted separately, and
-spinning is excluded. Wait time is the wall window scaled by the share of
-samples, and `/proc` schedstat supplies CPU, so wait/CPU can exceed one.
-`lock/mutex.folded` holds the blocking stacks in flamegraph folded format.
+overhead. During the profiled run's steady window, `perf record` captures every
+worker switch-out on the `sched:sched_switch` tracepoint with a DWARF-unwound
+stack, plus each switch-in, so every off-CPU interval has an exact duration.
+glibc's `syscall` wrapper keeps no frame pointer, so frame-pointer unwinding
+would drop `Mutex::lock_contended`, which is why the stacks are unwound by
+DWARF. An interval counts as a mutex wait only when the worker is blocked in
+the futex under std's `Mutex::lock_contended` (`kio::Lock`). Condvar,
+allocator and parking waits are counted separately, and spinning is excluded.
+`/proc` schedstat supplies CPU, so wait/CPU can exceed one.
+`lock/mutex.folded` holds the blocking stacks, weighted by microseconds
+waited, in flamegraph folded format.
 
-It needs no root or perf/BPF permissions: the relay starts with
-`PR_SET_PTRACER` naming the harness, which lets Yama's default
-`ptrace_scope=1` admit the sampler. Each sample stops the relay while it
-unwinds, so treat the stacks as attribution and the absolute wait as an
-estimate. Linux only.
+Linux only. The kernel must expose the tracepoint and kernel stacks, and the
+recipe refuses before building until it does:
+
+```bash
+sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+sudo mount -o remount,mode=755 /sys/kernel/tracing
+```
 
 ## Workloads
 

@@ -564,8 +564,8 @@
             ++ dartDeps
             ++ devTools
             ++ [ quest-cli ]
-            # eu-stack samples relay worker stacks for `just bench-lock`.
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.elfutils ];
+            # perf records relay worker off-CPU stacks for `just bench-lock`.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.perf ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

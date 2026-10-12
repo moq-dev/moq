@@ -6,7 +6,7 @@ One local `just` recipe runs a bench shape and captures a relay profile in
 one of three modes, with enough metadata to reproduce it and to tell relay
 cost from load-generator cost:
 
-- **Lock wait** (first): sampled stacks report, per relay worker thread
+- **Lock wait** (first): perf reports, per relay worker thread
   (`moq-uring-N`, `moq-quic-N`), the time spent blocked in futex waits and the
   user stacks that blocked, as a share of that thread's CPU. Lock wait becomes
   a number anyone can reproduce without code in `kio`.
@@ -42,10 +42,10 @@ Shared by every mode:
   OS/kernel, CPU, runtime, affinity, allocator, and resolved workload with the
   result, in a caller-selected artifact directory. On cancellation or a failed
   capture, stop every owned child and keep the diagnostics.
-- Documented next to `just bench` and `just bench-runtime`. A mode that
-  needs privileges stays local and refuses an unsupported capture clearly;
-  one that does not runs nightly. Never substitute wall-clock timing for CPU
-  samples.
+- Documented next to `just bench` and `just bench-runtime`, and smoke-tested
+  nightly, where the runner can grant privileges with sudo. Refuse an
+  unsupported capture with the exact setup commands; never fall back silently
+  or substitute wall-clock timing for CPU samples.
 
 Lock wait (decided by the maintainer 2026-10-07, after closing #5031, which
 timed every contended `kio::Lock` acquire in code and added public API in
@@ -53,15 +53,18 @@ three crates plus five Prometheus families):
 
 - Measure from outside the process, aggregated by thread name and user
   stack. No instrumentation in `kio`, no new public API, no metrics.
-- Capture without root, so it runs on a developer host with
-  `perf_event_paranoid=4` and `unprivileged_bpf_disabled=2` and nightly in CI
-  (decided 2026-10-12, replacing bpftrace, which needs `CAP_BPF`). The relay
-  starts with `PR_SET_PTRACER` naming the harness; `eu-stack -q -m` samples
-  every thread at 20 Hz in the steady window, and `addr2line -i -C`
-  symbolizes once afterwards, expanding inlined frames such as
-  `Consumer::poll`. Wait is the window scaled by the share of samples blocked
-  in the futex; `/proc` schedstat supplies CPU. Each sample briefly stops the
-  relay, so an unprofiled control run precedes every profiled run.
+- perf records each worker switch-out on `sched:sched_switch` with its
+  stack, and `--switch-events` adds the switch-in, so each off-CPU interval
+  has an exact duration; `/proc` schedstat supplies CPU (decided by the
+  maintainer 2026-10-12, replacing bpftrace and an eu-stack sampler; its
+  ptrace stops likely inflated waits, reading 0.15 wait/CPU on fanout-heavy
+  at 4 workers where exact intervals read 0.0013). It needs
+  `kernel.perf_event_paranoid=-1`, `kernel.kptr_restrict=0` and a readable
+  `/sys/kernel/tracing`, and refuses with the commands until they hold; the
+  nightly sets them with sudo. User stacks unwind by DWARF, because glibc's
+  frameless `syscall` wrapper hides `Mutex::lock_contended` from
+  frame-pointer unwinding. `perf script --inline` expands inlined frames such
+  as `Consumer::poll`.
 - Count only stacks under the std mutex's contended path (`kio::Lock` is a
   `std::sync::Mutex`): futex waits also include allocator, condvar, and tokio
   waits, and a contended acquire that resolves while spinning never reaches

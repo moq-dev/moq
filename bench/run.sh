@@ -7,7 +7,7 @@ set -euo pipefail
 # runtime with the same number of independent Tokio/epoll and io_uring workers
 # on the current tree. The current load generator drives every relay so the
 # workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
-# `--lock` samples relay worker stacks to attribute std mutex waits.
+# `--lock` records relay worker off-CPU stacks to attribute std mutex waits.
 
 MODE=${1:-}
 ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
@@ -24,7 +24,7 @@ case $MODE in
         BASE=
         LOCK_WORKLOAD=${MOQ_BENCH_LOCK_WORKLOAD:-fanout}
         LOCK_WORKERS=${MOQ_BENCH_LOCK_WORKERS:-1 4 16}
-        # Without frame pointers or symbols the stacks stop at libc.
+        # For frame-pointer profilers; the lock capture itself unwinds by DWARF (see profile.py).
         export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
         ;;
     --runtime)
@@ -493,9 +493,11 @@ run_runtime_comparison() {
 
 run_lock_profile() {
     if [[ $(uname -s) != Linux ]]; then
-        printf 'lock profiling needs Linux for eu-stack and /proc schedstat\n' >&2
+        printf 'lock profiling needs Linux for perf and /proc schedstat\n' >&2
         return 1
     fi
+    # Refuse before the build when the kernel would refuse the capture.
+    python3 "$ROOT/bench/profile.py" check
     generate_certificate
 
     printf 'Building the relay with the profiling profile and frame pointers...\n'
@@ -503,12 +505,10 @@ run_lock_profile() {
     LOAD_BIN=$TARGET/profile/profiling/moq-bench
     HOST_BIN=$TARGET/profile/profiling/moq-bench-host
     local relay=$TARGET/profile/profiling/moq-relay
-    # Yama's default ptrace_scope lets only ancestors attach; eu-stack is this shell's grandchild.
-    RELAY_PREFIX=(python3 "$ROOT/bench/profile.py" traceable "$$" --)
 
     printf '\nLock wait: %s, tokio workers; each profiled run follows an unprofiled control\n' "$LOCK_WORKLOAD"
     printf '%-8s %8s %13s %13s %10s %10s %13s %9s\n' \
-        workers samples control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
+        workers switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
     local workers
     for workers in $LOCK_WORKERS; do
         run_workload "control-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
@@ -517,15 +517,15 @@ run_lock_profile() {
         PROFILE_LOCK=
         jq -r -s '[
             .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores,
-            ([.[2].workers[].samples] | min),
+            ([.[2].workers[].switches] | min),
             ([.[2].workers[].mutex_wait_ns] | add / 1000000),
             ([.[2].workers[].mutex_wait_ns] | add) / ([.[2].workers[].cpu_ns] | add)
         ] | @tsv' "$RUN/relay/control-$workers/$LOCK_WORKLOAD/summary.json" \
             "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/summary.json" \
             "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/lock/lock.json" |
-            while IFS=$'\t' read -r control profiled control_cpu profiled_cpu samples wait share; do
+            while IFS=$'\t' read -r control profiled control_cpu profiled_cpu switches wait share; do
                 printf '%-8s %8s %13.1f %13.1f %10.3f %10.3f %13.1f %9.4f\n' \
-                    "$workers" "$samples" "$control" "$profiled" "$control_cpu" "$profiled_cpu" "$wait" "$share"
+                    "$workers" "$switches" "$control" "$profiled" "$control_cpu" "$profiled_cpu" "$wait" "$share"
             done
     done
     printf '\nMutex stacks (flamegraph folded format): %s/relay/lock-*/%s/lock/mutex.folded\n' "$RUN" "$LOCK_WORKLOAD"

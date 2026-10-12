@@ -3,9 +3,7 @@
 # Sourced by run.sh, which owns these process and output paths.
 # shellcheck disable=SC2153,SC2154
 
-# Prepended to the relay command line; the lock profile makes the relay traceable.
-RELAY_PREFIX=()
-# Set to sample the relay's worker stacks during each workload's steady window.
+# Set to record the relay's worker off-CPU stacks during each workload's steady window.
 PROFILE_LOCK=
 
 relay_config() {
@@ -94,9 +92,9 @@ start_relay() {
 
         if [[ -n $tokio_threads ]]; then
             env TOKIO_WORKER_THREADS="$tokio_threads" RUST_LOG=warn \
-                "${RELAY_PREFIX[@]}" "$relay" "$config" >"$log" 2>&1 &
+                "$relay" "$config" >"$log" 2>&1 &
         else
-            RUST_LOG=warn "${RELAY_PREFIX[@]}" "$relay" "$config" >"$log" 2>&1 &
+            RUST_LOG=warn "$relay" "$config" >"$log" 2>&1 &
         fi
         RELAY_PID=$!
 
@@ -236,7 +234,7 @@ run_workload() {
         HOST_PID=$!
         if [[ -n $PROFILE_LOCK ]]; then
             # The second half of the host window, matching the summary's throughput window.
-            python3 "$ROOT/bench/profile.py" lock "$relay_pid" "$directory/lock" --delay 5 --duration 5 \
+            python3 "$ROOT/bench/profile.py" record "$relay_pid" "$directory/lock" --delay 5 --duration 5 \
                 >"$directory/lock.log" 2>&1 &
             PROFILE_PID=$!
         fi
