@@ -22,15 +22,35 @@ pub(super) fn stamp(value: Timestamp) -> String {
 }
 
 pub(super) fn header(value: &str) -> Result<String, &'static str> {
-	let value = value.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+	let value = newlines(value.trim_start_matches('\u{feff}'));
 	let first = value.lines().next().ok_or("missing WEBVTT header")?;
 	if first != "WEBVTT" && !first.starts_with("WEBVTT ") && !first.starts_with("WEBVTT\t") {
 		return Err("missing WEBVTT header");
 	}
-	if value.contains("-->") || value.contains("X-TIMESTAMP-MAP") || value.contains('\0') || value.contains('\r') {
+	if value.contains("-->") || value.contains("X-TIMESTAMP-MAP") || value.contains('\0') {
 		return Err("unsupported WebVTT header");
 	}
 	Ok(format!("{}\n\n", value.trim_end_matches('\n')))
+}
+
+/// The role a normalized WebVTT header's `Kind` metadata declares; subtitles when absent.
+pub(super) fn role(header: &str) -> hang::catalog::TextRole {
+	let kind = header
+		.lines()
+		.skip(1)
+		.take_while(|line| !line.is_empty())
+		.find_map(|line| line.strip_prefix("Kind:"))
+		.map(str::trim);
+	match kind {
+		None | Some("subtitles") => hang::catalog::TextRole::Subtitle,
+		Some("captions") => hang::catalog::TextRole::Caption,
+		Some(other) => hang::catalog::TextRole::Unknown(other.into()),
+	}
+}
+
+/// WebVTT accepts CRLF, LF, and lone CR line terminators.
+fn newlines(value: &str) -> String {
+	value.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 pub(super) fn append(output: &mut String, cue: Cue<'_>) -> Result<(), &'static str> {
@@ -42,8 +62,8 @@ pub(super) fn append(output: &mut String, cue: Cue<'_>) -> Result<(), &'static s
 			return Err("invalid cue identifier or settings");
 		}
 	}
-	let body = cue.body.replace("\r\n", "\n");
-	if body.contains(['\r', '\0']) || body.contains("\n\n") || body.contains("-->") {
+	let body = newlines(cue.body);
+	if body.contains('\0') || body.contains("\n\n") || body.contains("-->") {
 		return Err("invalid WebVTT cue text");
 	}
 	if !cue.id.is_empty() {

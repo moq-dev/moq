@@ -423,6 +423,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let media = match kind {
 			TrackKind::Text => {
 				let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
+				if let Some(header) = &text_header {
+					config.role = crate::container::text::role(header);
+				}
 				config.lang = language_ietf.or(language);
 				config.label = name;
 				config.container = self.container.clone();
@@ -597,9 +600,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Close the current group on every track and open the next one at `sequence`.
 	///
 	/// Broadcast-wide: every track inside this MKV import advances together; per-track
-	/// control is intentionally not exposed.
+	/// control is intentionally not exposed. Text spends a group per cue, so a text track that is
+	/// already past `sequence` continues from its own next group instead.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
+			let sequence = match &track.track {
+				Media::Text(text) => sequence.max(text.track().latest().map_or(0, |latest| latest + 1)),
+				_ => sequence,
+			};
 			track.track.seek(sequence)?;
 		}
 		Ok(())

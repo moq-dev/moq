@@ -365,12 +365,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		let header = crate::container::text::header(&codec.config.config).map_err(Error::InvalidSubtitle)?;
 		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
+		config.role = crate::container::text::role(&header);
 		config.lang = Some(trak.mdia.mdhd.language.clone());
-		config.label = codec
-			.label
-			.as_ref()
-			.map(|label| label.source_label.clone())
-			.or_else(|| (!trak.mdia.hdlr.name.is_empty()).then(|| trak.mdia.hdlr.name.clone()));
+		// The picker label is the HandlerBox name; `vlab` is an opaque source identifier.
+		config.label = (!trak.mdia.hdlr.name.is_empty()).then(|| trak.mdia.hdlr.name.clone());
 		let wire = crate::catalog::hang::Container::new(&config.container, crate::container::Kind::Data)?;
 		let track = self.broadcast.create_track(
 			self.broadcast.unique_name(".mp4-t"),
@@ -1047,10 +1045,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Broadcast-wide: every track inside this fMP4 import advances together; per-track
 	/// control is intentionally not exposed. Skipping sequences is not a new timeline, so the
 	/// next fragment must still advance past the last decode time; see
-	/// [`discontinuity`](Self::discontinuity).
+	/// [`discontinuity`](Self::discontinuity). Text spends a group per cue, so a text track that
+	/// is already past `sequence` continues from its own next group instead.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.text.values_mut() {
-			track.producer.seek(sequence)?;
+			let next = track.producer.track().latest().map_or(0, |latest| latest + 1);
+			track.producer.seek(sequence.max(next))?;
 		}
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);

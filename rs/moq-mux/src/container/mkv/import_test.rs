@@ -1021,3 +1021,43 @@ async fn unlaced_block_duration_does_not_use_track_default() {
 	}
 	assert_eq!(last, Some((80_000, 0)));
 }
+
+/// Text closes a group per cue, so a segment seek must not rewind onto a cue group already written.
+#[test]
+fn subtitle_seek_after_several_cues_does_not_reuse_a_group() {
+	let MatroskaSpec::TrackEntry(Master::Full(mut fields)) = text_entry(1, "S_TEXT/UTF8", "en", "English") else {
+		unreachable!()
+	};
+	fields.push(MatroskaSpec::DefaultDuration(500_000_000));
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(fields))])
+		.cluster(0, || {
+			(0..3).map(|index| simple_block(1, index * 1000, true, b"hi")).collect()
+		})
+		.cluster(4000, || vec![simple_block(1, 0, true, b"hi")])
+		.segment_end()
+		.build();
+	// Split just before each Cluster's ID.
+	const CLUSTER: [u8; 4] = [0x1f, 0x43, 0xb6, 0x75];
+	let clusters: Vec<usize> = data
+		.windows(4)
+		.enumerate()
+		.filter(|(_, window)| *window == CLUSTER)
+		.map(|(index, _)| index)
+		.collect();
+	let (head, rest) = data.split_at(clusters[0]);
+	let (first, second) = rest.split_at(clusters[1] - clusters[0]);
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(head).unwrap();
+	importer.seek(100).unwrap();
+	importer.decode(first).unwrap();
+	// The next segment is 101, but the cues already spent groups past it.
+	importer.seek(101).unwrap();
+	importer.decode(second).unwrap();
+	importer.finish().unwrap();
+}
