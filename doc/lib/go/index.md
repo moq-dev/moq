@@ -45,13 +45,18 @@ for event, err := range announced.All(ctx) {
         if moq.IsShutdown(err) { break }
         log.Fatal(err)
     }
-    ann, ok := event.(moq.AnnounceEventStart)
-    if !ok {
+    var ann moq.Announce
+    switch event := event.(type) {
+    case moq.AnnounceEventStart:
+        ann = event.Announce
+    case moq.AnnounceEventRestart: // a new publisher run at the same path: request it again
+        ann = event.Announce
+    default:
         continue // AnnounceEventUpdate or AnnounceEventEnd
     }
     // Prefix stays origin-relative; Captures reports what each wildcard matched.
-    fmt.Printf("captures: %v\n", ann.Announce.Captures)
-    broadcast, err := client.RequestBroadcast(ctx, ann.Announce.Prefix)
+    fmt.Printf("captures: %v\n", ann.Captures)
+    broadcast, err := client.RequestBroadcast(ctx, ann.Prefix)
     if err != nil {
         log.Fatal(err)
     }
@@ -81,7 +86,8 @@ video, _ := broadcast.EncodeVideo(
     nil,
 )
 _ = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
-_ = broadcast.Announce(moq.Route{})
+epoch := moq.MintEpoch() // a fresh epoch per run
+_ = broadcast.Announce(moq.Route{Epoch: &epoch})
 _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
@@ -99,8 +105,16 @@ one to one; the API reference has the names.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
 - **Closing.** `client.Close()` gives finished tracks up to one second to deliver and returns an error if they did not. `session.Shutdown(ctx)` does the same, and `session.Cancel(code)` closes at once. Finish or abort live tracks first.
 - **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, `EstimatedRecvRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero.
+- **Errors.** Read diagnostic payloads from `Reason` and structured protocol failures from `Details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 - **Track demand.** Obtain a dynamic track request’s `Demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+
+## Runtime
+
+Native I/O and background tasks run on a Tokio worker pool. Calls awaited by the
+host still poll in place; independent native wake callbacks can run concurrently.
+The generated bridge synchronizes wakeups before resuming the awaiting goroutine.
+Application goroutines remain responsible for serializing their own shared state.
 
 ## Reference
 

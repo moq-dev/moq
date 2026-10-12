@@ -17,6 +17,7 @@ author:
     email: kixelated@gmail.com
 
 normative:
+  moqmsf: I-D.ietf-moq-msf
   moql: I-D.lcurley-moq-lite
   moqflate:
     title: "DEFLATE Compressed Tracks for MoQ"
@@ -328,6 +329,10 @@ Unlike `format`, an unrecognized `role` never prevents rendering: it describes i
 
 The `lang` field is the BCP-47 {{!RFC5646}} language tag of the track, for example `en` or `es-419`.
 Two renditions sharing a `lang` are told apart by `label` ({{field-label}}), one of the common rendition fields ({{common}}).
+
+A gateway translating an MSF {{moqmsf}} caption or subtitle track MUST preserve its `codec` as `format`, and its `role`, `lang`, and `label` when present.
+It MUST preserve supported packaging and timing, and MUST refuse text packaging it cannot represent rather than silently delete the track.
+A missing text codec MUST NOT be replaced with a guessed format.
 
 Regardless of `format`, each frame's timestamp ({{container}}) is the authoritative cue start time on the media clock, so a relay and a consumer can order and schedule cues without parsing the payload.
 A text track has no delta frames: every frame is a self-contained cue, so a group MAY consist of multiple frames, following the same rule as a codec that lacks delta frames ({{container}}).
@@ -1086,6 +1091,8 @@ This document has no IANA actions.
 
 ## moq-hang-04
 {:numbered="false"}
+
+- Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 
 - Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures.
 - Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.

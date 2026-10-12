@@ -27,7 +27,7 @@ impl<T: Message> Encode<Version> for T {
 /// A control message body not decoded yet: a `u16` length, then that many bytes.
 ///
 /// Read after the message type, when the type decides how to decode the rest.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Body(pub bytes::Bytes);
 
 impl Decode<Version> for Body {

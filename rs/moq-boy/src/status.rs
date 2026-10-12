@@ -40,7 +40,10 @@ pub struct StatusPublisher {
 
 impl StatusPublisher {
 	pub fn new(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<Self> {
-		let producer = broadcast.create_track("status", None)?;
+		let producer = broadcast.create_track(
+			"status",
+			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)?;
 
 		Ok(Self {
 			producer: moq_json::snapshot::Producer::new(producer, moq_json::snapshot::Config::default()),

@@ -24,7 +24,10 @@ async fn main() -> anyhow::Result<()> {
     match args[1].as_str() {
         "publish" => {
             let broadcast = origin.create_broadcast(&args[3])?;
-            let mut track = broadcast.create_track("tail", None)?;
+            let mut track = broadcast.create_track(
+                "tail",
+                moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+            )?;
             broadcast.announce(Default::default())?;
             let _session = client
                 .with_publisher(&origin)

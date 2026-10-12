@@ -573,6 +573,8 @@ struct Advertised {
 
 #[derive(Clone)]
 pub(super) struct Subscriber<S: crate::transport::poll::Session> {
+	// Scoped to a minted source on the clone that serves its requests.
+	validity: crate::model::broadcast::RequestValidity,
 	// Arms the track-alias and request-id timeouts.
 	runtime: crate::time::Clock,
 	session: S,
@@ -594,6 +596,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	self_origin: crate::Hop,
 	// What the peer declared in its SETUP.
 	peer_setup: peer::PeerSetup,
+	// Whether our SETUP declared MoQ Solicit, which is what makes an unsolicited
+	// PUBLISH_NAMESPACE the peer's fault.
+	solicit: bool,
 	// Local policy for what pulling from this peer costs, overriding whatever it
 	// declared. See `cluster::link_cost`.
 	cost: Option<u64>,
@@ -686,6 +691,7 @@ where
 			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
 			peer_setup,
+			solicit: true,
 			cost,
 			state: Default::default(),
 			tasks,
@@ -694,6 +700,7 @@ where
 			auth: crate::auth::Handle::new(false),
 			frames: Default::default(),
 			announces: Default::default(),
+			validity: Default::default(),
 		}
 	}
 
@@ -703,6 +710,13 @@ where
 		self.auth = auth;
 		let this = self.clone();
 		self.tasks.push(async move { this.run_limit().await });
+		self
+	}
+
+	/// Whether our SETUP declared MoQ Solicit. Without it an unsolicited PUBLISH_NAMESPACE
+	/// is what we invited, even from a peer that implements the extension.
+	pub fn with_solicit(mut self, solicit: bool) -> Self {
+		self.solicit = solicit;
 		self
 	}
 
@@ -1131,7 +1145,12 @@ where
 		let mut data = body.decoder(this.version);
 		let task = match id {
 			ietf::Publish::ID => {
-				let msg = ietf::Publish::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::Publish::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::Publish, body.clone()));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -1146,7 +1165,12 @@ where
 			ietf::PublishNamespace::ID => {
 				// A negotiated session that omits HOP_PATH fails the decode here, which
 				// the dispatcher turns into the protocol violation the draft requires.
-				let msg = ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated())?;
+				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated()) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::PublishNamespace, body.clone()));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -1174,6 +1198,23 @@ where
 		Ok(task)
 	}
 
+	/// Refuse a request whose AUTHORIZATION TOKEN repeats (section 8.9), which unlike any
+	/// other decode error leaves the session open.
+	fn reject_token(
+		&self,
+		stream: Stream<S, Version>,
+		kind: request::Kind,
+		body: ietf::Body,
+	) -> MaybeSendBox<'static, ()> {
+		let version = self.version;
+		async move {
+			if let Err(err) = super::token::reject(stream, kind, body, version).await {
+				tracing::debug!(%err, "token refusal failed");
+			}
+		}
+		.maybe_boxed()
+	}
+
 	/// What the peer declared about being solicited (MoQ Solicit).
 	///
 	/// Read once by the dispatch loop and handed to each stream rather than awaited per
@@ -1185,16 +1226,20 @@ where
 
 	/// Whether an incoming PUBLISH_NAMESPACE means the peer ignored our SETUP.
 	///
-	/// We always declare that advertisements to us must be solicited (MoQ Solicit), and a
-	/// peer that wrote the option at all proves it implements the extension, whichever
-	/// value it chose. It also cannot have advertised before reading our SETUP, since our
-	/// SETUP is what says whether advertising unasked is allowed. So this is a bug in the
-	/// peer, and a silent one on both sides if we tolerate it.
+	/// Unless [`with_solicit`](Self::with_solicit) turned it off, we declare that
+	/// advertisements to us must be solicited (MoQ Solicit), and a peer that wrote the
+	/// option at all proves it implements the extension, whichever value it chose. It also
+	/// cannot have advertised before reading our SETUP, since our SETUP is what says whether
+	/// advertising unasked is allowed. So this is a bug in the peer, and a silent one on
+	/// both sides if we tolerate it.
 	///
 	/// Draft-14/15 are exempt: they have no inline NAMESPACE, so a PUBLISH_NAMESPACE
 	/// request is also how a peer answers our SUBSCRIBE_NAMESPACE there, and the message
 	/// alone does not say which it is.
 	fn unsolicited_is_a_violation(&self, declared: Option<bool>) -> bool {
+		if !self.solicit {
+			return false;
+		}
 		match self.version {
 			Version::Draft14 | Version::Draft15 => false,
 			_ => declared.is_some(),
@@ -1347,7 +1392,21 @@ where
 				return Ok(());
 			}
 
-			let msg = ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version)?;
+			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
+				// Section 8.9 rejects the update, which withdraws the advertisement as any
+				// refused update does.
+				Err(DecodeError::MalformedAuthToken) => {
+					let request_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
+					let err = Error::Decode(DecodeError::MalformedAuthToken);
+					self.write_error(stream, request_id, &err, "repeated AUTHORIZATION TOKEN")
+						.await?;
+					if stream.writer.finish().is_ok() {
+						let _ = stream.writer.closed().await;
+					}
+					return Ok(());
+				}
+				msg => msg?,
+			};
 			// Junk inside the declared size would otherwise be applied silently, which
 			// is the one decode path that skipped the check the others make.
 			if !data.is_empty() {
@@ -1780,6 +1839,17 @@ where
 			// The handler exists before the requester sees the source, so a track it asks
 			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
 			let dynamic = source.dynamic();
+			let validity = self
+				.state
+				.lock()
+				.broadcasts
+				.get(&path)
+				.filter(|entry| entry.generation == generation)
+				.and_then(|entry| entry.dynamic.as_ref())
+				.map(|route| crate::model::broadcast::RequestValidity::for_source(route, request.path()))
+				.unwrap_or_else(|| {
+					crate::model::broadcast::RequestValidity::token(Some(kio::Producer::new(()).consume()))
+				});
 			request.accept(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
@@ -1790,12 +1860,14 @@ where
 				.lock()
 				.broadcasts
 				.get(&path)
+				.filter(|entry| entry.generation == generation)
 				.map(|entry| entry.live.consume());
 			if route.is_none() {
 				source.close();
 			}
 
-			let this = self.clone();
+			let mut this = self.clone();
+			this.validity = validity;
 			broadcasts.push(async move {
 				if let Err(err) = this.run_broadcast(requested.borrow(), source, dynamic, route).await {
 					tracing::debug!(%err, "error running broadcast");
@@ -1959,6 +2031,7 @@ where
 		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
+		let validity = self.validity.start();
 		let subscription = target.subscription();
 		let start = subscription.as_ref().and_then(|s| s.start);
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
@@ -1975,7 +2048,10 @@ where
 			}
 		};
 
-		let request_id = match self.control.next_request_id(&self.runtime).await {
+		// Retirement cancels only the wait for an ID. On drafts 14-16 the peer grants
+		// MAX_REQUEST_ID credit back only for requests it receives, so an allocated ID is
+		// always sent; the response wait below cancels it if the source retired meanwhile.
+		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
 			Ok(id) => id,
 			Err(err) => {
 				target.fail(err);
@@ -2076,15 +2152,24 @@ where
 			Gone,
 		}
 
+		let mut retired = false;
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
 			loop {
 				let setup = kio::wait(|waiter| {
+					let response = waiter.poll_future(response.as_mut());
+					if let Poll::Ready(Err(err)) = response {
+						return Poll::Ready(Setup::Response(Err(err)));
+					}
+					if let Err(err) = validity.check(waiter) {
+						retired = true;
+						return Poll::Ready(Setup::Response(Err(err)));
+					}
 					// An answer that has already arrived wins over the local terminals. Both can
 					// be ready in one poll, and taking abandonment there would discard a response
 					// the publisher has already sent: if it was a rejection, the request is gone
 					// and cancelling it names a dead id back at a peer entitled to object.
-					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+					if let Poll::Ready(res) = response {
 						return Poll::Ready(Setup::Response(res));
 					}
 					let mut state = self.state.lock();
@@ -2167,6 +2252,9 @@ where
 			}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
+				if retired {
+					self.cancel_subscribe(stream, request_id).await;
+				}
 				if let Some(pending) = self.take_pending(request_id) {
 					pending.reject(err.clone());
 				}
@@ -2764,7 +2852,9 @@ where
 		track_name: &str,
 		request: track::Request,
 	) -> Option<Idle> {
-		let request_id = match self.control.next_request_id(&self.runtime).await {
+		let validity = self.validity.start();
+		// An allocated ID is always sent, as in `subscribe_once`.
+		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
 			Ok(id) => id,
 			Err(err) => {
 				request.reject(err);
@@ -2804,6 +2894,9 @@ where
 			let mut response = std::pin::pin!(self.read_track_status_response(&mut stream));
 			loop {
 				let res = kio::wait(|waiter| {
+					if let Err(err) = validity.check(waiter) {
+						return Poll::Ready(Some(Err(err)));
+					}
 					// An answer that already arrived wins over abandonment.
 					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
 						return Poll::Ready(Some(res));
@@ -3754,11 +3847,13 @@ where
 		request: group::Request,
 		timescale: Option<Timescale>,
 	) {
+		let validity = self.validity.start();
 		let sequence = request.sequence();
 		let start = request.frame_start();
 		let draft20 = Filter::is_draft20(self.version);
 
-		let fetch_id = match self.control.next_request_id(&self.runtime).await {
+		// An allocated ID is always sent, as in `subscribe_once`.
+		let fetch_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
 			Ok(id) => id,
 			Err(err) => return request.reject(err),
 		};
@@ -3821,13 +3916,22 @@ where
 			Ok::<_, Error>(())
 		}
 		.await;
+		let mut retired = false;
 		let res = match res {
 			Err(err) => Some(Err(err)),
 			Ok(()) => {
 				let mut response = std::pin::pin!(self.read_group_fetch_response(&mut stream));
 				kio::wait(|waiter| {
+					let response = waiter.poll_future(response.as_mut());
+					if let Poll::Ready(Err(err)) = response {
+						return Poll::Ready(Some(Err(err)));
+					}
+					if let Err(err) = validity.check(waiter) {
+						retired = true;
+						return Poll::Ready(Some(Err(err)));
+					}
 					// A refusal retires the peer's request, so it wins over abandonment.
-					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+					if let Poll::Ready(res) = response {
 						return Poll::Ready(Some(res));
 					}
 					request.demand().poll_unused(waiter).map(|_| None)
@@ -3847,7 +3951,11 @@ where
 			Some(Err(err)) => {
 				tracing::debug!(%err, group = sequence, "group fetch refused");
 				request.reject(err);
-				let _ = stream.writer.close().await;
+				if retired {
+					self.cancel_group_fetch(stream, fetch_id).await;
+				} else {
+					let _ = stream.writer.close().await;
+				}
 				return;
 			}
 		};
@@ -4631,8 +4739,13 @@ mod tests {
 	}
 
 	/// What an unsolicited advertisement means to a subscriber on `version` whose peer
-	/// declared `solicit`.
+	/// declared `solicit`, when we declared MoQ Solicit ourselves.
 	fn unsolicited_is_a_violation(solicit: Option<bool>, version: Version) -> bool {
+		unsolicited_is_a_violation_to(true, solicit, version)
+	}
+
+	/// The same, for a subscriber whose own SETUP declared MoQ Solicit only if `ours`.
+	fn unsolicited_is_a_violation_to(ours: bool, solicit: Option<bool>, version: Version) -> bool {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let peer_setup = peer::PeerSetup::default();
@@ -4655,10 +4768,23 @@ mod tests {
 			tasks,
 			Default::default(),
 		)
+		.with_solicit(ours)
 		.unsolicited_is_a_violation(solicit)
 	}
 
-	/// We always declare that advertisements to us must be solicited, so a peer that
+	/// A side that declined MoQ Solicit invited unsolicited advertisements, so one is
+	/// expected even from a peer that implements the extension.
+	#[moq_net_sim::test]
+	async fn an_announce_to_a_side_that_declined_solicit_is_fine() {
+		for solicit in [Some(true), Some(false), None] {
+			assert!(
+				!unsolicited_is_a_violation_to(false, solicit, Version::Draft17),
+				"{solicit:?}"
+			);
+		}
+	}
+
+	/// By default we declare that advertisements to us must be solicited, so a peer that
 	/// implements the extension and announces anyway has a bug. Tolerating it is what
 	/// keeps that bug invisible on both sides, so the session goes.
 	///
@@ -5000,7 +5126,11 @@ mod tests {
 				state.subscribes.insert(
 					*request_id,
 					TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), *name, None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							*name,
+							crate::track::Info::timed(),
+						),
 						Path::new(broadcast).to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,
@@ -5040,17 +5170,17 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 
-		let timestamp = crate::Timestamp::new(96_000, Timescale::default()).unwrap();
+		let timestamp = crate::Timestamp::new(96_000, Timescale::MILLI).unwrap();
 		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
 				timestamp,
-				Timescale::default(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -5107,15 +5237,15 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::default());
+			track.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 		let datagram = |group_id: u64| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
 				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
-				crate::Timestamp::new(96_000, Timescale::default()).unwrap(),
-				Timescale::default(),
+				crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
+				Timescale::MILLI,
 				Version::Draft19,
 			)
 			.unwrap();
@@ -5353,12 +5483,10 @@ mod tests {
 		);
 	}
 
-	/// A retraction does not disturb subscriptions already in flight, and one whose
-	/// SUBSCRIBE_OK has not arrived yet is in flight too: the publisher may already be
-	/// serving it. The broadcast ending in that window must not abort the track or cancel
-	/// the subscription.
+	/// An unanswered epochless request cannot prove which instance the peer resolved.
+	/// Retiring its source cancels it even while the caller keeps its demand.
 	#[moq_net_sim::test]
-	async fn a_retraction_before_subscribe_ok_keeps_the_subscription() {
+	async fn a_retirement_before_subscribe_ok_refuses_the_subscription() {
 		const VERSION: Version = Version::Draft16;
 
 		// A peer that accepts the stream and then says nothing at all.
@@ -5380,6 +5508,9 @@ mod tests {
 			Default::default(),
 		);
 
+		let route = kio::Producer::new(());
+		subscriber.validity = crate::model::broadcast::RequestValidity::token(Some(route.consume()));
+
 		let producer = crate::broadcast::Info::default().produce();
 		let mut dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -5394,27 +5525,108 @@ mod tests {
 
 		// Let the SUBSCRIBE go out, then retract the broadcast before any response.
 		settle().await;
-		producer.close();
-		settle().await;
+		drop(route);
+		serving.await.unwrap();
+		assert!(matches!(subscription.await, Err(Error::Unroutable)));
+		assert!(occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0);
+		assert_eq!(log.stops(), vec![crate::ietf::error::CANCELLED]);
+	}
 
-		assert!(
-			!serving.is_finished(),
-			"a retraction ended a subscription still in flight"
-		);
-		assert_eq!(
-			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
-			0,
-			"a retraction must not cancel a subscription still in flight",
-		);
+	#[derive(Clone, Copy, Debug)]
+	enum Allocated {
+		Subscribe,
+		TrackStatus,
+		GroupFetch,
+	}
 
-		// The reader leaving is still what ends it.
-		drop(subscription);
-		drop(track);
-		drop(consumer);
-		moq_net_sim::timeout(std::time::Duration::from_secs(1), serving)
-			.await
-			.expect("run_subscribe parked after its reader left")
-			.unwrap();
+	/// Drafts 14-16 return MAX_REQUEST_ID credit only for requests the peer receives, so a
+	/// source retiring after its request ID was allocated must still send that request,
+	/// then cancel it if the draft can. Skipping it would leak the credit for good.
+	#[moq_net_sim::test]
+	async fn a_retirement_after_allocation_still_sends_the_request() {
+		const VERSION: Version = Version::Draft16;
+
+		for kind in [Allocated::Subscribe, Allocated::TrackStatus, Allocated::GroupFetch] {
+			// Every request write parks until the gate opens, after the retirement.
+			let gate = kio::Producer::new(false);
+			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let mut subscriber = Subscriber::new(
+				crate::time::Clock::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				VERSION,
+				tasks,
+				Default::default(),
+			);
+			let route = kio::Producer::new(());
+			subscriber.validity = crate::model::broadcast::RequestValidity::token(Some(route.consume()));
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let _subscription = track.subscribe(None);
+			let request = dynamic.requested_track().await.expect("no track requested");
+
+			let mut fetch = None;
+			let serving = match kind {
+				Allocated::Subscribe => moq_net_sim::spawn(async move {
+					subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+				}),
+				Allocated::TrackStatus => moq_net_sim::spawn(async move {
+					assert!(
+						subscriber
+							.track_status(&Path::new("broadcast"), "video", request)
+							.await
+							.is_none()
+					);
+				}),
+				Allocated::GroupFetch => {
+					let track = track::Producer::new(
+						std::sync::Arc::new(crate::broadcast::Info::default()),
+						"video",
+						track::Info::default().with_timescale(None),
+					);
+					let requested = track.dynamic();
+					let mut pending = Box::pin(track.consume().fetch_group(0, None));
+					assert!(futures::poll!(pending.as_mut()).is_pending());
+					let group = requested.requested_group().await.expect("group request");
+					fetch = Some((track, pending));
+					moq_net_sim::spawn(subscriber.run_group_fetch(
+						Path::new("broadcast").to_owned(),
+						"video".into(),
+						group,
+						None,
+					))
+				}
+			};
+
+			// The ID is allocated and its request parked mid-write when the source retires.
+			settle().await;
+			drop(route);
+			settle().await;
+			let Ok(mut open) = gate.write() else {
+				panic!("gate closed")
+			};
+			*open = true;
+			drop(open);
+			serving.await.unwrap();
+			drop(fetch);
+
+			let expected = match kind {
+				Allocated::Subscribe => vec![ietf::Subscribe::ID, ietf::Unsubscribe::ID],
+				Allocated::TrackStatus => vec![ietf::TrackStatus::ID],
+				Allocated::GroupFetch => vec![ietf::Fetch::ID, ietf::FetchCancel::ID],
+			};
+			assert_eq!(control_message_types(&log, VERSION), expected, "{kind:?}");
+		}
 	}
 
 	/// The control messages that actually reached the wire, by type id.
@@ -5607,7 +5819,11 @@ mod tests {
 				TrackState {
 					alias: Some(7),
 					..TrackState::new(
-						track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None),
+						track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							"video",
+							crate::track::Info::timed(),
+						),
 						Path::new("broadcast").to_owned(),
 						kio::Producer::new(Fill::Done),
 						None,
@@ -9711,6 +9927,7 @@ mod joining_fetch_tests {
 	#[derive(Clone, Copy, PartialEq, Eq)]
 	enum FetchStage {
 		Unanswered,
+		Retired,
 		Accepted,
 		Receiving,
 		Complete,
@@ -9725,7 +9942,7 @@ mod joining_fetch_tests {
 		let complete = matches!(stage, FetchStage::Complete | FetchStage::CompleteReset);
 		let session = ScriptedSession::new(Vec::new());
 		let (tasks, _task_set) = TaskSet::new();
-		let subscriber = Subscriber::new(
+		let mut subscriber = Subscriber::new(
 			crate::time::Clock::sim(),
 			session.clone(),
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
@@ -9738,6 +9955,8 @@ mod joining_fetch_tests {
 			tasks,
 			Default::default(),
 		);
+		let route = kio::Producer::new(());
+		subscriber.validity = crate::model::broadcast::RequestValidity::token(Some(route.consume()));
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
@@ -9758,13 +9977,20 @@ mod joining_fetch_tests {
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		let slot = subscriber.state.lock().group_fetches[&RequestId(1)].clone();
 
-		if stage == FetchStage::Unanswered {
-			drop(fetch);
+		if matches!(stage, FetchStage::Unanswered | FetchStage::Retired) {
+			if stage == FetchStage::Retired {
+				drop(route);
+			} else {
+				drop(fetch);
+			}
 			assert!(
 				futures::poll!(run.as_mut()).is_ready(),
 				"{version:?}: unanswered FETCH stays alive"
 			);
-			assert!(matches!(outcome.read().rejected, Some(Error::Cancel)));
+			assert!(matches!(
+				outcome.read().rejected,
+				Some(Error::Cancel | Error::Unroutable)
+			));
 		} else {
 			session.push(&message_bytes(
 				ietf::FetchOk::ID,
@@ -9890,6 +10116,13 @@ mod joining_fetch_tests {
 			assert_eq!(session.log.resets(), [crate::ietf::error::CANCELLED]);
 		}
 		assert!(subscriber.state.lock().group_fetches.is_empty(), "request retired");
+	}
+
+	#[moq_net_sim::test]
+	async fn a_retired_group_fetch_before_fetch_ok_is_cancelled() {
+		for version in JOINING_DRAFTS {
+			abandon_group_fetch(version, FetchStage::Retired).await;
+		}
 	}
 
 	#[moq_net_sim::test]

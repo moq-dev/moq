@@ -173,6 +173,21 @@ test("the group range bounds datagrams", async () => {
 	expect(await track.recvDatagram()).toBeUndefined();
 });
 
+for (const timed of [true, false]) {
+	test(`late ${timed ? "timed" : "untimed"} subscribers do not replay datagrams`, async () => {
+		const producer = new TrackProducer("test").accept(timed ? { timescale: Timescale.MICRO } : {});
+		const timestamp = timed ? Timestamp.fromMillis(180_000) : undefined;
+		producer.appendDatagram(timestamp, enc.encode("before"));
+		const subscriber = producer.subscribe({ maxDelay: Milli(50) });
+		const sequence = producer.appendDatagram(timestamp, enc.encode("after"));
+		producer.close();
+		const datagram = await subscriber.recvDatagram();
+		expect(datagram?.sequence).toBe(sequence);
+		expect(datagram && dec.decode(datagram.payload)).toBe("after");
+		expect(await subscriber.recvDatagram()).toBeUndefined();
+	});
+}
+
 test("datagram buffers drop oldest at capacity without delaying active subscribers", async () => {
 	const producer = new TrackProducer("test");
 	const slow = producer.subscribe();

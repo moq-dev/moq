@@ -71,7 +71,12 @@ async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u6
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
-		.create_track("late", Info::default().with_max_age(FOREVER))
+		.create_track(
+			"late",
+			Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(FOREVER),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -140,7 +145,12 @@ async fn in_process(start: Option<Position>) -> Vec<(u64, usize)> {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
-		.create_track("late", Info::default().with_max_age(FOREVER))
+		.create_track(
+			"late",
+			Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				.with_max_age(FOREVER),
+		)
 		.unwrap();
 	let subscription = Subscription::default().with_max_delay(BUDGET).with_start(start);
 	let mut sub = track.subscribe(subscription);

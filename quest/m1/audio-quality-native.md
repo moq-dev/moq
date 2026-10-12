@@ -9,29 +9,28 @@ from whichever platform a user happened to be on.
 
 ## Plan
 
-- Drive the shipped binary, not a purpose-built harness: `moq play` against a
-  local relay behind the same seeded shaper, on a cpal null or dummy backend so
-  CI needs no audio hardware. The speaker is only half of it: `play::run` is the
-  winit event loop (`rs/moq-cli/src/play/mod.rs` re-exports `window::run`), and
-  `resumed` builds a `Display` with a real window and a presentable wgpu surface
-  even for an audio-only broadcast, so the lane dies on a headless runner before
-  it measures anything. Settle which way out: a virtual display and software
-  rendering in CI, or an audio-only mode in `moq play` that never opens a
-  window. The second is worth having on its own, and it is the smaller
-  dependency to keep working. Recorded in the 2026-10-05 audit:
-  `moq play --no-video` still shows a blank, closable window, so this quest
-  owns the headless audio-only path, built on `--no-video`. A real device callback is part of what is being
-  measured, so keep the real backend rather than substituting a fake clock, and
-  accept that the timing noise it adds sets the floor for the native budgets.
-  That floor is worth measuring on its own before the budgets are written.
-- `moq play` needs to emit the run's counters and stage timings as JSON for the
-  analyzer. Add that output, and keep it useful outside the test: a user
-  debugging their own latency wants the same dump.
-- Reuse the browser lane's analyzer and budget file (`test/audio-quality/`, the
-  schema is `clients/js/src/schema.ts`), with the JSON field names
-  and meanings matching its schema exactly. Native rows get their own budget
-  values in the same file, keyed the same way, since the device floor differs;
-  they do not get their own schema.
+- Drive the shipped binary, not a purpose-built harness: `moq play --no-video`
+  against a local relay behind the same seeded shaper. Headless playback has
+  landed: `--no-video` opens no window or GPU surface, and `just test
+  native-play` already hears it through a private PulseAudio null sink via the
+  production ALSA/cpal backend in nightly (`test/native-play/`). Reuse that
+  device setup rather than a fake clock: a real device callback is part of what
+  is measured. Measure that null sink's timing noise before writing native
+  budgets; it is the CI floor, not a physical device's.
+- Collect the metrics where they happen. The native driver exposes only device
+  failures and sink writes today, not rendered quanta, short quanta, stalls, or
+  per-stage timings, so sample them at the device callback and decoder
+  boundaries. Recommended shape: a bounded observation handle that a reader
+  drains into the browser lane's `Summary` (`clients/js/src/schema.ts`), with
+  overflow invalidating the run and no blocking or user callback on the audio
+  thread. Settle the handle's API and the CLI JSON flag name when implementing.
+- `moq play` emits that `Summary` as JSON for the analyzer. Keep it useful
+  outside the test: a user debugging their own latency wants the same dump.
+- Reuse the browser lane's analyzer and budget file (`test/audio-quality/`),
+  with the JSON field names and meanings matching its schema exactly. Native
+  rows get their own budget values in the same file, keyed the same way, since
+  the device floor differs; they do not get their own schema. Never fill an
+  unmeasured field with a passing zero.
 - Add the lane to the nightly matrix beside the browser one.
 
 Nothing here is a second estimator, and this lane does not compare the two

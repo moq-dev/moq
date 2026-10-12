@@ -770,7 +770,10 @@ impl Publish {
 		publish: impl FnOnce(&moq_mux::catalog::Producer<Extra>, moq_net::track::Producer) -> moq_mux::Result<T>,
 	) -> Result<T, Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let track = broadcast.producer.create_track(name, None)?;
+		let track = broadcast.producer.create_track(
+			name,
+			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)?;
 		Ok(publish(&broadcast.catalog, track)?)
 	}
 

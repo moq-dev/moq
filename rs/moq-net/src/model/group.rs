@@ -70,20 +70,24 @@ pub struct Info {
 }
 
 impl Info {
-	/// Create a producer for this group on a default (millisecond) track.
+	/// Create a producer for this group on a millisecond track.
 	///
 	/// Test-only: real groups are created via [`track::Producer`], which
 	/// supplies the parent track's [`track::Info`]. This helper exists for in-crate
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> Producer {
-		Producer::new(self, track::Info::default(), Default::default())
+		Producer::new(
+			self,
+			track::Info::default().with_timescale(Timescale::MILLI),
+			Default::default(),
+		)
 	}
 
 	/// Create a producer for this group on an untimed track. Test-only, like [`Self::produce`].
 	#[cfg(test)]
 	pub(crate) fn produce_untimed(self) -> Producer {
-		Producer::new(self, track::Info::default().with_timescale(None), Default::default())
+		Producer::new(self, track::Info::default(), Default::default())
 	}
 }
 
@@ -2026,7 +2030,7 @@ mod test {
 		for mode in 0..3 {
 			let pool = cache::Pool::unbounded();
 			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
-			let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
+			let mut group = Producer::new(Info::from(0u64), track::Info::timed(), cache);
 			for _ in 0..FRAME_SLOTS {
 				group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap();
 			}
@@ -2435,7 +2439,7 @@ mod test {
 
 	fn prefetched_consumer(pool: &cache::Pool, max_age: std::time::Duration) -> (Producer, Consumer) {
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
-		let track = track::Info::default().with_max_age(max_age);
+		let track = track::Info::timed().with_max_age(max_age);
 		let mut producer = Producer::new(Info { sequence: 0 }, track, cache);
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"b")).unwrap();
@@ -2866,7 +2870,7 @@ mod test {
 	fn frame_is_charged_as_written() {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
-		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::default(), cache);
+		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::timed(), cache);
 		let before = pool.used();
 
 		let mut frame = producer
@@ -2893,7 +2897,7 @@ mod test {
 	fn frame_commit_charges_the_tail() {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
-		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::default(), cache);
+		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::timed(), cache);
 		let before = pool.used();
 
 		let mut frame = producer

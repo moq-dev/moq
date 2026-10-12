@@ -16,6 +16,11 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('diagnostic errors expose their named reason', () {
+    final error = TransportMoqException('reset');
+    expect(error.reason, 'reset');
+  });
+
   test('catalog handle closes with its broadcast', () {
     final broadcast = BroadcastProducer();
     final catalog = moq_media.CatalogProducer(broadcast: broadcast);
@@ -222,6 +227,30 @@ void main() {
     broadcast.announce(route: MoqRoute());
     expect(await nextRoute(announced), isA<AnnounceEventStart>());
     await consumer.requestBroadcast(path: 'live').timeout(timeout);
+    announced.cancel();
+    announced.dispose();
+  });
+
+  test('a new epoch restarts announce consumers', () async {
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
+    final announced = origin.consume().announced(config: MoqAnnounceConfig());
+    final broadcast = origin.createBroadcast(path: 'epoch');
+
+    final first = mintEpoch();
+    expect(
+      epochTime('018bcfe5-6800-7000-8000-000000000000'),
+      DateTime.utc(2023, 11, 14, 22, 13, 20),
+    );
+    broadcast.announce(route: MoqRoute(epoch: first));
+    final start = await nextRoute(announced) as AnnounceEventStart;
+    expect(start.announce.route.epoch, first);
+
+    final second = mintEpoch();
+    broadcast.announce(route: MoqRoute(epoch: second));
+    final restart = await nextRoute(announced) as AnnounceEventRestart;
+    expect(restart.announce.route.epoch, second);
+
+    expect(() => epochTime('not-an-epoch'), throwsA(isA<MoqException>()));
     announced.cancel();
     announced.dispose();
   });
