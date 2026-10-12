@@ -96,7 +96,7 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 		out.connect.backoff.max = std::time::Duration::from_micros(config.backoff_max_us);
 	}
 	if config.has_backoff_timeout {
-		out.connect.backoff.timeout = std::time::Duration::from_micros(config.backoff_timeout_us);
+		out.connect.backoff.timeout = Some(std::time::Duration::from_micros(config.backoff_timeout_us));
 	}
 
 	// QUIC

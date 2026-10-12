@@ -1758,7 +1758,7 @@ impl Cluster {
 			.connect
 			.clone()
 			.context("internal: LAN dial without Cluster::with_connect")?;
-		connect.backoff.timeout = std::time::Duration::ZERO;
+		connect.backoff.timeout = Some(std::time::Duration::ZERO);
 		connect.once = Some(false);
 		let mut bind = connect.resolve().bind;
 		bind.set_port(0);
