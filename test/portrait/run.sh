@@ -19,10 +19,10 @@ harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"
 publish_portrait() {
     ffmpeg -hide_banner -loglevel error -re -f lavfi -i testsrc2=size=720x1280:rate=10 \
         -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -pix_fmt yuv420p -g 10 -f h264 - |
-        "$WORKSPACE/target/debug/moq" --connect "$URL" --broadcast portrait.hang import avc3
+        "$WORKSPACE/target/debug/moq" --connect "$URL" --connect-version moq-lite-07-wip --broadcast portrait.hang import avc3
 }
 harness_spawn publisher "$HARNESS_RUN/publisher.log" publish_portrait
 harness_spawn transcode "$HARNESS_RUN/transcode.log" "$WORKSPACE/target/debug/moq" \
-    --connect "$URL" --broadcast portrait.hang transcode --rung 360:600000 --encoder software --decoder software
+    --connect "$URL" --connect-version moq-lite-07-wip --broadcast portrait.hang transcode --rung 360:600000 --encoder software --decoder software
 cd test/interop/clients/js
 bun portrait.ts --url "$URL"
