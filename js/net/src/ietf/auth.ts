@@ -250,7 +250,7 @@ export class IetfAuthWire implements AuthWire {
 	/** The type id is already consumed by the dispatcher. */
 	async accept(stream: Stream): Promise<Uint8Array> {
 		const msg = await AuthMessage.decode(stream.reader, this.#version);
-		this.#session.admitRequest(msg.requestId);
+		this.#session.spendRequest(msg.requestId);
 		return msg.token;
 	}
 

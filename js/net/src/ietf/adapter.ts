@@ -3,10 +3,11 @@ import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
 import { error, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import { Reader, Stream, type Writer } from "../stream.ts";
+import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestIds } from "./request.ts";
+import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** The peer used a request ID the draft closes the session for. */
@@ -28,8 +29,9 @@ export interface Session {
 	openBi(): Stream | Promise<Stream>;
 	openNativeBi?(): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
-	nextRequestId(): Promise<bigint | undefined>;
-	admitRequest(id: bigint): void;
+	nextRequestId(signal?: AbortSignal): Promise<bigint | undefined>;
+	/** Spend a request ID the peer used without holding a request open, closing the session if it cannot. */
+	spendRequest(id: bigint): void;
 	close(): void;
 	readonly version: IetfVersion;
 }
@@ -43,20 +45,20 @@ export class NativeSession implements Session {
 	// moq-transport reserves even request IDs for the client and odd for the server,
 	// so the two peers' ID spaces never overlap.
 	#requestId: bigint;
-	#received: RequestIds;
+	// The peer's IDs, of the other parity. Draft 17 has no window, yet an ID stays spent.
+	#spent: SpentIds;
 	readonly version: IetfVersion;
 
 	constructor(quic: WebTransport, version: IetfVersion, client: boolean) {
 		this.#quic = quic;
 		this.version = version;
 		this.#requestId = client ? 0n : 1n;
-		this.#received = new RequestIds(client);
+		this.#spent = new SpentIds(client ? 1n : 0n);
 	}
 
-	/** Validate all incoming modern requests against the same lifetime history. */
-	admitRequest(id: bigint): void {
+	spendRequest(id: bigint): void {
 		try {
-			this.#received.accept(id);
+			this.#spent.spend(id);
 		} catch (err) {
 			if (err instanceof SessionError) this.#quic.close({ closeCode: err.code, reason: err.message });
 			throw err;
@@ -71,7 +73,8 @@ export class NativeSession implements Session {
 		return Stream.accept(this.#quic, this.version);
 	}
 
-	async nextRequestId(): Promise<bigint | undefined> {
+	async nextRequestId(signal?: AbortSignal): Promise<bigint | undefined> {
+		signal?.throwIfAborted();
 		const id = this.#requestId;
 		this.#requestId += 2n;
 		return id;
@@ -102,6 +105,116 @@ interface StreamEntry {
 }
 
 type NamespaceDirection = "incoming" | "outgoing";
+
+/** Runs per chunk before it splits, so a split or removal shifts at most one chunk. */
+const RUN_CHUNK = 256;
+
+/**
+ * Skipped request IDs as sorted, disjoint `[start, end)` runs of one parity.
+ *
+ * A jump costs one run however far it skips, and only an ID landing inside a run splits it,
+ * so the runs never outnumber the requests received. They are kept in chunks so a split
+ * costs the chunk it lands in rather than shifting the whole table.
+ */
+class MissingRuns {
+	#chunks: [bigint, bigint][][] = [];
+	#size = 0;
+
+	/** How many runs are remembered. */
+	get size(): number {
+		return this.#size;
+	}
+
+	/** Whether `id` was skipped and not yet received. */
+	has(id: bigint): boolean {
+		return this.#find(id) !== undefined;
+	}
+
+	/** Whether taking `id` leaves one more run, landing strictly inside its run. */
+	splits(id: bigint): boolean {
+		const found = this.#find(id);
+		if (!found) return false;
+		const [start, end] = this.#chunks[found[0]][found[1]];
+		return start < id && id + 2n < end;
+	}
+
+	/** Mark a skipped `id` received, splitting its run. */
+	take(id: bigint): void {
+		const found = this.#find(id);
+		if (!found) return;
+		const [index, run] = found;
+		const chunk = this.#chunks[index];
+		const [start, end] = chunk[run];
+		const rest: [bigint, bigint][] = [];
+		if (start < id) rest.push([start, id]);
+		if (id + 2n < end) rest.push([id + 2n, end]);
+		this.#size += rest.length - 1;
+		chunk.splice(run, 1, ...rest);
+		if (chunk.length === 0) this.#chunks.splice(index, 1);
+		else if (chunk.length > 2 * RUN_CHUNK) this.#chunks.splice(index + 1, 0, chunk.splice(RUN_CHUNK));
+	}
+
+	/** Record `[start, end)` as skipped, above every existing run. */
+	push(start: bigint, end: bigint): void {
+		this.#size++;
+		const last = this.#chunks.at(-1);
+		if (last && last.length < 2 * RUN_CHUNK) last.push([start, end]);
+		else this.#chunks.push([[start, end]]);
+	}
+
+	/** The chunk and run holding `id`. */
+	#find(id: bigint): [number, number] | undefined {
+		const index = lastAtOrBelow(this.#chunks, id, (chunk) => chunk[0][0]);
+		if (index < 0) return undefined;
+		const chunk = this.#chunks[index];
+		const run = lastAtOrBelow(chunk, id, (run) => run[0]);
+		return run >= 0 && id < chunk[run][1] ? [index, run] : undefined;
+	}
+}
+
+/**
+ * The peer's spent request IDs on draft 17 and later: every ID of its parity below `#next`,
+ * except the skipped runs. Mirrors Rust's `Spent`.
+ */
+export class SpentIds {
+	#next: bigint;
+	#missing = new MissingRuns();
+	// No window bounds the runs here, and forgetting one would make its IDs usable again.
+	#limit: number;
+
+	constructor(first: bigint, limit = Number(REQUEST_WINDOW)) {
+		this.#next = first;
+		this.#limit = limit;
+	}
+
+	/** Spend `id`, throwing the session error a reused, wrong-parity, or unrecordable ID closes with. */
+	spend(id: bigint): void {
+		const unused = id >= this.#next || this.#missing.has(id);
+		if (id % 2n !== this.#next % 2n || !unused) throw new SessionError(SessionCode.InvalidRequestId);
+		const splits = id < this.#next ? this.#missing.splits(id) : id > this.#next;
+		if (splits && this.#missing.size >= this.#limit) {
+			throw new SessionError(SessionCode.Internal, { reason: "request ID history exhausted" });
+		}
+		if (id < this.#next) {
+			this.#missing.take(id);
+			return;
+		}
+		if (id > this.#next) this.#missing.push(this.#next, id);
+		this.#next = id + 2n;
+	}
+}
+
+/** The last index whose key is at or below `id`, or -1, in an array sorted by key. */
+function lastAtOrBelow<T>(items: T[], id: bigint, key: (item: T) => bigint): number {
+	let lo = 0;
+	let hi = items.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (key(items[mid]) <= id) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo - 1;
+}
 
 /**
  * Converts v14-v16 control stream multiplexing into virtual bidi streams.
@@ -152,7 +265,14 @@ export class ControlStreamAdapter implements Session {
 	// delivered to the wrong virtual stream).
 	#requestId: bigint;
 	#maxRequestId: bigint;
-	#maxRequestIdResolves: (() => void)[] = [];
+	#maxRequestIdResolves = new Set<() => void>();
+
+	// Drafts 14/15 require our new request IDs in order on the control stream. Callers
+	// allocate an ID and then encode asynchronously, so a shorter later request can finish
+	// first: a message spending a new ID waits here until every lower one has gone out.
+	// Draft 16 sends SUBSCRIBE_NAMESPACE on its own stream and the peer accepts any order.
+	#sendNext: bigint | undefined;
+	#sendTurns = new Map<bigint, () => void>();
 
 	// The peer's requests, flow controlled as moq-net does: at most `#peerWindow` open at
 	// once, every ID below `#peerMax`, and once half the window has closed the bound rises
@@ -160,9 +280,8 @@ export class ControlStreamAdapter implements Session {
 	#peerWindow: bigint;
 	#peerMax: bigint;
 	#peerNext: bigint;
-	// Draft 16 reorders across streams. Every missing ID retains an unreturned window
-	// credit, so this set is bounded by the window rather than the session lifetime.
-	#peerMissing: Set<bigint> | undefined;
+	// Draft 16 reorders across streams, so it remembers the IDs skipped below #peerNext.
+	#peerMissing: MissingRuns | undefined;
 	#open = new Set<bigint>();
 	#retired = 0n;
 	#granting = false;
@@ -194,8 +313,9 @@ export class ControlStreamAdapter implements Session {
 		this.#peerWindow = window;
 		this.#peerMax = initialMaxRequestId(!client, window);
 		this.#peerNext = client ? 1n : 0n;
-		this.#peerMissing = version === Version.DRAFT_16 ? new Set() : undefined;
+		this.#peerMissing = version === Version.DRAFT_16 ? new MissingRuns() : undefined;
 		this.#requestId = client ? 0n : 1n;
+		this.#sendNext = version === Version.DRAFT_16 ? undefined : this.#requestId;
 		this.#client = client;
 	}
 
@@ -255,6 +375,7 @@ export class ControlStreamAdapter implements Session {
 					const toFlush = buffer.subarray(0, boundary);
 					buffer = buffer.subarray(boundary);
 
+					let spent: bigint | undefined;
 					if (!registered) {
 						// First message: extract requestId and register before flushing
 						const parsed = await this.#tryParseOutgoing(toFlush);
@@ -262,10 +383,13 @@ export class ControlStreamAdapter implements Session {
 							registeredRequestId = parsed.requestId;
 							this.#streams.set(parsed.requestId, { controller });
 							registered = true;
+							spent = parsed.requestId;
 						}
+					} else {
+						spent = this.#updateId(toFlush);
 					}
 
-					await this.#writeMutex.runExclusive(() => this.#writer.write(toFlush));
+					await this.#send(toFlush, spent);
 				}
 			},
 		});
@@ -295,19 +419,25 @@ export class ControlStreamAdapter implements Session {
 	}
 
 	/**
-	 * Allocate the next request ID, blocking if flow control limit reached.
+	 * Allocate the next request ID, canceling before allocation while waiting for credit.
+	 * A returned legacy ID is spent and its request must be sent, even if then canceled.
 	 */
-	async nextRequestId(): Promise<bigint | undefined> {
+	async nextRequestId(signal?: AbortSignal): Promise<bigint | undefined> {
 		for (;;) {
+			signal?.throwIfAborted();
 			if (this.#closed) return undefined;
 			const id = this.#requestId;
 			if (id < this.#maxRequestId) {
 				this.#requestId += 2n;
 				return id;
 			}
-			await new Promise<void>((resolve) => {
-				this.#maxRequestIdResolves.push(resolve);
-			});
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#maxRequestIdResolves.add(resolve);
+			try {
+				await untilAborted(promise, signal);
+			} finally {
+				this.#maxRequestIdResolves.delete(resolve);
+			}
 		}
 	}
 
@@ -350,7 +480,7 @@ export class ControlStreamAdapter implements Session {
 				}
 
 				if (classified.route === Route.Update) {
-					this.#admitUpdate(classified.ownRequestId);
+					this.spendRequest(classified.ownRequestId);
 					this.#pushMessage(classified.requestId, typeId, size, body);
 					continue;
 				}
@@ -378,7 +508,7 @@ export class ControlStreamAdapter implements Session {
 					case Route.MaxRequestId:
 						this.#maxRequestId = requestId;
 						for (const resolve of this.#maxRequestIdResolves) resolve();
-						this.#maxRequestIdResolves = [];
+						this.#maxRequestIdResolves.clear();
 						break;
 				}
 			}
@@ -506,16 +636,14 @@ export class ControlStreamAdapter implements Session {
 		this.#checkPeer(requestId);
 		const unused =
 			requestId < this.#peerNext
-				? this.#peerMissing?.has(requestId)
+				? this.#peerMissing?.has(requestId) === true
 				: requestId === this.#peerNext || this.#peerMissing !== undefined;
 		if (!unused) {
 			this.#refuse(SessionCode.InvalidRequestId, "request id was already spent or out of sequence");
 		}
 		this.#checkLive();
-		if (this.#peerMissing) {
-			for (let skipped = this.#peerNext; skipped < requestId; skipped += 2n) this.#peerMissing.add(skipped);
-			this.#peerMissing.delete(requestId);
-		}
+		if (requestId < this.#peerNext) this.#peerMissing?.take(requestId);
+		else if (requestId > this.#peerNext) this.#peerMissing?.push(this.#peerNext, requestId);
 		if (requestId >= this.#peerNext) this.#peerNext = requestId + 2n;
 		this.#open.add(requestId);
 	}
@@ -524,7 +652,7 @@ export class ControlStreamAdapter implements Session {
 	 * An update spends its own request ID like any request but keeps no stream, so the
 	 * slot is retired at once. The ID is spent even when the target is already gone.
 	 */
-	#admitUpdate(requestId: bigint): void {
+	spendRequest(requestId: bigint): void {
 		this.#admitHeld(requestId);
 		this.#open.delete(requestId);
 		this.#retire();
@@ -693,10 +821,42 @@ export class ControlStreamAdapter implements Session {
 
 					const toFlush = buffer.subarray(0, boundary);
 					buffer = buffer.subarray(boundary);
-					await this.#writeMutex.runExclusive(() => this.#writer.write(toFlush));
+					await this.#send(toFlush, this.#updateId(toFlush));
 				}
 			},
 		});
+	}
+
+	/** The update's own request ID if this complete message is SUBSCRIBE_UPDATE or REQUEST_UPDATE. */
+	#updateId(message: Uint8Array): bigint | undefined {
+		const [typeId, afterType] = Varint.decode(message);
+		if (typeId !== 0x02) return undefined;
+		return Varint.decodeBigInt(afterType.subarray(2))[0];
+	}
+
+	/** Write one complete message, after every lower request ID when it spends a new one. */
+	async #send(message: Uint8Array, requestId: bigint | undefined): Promise<void> {
+		if (requestId === undefined || this.#sendNext === undefined) {
+			await this.#writeMutex.runExclusive(() => this.#writer.write(message));
+			return;
+		}
+		if (requestId < this.#sendNext || this.#sendTurns.has(requestId)) {
+			throw new Error(`request id ${requestId} was already sent`);
+		}
+		if (requestId !== this.#sendNext) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#sendTurns.set(requestId, resolve);
+			await promise;
+			if (this.#closed) throw new Error("control stream closed");
+		}
+		try {
+			await this.#writeMutex.runExclusive(() => this.#writer.write(message));
+		} finally {
+			this.#sendNext = requestId + 2n;
+			const next = this.#sendTurns.get(this.#sendNext);
+			this.#sendTurns.delete(this.#sendNext);
+			next?.();
+		}
 	}
 
 	/** Encode raw message bytes: [typeId varint][size u16 BE][body] */
@@ -948,6 +1108,9 @@ export class ControlStreamAdapter implements Session {
 
 		// Unblock maxRequestId waiters
 		for (const resolve of this.#maxRequestIdResolves) resolve();
-		this.#maxRequestIdResolves = [];
+		this.#maxRequestIdResolves.clear();
+
+		for (const resolve of this.#sendTurns.values()) resolve();
+		this.#sendTurns.clear();
 	}
 }

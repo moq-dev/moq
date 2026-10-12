@@ -25,16 +25,17 @@ class MoqGst < Formula
   end
 
   def install
-    lib.install Dir["lib/libgstmoq.*"]
+    plugin = OS.mac? ? "libgstmoq.dylib" : "libgstmoq.so"
+    (lib/"gstreamer-1.0").install "lib/gstreamer-1.0/#{plugin}"
   end
 
   def caveats
     <<~EOS
       The moq GStreamer plugin is installed at:
-        #{opt_lib}/libgstmoq.#{OS.mac? ? "dylib" : "so"}
+        #{opt_lib}/gstreamer-1.0/libgstmoq.#{OS.mac? ? "dylib" : "so"}
 
-      For GStreamer to discover it, add this prefix to GST_PLUGIN_PATH:
-        export GST_PLUGIN_PATH="#{opt_lib}:$GST_PLUGIN_PATH"
+      For GStreamer to discover it, add this directory to GST_PLUGIN_PATH_1_0:
+        export GST_PLUGIN_PATH_1_0="#{opt_lib}/gstreamer-1.0:$GST_PLUGIN_PATH_1_0"
 
       Then verify with:
         gst-inspect-1.0 moq
@@ -43,8 +44,11 @@ class MoqGst < Formula
 
   test do
     plugin = OS.mac? ? "libgstmoq.dylib" : "libgstmoq.so"
-    assert_predicate lib/plugin, :exist?
-    ENV["GST_PLUGIN_PATH"] = lib
-    system Formula["gstreamer"].opt_bin/"gst-inspect-1.0", "moq"
+    assert_predicate lib/"gstreamer-1.0"/plugin, :exist?
+    ENV["GST_REGISTRY"] = (testpath/"registry.bin").to_s
+    ENV["GST_PLUGIN_PATH_1_0"] = (lib/"gstreamer-1.0").to_s
+    ENV["GST_PLUGIN_SYSTEM_PATH_1_0"] = ""
+    output = shell_output("#{Formula["gstreamer"].opt_bin}/gst-inspect-1.0 moq")
+    assert_match (lib/"gstreamer-1.0"/plugin).to_s, output
   end
 end

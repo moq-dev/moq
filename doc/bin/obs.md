@@ -12,6 +12,8 @@ OBS Studio install.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
 - **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (RTT, bandwidth, loss).
 
+MoQ Source follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing; removing a media kind from the catalog clears it.
+
 Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
 such as `https://cdn.moq.dev/anon/your-stream`. A URL with `?jwt=` fills the
 token field.

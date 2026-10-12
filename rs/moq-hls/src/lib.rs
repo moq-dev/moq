@@ -38,3 +38,14 @@ pub use server::Server;
 /// breaking change for this crate.
 #[cfg(feature = "server")]
 pub use axum;
+
+/// Test helper: a [`moq_mux::Source`] for the broadcast at `path`, resolved through `origin`.
+#[cfg(test)]
+pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
+	let consumer = origin.consume();
+	let broadcast = consumer
+		.request_broadcast(path, None)
+		.await
+		.expect("the broadcast resolves");
+	moq_mux::Source::new(consumer, broadcast)
+}

@@ -6,8 +6,9 @@ Every AUTH stream message that the lite or IETF drafts call a
 PROTOCOL_VIOLATION closes the session in Rust and `@moq/net` alike, instead
 of ending only its token. Examples: an AUTH_ERROR code past `u32`, an
 out-of-range IETF AUTH_OK expiry, or an AUTH or AUTH_ERROR that fails to
-decode. The lite AUTH_OK pattern and `Expires` decode gap belongs to
-[Malformed grant](/quest/m1/auth/malformed-grant.md).
+decode. The lite AUTH_OK pattern and `Expires` decode gap, plus invalid UTF-8
+and oversized AUTH_ERROR reasons, belong to
+[Malformed grant](https://github.com/moq-dev/moq/pull/5256).
 
 ## Plan
 
@@ -17,8 +18,8 @@ on an explicit `ProtocolViolation` in Rust lite. These gaps remain:
 - JS reports the exact oversized code but doesn't close the session. Let the
   JS connection close on an `AuthSession` protocol violation.
 - An out-of-range IETF AUTH_OK expiry still ends only its token.
-- An AUTH_ERROR that fails to decode ends only the token, like every other
-  lite stream.
+- Other AUTH_ERROR framing or decode failures end only the token; invalid
+  UTF-8 and oversized reasons already close the session.
 - On the acceptor side, a presenter's AUTH that fails to decode only aborts
   its stream (Rust lite `AuthServe`, JS `#runBidis`), so a peer can repeat
   malformed AUTH streams without closing the session.

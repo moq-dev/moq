@@ -13,7 +13,7 @@ use std::{
 use crate::transport::poll::SendStream as _;
 
 use crate::{
-	AsPath, Error, Timescale, Timestamp,
+	AsPath, DecodeError, Error, Timescale, Timestamp,
 	coding::{Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
 	track::Subscription,
@@ -540,7 +540,12 @@ where
 		});
 		let task = match id {
 			ietf::Subscribe::ID => {
-				let msg = ietf::Subscribe::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::Subscribe::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::Subscribe, body.clone(), serve));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -555,7 +560,12 @@ where
 				.maybe_boxed()
 			}
 			ietf::Fetch::ID => {
-				let msg = ietf::Fetch::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::Fetch::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::Fetch, body.clone(), serve));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -572,17 +582,25 @@ where
 			// to the same request_id + namespace. We never send PUBLISH, so a legacy
 			// request for PUBLISH alone is refused, and one for both gets only NAMESPACE.
 			ietf::SubscribeNamespace::ID | ietf::SubscribeNamespaceLegacy::ID => {
-				let (msg, options) = if id == ietf::SubscribeNamespace::ID {
-					let msg = ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?;
-					(msg, ietf::SubscribeOptions::Namespace)
+				let decoded = if id == ietf::SubscribeNamespace::ID {
+					ietf::SubscribeNamespace::decode_msg(&mut data, this.version)
+						.map(|msg| (msg, ietf::SubscribeOptions::Namespace))
 				} else {
-					let legacy = ietf::SubscribeNamespaceLegacy::decode_msg(&mut data, this.version)?;
-					let msg = ietf::SubscribeNamespace {
-						request_id: legacy.request_id,
-						namespace: legacy.namespace,
-						hidden: legacy.hidden,
-					};
-					(msg, legacy.subscribe_options)
+					ietf::SubscribeNamespaceLegacy::decode_msg(&mut data, this.version).map(|legacy| {
+						let msg = ietf::SubscribeNamespace {
+							request_id: legacy.request_id,
+							namespace: legacy.namespace,
+							hidden: legacy.hidden,
+						};
+						(msg, legacy.subscribe_options)
+					})
+				};
+				let (msg, options) = match decoded {
+					Err(DecodeError::MalformedAuthToken) => {
+						let kind = request::Kind::SubscribeNamespace;
+						return Ok(this.reject_token(stream, kind, body.clone(), serve));
+					}
+					decoded => decoded?,
 				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
@@ -623,7 +641,12 @@ where
 				.maybe_boxed()
 			}
 			ietf::TrackStatus::ID => {
-				let msg = ietf::TrackStatus::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::TrackStatus::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::TrackStatus, body.clone(), serve));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -641,6 +664,25 @@ where
 			}
 		};
 		Ok(task)
+	}
+
+	/// Refuse a request whose AUTHORIZATION TOKEN repeats (section 8.9), which unlike any
+	/// other decode error leaves the session open.
+	fn reject_token(
+		&self,
+		stream: Stream<S, Version>,
+		kind: request::Kind,
+		body: ietf::Body,
+		serve: Option<Serve>,
+	) -> MaybeSendBox<'static, ()> {
+		let version = self.version;
+		async move {
+			let _serve = serve;
+			if let Err(err) = super::token::reject(stream, kind, body, version).await {
+				tracing::debug!(%err, "token refusal failed");
+			}
+		}
+		.maybe_boxed()
 	}
 
 	/// Handle a SUBSCRIBE on its bidi stream.
@@ -984,6 +1026,15 @@ where
 			match event {
 				Ok(None) => return Some(Ok(())),
 				Err(Error::Cancel) => return None,
+				// An update the draft answers by closing the session, such as one whose
+				// AUTHORIZATION TOKEN names an alias, closes it rather than only ending this
+				// subscription, as the same token on the request itself would.
+				Err(err @ Error::Decode(crate::coding::DecodeError::Session(_))) => {
+					self.session
+						.clone()
+						.close(crate::SessionError::from(&err).to_code(), &err.to_string());
+					return Some(Err(err));
+				}
 				Err(err) => return Some(Err(err)),
 				Ok(Some(update)) => {
 					// Draft 14 answers no update. Drafts 15 and 16 answer on the control
@@ -991,18 +1042,18 @@ where
 					let answer = self.version != Version::Draft14;
 					let answer_id =
 						matches!(self.version, Version::Draft15 | Version::Draft16).then_some(update.request_id);
-					if update.unsupported {
+					if let Some(err) = update.refused {
+						let reason = match err {
+							Error::Unsupported => "REQUEST_UPDATE parameters not supported",
+							_ => "repeated AUTHORIZATION TOKEN",
+						};
 						let result = if answer {
-							self.write_subscribe_error(
-								&mut stream.writer,
-								update.request_id,
-								&Error::Unsupported,
-								"REQUEST_UPDATE parameters not supported",
-							)
-							.await
+							self.write_subscribe_error(&mut stream.writer, update.request_id, &err, reason)
+								.await
 						} else {
 							Ok(())
 						};
+						// Either way the update failed, which ends the subscription.
 						return Some(result.and(Err(Error::Unsupported)));
 					}
 					if let Some(priority) = update.priority
@@ -3464,7 +3515,11 @@ mod group_priority_test {
 		let log = crate::lite::test_transport::Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
@@ -3485,7 +3540,7 @@ mod group_priority_test {
 			msg,
 			kio::Producer::new(200).consume(),
 			consumer,
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 			Version::Draft14,
 			GroupSlice::default(),
 		);
@@ -3504,7 +3559,7 @@ mod group_priority_test {
 	/// every moq-transport peer.
 	#[moq_net_sim::test]
 	async fn group_header_carries_the_publisher_priority() {
-		let header = serve_group_header(track::Info::default().with_priority(hang_audio_priority())).await;
+		let header = serve_group_header(track::Info::timed().with_priority(hang_audio_priority())).await;
 		assert_eq!(
 			header.publisher_priority,
 			priority::to_wire(hang_audio_priority()),
@@ -3520,7 +3575,7 @@ mod group_priority_test {
 	/// not 255, the least urgent value a peer like moxygen would deprioritize.
 	#[moq_net_sim::test]
 	async fn group_header_defaults_to_the_midpoint() {
-		let header = serve_group_header(track::Info::default()).await;
+		let header = serve_group_header(track::Info::timed()).await;
 		assert_eq!(header.publisher_priority, 128);
 	}
 
@@ -3530,7 +3585,7 @@ mod group_priority_test {
 	async fn drafts_14_through_16_send_no_timestamp_without_timescale() {
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
 			let stamped = ietf::Properties::sends_timescale(version);
-			let (header, mut buf) = serve_group(version, Some(Timescale::default())).await;
+			let (header, mut buf) = serve_group(version, Some(Timescale::MILLI)).await;
 			assert_eq!(header.flags.has_extensions, stamped, "{version}");
 			assert_eq!(
 				crate::coding::decode_varint(&mut buf, version).unwrap(),
@@ -3542,7 +3597,7 @@ mod group_priority_test {
 				let mut ext = bytes::Bytes::from(ext);
 				assert!(
 					crate::coding::decode_buf(&mut ext, version, |r, v| {
-						ietf::decode_object_time(r, Timescale::default(), v)
+						ietf::decode_object_time(r, Timescale::MILLI, v)
 					})
 					.unwrap()
 					.is_some(),
@@ -3618,7 +3673,11 @@ mod group_priority_test {
 		const BATCH: u64 = 1_000;
 
 		let session = SinkSession::new(crate::lite::test_transport::Log::default()).with_unacked_fin();
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber =
 			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
 		let serve = TrackServe::new(
@@ -3663,7 +3722,11 @@ mod group_priority_test {
 
 		let log = crate::lite::test_transport::Log::default();
 		let session = SinkSession::new(log.clone()).with_unacked_fin();
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber =
 			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -3698,7 +3761,11 @@ mod group_priority_test {
 		let log = crate::lite::test_transport::Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(None);
 
 		let mut group = track.append_group().unwrap();
@@ -3741,7 +3808,7 @@ mod group_priority_test {
 			RequestId(0),
 			Version::Draft14,
 			ServeRange::default(),
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 		);
 		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
@@ -3765,7 +3832,11 @@ mod group_priority_test {
 	async fn group_waiting_for_stream_credit_expires() {
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_open_uni(gate.consume());
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -3783,7 +3854,7 @@ mod group_priority_test {
 			},
 			kio::Producer::new(0).consume(),
 			group,
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 			Version::Draft19,
 			GroupSlice::default(),
 		);
@@ -3808,7 +3879,11 @@ mod group_priority_test {
 	async fn unacknowledged_fin_expires_with_the_group() {
 		let session = SinkSession::new(Default::default()).with_unacked_fin();
 		let log = session.log.clone();
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -3826,7 +3901,7 @@ mod group_priority_test {
 			},
 			kio::Producer::new(0).consume(),
 			group,
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 			Version::Draft19,
 			GroupSlice::default(),
 		);
@@ -3852,7 +3927,11 @@ mod group_priority_test {
 	async fn unacknowledged_fin_follows_priority_updates() {
 		let session = SinkSession::new(Default::default()).with_unacked_fin();
 		let log = session.log.clone();
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"done".as_slice()).unwrap();
 		let consumer = group.consume();
@@ -3870,7 +3949,7 @@ mod group_priority_test {
 			},
 			priority.consume(),
 			consumer,
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 			Version::Draft19,
 			GroupSlice::default(),
 		);
@@ -3895,7 +3974,11 @@ mod group_priority_test {
 	async fn blocked_final_transport_chunk_expires_with_the_group() {
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_uni(gate.consume());
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		let mut frame = old
@@ -3917,7 +4000,7 @@ mod group_priority_test {
 			},
 			kio::Producer::new(0).consume(),
 			group,
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 			Version::Draft19,
 			GroupSlice::default(),
 		);
@@ -3961,7 +4044,11 @@ mod subscribe_cursor_test {
 		let log = Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		for sequence in 0..4 {
 			let mut group = track.create_group(group::Info { sequence }).unwrap();
 			group
@@ -3979,7 +4066,7 @@ mod subscribe_cursor_test {
 			RequestId(1),
 			Version::Draft14,
 			ServeRange::default(),
-			Some(Timescale::default()),
+			Some(Timescale::MILLI),
 		);
 		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
@@ -4017,7 +4104,7 @@ mod serve_tests {
 	fn serve(version: Version) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 
 		let session = ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
@@ -4499,8 +4586,8 @@ mod serve_tests {
 		)
 		.await;
 
-		// REQUEST_UPDATE, Request ID 2, one AUTHORIZATION TOKEN (0x03) parameter.
-		request.push(&[0x02, 0, 5, 2, 1, 0x03, 1, 0x00]);
+		// REQUEST_UPDATE, Request ID 2, one AUTHORIZATION TOKEN (0x03): USE_VALUE, type 0.
+		request.push(&[0x02, 0, 6, 2, 1, 0x03, 2, 0x03, 0x00]);
 		moq_net_sim::timeout(std::time::Duration::from_secs(10), serve)
 			.await
 			.expect("the failed update ends the subscription")
@@ -4646,6 +4733,156 @@ mod serve_tests {
 					"{version}: {written:?}"
 				),
 			}
+		}
+	}
+
+	/// An update whose only parameters are AUTHORIZATION TOKENs holding `tokens`, framed for
+	/// the subscription's stream.
+	fn update_with_tokens(version: Version, tokens: &[&[u8]]) -> Vec<u8> {
+		let mut body = match version {
+			Version::Draft14 => {
+				let mut body = Vec::new();
+				ietf::SubscribeUpdate {
+					request_id: RequestId(2),
+					subscription_request_id: Some(RequestId(0)),
+					start_location: Location { group: 0, object: 0 },
+					end_group: 0,
+					subscriber_priority: 10,
+					forward: true,
+				}
+				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+				.unwrap();
+				// Replace the empty parameter block with the token.
+				assert_eq!(body.pop(), Some(0));
+				body
+			}
+			// Then the request it updates, through draft 16. Every parameter but the token is
+			// left as it is.
+			Version::Draft15 | Version::Draft16 => vec![2, 0],
+			_ => vec![2],
+		};
+		body.extend(token_params(version, tokens));
+		let mut frame = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
+		frame.extend(body);
+		frame
+	}
+
+	/// An update's AUTHORIZATION TOKEN that this endpoint cannot use closes the session with
+	/// the draft's code, as it would on the SUBSCRIBE, not only the subscription.
+	#[moq_net_sim::test]
+	async fn an_update_token_that_cannot_be_used_closes_the_session() {
+		for version in [Version::Draft14, Version::Draft22] {
+			for (token, expected, why) in [
+				(
+					&[0x01, 0x07, 0x00][..],
+					crate::SessionError::AuthTokenCacheOverflow,
+					"REGISTER",
+				),
+				(&[0x00, 0x07][..], crate::SessionError::UnknownAuthTokenAlias, "DELETE"),
+				(
+					&[0x02, 0x07][..],
+					crate::SessionError::UnknownAuthTokenAlias,
+					"USE_ALIAS",
+				),
+				(
+					&[0x03][..],
+					crate::SessionError::KeyValueFormatting,
+					"USE_VALUE without a type",
+				),
+			] {
+				let h = serve(version);
+				let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[token])]);
+				let mut stream = Stream::open(&mut session, version).await.unwrap();
+				let mut serving = TrackServe::new(
+					h.session.clone(),
+					h.track.subscribe(None),
+					RequestId(0),
+					version,
+					ServeRange::default(),
+					None,
+				);
+				let mut finished = false;
+				let served = h
+					.publisher
+					.run_subscription(&mut stream, &mut serving, &mut finished, async {})
+					.await;
+				assert!(matches!(served, Some(Err(_))), "{version} {why}: {served:?}");
+				let codes: Vec<u32> = h.log.closes().into_iter().map(|(code, _)| code).collect();
+				assert_eq!(codes, vec![expected.to_code()], "{version} {why}");
+			}
+		}
+	}
+
+	/// A parameter block of AUTHORIZATION TOKENs. Draft-16 on codes each key as a delta from
+	/// the one before, so a repeat is 0.
+	fn token_params(version: Version, tokens: &[&[u8]]) -> Vec<u8> {
+		let mut params = vec![tokens.len() as u8];
+		for (i, token) in tokens.iter().enumerate() {
+			let delta = i > 0 && !matches!(version, Version::Draft14 | Version::Draft15);
+			params.extend([if delta { 0 } else { 0x03 }, token.len() as u8]);
+			params.extend(*token);
+		}
+		params
+	}
+
+	/// USE_VALUE, type 0, value 0xAA.
+	const TOKEN: &[u8] = &[0x03, 0x00, 0xAA];
+
+	/// Section 8.9: a request whose tokens repeat is rejected MALFORMED_AUTH_TOKEN, which
+	/// draft-15 moved from 0x10 to 0x4, and the session stays open. A token with another
+	/// value is not a repeat.
+	#[moq_net_sim::test]
+	async fn a_repeated_request_token_rejects_only_the_request() {
+		for (version, malformed) in [(Version::Draft14, 0x10), (Version::Draft22, 0x4)] {
+			let request = |tokens: &[&[u8]]| {
+				let mut body = track_status("room", true, version);
+				assert_eq!(body.pop(), Some(0), "{version}");
+				body.extend(token_params(version, tokens));
+				body
+			};
+
+			let code = refusal(version, ietf::TrackStatus::ID, request(&[TOKEN, TOKEN])).await;
+			assert_eq!(code, malformed, "{version}");
+
+			let h = serve(version);
+			let other = [0x03, 0x00, 0xBB];
+			assert_eq!(
+				answer_code(&h, request(&[TOKEN, &other]), version).await,
+				None,
+				"{version}"
+			);
+		}
+	}
+
+	/// An update whose tokens repeat is answered MALFORMED_AUTH_TOKEN rather than
+	/// NOT_SUPPORTED, and fails only its subscription.
+	#[moq_net_sim::test]
+	async fn a_repeated_update_token_is_malformed() {
+		for version in [Version::Draft16, Version::Draft22] {
+			let h = serve(version);
+			let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[TOKEN, TOKEN])]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let served = h
+				.publisher
+				.run_subscription(&mut stream, &mut serving, &mut finished, async {})
+				.await;
+			assert!(matches!(served, Some(Err(Error::Unsupported))), "{version}: {served:?}");
+			assert!(h.log.closes().is_empty(), "{version}: the session closed");
+
+			let wire = session.log.writes.lock().unwrap().clone();
+			let mut buf = Decoder::new(&wire, version.into());
+			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
+			let error = ietf::RequestError::decode(&mut buf, version).unwrap();
+			assert_eq!(error.error_code, 0x4, "{version}");
 		}
 	}
 
@@ -4856,7 +5093,7 @@ mod serve_tests {
 					Version::Draft16 | Version::Draft17 => ietf::Properties::default(),
 					// Only draft-20 can carry the opt-out.
 					_ if !wanted && Filter::is_draft20(version) => ietf::Properties::default(),
-					_ => track_properties(&track::Info::default(), true),
+					_ => track_properties(&track::Info::timed(), true),
 				};
 				assert_eq!(
 					ok,
@@ -4930,6 +5167,31 @@ mod serve_tests {
 
 			let code = refusal_code(&h.log.writes.lock().unwrap()[mark..], version);
 			assert_eq!(code, Some(unauthorized(version)), "{version}: narrowed while resolving");
+		}
+	}
+
+	/// A request's USE_VALUE token decodes but grants nothing yet, so a TRACK_STATUS outside
+	/// the session grant is still refused.
+	#[moq_net_sim::test]
+	async fn a_request_token_does_not_widen_the_grant() {
+		let nothing = crate::auth::Grant {
+			publish: Default::default(),
+			subscribe: Default::default(),
+			expires: None,
+		};
+		for version in [Version::Draft14, Version::Draft22] {
+			let mut h = serve(version);
+			let auth = crate::auth::Handle::new(false);
+			auth.authorize(&nothing);
+			h.publisher = h.publisher.clone().with_auth(auth);
+
+			let mut body = track_status("room", true, version);
+			// Replace the empty parameter block with an AUTHORIZATION TOKEN: USE_VALUE, type 0.
+			assert_eq!(body.pop(), Some(0), "{version}");
+			body.extend([0x01, 0x03, 0x03, 0x03, 0x00, 0xAA]);
+
+			let unauthorized = request::to_code(&Error::Unauthorized, request::Kind::TrackStatus, version);
+			assert_eq!(answer_code(&h, body, version).await, Some(unauthorized), "{version}");
 		}
 	}
 
@@ -5055,7 +5317,7 @@ mod serve_tests {
 		ietf::encode_object_time(
 			&mut Encoder::new(&mut properties, version.into()),
 			stamp,
-			track::Info::default().timescale.expect("a timed track"),
+			track::Info::timed().timescale.expect("a timed track"),
 			version,
 		)
 		.unwrap();
@@ -5579,7 +5841,7 @@ mod serve_tests {
 			}
 			let properties = match ietf::Properties::sends_timescale(version) {
 				false => ietf::Properties::default(),
-				true => track_properties(&track::Info::default(), true),
+				true => track_properties(&track::Info::timed(), true),
 			};
 			assert_eq!(ok.properties, properties, "{version}: wrong properties");
 			assert_eq!(
@@ -6112,6 +6374,7 @@ mod serve_tests {
 		let info = track::Info {
 			max_age: Some(Duration::from_secs(5)),
 			priority: 200,
+			timescale: Some(crate::Timescale::MILLI),
 			..Default::default()
 		};
 		let stamp = crate::Timestamp::from_millis(123_456).unwrap();
@@ -6570,7 +6833,7 @@ mod serve_tests {
 		for version in FETCH_DRAFTS {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-			let track = broadcast.create_track("video", None).unwrap();
+			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(timestamp(), b"0-0".to_vec()).unwrap();
 			group.finish().unwrap();
@@ -6663,7 +6926,7 @@ mod serve_tests {
 			] {
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", None).unwrap();
+				let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 				let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 				group.write_frame(timestamp(), PAYLOAD.to_vec()).unwrap();
 				settle().await;
@@ -6974,7 +7237,11 @@ mod serve_tests {
 		async fn serve_slice(slice: GroupSlice) -> Vec<u8> {
 			let log = Log::default();
 			let session = SinkSession::new(log.clone());
-			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			for payload in [b"aa", b"bb", b"cc", b"dd"] {
 				group.write_frame(timestamp(), payload.as_slice()).unwrap();
@@ -6987,7 +7254,7 @@ mod serve_tests {
 				header(),
 				kio::Producer::new(0).consume(),
 				consumer,
-				Some(Timescale::default()),
+				Some(Timescale::MILLI),
 				Version::Draft20,
 				slice,
 			);
@@ -7029,7 +7296,11 @@ mod serve_tests {
 			let log = crate::lite::test_transport::Log::default();
 			let session = SinkSession::new(log.clone());
 
-			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
 			let subscriber = track.subscribe(None);
 
 			let mut group = track.append_group().unwrap();
@@ -7113,7 +7384,11 @@ mod tests {
 	/// subscription must preserve everything the producer still retains.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
-		let producer = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let producer = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		for millis in [0, 1000] {
 			let mut group = producer.append_group().unwrap();
 			group
@@ -9268,7 +9543,11 @@ mod range_tests {
 	/// Clamping it to the live edge would serve a group outside the requested range.
 	#[moq_net_sim::test]
 	async fn a_future_start_is_not_clamped_to_the_live_edge() {
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		track
 			.create_group(group::Info { sequence: 7 })
 			.unwrap()
@@ -9419,7 +9698,11 @@ mod range_tests {
 	/// one exists, so the earlier group is deliberately left unfinished here.
 	#[test]
 	fn an_empty_newest_group_walks_back_for_the_largest() {
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
 		for _ in 0..3 {
 			first
@@ -9446,7 +9729,11 @@ mod range_tests {
 	/// order rather than decrementing by one.
 	#[test]
 	fn the_walkback_crosses_a_gap_in_the_numbering() {
-		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
 		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
 		first
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())

@@ -15,6 +15,7 @@
 // not part of the plugin build.
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,7 +37,8 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-#include "moq-source.h"
+// Include the implementation so catalog-shape tests need no production test hooks.
+#include "../src/moq-source.cpp"
 #include "moq-test-relay.h"
 
 namespace {
@@ -81,13 +83,27 @@ std::atomic<int> g_audio_frame_unrefs{0};
 // The bmalloc/bfree balance, so a frame buffer that outlives its decoder shows up
 // as a leak.
 std::atomic<long> g_live_allocs{0};
+
+// Candidate resolve and subscribe failures, logged under the source lock as the candidate
+// is released, so taking that lock afterwards observes the release.
+std::mutex g_candidate_mutex;
+std::condition_variable g_candidate_failed;
+int g_candidate_failures = 0;
 } // namespace
 
 extern "C" {
 
 // Deliberately silent: stdio locking would create happens-before edges between
-// the test thread and the source's worker and mask the races we're after.
-void blog(int, const char *, ...) {}
+// the test thread and the source's worker and mask the races we're after. Only a
+// candidate's resolve or subscribe failure synchronizes, so a scenario can wait on it.
+void blog(int, const char *format, ...)
+{
+	if (!strstr(format, "Failed to resolve") && !strstr(format, "Failed to subscribe"))
+		return;
+	std::lock_guard<std::mutex> lock(g_candidate_mutex);
+	g_candidate_failures++;
+	g_candidate_failed.notify_all();
+}
 
 void *bmalloc(size_t size)
 {
@@ -188,7 +204,7 @@ namespace {
 std::atomic<long> g_av_allocs{0};
 
 // Decode knobs. Only the failure scenarios move them.
-bool g_find_decoder_ok = true;
+std::atomic<bool> g_find_decoder_ok{true};
 int g_send_result = 0;
 int g_receive_result = 0;
 int g_audio_send_result = 0;
@@ -201,10 +217,17 @@ int64_t g_decoded_audio_pts = AV_NOPTS_VALUE;
 int g_decoded_audio_channels = 2;
 enum AVChannelOrder g_decoded_audio_order = AV_CHANNEL_ORDER_NATIVE;
 uint64_t g_decoded_audio_layout = AV_CH_LAYOUT_STEREO;
-bool g_audio_frame_pending = false;
 bool g_audio_packet_owned = false;
 bool g_audio_packet_padding_zero = false;
 std::atomic<int> g_last_decoder_extradata{-1};
+std::atomic<int> g_decoder_opens{0};
+// Only packets from the replacement use this timestamp; the old stream keeps decoding.
+std::atomic<int> g_candidate_decode{0}; // 1: send error, 2: receive error, 3: needs more input
+std::atomic<int> g_candidate_attempts{0};
+struct DecodeState {
+	int64_t timestamp_us = 0;
+	bool audio_pending = false;
+};
 
 std::atomic<int> g_sws_scales{0};
 
@@ -225,6 +248,7 @@ AVCodecContext *avcodec_alloc_context3(const AVCodec *codec)
 	g_av_allocs++;
 	auto *ctx = static_cast<AVCodecContext *>(calloc(1, sizeof(AVCodecContext)));
 	ctx->codec_id = codec ? codec->id : AV_CODEC_ID_NONE;
+	ctx->opaque = new DecodeState{};
 	return ctx;
 }
 
@@ -236,6 +260,7 @@ void avcodec_free_context(AVCodecContext **avctx)
 		g_av_allocs--;
 		free((*avctx)->extradata);
 	}
+	delete static_cast<DecodeState *>((*avctx)->opaque);
 	g_av_allocs--;
 	free(*avctx);
 	*avctx = nullptr;
@@ -243,6 +268,7 @@ void avcodec_free_context(AVCodecContext **avctx)
 
 int avcodec_open2(AVCodecContext *, const AVCodec *, AVDictionary **)
 {
+	g_decoder_opens++;
 	return 0;
 }
 
@@ -251,6 +277,14 @@ void avcodec_flush_buffers(AVCodecContext *) {}
 int avcodec_send_packet(AVCodecContext *ctx, const AVPacket *packet)
 {
 	g_last_decoder_extradata = ctx->extradata_size > 0 ? ctx->extradata[0] : -1;
+	auto &state = *static_cast<DecodeState *>(ctx->opaque);
+	const bool audio = ctx->codec_id == AV_CODEC_ID_AAC || ctx->codec_id == AV_CODEC_ID_OPUS;
+	state.timestamp_us = packet->pts * (audio ? 1 : 1000);
+	if (state.timestamp_us == 1'000'000'000) {
+		g_candidate_attempts++;
+		if (g_candidate_decode == 1)
+			return AVERROR_INVALIDDATA;
+	}
 	if (ctx->codec_id == AV_CODEC_ID_AAC || ctx->codec_id == AV_CODEC_ID_OPUS) {
 		g_audio_packet_owned = packet->buf != nullptr;
 		g_audio_packet_padding_zero = true;
@@ -258,19 +292,26 @@ int avcodec_send_packet(AVCodecContext *ctx, const AVPacket *packet)
 			g_audio_packet_padding_zero &= packet->data[packet->size + i] == 0;
 		if (g_audio_send_result < 0)
 			return g_audio_send_result;
-		g_audio_frame_pending = true;
+		state.audio_pending = true;
 	}
 	return g_send_result;
 }
 
 int avcodec_receive_frame(AVCodecContext *ctx, AVFrame *frame)
 {
+	auto &state = *static_cast<DecodeState *>(ctx->opaque);
+	if (state.timestamp_us == 1'000'000'000) {
+		if (g_candidate_decode == 2)
+			return AVERROR_INVALIDDATA;
+		if (g_candidate_decode == 3)
+			return AVERROR(EAGAIN);
+	}
 	if (ctx->codec_id == AV_CODEC_ID_AAC || ctx->codec_id == AV_CODEC_ID_OPUS) {
 		if (g_audio_receive_result < 0)
 			return g_audio_receive_result;
-		if (!g_audio_frame_pending)
+		if (!state.audio_pending)
 			return AVERROR(EAGAIN);
-		g_audio_frame_pending = false;
+		state.audio_pending = false;
 		frame->format = g_decoded_audio_format;
 		frame->sample_rate = ctx->sample_rate;
 		frame->nb_samples = g_decoded_audio_samples;
@@ -439,10 +480,12 @@ void reset(std::string url, std::string broadcast = "obs/test")
 	g_audio_receive_result = 0;
 	g_decoded_width = 320;
 	g_decoded_height = 240;
-	g_audio_frame_pending = false;
 	g_audio_packet_owned = false;
 	g_audio_packet_padding_zero = false;
 	g_last_decoder_extradata = -1;
+	g_decoder_opens = 0;
+	g_candidate_decode = 0;
+	g_candidate_attempts = 0;
 	g_live_allocs = 0;
 	g_av_allocs = 0;
 }
@@ -568,6 +611,266 @@ int main()
 		destroySource(source);
 	}
 	report("plays video and audio");
+
+	// A metadata-only snapshot leaves the same rendition and decoder running.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		const int opens = g_decoder_opens;
+		const int frames = g_output_frames;
+		auto catalog = TestOk(moq::MediaCatalogProducer::init(publisher.broadcast), "catalog");
+		moq::VideoProperties properties{};
+		properties.rotation = 90;
+		TestOk(catalog->set_video_properties(properties), "catalog properties");
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 10; }));
+		CHECK(g_decoder_opens == opens);
+		destroySource(source);
+	}
+	report("unchanged rendition keeps decoder");
+
+	// The same track name with a new decoder configuration is a replacement; metadata alone is not.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
+		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
+		CHECK(snapshot.has_value());
+		auto &video = snapshot->video.begin()->second;
+		auto &audio = snapshot->audio.begin()->second;
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			video.label = "relabeled";
+			video.bitrate = 1;
+			audio.label = "relabeled";
+			audio.bitrate = 1;
+			moq_source_subscribe_video(ctx, conn, *snapshot);
+			moq_source_subscribe_audio(ctx, conn, *snapshot);
+			CHECK(!conn->pending_video && !conn->pending_audio);
+			video.coded = moq::Dimensions{(video.coded ? video.coded->width : 0) + 16, 16};
+			audio.sample_rate += 1;
+			moq_source_subscribe_video(ctx, conn, *snapshot);
+			moq_source_subscribe_audio(ctx, conn, *snapshot);
+			CHECK(conn->pending_video && conn->pending_audio);
+		}
+		destroySource(source);
+	}
+	report("reshaped rendition replaces decoder");
+
+	// A new rendition that has not delivered a frame cannot stop the old track.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		moq::VideoInit init{};
+		init.format = moq::VideoFormat::kAvc3;
+		init.data = TestH264Init();
+		auto replacement = TestOk(
+			moq::MediaTrackProducer::video(publisher.broadcast,
+						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
+			"replacement");
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 10; }));
+		CHECK(publisher.WriteUntil([&] {
+			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), 2'000'000}),
+			       "replacement frame");
+			return g_last_timestamp == 2'000'000'000;
+		}));
+		destroySource(source);
+	}
+	report("replacement waits for first frame");
+
+	// A keyframe flag or accepted packet is not proof that the replacement decodes.
+	for (int failure : {1, 2, 3}) {
+		TestRelay relay;
+		reset(relay.Url());
+		const bool audio = failure == 1;
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		g_candidate_decode = failure;
+		std::shared_ptr<moq::MediaTrackProducer> replacement;
+		if (audio) {
+			moq::AudioInit init{};
+			init.format = moq::AudioFormat::kOpus;
+			init.data = TestOpusHead();
+			replacement = TestOk(moq::MediaTrackProducer::audio(
+						     publisher.broadcast,
+						     moq::MediaTarget::kNamed{std::string("!replacement")}, init),
+					     "replacement audio");
+		} else {
+			moq::VideoInit init{};
+			init.format = moq::VideoFormat::kAvc3;
+			init.data = TestH264Init();
+			replacement = TestOk(moq::MediaTrackProducer::video(
+						     publisher.broadcast,
+						     moq::MediaTarget::kNamed{std::string("!replacement")}, init),
+					     "replacement video");
+		}
+		auto write = [&] {
+			auto payload = audio ? std::vector<uint8_t>{0xfc, 0xff, 0xfe} : TestH264Keyframe();
+			TestOk(replacement->write_frame(moq::Frame{payload, 1'000'000'000}), "replacement frame");
+			if (audio)
+				TestOk(replacement->cut(), "replacement audio cut");
+		};
+		CHECK(publisher.WriteUntil([&] {
+			write();
+			return g_candidate_attempts > 0;
+		}));
+		const int frames = audio ? g_output_audio.load() : g_output_frames.load();
+		CHECK(publisher.WriteUntil(
+			[&] { return (audio ? g_output_audio.load() : g_output_frames.load()) >= frames + 3; }));
+		if (failure == 3) {
+			// Metadata-only updates must preserve the candidate's accumulated decode state.
+			auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
+			auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+			auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
+			CHECK(snapshot.has_value());
+			auto *ctx = static_cast<moq_source *>(source);
+			{
+				std::lock_guard lock(ctx->mutex);
+				auto pending = ctx->connection->pending_video;
+				CHECK(pending != nullptr);
+				moq_source_subscribe_video(ctx, ctx->connection, *snapshot);
+				CHECK(ctx->connection->pending_video == pending);
+			}
+			g_candidate_decode = 0;
+			CHECK(publisher.WriteUntil([&] {
+				write();
+				return g_last_timestamp == 1'000'000'000'000;
+			}));
+		}
+		destroySource(source);
+		report(audio          ? "failed audio candidate preserves playback"
+		       : failure == 2 ? "failed video candidate preserves playback"
+				      : "video waits for decoded output");
+	}
+
+	// A malformed packet on the active audio track stops only that track; the pending
+	// replacement still takes over without another catalog update.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_audio > 0; }));
+		g_candidate_decode = 3;
+		moq::AudioInit init{};
+		init.format = moq::AudioFormat::kOpus;
+		init.data = TestOpusHead();
+		auto replacement = TestOk(
+			moq::MediaTrackProducer::audio(publisher.broadcast,
+						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
+			"replacement audio");
+		auto write = [&] {
+			TestOk(replacement->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, 1'000'000'000}),
+			       "replacement frame");
+			TestOk(replacement->cut(), "replacement audio cut");
+		};
+		CHECK(publisher.WriteUntil([&] {
+			write();
+			return g_candidate_attempts > 0;
+		}));
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			auto conn = ctx->connection;
+			auto active = conn->audio;
+			auto pending = conn->pending_audio;
+			CHECK(active && pending);
+			g_audio_send_result = AVERROR_INVALIDDATA;
+			moq::MediaFrame malformed{};
+			malformed.timestamp_us = 1;
+			moq_source_on_frame(ctx, conn, active, std::optional<moq::MediaFrame>(malformed));
+			g_audio_send_result = 0;
+			CHECK(!conn->audio);
+			CHECK(conn->pending_audio == pending);
+		}
+		g_candidate_decode = 0;
+		CHECK(publisher.WriteUntil([&] {
+			write();
+			return g_last_audio_timestamp == 1'000'000'000'000;
+		}));
+		destroySource(source);
+	}
+	report("failed active audio keeps pending replacement");
+
+	// The public publishing wrapper cannot author a sibling-reference catalog, so deliver
+	// that snapshot directly; resolution and subscription still cross the real relay.
+	for (bool sibling : {false, true}) {
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
+		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
+		CHECK(snapshot.has_value());
+		auto config = snapshot->video.begin()->second;
+		std::shared_ptr<moq::BroadcastProducer> hidden;
+		if (sibling) {
+			hidden = TestOk(relay.origin->create_broadcast("obs/test/hidden"), "unannounced sibling");
+			config.broadcast = "./hidden";
+		}
+		snapshot->video.clear();
+		snapshot->video.emplace("!unavailable", config);
+		auto *ctx = static_cast<moq_source *>(source);
+		int failures = 0;
+		{
+			std::lock_guard<std::mutex> lock(g_candidate_mutex);
+			failures = g_candidate_failures;
+		}
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			moq_source_subscribe_video(ctx, ctx->connection, *snapshot);
+			CHECK(ctx->connection->pending_video != nullptr);
+		}
+		{
+			std::unique_lock<std::mutex> lock(g_candidate_mutex);
+			g_candidate_failed.wait(lock, [&] { return g_candidate_failures > failures; });
+		}
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			CHECK(ctx->connection && !ctx->connection->pending_video);
+		}
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
+		destroySource(source);
+		report(sibling ? "failed sibling resolution preserves playback"
+			       : "rejected subscription preserves playback");
+	}
+
+	// A replacement that cannot prepare a decoder leaves current playback alive.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		g_find_decoder_ok = false;
+		moq::VideoInit init{};
+		init.format = moq::VideoFormat::kAvc3;
+		init.data = TestH264Init();
+		auto replacement = TestOk(
+			moq::MediaTrackProducer::video(publisher.broadcast,
+						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
+			"failed replacement");
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 10; }));
+		destroySource(source);
+	}
+	report("failed replacement preserves playback");
 
 	// A broadcast with no video rendition plays its audio and blanks the video.
 	{

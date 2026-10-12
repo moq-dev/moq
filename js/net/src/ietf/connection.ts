@@ -6,7 +6,7 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
+import { error, fromClose, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -15,21 +15,25 @@ import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
 import { AuthMessage, supported as authSupported, IetfAuthWire } from "./auth.ts";
 import * as Cluster from "./cluster.ts";
-import { Fetch, FetchHeader } from "./fetch.ts";
+import { type RequestKind, toRequestCode } from "./error.ts";
+import { Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
 import { Group } from "./object.ts";
-import { Publish } from "./publish.ts";
-import { PublishNamespace } from "./publish_namespace.ts";
+import { Publish, PublishError } from "./publish.ts";
+import { PublishNamespace, PublishNamespaceError } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
-import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { RequestError } from "./request.ts";
+import { Subscribe, SubscribeError, SubscribeUpdate } from "./subscribe.ts";
 import {
 	SUBSCRIBE_TRACKS_ID,
 	SubscribeNamespace,
+	SubscribeNamespaceError,
 	SubscribeNamespaceLegacy,
 	SubscribeOptions,
 } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
+import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
 
@@ -84,6 +88,8 @@ export class Connection implements Established {
 
 	// What the peer declared about being solicited; see {@link Ietf.solicitFromSetup}.
 	#solicit: boolean | undefined;
+	// Whether our SETUP declared MoQ Solicit, which is what makes an unasked announce a fault.
+	#declaredSolicit: boolean;
 
 	// The Hop IDs this session declared; see {@link Cluster}.
 	#cluster?: Cluster.Hops;
@@ -122,6 +128,7 @@ export class Connection implements Established {
 		auth = false,
 		early = [],
 		requestWindow,
+		extensions,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -145,12 +152,14 @@ export class Connection implements Established {
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
 		 */
 		cluster?: Cluster.Hops;
-		/** Whether the peer's SETUP offered MoQ Auth (draft-17+). */
+		/** Whether MoQ Auth is negotiated (draft-17+): offered by both SETUPs. */
 		auth?: boolean;
 		/** Uni streams that arrived before the peer's SETUP, type unread (v17+). */
 		early?: Reader[];
 		/** Requests the peer may hold open on drafts 14 to 16, the window our SETUP advertised (default `REQUEST_WINDOW`). */
 		requestWindow?: bigint;
+		/** What our own SETUP offered; every extension when omitted. */
+		extensions?: { solicit: boolean };
 	}) {
 		this.url = url;
 		this.discovery = discovery;
@@ -194,9 +203,7 @@ export class Connection implements Established {
 		this.#client = client;
 
 		this.#auth.violated.subscribe((err) => {
-			if (!err) return;
-			this.#quic.close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
-			this.abort();
+			if (err) this.#violated(err);
 		});
 
 		this.#publisher = new Publisher({
@@ -210,6 +217,7 @@ export class Connection implements Established {
 			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;
+		this.#declaredSolicit = extensions?.solicit ?? true;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({
 			session: this.#session,
@@ -267,7 +275,7 @@ export class Connection implements Established {
 	// The peer broke the protocol, so losing the stream is not enough: nothing stops it
 	// repeating the violation on the next one.
 	#violated(err: ProtocolViolation) {
-		this.#close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
+		this.#close({ closeCode: err.code, reason: err.message });
 	}
 
 	async #run(early: Reader[]): Promise<void> {
@@ -337,14 +345,12 @@ export class Connection implements Established {
 			// to the same request_id + namespace. We never send PUBLISH, so a legacy
 			// request for PUBLISH alone is refused, and one for both gets only NAMESPACE.
 			case BigInt(SubscribeNamespace.id): {
-				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
-				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
-				await this.#publisher.runSubscribeNamespace(msg, stream);
+				const decoded = SubscribeNamespace.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "subscribe_namespace", decoded);
+				if (msg) await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
 			}
 			case BigInt(SubscribeNamespaceLegacy.id): {
-				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
-				if (this.#session instanceof NativeSession) this.#session.admitRequest(legacy.requestId);
 				// Draft-16 carries this on its own stream, so the control adapter never sees the ID.
 				// Draft-14 and 15 already admitted it off the control stream. A refused request
 				// still spends its ID, so it is admitted and released like any other.
@@ -352,7 +358,22 @@ export class Connection implements Established {
 					this.#session instanceof ControlStreamAdapter && this.#session.version === Version.DRAFT_16
 						? this.#session
 						: undefined;
+				let legacy: SubscribeNamespaceLegacy;
+				try {
+					legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
+				} catch (err) {
+					if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw err;
+					adapter?.admitRequest(err.requestId);
+					this.#spend(err.requestId);
+					try {
+						await this.#refuseToken(stream, "subscribe_namespace", err.requestId);
+					} finally {
+						adapter?.releaseRequest(err.requestId);
+					}
+					break;
+				}
 				if (adapter) adapter.admitRequest(legacy.requestId);
+				this.#spend(legacy.requestId);
 				try {
 					if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
 						await this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream);
@@ -376,9 +397,9 @@ export class Connection implements Established {
 			}
 			// Publisher handles incoming requests
 			case BigInt(Subscribe.id): {
-				const msg = await Subscribe.decode(stream.reader, this.#session.version);
-				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
-				await this.#publisher.runSubscribe(msg, stream);
+				const decoded = Subscribe.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "subscribe", decoded);
+				if (msg) await this.#publisher.runSubscribe(msg, stream);
 				break;
 			}
 			case BigInt(SUBSCRIBE_TRACKS_ID): {
@@ -391,45 +412,46 @@ export class Connection implements Established {
 					await reader.readAll();
 					return id;
 				});
-				this.#session.admitRequest(requestId);
+				this.#session.spendRequest(requestId);
 				await this.#publisher.runSubscribeTracks(stream);
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
-				const msg = await TrackStatusRequest.decode(stream.reader, this.#session.version);
-				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
-				await this.#publisher.runTrackStatusRequest(msg, stream);
+				const decoded = TrackStatusRequest.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "track_status", decoded);
+				if (msg) await this.#publisher.runTrackStatusRequest(msg, stream);
 				break;
 			}
 			case BigInt(Fetch.id): {
-				const msg = await Fetch.decode(stream.reader, this.#session.version);
-				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
-				await this.#publisher.runFetch(msg, stream);
+				const decoded = Fetch.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "fetch", decoded);
+				if (msg) await this.#publisher.runFetch(msg, stream);
 				break;
 			}
 
 			// Subscriber handles incoming notifications
 			case BigInt(PublishNamespace.id): {
-				const msg = await PublishNamespace.decode(
+				const decoded = PublishNamespace.decode(
 					stream.reader,
 					this.#session.version,
 					Cluster.negotiated(this.#cluster),
 				);
+				const msg = await this.#request(stream, "publish_namespace", decoded);
+				if (!msg) break;
 
-				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
-
-				// We always declare that advertisements to us must be solicited (MoQ
-				// Solicit), and writing the option at all proves the peer implements the
-				// extension, whichever value it chose. It also cannot have advertised
-				// before reading our SETUP, since our SETUP is what says whether
+				// Unless we declined it, we declare that advertisements to us must be
+				// solicited (MoQ Solicit), and writing the option at all proves the peer
+				// implements the extension, whichever value it chose. It also cannot have
+				// advertised before reading our SETUP, since our SETUP is what says whether
 				// advertising unasked is allowed. So this is a bug in the peer, and a
-				// silent one on both sides if we tolerate it.
+				// silent one on both sides if we tolerate it. Without our declaration an
+				// unasked announce is what we invited.
 				//
 				// Draft-14/15 are exempt: they have no inline NAMESPACE, so a
 				// PUBLISH_NAMESPACE request is also how a peer answers our
 				// SUBSCRIBE_NAMESPACE there, and the message alone does not say which.
 				const legacy = this.#session.version === Version.DRAFT_14 || this.#session.version === Version.DRAFT_15;
-				if (this.#solicit !== undefined && !legacy) {
+				if (this.#declaredSolicit && this.#solicit !== undefined && !legacy) {
 					console.error(
 						`unsolicited publish_namespace from a peer that implements MoQ Solicit: broadcast=${msg.trackNamespace}`,
 					);
@@ -447,15 +469,67 @@ export class Connection implements Established {
 				break;
 			}
 			case BigInt(Publish.id): {
-				const msg = await Publish.decode(stream.reader, this.#session.version);
-				if (this.#session instanceof NativeSession) this.#session.admitRequest(msg.requestId);
-				await this.#subscriber.runPublish(msg, stream);
+				const decoded = Publish.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "publish", decoded);
+				if (msg) await this.#subscriber.runPublish(msg, stream);
 				break;
 			}
 
 			default:
 				throw new ProtocolViolation(`unknown bidi stream type: 0x${typeId.toString(16)}`);
 		}
+	}
+
+	/**
+	 * Finish decoding a request, refusing it instead when its AUTHORIZATION TOKENs repeat.
+	 * Section 8.9 rejects that message rather than the session, unlike any other decode error.
+	 *
+	 * @returns undefined once refused.
+	 */
+	async #request<T extends { requestId: bigint }>(
+		stream: Stream,
+		kind: RequestKind,
+		decoded: Promise<T>,
+	): Promise<T | undefined> {
+		let msg: T;
+		try {
+			msg = await decoded;
+		} catch (err) {
+			if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw err;
+			this.#spend(err.requestId);
+			await this.#refuseToken(stream, kind, err.requestId);
+			return undefined;
+		}
+		this.#spend(msg.requestId);
+		return msg;
+	}
+
+	/** Spend a request's ID on draft 17+; the control stream adapter already spent it on earlier drafts. */
+	#spend(requestId: bigint) {
+		if (this.#session instanceof NativeSession) this.#session.spendRequest(requestId);
+	}
+
+	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */
+	async #refuseToken(stream: Stream, kind: RequestKind, requestId: bigint) {
+		const version = this.#session.version;
+		// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
+		const id14 = {
+			subscribe: SubscribeError.id,
+			fetch: FetchError.id,
+			publish: PublishError.id,
+			publish_namespace: PublishNamespaceError.id,
+			subscribe_namespace: SubscribeNamespaceError.id,
+			// TRACK_STATUS_ERROR
+			track_status: 0x0f,
+		}[kind];
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		await stream.writer.u53(version === Version.DRAFT_14 ? id14 : RequestError.id);
+		await new RequestError({
+			requestId: legacy ? requestId : undefined,
+			errorCode: toRequestCode("malformed_auth_token", kind, version),
+			reasonPhrase: "repeated AUTHORIZATION TOKEN",
+		}).encode(stream.writer, version);
+		stream.close();
 	}
 
 	// A malformed OBJECT_DATAGRAM is the peer breaking the protocol, like an invalid stream type.

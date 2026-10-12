@@ -1,12 +1,64 @@
-use std::{
-	collections::{BTreeMap, HashSet},
-	task::Poll,
-};
+use std::{collections::BTreeMap, task::Poll};
 
 use crate::{
 	Error, SessionError,
 	ietf::{RequestId, Version},
 };
+
+/// The peer's spent request IDs: every ID of its parity below `next`, except the skipped
+/// `start..end` runs in `missing`.
+///
+/// Independent streams can reorder, so a peer's IDs need not arrive in sequence. A jump
+/// costs one run however far it skips, and only a request landing inside a run splits it,
+/// so the runs never outnumber the requests received.
+struct Spent {
+	next: u64,
+	missing: BTreeMap<u64, u64>,
+}
+
+impl Spent {
+	fn new(first: u64) -> Self {
+		Self {
+			next: first,
+			missing: BTreeMap::new(),
+		}
+	}
+
+	/// The skipped run holding `id`, if any.
+	fn run(&self, id: u64) -> Option<(u64, u64)> {
+		let (&start, &end) = self.missing.range(..=id).next_back()?;
+		(id < end).then_some((start, end))
+	}
+
+	/// Whether `id` has the peer's parity and was never spent.
+	fn unused(&self, id: u64) -> bool {
+		id % 2 == self.next % 2 && (id >= self.next || self.run(id).is_some())
+	}
+
+	/// Whether spending `id` would record one more run.
+	fn splits(&self, id: u64) -> bool {
+		match self.run(id) {
+			Some((start, end)) => start < id && id + 2 < end,
+			None => id > self.next,
+		}
+	}
+
+	/// Spend an [unused](Self::unused) `id`.
+	fn spend(&mut self, id: u64) {
+		if let Some((start, end)) = self.run(id) {
+			self.missing.remove(&start);
+			if start < id {
+				self.missing.insert(start, id);
+			}
+			if id + 2 < end {
+				self.missing.insert(id + 2, end);
+			}
+		} else if id > self.next {
+			self.missing.insert(self.next, id);
+		}
+		self.next = self.next.max(id + 2);
+	}
+}
 
 /// The MAX_REQUEST_ID that first admits `window` requests from a peer.
 ///
@@ -22,8 +74,10 @@ struct ControlState {
 	request_id_max: Option<RequestId>,
 	/// The peer's requests, flow controlled on drafts 14 to 16 only.
 	incoming: Option<Incoming>,
-	/// Permanently spent modern request IDs, compressed across adjacent IDs.
-	modern: Ids,
+	/// The peer's spent IDs on draft 17 and later, which has no window to bound the runs.
+	modern: Spent,
+	/// The most runs `modern` may hold. Forgetting one would make its IDs usable again.
+	history: u64,
 }
 
 /// The MAX_REQUEST_ID window we grant the peer.
@@ -38,46 +92,10 @@ struct Incoming {
 	live: u64,
 	/// Requests retired since the last grant.
 	retired: u64,
-	/// One past the highest accepted ID, preserving IDs whose requests retired.
-	next: RequestId,
-	/// Draft 16 can reorder across streams. Missing IDs retain unreturned window credits,
-	/// so remembering only these holes is bounded by the request window, not session age.
-	missing: Option<HashSet<RequestId>>,
-}
-
-/// Modern request streams can reorder, so a high-water mark alone would reject valid peers.
-struct Ids {
-	parity: u64,
-	ranges: BTreeMap<u64, u64>,
-	limit: u64,
-}
-
-impl Ids {
-	fn accept(&mut self, id: RequestId) -> Result<(), Error> {
-		let id = id.0;
-		if id >= 1 << 62 || id % 2 != self.parity {
-			return Err(SessionError::InvalidRequestId.into());
-		}
-		let previous = self.ranges.range(..=id).next_back().map(|(&start, &end)| (start, end));
-		if previous.is_some_and(|(_, end)| id <= end) {
-			return Err(SessionError::InvalidRequestId.into());
-		}
-		let next = self.ranges.range(id..).next().map(|(&start, &end)| (start, end));
-		let left = previous.filter(|(_, end)| end + 2 == id);
-		let right = next.filter(|(start, _)| *start == id + 2);
-		// Never evict history: doing so would make a retired ID usable again.
-		if left.is_none() && right.is_none() && self.ranges.len() as u64 >= self.limit {
-			tracing::warn!(limit = self.limit, "request ID history exhausted");
-			return Err(SessionError::Internal.into());
-		}
-		let start = left.map_or(id, |(start, _)| start);
-		let end = right.map_or(id, |(_, end)| end);
-		if let Some((start, _)) = right {
-			self.ranges.remove(&start);
-		}
-		self.ranges.insert(start, end);
-		Ok(())
-	}
+	/// Every accepted ID, preserving IDs whose requests retired.
+	spent: Spent,
+	/// Draft 16 can reorder across streams; drafts 14 and 15 require the next ID.
+	reorder: bool,
 }
 
 #[derive(Clone)]
@@ -92,11 +110,9 @@ impl Control {
 				request_id_next: if client { RequestId(0) } else { RequestId(1) },
 				request_id_max,
 				incoming: None,
-				modern: Ids {
-					parity: u64::from(client),
-					ranges: BTreeMap::new(),
-					limit: crate::session::Limits::default().requests(),
-				},
+				// The peer takes the other parity: a client's IDs are even, a server's odd.
+				modern: Spent::new(u64::from(client)),
+				history: crate::session::Limits::default().requests(),
 			}),
 		}
 	}
@@ -113,15 +129,17 @@ impl Control {
 			sent: max,
 			live: 0,
 			retired: 0,
-			next: RequestId(u64::from(client)),
-			missing: (version == Version::Draft16).then(HashSet::new),
+			spent: Spent::new(u64::from(client)),
+			reorder: version == Version::Draft16,
 		});
 		self
 	}
 
-	/// Bound fragmented modern ID history using the session's existing request capacity.
-	pub fn history_limit(&self, limit: u64) {
-		self.state.lock().modern.limit = limit;
+	/// Bound the runs of skipped IDs a draft-17+ peer may leave, closing the session with
+	/// INTERNAL_ERROR past `limit` rather than forgetting any.
+	pub fn with_history(self, limit: u64) -> Self {
+		self.state.lock().history = limit;
+		self
 	}
 
 	pub fn max_request_id(&self, max: RequestId) {
@@ -134,36 +152,38 @@ impl Control {
 	/// Closes the session with TOO_MANY_REQUESTS when the ID is at or past the
 	/// MAX_REQUEST_ID we advertised, or its live requests exceed the window.
 	/// Drafts 14/15 require the next ID; draft 16 permits cross-stream reordering.
-	/// Used IDs close with INVALID_REQUEST_ID even after retirement.
-	/// `None` when the peer's requests are not flow controlled.
+	/// Used IDs close with INVALID_REQUEST_ID even after retirement, on every draft.
+	/// `None` when the peer's requests are not flow controlled (draft 17 and later).
 	pub fn accept(&self, id: RequestId) -> Result<Option<RequestPermit>, Error> {
 		let mut state = self.state.lock();
+		let state = &mut *state;
 		let Some(incoming) = &mut state.incoming else {
-			state.modern.accept(id)?;
+			let modern = &mut state.modern;
+			if !modern.unused(id.0) {
+				return Err(SessionError::InvalidRequestId.into());
+			}
+			if modern.splits(id.0) && modern.missing.len() as u64 >= state.history {
+				tracing::warn!(limit = state.history, "request ID history exhausted");
+				return Err(SessionError::Internal.into());
+			}
+			modern.spend(id.0);
 			return Ok(None);
 		};
 		if id.0 >= incoming.max {
 			tracing::warn!(id = %id, max = incoming.max, live = incoming.live, "peer exceeded MAX_REQUEST_ID");
 			return Err(SessionError::TooManyRequests.into());
 		}
-		let unused = if id < incoming.next {
-			incoming.missing.as_ref().is_some_and(|missing| missing.contains(&id))
-		} else {
-			id == incoming.next || incoming.missing.is_some()
+		let unused = match incoming.reorder {
+			true => incoming.spent.unused(id.0),
+			false => id.0 == incoming.spent.next,
 		};
-		if id.0 % 2 != incoming.next.0 % 2 || !unused {
+		if !unused {
 			return Err(SessionError::InvalidRequestId.into());
 		}
 		if incoming.live >= incoming.window {
 			return Err(SessionError::TooManyRequests.into());
 		}
-		if let Some(missing) = &mut incoming.missing {
-			for skipped in (incoming.next.0..id.0).step_by(2) {
-				missing.insert(RequestId(skipped));
-			}
-			missing.remove(&id);
-		}
-		incoming.next.0 = incoming.next.0.max(id.0 + 2);
+		incoming.spent.spend(id.0);
 		incoming.live += 1;
 		Ok(Some(RequestPermit(self.clone())))
 	}
@@ -351,9 +371,8 @@ mod tests {
 		for id in 1..1024 {
 			drop(control.accept(RequestId(id * 2)).unwrap());
 			let state = control.state.lock();
-			let missing = state.incoming.as_ref().unwrap().missing.as_ref().unwrap();
-			assert_eq!(missing.len(), 1);
-			assert!(missing.contains(&RequestId(0)));
+			let missing = &state.incoming.as_ref().unwrap().spent.missing;
+			assert_eq!(missing.iter().collect::<Vec<_>>(), [(&0, &2)]);
 		}
 		drop(control.accept(RequestId(0)).unwrap());
 		assert!(
@@ -363,12 +382,39 @@ mod tests {
 				.incoming
 				.as_ref()
 				.unwrap()
+				.spent
 				.missing
-				.as_ref()
-				.unwrap()
 				.is_empty()
 		);
 		for id in [0, 2, 2046] {
+			assert!(matches!(
+				control.accept(RequestId(id)),
+				Err(Error::Session(SessionError::InvalidRequestId))
+			));
+		}
+	}
+
+	/// Skipping to the top of a production-sized window records one run, not every ID.
+	#[test]
+	fn draft16_a_jump_is_one_run_split_only_by_requests_inside_it() {
+		let window = 220_000;
+		let control = Control::new(None, false).with_window(window, false, Version::Draft16);
+		let top = 2 * (window - 1);
+		let runs = |control: &Control| {
+			let state = control.state.lock();
+			let missing = &state.incoming.as_ref().unwrap().spent.missing;
+			missing.iter().map(|(&start, &end)| (start, end)).collect::<Vec<_>>()
+		};
+
+		drop(control.accept(RequestId(top)).unwrap());
+		assert_eq!(runs(&control), [(0, top)]);
+
+		for id in [100, 0, top - 2] {
+			drop(control.accept(RequestId(id)).unwrap());
+		}
+		assert_eq!(runs(&control), [(2, 100), (102, top - 2)]);
+
+		for id in [0, 100, top - 2, top] {
 			assert!(matches!(
 				control.accept(RequestId(id)),
 				Err(Error::Session(SessionError::InvalidRequestId))
@@ -382,7 +428,7 @@ mod tests {
 			let control = Control::new(None, client);
 			let first = u64::from(client);
 			for id in [first + 4, first, first + 2] {
-				assert!(control.accept(RequestId(id)).is_ok());
+				assert!(control.accept(RequestId(id)).unwrap().is_none());
 			}
 			for id in [first, first + 2, first + 4, first ^ 1] {
 				assert!(
@@ -396,23 +442,23 @@ mod tests {
 		}
 	}
 
+	/// Contiguous arrival in either order leaves no runs, and a full history refuses a new
+	/// gap rather than forgetting an old one.
 	#[test]
 	fn modern_history_coalesces_and_never_forgets() {
 		for reversed in [false, true] {
-			let control = Control::new(None, false);
-			control.history_limit(1);
+			let control = Control::new(None, false).with_history(1);
 			for n in 0..4096 {
 				let id = if reversed { 4095 - n } else { n } * 2;
-				assert!(control.accept(RequestId(id)).is_ok());
+				control.accept(RequestId(id)).unwrap();
 			}
-			assert_eq!(control.state.lock().modern.ranges.len(), 1);
+			assert!(control.state.lock().modern.missing.is_empty());
 			assert!(matches!(
 				control.accept(RequestId(0)),
 				Err(Error::Session(SessionError::InvalidRequestId))
 			));
 		}
-		let control = Control::new(None, false);
-		control.history_limit(2);
+		let control = Control::new(None, false).with_history(1);
 		control.accept(RequestId(0)).unwrap();
 		control.accept(RequestId(4)).unwrap();
 		assert!(matches!(
@@ -431,22 +477,19 @@ mod tests {
 
 	#[test]
 	fn modern_sparse_ids_do_not_allocate_the_gap() {
-		let control = Control::new(None, false);
-		control.history_limit(2);
-		control.accept(RequestId((1 << 62) - 2)).unwrap();
+		let control = Control::new(None, false).with_history(1);
+		let top = (1 << 62) - 2;
+		control.accept(RequestId(top)).unwrap();
 		control.accept(RequestId(0)).unwrap();
-		assert_eq!(control.state.lock().modern.ranges.len(), 2);
+		let runs: Vec<_> = control.state.lock().modern.missing.clone().into_iter().collect();
+		assert_eq!(runs, [(2, top)]);
 		assert!(matches!(
-			control.accept(RequestId((1 << 62) - 2)),
-			Err(Error::Session(SessionError::InvalidRequestId))
-		));
-		assert!(matches!(
-			control.accept(RequestId(1 << 62)),
+			control.accept(RequestId(top)),
 			Err(Error::Session(SessionError::InvalidRequestId))
 		));
 	}
 
-	/// Draft-17+ spends IDs without granting a MAX_REQUEST_ID window.
+	/// Draft-17+ has no MAX_REQUEST_ID: nothing is granted.
 	#[test]
 	fn unlimited_without_a_window() {
 		let control = Control::new(None, true);

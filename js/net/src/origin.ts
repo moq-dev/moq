@@ -17,6 +17,7 @@ import type * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { Route, routesEqual } from "./hop.ts";
 import {
+	compareEpochs,
 	compareRouteCandidates,
 	compareRoutes,
 	coveringPrefixes,
@@ -32,6 +33,27 @@ import { type Advertised, type Advertisements, type Instance, registerWire, same
 
 export type { Cost, Hop, Route } from "./hop.ts";
 export { isAnonymous } from "./hop.ts";
+
+/**
+ * How much an endpoint prefers a link over its others; higher wins. A positive value promotes a
+ * link and a negative one demotes it. See {@link Producer.withPreference}.
+ */
+export type Preference = number & { readonly _brand: "preference" };
+
+/** Constructors for {@link Preference}. */
+export const Preference = Object.assign(
+	/** Rank a link, throwing a `RangeError` outside -128..=127. */
+	(value: number): Preference => {
+		if (!Number.isInteger(value) || value < -128 || value > 127) {
+			throw new RangeError(`preference must be an integer in -128..=127: ${value}`);
+		}
+		return value as Preference;
+	},
+	{
+		/** The neutral 0 every link starts at, and what a broadcast published locally ranks. */
+		default: 0 as Preference,
+	},
+);
 
 /** The rooted permissions shared by a handle and every route it inserts. */
 class Scope {
@@ -221,6 +243,8 @@ export interface RouteEntry {
 	/** The paths the entry may serve beneath its prefix, when its producer is scoped. */
 	readonly claim?: Path.Patterns;
 	readonly route: Signal<Route>;
+	/** The rank of the link the entry arrived on; see {@link Producer.withPreference}. */
+	readonly preference: Preference;
 	readonly originated: boolean;
 	readonly server?: ServeState;
 }
@@ -228,6 +252,7 @@ export interface RouteEntry {
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
 interface Candidate extends Advertised {
 	readonly exact: boolean;
+	readonly preference: Preference;
 }
 
 /**
@@ -236,6 +261,7 @@ interface Candidate extends Advertised {
  */
 function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): number {
 	const order =
+		compareLinks(a.route, b.route, a.preference, b.preference) ||
 		compareRoutes(a.route, b.route) ||
 		Number(b.exact) - Number(a.exact) ||
 		a.route.hops.length - b.route.hops.length;
@@ -243,6 +269,15 @@ function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): numb
 	const ha = spreadHash(prefix, a.route.hops);
 	const hb = spreadHash(prefix, b.route.hops);
 	return ha < hb ? -1 : ha > hb ? 1 : 0;
+}
+
+/**
+ * Orders routes from different links: the newer epoch, since an older one is a publisher that
+ * was replaced, then the higher link {@link Preference}, so metrics from different operators are
+ * never compared. Zero on a tie, leaving the rest to {@link compareRoutes}.
+ */
+function compareLinks(a: Route, b: Route, aPreference: Preference, bPreference: Preference): number {
+	return compareEpochs(a, b) || bPreference - aPreference;
 }
 
 /**
@@ -264,7 +299,7 @@ function preferredEntry(
 		}
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		const order = compareRouteCandidates(path, a, b);
+		const order = compareLinks(a, b, entry.preference, best.preference) || compareRouteCandidates(path, a, b);
 		if (order < 0) best = entry;
 	}
 	return best;
@@ -458,13 +493,24 @@ class OriginState {
 			const list: Candidate[] = [];
 			for (const entry of entries) {
 				if (skip?.(entry)) continue;
-				list.push({ identity: entry.identity, route: entry.route.peek(), claim: entry.claim, exact: false });
+				list.push({
+					identity: entry.identity,
+					route: entry.route.peek(),
+					claim: entry.claim,
+					exact: false,
+					preference: entry.preference,
+				});
 			}
 			if (list.length > 0) out.set(path, list);
 		}
 		const advertised = this.advertisedLocal.peek();
 		for (const [path, front] of this.local.peek() ?? []) {
-			const local = { identity: front, route: advertised?.get(path) ?? Route.default, exact: true };
+			const local = {
+				identity: front,
+				route: advertised?.get(path) ?? Route.default,
+				exact: true,
+				preference: Preference.default,
+			};
 			const list = out.get(path);
 			if (list) list.push(local);
 			else out.set(path, [local]);
@@ -496,8 +542,12 @@ class OriginState {
 
 	// Slots taken out of `requests` because another instance won their path, still open for
 	// their handles. Nothing joins them, but they are refreshed with the table, so one ends
-	// once its own instance stops serving.
+	// once its own instance stops serving, except retained answers from an in-place Restart.
 	detached = new Map<Path.Valid, Set<RequestSlot>>();
+
+	// An in-place Restart forgets served answers for future requests, but resolved handles
+	// retain their old broadcast without participating in routing or same-epoch failover.
+	retained = new WeakSet<RequestSlot>();
 
 	// How many sessions are attached, and how many of those support broadcast discovery.
 	// What backs the public `discovery` getter.
@@ -529,9 +579,10 @@ class OriginState {
 	 * Recompute what `slot` resolves to. A slot never moves to another publisher instance: while
 	 * its own still serves and another wins `path`, it keeps what it resolved for the handles
 	 * already on it and the next request resolves the winner on a slot of its own; once its own
-	 * stops serving, it ends.
+	 * stops serving, it ends, except for an answer retained across an in-place Restart.
 	 */
 	reroute(path: Path.Valid, slot: RequestSlot): void {
+		if (this.retained.has(slot)) return;
 		const current = slot.route.peek();
 		if (current?.front && current.source) {
 			if (this.detached.get(path)?.has(slot)) {
@@ -641,6 +692,31 @@ class OriginState {
 		if (cached && cached.front === slot.route.peek()?.front) {
 			this.materialized.delete(path);
 			slot.retired = cached.front;
+		}
+	}
+
+	/** Preserve this route's resolved answers before its server resets for another epoch. */
+	restart(entry: RouteEntry): void {
+		for (const path of entry.server?.served.keys() ?? []) {
+			const joined = this.requests.peek()?.get(path);
+			const slots = [...(this.detached.get(path) ?? [])];
+			if (joined) slots.push(joined);
+			for (const slot of slots) {
+				const current = slot.route.peek();
+				if (
+					!current?.front ||
+					current.front.closed.peek() !== undefined ||
+					current.source !== entry.identity ||
+					this.retained.has(slot)
+				)
+					continue;
+				this.retire(path, slot);
+				// reset() releases the server's front; retain a separate owner even when no
+				// request has read active yet and therefore no per-request clone exists.
+				slot.retired = current.front.clone();
+				slot.failover = undefined;
+				this.retained.add(slot);
+			}
 		}
 	}
 
@@ -759,16 +835,17 @@ class OriginState {
 
 	/**
 	 * Whether the announced local broadcast at `path` wins over `entry`, the best route a
-	 * session or dynamic handle announced there. Cost decides, as for any two routes: an
-	 * identified route strictly cheaper than the local one wins, and the local broadcast
-	 * wins a tie. A route at a shorter prefix never competes, since the most specific
+	 * session or dynamic handle announced there. They compare as any two routes do, with the
+	 * local broadcast at {@link Preference.default}: an identified route strictly cheaper
+	 * than the local one wins, and the local broadcast wins a tie. A route at a shorter prefix never competes, since the most specific
 	 * prefix wins outright. False when nothing is announced locally at `path`.
 	 */
 	localWins(path: Path.Valid, entry: RouteEntry | undefined): boolean {
 		const local = this.advertisedLocal.peek()?.get(path);
 		if (!local || !this.local.peek()?.has(path)) return false;
 		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
-		return compareRoutes(local, entry.route.peek()) <= 0;
+		const remote = entry.route.peek();
+		return (compareLinks(local, remote, Preference.default, entry.preference) || compareRoutes(local, remote)) <= 0;
 	}
 
 	/**
@@ -880,6 +957,7 @@ export interface RequestOptions {
 export class Producer implements Table {
 	#state = new OriginState();
 	#scope = Scope.all;
+	#preference = Preference.default;
 	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
 
 	// The reader backing the passthroughs, so holding a Producer never requires the
@@ -917,7 +995,28 @@ export class Producer implements Table {
 		const producer = new Producer();
 		producer.#state = this.#state;
 		producer.#scope = scope;
+		producer.#preference = this.#preference;
 		producer.#reader = makeConsumer(this.#state, scope);
+		return producer;
+	}
+
+	/**
+	 * Rank the link this handle (and any handle derived from it) is given to: higher wins, and
+	 * every handle starts at the neutral {@link Preference.default}.
+	 *
+	 * Applies to what {@link dynamic} advertises, which is how a session lands its peer's
+	 * routes, not to a broadcast published here. A route with a newer epoch still wins, but
+	 * among the rest preference decides before cost, so links to different operators rank by
+	 * this instead of comparing their metrics. Hand each CDN's session its own rank to use the
+	 * primary while it has a route and fail over to the next. Mirrors
+	 * `origin::Producer::with_preference` in rs/moq-net.
+	 */
+	withPreference(preference: Preference): Producer {
+		const producer = new Producer();
+		producer.#state = this.#state;
+		producer.#scope = this.#scope;
+		producer.#preference = preference;
+		producer.#reader = makeConsumer(this.#state, this.#scope);
 		return producer;
 	}
 
@@ -1044,6 +1143,7 @@ export class Producer implements Table {
 			scope: this.#scope,
 			claim: this.#scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)])),
 			route: new Signal(route),
+			preference: this.#preference,
 			originated,
 			server,
 		};
@@ -1292,8 +1392,9 @@ export class Requesting {
 	 *
 	 * The table's route when it has one: a local publish (no round trip) or an announced
 	 * broadcast. It stays on the publisher instance it resolved, even once another wins the path
-	 * (announced as a restart), and the request ends with an error once that instance stops
-	 * serving: it never moves onto another instance, which may not hold the same bytes. Routes
+	 * (announced as a restart). An in-place epoch change keeps the resolved broadcast until
+	 * you close the request; otherwise it ends with an error once that instance stops serving.
+	 * It never moves onto another instance, which may not hold the same bytes. Routes
 	 * sharing an epoch are one instance, so it moves between them. Otherwise a session's blind
 	 * answer, which is assumed present rather than known live: a missing broadcast
 	 * surfaces as a reset on the first track subscription, not here; the request ends when the
@@ -1320,8 +1421,8 @@ export class Requesting {
 	/**
 	 * Settles with the error a route's handler refused the path with, an unroutable error once
 	 * the publisher instance it resolved stops serving, or `null` once you {@link close} the
-	 * request. Either error is final: no other route or instance is asked, and a fresh request
-	 * is needed to try again.
+	 * request. An in-place epoch change keeps an already-resolved request open. Either error
+	 * is final: no other route or instance is asked, and a fresh request is needed to try again.
 	 */
 	readonly closed: GetPromise<Error | null>;
 
@@ -1436,9 +1537,10 @@ export class Consumer {
 	 *
 	 * The one way to consume by path. {@link Requesting.active} follows whatever the table
 	 * routes (an announced local publish, or any feeding session's announcement), staying on
-	 * the publisher instance it resolved and ending with an error once that stops serving;
-	 * request again to follow a restart. When nothing routes the path, the request stands and
-	 * whichever attached session answers first provides a blind subscription instead, which
+	 * the publisher instance it resolved. An in-place epoch change keeps its resolved broadcast
+	 * until you close the request; otherwise it ends with an error once its instance stops serving.
+	 * Request again to follow the new instance after a restart. When nothing routes the path,
+	 * the request stands and whichever attached session answers first provides a blind subscription instead, which
 	 * ends with that session.
 	 * With `announced: true`, an unrouted request waits while discovery is supported and
 	 * falls back to that blind behavior only when discovery is unavailable. Close the request
@@ -1853,12 +1955,12 @@ export class Dynamic {
 	 *
 	 * The route is taken as given. At the same epoch this re-prices: consumers see an update
 	 * and every handle survives. Another epoch, or none, names another publisher instance:
-	 * consumers see a restart, the requests resolved through the old one end, and a
+	 * consumers see a restart, resolved requests keep their old broadcast until closed, and a
 	 * re-request never joins it. Requests still waiting on this handle carry over: the handler
 	 * is asked again under the new epoch, and its answer to a request asked before the change
-	 * is dropped, never served under the new epoch. A request pinned to the old epoch is
-	 * refused as unroutable. The answers already served are forgotten, so the next request
-	 * for one of those paths asks the handler again too. The broadcasts it served keep
+	 * is dropped, never served under the new epoch. A new or unresolved request pinned to the
+	 * old epoch is refused as unroutable. The answers already served are forgotten, so the next
+	 * request for one of those paths asks the handler again too. The broadcasts it served keep
 	 * running for the subscriptions already on them; close them to end those too.
 	 * Route selection still applies: another route still at the old epoch outranks one
 	 * without. To re-price, start from the current route, `update({ ...dynamic.route, cost })`.
@@ -1867,6 +1969,7 @@ export class Dynamic {
 		if (this.#closed) throw new Error("dynamic is closed");
 		const next = Route.normalize(route);
 		const previous = this.#entry.route.peek().epoch;
+		if (previous !== next.epoch) this.#state.restart(this.#entry);
 		this.#entry.route.set(next);
 		if (previous !== next.epoch) this.#entry.server?.reset();
 		this.#state.rebuildOriginated();

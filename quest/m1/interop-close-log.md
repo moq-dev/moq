@@ -20,3 +20,7 @@ the round loudly when the relay log shows no connection for it, so a filter
 that hides the `conn{id=...}` and close lines can't pass as nothing open.
 
 Public API: none. Wire: none.
+
+### Validation remaining
+
+The implementation and shell regression are complete in [#5215](https://github.com/moq-dev/moq/pull/5215). Full checks and all-language interop pass with inherited `RUST_LOG=warn`. Keep this quest until the required Interop CI is green: hosted TS captured 3.27/20.06 seconds, and the independent current-main local headroom run stops at a PID 256 decode deadline (0.50/20.06 seconds). Neither failure has been attributed to relay-log accounting. Do not weaken duration or deadline checks. The stdin throughput fix in #5292 has merged; delete this quest once the required Interop run passes with it.
