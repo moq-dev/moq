@@ -50,7 +50,9 @@ fn settles_walk(err: &Error) -> bool {
 ///
 /// The delays carry jitter, so a fleet
 /// knocked offline together does not reconnect in lockstep. The timeout bounds every failure;
-/// a settled rejection or invalid local configuration stops retrying.
+/// a settled rejection or invalid local configuration stops retrying. A GOAWAY naming no new URI
+/// is no failure: a restarting peer sends one to each session until it goes, and each of those
+/// serves, so it restarts the timeout instead.
 #[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -971,15 +973,23 @@ impl Connection {
 							continue;
 						}
 
-						// Redirected almost immediately. Still follow it, but score it as a
-						// failed attempt so two peers bouncing us between them escalate
-						// through backoff and eventually give up. The old session serves
-						// across the sleep, so the redirect loop costs time, not data.
-						retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
+						// Drained almost immediately. The backoff still escalates, so the redials
+						// cannot hammer the peer, and the old session serves across the sleep.
+						if msg.uri().is_empty() {
+							// "Reconnect to me": the peer is restarting and drains each new
+							// session until it goes, which is no failure, since every one
+							// serves. The window restarts here, so it counts only the time
+							// after the peer stops answering.
+							retry.start = tokio::time::Instant::now();
+						} else {
+							// Redirected: score it as a failed attempt, so two peers bouncing us
+							// between them eventually give up.
+							retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
+						}
 						let Some(wait) = retry_wait(retry.delay, retry.start, timeout) else {
 							return Err(timeout_error(timeout, retry.last_error.as_ref()));
 						};
-						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer redirected immediately; retrying after backoff");
+						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer drained the session immediately; retrying after backoff");
 						// Keep the handover bounded across the sleep: nothing else polls the
 						// predecessor while the loop is between connections.
 						sleep_draining(wait, &mut draining, shared).await;

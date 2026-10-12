@@ -20,6 +20,9 @@
 //! The drain ends as soon as every session has left rather than waiting out the
 //! window, which a stop-time budget depends on.
 //!
+//! A reconnecting client rides out a restart on the same address: the GOAWAYs
+//! the drain sends its redials must not exhaust its retry window.
+//!
 //! A raised signal reaches every listener in the process, and a relay exits at
 //! once on its second one, so the tests that raise SIGINT hold [`SIGINT`]:
 //! `cargo test` (the Nix check phase) runs them as threads of one process.
@@ -86,6 +89,11 @@ fn a_drain_ends_once_every_session_leaves() {
 #[test]
 fn a_trigger_before_run_keeps_the_deadline() {
 	run_test(a_trigger_before_run_keeps_the_deadline_inner);
+}
+
+#[test]
+fn a_reconnecting_client_rides_out_a_restart() {
+	run_test(a_reconnecting_client_rides_out_a_restart_inner);
 }
 
 async fn sigint_drains_sessions_before_exiting_inner() {
@@ -312,6 +320,84 @@ async fn a_trigger_before_run_keeps_the_deadline_inner() {
 		over <= Duration::from_secs(2),
 		"run returned {over:?} past the recorded deadline, not the one-second grace"
 	);
+}
+
+/// A restart on the same address, with a reconnecting publisher whose retry window is a third of
+/// the drain. The drain sends each of its redials an empty-URI GOAWAY until the window closes.
+/// Every one of those sessions served, so none counts against the retry window, and the
+/// publisher is still there to land on the relay that takes the address over.
+async fn a_reconnecting_client_rides_out_a_restart_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let relay = Relay::load(relay_config())
+		.await
+		.expect("load relay")
+		.with_signals(false);
+	let addr = relay.tcp_addr().expect("TCP listener bound");
+	let trigger = relay.shutdown_trigger().clone();
+	let run = tokio::spawn(relay.run());
+	let url: url::Url = format!("tcp://{addr}/").parse().expect("parse url");
+
+	let origin = moq_tokio::origin::spawn();
+	let broadcast = origin.create_broadcast("cam").expect("create broadcast");
+	broadcast.announce(Default::default()).expect("announce");
+	let mut publisher = moq_tokio::connect::Config::default();
+	// Redials paced well inside the drain, under a window that ends long before it.
+	publisher.backoff.initial = Duration::from_millis(200);
+	publisher.backoff.max = Duration::from_millis(200);
+	publisher.backoff.timeout = Some(DRAIN_TIMEOUT / 3);
+	let publisher = publisher
+		.init(Default::default())
+		.expect("client init")
+		.with_publisher(&origin)
+		.connect(url.clone())
+		.established()
+		.await
+		.expect("connect");
+
+	// Holds the drain open for its whole window, as the rest of a busy relay's sessions would.
+	let straggler = straggler(addr.port()).await;
+
+	trigger.start();
+	tokio::time::timeout(Duration::from_secs(15), run)
+		.await
+		.expect("relay never exited after the drain window")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
+	drop(straggler);
+
+	let mut config = relay_config();
+	config.listen.tcp.bind = Some(addr);
+	let relay = Relay::load(config)
+		.await
+		.expect("restart on the same address")
+		.with_signals(false);
+	let trigger = relay.shutdown_trigger().clone();
+	let run = tokio::spawn(relay.run());
+
+	let subscriber = moq_tokio::origin::spawn();
+	let consumer = subscriber.consume();
+	let observer = client(Vec::new())
+		.with_subscriber(subscriber)
+		.connect(url)
+		.established()
+		.await
+		.expect("connect");
+	tokio::select! {
+		res = consumer.routed_broadcast("cam") => {
+			res.expect("the publisher's broadcast never resolved");
+		}
+		res = publisher.closed() => panic!("the publisher gave up during the restart: {res:?}"),
+		_ = tokio::time::sleep(Duration::from_secs(15)) => panic!("the publisher never reached the new relay"),
+	}
+
+	drop((publisher, observer));
+	trigger.start();
+	tokio::time::timeout(Duration::from_secs(15), run)
+		.await
+		.expect("relay never exited after its sessions left")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
 }
 
 /// A one-shot client offering `version` (every version when empty): a

@@ -325,3 +325,62 @@ async fn an_empty_goaway_preserves_configured_fallbacks() {
 		.expect("configured fallback was discarded")
 		.expect("server B stopped accepting");
 }
+
+/// A graceful restart: the server keeps accepting while it drains, and sends every new session
+/// an empty-URI GOAWAY at once, for longer than the retry window. Each of those sessions serves
+/// until the client moves on, so none is a failure, and the client is still there to land on
+/// the first session the server lets stay.
+#[tokio::test]
+async fn a_draining_peer_does_not_exhaust_the_retry_window() {
+	// Each redial waits at least half of its 200ms delay, so the drained sessions alone span
+	// more than twice the window. A GOAWAY arriving inside the 200ms health bar is what makes a
+	// session count as drained at once rather than as a healthy session that later migrated.
+	const DRAINED: usize = 12;
+	let mut config = moq_tokio::connect::Config::default();
+	config.backoff.initial = Duration::from_millis(200);
+	config.backoff.max = Duration::from_millis(200);
+	config.backoff.timeout = Some(Duration::from_millis(500));
+	let client = config.init(Default::default()).expect("failed to init client");
+
+	let mut server = moq_tokio::listen::Config::default();
+	server.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	let mut server = server
+		.init(Default::default())
+		.expect("init server")
+		.listen()
+		.await
+		.expect("bind tcp listener");
+	let port = server.tcp_local_addr().expect("tcp listener bound").port();
+
+	let (served_tx, mut served) = tokio::sync::mpsc::unbounded_channel();
+	let _task = tokio::spawn(async move {
+		let origin = moq_tokio::origin::spawn();
+		// Held, as a draining server does: each one closes when the client leaves it.
+		let mut drained = Vec::new();
+		while let Some(request) = server.accept().await {
+			let Ok(session) = request.with_publisher(&origin).ok().await else {
+				continue;
+			};
+			if drained.len() < DRAINED {
+				session
+					.drain()
+					.send(moq_net::goaway::Goaway::new().with_timeout(Duration::from_secs(30)))
+					.expect("send goaway");
+				drained.push(session);
+			} else {
+				let _ = served_tx.send(session);
+			}
+		}
+	});
+
+	let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
+	let connection = client.connect(url);
+
+	tokio::select! {
+		session = served.recv() => {
+			session.expect("server stopped accepting");
+		}
+		res = connection.closed() => panic!("gave up during the drain: {res:?}"),
+		_ = tokio::time::sleep(Duration::from_secs(30)) => panic!("never landed after the drain"),
+	}
+}
