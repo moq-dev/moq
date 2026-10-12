@@ -419,13 +419,14 @@ sleep 1
 # at 5). It is the publisher's granularity, not the exporter's, so the harness has
 # to be well inside it or it grades tsp.
 # Bounded like the subscriber: if the relay stalls after readiness, `moq import
-# ts` could otherwise block `wait "$PUB_PID"` forever. tsp/moq stderr lands in
-# pub.log, which the empty-capture handler below dumps on failure.
+# ts` could otherwise block `wait "$PUB_PID"` forever. The bound adds the 30 s
+# default max-age a finished import stays up for after EOF. tsp/moq stderr lands
+# in pub.log, which the empty-capture handler below dumps on failure.
 echo "### publishing PCR-paced TS -> $BROADCAST"
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 publish() {
     # shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
-    timeout -k 3 $((DURATION + 20)) bash -c '
+    timeout -k 3 $((DURATION + 20 + 30)) bash -c '
         tsp -I file "$1" -P regulate --pcr-synchronous --wait-min 5 |
             "$2" --connect "$3" --broadcast "$4" import ts
     ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST"

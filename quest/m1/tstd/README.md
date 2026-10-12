@@ -35,7 +35,6 @@ nightly.
 
 ## Required
 
-- [Mux-rate hold](/quest/m1/tstd/mux-rate-hold.md) - import publishes its catalog once the mux rate is measured, so export is constant-rate from the start
 - [Send-ahead within the delay](/quest/m1/tstd/send-ahead.md) - total lag is `--delay`, send-ahead included, with a 1 s default
 - [PSI runs](/quest/m1/tstd/psi-runs.md) - the PAT and PMT are deduplicated and paced so the system buffers never overflow
 

@@ -8,6 +8,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a finished import stays up: long enough for a subscriber to request its media
+/// after reading the final catalog, short enough that the process exits within `TIMEOUT`.
+const MAX_AGE: &str = "5s";
 const BBB: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 
 /// Await `step` while `moq` still holds stdin open, failing as soon as the process exits.
@@ -40,6 +43,8 @@ fn import(url: &str, fingerprint: &str) -> Child {
 			"--broadcast",
 			"demo",
 			"import",
+			"--max-age",
+			MAX_AGE,
 			"ts",
 		])
 		.stdin(Stdio::piped())
@@ -124,9 +129,8 @@ const SHORT: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bb
 	.0;
 
 /// A subscriber already waiting when a short import ends still receives its media: the
-/// publisher keeps the finished tracks available until that subscriber drains them.
+/// publisher keeps the finished tracks servable for their max-age after EOF.
 #[tokio::test]
-#[ignore = "fails: the publisher leaves before the media SUBSCRIBE the final catalog prompts arrives; see quest/m1/tstd/mux-rate-hold.md"]
 async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	let _ = moq_tokio::crypto::install_default();
 	let fixture = moq_relay::test_relay().await.expect("test relay");
